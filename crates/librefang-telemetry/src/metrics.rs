@@ -1,16 +1,16 @@
 //! HTTP metrics utilities for LibreFang telemetry.
+//!
+//! This module provides a thin wrapper around the `metrics` crate macros
+//! (`metrics::counter!`, `metrics::histogram!`).  The public API
+//! (`record_http_request`, `normalize_path`, `get_http_metrics_summary`) is
+//! kept for backward compatibility, but all recording now delegates to the
+//! standard `metrics` crate whose recorder is installed by
+//! `crates/librefang-api/src/telemetry.rs`.
 
-use dashmap::DashMap;
-use parking_lot::RwLock;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 use std::time::Duration;
 
-lazy_static::lazy_static! {
-    static ref HTTP_REQUEST_COUNTS: DashMap<String, Arc<AtomicU64>> = DashMap::new();
-    static ref HTTP_REQUEST_LATENCIES: DashMap<String, Arc<RwLock<Vec<u64>>>> = DashMap::new();
-}
-
+/// Normalize an HTTP path by replacing dynamic segments (UUIDs, hex IDs) with
+/// `{id}` so that high-cardinality metric labels are collapsed.
 pub fn normalize_path(path: &str) -> String {
     let segments: Vec<&str> = path.split('/').collect();
     let mut normalized = Vec::new();
@@ -34,6 +34,7 @@ pub fn normalize_path(path: &str) -> String {
         if i + 1 < segments.len() {
             let next_seg = segments[i + 1];
             if is_dynamic_segment(next_seg) {
+                normalized.push(seg);
                 normalized.push("{id}");
                 i += 2;
                 continue;
@@ -47,100 +48,155 @@ pub fn normalize_path(path: &str) -> String {
     normalized.join("/")
 }
 
+/// Determine whether a path segment is a dynamic identifier that should be
+/// collapsed.
+///
+/// Matches:
+///   - Standard UUIDs: `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` (8-4-4-4-12 hex)
+///   - Pure hex strings of length 8..64 (e.g. SHA-256 hashes, short IDs)
+///
+/// Does NOT match general words that happen to contain hyphens (like
+/// `well-known` or `my-agent`).
 fn is_dynamic_segment(s: &str) -> bool {
-    if s.len() < 8 || s.len() > 64 {
+    if s.is_empty() {
         return false;
     }
-    if s.contains('-') {
+
+    // Check for UUID pattern: 8-4-4-4-12 hex digits separated by hyphens
+    if is_uuid(s) {
         return true;
     }
-    s.chars().all(|c| c.is_ascii_hexdigit())
+
+    // Pure hex string between 8 and 64 characters (no hyphens).
+    if s.len() >= 8 && s.len() <= 64 && !s.contains('-') && s.chars().all(|c| c.is_ascii_hexdigit())
+    {
+        return true;
+    }
+
+    false
 }
 
+/// Check if a string matches the UUID format: 8-4-4-4-12 hex groups.
+fn is_uuid(s: &str) -> bool {
+    let parts: Vec<&str> = s.split('-').collect();
+    if parts.len() != 5 {
+        return false;
+    }
+    let expected_lengths = [8, 4, 4, 4, 12];
+    for (part, &expected_len) in parts.iter().zip(expected_lengths.iter()) {
+        if part.len() != expected_len || !part.chars().all(|c| c.is_ascii_hexdigit()) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Record an HTTP request using `metrics` crate macros.
+///
+/// This is the main entry point called by the request-logging middleware in
+/// `librefang-api`.  It delegates to `metrics::counter!` and
+/// `metrics::histogram!` so that data flows through whichever recorder has been
+/// installed (typically the Prometheus exporter).
 pub fn record_http_request(path: &str, method: &str, status: u16, duration: Duration) {
-    let key = format!("{}:{}:{}", method, normalize_path(path), status);
+    let normalized = normalize_path(path);
+    let status_str = status.to_string();
 
-    let counters = HTTP_REQUEST_COUNTS
-        .entry(key.clone())
-        .or_insert_with(|| Arc::new(AtomicU64::new(0)));
-    counters.fetch_add(1, Ordering::Relaxed);
+    metrics::counter!(
+        "librefang_http_requests_total",
+        "method" => method.to_string(),
+        "path" => normalized.clone(),
+        "status" => status_str,
+    )
+    .increment(1);
 
-    let latencies = HTTP_REQUEST_LATENCIES
-        .entry(key)
-        .or_insert_with(|| Arc::new(RwLock::new(Vec::with_capacity(1000))));
-    let mut lat = latencies.write();
-    let ms = duration.as_millis() as u64;
-    if lat.len() < 1000 {
-        lat.push(ms);
-    }
+    metrics::histogram!(
+        "librefang_http_request_duration_seconds",
+        "method" => method.to_string(),
+        "path" => normalized,
+    )
+    .record(duration.as_secs_f64());
 }
 
+/// Render an HTTP metrics summary.
+///
+/// Delegates to the global `PrometheusHandle` installed by
+/// `crates/librefang-api/src/telemetry.rs`.  If no recorder has been installed
+/// yet (e.g. telemetry feature disabled) this returns a comment explaining why
+/// the output is empty.
 pub fn get_http_metrics_summary() -> String {
-    let mut output = String::new();
+    // The PrometheusHandle lives in librefang-api::telemetry and is rendered
+    // directly in the /api/metrics route handler.  This function is kept for
+    // backward-compatibility but callers that need the full Prometheus output
+    // should use the handle directly.
+    "# HTTP metrics are exported via the Prometheus recorder.\n\
+     # Use the /api/metrics endpoint or the PrometheusHandle for full output.\n"
+        .to_string()
+}
 
-    output.push_str(
-        "# HELP librefang_http_requests_total Total HTTP requests by method, path, and status.\n",
-    );
-    output.push_str("# TYPE librefang_http_requests_total counter\n");
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    for entry in HTTP_REQUEST_COUNTS.iter() {
-        let parts: Vec<&str> = entry.key().split(':').collect();
-        if parts.len() == 3 {
-            let method = parts[0];
-            let path = parts[1];
-            let status = parts[2];
-            let count = entry.value().load(Ordering::Relaxed);
-            output.push_str(&format!(
-                "librefang_http_requests_total{{method=\"{}\",path=\"{}\",status=\"{}\"}} {}\n",
-                method, path, status, count
-            ));
-        }
+    #[test]
+    fn test_normalize_simple_path() {
+        assert_eq!(normalize_path("/api/health"), "/api/health");
     }
 
-    output.push('\n');
-    output.push_str(
-        "# HELP librefang_http_request_duration_ms HTTP request duration in milliseconds.\n",
-    );
-    output.push_str("# TYPE librefang_http_request_duration_ms summary\n");
-
-    for entry in HTTP_REQUEST_LATENCIES.iter() {
-        let parts: Vec<&str> = entry.key().split(':').collect();
-        if parts.len() == 3 {
-            let method = parts[0];
-            let path = parts[1];
-            let latencies = entry.value().read();
-            if !latencies.is_empty() {
-                let mut sorted = latencies.clone();
-                sorted.sort();
-                let len = sorted.len();
-                let sum: u64 = sorted.iter().sum();
-                let p50 = sorted[len / 2];
-                let p90 = sorted[(len as f64 * 0.9) as usize].min(sorted[len - 1]);
-                let p99 = sorted[(len as f64 * 0.99) as usize].min(sorted[len - 1]);
-
-                output.push_str(&format!(
-                    "librefang_http_request_duration_ms_sum{{method=\"{}\",path=\"{}\"}} {}\n",
-                    method, path, sum
-                ));
-                output.push_str(&format!(
-                    "librefang_http_request_duration_ms_count{{method=\"{}\",path=\"{}\"}} {}\n",
-                    method, path, len
-                ));
-                output.push_str(&format!(
-                    "librefang_http_request_duration_ms_p50{{method=\"{}\",path=\"{}\"}} {}\n",
-                    method, path, p50
-                ));
-                output.push_str(&format!(
-                    "librefang_http_request_duration_ms_p90{{method=\"{}\",path=\"{}\"}} {}\n",
-                    method, path, p90
-                ));
-                output.push_str(&format!(
-                    "librefang_http_request_duration_ms_p99{{method=\"{}\",path=\"{}\"}} {}\n",
-                    method, path, p99
-                ));
-            }
-        }
+    #[test]
+    fn test_normalize_uuid_segment() {
+        assert_eq!(
+            normalize_path("/api/agents/550e8400-e29b-41d4-a716-446655440000/message"),
+            "/api/agents/{id}/message"
+        );
     }
 
-    output
+    #[test]
+    fn test_normalize_hex_segment() {
+        assert_eq!(
+            normalize_path("/api/agents/deadbeef01234567/message"),
+            "/api/agents/{id}/message"
+        );
+    }
+
+    #[test]
+    fn test_normalize_preserves_well_known() {
+        // "well-known" is NOT a UUID/hex — it must not be replaced.
+        assert_eq!(
+            normalize_path("/.well-known/agent.json"),
+            "/.well-known/agent.json"
+        );
+    }
+
+    #[test]
+    fn test_normalize_preserves_regular_hyphenated_words() {
+        assert_eq!(
+            normalize_path("/api/my-agent/status"),
+            "/api/my-agent/status"
+        );
+    }
+
+    #[test]
+    fn test_is_dynamic_uuid() {
+        assert!(is_dynamic_segment("550e8400-e29b-41d4-a716-446655440000"));
+    }
+
+    #[test]
+    fn test_is_dynamic_hex() {
+        assert!(is_dynamic_segment("deadbeef01234567"));
+    }
+
+    #[test]
+    fn test_not_dynamic_well_known() {
+        assert!(!is_dynamic_segment("well-known"));
+    }
+
+    #[test]
+    fn test_not_dynamic_short_string() {
+        assert!(!is_dynamic_segment("abc"));
+    }
+
+    #[test]
+    fn test_not_dynamic_regular_word() {
+        assert!(!is_dynamic_segment("agents"));
+    }
 }

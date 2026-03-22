@@ -6,12 +6,8 @@ license.workspace = true
 description = "OpenTelemetry + Prometheus metrics instrumentation for LibreFang"
 
 [dependencies]
-serde = { workspace = true }
-serde_json = { workspace = true }
-tracing = { workspace = true }
-lazy_static = "1.5"
-parking_lot = "0.12"
-dashmap = { workspace = true }
+metrics = { workspace = true }
+librefang-types = { path = "../librefang-types" }
 
 [dev-dependencies]
 tokio-test = { workspace = true }

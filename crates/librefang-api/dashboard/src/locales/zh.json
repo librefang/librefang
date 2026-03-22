@@ -14,7 +14,7 @@
     "save": "保存", "saving": "保存中...", "edit": "编辑", "confirm": "确认", "loading": "加载中...", "search": "搜索", "back": "返回",
     "actions": "操作", "clear": "清空", "load": "加载", "active": "活跃", "idle": "空闲", "running": "运行中",
     "online": "在线", "offline": "离线", "setup": "需配置", "ok": "正常", "config": "配置", "interact": "交互",
-    "never": "从不", "unknown": "未知", "no_data": "暂无数据", "resume": "恢复", "close": "关闭",
+    "never": "从不", "unknown": "未知", "no_data": "暂无数据", "resume": "恢复", "close": "关闭", "yes": "是", "no": "否", "details": "详情",
     "kernel_runtime": "内核运行时", "run_now": "立即运行", "view_all": "查看全部", "created": "已创建",
     "check": "检查", "label": "标签", "local": "本地", "properties": "属性", "success": "成功", "type": "类型",
     "symbols": { "separator": "：", "arrow": "→", "none": "-", "slash": "/", "expand": "+", "collapse": "−" },

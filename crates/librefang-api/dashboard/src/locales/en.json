@@ -166,6 +166,7 @@
       "loop": "Loop", "loop_desc": "Repeat actions",
       "parallel": "Parallel", "parallel_desc": "Parallel execution",
       "wait": "Wait", "wait_desc": "Delay/wait",
+      "collect": "Collect", "collect_desc": "Merge parallel results",
       "respond": "Respond", "respond_desc": "Send response",
       "agent": "Agent", "agent_desc": "Run agent task"
     }
