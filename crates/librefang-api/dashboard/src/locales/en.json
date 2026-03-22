@@ -44,7 +44,10 @@
     "template_hint": "Templates are loaded from ~/.librefang/agents/{name}/agent.toml",
     "manifest_toml": "Agent Manifest (TOML)",
     "suspend": "Suspend", "resume": "Resume", "core_agents": "Core Agents", "hands": "Hands",
-    "hand_badge": "HAND", "tools_cap": "Tools", "network": "Network"
+    "hand_badge": "HAND", "tools_cap": "Tools", "network": "Network",
+    "thinking": "Thinking", "thinking_enabled": "Enable Extended Thinking", "budget_tokens": "Token Budget",
+    "stream_thinking": "Stream Thinking", "thinking_hint": "Higher budget = deeper reasoning, more cost",
+    "thinking_toml_hint": "Add [thinking] section to enable extended reasoning for this agent"
   },
   "providers": {
     "title": "Providers", "subtitle": "Manage LLM API connections and health.",
