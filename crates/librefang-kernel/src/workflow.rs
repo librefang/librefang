@@ -1152,6 +1152,15 @@ pub fn load_workflow_definitions(dir: &Path) -> Vec<Workflow> {
 
 use librefang_types::workflow_template::WorkflowTemplate;
 
+/// Convert a `serde_json::Value` to a plain string for template substitution.
+fn value_to_string(val: &serde_json::Value) -> String {
+    match val {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Null => String::new(),
+        other => other.to_string(),
+    }
+}
+
 /// In-memory registry for storing and retrieving [`WorkflowTemplate`]s.
 ///
 /// Thread-safe: the registry is designed to be wrapped in an `Arc` and shared
@@ -1193,6 +1202,126 @@ impl WorkflowTemplateRegistry {
     pub async fn remove(&self, id: &str) -> Option<WorkflowTemplate> {
         let mut map = self.templates.write().await;
         map.remove(id)
+    }
+
+    /// Load templates from a directory. Only reads top-level `*.toml` files.
+    ///
+    /// **Must not be called from async context** — uses blocking I/O.
+    pub fn load_templates_from_dir(&self, dir: &std::path::Path) -> usize {
+        use tracing::{info, warn};
+
+        if !dir.is_dir() {
+            return 0;
+        }
+
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(e) => {
+                warn!("Cannot read template directory {}: {e}", dir.display());
+                return 0;
+            }
+        };
+
+        let mut map = self.templates.blocking_write();
+        let mut count = 0;
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+                continue;
+            }
+            // Skip files > 1 MiB
+            if let Ok(meta) = std::fs::metadata(&path) {
+                if meta.len() > 1_048_576 {
+                    warn!("Skipping oversized template file: {}", path.display());
+                    continue;
+                }
+            }
+            let content = match std::fs::read_to_string(&path) {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!("Cannot read {}: {e}", path.display());
+                    continue;
+                }
+            };
+            match toml::from_str::<WorkflowTemplate>(&content) {
+                Ok(tpl) => {
+                    info!(id = %tpl.id, name = %tpl.name, "Loaded workflow template");
+                    map.insert(tpl.id.clone(), tpl);
+                    count += 1;
+                }
+                Err(e) => {
+                    warn!("Failed to parse template {}: {e}", path.display());
+                }
+            }
+        }
+        count
+    }
+
+    /// Instantiate a concrete [`Workflow`] from a template by substituting
+    /// parameter values into step prompt templates.
+    ///
+    /// Returns an error if any required parameter is missing and has no default.
+    pub fn instantiate(
+        &self,
+        template: &WorkflowTemplate,
+        params: &HashMap<String, serde_json::Value>,
+    ) -> Result<Workflow, String> {
+        // Build the resolved parameter map (apply defaults, validate required).
+        let mut resolved: HashMap<String, String> = HashMap::new();
+        for p in &template.parameters {
+            if let Some(val) = params.get(&p.name) {
+                resolved.insert(p.name.clone(), value_to_string(val));
+            } else if let Some(ref default) = p.default {
+                resolved.insert(p.name.clone(), value_to_string(default));
+            } else if p.required {
+                return Err(format!("Missing required parameter: {}", p.name));
+            }
+        }
+
+        // Also include any extra params the caller provided that aren't declared
+        // (pass-through), so users can use ad-hoc placeholders.
+        for (k, v) in params {
+            resolved
+                .entry(k.clone())
+                .or_insert_with(|| value_to_string(v));
+        }
+
+        // Convert template steps → workflow steps.
+        let steps = template
+            .steps
+            .iter()
+            .map(|ts| {
+                let mut prompt = ts.prompt_template.clone();
+                for (k, v) in &resolved {
+                    prompt = prompt.replace(&format!("{{{{{}}}}}", k), v);
+                }
+                WorkflowStep {
+                    name: ts.name.clone(),
+                    agent: match &ts.agent {
+                        Some(a) => StepAgent::ByName { name: a.clone() },
+                        None => StepAgent::ByName {
+                            name: "default".into(),
+                        },
+                    },
+                    prompt_template: prompt,
+                    mode: StepMode::Sequential,
+                    timeout_secs: 120,
+                    error_mode: ErrorMode::Fail,
+                    // Use step name as output_var so subsequent steps can reference via {{step_name}}
+                    output_var: Some(ts.name.clone()),
+                }
+            })
+            .collect();
+
+        Ok(Workflow {
+            id: WorkflowId::new(),
+            name: template.name.clone(),
+            description: template.description.clone(),
+            steps,
+            created_at: Utc::now(),
+            layout: None,
+        })
     }
 }
 
