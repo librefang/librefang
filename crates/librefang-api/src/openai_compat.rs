@@ -162,20 +162,20 @@ struct ModelListResponse {
 fn resolve_agent(state: &AppState, model: &str) -> Option<(AgentId, String)> {
     // 1. "librefang:<name>" → find agent by name
     if let Some(name) = model.strip_prefix("librefang:") {
-        if let Some(entry) = state.kernel.registry.find_by_name(name) {
+        if let Some(entry) = state.kernel.agent_registry().find_by_name(name) {
             return Some((entry.id, entry.name.clone()));
         }
     }
 
     // 2. Valid UUID → find agent by ID
     if let Ok(id) = model.parse::<AgentId>() {
-        if let Some(entry) = state.kernel.registry.get(id) {
+        if let Some(entry) = state.kernel.agent_registry().get(id) {
             return Some((entry.id, entry.name.clone()));
         }
     }
 
     // 3. Plain string → try as agent name
-    if let Some(entry) = state.kernel.registry.find_by_name(model) {
+    if let Some(entry) = state.kernel.agent_registry().find_by_name(model) {
         return Some((entry.id, entry.name.clone()));
     }
 
@@ -540,7 +540,7 @@ async fn stream_response(
 /// GET /v1/models — List available agents as OpenAI model objects.
 #[utoipa::path(get, path = "/v1/models", tag = "openai", responses((status = 200, description = "OpenAI-compatible model list", body = serde_json::Value)))]
 pub async fn list_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let agents = state.kernel.registry.list();
+    let agents = state.kernel.agent_registry().list();
     let created = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()

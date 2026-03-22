@@ -233,7 +233,7 @@ pub async fn get_profile(
 // ---------------------------------------------------------------------------
 
 /// GET /api/templates — List available agent templates.
-#[utoipa::path(get, path = "/api/templates", tag = "system", responses((status = 200, description = "List templates", body = Vec<serde_json::Value>)))]
+#[utoipa::path(get, path = "/api/templates", tag = "system", operation_id = "list_agent_templates", responses((status = 200, description = "List templates", body = Vec<serde_json::Value>)))]
 pub async fn list_agent_templates() -> impl IntoResponse {
     let agents_dir = librefang_kernel::config::librefang_home().join("agents");
     let mut templates = Vec::new();
@@ -272,7 +272,7 @@ pub async fn list_agent_templates() -> impl IntoResponse {
 }
 
 /// GET /api/templates/:name — Get template details.
-#[utoipa::path(get, path = "/api/templates/{name}", tag = "system", params(("name" = String, Path, description = "Template name")), responses((status = 200, description = "Template details", body = serde_json::Value)))]
+#[utoipa::path(get, path = "/api/templates/{name}", tag = "system", operation_id = "get_agent_template", params(("name" = String, Path, description = "Template name")), responses((status = 200, description = "Template details", body = serde_json::Value)))]
 pub async fn get_agent_template(
     Path(name): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
@@ -350,7 +350,7 @@ pub async fn get_agent_kv(
             );
         }
     };
-    match state.kernel.memory.list_kv(agent_id) {
+    match state.kernel.memory_substrate().list_kv(agent_id) {
         Ok(pairs) => {
             let kv: Vec<serde_json::Value> = pairs
                 .into_iter()
@@ -385,7 +385,11 @@ pub async fn get_agent_kv_key(
             );
         }
     };
-    match state.kernel.memory.structured_get(agent_id, &key) {
+    match state
+        .kernel
+        .memory_substrate()
+        .structured_get(agent_id, &key)
+    {
         Ok(Some(val)) => (
             StatusCode::OK,
             Json(serde_json::json!({"key": key, "value": val})),
@@ -424,7 +428,11 @@ pub async fn set_agent_kv_key(
     };
     let value = body.get("value").cloned().unwrap_or(body);
 
-    match state.kernel.memory.structured_set(agent_id, &key, value) {
+    match state
+        .kernel
+        .memory_substrate()
+        .structured_set(agent_id, &key, value)
+    {
         Ok(()) => (
             StatusCode::OK,
             Json(serde_json::json!({"status": "stored", "key": key})),
@@ -456,7 +464,11 @@ pub async fn delete_agent_kv_key(
             );
         }
     };
-    match state.kernel.memory.structured_delete(agent_id, &key) {
+    match state
+        .kernel
+        .memory_substrate()
+        .structured_delete(agent_id, &key)
+    {
         Ok(()) => (
             StatusCode::OK,
             Json(serde_json::json!({"status": "deleted", "key": key})),
@@ -490,14 +502,14 @@ pub async fn export_agent_memory(
     };
 
     // Verify agent exists
-    if state.kernel.registry.get(agent_id).is_none() {
+    if state.kernel.agent_registry().get(agent_id).is_none() {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
         );
     }
 
-    match state.kernel.memory.list_kv(agent_id) {
+    match state.kernel.memory_substrate().list_kv(agent_id) {
         Ok(pairs) => {
             let kv_map: serde_json::Map<String, serde_json::Value> = pairs.into_iter().collect();
             (
@@ -542,7 +554,7 @@ pub async fn import_agent_memory(
     };
 
     // Verify agent exists
-    if state.kernel.registry.get(agent_id).is_none() {
+    if state.kernel.agent_registry().get(agent_id).is_none() {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
@@ -566,10 +578,14 @@ pub async fn import_agent_memory(
 
     // Clear existing memory if requested
     if clear_existing {
-        match state.kernel.memory.list_kv(agent_id) {
+        match state.kernel.memory_substrate().list_kv(agent_id) {
             Ok(existing) => {
                 for (key, _) in existing {
-                    if let Err(e) = state.kernel.memory.structured_delete(agent_id, &key) {
+                    if let Err(e) = state
+                        .kernel
+                        .memory_substrate()
+                        .structured_delete(agent_id, &key)
+                    {
                         tracing::warn!("Failed to delete key '{key}' during import clear: {e}");
                     }
                 }
@@ -590,7 +606,7 @@ pub async fn import_agent_memory(
     for (key, value) in &kv {
         match state
             .kernel
-            .memory
+            .memory_substrate()
             .structured_set(agent_id, key, value.clone())
         {
             Ok(()) => imported += 1,
@@ -637,8 +653,8 @@ pub async fn audit_recent(
         .unwrap_or(50)
         .min(1000); // Cap at 1000
 
-    let entries = state.kernel.audit_log.recent(n);
-    let tip = state.kernel.audit_log.tip_hash();
+    let entries = state.kernel.audit().recent(n);
+    let tip = state.kernel.audit().tip_hash();
 
     let items: Vec<serde_json::Value> = entries
         .iter()
@@ -657,7 +673,7 @@ pub async fn audit_recent(
 
     Json(serde_json::json!({
         "entries": items,
-        "total": state.kernel.audit_log.len(),
+        "total": state.kernel.audit().len(),
         "tip_hash": tip,
     }))
 }
@@ -665,8 +681,8 @@ pub async fn audit_recent(
 /// GET /api/audit/verify — Verify the audit chain integrity.
 #[utoipa::path(get, path = "/api/audit/verify", tag = "system", responses((status = 200, description = "Audit verification result", body = serde_json::Value)))]
 pub async fn audit_verify(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let entry_count = state.kernel.audit_log.len();
-    match state.kernel.audit_log.verify_integrity() {
+    let entry_count = state.kernel.audit().len();
+    match state.kernel.audit().verify_integrity() {
         Ok(()) => {
             if entry_count == 0 {
                 // SECURITY: Warn that an empty audit log has no forensic value
@@ -674,13 +690,13 @@ pub async fn audit_verify(State(state): State<Arc<AppState>>) -> impl IntoRespon
                     "valid": true,
                     "entries": 0,
                     "warning": "Audit log is empty — no events have been recorded yet",
-                    "tip_hash": state.kernel.audit_log.tip_hash(),
+                    "tip_hash": state.kernel.audit().tip_hash(),
                 }))
             } else {
                 Json(serde_json::json!({
                     "valid": true,
                     "entries": entry_count,
-                    "tip_hash": state.kernel.audit_log.tip_hash(),
+                    "tip_hash": state.kernel.audit().tip_hash(),
                 }))
             }
         }
@@ -729,7 +745,7 @@ pub async fn logs_stream(
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
-            let entries = state.kernel.audit_log.recent(200);
+            let entries = state.kernel.audit().recent(200);
 
             for entry in &entries {
                 // On first poll, send all existing entries as backfill.
@@ -828,7 +844,7 @@ pub async fn list_tools(State(state): State<Arc<AppState>>) -> impl IntoResponse
         .collect();
 
     // Include MCP tools so they're visible in Settings -> Tools
-    if let Ok(mcp_tools) = state.kernel.mcp_tools.lock() {
+    if let Ok(mcp_tools) = state.kernel.mcp_tools_ref().lock() {
         for t in mcp_tools.iter() {
             tools.push(serde_json::json!({
                 "name": t.name,
@@ -865,7 +881,7 @@ pub async fn get_tool(
     }
 
     // Search MCP tools
-    if let Ok(mcp_tools) = state.kernel.mcp_tools.lock() {
+    if let Ok(mcp_tools) = state.kernel.mcp_tools_ref().lock() {
         for t in mcp_tools.iter() {
             if t.name == name {
                 return (
@@ -903,7 +919,7 @@ pub async fn get_tool(
     )
 )]
 pub async fn list_sessions(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    match state.kernel.memory.list_sessions() {
+    match state.kernel.memory_substrate().list_sessions() {
         Ok(sessions) => Json(serde_json::json!({"sessions": sessions})),
         Err(_) => Json(serde_json::json!({"sessions": []})),
     }
@@ -927,7 +943,11 @@ pub async fn get_session(
         }
     };
 
-    match state.kernel.memory.get_session_with_created_at(session_id) {
+    match state
+        .kernel
+        .memory_substrate()
+        .get_session_with_created_at(session_id)
+    {
         Ok(Some((session, created_at))) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -971,7 +991,7 @@ pub async fn delete_session(
         }
     };
 
-    match state.kernel.memory.delete_session(session_id) {
+    match state.kernel.memory_substrate().delete_session(session_id) {
         Ok(()) => (
             StatusCode::OK,
             Json(serde_json::json!({"status": "deleted", "session_id": id})),
@@ -1018,7 +1038,11 @@ pub async fn set_session_label(
         }
     }
 
-    match state.kernel.memory.set_session_label(session_id, label) {
+    match state
+        .kernel
+        .memory_substrate()
+        .set_session_label(session_id, label)
+    {
         Ok(()) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -1048,7 +1072,7 @@ pub async fn find_session_by_label(
         Ok(u) => librefang_types::agent::AgentId(u),
         Err(_) => {
             // Try name lookup
-            match state.kernel.registry.find_by_name(&agent_id_str) {
+            match state.kernel.agent_registry().find_by_name(&agent_id_str) {
                 Some(entry) => entry.id,
                 None => {
                     return (
@@ -1060,7 +1084,11 @@ pub async fn find_session_by_label(
         }
     };
 
-    match state.kernel.memory.find_session_by_label(agent_id, &label) {
+    match state
+        .kernel
+        .memory_substrate()
+        .find_session_by_label(agent_id, &label)
+    {
         Ok(Some(session)) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -1097,13 +1125,13 @@ pub async fn session_cleanup(
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-    let cfg = &state.kernel.config.session;
+    let cfg = &state.kernel.config_ref().session;
     let mut total: u64 = 0;
 
     if cfg.retention_days > 0 {
         match state
             .kernel
-            .memory
+            .memory_substrate()
             .cleanup_expired_sessions(cfg.retention_days)
         {
             Ok(n) => total += n,
@@ -1121,7 +1149,7 @@ pub async fn session_cleanup(
     if cfg.max_sessions_per_agent > 0 {
         match state
             .kernel
-            .memory
+            .memory_substrate()
             .cleanup_excess_sessions(cfg.max_sessions_per_agent)
         {
             Ok(n) => total += n,
@@ -1178,7 +1206,7 @@ pub async fn search_sessions(
 
     match state
         .kernel
-        .memory
+        .memory_substrate()
         .search_sessions(&query, agent_id.as_ref())
     {
         Ok(results) => (
@@ -1193,7 +1221,7 @@ pub async fn search_sessions(
 }
 
 // ---------------------------------------------------------------------------
-// Execution Approval System — backed by kernel.approval_manager
+// Execution Approval System — backed by kernel.approvals()
 // ---------------------------------------------------------------------------
 
 /// Serialize an [`ApprovalRequest`] to the JSON shape expected by the dashboard.
@@ -1230,10 +1258,10 @@ fn approval_to_json(
 /// `action_summary` → `action`, `agent_id` → `agent_name`, `requested_at` → `created_at`.
 #[utoipa::path(get, path = "/api/approvals", tag = "approvals", responses((status = 200, description = "List pending and recent approvals", body = Vec<serde_json::Value>)))]
 pub async fn list_approvals(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let pending = state.kernel.approval_manager.list_pending();
-    let recent = state.kernel.approval_manager.list_recent(50);
+    let pending = state.kernel.approvals().list_pending();
+    let recent = state.kernel.approvals().list_recent(50);
 
-    let registry_agents = state.kernel.registry.list();
+    let registry_agents = state.kernel.agent_registry().list();
     let agent_name_for = |agent_id: &str| {
         registry_agents
             .iter()
@@ -1304,9 +1332,9 @@ pub async fn get_approval(
         }
     };
 
-    match state.kernel.approval_manager.get_pending(uuid) {
+    match state.kernel.approvals().get_pending(uuid) {
         Some(a) => {
-            let registry_agents = state.kernel.registry.list();
+            let registry_agents = state.kernel.agent_registry().list();
             (StatusCode::OK, Json(approval_to_json(&a, &registry_agents)))
         }
         None => (
@@ -1340,7 +1368,7 @@ pub async fn create_approval(
 ) -> impl IntoResponse {
     use librefang_types::approval::{ApprovalRequest, RiskLevel};
 
-    let policy = state.kernel.approval_manager.policy();
+    let policy = state.kernel.approvals().policy();
     let id = uuid::Uuid::new_v4();
     let approval_req = ApprovalRequest {
         id,
@@ -1364,7 +1392,7 @@ pub async fn create_approval(
     // Spawn the request in the background (it will block until resolved or timed out)
     let kernel = Arc::clone(&state.kernel);
     tokio::spawn(async move {
-        kernel.approval_manager.request_approval(approval_req).await;
+        kernel.approvals().request_approval(approval_req).await;
     });
 
     (
@@ -1391,7 +1419,7 @@ pub async fn approve_request(
         }
     };
 
-    match state.kernel.approval_manager.resolve(
+    match state.kernel.approvals().resolve(
         uuid,
         librefang_types::approval::ApprovalDecision::Approved,
         Some("api".to_string()),
@@ -1424,7 +1452,7 @@ pub async fn reject_request(
         }
     };
 
-    match state.kernel.approval_manager.resolve(
+    match state.kernel.approvals().resolve(
         uuid,
         librefang_types::approval::ApprovalDecision::Denied,
         Some("api".to_string()),
@@ -1462,7 +1490,7 @@ pub async fn webhook_wake(
         )
     };
     // Check if webhook triggers are enabled
-    let wh_config = match &state.kernel.config.webhook_triggers {
+    let wh_config = match &state.kernel.config_ref().webhook_triggers {
         Some(c) if c.enabled => c,
         _ => {
             return (
@@ -1538,7 +1566,7 @@ pub async fn webhook_agent(
         )
     };
     // Check if webhook triggers are enabled
-    let wh_config = match &state.kernel.config.webhook_triggers {
+    let wh_config = match &state.kernel.config_ref().webhook_triggers {
         Some(c) if c.enabled => c,
         _ => {
             return (
@@ -1570,7 +1598,7 @@ pub async fn webhook_agent(
             Ok(id) => id,
             Err(_) => {
                 // Try name lookup
-                match state.kernel.registry.find_by_name(agent_ref) {
+                match state.kernel.agent_registry().find_by_name(agent_ref) {
                     Some(entry) => entry.id,
                     None => {
                         let err_msg = {
@@ -1587,7 +1615,7 @@ pub async fn webhook_agent(
         },
         None => {
             // No agent specified — use the first available agent
-            match state.kernel.registry.list().first() {
+            match state.kernel.agent_registry().list().first() {
                 Some(entry) => entry.id,
                 None => {
                     return (
@@ -1646,7 +1674,7 @@ pub async fn add_binding(
     Json(binding): Json<librefang_types::config::AgentBinding>,
 ) -> impl IntoResponse {
     // Validate agent exists
-    let agents = state.kernel.registry.list();
+    let agents = state.kernel.agent_registry().list();
     let agent_exists = agents.iter().any(|e| e.name == binding.agent)
         || binding.agent.parse::<uuid::Uuid>().is_ok();
     if !agent_exists {
@@ -1689,14 +1717,14 @@ pub async fn pairing_request(
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-    if !state.kernel.config.pairing.enabled {
+    if !state.kernel.config_ref().pairing.enabled {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": t.t("api-error-pairing-not-enabled")})),
         )
             .into_response();
     }
-    match state.kernel.pairing.create_pairing_request() {
+    match state.kernel.pairing_ref().create_pairing_request() {
         Ok(req) => {
             let qr_uri = format!("librefang://pair?token={}", req.token);
             Json(serde_json::json!({
@@ -1722,7 +1750,7 @@ pub async fn pairing_complete(
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-    if !state.kernel.config.pairing.enabled {
+    if !state.kernel.config_ref().pairing.enabled {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": t.t("api-error-pairing-not-enabled")})),
@@ -1750,7 +1778,11 @@ pub async fn pairing_complete(
         last_seen: chrono::Utc::now(),
         push_token,
     };
-    match state.kernel.pairing.complete_pairing(token, device_info) {
+    match state
+        .kernel
+        .pairing_ref()
+        .complete_pairing(token, device_info)
+    {
         Ok(device) => Json(serde_json::json!({
             "device_id": device.device_id,
             "display_name": device.display_name,
@@ -1773,7 +1805,7 @@ pub async fn pairing_devices(
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-    if !state.kernel.config.pairing.enabled {
+    if !state.kernel.config_ref().pairing.enabled {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": t.t("api-error-pairing-not-enabled")})),
@@ -1782,7 +1814,7 @@ pub async fn pairing_devices(
     }
     let devices: Vec<_> = state
         .kernel
-        .pairing
+        .pairing_ref()
         .list_devices()
         .into_iter()
         .map(|d| {
@@ -1806,14 +1838,14 @@ pub async fn pairing_remove_device(
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-    if !state.kernel.config.pairing.enabled {
+    if !state.kernel.config_ref().pairing.enabled {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": t.t("api-error-pairing-not-enabled")})),
         )
             .into_response();
     }
-    match state.kernel.pairing.remove_device(&device_id) {
+    match state.kernel.pairing_ref().remove_device(&device_id) {
         Ok(()) => Json(serde_json::json!({"ok": true})).into_response(),
         Err(e) => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": e}))).into_response(),
     }
@@ -1833,7 +1865,7 @@ pub async fn pairing_notify(
             t.t("api-error-pairing-message-required"),
         )
     };
-    if !state.kernel.config.pairing.enabled {
+    if !state.kernel.config_ref().pairing.enabled {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": err_pairing_not_enabled})),
@@ -1852,8 +1884,12 @@ pub async fn pairing_notify(
         )
             .into_response();
     }
-    state.kernel.pairing.notify_devices(title, message).await;
-    Json(serde_json::json!({"ok": true, "notified": state.kernel.pairing.list_devices().len()}))
+    state
+        .kernel
+        .pairing_ref()
+        .notify_devices(title, message)
+        .await;
+    Json(serde_json::json!({"ok": true, "notified": state.kernel.pairing_ref().list_devices().len()}))
         .into_response()
 }
 
@@ -1878,7 +1914,7 @@ pub async fn list_commands(State(state): State<Arc<AppState>>) -> impl IntoRespo
     ];
 
     // Add skill-registered tool names as potential commands
-    if let Ok(registry) = state.kernel.skill_registry.read() {
+    if let Ok(registry) = state.kernel.skill_registry_ref().read() {
         for skill in registry.list() {
             let desc: String = skill.manifest.skill.description.chars().take(80).collect();
             commands.push(serde_json::json!({
@@ -1944,7 +1980,7 @@ pub async fn get_command(
     }
 
     // Skill-registered commands
-    if let Ok(registry) = state.kernel.skill_registry.read() {
+    if let Ok(registry) = state.kernel.skill_registry_ref().read() {
         for skill in registry.list() {
             let skill_cmd = format!("/{}", skill.manifest.skill.name);
             if skill_cmd.eq_ignore_ascii_case(&lookup) {
@@ -1993,7 +2029,7 @@ pub async fn create_backup(
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-    let home_dir = &state.kernel.config.home_dir;
+    let home_dir = &state.kernel.home_dir();
     let backups_dir = home_dir.join("backups");
     if let Err(e) = std::fs::create_dir_all(&backups_dir) {
         return (
@@ -2187,7 +2223,7 @@ pub async fn create_backup(
         size,
         components.len()
     );
-    state.kernel.audit_log.record(
+    state.kernel.audit().record(
         "system",
         librefang_runtime::audit::AuditAction::ConfigChange,
         format!("Backup created: {filename}"),
@@ -2209,7 +2245,7 @@ pub async fn create_backup(
 /// GET /api/backups — List existing backups.
 #[utoipa::path(get, path = "/api/backups", tag = "system", responses((status = 200, description = "List backups", body = Vec<serde_json::Value>)))]
 pub async fn list_backups(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let backups_dir = state.kernel.config.home_dir.join("backups");
+    let backups_dir = state.kernel.home_dir().join("backups");
     if !backups_dir.exists() {
         return Json(serde_json::json!({"backups": [], "total": 0}));
     }
@@ -2314,7 +2350,7 @@ pub async fn delete_backup(
         );
     }
 
-    let backups_dir = state.kernel.config.home_dir.join("backups");
+    let backups_dir = state.kernel.home_dir().join("backups");
     let backup_path = match find_backup_path(&backups_dir, &filename) {
         Ok(Some(path)) => path,
         Ok(None) => {
@@ -2393,7 +2429,7 @@ pub async fn restore_backup(
         );
     }
 
-    let home_dir = &state.kernel.config.home_dir;
+    let home_dir = &state.kernel.home_dir();
     let backups_dir = home_dir.join("backups");
     let backup_path = match find_backup_path(&backups_dir, &filename) {
         Ok(Some(path)) => path,
@@ -2524,7 +2560,7 @@ pub async fn restore_backup(
         "Restore from {filename}: {total_restored} files restored, {} errors",
         errors.len()
     );
-    state.kernel.audit_log.record(
+    state.kernel.audit().record(
         "system",
         librefang_runtime::audit::AuditAction::ConfigChange,
         format!("Backup restored: {filename} ({total_restored} files)"),
@@ -2555,7 +2591,7 @@ fn read_backup_manifest(path: &std::path::Path) -> Option<BackupManifest> {
 /// GET /api/queue/status — Command queue status and occupancy.
 #[utoipa::path(get, path = "/api/queue/status", tag = "system", responses((status = 200, description = "Queue status", body = serde_json::Value)))]
 pub async fn queue_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let occupancy = state.kernel.command_queue.occupancy();
+    let occupancy = state.kernel.command_queue_ref().occupancy();
     let lanes: Vec<serde_json::Value> = occupancy
         .iter()
         .map(|o| {
@@ -2567,7 +2603,7 @@ pub async fn queue_status(State(state): State<Arc<AppState>>) -> impl IntoRespon
         })
         .collect();
 
-    let queue_cfg = &state.kernel.config.queue;
+    let queue_cfg = &state.kernel.config_ref().queue;
     Json(serde_json::json!({
         "lanes": lanes,
         "config": {

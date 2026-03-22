@@ -135,7 +135,7 @@ async fn test_custom_config_kernel() {
     }));
 
     // 验证自定义配置生效
-    assert_eq!(app.state.kernel.config.language, "zh");
+    assert_eq!(app.state.kernel.config_ref().language, "zh");
 }
 
 /// 测试 GET /api/version 端点。

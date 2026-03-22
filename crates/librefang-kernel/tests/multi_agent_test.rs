@@ -152,7 +152,7 @@ memory_write = ["self.*"]
         agent_ids.push(id);
     }
 
-    assert_eq!(kernel.registry.count(), 6, "Should have 6 agents");
+    assert_eq!(kernel.agent_registry().count(), 6, "Should have 6 agents");
     println!(
         "\n  All {} agents spawned. Sending messages...\n",
         agents.len()
