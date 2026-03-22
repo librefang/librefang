@@ -787,6 +787,11 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
             "/pairing/notify",
             axum::routing::post(routes::pairing_notify),
         )
+        // Inbox status endpoint
+        .route(
+            "/inbox/status",
+            axum::routing::get(routes::inbox_status),
+        )
         // Dashboard credential login
         .route(
             "/auth/dashboard-login",
