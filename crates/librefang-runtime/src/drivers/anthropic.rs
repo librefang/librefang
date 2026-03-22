@@ -48,6 +48,10 @@ struct ApiRequest {
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     stream: bool,
+    /// Extended thinking configuration.
+    /// Anthropic API expects: `{"type": "enabled", "budget_tokens": N}`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -197,14 +201,40 @@ impl LlmDriver for AnthropicDriver {
             })
             .collect();
 
+        // Anthropic requires budget_tokens >= 1024 for extended thinking.
+        // Skip thinking if budget is too low.
+        let thinking_value = request
+            .thinking
+            .as_ref()
+            .filter(|tc| tc.budget_tokens >= 1024)
+            .map(|tc| {
+                serde_json::json!({
+                    "type": "enabled",
+                    "budget_tokens": tc.budget_tokens
+                })
+            });
+
+        // When thinking is enabled, max_tokens must be > budget_tokens.
+        let effective_max_tokens = if let Some(ref tv) = thinking_value {
+            let budget = tv["budget_tokens"].as_u64().unwrap_or(0) as u32;
+            request.max_tokens.max(budget + 1024)
+        } else {
+            request.max_tokens
+        };
+
         let api_request = ApiRequest {
             model: request.model.clone(),
-            max_tokens: request.max_tokens,
+            max_tokens: effective_max_tokens,
             system,
             messages: api_messages,
             tools: api_tools,
-            temperature: Some(request.temperature),
+            temperature: if thinking_value.is_some() {
+                None
+            } else {
+                Some(request.temperature)
+            },
             stream: false,
+            thinking: thinking_value,
         };
 
         // Retry loop for rate limits and overloads
@@ -306,14 +336,40 @@ impl LlmDriver for AnthropicDriver {
             })
             .collect();
 
+        // Anthropic requires budget_tokens >= 1024 for extended thinking.
+        // Skip thinking if budget is too low.
+        let thinking_value = request
+            .thinking
+            .as_ref()
+            .filter(|tc| tc.budget_tokens >= 1024)
+            .map(|tc| {
+                serde_json::json!({
+                    "type": "enabled",
+                    "budget_tokens": tc.budget_tokens
+                })
+            });
+
+        // When thinking is enabled, max_tokens must be > budget_tokens.
+        let effective_max_tokens = if let Some(ref tv) = thinking_value {
+            let budget = tv["budget_tokens"].as_u64().unwrap_or(0) as u32;
+            request.max_tokens.max(budget + 1024)
+        } else {
+            request.max_tokens
+        };
+
         let api_request = ApiRequest {
             model: request.model.clone(),
-            max_tokens: request.max_tokens,
+            max_tokens: effective_max_tokens,
             system,
             messages: api_messages,
             tools: api_tools,
-            temperature: Some(request.temperature),
+            temperature: if thinking_value.is_some() {
+                None
+            } else {
+                Some(request.temperature)
+            },
             stream: true,
+            thinking: thinking_value,
         };
 
         // Retry loop for the initial HTTP request

@@ -77,6 +77,14 @@ mode = "hybrid"                 # off | restart | hot | hybrid
 debounce_ms = 500
 
 # ── Provider Regions (uncomment to use) ──────────────────────
+# Extended thinking — enable chain-of-thought for supported models (Claude, DeepSeek, etc.)
+# [thinking]
+# budget_tokens = 10000                   # Max tokens the model can use for thinking
+# stream_thinking = false                 # Stream thinking tokens to the client
+
+# Provider region selection (provider ID → region name)
+# Some providers offer region-specific endpoints defined in registry TOML files.
+# Selecting a region overrides the provider's base_url (and optionally api_key_env).
 # [provider_regions]
 # qwen = "intl"                # Qwen international endpoint
 # minimax = "china"            # MiniMax China endpoint

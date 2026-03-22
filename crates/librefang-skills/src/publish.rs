@@ -239,7 +239,7 @@ fn validate_manifest(manifest: &SkillManifest, source_dir: &Path) -> Result<(), 
     }
 
     match manifest.runtime.runtime_type {
-        SkillRuntime::Python | SkillRuntime::Node | SkillRuntime::Wasm => {
+        SkillRuntime::Python | SkillRuntime::Node | SkillRuntime::Shell | SkillRuntime::Wasm => {
             if manifest.runtime.entry.trim().is_empty() {
                 return Err(SkillError::InvalidManifest(format!(
                     "Runtime {:?} requires an entry path",

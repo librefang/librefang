@@ -5620,4 +5620,33 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn test_thinking_config_deserialization() {
+        let toml_str = r#"
+            [thinking]
+            budget_tokens = 20000
+            stream_thinking = true
+        "#;
+        let config: KernelConfig = toml::from_str(toml_str).unwrap();
+        let tc = config.thinking.unwrap();
+        assert_eq!(tc.budget_tokens, 20000);
+        assert!(tc.stream_thinking);
+    }
+
+    #[test]
+    fn test_thinking_config_defaults() {
+        let tc = ThinkingConfig::default();
+        assert_eq!(tc.budget_tokens, 10_000);
+        assert!(!tc.stream_thinking);
+    }
+
+    #[test]
+    fn test_thinking_config_absent_is_none() {
+        let toml_str = r#"
+            log_level = "info"
+        "#;
+        let config: KernelConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.thinking.is_none());
+    }
 }
