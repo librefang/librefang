@@ -38,9 +38,13 @@ const mdComponents = {
   ul: ({ children }: any) => <ul className="list-disc pl-4 mb-2 space-y-0.5">{children}</ul>,
   ol: ({ children }: any) => <ol className="list-decimal pl-4 mb-2 space-y-0.5">{children}</ol>,
   li: ({ children }: any) => <li className="text-sm">{children}</li>,
-  code: ({ inline, children }: any) => inline
-    ? <code className="px-1 py-0.5 rounded bg-main font-mono text-[11px]">{children}</code>
-    : <pre className="p-2 rounded-lg bg-main font-mono text-[11px] overflow-x-auto mb-2"><code>{children}</code></pre>,
+  code: ({ node, children, ...props }: any) => {
+    const isBlock = node?.position?.start?.line !== node?.position?.end?.line || String(children).includes("\n");
+    return isBlock
+      ? <pre className="p-2 rounded-lg bg-main font-mono text-[11px] overflow-x-auto mb-2"><code>{children}</code></pre>
+      : <code className="px-1 py-0.5 rounded bg-main font-mono text-[11px]" {...props}>{children}</code>;
+  },
+  pre: ({ children }: any) => <>{children}</>,
   table: ({ children }: any) => <table className="w-full text-xs border-collapse mb-2">{children}</table>,
   th: ({ children }: any) => <th className="border border-border-subtle px-2 py-1 bg-main font-bold text-left">{children}</th>,
   td: ({ children }: any) => <td className="border border-border-subtle px-2 py-1">{children}</td>,
