@@ -20,6 +20,7 @@ pub mod compactor;
 pub mod context_budget;
 pub mod context_engine;
 pub mod context_overflow;
+pub mod context_plugin;
 pub mod copilot_oauth;
 pub mod docker_sandbox;
 pub mod drivers;
