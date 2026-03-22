@@ -1211,6 +1211,15 @@ impl WorkflowTemplateRegistry {
         use tracing::{info, warn};
 
         if !dir.is_dir() {
+    /// Load and register workflow templates from a directory (sync, for boot).
+    ///
+    /// Scans for `*.toml` files in `dir`, parses each as a
+    /// [`WorkflowTemplate`], and registers it. Invalid files are logged as
+    /// warnings and skipped.  Returns the number of templates successfully
+    /// loaded.
+    pub fn load_templates_from_dir(&self, dir: &Path) -> usize {
+        if !dir.is_dir() {
+            debug!(path = %dir.display(), "Template directory does not exist, skipping");
             return 0;
         }
 
@@ -1218,6 +1227,7 @@ impl WorkflowTemplateRegistry {
             Ok(e) => e,
             Err(e) => {
                 warn!("Cannot read template directory {}: {e}", dir.display());
+                warn!(path = %dir.display(), "Failed to read template directory: {e}");
                 return 0;
             }
         };
@@ -1322,6 +1332,64 @@ impl WorkflowTemplateRegistry {
             created_at: Utc::now(),
             layout: None,
         })
+    }
+        /// Maximum template file size (1 MiB).
+        const MAX_TEMPLATE_FILE_SIZE: u64 = 1024 * 1024;
+
+        let mut count = 0;
+        let mut map = self.templates.blocking_write();
+
+        for entry in entries {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(e) => {
+                    warn!(dir = %dir.display(), "Failed to read directory entry: {e}");
+                    continue;
+                }
+            };
+            let path = entry.path();
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+
+            if !name.ends_with(".toml") {
+                continue;
+            }
+
+            // Check file size before reading.
+            match std::fs::metadata(&path) {
+                Ok(meta) if meta.len() > MAX_TEMPLATE_FILE_SIZE => {
+                    warn!(
+                        path = %path.display(),
+                        size = meta.len(),
+                        max = MAX_TEMPLATE_FILE_SIZE,
+                        "Template file exceeds maximum size limit, skipping"
+                    );
+                    continue;
+                }
+                Err(e) => {
+                    warn!(path = %path.display(), "Failed to stat template file: {e}");
+                    continue;
+                }
+                _ => {}
+            }
+
+            match std::fs::read_to_string(&path) {
+                Ok(content) => match toml::from_str::<WorkflowTemplate>(&content) {
+                    Ok(tpl) => {
+                        info!(id = %tpl.id, name = %tpl.name, "Loaded workflow template");
+                        map.insert(tpl.id.clone(), tpl);
+                        count += 1;
+                    }
+                    Err(e) => {
+                        warn!(path = %path.display(), "Invalid template TOML: {e}");
+                    }
+                },
+                Err(e) => {
+                    warn!(path = %path.display(), "Failed to read template file: {e}");
+                }
+            }
+        }
+
+        count
     }
 }
 
@@ -2436,5 +2504,104 @@ id = "{id}"
         }"#;
         let step: WorkflowStep = serde_json::from_str(json).unwrap();
         assert_eq!(step.inherit_context, Some(false));
+    // ---- template TOML loading tests ----
+
+    #[test]
+    fn test_load_template_from_toml() {
+        let toml_str = r#"
+id = "test-tpl"
+name = "Test Template"
+description = "A test template"
+category = "testing"
+tags = ["test", "example"]
+
+[[parameters]]
+name = "input"
+description = "The input data"
+param_type = "string"
+required = true
+
+[[parameters]]
+name = "verbose"
+description = "Enable verbose output"
+param_type = "boolean"
+required = false
+default = false
+
+[[steps]]
+name = "step1"
+prompt_template = "Process {{input}}"
+
+[[steps]]
+name = "step2"
+prompt_template = "Summarise: {{step1}}"
+depends_on = ["step1"]
+"#;
+        let tpl: WorkflowTemplate = toml::from_str(toml_str).expect("parse template TOML");
+        assert_eq!(tpl.id, "test-tpl");
+        assert_eq!(tpl.name, "Test Template");
+        assert_eq!(tpl.category, Some("testing".into()));
+        assert_eq!(tpl.parameters.len(), 2);
+        assert!(tpl.parameters[0].required);
+        assert!(!tpl.parameters[1].required);
+        assert_eq!(tpl.steps.len(), 2);
+        assert!(tpl.steps[0].depends_on.is_empty());
+        assert_eq!(tpl.steps[1].depends_on, vec!["step1"]);
+        assert_eq!(tpl.tags, vec!["test", "example"]);
+    }
+
+    #[test]
+    fn test_template_registry_load_dir() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let tpl1 = r#"
+id = "tpl-a"
+name = "Template A"
+description = "First"
+
+[[steps]]
+name = "s1"
+prompt_template = "do A"
+"#;
+        let tpl2 = r#"
+id = "tpl-b"
+name = "Template B"
+description = "Second"
+
+[[steps]]
+name = "s1"
+prompt_template = "do B"
+"#;
+        std::fs::write(dir.path().join("a.toml"), tpl1).unwrap();
+        std::fs::write(dir.path().join("b.toml"), tpl2).unwrap();
+        // Non-TOML file should be ignored
+        std::fs::write(dir.path().join("readme.txt"), "ignore me").unwrap();
+
+        let reg = WorkflowTemplateRegistry::new();
+        let loaded = reg.load_templates_from_dir(dir.path());
+        assert_eq!(loaded, 2);
+
+        let map = reg.templates.blocking_read();
+        assert!(map.contains_key("tpl-a"));
+        assert!(map.contains_key("tpl-b"));
+        assert_eq!(map.get("tpl-a").unwrap().name, "Template A");
+    }
+
+    #[test]
+    fn test_template_registry_load_dir_invalid() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("bad.toml"), "not valid {{{{").unwrap();
+
+        let reg = WorkflowTemplateRegistry::new();
+        let loaded = reg.load_templates_from_dir(dir.path());
+        assert_eq!(loaded, 0);
+        assert!(reg.templates.blocking_read().is_empty());
+    }
+
+    #[test]
+    fn test_template_registry_load_dir_nonexistent() {
+        let reg = WorkflowTemplateRegistry::new();
+        let loaded = reg.load_templates_from_dir(Path::new("/tmp/does-not-exist-template-dir"));
+        assert_eq!(loaded, 0);
     }
 }

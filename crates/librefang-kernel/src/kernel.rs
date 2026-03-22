@@ -1720,6 +1720,7 @@ system_prompt = "You are a helpful assistant."
             if loaded > 0 {
                 info!(
                     "Loaded {loaded} workflow template(s) from {}",
+                    "Loaded {loaded} user workflow template(s) from {}",
                     user_dir.display()
                 );
             }
