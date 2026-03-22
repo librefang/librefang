@@ -42,6 +42,16 @@ pub async fn execute_skill_tool(
             )
             .await
         }
+        SkillRuntime::Shell => {
+            execute_shell(
+                skill_dir,
+                &manifest.runtime.entry,
+                tool_name,
+                input,
+                &manifest.config,
+            )
+            .await
+        }
         SkillRuntime::Wasm => Err(SkillError::RuntimeNotAvailable(
             "WASM skill runtime not yet implemented".to_string(),
         )),
@@ -285,6 +295,141 @@ async fn execute_node(
     }
 }
 
+/// Execute a Shell/Bash skill script.
+async fn execute_shell(
+    skill_dir: &Path,
+    entry: &str,
+    tool_name: &str,
+    input: &serde_json::Value,
+    config: &std::collections::HashMap<String, serde_json::Value>,
+) -> Result<SkillToolResult, SkillError> {
+    let script_path = skill_dir.join(entry);
+    if !script_path.exists() {
+        return Err(SkillError::ExecutionFailed(format!(
+            "Shell script not found: {}",
+            script_path.display()
+        )));
+    }
+
+    let shell = find_shell().ok_or_else(|| {
+        SkillError::RuntimeNotAvailable(
+            "Shell not found. Install bash or sh to run Shell skills.".to_string(),
+        )
+    })?;
+
+    // Build the JSON payload to send via stdin, including any skill config
+    let payload = if config.is_empty() {
+        serde_json::json!({
+            "tool": tool_name,
+            "input": input,
+        })
+    } else {
+        serde_json::json!({
+            "tool": tool_name,
+            "input": input,
+            "config": config,
+        })
+    };
+
+    debug!("Executing Shell skill: {} {}", shell, script_path.display());
+
+    let mut cmd = tokio::process::Command::new(&shell);
+    cmd.arg(&script_path)
+        .current_dir(skill_dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    // SECURITY: Isolate environment (same as Python/Node — prevent secret leakage)
+    cmd.env_clear();
+    if let Ok(path) = std::env::var("PATH") {
+        cmd.env("PATH", path);
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        cmd.env("HOME", home);
+    }
+    if let Ok(shell_env) = std::env::var("SHELL") {
+        cmd.env("SHELL", shell_env);
+    }
+    if let Ok(term) = std::env::var("TERM") {
+        cmd.env("TERM", term);
+    }
+    #[cfg(windows)]
+    {
+        if let Ok(sp) = std::env::var("SYSTEMROOT") {
+            cmd.env("SYSTEMROOT", sp);
+        }
+        if let Ok(tmp) = std::env::var("TEMP") {
+            cmd.env("TEMP", tmp);
+        }
+    }
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| SkillError::ExecutionFailed(format!("Failed to spawn shell: {e}")))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        let payload_bytes = serde_json::to_vec(&payload)
+            .map_err(|e| SkillError::ExecutionFailed(format!("JSON serialize: {e}")))?;
+        stdin
+            .write_all(&payload_bytes)
+            .await
+            .map_err(|e| SkillError::ExecutionFailed(format!("Write stdin: {e}")))?;
+        drop(stdin);
+    }
+
+    let timeout_dur = std::time::Duration::from_secs(120);
+    let output = match tokio::time::timeout(timeout_dur, child.wait_with_output()).await {
+        Ok(result) => {
+            result.map_err(|e| SkillError::ExecutionFailed(format!("Wait for shell: {e}")))?
+        }
+        Err(_) => {
+            error!("Shell skill timed out after 120s: {}", script_path.display());
+            return Ok(SkillToolResult {
+                output: "Shell script timed out after 120 seconds".into(),
+                is_error: true,
+            });
+        }
+    };
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        error!("Shell skill failed: {stderr}");
+        return Ok(SkillToolResult {
+            output: serde_json::json!({ "error": stderr.to_string() }),
+            is_error: true,
+        });
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    match serde_json::from_str::<serde_json::Value>(&stdout) {
+        Ok(value) => Ok(SkillToolResult {
+            output: value,
+            is_error: false,
+        }),
+        Err(_) => Ok(SkillToolResult {
+            output: serde_json::json!({ "result": stdout.trim() }),
+            is_error: false,
+        }),
+    }
+}
+
+/// Find a shell interpreter (bash preferred, sh as fallback).
+fn find_shell() -> Option<String> {
+    for name in &["bash", "sh"] {
+        if std::process::Command::new(name)
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok()
+        {
+            return Some(name.to_string());
+        }
+    }
+    None
+}
+
 /// Find Python 3 binary.
 fn find_python() -> Option<String> {
     for name in &["python3", "python"] {
@@ -328,6 +473,220 @@ mod tests {
     #[test]
     fn test_find_node() {
         let _ = find_node();
+    }
+
+    #[test]
+    fn test_find_shell() {
+        // Just ensure it doesn't panic — result depends on environment
+        let result = find_shell();
+        // On Unix-like systems, at least sh should be available
+        #[cfg(unix)]
+        assert!(result.is_some(), "Expected bash or sh to be found on Unix");
+        #[cfg(not(unix))]
+        let _ = result;
+    }
+
+    #[tokio::test]
+    async fn test_shell_execution_json_output() {
+        use crate::{
+            SkillManifest, SkillMeta, SkillRequirements, SkillRuntimeConfig, SkillToolDef,
+            SkillTools,
+        };
+        use tempfile::TempDir;
+
+        // Skip if no shell available
+        if find_shell().is_none() {
+            return;
+        }
+
+        let dir = TempDir::new().unwrap();
+        // Write a shell script that reads stdin JSON and echoes JSON output
+        let script = r#"#!/bin/bash
+read INPUT
+echo '{"greeting": "hello from shell"}'
+"#;
+        std::fs::write(dir.path().join("run.sh"), script).unwrap();
+
+        let manifest = SkillManifest {
+            skill: SkillMeta {
+                name: "test-shell".to_string(),
+                version: librefang_types::VERSION.to_string(),
+                description: "A shell test".to_string(),
+                author: String::new(),
+                license: String::new(),
+                tags: vec![],
+            },
+            runtime: SkillRuntimeConfig {
+                runtime_type: SkillRuntime::Shell,
+                entry: "run.sh".to_string(),
+            },
+            tools: SkillTools {
+                provided: vec![SkillToolDef {
+                    name: "greet".to_string(),
+                    description: "Test greeting".to_string(),
+                    input_schema: serde_json::json!({"type": "object"}),
+                }],
+            },
+            requirements: SkillRequirements::default(),
+            prompt_context: None,
+            source: None,
+            config: std::collections::HashMap::new(),
+        };
+
+        let result = execute_skill_tool(&manifest, dir.path(), "greet", &serde_json::json!({}))
+            .await
+            .unwrap();
+        assert!(!result.is_error);
+        assert_eq!(result.output["greeting"], "hello from shell");
+    }
+
+    #[tokio::test]
+    async fn test_shell_execution_plain_output() {
+        use crate::{
+            SkillManifest, SkillMeta, SkillRequirements, SkillRuntimeConfig, SkillToolDef,
+            SkillTools,
+        };
+        use tempfile::TempDir;
+
+        if find_shell().is_none() {
+            return;
+        }
+
+        let dir = TempDir::new().unwrap();
+        let script = "#!/bin/bash\necho 'plain text output'\n";
+        std::fs::write(dir.path().join("run.sh"), script).unwrap();
+
+        let manifest = SkillManifest {
+            skill: SkillMeta {
+                name: "test-shell-plain".to_string(),
+                version: librefang_types::VERSION.to_string(),
+                description: "Shell plain output test".to_string(),
+                author: String::new(),
+                license: String::new(),
+                tags: vec![],
+            },
+            runtime: SkillRuntimeConfig {
+                runtime_type: SkillRuntime::Shell,
+                entry: "run.sh".to_string(),
+            },
+            tools: SkillTools {
+                provided: vec![SkillToolDef {
+                    name: "echo_tool".to_string(),
+                    description: "Test echo".to_string(),
+                    input_schema: serde_json::json!({"type": "object"}),
+                }],
+            },
+            requirements: SkillRequirements::default(),
+            prompt_context: None,
+            source: None,
+            config: std::collections::HashMap::new(),
+        };
+
+        let result = execute_skill_tool(&manifest, dir.path(), "echo_tool", &serde_json::json!({}))
+            .await
+            .unwrap();
+        assert!(!result.is_error);
+        assert_eq!(result.output["result"], "plain text output");
+    }
+
+    #[tokio::test]
+    async fn test_shell_execution_error() {
+        use crate::{
+            SkillManifest, SkillMeta, SkillRequirements, SkillRuntimeConfig, SkillToolDef,
+            SkillTools,
+        };
+        use tempfile::TempDir;
+
+        if find_shell().is_none() {
+            return;
+        }
+
+        let dir = TempDir::new().unwrap();
+        let script = "#!/bin/bash\necho 'something went wrong' >&2\nexit 1\n";
+        std::fs::write(dir.path().join("fail.sh"), script).unwrap();
+
+        let manifest = SkillManifest {
+            skill: SkillMeta {
+                name: "test-shell-fail".to_string(),
+                version: librefang_types::VERSION.to_string(),
+                description: "Shell error test".to_string(),
+                author: String::new(),
+                license: String::new(),
+                tags: vec![],
+            },
+            runtime: SkillRuntimeConfig {
+                runtime_type: SkillRuntime::Shell,
+                entry: "fail.sh".to_string(),
+            },
+            tools: SkillTools {
+                provided: vec![SkillToolDef {
+                    name: "fail_tool".to_string(),
+                    description: "Test failure".to_string(),
+                    input_schema: serde_json::json!({"type": "object"}),
+                }],
+            },
+            requirements: SkillRequirements::default(),
+            prompt_context: None,
+            source: None,
+            config: std::collections::HashMap::new(),
+        };
+
+        let result = execute_skill_tool(&manifest, dir.path(), "fail_tool", &serde_json::json!({}))
+            .await
+            .unwrap();
+        assert!(result.is_error);
+        assert!(result.output["error"]
+            .as_str()
+            .unwrap()
+            .contains("something went wrong"));
+    }
+
+    #[tokio::test]
+    async fn test_shell_script_not_found() {
+        use crate::{
+            SkillManifest, SkillMeta, SkillRequirements, SkillRuntimeConfig, SkillToolDef,
+            SkillTools,
+        };
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+
+        let manifest = SkillManifest {
+            skill: SkillMeta {
+                name: "test-shell-missing".to_string(),
+                version: librefang_types::VERSION.to_string(),
+                description: "Missing script test".to_string(),
+                author: String::new(),
+                license: String::new(),
+                tags: vec![],
+            },
+            runtime: SkillRuntimeConfig {
+                runtime_type: SkillRuntime::Shell,
+                entry: "nonexistent.sh".to_string(),
+            },
+            tools: SkillTools {
+                provided: vec![SkillToolDef {
+                    name: "missing_tool".to_string(),
+                    description: "Test missing".to_string(),
+                    input_schema: serde_json::json!({"type": "object"}),
+                }],
+            },
+            requirements: SkillRequirements::default(),
+            prompt_context: None,
+            source: None,
+            config: std::collections::HashMap::new(),
+        };
+
+        let err = execute_skill_tool(
+            &manifest,
+            dir.path(),
+            "missing_tool",
+            &serde_json::json!({}),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, SkillError::ExecutionFailed(_)));
+        assert!(err.to_string().contains("Shell script not found"));
     }
 
     #[tokio::test]
