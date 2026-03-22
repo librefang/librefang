@@ -331,11 +331,7 @@ async fn execute_shell(
         })
     };
 
-    debug!(
-        "Executing Shell skill: {} {}",
-        shell,
-        script_path.display()
-    );
+    debug!("Executing Shell skill: {} {}", shell, script_path.display());
 
     let mut cmd = tokio::process::Command::new(&shell);
     cmd.arg(&script_path)
@@ -577,10 +573,9 @@ echo '{"greeting": "hello from shell"}'
             config: std::collections::HashMap::new(),
         };
 
-        let result =
-            execute_skill_tool(&manifest, dir.path(), "echo_tool", &serde_json::json!({}))
-                .await
-                .unwrap();
+        let result = execute_skill_tool(&manifest, dir.path(), "echo_tool", &serde_json::json!({}))
+            .await
+            .unwrap();
         assert!(!result.is_error);
         assert_eq!(result.output["result"], "plain text output");
     }
@@ -627,10 +622,9 @@ echo '{"greeting": "hello from shell"}'
             config: std::collections::HashMap::new(),
         };
 
-        let result =
-            execute_skill_tool(&manifest, dir.path(), "fail_tool", &serde_json::json!({}))
-                .await
-                .unwrap();
+        let result = execute_skill_tool(&manifest, dir.path(), "fail_tool", &serde_json::json!({}))
+            .await
+            .unwrap();
         assert!(result.is_error);
         assert!(result.output["error"]
             .as_str()
@@ -674,10 +668,14 @@ echo '{"greeting": "hello from shell"}'
             config: std::collections::HashMap::new(),
         };
 
-        let err =
-            execute_skill_tool(&manifest, dir.path(), "missing_tool", &serde_json::json!({}))
-                .await
-                .unwrap_err();
+        let err = execute_skill_tool(
+            &manifest,
+            dir.path(),
+            "missing_tool",
+            &serde_json::json!({}),
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(err, SkillError::ExecutionFailed(_)));
         assert!(err.to_string().contains("Shell script not found"));
     }
