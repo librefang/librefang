@@ -362,18 +362,21 @@ dashboard_user = "admin"
 dashboard_pass = "vault:dashboard_password"
 ```
 
-**方式二：迁移到 Argon2id 哈希**
+**方式二：使用 Argon2id 哈希**
 
-1. 使用现有的 `dashboard_pass` 明文密码正常登录 Dashboard
-2. 登录成功后查看服务日志，会输出可用的哈希值：
-   ```
-   Set `dashboard_pass_hash = "$argon2id$v=19$m=19456,t=2,p=1$..."` in config.toml ...
-   ```
-3. 将哈希值写入 `config.toml`，并删除明文密码：
-   ```toml
-   dashboard_user      = "admin"
-   dashboard_pass_hash = "$argon2id$v=19$m=19456,t=2,p=1$<salt>$<hash>"
-   ```
+使用 CLI 生成哈希：
+```bash
+librefang hash-password
+# Enter password: ********
+# Confirm password: ********
+# $argon2id$v=19$m=19456,t=2,p=1$<salt>$<hash>
+```
+
+将输出的哈希写入 `config.toml`：
+```toml
+dashboard_user      = "admin"
+dashboard_pass_hash = "$argon2id$v=19$m=19456,t=2,p=1$<salt>$<hash>"
+```
 
 > **注意：** 迁移到 `dashboard_pass_hash` 后，已登录的会话需要重新登录。
 
