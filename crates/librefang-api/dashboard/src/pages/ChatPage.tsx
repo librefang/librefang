@@ -5,6 +5,7 @@ import remarkGfm from "remark-gfm";
 import { useTranslation } from "react-i18next";
 import { useSearch } from "@tanstack/react-router";
 import { listAgents, sendAgentMessage, loadAgentSession } from "../api";
+import { normalizeToolOutput } from "../lib/chat";
 import { MessageCircle, Send, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, Zap } from "lucide-react";
 import { Badge } from "../components/ui/Badge";
 import { useUIStore } from "../lib/store";
@@ -217,6 +218,12 @@ function useChatMessages(agentId: string | null, agents: any[] = []) {
               setMessages(prev => prev.map(m =>
                 m.id === botMsg.id ? { ...m, content: m.content + chunk } : m
               ));
+            } else if (data.type === "tool_result") {
+              // Persist tool output for display
+              const entry = normalizeToolOutput(data);
+              if (entry) {
+                addSkillOutput({ skillName: entry.tool, agentId: agentId || undefined, content: entry.content });
+              }
             } else if (data.type === "done" || data.done) {
               // Stream complete
               setMessages(prev => prev.map(m =>
