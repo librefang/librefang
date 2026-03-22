@@ -24,6 +24,9 @@ self.addEventListener("activate", (e) => {
 self.addEventListener("fetch", (e) => {
   const url = new URL(e.request.url);
 
+  // Only handle http(s) requests
+  if (!url.protocol.startsWith("http")) return;
+
   // API requests: network only
   if (url.pathname.startsWith("/api/")) return;
 
