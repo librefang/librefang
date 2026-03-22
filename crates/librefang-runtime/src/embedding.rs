@@ -292,7 +292,6 @@ fn sigv4_signing_key(secret: &str, date: &str, region: &str, service: &str) -> V
 ///
 /// This is a *minimal* implementation that covers the Bedrock invoke use-case
 /// (POST, JSON body, no query-string parameters).
-#[allow(clippy::too_many_arguments)]
 fn sigv4_auth_header(
     access_key: &str,
     secret_key: &str,
@@ -310,9 +309,9 @@ fn sigv4_auth_header(
     let payload_hash = sha256_hex(payload);
 
     // Canonical headers (must be sorted). Include security token if present.
-    let (canonical_headers, signed_headers) = if let Some(token) = session_token {
+    let (canonical_headers, signed_headers) = if session_token.is_some() {
         (
-            format!("content-type:application/json\nhost:{host}\nx-amz-content-sha256:{payload_hash}\nx-amz-date:{amz_date}\nx-amz-security-token:{token}\n"),
+            format!("content-type:application/json\nhost:{host}\nx-amz-content-sha256:{payload_hash}\nx-amz-date:{amz_date}\nx-amz-security-token:{}\n", session_token.unwrap()),
             "content-type;host;x-amz-content-sha256;x-amz-date;x-amz-security-token",
         )
     } else {
@@ -370,7 +369,7 @@ impl EmbeddingDriver for BedrockEmbeddingDriver {
             let (auth, amz_date, payload_hash) = sigv4_auth_header(
                 &self.access_key,
                 &self.secret_key,
-                self.session_token.as_ref().map(|t| t.as_str()),
+                self.session_token.as_deref(),
                 &self.region,
                 "bedrock",
                 &host,
@@ -749,8 +748,8 @@ mod tests {
 
     // AWS example credentials from official documentation — NOT real secrets.
     // https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_access-keys.html
-    const TEST_AWS_ACCESS_KEY: &str = "AKIAIOSFODNN7EXAMPLE";
-    const TEST_AWS_SECRET_KEY: &str = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
+    const TEST_AWS_ACCESS_KEY: &str = TEST_AWS_ACCESS_KEY;
+    const TEST_AWS_SECRET_KEY: &str = TEST_AWS_SECRET_KEY;
 
     #[test]
     fn test_sigv4_signing_key_deterministic() {
@@ -768,7 +767,6 @@ mod tests {
         let (auth, amz_date, payload_hash) = sigv4_auth_header(
             TEST_AWS_ACCESS_KEY,
             TEST_AWS_SECRET_KEY,
-            None,
             "us-east-1",
             "bedrock",
             "bedrock-runtime.us-east-1.amazonaws.com",
@@ -797,7 +795,7 @@ mod tests {
         let result =
             create_embedding_driver("bedrock", "amazon.titan-embed-text-v2:0", "", None, None);
         assert!(result.is_err());
-        let err_msg = result.err().unwrap().to_string();
+        let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("AWS_ACCESS_KEY_ID"));
 
         // Restore env vars if they were set.

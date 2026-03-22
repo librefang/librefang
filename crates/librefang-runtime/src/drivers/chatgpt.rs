@@ -63,6 +63,7 @@ struct ResponsesApiRequest {
 #[cfg(test)]
 #[allow(dead_code)]
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct ResponsesOutputItem {
     #[serde(rename = "type")]
     item_type: String,
@@ -86,6 +87,7 @@ struct ResponsesOutputItem {
 #[cfg(test)]
 #[allow(dead_code)]
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct ResponsesContentPart {
     #[serde(rename = "type")]
     part_type: String,
@@ -97,6 +99,7 @@ struct ResponsesContentPart {
 #[cfg(test)]
 #[allow(dead_code)]
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct ResponsesReasoningSummary {
     #[serde(rename = "type")]
     #[serde(default)]

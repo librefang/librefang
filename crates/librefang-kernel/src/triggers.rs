@@ -487,9 +487,6 @@ fn describe_event(event: &Event) -> String {
                 )
             }
         },
-        EventPayload::ApprovalRequested(ar) => {
-            format!("Approval requested: {}", ar.request_id)
-        }
         EventPayload::Custom(data) => {
             format!("Custom event ({} bytes)", data.len())
         }
