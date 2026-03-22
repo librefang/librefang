@@ -503,6 +503,10 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
         )
         .route("/sessions", axum::routing::get(routes::list_sessions))
         .route(
+            "/sessions/search",
+            axum::routing::get(routes::search_sessions),
+        )
+        .route(
             "/sessions/cleanup",
             axum::routing::post(routes::session_cleanup),
         )
