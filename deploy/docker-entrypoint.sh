@@ -63,4 +63,8 @@ if [ -n "$PORT" ]; then
   sed -i "s|^api_listen = .*|api_listen = \"0.0.0.0:${PORT}\"|" "$CONFIG"
 fi
 
+# Auto-sync registry content (agents, hands, skills, providers) on boot
+# Uses HTTP tarball download if git is unavailable
+librefang init 2>/dev/null || true
+
 exec "$@"

@@ -52,11 +52,11 @@ curl -fsSL https://librefang.ai/install.sh | sh
 # Or install via Cargo
 cargo install --git https://github.com/librefang/librefang librefang-cli
 
-# Initialize (walks you through provider setup)
-librefang init
-
-# Start — dashboard live at http://localhost:4545
+# Start — auto-initializes on first run, dashboard at http://localhost:4545
 librefang start
+
+# Or run the setup wizard manually for interactive provider selection
+# librefang init
 ```
 
 <details>
