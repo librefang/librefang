@@ -104,18 +104,26 @@ export function OverviewPage() {
   ];
 
   return (
-    <div className="flex flex-col gap-6 pb-12 transition-colors duration-300">
+    <div className="flex flex-col gap-4 sm:gap-6 pb-12 transition-colors duration-300">
       {/* Header */}
-      <header className="flex flex-col justify-between gap-4 md:flex-row md:items-end">
+      <header className="flex flex-col justify-between gap-3 sm:gap-4 md:flex-row md:items-end">
         <div>
-          <div className="flex items-center gap-2 text-brand font-bold uppercase tracking-widest text-[10px]">
+          <div className="hidden sm:flex items-center gap-2 text-brand font-bold uppercase tracking-widest text-[10px]">
             <Home className="h-4 w-4" />
             {t("overview.system_overview")}
           </div>
-          <h1 className="mt-2 text-3xl font-extrabold tracking-tight md:text-4xl">{t("overview.welcome")}</h1>
-          <p className="mt-2 text-text-dim max-w-2xl font-medium">{t("overview.description")}</p>
+          <div className="flex items-center gap-3 sm:block">
+            <h1 className="text-xl sm:text-3xl font-extrabold tracking-tight md:text-4xl sm:mt-2">{t("overview.welcome")}</h1>
+            <div className="flex items-center gap-2 rounded-full border border-border-subtle bg-surface px-3 py-1 sm:hidden shrink-0">
+              <div className={`h-2 w-2 rounded-full ${snapshot?.health?.status === "ok" ? "bg-success" : "bg-warning animate-pulse"}`} />
+              <span className="text-[10px] font-semibold text-slate-600 dark:text-slate-300">
+                {snapshot?.health?.status === "ok" ? "OK" : "!"}
+              </span>
+            </div>
+          </div>
+          <p className="mt-1 sm:mt-2 text-text-dim max-w-2xl font-medium text-xs sm:text-base hidden sm:block">{t("overview.description")}</p>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="hidden sm:flex items-center gap-3">
           <div className="flex items-center gap-2 rounded-full border border-border-subtle bg-surface px-4 py-1.5 backdrop-blur-md shadow-sm">
             <div className={`h-2 w-2 rounded-full ${snapshot?.health?.status === "ok" ? "bg-success shadow-[0_0_8px_var(--success-color)]" : "bg-warning animate-pulse"}`} />
             <span className="text-xs font-semibold text-slate-600 dark:text-slate-300">
@@ -132,7 +140,7 @@ export function OverviewPage() {
       </header>
 
       {/* Stats Cards */}
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4 stagger-children">
+      <div className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-4 stagger-children">
         {isLoading ? (
           // Loading skeletons
           <>
@@ -152,9 +160,9 @@ export function OverviewPage() {
               <div className="absolute right-2 top-2 text-brand/30 transition-transform group-hover:scale-110 group-hover:text-brand/40">
                 <stat.icon className="h-5 w-5" />
               </div>
-              <p className="text-[10px] font-bold uppercase tracking-widest text-text-dim relative z-10">{stat.title}</p>
-              <div className="mt-2 flex items-baseline gap-2 relative z-10">
-                <span className="text-4xl font-black tracking-tight">{stat.value}</span>
+              <p className="text-[9px] sm:text-[10px] font-bold uppercase tracking-widest text-text-dim relative z-10">{stat.title}</p>
+              <div className="mt-1 sm:mt-2 flex items-baseline gap-1.5 sm:gap-2 relative z-10">
+                <span className="text-2xl sm:text-4xl font-black tracking-tight">{stat.value}</span>
                 <span className="text-xs font-semibold text-text-dim">{stat.subValue}</span>
               </div>
               {stat.progress !== undefined && (
@@ -171,7 +179,7 @@ export function OverviewPage() {
       </div>
 
       {/* Main Content Grid */}
-      <div className="grid gap-6 lg:grid-cols-3">
+      <div className="grid gap-4 sm:gap-6 lg:grid-cols-3">
         {/* Left Column */}
         <div className="flex flex-col gap-6 lg:col-span-2">
           {/* Quick Actions */}
@@ -179,23 +187,23 @@ export function OverviewPage() {
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-xs font-bold uppercase tracking-wider text-text-dim">{t("overview.quick_actions")}</h3>
             </div>
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 stagger-children">
+            <div className="grid grid-cols-2 gap-2 sm:gap-3 sm:grid-cols-4 stagger-children">
               {quickActions.map((action, i) => (
                 <button
                   key={i}
                   onClick={() => navigate({ to: action.to as any })}
-                  className={`group flex flex-col items-center gap-3 rounded-2xl border p-5 transition-all duration-300 hover:-translate-y-1 hover:shadow-lg ${
+                  className={`group flex flex-col items-center gap-2 sm:gap-3 rounded-2xl border p-3 sm:p-5 transition-all duration-300 hover:-translate-y-1 hover:shadow-lg ${
                     action.primary
                       ? "border-brand/20 bg-gradient-to-b from-brand/5 to-brand/10 text-brand hover:shadow-brand/15"
                       : "border-border-subtle bg-surface text-text-dim hover:border-brand/30 hover:text-brand"
                   }`}
                 >
-                  <div className={`w-10 h-10 rounded-xl flex items-center justify-center transition-all duration-300 group-hover:scale-110 ${
+                  <div className={`w-8 h-8 sm:w-10 sm:h-10 rounded-xl flex items-center justify-center transition-all duration-300 group-hover:scale-110 ${
                     action.primary ? "bg-brand/15" : "bg-main group-hover:bg-brand/10"
                   }`}>
-                    <action.icon className="h-5 w-5" />
+                    <action.icon className="h-4 w-4 sm:h-5 sm:w-5" />
                   </div>
-                  <span className="text-[11px] font-bold text-center">{action.label}</span>
+                  <span className="text-[10px] sm:text-[11px] font-bold text-center">{action.label}</span>
                 </button>
               ))}
             </div>
@@ -262,23 +270,23 @@ export function OverviewPage() {
                 {t("overview.view_all")} →
               </button>
             </div>
-            <div className="flex items-center gap-6">
+            <div className="flex flex-wrap items-center gap-4 sm:gap-6">
               <div className="flex items-center gap-3">
-                <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-success/10">
-                  <Clock className="h-6 w-6 text-success" />
+                <div className="flex h-10 w-10 sm:h-12 sm:w-12 items-center justify-center rounded-xl bg-success/10">
+                  <Clock className="h-5 w-5 sm:h-6 sm:w-6 text-success" />
                 </div>
                 <div>
-                  <p className="text-2xl font-black">{sessionsCount}</p>
+                  <p className="text-xl sm:text-2xl font-black">{sessionsCount}</p>
                   <p className="text-[10px] text-text-dim uppercase">{t("overview.active_sessions")}</p>
                 </div>
               </div>
-              <div className="h-10 w-px bg-border-subtle" />
+              <div className="h-10 w-px bg-border-subtle hidden sm:block" />
               <div className="flex items-center gap-3">
-                <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-brand/10">
-                  <Shield className="h-6 w-6 text-brand" />
+                <div className="flex h-10 w-10 sm:h-12 sm:w-12 items-center justify-center rounded-xl bg-brand/10">
+                  <Shield className="h-5 w-5 sm:h-6 sm:w-6 text-brand" />
                 </div>
                 <div>
-                  <p className="text-2xl font-black">{skillsCount}</p>
+                  <p className="text-xl sm:text-2xl font-black">{skillsCount}</p>
                   <p className="text-[10px] text-text-dim uppercase">{t("nav.skills")}</p>
                 </div>
               </div>

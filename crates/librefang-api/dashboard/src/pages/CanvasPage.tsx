@@ -289,7 +289,7 @@ function NodeConfigPanel({
   const hasAgent = !!agentId;
 
   return (
-    <div className="absolute top-3 right-3 z-20 w-80 max-h-[calc(100%-24px)] rounded-xl border border-border-subtle bg-surface shadow-2xl overflow-hidden flex flex-col">
+    <div className="absolute top-3 right-3 z-20 w-[calc(100%-24px)] sm:w-80 max-h-[calc(100%-24px)] rounded-xl border border-border-subtle bg-surface shadow-2xl overflow-hidden flex flex-col">
       <div className="flex items-center justify-between px-3 py-2 bg-main/50 border-b border-border-subtle shrink-0">
         <span className="text-xs font-bold">{t("canvas.node_config")}</span>
         <div className="flex items-center gap-1">
@@ -1307,8 +1307,8 @@ function CanvasPageInner() {
 
   return (
     <div className={`flex flex-col transition-all duration-300 ${isFullscreen ? "fixed inset-0 z-[100] bg-main" : "h-[calc(100vh-140px)]"}`}>
-      <header className="flex justify-between items-end pb-4">
-        <div className="flex items-center gap-4">
+      <header className="flex flex-wrap justify-between items-end gap-2 pb-2 sm:pb-4">
+        <div className="flex items-center gap-2 sm:gap-4">
           {isFullscreen && (
             <Button variant="ghost" size="sm" onClick={() => navigate({ to: "/workflows" })}>
               <ArrowLeft className="w-4 h-4 mr-1" />
@@ -1328,22 +1328,22 @@ function CanvasPageInner() {
             </>
           )}
         </div>
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-1 flex-wrap">
           {/* 状态信息 */}
           {selectedNodeIds.size >= 2 && (
             <Button variant="secondary" size="sm" onClick={createGroup}>
               <Group className="w-3.5 h-3.5 mr-1" />
-              {t("canvas.create_group")}
+              <span className="hidden sm:inline">{t("canvas.create_group")}</span>
             </Button>
           )}
           {agentStepCount > 0 && (
-            <span className="text-[10px] font-bold text-success px-2">
+            <span className="text-[10px] font-bold text-success px-2 hidden sm:inline">
               {agentStepCount} {t("canvas.agent_steps")}
             </span>
           )}
 
           {/* 视图工具 */}
-          <div className="flex items-center gap-0.5 px-1">
+          <div className="flex items-center gap-0.5 px-0.5 sm:px-1">
             <Button variant="secondary" onClick={() => setIsFullscreen(!isFullscreen)} title={isFullscreen ? "Exit fullscreen" : "Fullscreen"}>
               {isFullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
             </Button>
@@ -1352,45 +1352,45 @@ function CanvasPageInner() {
             </Button>
           </div>
 
-          <div className="w-px h-5 bg-border-subtle" />
+          <div className="w-px h-5 bg-border-subtle hidden sm:block" />
 
           {/* 文件操作 */}
-          <div className="flex items-center gap-0.5 px-1">
+          <div className="flex items-center gap-0.5 px-0.5 sm:px-1">
             <Button variant="secondary" onClick={() => setShowWorkflowPanel(!showWorkflowPanel)} title={t("workflows.open_workflows")}>
               <FolderOpen className="w-4 h-4" />
             </Button>
-            <Button variant="secondary" onClick={exportWorkflow} title="Export (Cmd+E)">
+            <Button variant="secondary" onClick={exportWorkflow} title="Export (Cmd+E)" className="hidden sm:flex">
               <Download className="w-4 h-4" />
             </Button>
-            <Button variant="secondary" onClick={importWorkflow} title="Import (Cmd+I)">
+            <Button variant="secondary" onClick={importWorkflow} title="Import (Cmd+I)" className="hidden sm:flex">
               <Upload className="w-4 h-4" />
             </Button>
           </div>
 
-          <div className="w-px h-5 bg-border-subtle" />
+          <div className="w-px h-5 bg-border-subtle hidden sm:block" />
 
           {/* 画布操作 */}
-          <div className="flex items-center gap-0.5 px-1">
+          <div className="flex items-center gap-0.5 px-0.5 sm:px-1">
             <Button variant="secondary" onClick={() => { setNodes([]); setEdges([]); setEditingNode(null); }} title={t("common.clear")}>
               <Trash2 className="w-4 h-4" />
             </Button>
-            <Button variant="secondary" onClick={() => setShowHelp(true)} title="Shortcuts (?)">
+            <Button variant="secondary" onClick={() => setShowHelp(true)} title="Shortcuts (?)" className="hidden sm:flex">
               <HelpCircle className="w-4 h-4" />
             </Button>
           </div>
 
-          <div className="w-px h-5 bg-border-subtle" />
+          <div className="w-px h-5 bg-border-subtle hidden sm:block" />
 
           {/* 主操作 */}
-          <div className="flex items-center gap-1.5 pl-1">
+          <div className="flex items-center gap-1 sm:gap-1.5 pl-0.5 sm:pl-1">
             <Button variant="primary" onClick={handleSave} disabled={!workflowName.trim() || agentStepCount === 0}>
-              <Save className="w-4 h-4 mr-1" />
-              {t("common.save")}
+              <Save className="w-4 h-4" />
+              <span className="hidden sm:inline ml-1">{t("common.save")}</span>
             </Button>
             <Button variant="primary" onClick={() => handleRunClick()}
               disabled={(!selectedWorkflow && agentStepCount === 0) || !!runningWorkflowId}>
-              {runningWorkflowId ? <Loader2 className="w-4 h-4 mr-1 animate-spin" /> : <Play className="w-4 h-4 mr-1" />}
-              {t("workflows.run_workflow")}
+              {runningWorkflowId ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
+              <span className="hidden sm:inline ml-1">{t("workflows.run_workflow")}</span>
             </Button>
           </div>
         </div>
@@ -1411,7 +1411,7 @@ function CanvasPageInner() {
         )}
 
         {/* 节点库（可折叠） */}
-        <div className={`border-r border-border-subtle bg-surface/50 backdrop-blur overflow-y-auto transition-all duration-200 ${
+        <div className={`border-r border-border-subtle bg-surface/50 backdrop-blur overflow-y-auto transition-all duration-200 hidden sm:block ${
           sidebarCollapsed ? "w-10 px-1 py-2" : "w-52 p-3 space-y-4"
         }`}>
           <button onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
