@@ -61,35 +61,60 @@ fn build_segments(text: &str, max_size: usize) -> Vec<String> {
     segments
 }
 
-/// Split a paragraph into sentences. Uses `. ` and `.\n` as delimiters,
-/// keeping the period with the preceding sentence.
+/// Split a paragraph into sentences.
+///
+/// Recognises the following sentence-ending punctuation:
+/// - ASCII period followed by space or newline: `. ` / `.\n`
+/// - Chinese/Japanese period: `。`
+/// - Chinese question mark: `？`
+/// - Chinese exclamation mark: `！`
+///
+/// Uses char-based iteration to handle multi-byte characters properly.
 fn split_sentences(text: &str) -> Vec<String> {
     let mut sentences = Vec::new();
-    let mut start = 0;
-    let bytes = text.as_bytes();
+    let mut start_byte = 0;
+
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    let len = chars.len();
 
     let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'.'
-            && i + 1 < bytes.len()
-            && (bytes[i + 1] == b' ' || bytes[i + 1] == b'\n')
-        {
-            let end = i + 1; // include the period
-            let segment = text[start..end].trim();
+    while i < len {
+        let (byte_idx, ch) = chars[i];
+        let is_boundary = match ch {
+            '.' => {
+                // Only split on `. ` or `.\n` (ASCII period followed by whitespace)
+                if let Some(&(_, next_ch)) = chars.get(i + 1) {
+                    next_ch == ' ' || next_ch == '\n'
+                } else {
+                    false
+                }
+            }
+            '。' | '？' | '！' => true,
+            _ => false,
+        };
+
+        if is_boundary {
+            let end_byte = byte_idx + ch.len_utf8();
+            let segment = text[start_byte..end_byte].trim();
             if !segment.is_empty() {
                 sentences.push(segment.to_string());
             }
-            start = end;
-            // skip whitespace after the period
-            if i + 1 < bytes.len() {
-                i += 1; // skip the space/newline
+            start_byte = end_byte;
+            // For ASCII period, skip the trailing space/newline
+            if ch == '.' {
+                if let Some(&(_, next_ch)) = chars.get(i + 1) {
+                    if next_ch == ' ' || next_ch == '\n' {
+                        start_byte += next_ch.len_utf8();
+                        i += 1;
+                    }
+                }
             }
         }
         i += 1;
     }
 
     // Remaining text
-    let remaining = text[start..].trim();
+    let remaining = text[start_byte..].trim();
     if !remaining.is_empty() {
         sentences.push(remaining.to_string());
     }

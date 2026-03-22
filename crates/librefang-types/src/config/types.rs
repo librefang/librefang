@@ -2369,7 +2369,7 @@ pub struct ChunkConfig {
 impl Default for ChunkConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             max_chunk_size: 1500,
             overlap: 200,
         }

@@ -423,20 +423,39 @@ impl MemorySubstrate {
         metadata: HashMap<String, serde_json::Value>,
         embedding: Option<&[f32]>,
     ) -> LibreFangResult<MemoryId> {
+        Self::store_with_chunking(
+            &self.semantic,
+            &self.chunk_config,
+            agent_id,
+            content,
+            source,
+            scope,
+            metadata,
+            embedding,
+        )
+    }
+
+    /// Shared chunking + storing logic used by both sync and async paths.
+    fn store_with_chunking(
+        semantic: &SemanticStore,
+        chunk_config: &ChunkConfig,
+        agent_id: AgentId,
+        content: &str,
+        source: MemorySource,
+        scope: &str,
+        metadata: HashMap<String, serde_json::Value>,
+        embedding: Option<&[f32]>,
+    ) -> LibreFangResult<MemoryId> {
         let should_chunk =
-            self.chunk_config.enabled && content.chars().count() > self.chunk_config.max_chunk_size;
+            chunk_config.enabled && content.chars().count() > chunk_config.max_chunk_size;
 
         if !should_chunk {
-            return self
-                .semantic
+            return semantic
                 .remember_with_embedding(agent_id, content, source, scope, metadata, embedding);
         }
 
-        let chunks = chunker::chunk_text(
-            content,
-            self.chunk_config.max_chunk_size,
-            self.chunk_config.overlap,
-        );
+        let chunks =
+            chunker::chunk_text(content, chunk_config.max_chunk_size, chunk_config.overlap);
 
         // Store the first chunk and use its ID as the parent_id for siblings.
         let mut parent_id: Option<MemoryId> = None;
@@ -460,13 +479,17 @@ impl MemorySubstrate {
                 );
             }
 
-            let id = self.semantic.remember_with_embedding(
+            // Pass None for chunk embeddings — the original embedding was
+            // computed for the full text and is meaningless for individual
+            // chunks.  Let the embedding pipeline compute per-chunk embeddings
+            // later.
+            let id = semantic.remember_with_embedding(
                 agent_id,
                 chunk,
                 source.clone(),
                 scope,
                 chunk_meta,
-                embedding,
+                None,
             )?;
 
             if parent_id.is_none() {
@@ -530,58 +553,16 @@ impl MemorySubstrate {
         let embedding_owned = embedding.map(|e| e.to_vec());
         let chunk_config = self.chunk_config.clone();
         tokio::task::spawn_blocking(move || {
-            let should_chunk =
-                chunk_config.enabled && content.chars().count() > chunk_config.max_chunk_size;
-
-            if !should_chunk {
-                return store.remember_with_embedding(
-                    agent_id,
-                    &content,
-                    source,
-                    &scope,
-                    metadata,
-                    embedding_owned.as_deref(),
-                );
-            }
-
-            let chunks =
-                chunker::chunk_text(&content, chunk_config.max_chunk_size, chunk_config.overlap);
-
-            let mut parent_id: Option<MemoryId> = None;
-            let total_chunks = chunks.len();
-
-            for (idx, chunk) in chunks.iter().enumerate() {
-                let mut chunk_meta = metadata.clone();
-                chunk_meta.insert(
-                    "chunk_index".to_string(),
-                    serde_json::Value::Number(serde_json::Number::from(idx)),
-                );
-                chunk_meta.insert(
-                    "total_chunks".to_string(),
-                    serde_json::Value::Number(serde_json::Number::from(total_chunks)),
-                );
-                if let Some(pid) = &parent_id {
-                    chunk_meta.insert(
-                        "parent_id".to_string(),
-                        serde_json::Value::String(pid.0.to_string()),
-                    );
-                }
-
-                let id = store.remember_with_embedding(
-                    agent_id,
-                    chunk,
-                    source.clone(),
-                    &scope,
-                    chunk_meta,
-                    embedding_owned.as_deref(),
-                )?;
-
-                if parent_id.is_none() {
-                    parent_id = Some(id);
-                }
-            }
-
-            Ok(parent_id.expect("chunks is non-empty"))
+            Self::store_with_chunking(
+                &store,
+                &chunk_config,
+                agent_id,
+                &content,
+                source,
+                &scope,
+                metadata,
+                embedding_owned.as_deref(),
+            )
         })
         .await
         .map_err(|e| LibreFangError::Internal(e.to_string()))?
@@ -1064,7 +1045,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_chunking_reuses_embedding_for_all_chunks() {
+    async fn test_chunking_does_not_share_embedding_across_chunks() {
         let config = ChunkConfig {
             enabled: true,
             max_chunk_size: 100,
@@ -1087,13 +1068,15 @@ mod tests {
             .await
             .unwrap();
 
-        let results = substrate
-            .recall_with_embedding_async("", 20, None, Some(&embedding))
-            .await
-            .unwrap();
+        // Recall without embedding (FTS) so we can inspect all stored chunks.
+        let results = substrate.recall("fox", 20, None).await.unwrap();
 
-        assert!(results.len() > 1);
-        assert!(results.iter().all(|result| result.embedding.is_some()));
+        assert!(results.len() > 1, "expected multiple chunks");
+        // Chunks should NOT carry the original full-text embedding.
+        assert!(
+            results.iter().all(|result| result.embedding.is_none()),
+            "chunks should not have the original full-text embedding"
+        );
     }
 
     #[tokio::test]
