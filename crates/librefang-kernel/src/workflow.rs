@@ -1110,7 +1110,9 @@ impl WorkflowTemplateRegistry {
         // Also include any extra params the caller provided that aren't declared
         // (pass-through), so users can use ad-hoc placeholders.
         for (k, v) in params {
-            resolved.entry(k.clone()).or_insert_with(|| value_to_string(v));
+            resolved
+                .entry(k.clone())
+                .or_insert_with(|| value_to_string(v));
         }
 
         // Convert template steps → workflow steps.

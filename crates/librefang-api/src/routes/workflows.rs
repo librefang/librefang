@@ -6,12 +6,12 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
 use librefang_kernel::triggers::{TriggerId, TriggerPattern};
-use serde::Deserialize;
 use librefang_kernel::workflow::{
     ErrorMode, StepAgent, StepMode, Workflow, WorkflowId, WorkflowStep,
 };
 use librefang_runtime::kernel_handle::KernelHandle;
 use librefang_types::agent::AgentId;
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::warn;
@@ -1420,7 +1420,10 @@ pub async fn list_templates(
                 let q_lower = q.to_lowercase();
                 let matches_name = t.name.to_lowercase().contains(&q_lower);
                 let matches_desc = t.description.to_lowercase().contains(&q_lower);
-                let matches_tags = t.tags.iter().any(|tag| tag.to_lowercase().contains(&q_lower));
+                let matches_tags = t
+                    .tags
+                    .iter()
+                    .any(|tag| tag.to_lowercase().contains(&q_lower));
                 if !matches_name && !matches_desc && !matches_tags {
                     return false;
                 }
@@ -1464,7 +1467,10 @@ pub async fn get_template(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     match state.kernel.template_registry.get(&id).await {
-        Some(t) => (StatusCode::OK, Json(serde_json::to_value(&t).unwrap_or_default())),
+        Some(t) => (
+            StatusCode::OK,
+            Json(serde_json::to_value(&t).unwrap_or_default()),
+        ),
         None => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": format!("Template '{}' not found", id)})),
@@ -1500,7 +1506,11 @@ pub async fn instantiate_template(
         }
     };
 
-    let workflow = match state.kernel.template_registry.instantiate(&template, &params) {
+    let workflow = match state
+        .kernel
+        .template_registry
+        .instantiate(&template, &params)
+    {
         Ok(w) => w,
         Err(e) => {
             return (
