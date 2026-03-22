@@ -242,6 +242,7 @@ export function App() {
       label: t("nav.core"),
       items: [
         { to: "/overview", label: t("nav.overview"), icon: Home },
+        { to: "/hands", label: t("nav.hands"), icon: Hand },
         { to: "/workflows", label: t("nav.workflows"), icon: Layers },
         { to: "/chat", label: t("nav.chat"), icon: MessageCircle },
         { to: "/sessions", label: t("nav.sessions"), icon: Clock },
@@ -265,7 +266,6 @@ export function App() {
         { to: "/models", label: t("nav.models"), icon: Cpu },
         { to: "/channels", label: t("nav.channels"), icon: Network },
         { to: "/skills", label: t("nav.skills"), icon: Bell },
-        { to: "/hands", label: t("nav.hands"), icon: Hand },
         { to: "/plugins", label: t("nav.plugins"), icon: Puzzle },
       ],
     },
