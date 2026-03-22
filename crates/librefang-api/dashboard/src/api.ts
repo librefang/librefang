@@ -1202,7 +1202,8 @@ export async function getA2ATaskStatus(taskId: string): Promise<A2ATaskStatus> {
 
 export async function checkAuthRequired(): Promise<boolean> {
   try {
-    const response = await fetch("/api/health", {
+    // Use /api/status (requires auth) instead of /api/health (public)
+    const response = await fetch("/api/status", {
       headers: { ...authHeader() },
     });
     return response.status === 401;

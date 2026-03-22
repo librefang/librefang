@@ -4,7 +4,7 @@ import { useTranslation } from "react-i18next";
 import { Globe, Sun, Moon, Search, ChevronLeft, ChevronRight, ChevronDown, Menu, Home, Layers, MessageCircle, Clock, CheckCircle, Calendar, Shield, Users, Server, Network, Bell, Hand, BarChart3, Database, Activity, FileText, Settings, Puzzle, Cpu, Lock, Share2 } from "lucide-react";
 import { useUIStore } from "./lib/store";
 import { CommandPalette, useCommandPalette } from "./components/ui/CommandPalette";
-import { checkAuthRequired, setApiKey, checkDashboardAuthMode, dashboardLogin, type AuthMode } from "./api";
+import { checkAuthRequired, setApiKey, hasApiKey, checkDashboardAuthMode, dashboardLogin, type AuthMode } from "./api";
 import { SkillOutputPanel } from "./components/ui/SkillOutputPanel";
 
 function LoginScreen({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated: () => void }) {
@@ -141,9 +141,18 @@ export function App() {
 
   // Check auth on mount — determine if credentials or api_key login is needed
   useEffect(() => {
-    Promise.all([checkDashboardAuthMode(), checkAuthRequired()]).then(([mode, needed]) => {
+    checkDashboardAuthMode().then(async (mode) => {
       setAuthMode(mode);
-      setAuthNeeded(mode === "credentials" ? needed : needed);
+      if (mode === "none") {
+        setAuthNeeded(false);
+      } else if (hasApiKey()) {
+        // Have a stored token — verify it's still valid
+        const needed = await checkAuthRequired();
+        setAuthNeeded(needed);
+      } else {
+        // No token stored — login required
+        setAuthNeeded(true);
+      }
       setAuthChecked(true);
     });
   }, []);
