@@ -51,7 +51,7 @@ export function AnalyticsPage() {
       ) : (
         <>
           {/* KPI Cards */}
-          <div className="grid gap-4 grid-cols-2 md:grid-cols-4 stagger-children">
+          <div className="grid grid-cols-2 gap-2 sm:gap-4 md:grid-cols-4 stagger-children">
             {[
               { icon: Zap, label: t("analytics.total_calls"), value: usage?.call_count ?? 0, color: "text-brand", bg: "bg-brand/10" },
               { icon: Cpu, label: t("analytics.total_tokens_label"), value: `${(((usage?.total_input_tokens ?? 0) + (usage?.total_output_tokens ?? 0)) / 1000).toFixed(0)}K`, color: "text-purple-500", bg: "bg-purple-500/10" },

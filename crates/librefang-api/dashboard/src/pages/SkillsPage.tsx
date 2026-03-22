@@ -470,13 +470,13 @@ export function SkillsPage() {
       {/* Content */}
       {viewMode === "installed" ? (
         skillsQuery.isLoading ? (
-          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+          <div className="grid gap-2 sm:gap-4 md:grid-cols-2 xl:grid-cols-3">
             {[1, 2, 3, 4, 5, 6].map(i => <CardSkeleton key={i} />)}
           </div>
         ) : installedSkills.length === 0 ? (
           <EmptyState title={t("skills.no_skills")} icon={<Package className="h-6 w-6" />} />
         ) : (
-          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+          <div className="grid gap-2 sm:gap-4 md:grid-cols-2 xl:grid-cols-3">
             {installedSkills.map(s => (
               <InstalledSkillCard key={s.name} skill={s} onUninstall={handleUninstall} t={t} />
             ))}
@@ -484,7 +484,7 @@ export function SkillsPage() {
         )
       ) : (
         isMarketplaceLoading ? (
-          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+          <div className="grid gap-2 sm:gap-4 md:grid-cols-2 xl:grid-cols-3">
             {[1, 2, 3, 4, 5, 6].map(i => <CardSkeleton key={i} />)}
           </div>
         ) : isRateLimited ? (
@@ -503,7 +503,7 @@ export function SkillsPage() {
           <EmptyState title={t("skills.no_results")} icon={<Search className="h-6 w-6" />} />
         ) : (
           <>
-            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+            <div className="grid gap-2 sm:gap-4 md:grid-cols-2 xl:grid-cols-3">
               {paginatedMarketplace.map(s => (
                 <MarketplaceSkillCard
                   key={s.slug}

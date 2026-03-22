@@ -556,7 +556,7 @@ export function ChatPage() {
   }, [messages]);
 
   return (
-    <div className="flex h-[calc(100vh-140px)] flex-col">
+    <div className="flex h-[calc(100vh-100px)] sm:h-[calc(100vh-140px)] flex-col">
       {/* 头部 */}
       <header className="pb-2 sm:pb-4">
         <div className="flex items-center justify-between">

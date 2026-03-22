@@ -164,7 +164,7 @@ export function GoalsPage() {
         </div>
       ) : (
         <>
-          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4 stagger-children">
+          <div className="grid grid-cols-2 gap-2 sm:gap-4 xl:grid-cols-4 stagger-children">
             {[
               { label: t("goals.total"), value: stats.total, color: "text-brand", bg: "bg-brand/10", icon: Target },
               { label: t("goals.pending"), value: stats.pending, color: "text-text-dim", bg: "bg-main", icon: Shield },
@@ -208,7 +208,7 @@ export function GoalsPage() {
               </div>
               <div className="space-y-2">
                 {rows.map(r => (
-                  <div key={r.goal.id} className="p-4 rounded-xl bg-main/40 border border-border-subtle hover:border-brand/30 transition-all" style={{ marginLeft: `${r.depth * 20}px` }}>
+                  <div key={r.goal.id} className="p-3 sm:p-4 rounded-xl bg-main/40 border border-border-subtle hover:border-brand/30 transition-all" style={{ marginLeft: `${r.depth * 12}px` }}>
                     {editingId === r.goal.id ? (
                       <div className="flex flex-col gap-2">
                         <input value={editDraft.title} onChange={e => setEditDraft({...editDraft, title: e.target.value})} className={inputClass} placeholder={t("goals.title_label")} />

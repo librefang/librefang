@@ -160,7 +160,7 @@ export function SessionsPage() {
                 <div className="flex items-center gap-1 shrink-0 self-end sm:self-auto">
                   {!(s as any).active && s.agent_id && (
                     <Button variant="secondary" size="sm" onClick={() => handleSwitch(s.agent_id!, s.session_id)} disabled={pendingId === s.session_id}>
-                      <Play className="w-3.5 h-3.5 mr-1" /> {t("common.resume")}
+                      <Play className="w-3.5 h-3.5 sm:mr-1" /> <span className="hidden sm:inline">{t("common.resume")}</span>
                     </Button>
                   )}
                   {confirmDeleteId === s.session_id ? (

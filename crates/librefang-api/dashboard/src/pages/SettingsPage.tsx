@@ -63,7 +63,7 @@ export function SettingsPage() {
         icon={<Settings className="h-4 w-4" />}
       />
 
-      <div className="grid gap-6 md:grid-cols-1 lg:grid-cols-2">
+      <div className="grid gap-4 sm:gap-6 lg:grid-cols-2">
         {/* 外观设置 */}
         <Card padding="lg" hover>
           <h2 className="text-lg font-black tracking-tight mb-6">{t("settings.appearance")}</h2>

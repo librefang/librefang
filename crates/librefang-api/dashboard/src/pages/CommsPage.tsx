@@ -220,7 +220,7 @@ export function CommsPage() {
       {activeTab === "channels" && (
         <>
           {/* Stats Grid */}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 stagger-children">
+          <div className="grid grid-cols-2 gap-2 sm:gap-4 md:grid-cols-4 stagger-children">
             {[
               { icon: Radio, label: t("comms.total_channels"), value: channels.length, color: "text-brand", bg: "bg-brand/10" },
               { icon: CheckCircle2, label: t("comms.connected"), value: configuredCount, color: "text-success", bg: "bg-success/10" },
