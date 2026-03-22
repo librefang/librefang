@@ -4,6 +4,13 @@
 # For Docker, change to "0.0.0.0:4545" or set LIBREFANG_LISTEN env var.
 api_listen = "0.0.0.0:4545"
 
+# Dashboard login credentials (change the defaults!)
+# Recommended: store password in vault instead of plaintext:
+#   librefang vault set dashboard_password
+#   dashboard_pass = "vault:dashboard_password"
+dashboard_user = "librefang"
+dashboard_pass = "librefang"
+
 [default_model]
 provider = "{{provider}}"
 model = "{{model}}"

@@ -1276,7 +1276,9 @@ pub struct KernelConfig {
     #[serde(default)]
     pub dashboard_user: String,
     /// Dashboard login password. Can also be set via `LIBREFANG_DASHBOARD_PASS`
-    /// env var (recommended over plaintext in config.toml).
+    /// env var. **Recommended**: use `vault:KEY` syntax for secure storage.
+    /// Example: `dashboard_pass = "vault:dashboard_password"`
+    /// then run `librefang vault set dashboard_password`.
     #[serde(default)]
     pub dashboard_pass: String,
     /// Kernel operating mode (stable, default, dev).
