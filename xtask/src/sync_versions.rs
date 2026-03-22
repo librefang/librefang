@@ -98,11 +98,15 @@ fn update_rust_sdk_readme(path: &Path, version: &str) -> Result<(), Box<dyn std:
         version.to_string()
     };
     let content = fs::read_to_string(path)?;
-    let re = Regex::new(r#"librefang = "[^"]*""#)?;
-    let new_content = re.replace_all(
-        &content,
-        format!(r#"librefang = "{}""#, major_minor).as_str(),
-    );
+    // Only replace within [dependencies] code blocks, not the entire file
+    let re = Regex::new(r"(?s)(\[dependencies\].*?```)")?;
+    let new_content = re.replace_all(&content, |caps: &regex::Captures| {
+        let block = caps.get(0).unwrap().as_str();
+        let ver_re = Regex::new(r#"librefang = "[^"]*""#).unwrap();
+        ver_re
+            .replace_all(block, format!(r#"librefang = "{}""#, major_minor).as_str())
+            .to_string()
+    });
     fs::write(path, new_content.as_ref())?;
     println!("  Updated sdk/rust/README.md");
     Ok(())

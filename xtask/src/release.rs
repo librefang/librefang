@@ -123,6 +123,26 @@ fn compute_calver() -> String {
     )
 }
 
+fn extract_changelog_section(content: &str, heading: &str) -> String {
+    let lines: Vec<&str> = content.lines().collect();
+    let mut start = None;
+    let mut end = None;
+    for (i, line) in lines.iter().enumerate() {
+        if line.starts_with(heading) {
+            start = Some(i + 1);
+        } else if start.is_some() && end.is_none() && line.starts_with("## [") {
+            end = Some(i);
+        }
+    }
+    match start {
+        Some(s) => {
+            let e = end.unwrap_or(lines.len());
+            lines[s..e].join("\n").trim().to_string()
+        }
+        None => String::new(),
+    }
+}
+
 pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
     let root = repo_root();
 
@@ -142,7 +162,7 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
     git(&root, &["pull", "--rebase", "origin", "main"])?;
 
     let current = read_workspace_version(&root)?;
-    let prev_tag = find_latest_stable_tag(&root);
+    let mut prev_tag = find_latest_stable_tag(&root);
 
     // --- Determine version ---
     let version = if let Some(v) = args.version {
@@ -205,6 +225,14 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
     let tag = format!("v{}", version);
     let is_prerelease = version.contains("-beta") || version.contains("-rc");
 
+    // --- Check if tag already exists ---
+    let tag_exists = Command::new("git")
+        .args(["rev-parse", &tag])
+        .current_dir(&root)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
     // --- Confirmation ---
     if !args.no_confirm {
         println!();
@@ -213,6 +241,9 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
         println!("  Tag:     {}", tag);
         if is_prerelease {
             println!("  Type:    pre-release");
+        }
+        if tag_exists {
+            println!("  Warning: tag {} already exists, will be overwritten", tag);
         }
         if let Some(ref pt) = prev_tag {
             println!(
@@ -229,6 +260,46 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // --- Clean up existing tag if re-releasing ---
+    let mut prev_tag = prev_tag;
+    if tag_exists {
+        println!();
+        println!("Cleaning up existing tag '{}'...", tag);
+        let _ = git(&root, &["tag", "-d", &tag]);
+        let _ = Command::new("git")
+            .args(["push", "origin", "--delete", &tag])
+            .current_dir(&root)
+            .status();
+
+        let release_branch_check = format!("chore/bump-version-{}", version);
+        let branch_exists = Command::new("git")
+            .args([
+                "rev-parse",
+                "--verify",
+                &format!("refs/heads/{}", release_branch_check),
+            ])
+            .current_dir(&root)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if branch_exists {
+            let _ = git(&root, &["branch", "-D", &release_branch_check]);
+        }
+        let _ = Command::new("git")
+            .args(["push", "origin", "--delete", &release_branch_check])
+            .current_dir(&root)
+            .status();
+
+        // Delete existing GitHub Release
+        let _ = Command::new("gh")
+            .args(["release", "delete", &tag, "--yes"])
+            .current_dir(&root)
+            .status();
+
+        // Re-compute prev_tag since we deleted the old one
+        prev_tag = find_latest_stable_tag(&root);
+    }
+
     // --- Generate changelog ---
     println!();
     println!("Generating changelog...");
@@ -243,7 +314,7 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     changelog::run(changelog::ChangelogArgs {
-        version: changelog_version,
+        version: changelog_version.clone(),
         base_tag: prev_tag.clone(),
     })?;
 
@@ -278,6 +349,84 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
         println!("  Warning: dashboard build failed: {}", e);
     }
 
+    // --- Generate Dev.to article (skip for pre-releases or --no-article) ---
+    let article_path = if !args.no_article && !is_prerelease {
+        let article = root.join(format!("articles/release-{}.md", changelog_version));
+        if !article.exists() {
+            let changelog_path = root.join("CHANGELOG.md");
+            if changelog_path.exists() {
+                let cl_content = fs::read_to_string(&changelog_path).unwrap_or_default();
+                let heading = format!("## [{}]", changelog_version);
+                let changes = extract_changelog_section(&cl_content, &heading);
+                if !changes.is_empty() {
+                    println!();
+                    println!("Generating Dev.to article...");
+                    // Ensure articles/ directory exists
+                    let _ = fs::create_dir_all(root.join("articles"));
+                    let article_content = format!(
+                        r#"---
+title: "LibreFang {} Released"
+published: true
+description: "LibreFang v{} release notes — open-source Agent OS built in Rust"
+tags: rust, ai, opensource, release
+canonical_url: https://github.com/librefang/librefang/releases/tag/{}
+cover_image: https://raw.githubusercontent.com/librefang/librefang/main/public/assets/logo.png
+---
+
+# LibreFang {} Released
+
+We're excited to announce **LibreFang v{}**! Here's what's new:
+
+{}
+
+## Install / Upgrade
+
+```bash
+# Binary
+curl -fsSL https://get.librefang.ai | sh
+
+# Rust SDK
+cargo add librefang
+
+# JavaScript SDK
+npm install @librefang/sdk
+
+# Python SDK
+pip install librefang-sdk
+```
+
+## Links
+
+- [Full Changelog](https://github.com/librefang/librefang/blob/main/CHANGELOG.md)
+- [GitHub Release](https://github.com/librefang/librefang/releases/tag/{})
+- [GitHub](https://github.com/librefang/librefang)
+- [Discord](https://discord.gg/DzTYqAZZmc)
+- [Contributing Guide](https://github.com/librefang/librefang/blob/main/docs/CONTRIBUTING.md)
+"#,
+                        changelog_version,
+                        changelog_version,
+                        tag,
+                        changelog_version,
+                        changelog_version,
+                        changes,
+                        tag,
+                    );
+                    fs::write(&article, article_content)?;
+                    println!("  Generated {}", article.display());
+                }
+            }
+            Some(article)
+        } else {
+            Some(article)
+        }
+    } else {
+        if is_prerelease {
+            println!();
+            println!("Skipping Dev.to article for pre-release");
+        }
+        None
+    };
+
     // --- Git add + commit + tag ---
     println!();
     println!("Committing version bump...");
@@ -300,6 +449,16 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
         if path.exists() {
             let _ = Command::new("git")
                 .args(["add", file])
+                .current_dir(&root)
+                .status();
+        }
+    }
+
+    // Add article if generated
+    if let Some(ref article) = article_path {
+        if article.exists() {
+            let _ = Command::new("git")
+                .args(["add", &article.display().to_string()])
                 .current_dir(&root)
                 .status();
         }
@@ -338,7 +497,25 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
             println!();
             println!("Creating Pull Request...");
 
-            let pr_body = format!("## Release {}", tag);
+            // Build PR body with changelog content
+            let mut pr_body = format!("## Release {}", tag);
+            let changelog_path = root.join("CHANGELOG.md");
+            if changelog_path.exists() {
+                let cl_content = fs::read_to_string(&changelog_path).unwrap_or_default();
+                let heading = format!("## [{}]", changelog_version);
+                let section = extract_changelog_section(&cl_content, &heading);
+                if !section.is_empty() {
+                    pr_body.push_str("\n\n");
+                    pr_body.push_str(&section);
+                }
+            }
+            if let Some(ref pt) = prev_tag {
+                pr_body.push_str(&format!(
+                    "\n\n---\n**Full diff:** https://github.com/librefang/librefang/compare/{}...{}",
+                    pt, tag
+                ));
+            }
+
             let pr_output = Command::new("gh")
                 .args([
                     "pr",
