@@ -193,6 +193,7 @@ mod tests {
             system: None,
             thinking: None,
             prompt_caching: false,
+            response_format: None,
         }
     }
 

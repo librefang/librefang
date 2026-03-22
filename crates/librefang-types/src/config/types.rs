@@ -952,6 +952,37 @@ impl Default for ThinkingConfig {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Gap 8: Structured output / response format
+// ---------------------------------------------------------------------------
+
+/// Desired response format from the LLM.
+///
+/// - `Text` — default free-form text (no constraint).
+/// - `Json` — ask the model to respond with valid JSON (`json_object` mode).
+/// - `JsonSchema` — constrain output to a specific JSON Schema (OpenAI
+///   `json_schema` mode; for providers without native support the schema is
+///   injected into the system prompt).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ResponseFormat {
+    /// Free-form text (default behaviour).
+    #[default]
+    Text,
+    /// Valid JSON object (no schema constraint).
+    Json,
+    /// JSON output that must conform to the supplied schema.
+    JsonSchema {
+        /// Schema name (sent to OpenAI as `json_schema.name`).
+        name: String,
+        /// The JSON Schema definition.
+        schema: serde_json::Value,
+        /// Whether to enable strict schema adherence (OpenAI).
+        #[serde(default)]
+        strict: Option<bool>,
+    },
+}
+
 /// Configuration for a sidecar channel adapter (external process-based).
 ///
 /// Sidecar adapters allow external processes written in any language to act as
@@ -4367,5 +4398,89 @@ mod tests {
             sc.on_session_start_script.as_deref(),
             Some("/usr/local/bin/on_start.sh")
         );
+    }
+
+    // ---- ResponseFormat tests ----
+
+    #[test]
+    fn test_response_format_default_is_text() {
+        assert_eq!(ResponseFormat::default(), ResponseFormat::Text);
+    }
+
+    #[test]
+    fn test_response_format_text_roundtrip() {
+        let rf = ResponseFormat::Text;
+        let json = serde_json::to_string(&rf).unwrap();
+        let back: ResponseFormat = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, ResponseFormat::Text);
+    }
+
+    #[test]
+    fn test_response_format_json_roundtrip() {
+        let rf = ResponseFormat::Json;
+        let json = serde_json::to_string(&rf).unwrap();
+        assert!(json.contains(r#""type":"json""#));
+        let back: ResponseFormat = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, ResponseFormat::Json);
+    }
+
+    #[test]
+    fn test_response_format_json_schema_roundtrip() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"}
+            },
+            "required": ["name"]
+        });
+        let rf = ResponseFormat::JsonSchema {
+            name: "person".to_string(),
+            schema: schema.clone(),
+            strict: Some(true),
+        };
+        let json = serde_json::to_string(&rf).unwrap();
+        assert!(json.contains(r#""type":"json_schema""#));
+        assert!(json.contains(r#""name":"person""#));
+        let back: ResponseFormat = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, rf);
+    }
+
+    #[test]
+    fn test_response_format_json_schema_strict_none() {
+        let rf = ResponseFormat::JsonSchema {
+            name: "test".to_string(),
+            schema: serde_json::json!({}),
+            strict: None,
+        };
+        let json = serde_json::to_string(&rf).unwrap();
+        let back: ResponseFormat = serde_json::from_str(&json).unwrap();
+        match back {
+            ResponseFormat::JsonSchema { strict, .. } => assert_eq!(strict, None),
+            _ => panic!("Expected JsonSchema variant"),
+        }
+    }
+
+    #[test]
+    fn test_response_format_toml_roundtrip() {
+        // Simulate a TOML config fragment for json_schema
+        let toml_str = r#"
+type = "json_schema"
+name = "weather"
+strict = true
+
+[schema]
+type = "object"
+
+[schema.properties.temp]
+type = "number"
+"#;
+        let rf: ResponseFormat = toml::from_str(toml_str).unwrap();
+        match &rf {
+            ResponseFormat::JsonSchema { name, strict, .. } => {
+                assert_eq!(name, "weather");
+                assert_eq!(*strict, Some(true));
+            }
+            _ => panic!("Expected JsonSchema variant"),
+        }
     }
 }

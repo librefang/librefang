@@ -3484,6 +3484,7 @@ system_prompt = "You are a helpful assistant."
             system: Some(classify_prompt),
             thinking: None,
             prompt_caching: false,
+            response_format: None,
         };
 
         let result = match tokio::time::timeout(
@@ -3955,6 +3956,7 @@ system_prompt = "You are a helpful assistant."
                 system: Some(manifest.model.system_prompt.clone()),
                 thinking: None,
                 prompt_caching: false,
+                response_format: None,
             };
             let (complexity, routed_model) = router.select_model(&probe);
             info!(
