@@ -19,6 +19,7 @@ pub mod token_rotation;
 pub mod vertex_ai;
 
 use crate::llm_driver::{DriverConfig, LlmDriver, LlmError};
+use dashmap::DashMap;
 use librefang_types::model_catalog::{
     AI21_BASE_URL, ANTHROPIC_BASE_URL, CEREBRAS_BASE_URL, CHATGPT_BASE_URL, CHUTES_BASE_URL,
     COHERE_BASE_URL, DEEPINFRA_BASE_URL, DEEPSEEK_BASE_URL, FIREWORKS_BASE_URL, GEMINI_BASE_URL,
@@ -30,7 +31,6 @@ use librefang_types::model_catalog::{
     VOLCENGINE_CODING_BASE_URL, XAI_BASE_URL, ZAI_BASE_URL, ZAI_CODING_BASE_URL, ZHIPU_BASE_URL,
     ZHIPU_CODING_BASE_URL,
 };
-use dashmap::DashMap;
 use std::sync::Arc;
 
 // ── Driver Cache ────────────────────────────────────────────────
@@ -64,10 +64,7 @@ impl DriverCache {
     ///
     /// The cache key is derived from `(provider, api_key, base_url)` so that
     /// different credentials or endpoints produce distinct drivers.
-    pub fn get_or_create(
-        &self,
-        config: &DriverConfig,
-    ) -> Result<Arc<dyn LlmDriver>, LlmError> {
+    pub fn get_or_create(&self, config: &DriverConfig) -> Result<Arc<dyn LlmDriver>, LlmError> {
         let key = Self::cache_key(config);
         if let Some(driver) = self.cache.get(&key) {
             return Ok(Arc::clone(driver.value()));
@@ -1279,7 +1276,10 @@ mod tests {
         };
         let d_a = cache.get_or_create(&config_a).unwrap();
         let d_b = cache.get_or_create(&config_b).unwrap();
-        assert!(!Arc::ptr_eq(&d_a, &d_b), "Different keys should produce different drivers");
+        assert!(
+            !Arc::ptr_eq(&d_a, &d_b),
+            "Different keys should produce different drivers"
+        );
         assert_eq!(cache.len(), 2);
     }
 
