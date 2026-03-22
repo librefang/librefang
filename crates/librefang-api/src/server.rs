@@ -330,7 +330,7 @@ pub async fn build_router(
     let app = Router::new()
         .route("/", axum::routing::get(webchat::webchat_page))
         .route(
-            "/react-assets/{*path}",
+            "/dashboard/{*path}",
             axum::routing::get(webchat::react_asset),
         )
         .route("/logo.png", axum::routing::get(webchat::logo_png))

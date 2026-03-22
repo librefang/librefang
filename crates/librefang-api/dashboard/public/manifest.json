@@ -2,7 +2,7 @@
   "name": "LibreFang Dashboard",
   "short_name": "LibreFang",
   "description": "Autonomous Agent Operating System Dashboard",
-  "start_url": "/react-assets/#/overview",
+  "start_url": "/dashboard/#/overview",
   "display": "standalone",
   "background_color": "#020617",
   "theme_color": "#0284c7",
