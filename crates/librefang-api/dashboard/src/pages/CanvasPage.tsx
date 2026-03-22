@@ -23,8 +23,7 @@ import {
   ConnectionLineType,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { listAgents, listWorkflows, createWorkflow, updateWorkflow, deleteWorkflow, runWorkflow, listWorkflowTemplates, instantiateTemplate, type AgentItem, type WorkflowItem, type WorkflowTemplate as ApiWorkflowTemplate } from "../api";
-import { listAgents, listWorkflows, createWorkflow, updateWorkflow, deleteWorkflow, runWorkflow, saveWorkflowAsTemplate, type AgentItem, type WorkflowItem } from "../api";
+import { listAgents, listWorkflows, createWorkflow, updateWorkflow, deleteWorkflow, runWorkflow, listWorkflowTemplates, instantiateTemplate, saveWorkflowAsTemplate, type AgentItem, type WorkflowItem, type WorkflowTemplate as ApiWorkflowTemplate } from "../api";
 import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
@@ -33,8 +32,7 @@ import {
   Play, Save, Trash2, Plus, FolderOpen, Loader2,
   Maximize2, Minimize2, ArrowLeft, X, Group, ChevronDown, ChevronRight,
   Copy, ClipboardPaste, LayoutGrid,
-  Download, Upload, HelpCircle, Scan, Check, LayoutTemplate, Search, Tag
-  Download, Upload, HelpCircle, Scan, Check, BookCopy
+  Download, Upload, HelpCircle, Scan, Check, LayoutTemplate, Search, Tag, BookCopy
 } from "lucide-react";
 
 // Node type configuration — n8n-style color scheme
