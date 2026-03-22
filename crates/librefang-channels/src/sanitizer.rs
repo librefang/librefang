@@ -73,13 +73,8 @@ impl InputSanitizer {
             });
         }
 
-        // Excessive repetition: same character repeated 100+ times
-        if let Ok(re) = Regex::new(r"(.)\1{99,}") {
-            patterns.push(CompiledPattern {
-                regex: re,
-                label: "excessive_repetition",
-            });
-        }
+        // Excessive repetition is checked directly in `check()` because
+        // regex_lite does not support backreferences like `(.)\1{99,}`.
 
         // "You are now" / "Act as" role reassignment
         if let Ok(re) = Regex::new(r"(?i)(you are now|from now on you|act as|pretend to be)\s") {
@@ -130,6 +125,13 @@ impl InputSanitizer {
             return self.verdict(&reason);
         }
 
+        // Excessive repetition check (done without regex because regex_lite
+        // does not support backreferences).
+        if has_excessive_repetition(text, 100) {
+            let reason = "Prompt injection detected (excessive_repetition)".to_string();
+            return self.verdict(&reason);
+        }
+
         // Pattern check
         for pat in &self.patterns {
             if pat.regex.is_match(text) {
@@ -154,6 +156,25 @@ impl InputSanitizer {
     pub fn is_off(&self) -> bool {
         self.mode == SanitizeMode::Off
     }
+}
+
+/// Returns `true` if `text` contains any single character repeated `threshold`
+/// or more times consecutively.
+fn has_excessive_repetition(text: &str, threshold: usize) -> bool {
+    let mut run_len = 0usize;
+    let mut prev: Option<char> = None;
+    for ch in text.chars() {
+        if Some(ch) == prev {
+            run_len += 1;
+        } else {
+            run_len = 1;
+            prev = Some(ch);
+        }
+        if run_len >= threshold {
+            return true;
+        }
+    }
+    false
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
