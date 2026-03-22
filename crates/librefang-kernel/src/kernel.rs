@@ -4791,15 +4791,38 @@ system_prompt = "You are a helpful assistant."
         prompt_template: String,
         max_fires: u64,
     ) -> KernelResult<TriggerId> {
-        // Verify agent exists
+        self.register_trigger_with_target(agent_id, pattern, prompt_template, max_fires, None)
+    }
+
+    /// Register a trigger with an optional cross-session target agent.
+    ///
+    /// When `target_agent` is `Some`, the triggered message is routed to that
+    /// agent instead of the owner. Both owner and target must exist.
+    pub fn register_trigger_with_target(
+        &self,
+        agent_id: AgentId,
+        pattern: TriggerPattern,
+        prompt_template: String,
+        max_fires: u64,
+        target_agent: Option<AgentId>,
+    ) -> KernelResult<TriggerId> {
+        // Verify owner agent exists
         if self.registry.get(agent_id).is_none() {
             return Err(KernelError::LibreFang(LibreFangError::AgentNotFound(
                 agent_id.to_string(),
             )));
         }
+        // Verify target agent exists (if specified)
+        if let Some(target) = target_agent {
+            if self.registry.get(target).is_none() {
+                return Err(KernelError::LibreFang(LibreFangError::AgentNotFound(
+                    target.to_string(),
+                )));
+            }
+        }
         Ok(self
             .triggers
-            .register(agent_id, pattern, prompt_template, max_fires))
+            .register_with_target(agent_id, pattern, prompt_template, max_fires, target_agent))
     }
 
     /// Remove a trigger by ID.
