@@ -36,7 +36,7 @@ pub fn bundled_hands(
         .clone()
 }
 
-fn disk_hands(home_dir: &std::path::Path) -> Vec<(String, String, String)> {
+pub(crate) fn disk_hands(home_dir: &std::path::Path) -> Vec<(String, String, String)> {
     let mut results = Vec::new();
     let hands_dir = home_dir.join("hands");
 
