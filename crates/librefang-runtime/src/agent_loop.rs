@@ -393,6 +393,7 @@ pub async fn run_agent_loop(
     user_content_blocks: Option<Vec<ContentBlock>>,
     proactive_memory: Option<Arc<librefang_memory::ProactiveMemoryStore>>,
     context_engine: Option<&dyn ContextEngine>,
+    pending_messages: Option<&tokio::sync::Mutex<mpsc::Receiver<String>>>,
 ) -> LibreFangResult<AgentLoopResult> {
     info!(agent = %manifest.name, "Starting agent loop");
 
@@ -551,13 +552,42 @@ pub async fn run_agent_loop(
     // Mutable collector for memory conflicts detected during this turn.
     let mut memory_conflicts: Vec<librefang_types::memory::MemoryConflict> = Vec::new();
 
+    // PII privacy filtering: extract config from manifest metadata.
+    let privacy_config: librefang_types::config::PrivacyConfig = manifest
+        .metadata
+        .get("privacy")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+    let pii_filter = crate::pii_filter::PiiFilter::new(&privacy_config.redact_patterns);
+
     // Add the user message to session history.
     // When content blocks are provided (e.g. text + image from a channel),
     // use multimodal message format so the LLM receives the image for vision.
+    // PII filter is applied to text content before adding to session.
     if let Some(blocks) = user_content_blocks {
-        session.messages.push(Message::user_with_blocks(blocks));
+        let filtered_blocks = if privacy_config.mode != librefang_types::config::PrivacyMode::Off {
+            blocks
+                .into_iter()
+                .map(|block| match block {
+                    ContentBlock::Text {
+                        text,
+                        provider_metadata,
+                    } => ContentBlock::Text {
+                        text: pii_filter.filter_message(&text, &privacy_config.mode),
+                        provider_metadata,
+                    },
+                    other => other,
+                })
+                .collect()
+        } else {
+            blocks
+        };
+        session
+            .messages
+            .push(Message::user_with_blocks(filtered_blocks));
     } else {
-        session.messages.push(Message::user(user_message));
+        let filtered_message = pii_filter.filter_message(user_message, &privacy_config.mode);
+        session.messages.push(Message::user(&filtered_message));
     }
 
     // Build the messages for the LLM, filtering system messages
@@ -1229,6 +1259,40 @@ pub async fn run_agent_loop(
                         );
                         break;
                     }
+
+                    // Mid-turn message injection (#956): check for pending user
+                    // messages between tool calls. If one is available, flush
+                    // completed tool results so far and inject the user message
+                    // so the LLM can process the interrupt on the next iteration.
+                    if let Some(pending_rx) = pending_messages {
+                        if let Ok(mut rx) = pending_rx.try_lock() {
+                            if let Ok(injected_msg) = rx.try_recv() {
+                                info!(
+                                    agent = %manifest.name,
+                                    "Mid-turn message injected — interrupting tool execution"
+                                );
+                                // Flush completed tool results collected so far
+                                if !tool_result_blocks.is_empty() {
+                                    let partial_results = Message {
+                                        role: Role::User,
+                                        content: MessageContent::Blocks(
+                                            tool_result_blocks.clone(),
+                                        ),
+                                        pinned: false,
+                                    };
+                                    session.messages.push(partial_results.clone());
+                                    messages.push(partial_results);
+                                }
+                                // Inject the user interrupt message
+                                let inject_msg = Message::user(&injected_msg);
+                                session.messages.push(inject_msg.clone());
+                                messages.push(inject_msg);
+                                // Clear tool_result_blocks — they've been flushed
+                                tool_result_blocks.clear();
+                                break;
+                            }
+                        }
+                    }
                 }
 
                 // Detect approval denials and inject guidance to prevent infinite retry loops
@@ -1691,6 +1755,7 @@ pub async fn run_agent_loop_streaming(
     user_content_blocks: Option<Vec<ContentBlock>>,
     proactive_memory: Option<Arc<librefang_memory::ProactiveMemoryStore>>,
     context_engine: Option<&dyn ContextEngine>,
+    pending_messages: Option<&tokio::sync::Mutex<mpsc::Receiver<String>>>,
 ) -> LibreFangResult<AgentLoopResult> {
     info!(agent = %manifest.name, "Starting streaming agent loop");
 
@@ -1851,13 +1916,42 @@ pub async fn run_agent_loop_streaming(
     // Mutable collector for memory conflicts detected during this turn.
     let mut memory_conflicts: Vec<librefang_types::memory::MemoryConflict> = Vec::new();
 
+    // PII privacy filtering: extract config from manifest metadata.
+    let privacy_config: librefang_types::config::PrivacyConfig = manifest
+        .metadata
+        .get("privacy")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+    let pii_filter = crate::pii_filter::PiiFilter::new(&privacy_config.redact_patterns);
+
     // Add the user message to session history.
     // When content blocks are provided (e.g. text + image from a channel),
     // use multimodal message format so the LLM receives the image for vision.
+    // PII filter is applied to text content before adding to session.
     if let Some(blocks) = user_content_blocks {
-        session.messages.push(Message::user_with_blocks(blocks));
+        let filtered_blocks = if privacy_config.mode != librefang_types::config::PrivacyMode::Off {
+            blocks
+                .into_iter()
+                .map(|block| match block {
+                    ContentBlock::Text {
+                        text,
+                        provider_metadata,
+                    } => ContentBlock::Text {
+                        text: pii_filter.filter_message(&text, &privacy_config.mode),
+                        provider_metadata,
+                    },
+                    other => other,
+                })
+                .collect()
+        } else {
+            blocks
+        };
+        session
+            .messages
+            .push(Message::user_with_blocks(filtered_blocks));
     } else {
-        session.messages.push(Message::user(user_message));
+        let filtered_message = pii_filter.filter_message(user_message, &privacy_config.mode);
+        session.messages.push(Message::user(&filtered_message));
     }
 
     let llm_messages: Vec<Message> = session
@@ -2549,6 +2643,35 @@ pub async fn run_agent_loop_streaming(
                             "Tool execution failed — skipping remaining tool calls (streaming)"
                         );
                         break;
+                    }
+
+                    // Mid-turn message injection (#956): check for pending user
+                    // messages between tool calls (streaming variant).
+                    if let Some(pending_rx) = pending_messages {
+                        if let Ok(mut rx) = pending_rx.try_lock() {
+                            if let Ok(injected_msg) = rx.try_recv() {
+                                info!(
+                                    agent = %manifest.name,
+                                    "Mid-turn message injected — interrupting tool execution (streaming)"
+                                );
+                                if !tool_result_blocks.is_empty() {
+                                    let partial_results = Message {
+                                        role: Role::User,
+                                        content: MessageContent::Blocks(
+                                            tool_result_blocks.clone(),
+                                        ),
+                                        pinned: false,
+                                    };
+                                    session.messages.push(partial_results.clone());
+                                    messages.push(partial_results);
+                                }
+                                let inject_msg = Message::user(&injected_msg);
+                                session.messages.push(inject_msg.clone());
+                                messages.push(inject_msg);
+                                tool_result_blocks.clear();
+                                break;
+                            }
+                        }
                     }
                 }
 
@@ -3729,6 +3852,7 @@ mod tests {
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
+            None, // pending_messages
         )
         .await
         .expect("Loop should complete without error");
@@ -3784,6 +3908,7 @@ mod tests {
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
+            None, // pending_messages
         )
         .await
         .expect("Loop should complete without error");
@@ -3839,6 +3964,7 @@ mod tests {
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
+            None, // pending_messages
         )
         .await
         .expect("Loop should complete without error");
@@ -3887,6 +4013,7 @@ mod tests {
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
+            None, // pending_messages
         )
         .await
         .expect("Streaming loop should complete without error");
@@ -4016,6 +4143,7 @@ mod tests {
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
+            None, // pending_messages
         )
         .await
         .expect("Loop should recover via retry");
@@ -4065,6 +4193,7 @@ mod tests {
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
+            None, // pending_messages
         )
         .await
         .expect("Loop should complete with fallback");
@@ -4122,6 +4251,7 @@ mod tests {
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
+            None, // pending_messages
         )
         .await
         .expect("Streaming loop should complete without error");
@@ -4901,6 +5031,7 @@ mod tests {
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
+            None, // pending_messages
         )
         .await
         .expect("Agent loop should complete");
@@ -4970,6 +5101,7 @@ mod tests {
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
+            None, // pending_messages
         )
         .await
         .expect("Normal loop should complete");
@@ -5035,6 +5167,7 @@ mod tests {
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
+            None, // pending_messages
         )
         .await
         .expect("Streaming loop should complete");

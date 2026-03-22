@@ -6,6 +6,7 @@
 use crate::bridge::SENDER_USER_ID_KEY;
 use crate::types::{
     split_message, ChannelAdapter, ChannelContent, ChannelMessage, ChannelType, ChannelUser,
+    InteractiveButton, InteractiveMessage,
 };
 use async_trait::async_trait;
 use futures::{SinkExt, Stream, StreamExt};
@@ -107,6 +108,95 @@ impl SlackAdapter {
         text: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.api_send_message_opts(channel_id, text, None).await
+    }
+
+    /// Send an interactive message with Block Kit action buttons.
+    ///
+    /// Uses Slack's `chat.postMessage` with `blocks` containing a section for
+    /// the text and action blocks for button rows.
+    async fn api_send_interactive_message(
+        &self,
+        channel_id: &str,
+        text: &str,
+        buttons: &[Vec<InteractiveButton>],
+        thread_ts: Option<&str>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut blocks = vec![serde_json::json!({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": text,
+            }
+        })];
+
+        // Each row of buttons becomes an "actions" block
+        for (row_idx, row) in buttons.iter().enumerate() {
+            let elements: Vec<serde_json::Value> = row
+                .iter()
+                .enumerate()
+                .map(|(btn_idx, btn)| {
+                    let mut element = serde_json::json!({
+                        "type": "button",
+                        "text": {
+                            "type": "plain_text",
+                            "text": btn.label,
+                            "emoji": true,
+                        },
+                        "action_id": format!("interactive_{}_{}", row_idx, btn_idx),
+                        "value": btn.action,
+                    });
+                    if let Some(ref style) = btn.style {
+                        // Slack supports "primary" and "danger" button styles
+                        if style == "primary" || style == "danger" {
+                            element["style"] = serde_json::json!(style);
+                        }
+                    }
+                    if let Some(ref url) = btn.url {
+                        element["url"] = serde_json::json!(url);
+                    }
+                    element
+                })
+                .collect();
+
+            blocks.push(serde_json::json!({
+                "type": "actions",
+                "block_id": format!("interactive_row_{row_idx}"),
+                "elements": elements,
+            }));
+        }
+
+        let mut body = serde_json::json!({
+            "channel": channel_id,
+            "text": text,  // fallback for notifications
+            "blocks": blocks,
+        });
+
+        if let Some(ts) = thread_ts {
+            body["thread_ts"] = serde_json::json!(ts);
+        }
+
+        if let Some(unfurl) = self.unfurl_links {
+            body["unfurl_links"] = serde_json::json!(unfurl);
+        }
+
+        let resp: serde_json::Value = self
+            .client
+            .post(format!("{SLACK_API_BASE}/chat.postMessage"))
+            .header(
+                "Authorization",
+                format!("Bearer {}", self.bot_token.as_str()),
+            )
+            .json(&body)
+            .send()
+            .await?
+            .json()
+            .await?;
+
+        if resp["ok"].as_bool() != Some(true) {
+            let err = resp["error"].as_str().unwrap_or("unknown");
+            warn!("Slack chat.postMessage (interactive) failed: {err}");
+        }
+        Ok(())
     }
 
     /// Send a message to a Slack channel, optionally as a thread reply.
@@ -312,6 +402,44 @@ impl ChannelAdapter for SlackAdapter {
                             }
                         }
 
+                        "interactive" => {
+                            // Handle interactive payloads (block_actions, etc.)
+                            let envelope_id = payload["envelope_id"].as_str().unwrap_or("");
+                            if !envelope_id.is_empty() {
+                                let ack = serde_json::json!({ "envelope_id": envelope_id });
+                                if let Err(e) = ws_tx
+                                    .send(tokio_tungstenite::tungstenite::Message::Text(
+                                        serde_json::to_string(&ack).unwrap().into(),
+                                    ))
+                                    .await
+                                {
+                                    error!("Slack: failed to send interactive ack: {e}");
+                                    break 'inner true;
+                                }
+                            }
+
+                            let interaction = &payload["payload"];
+                            if let Some(mut msg) = parse_slack_block_action(
+                                interaction,
+                                &bot_user_id,
+                                &allowed_channels,
+                            )
+                            .await
+                            {
+                                if let Some(ref aid) = account_id {
+                                    msg.metadata
+                                        .insert("account_id".to_string(), serde_json::json!(aid));
+                                }
+                                debug!(
+                                    "Slack block_action from {}: {:?}",
+                                    msg.sender.display_name, msg.content
+                                );
+                                if tx.send(msg).await.is_err() {
+                                    return;
+                                }
+                            }
+                        }
+
                         "disconnect" => {
                             let reason = payload["reason"].as_str().unwrap_or("unknown");
                             info!("Slack disconnect request: {reason}");
@@ -350,12 +478,25 @@ impl ChannelAdapter for SlackAdapter {
             ChannelContent::Text(text) => {
                 self.api_send_message(channel_id, &text).await?;
             }
+            ChannelContent::Interactive { text, buttons } => {
+                self.api_send_interactive_message(channel_id, &text, &buttons, None)
+                    .await?;
+            }
             _ => {
                 self.api_send_message(channel_id, "(Unsupported content type)")
                     .await?;
             }
         }
         Ok(())
+    }
+
+    async fn send_interactive(
+        &self,
+        user: &ChannelUser,
+        message: &InteractiveMessage,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.api_send_interactive_message(&user.platform_id, &message.text, &message.buttons, None)
+            .await
     }
 
     async fn send_in_thread(
@@ -526,6 +667,112 @@ async fn parse_slack_event(
             librefang_user: None,
         },
         content,
+        target_agent: None,
+        timestamp,
+        is_group,
+        thread_id,
+        metadata,
+    })
+}
+
+/// Parse a Slack `block_actions` interactive payload into a `ChannelMessage`.
+///
+/// Called when a user clicks a button in an interactive Block Kit message.
+/// Each clicked action's `value` is delivered as a `ButtonCallback` content variant.
+async fn parse_slack_block_action(
+    interaction: &serde_json::Value,
+    bot_user_id: &Arc<RwLock<Option<String>>>,
+    allowed_channels: &[String],
+) -> Option<ChannelMessage> {
+    let interaction_type = interaction["type"].as_str()?;
+    if interaction_type != "block_actions" {
+        debug!("Slack: ignoring non-block_actions interactive type: {interaction_type}");
+        return None;
+    }
+
+    let user = interaction.get("user")?;
+    let user_id = user["id"].as_str()?;
+
+    // Filter out bot's own interactions
+    if let Some(ref bid) = *bot_user_id.read().await {
+        if user_id == bid {
+            return None;
+        }
+    }
+
+    // Extract channel info
+    let channel = interaction
+        .get("channel")
+        .and_then(|c| c["id"].as_str())
+        .unwrap_or("");
+
+    if channel.is_empty() {
+        return None;
+    }
+
+    // Filter by allowed channels (DMs exempt)
+    if !channel.starts_with('D')
+        && !allowed_channels.is_empty()
+        && !allowed_channels.contains(&channel.to_string())
+    {
+        return None;
+    }
+
+    // Extract the first action (most common case: single button click)
+    let actions = interaction["actions"].as_array()?;
+    let action = actions.first()?;
+    let action_value = action["value"].as_str().unwrap_or("");
+    let action_id = action["action_id"].as_str().unwrap_or("");
+
+    if action_value.is_empty() {
+        return None;
+    }
+
+    // Extract message text from the original message (if available)
+    let message_text = interaction
+        .get("message")
+        .and_then(|m| m["text"].as_str())
+        .map(String::from);
+
+    let message_ts = interaction
+        .get("message")
+        .and_then(|m| m["ts"].as_str())
+        .unwrap_or("0");
+
+    let trigger_id = interaction["trigger_id"].as_str().unwrap_or("");
+
+    let timestamp = message_ts
+        .split('.')
+        .next()
+        .and_then(|s| s.parse::<i64>().ok())
+        .and_then(|epoch| chrono::DateTime::from_timestamp(epoch, 0))
+        .unwrap_or_else(chrono::Utc::now);
+
+    let is_group = !channel.starts_with('D');
+
+    let thread_id = interaction
+        .get("message")
+        .and_then(|m| m["thread_ts"].as_str())
+        .map(|s| s.to_string());
+
+    let mut metadata = HashMap::new();
+    metadata.insert(SENDER_USER_ID_KEY.to_string(), serde_json::json!(user_id));
+    metadata.insert("action_id".to_string(), serde_json::json!(action_id));
+    metadata.insert("trigger_id".to_string(), serde_json::json!(trigger_id));
+    metadata.insert("block_action".to_string(), serde_json::Value::Bool(true));
+
+    Some(ChannelMessage {
+        channel: ChannelType::Slack,
+        platform_message_id: message_ts.to_string(),
+        sender: ChannelUser {
+            platform_id: channel.to_string(),
+            display_name: user_id.to_string(),
+            librefang_user: None,
+        },
+        content: ChannelContent::ButtonCallback {
+            action: action_value.to_string(),
+            message_text,
+        },
         target_agent: None,
         timestamp,
         is_group,
@@ -817,5 +1064,124 @@ mod tests {
         );
         assert_eq!(adapter.name(), "slack");
         assert_eq!(adapter.channel_type(), ChannelType::Slack);
+    }
+
+    #[tokio::test]
+    async fn test_parse_slack_block_action_basic() {
+        let bot_id = Arc::new(RwLock::new(Some("B123".to_string())));
+        let interaction = serde_json::json!({
+            "type": "block_actions",
+            "user": { "id": "U456" },
+            "channel": { "id": "C789" },
+            "actions": [{
+                "action_id": "interactive_0_0",
+                "value": "approve_req_001",
+                "type": "button"
+            }],
+            "message": {
+                "text": "Approve this request?",
+                "ts": "1700000000.000100",
+            },
+            "trigger_id": "trigger_123"
+        });
+
+        let msg = parse_slack_block_action(&interaction, &bot_id, &[])
+            .await
+            .unwrap();
+        assert_eq!(msg.channel, ChannelType::Slack);
+        assert_eq!(msg.sender.platform_id, "C789");
+        assert!(msg.is_group);
+        match &msg.content {
+            ChannelContent::ButtonCallback {
+                action,
+                message_text,
+            } => {
+                assert_eq!(action, "approve_req_001");
+                assert_eq!(message_text.as_deref(), Some("Approve this request?"));
+            }
+            other => panic!("Expected ButtonCallback, got {other:?}"),
+        }
+        assert_eq!(
+            msg.metadata.get("block_action").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            msg.metadata.get("action_id").and_then(|v| v.as_str()),
+            Some("interactive_0_0")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_parse_slack_block_action_filters_bot() {
+        let bot_id = Arc::new(RwLock::new(Some("U456".to_string())));
+        let interaction = serde_json::json!({
+            "type": "block_actions",
+            "user": { "id": "U456" },
+            "channel": { "id": "C789" },
+            "actions": [{ "action_id": "a", "value": "v" }],
+            "message": { "text": "msg", "ts": "1700000000.000100" },
+            "trigger_id": "t"
+        });
+
+        let msg = parse_slack_block_action(&interaction, &bot_id, &[]).await;
+        assert!(msg.is_none(), "Bot's own block_action should be filtered");
+    }
+
+    #[tokio::test]
+    async fn test_parse_slack_block_action_filters_channel() {
+        let bot_id = Arc::new(RwLock::new(None));
+        let interaction = serde_json::json!({
+            "type": "block_actions",
+            "user": { "id": "U456" },
+            "channel": { "id": "C789" },
+            "actions": [{ "action_id": "a", "value": "v" }],
+            "message": { "text": "msg", "ts": "1700000000.000100" },
+            "trigger_id": "t"
+        });
+
+        let msg = parse_slack_block_action(&interaction, &bot_id, &["C111".to_string()]).await;
+        assert!(
+            msg.is_none(),
+            "Channel not in allowed list should be filtered"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_parse_slack_block_action_ignores_non_block_actions() {
+        let bot_id = Arc::new(RwLock::new(None));
+        let interaction = serde_json::json!({
+            "type": "view_submission",
+            "user": { "id": "U456" },
+            "channel": { "id": "C789" },
+            "actions": [{ "action_id": "a", "value": "v" }],
+        });
+
+        let msg = parse_slack_block_action(&interaction, &bot_id, &[]).await;
+        assert!(msg.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_parse_slack_block_action_dm() {
+        let bot_id = Arc::new(RwLock::new(None));
+        let interaction = serde_json::json!({
+            "type": "block_actions",
+            "user": { "id": "U456" },
+            "channel": { "id": "D789" },
+            "actions": [{ "action_id": "a", "value": "dm_action" }],
+            "message": { "text": "DM buttons", "ts": "1700000000.000100" },
+            "trigger_id": "t"
+        });
+
+        let msg = parse_slack_block_action(&interaction, &bot_id, &[])
+            .await
+            .unwrap();
+        assert!(!msg.is_group);
+        assert_eq!(msg.sender.platform_id, "D789");
+        match &msg.content {
+            ChannelContent::ButtonCallback { action, .. } => {
+                assert_eq!(action, "dm_action");
+            }
+            other => panic!("Expected ButtonCallback, got {other:?}"),
+        }
     }
 }

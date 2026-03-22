@@ -524,6 +524,11 @@ pub struct AgentManifest {
     /// for this agent. When empty (default), all installed plugins are available.
     #[serde(default, deserialize_with = "crate::serde_compat::vec_lenient")]
     pub allowed_plugins: Vec<String>,
+    /// Whether this agent inherits context from the parent workflow when
+    /// executed as a subagent. When true (default), previous step outputs
+    /// are prepended to the prompt. Set to false to run steps in isolation.
+    #[serde(default = "default_true")]
+    pub inherit_parent_context: bool,
 }
 
 fn default_true() -> bool {
@@ -562,6 +567,7 @@ impl Default for AgentManifest {
             tools_disabled: false,
             enabled: true,
             allowed_plugins: Vec::new(),
+            inherit_parent_context: true,
         }
     }
 }
