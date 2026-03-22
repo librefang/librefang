@@ -280,6 +280,11 @@ pub fn build_reload_plan(old: &KernelConfig, new: &KernelConfig) -> ReloadPlan {
         plan.hot_actions.push(HotAction::UpdateProactiveMemory);
     }
 
+    if field_changed(&old.sanitize, &new.sanitize) {
+        plan.noop_changes
+            .push("sanitize config changed (applied at bridge startup)".to_string());
+    }
+
     if field_changed(&old.provider_api_keys, &new.provider_api_keys) {
         plan.noop_changes
             .push("provider_api_keys changed (takes effect on next driver init)".to_string());
