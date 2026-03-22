@@ -6,7 +6,7 @@
 use crate::formatter;
 use crate::types::{
     split_message, ChannelAdapter, ChannelContent, ChannelMessage, ChannelType, ChannelUser,
-    LifecycleReaction,
+    InteractiveButton, InteractiveMessage, LifecycleReaction,
 };
 use async_trait::async_trait;
 use futures::Stream;
@@ -337,6 +337,108 @@ impl TelegramAdapter {
         Ok(())
     }
 
+    /// Call `sendMessage` with an `InlineKeyboardMarkup` reply_markup.
+    ///
+    /// Sends a text message with inline keyboard buttons. Each inner Vec of
+    /// `InteractiveButton` becomes one row of the keyboard.
+    async fn api_send_interactive_message(
+        &self,
+        chat_id: i64,
+        text: &str,
+        buttons: &[Vec<InteractiveButton>],
+        thread_id: Option<i64>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let url = format!(
+            "{}/bot{}/sendMessage",
+            self.api_base_url,
+            self.token.as_str()
+        );
+
+        let sanitized = sanitize_telegram_html(text);
+
+        // Build InlineKeyboardMarkup rows
+        let keyboard: Vec<Vec<serde_json::Value>> = buttons
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|btn| {
+                        if let Some(ref url) = btn.url {
+                            // URL button — opens a link, no callback
+                            serde_json::json!({
+                                "text": btn.label,
+                                "url": url,
+                            })
+                        } else {
+                            // Callback button — sends callback_query to the bot
+                            // Telegram limits callback_data to 64 bytes
+                            let action = if btn.action.len() > 64 {
+                                btn.action[..64].to_string()
+                            } else {
+                                btn.action.clone()
+                            };
+                            serde_json::json!({
+                                "text": btn.label,
+                                "callback_data": action,
+                            })
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+
+        let mut body = serde_json::json!({
+            "chat_id": chat_id,
+            "text": sanitized,
+            "parse_mode": "HTML",
+            "reply_markup": {
+                "inline_keyboard": keyboard,
+            },
+        });
+
+        if let Some(tid) = thread_id {
+            body["message_thread_id"] = serde_json::json!(tid);
+        }
+
+        let resp = self.client.post(&url).json(&body).send().await?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body_text = resp.text().await.unwrap_or_default();
+            warn!("Telegram sendMessage (interactive) failed ({status}): {body_text}");
+        }
+        Ok(())
+    }
+
+    /// Answer a callback query to dismiss the loading indicator on the button.
+    ///
+    /// Telegram shows a progress spinner on the button until the bot calls
+    /// `answerCallbackQuery`. Fire-and-forget.
+    fn fire_answer_callback_query(&self, callback_query_id: &str, notification_text: Option<&str>) {
+        let url = format!(
+            "{}/bot{}/answerCallbackQuery",
+            self.api_base_url,
+            self.token.as_str()
+        );
+        let mut body = serde_json::json!({
+            "callback_query_id": callback_query_id,
+        });
+        if let Some(text) = notification_text {
+            body["text"] = serde_json::json!(text);
+        }
+        let client = self.client.clone();
+        tokio::spawn(async move {
+            match client.post(&url).json(&body).send().await {
+                Ok(resp) if !resp.status().is_success() => {
+                    let body_text = resp.text().await.unwrap_or_default();
+                    debug!("Telegram answerCallbackQuery failed: {body_text}");
+                }
+                Err(e) => {
+                    debug!("Telegram answerCallbackQuery error: {e}");
+                }
+                _ => {}
+            }
+        });
+    }
+
     /// Call `sendChatAction` to show "typing..." indicator.
     ///
     /// When `thread_id` is provided, the typing indicator appears in the forum topic.
@@ -552,6 +654,14 @@ impl TelegramAdapter {
                 self.api_send_message(chat_id, text.trim(), thread_id)
                     .await?;
             }
+            ChannelContent::Interactive { text, buttons } => {
+                self.api_send_interactive_message(chat_id, &text, &buttons, thread_id)
+                    .await?;
+            }
+            ChannelContent::ButtonCallback { action, .. } => {
+                // Outbound ButtonCallback doesn't make sense — log and skip
+                debug!("Telegram: ignoring outbound ButtonCallback (action={action})");
+            }
         }
         Ok(())
     }
@@ -628,7 +738,7 @@ impl ChannelAdapter for TelegramAdapter {
                 let url = format!("{}/bot{}/getUpdates", api_base_url, token.as_str());
                 let mut params = serde_json::json!({
                     "timeout": LONG_POLL_TIMEOUT,
-                    "allowed_updates": ["message", "edited_message"],
+                    "allowed_updates": ["message", "edited_message", "callback_query"],
                 });
                 if let Some(off) = offset {
                     params["offset"] = serde_json::json!(off);
@@ -727,6 +837,34 @@ impl ChannelAdapter for TelegramAdapter {
                         offset = Some(update_id + 1);
                     }
 
+                    // Handle callback_query (inline keyboard button clicks)
+                    if let Some(callback) = update.get("callback_query") {
+                        if let Some(mut msg) = parse_telegram_callback_query(
+                            callback,
+                            &allowed_users,
+                            &token,
+                            &api_base_url,
+                            &client,
+                        ) {
+                            if let Some(ref aid) = account_id {
+                                msg.metadata
+                                    .insert("account_id".to_string(), serde_json::json!(aid));
+                            }
+                            debug!(
+                                "Telegram callback from {}: {:?}",
+                                msg.sender.display_name, msg.content
+                            );
+                            if tx.send(msg).await.is_err() {
+                                error!(
+                                    "Telegram dispatch channel closed — callback dropped. \
+                                     Bridge receiver may have been deallocated."
+                                );
+                                return;
+                            }
+                        }
+                        continue;
+                    }
+
                     // Parse the message
                     let bot_uname = bot_username.read().await.clone();
                     let mut msg = match parse_telegram_update(
@@ -799,6 +937,19 @@ impl ChannelAdapter for TelegramAdapter {
         content: ChannelContent,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.send_content(user, content, None).await
+    }
+
+    async fn send_interactive(
+        &self,
+        user: &ChannelUser,
+        message: &InteractiveMessage,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let chat_id: i64 = user
+            .platform_id
+            .parse()
+            .map_err(|_| format!("Invalid Telegram chat_id: {}", user.platform_id))?;
+        self.api_send_interactive_message(chat_id, &message.text, &message.buttons, None)
+            .await
     }
 
     async fn send_typing(
@@ -988,6 +1139,101 @@ fn mime_type_from_telegram_path(url_or_path: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+/// Parse a Telegram `callback_query` update into a `ChannelMessage`.
+///
+/// Called when a user clicks an inline keyboard button. The callback data
+/// is delivered as a `ButtonCallback` content variant, and the bot answers
+/// the callback query to dismiss the loading indicator.
+fn parse_telegram_callback_query(
+    callback: &serde_json::Value,
+    allowed_users: &[String],
+    token: &str,
+    api_base_url: &str,
+    client: &reqwest::Client,
+) -> Option<ChannelMessage> {
+    let callback_query_id = callback["id"].as_str()?;
+    let from = callback.get("from")?;
+    let user_id = from["id"].as_i64()?;
+    let user_id_str = user_id.to_string();
+
+    // Security: check allowed_users
+    if !allowed_users.is_empty() && !allowed_users.iter().any(|u| u == &user_id_str) {
+        debug!("Telegram callback_query filtered: user {user_id} not in allowed_users");
+        return None;
+    }
+
+    let first_name = from["first_name"].as_str().unwrap_or("Unknown");
+    let last_name = from["last_name"].as_str().unwrap_or("");
+    let display_name = if last_name.is_empty() {
+        first_name.to_string()
+    } else {
+        format!("{first_name} {last_name}")
+    };
+
+    let callback_data = callback["data"].as_str().unwrap_or("");
+    if callback_data.is_empty() {
+        return None;
+    }
+
+    // Extract chat_id from the original message
+    let message = callback.get("message")?;
+    let chat_id = message["chat"]["id"].as_i64()?;
+    let message_id = message["message_id"].as_i64().unwrap_or(0);
+    let message_text = message["text"].as_str().map(String::from);
+    let chat_type = message["chat"]["type"].as_str().unwrap_or("private");
+    let is_group = chat_type == "group" || chat_type == "supergroup";
+
+    let timestamp = message["date"]
+        .as_i64()
+        .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0))
+        .unwrap_or_else(chrono::Utc::now);
+
+    // Fire-and-forget answer to dismiss the button loading state
+    {
+        let url = format!("{api_base_url}/bot{token}/answerCallbackQuery");
+        let body = serde_json::json!({
+            "callback_query_id": callback_query_id,
+        });
+        let client = client.clone();
+        tokio::spawn(async move {
+            let _ = client.post(&url).json(&body).send().await;
+        });
+    }
+
+    let mut metadata = HashMap::new();
+    metadata.insert(
+        "callback_query_id".to_string(),
+        serde_json::json!(callback_query_id),
+    );
+    metadata.insert("user_id".to_string(), serde_json::json!(user_id_str));
+    metadata.insert(
+        "message_id".to_string(),
+        serde_json::json!(message_id.to_string()),
+    );
+
+    // Thread ID for forum topics
+    let thread_id = message["message_thread_id"].as_i64().map(|t| t.to_string());
+
+    Some(ChannelMessage {
+        channel: ChannelType::Telegram,
+        platform_message_id: message_id.to_string(),
+        sender: ChannelUser {
+            platform_id: chat_id.to_string(),
+            display_name,
+            librefang_user: None,
+        },
+        content: ChannelContent::ButtonCallback {
+            action: callback_data.to_string(),
+            message_text,
+        },
+        target_agent: None,
+        timestamp,
+        is_group,
+        thread_id,
+        metadata,
+    })
 }
 
 async fn parse_telegram_update(
@@ -2267,5 +2513,127 @@ mod tests {
         // and at most 5s to keep the UX responsive.
         assert!(STREAMING_EDIT_INTERVAL >= Duration::from_millis(500));
         assert!(STREAMING_EDIT_INTERVAL <= Duration::from_secs(5));
+    }
+
+    #[test]
+    fn test_parse_telegram_callback_query_basic() {
+        let client = crate::http_client::new_client();
+        let callback = serde_json::json!({
+            "id": "cb_12345",
+            "from": {
+                "id": 42,
+                "first_name": "Alice",
+                "last_name": "Smith"
+            },
+            "data": "approve_req_001",
+            "message": {
+                "message_id": 999,
+                "chat": { "id": -100123, "type": "supergroup" },
+                "text": "Approve this request?",
+                "date": 1700000000
+            }
+        });
+
+        let msg = parse_telegram_callback_query(
+            &callback,
+            &[],
+            "fake_token",
+            "https://api.telegram.org",
+            &client,
+        )
+        .unwrap();
+
+        assert_eq!(msg.channel, ChannelType::Telegram);
+        assert_eq!(msg.sender.platform_id, "-100123");
+        assert_eq!(msg.sender.display_name, "Alice Smith");
+        assert!(msg.is_group);
+        match &msg.content {
+            ChannelContent::ButtonCallback {
+                action,
+                message_text,
+            } => {
+                assert_eq!(action, "approve_req_001");
+                assert_eq!(message_text.as_deref(), Some("Approve this request?"));
+            }
+            other => panic!("Expected ButtonCallback, got {other:?}"),
+        }
+        assert!(msg.metadata.contains_key("callback_query_id"));
+    }
+
+    #[test]
+    fn test_parse_telegram_callback_query_filtered_user() {
+        let client = crate::http_client::new_client();
+        let callback = serde_json::json!({
+            "id": "cb_99",
+            "from": { "id": 42, "first_name": "Alice" },
+            "data": "some_action",
+            "message": {
+                "message_id": 1,
+                "chat": { "id": 100, "type": "private" },
+                "text": "msg",
+                "date": 1700000000
+            }
+        });
+
+        // User 42 not in allowed list
+        let msg = parse_telegram_callback_query(
+            &callback,
+            &["999".to_string()],
+            "fake_token",
+            "https://api.telegram.org",
+            &client,
+        );
+        assert!(msg.is_none());
+    }
+
+    #[test]
+    fn test_parse_telegram_callback_query_empty_data() {
+        let client = crate::http_client::new_client();
+        let callback = serde_json::json!({
+            "id": "cb_1",
+            "from": { "id": 42, "first_name": "Alice" },
+            "data": "",
+            "message": {
+                "message_id": 1,
+                "chat": { "id": 100, "type": "private" },
+                "date": 1700000000
+            }
+        });
+
+        let msg = parse_telegram_callback_query(
+            &callback,
+            &[],
+            "fake_token",
+            "https://api.telegram.org",
+            &client,
+        );
+        assert!(msg.is_none());
+    }
+
+    #[test]
+    fn test_parse_telegram_callback_query_dm() {
+        let client = crate::http_client::new_client();
+        let callback = serde_json::json!({
+            "id": "cb_dm",
+            "from": { "id": 42, "first_name": "Bob" },
+            "data": "action_dm",
+            "message": {
+                "message_id": 5,
+                "chat": { "id": 42, "type": "private" },
+                "text": "Pick option",
+                "date": 1700000000
+            }
+        });
+
+        let msg = parse_telegram_callback_query(
+            &callback,
+            &[],
+            "fake_token",
+            "https://api.telegram.org",
+            &client,
+        )
+        .unwrap();
+        assert!(!msg.is_group);
+        assert_eq!(msg.sender.display_name, "Bob");
     }
 }

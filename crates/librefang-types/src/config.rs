@@ -1454,6 +1454,9 @@ pub struct KernelConfig {
     /// Plugin registry configuration.
     #[serde(default)]
     pub plugins: PluginsConfig,
+    /// PII privacy controls for LLM context filtering.
+    #[serde(default)]
+    pub privacy: PrivacyConfig,
     /// Strict config mode: when `true`, the daemon refuses to start if the
     /// config file contains unknown or unrecognised fields. When `false`
     /// (the default), unknown fields are logged as warnings but the daemon
@@ -1902,6 +1905,56 @@ impl Default for AuditConfig {
     }
 }
 
+/// PII privacy mode for LLM context filtering.
+///
+/// Controls how personally identifiable information is handled before
+/// messages are sent to LLM providers.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrivacyMode {
+    /// No PII filtering — messages are sent as-is.
+    #[default]
+    Off,
+    /// Replace detected PII with `[REDACTED]`.
+    Redact,
+    /// Replace detected PII with stable pseudonyms (User-A, User-B, etc.).
+    /// Pseudonym mappings are stable within a session.
+    Pseudonymize,
+}
+
+/// PII privacy controls for LLM context.
+///
+/// When enabled, the runtime filters personally identifiable information
+/// (emails, phone numbers, credit card numbers, SSNs) from user messages
+/// and sender context before they are sent to LLM providers.
+///
+/// Configure in config.toml:
+/// ```toml
+/// [privacy]
+/// mode = "pseudonymize"  # off | redact | pseudonymize
+/// redact_patterns = ["\\b(CUSTOM_ID_\\d+)\\b"]
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PrivacyConfig {
+    /// Privacy mode: off, redact, or pseudonymize.
+    #[serde(default)]
+    pub mode: PrivacyMode,
+    /// Additional regex patterns to match and redact/pseudonymize.
+    /// These are applied in addition to the built-in PII patterns.
+    #[serde(default)]
+    pub redact_patterns: Vec<String>,
+}
+
+impl Default for PrivacyConfig {
+    fn default() -> Self {
+        Self {
+            mode: PrivacyMode::Off,
+            redact_patterns: Vec::new(),
+        }
+    }
+}
+
 /// Health check configuration.
 ///
 /// Configure in config.toml:
@@ -2162,6 +2215,7 @@ impl Default for KernelConfig {
             health_check: HealthCheckConfig::default(),
             plugins: PluginsConfig::default(),
             cors_origin: Vec::new(),
+            privacy: PrivacyConfig::default(),
             strict_config: false,
             qwen_code_path: None,
         }
@@ -2297,6 +2351,7 @@ impl std::fmt::Debug for KernelConfig {
                 "external_auth",
                 &format!("enabled={}", self.external_auth.enabled),
             )
+            .field("privacy", &format!("{:?}", self.privacy.mode))
             .field("strict_config", &self.strict_config)
             .field("qwen_code_path", &self.qwen_code_path)
             .finish()
