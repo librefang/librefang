@@ -2697,7 +2697,7 @@ id = "{id}"
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine
-            .create_run(wf_id, "test input".to_string())
+            .create_run(wf_id, "raw data".to_string())
             .await
             .unwrap();
 
