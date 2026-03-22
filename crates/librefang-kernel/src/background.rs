@@ -17,6 +17,17 @@ use tracing::{debug, info, warn};
 /// Maximum number of concurrent background LLM calls across all agents.
 const MAX_CONCURRENT_BG_LLM: usize = 5;
 
+/// RAII guard that clears the busy flag on drop, even if the task panics.
+struct BusyGuard {
+    flag: Arc<AtomicBool>,
+}
+
+impl Drop for BusyGuard {
+    fn drop(&mut self) {
+        self.flag.store(false, Ordering::SeqCst);
+    }
+}
+
 /// Manages background task loops for autonomous agents.
 pub struct BackgroundExecutor {
     /// Running background task handles, keyed by agent ID.
@@ -25,6 +36,8 @@ pub struct BackgroundExecutor {
     shutdown_rx: watch::Receiver<bool>,
     /// SECURITY: Global semaphore to limit concurrent background LLM calls.
     llm_semaphore: Arc<tokio::sync::Semaphore>,
+    /// Per-agent pause flags: when true, background ticks are skipped.
+    pause_flags: DashMap<AgentId, Arc<AtomicBool>>,
 }
 
 impl BackgroundExecutor {
@@ -34,6 +47,23 @@ impl BackgroundExecutor {
             tasks: DashMap::new(),
             shutdown_rx,
             llm_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_BG_LLM)),
+            pause_flags: DashMap::new(),
+        }
+    }
+
+    /// Pause an agent's background loop (ticks will be skipped until resumed).
+    pub fn pause_agent(&self, agent_id: AgentId) {
+        if let Some(flag) = self.pause_flags.get(&agent_id) {
+            flag.store(true, Ordering::SeqCst);
+            info!(id = %agent_id, "Background loop paused");
+        }
+    }
+
+    /// Resume a paused agent's background loop.
+    pub fn resume_agent(&self, agent_id: AgentId) {
+        if let Some(flag) = self.pause_flags.get(&agent_id) {
+            flag.store(false, Ordering::SeqCst);
+            info!(id = %agent_id, "Background loop resumed");
         }
     }
 
@@ -64,6 +94,8 @@ impl BackgroundExecutor {
                 let mut shutdown = self.shutdown_rx.clone();
                 let busy = Arc::new(AtomicBool::new(false));
                 let semaphore = self.llm_semaphore.clone();
+                let paused = Arc::new(AtomicBool::new(false));
+                self.pause_flags.insert(agent_id, paused.clone());
 
                 info!(
                     agent = %name, id = %agent_id,
@@ -79,6 +111,12 @@ impl BackgroundExecutor {
                                 info!(agent = %name, "Continuous loop: shutdown signal received");
                                 break;
                             }
+                        }
+
+                        // Skip tick if agent is paused (hand pause)
+                        if paused.load(Ordering::SeqCst) {
+                            debug!(agent = %name, "Continuous loop: skipping tick (paused)");
+                            continue;
                         }
 
                         // Skip if previous tick is still running
@@ -107,11 +145,11 @@ impl BackgroundExecutor {
                         debug!(agent = %name, "Continuous loop: sending self-prompt");
                         let busy_clone = busy.clone();
                         let jh = (send_message)(agent_id, prompt);
-                        // Spawn a watcher that clears the busy flag and drops permit when done
+                        // Spawn a watcher with RAII guard — busy flag clears even on panic
                         tokio::spawn(async move {
+                            let _guard = BusyGuard { flag: busy_clone };
+                            let _permit = permit; // drop permit when watcher exits
                             let _ = jh.await;
-                            drop(permit);
-                            busy_clone.store(false, Ordering::SeqCst);
                         });
                     }
                 });
@@ -126,6 +164,8 @@ impl BackgroundExecutor {
                 let mut shutdown = self.shutdown_rx.clone();
                 let busy = Arc::new(AtomicBool::new(false));
                 let semaphore = self.llm_semaphore.clone();
+                let paused = Arc::new(AtomicBool::new(false));
+                self.pause_flags.insert(agent_id, paused.clone());
 
                 info!(
                     agent = %name, id = %agent_id,
@@ -141,6 +181,12 @@ impl BackgroundExecutor {
                                 info!(agent = %name, "Periodic loop: shutdown signal received");
                                 break;
                             }
+                        }
+
+                        // Skip tick if agent is paused (hand pause)
+                        if paused.load(Ordering::SeqCst) {
+                            debug!(agent = %name, "Periodic loop: skipping tick (paused)");
+                            continue;
                         }
 
                         if busy
@@ -167,10 +213,11 @@ impl BackgroundExecutor {
                         debug!(agent = %name, "Periodic loop: sending scheduled prompt");
                         let busy_clone = busy.clone();
                         let jh = (send_message)(agent_id, prompt);
+                        // Spawn a watcher with RAII guard — busy flag clears even on panic
                         tokio::spawn(async move {
+                            let _guard = BusyGuard { flag: busy_clone };
+                            let _permit = permit; // drop permit when watcher exits
                             let _ = jh.await;
-                            drop(permit);
-                            busy_clone.store(false, Ordering::SeqCst);
                         });
                     }
                 });
@@ -187,6 +234,7 @@ impl BackgroundExecutor {
 
     /// Stop the background loop for an agent, if one is running.
     pub fn stop_agent(&self, agent_id: AgentId) {
+        self.pause_flags.remove(&agent_id);
         if let Some((_, handle)) = self.tasks.remove(&agent_id) {
             handle.abort();
             info!(id = %agent_id, "Background loop stopped");
