@@ -438,7 +438,7 @@ function HandDetailPanel({
                   {hand.category && (
                     <Badge variant="info">
                       <Tag className="w-3 h-3 mr-0.5" />
-                      {hand.category}
+                      {t(`hands.cat_${hand.category}`, { defaultValue: hand.category })}
                     </Badge>
                   )}
                 </div>
@@ -943,7 +943,7 @@ export function HandsPage() {
                       {h.category && (
                         <Badge variant="info">
                           <Tag className="w-3 h-3 mr-0.5" />
-                          {h.category}
+                          {t(`hands.cat_${h.category}`, { defaultValue: h.category })}
                         </Badge>
                       )}
                     </div>
