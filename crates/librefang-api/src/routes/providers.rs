@@ -362,7 +362,7 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
 
         // For local providers, attach the probe result
         if let Some(probe) = probe_map.remove(&i) {
-            attach_probe_result(&mut entry, &probe, &p.id, &state.kernel.model_catalog);
+            attach_probe_result(&mut entry, &probe, &p.id, &state.kernel.model_catalog_ref());
         } else if librefang_runtime::provider_health::is_local_provider(&p.id) {
             // Local HTTP provider with no probe result yet — still label it local.
             entry["is_local"] = serde_json::json!(true);
@@ -460,7 +460,7 @@ pub async fn get_provider(
             &mut entry,
             &probe,
             &provider.id,
-            &state.kernel.model_catalog,
+            &state.kernel.model_catalog_ref(),
         );
     } else if librefang_runtime::provider_health::is_local_provider(&provider.id) {
         entry["is_local"] = serde_json::json!(true);
@@ -1074,7 +1074,7 @@ pub async fn set_provider_url(
 
     // Merge discovered models into catalog
     if !probe.discovered_models.is_empty() {
-        if let Ok(mut catalog) = state.kernel.model_catalog.write() {
+        if let Ok(mut catalog) = state.kernel.model_catalog_ref().write() {
             catalog.merge_discovered_models(&name, &probe.discovered_models);
         }
     }

@@ -148,7 +148,7 @@ pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     )
 )]
 pub async fn health_detail(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let health = state.kernel.supervisor.health();
+    let health = state.kernel.supervisor_ref().health();
 
     let shared_id = librefang_types::agent::AgentId(uuid::Uuid::from_bytes([
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
@@ -238,7 +238,7 @@ pub async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> impl Into
     out.push('\n');
 
     // Supervisor health
-    let health = state.kernel.supervisor.health();
+    let health = state.kernel.supervisor_ref().health();
     out.push_str("# HELP librefang_panics_total Total supervisor panics since start.\n");
     out.push_str("# TYPE librefang_panics_total counter\n");
     out.push_str(&format!("librefang_panics_total {}\n", health.panic_count));

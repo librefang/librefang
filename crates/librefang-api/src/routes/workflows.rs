@@ -268,7 +268,7 @@ pub async fn create_workflow(
     )
 )]
 pub async fn list_workflows(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let workflows = state.kernel.workflows.list_workflows().await;
+    let workflows = state.kernel.workflow_engine().list_workflows().await;
     let list: Vec<serde_json::Value> = workflows
         .iter()
         .map(|w| {
@@ -309,7 +309,12 @@ pub async fn get_workflow(
         }
     });
 
-    match state.kernel.workflows.get_workflow(workflow_id).await {
+    match state
+        .kernel
+        .workflow_engine()
+        .get_workflow(workflow_id)
+        .await
+    {
         Some(w) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -370,7 +375,12 @@ pub async fn update_workflow(
     });
 
     // Fetch existing workflow to preserve created_at
-    let existing = match state.kernel.workflows.get_workflow(workflow_id).await {
+    let existing = match state
+        .kernel
+        .workflow_engine()
+        .get_workflow(workflow_id)
+        .await
+    {
         Some(w) => w,
         None => {
             return (
@@ -491,7 +501,12 @@ pub async fn delete_workflow(
         }
     });
 
-    if state.kernel.workflows.remove_workflow(workflow_id).await {
+    if state
+        .kernel
+        .workflow_engine()
+        .remove_workflow(workflow_id)
+        .await
+    {
         (
             StatusCode::OK,
             Json(serde_json::json!({"status": "removed", "workflow_id": id})),
@@ -548,7 +563,7 @@ pub async fn list_workflow_runs(
     State(state): State<Arc<AppState>>,
     Path(_id): Path<String>,
 ) -> impl IntoResponse {
-    let runs = state.kernel.workflows.list_runs(None).await;
+    let runs = state.kernel.workflow_engine().list_runs(None).await;
     let list: Vec<serde_json::Value> = runs
         .iter()
         .map(|r| {
@@ -1444,7 +1459,7 @@ pub async fn list_templates(
     State(state): State<Arc<AppState>>,
     Query(params): Query<TemplateListParams>,
 ) -> impl IntoResponse {
-    let all = state.kernel.template_registry.list().await;
+    let all = state.kernel.templates().list().await;
 
     let filtered: Vec<_> = all
         .into_iter()
@@ -1496,7 +1511,7 @@ pub async fn get_template(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    match state.kernel.template_registry.get(&id).await {
+    match state.kernel.templates().get(&id).await {
         Some(t) => (
             StatusCode::OK,
             Json(serde_json::to_value(&t).unwrap_or_default()),
@@ -1526,7 +1541,7 @@ pub async fn instantiate_template(
     Path(id): Path<String>,
     Json(params): Json<HashMap<String, serde_json::Value>>,
 ) -> impl IntoResponse {
-    let template = match state.kernel.template_registry.get(&id).await {
+    let template = match state.kernel.templates().get(&id).await {
         Some(t) => t,
         None => {
             return (

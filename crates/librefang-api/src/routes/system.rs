@@ -705,7 +705,7 @@ pub async fn list_tools(State(state): State<Arc<AppState>>) -> impl IntoResponse
         .collect();
 
     // Include MCP tools so they're visible in Settings -> Tools
-    if let Ok(mcp_tools) = state.kernel.mcp_tools.lock() {
+    if let Ok(mcp_tools) = state.kernel.mcp_tools_ref().lock() {
         for t in mcp_tools.iter() {
             tools.push(serde_json::json!({
                 "name": t.name,
@@ -742,7 +742,7 @@ pub async fn get_tool(
     }
 
     // Search MCP tools
-    if let Ok(mcp_tools) = state.kernel.mcp_tools.lock() {
+    if let Ok(mcp_tools) = state.kernel.mcp_tools_ref().lock() {
         for t in mcp_tools.iter() {
             if t.name == name {
                 return (
@@ -1585,7 +1585,7 @@ pub async fn pairing_request(
         )
             .into_response();
     }
-    match state.kernel.pairing.create_pairing_request() {
+    match state.kernel.pairing_ref().create_pairing_request() {
         Ok(req) => {
             let qr_uri = format!("librefang://pair?token={}", req.token);
             Json(serde_json::json!({
@@ -1639,7 +1639,11 @@ pub async fn pairing_complete(
         last_seen: chrono::Utc::now(),
         push_token,
     };
-    match state.kernel.pairing.complete_pairing(token, device_info) {
+    match state
+        .kernel
+        .pairing_ref()
+        .complete_pairing(token, device_info)
+    {
         Ok(device) => Json(serde_json::json!({
             "device_id": device.device_id,
             "display_name": device.display_name,
@@ -1702,7 +1706,7 @@ pub async fn pairing_remove_device(
         )
             .into_response();
     }
-    match state.kernel.pairing.remove_device(&device_id) {
+    match state.kernel.pairing_ref().remove_device(&device_id) {
         Ok(()) => Json(serde_json::json!({"ok": true})).into_response(),
         Err(e) => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": e}))).into_response(),
     }
@@ -1741,8 +1745,12 @@ pub async fn pairing_notify(
         )
             .into_response();
     }
-    state.kernel.pairing.notify_devices(title, message).await;
-    Json(serde_json::json!({"ok": true, "notified": state.kernel.pairing.list_devices().len()}))
+    state
+        .kernel
+        .pairing_ref()
+        .notify_devices(title, message)
+        .await;
+    Json(serde_json::json!({"ok": true, "notified": state.kernel.pairing_ref().list_devices().len()}))
         .into_response()
 }
 
@@ -1767,7 +1775,7 @@ pub async fn list_commands(State(state): State<Arc<AppState>>) -> impl IntoRespo
     ];
 
     // Add skill-registered tool names as potential commands
-    if let Ok(registry) = state.kernel.skill_registry.read() {
+    if let Ok(registry) = state.kernel.skill_registry_ref().read() {
         for skill in registry.list() {
             let desc: String = skill.manifest.skill.description.chars().take(80).collect();
             commands.push(serde_json::json!({
@@ -1833,7 +1841,7 @@ pub async fn get_command(
     }
 
     // Skill-registered commands
-    if let Ok(registry) = state.kernel.skill_registry.read() {
+    if let Ok(registry) = state.kernel.skill_registry_ref().read() {
         for skill in registry.list() {
             let skill_cmd = format!("/{}", skill.manifest.skill.name);
             if skill_cmd.eq_ignore_ascii_case(&lookup) {
@@ -2444,7 +2452,7 @@ fn read_backup_manifest(path: &std::path::Path) -> Option<BackupManifest> {
 /// GET /api/queue/status — Command queue status and occupancy.
 #[utoipa::path(get, path = "/api/queue/status", tag = "system", responses((status = 200, description = "Queue status", body = serde_json::Value)))]
 pub async fn queue_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let occupancy = state.kernel.command_queue.occupancy();
+    let occupancy = state.kernel.command_queue_ref().occupancy();
     let lanes: Vec<serde_json::Value> = occupancy
         .iter()
         .map(|o| {

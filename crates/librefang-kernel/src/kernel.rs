@@ -1075,6 +1075,18 @@ impl LibreFangKernel {
     ) -> Option<&dyn librefang_runtime::context_engine::ContextEngine> {
         self.context_engine.as_deref()
     }
+
+    /// Event bus.
+    #[inline]
+    pub fn event_bus_ref(&self) -> &EventBus {
+        &self.event_bus
+    }
+
+    /// OFP peer node (set once at startup).
+    #[inline]
+    pub fn peer_node_ref(&self) -> Option<&Arc<librefang_wire::PeerNode>> {
+        self.peer_node.get()
+    }
 }
 
 impl LibreFangKernel {
