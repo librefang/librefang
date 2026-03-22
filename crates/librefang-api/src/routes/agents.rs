@@ -4195,7 +4195,7 @@ pub async fn push_message(
     };
 
     // Validate agent exists
-    if state.kernel.registry.get(agent_id).is_none() {
+    if state.kernel.agent_registry().get(agent_id).is_none() {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": err_not_found})),
