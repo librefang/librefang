@@ -533,6 +533,11 @@ pub struct AgentManifest {
     /// Overrides the global `[thinking]` config when set.
     #[serde(default)]
     pub thinking: Option<crate::config::ThinkingConfig>,
+    /// Per-agent context injections. Merged with global `session.context_injection`
+    /// entries when a session starts. Agent-level injections are appended after
+    /// global ones within each position group.
+    #[serde(default)]
+    pub context_injection: Vec<crate::config::ContextInjection>,
 }
 
 fn default_true() -> bool {
@@ -573,6 +578,7 @@ impl Default for AgentManifest {
             allowed_plugins: Vec::new(),
             inherit_parent_context: true,
             thinking: None,
+            context_injection: Vec::new(),
         }
     }
 }
