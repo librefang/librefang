@@ -28,6 +28,18 @@ const MIN_TIMEOUT_SECS: u64 = 10;
 /// Maximum approval timeout in seconds.
 const MAX_TIMEOUT_SECS: u64 = 300;
 
+/// Maximum number of trusted senders.
+const MAX_TRUSTED_SENDERS: usize = 100;
+
+/// Maximum number of channel rules.
+const MAX_CHANNEL_RULES: usize = 50;
+
+/// Maximum length of a channel name (chars).
+const MAX_CHANNEL_NAME_LEN: usize = 64;
+
+/// Maximum number of tools in a single channel rule allow/deny list.
+const MAX_CHANNEL_RULE_TOOLS: usize = 50;
+
 // ---------------------------------------------------------------------------
 // RiskLevel
 // ---------------------------------------------------------------------------
@@ -84,6 +96,12 @@ pub struct ApprovalRequest {
     pub requested_at: DateTime<Utc>,
     /// Auto-deny timeout in seconds.
     pub timeout_secs: u64,
+    /// Sender user ID (from the channel that originated the request).
+    #[serde(default)]
+    pub sender_id: Option<String>,
+    /// Channel name (e.g. "telegram", "discord") that originated the request.
+    #[serde(default)]
+    pub channel: Option<String>,
 }
 
 impl ApprovalRequest {
@@ -97,8 +115,7 @@ impl ApprovalRequest {
         }
         if self.tool_name.len() > MAX_TOOL_NAME_LEN {
             return Err(format!(
-                "tool_name too long ({} chars, max {MAX_TOOL_NAME_LEN})",
-                self.tool_name.len()
+                "tool_name too long (max {MAX_TOOL_NAME_LEN} chars)"
             ));
         }
         if !self
@@ -114,16 +131,14 @@ impl ApprovalRequest {
         // -- description --
         if self.description.len() > MAX_DESCRIPTION_LEN {
             return Err(format!(
-                "description too long ({} chars, max {MAX_DESCRIPTION_LEN})",
-                self.description.len()
+                "description too long (max {MAX_DESCRIPTION_LEN} chars)"
             ));
         }
 
         // -- action_summary --
         if self.action_summary.len() > MAX_ACTION_SUMMARY_LEN {
             return Err(format!(
-                "action_summary too long ({} chars, max {MAX_ACTION_SUMMARY_LEN})",
-                self.action_summary.len()
+                "action_summary too long (max {MAX_ACTION_SUMMARY_LEN} chars)"
             ));
         }
 
@@ -159,6 +174,98 @@ pub struct ApprovalResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Validate a tool name field with a contextual label.
+fn validate_tool_name(name: &str, label: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err(format!("{label} must not be empty"));
+    }
+    if name.len() > MAX_TOOL_NAME_LEN {
+        return Err(format!("{label} too long (max {MAX_TOOL_NAME_LEN} chars)"));
+    }
+    if !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        return Err(format!(
+            "{label} may only contain alphanumeric characters and underscores: \"{name}\""
+        ));
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// ChannelToolRule
+// ---------------------------------------------------------------------------
+
+/// Per-channel tool authorization rule.
+///
+/// Controls which tools are allowed or denied when requests originate from a
+/// specific channel (e.g. "telegram", "discord", "slack").  If both
+/// `allowed_tools` and `denied_tools` are non-empty, `denied_tools` takes
+/// precedence (deny-wins).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ChannelToolRule {
+    /// Channel name to match (e.g. "telegram", "discord", "slack").
+    pub channel: String,
+    /// Tools explicitly allowed from this channel.  If non-empty, only these
+    /// tools may be executed when the request originates from this channel.
+    #[serde(default)]
+    pub allowed_tools: Vec<String>,
+    /// Tools explicitly denied from this channel.  Takes precedence over
+    /// `allowed_tools` (deny-wins).
+    #[serde(default)]
+    pub denied_tools: Vec<String>,
+}
+
+impl ChannelToolRule {
+    /// Validate this rule's fields.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.channel.is_empty() {
+            return Err("channel must not be empty".into());
+        }
+        if self.channel.len() > MAX_CHANNEL_NAME_LEN {
+            return Err(format!(
+                "channel name too long (max {MAX_CHANNEL_NAME_LEN} chars)"
+            ));
+        }
+        if self.allowed_tools.len() > MAX_CHANNEL_RULE_TOOLS {
+            return Err(format!(
+                "allowed_tools list too long (max {MAX_CHANNEL_RULE_TOOLS})"
+            ));
+        }
+        if self.denied_tools.len() > MAX_CHANNEL_RULE_TOOLS {
+            return Err(format!(
+                "denied_tools list too long (max {MAX_CHANNEL_RULE_TOOLS})"
+            ));
+        }
+        for (i, name) in self.allowed_tools.iter().enumerate() {
+            validate_tool_name(name, &format!("allowed_tools[{i}]"))?;
+        }
+        for (i, name) in self.denied_tools.iter().enumerate() {
+            validate_tool_name(name, &format!("denied_tools[{i}]"))?;
+        }
+        Ok(())
+    }
+
+    /// Check whether a tool is permitted by this rule.
+    ///
+    /// Returns `Some(true)` if explicitly allowed, `Some(false)` if explicitly
+    /// denied, and `None` if the rule does not apply to this tool.
+    pub fn check_tool(&self, tool_name: &str) -> Option<bool> {
+        // Deny-wins: if tool is in denied list, always deny.
+        if self.denied_tools.iter().any(|t| t == tool_name) {
+            return Some(false);
+        }
+        // If there is an allow-list, tool must be in it.
+        if !self.allowed_tools.is_empty() {
+            return Some(self.allowed_tools.iter().any(|t| t == tool_name));
+        }
+        // Rule has no opinion on this tool.
+        None
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ApprovalPolicy
 // ---------------------------------------------------------------------------
 
@@ -180,6 +287,19 @@ pub struct ApprovalPolicy {
     /// Alias: if `auto_approve = true`, clears the require list at boot.
     #[serde(default, alias = "auto_approve")]
     pub auto_approve: bool,
+    /// User IDs that are trusted and auto-approved for all tools.
+    ///
+    /// When a tool execution request comes from a sender whose `user_id`
+    /// appears in this list, the approval gate is bypassed automatically.
+    #[serde(default)]
+    pub trusted_senders: Vec<String>,
+    /// Per-channel tool authorization rules.
+    ///
+    /// Each rule specifies allowed and/or denied tools for a specific channel.
+    /// Rules are evaluated in order; the first matching rule wins.  If no rule
+    /// matches the request's channel, the default `require_approval` list applies.
+    #[serde(default)]
+    pub channel_rules: Vec<ChannelToolRule>,
 }
 
 impl Default for ApprovalPolicy {
@@ -189,6 +309,8 @@ impl Default for ApprovalPolicy {
             timeout_secs: 60,
             auto_approve_autonomous: false,
             auto_approve: false,
+            trusted_senders: Vec::new(),
+            channel_rules: Vec::new(),
         }
     }
 }
@@ -239,6 +361,24 @@ impl ApprovalPolicy {
         }
     }
 
+    /// Check if the given sender is trusted (auto-approve bypass).
+    pub fn is_trusted_sender(&self, sender_id: &str) -> bool {
+        self.trusted_senders.iter().any(|s| s == sender_id)
+    }
+
+    /// Check channel-level tool authorization.
+    ///
+    /// Returns `Some(false)` if the tool is explicitly denied for this channel,
+    /// `Some(true)` if explicitly allowed, or `None` if no channel rule applies.
+    pub fn check_channel_tool(&self, channel: &str, tool_name: &str) -> Option<bool> {
+        for rule in &self.channel_rules {
+            if rule.channel == channel {
+                return rule.check_tool(tool_name);
+            }
+        }
+        None
+    }
+
     /// Validate this policy's fields.
     ///
     /// Returns `Ok(())` or an error message describing the first validation failure.
@@ -259,20 +399,32 @@ impl ApprovalPolicy {
 
         // -- require_approval tool names --
         for (i, name) in self.require_approval.iter().enumerate() {
-            if name.is_empty() {
-                return Err(format!("require_approval[{i}] must not be empty"));
+            validate_tool_name(name, &format!("require_approval[{i}]"))?;
+        }
+
+        // -- trusted_senders --
+        if self.trusted_senders.len() > MAX_TRUSTED_SENDERS {
+            return Err(format!(
+                "trusted_senders list too long ({}, max {MAX_TRUSTED_SENDERS})",
+                self.trusted_senders.len()
+            ));
+        }
+        for (i, sender) in self.trusted_senders.iter().enumerate() {
+            if sender.is_empty() {
+                return Err(format!("trusted_senders[{i}] must not be empty"));
             }
-            if name.len() > MAX_TOOL_NAME_LEN {
-                return Err(format!(
-                    "require_approval[{i}] too long ({} chars, max {MAX_TOOL_NAME_LEN})",
-                    name.len()
-                ));
-            }
-            if !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
-                return Err(format!(
-                    "require_approval[{i}] may only contain alphanumeric characters and underscores: \"{name}\""
-                ));
-            }
+        }
+
+        // -- channel_rules --
+        if self.channel_rules.len() > MAX_CHANNEL_RULES {
+            return Err(format!(
+                "channel_rules list too long ({}, max {MAX_CHANNEL_RULES})",
+                self.channel_rules.len()
+            ));
+        }
+        for (i, rule) in self.channel_rules.iter().enumerate() {
+            rule.validate()
+                .map_err(|e| format!("channel_rules[{i}]: {e}"))?;
         }
 
         Ok(())
@@ -299,6 +451,8 @@ mod tests {
             risk_level: RiskLevel::High,
             requested_at: Utc::now(),
             timeout_secs: 60,
+            sender_id: None,
+            channel: None,
         }
     }
 
@@ -688,11 +842,189 @@ mod tests {
             timeout_secs: 120,
             auto_approve_autonomous: true,
             auto_approve: false,
+            trusted_senders: vec!["admin_123".into()],
+            channel_rules: vec![ChannelToolRule {
+                channel: "telegram".into(),
+                allowed_tools: vec!["file_read".into()],
+                denied_tools: vec!["shell_exec".into()],
+            }],
         };
         let json = serde_json::to_string(&policy).unwrap();
         let back: ApprovalPolicy = serde_json::from_str(&json).unwrap();
         assert_eq!(back.require_approval, policy.require_approval);
         assert_eq!(back.timeout_secs, 120);
         assert!(back.auto_approve_autonomous);
+        assert_eq!(back.trusted_senders, vec!["admin_123"]);
+        assert_eq!(back.channel_rules.len(), 1);
+        assert_eq!(back.channel_rules[0].channel, "telegram");
+    }
+
+    // -----------------------------------------------------------------------
+    // ChannelToolRule
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn channel_rule_deny_wins() {
+        let rule = ChannelToolRule {
+            channel: "telegram".into(),
+            allowed_tools: vec!["shell_exec".into()],
+            denied_tools: vec!["shell_exec".into()],
+        };
+        // deny-wins: even though shell_exec is in allowed, denied takes precedence
+        assert_eq!(rule.check_tool("shell_exec"), Some(false));
+    }
+
+    #[test]
+    fn channel_rule_allow_list_only() {
+        let rule = ChannelToolRule {
+            channel: "discord".into(),
+            allowed_tools: vec!["file_read".into(), "web_fetch".into()],
+            denied_tools: vec![],
+        };
+        assert_eq!(rule.check_tool("file_read"), Some(true));
+        assert_eq!(rule.check_tool("shell_exec"), Some(false));
+    }
+
+    #[test]
+    fn channel_rule_deny_list_only() {
+        let rule = ChannelToolRule {
+            channel: "slack".into(),
+            allowed_tools: vec![],
+            denied_tools: vec!["shell_exec".into()],
+        };
+        assert_eq!(rule.check_tool("shell_exec"), Some(false));
+        // No allow list, no deny match → no opinion
+        assert_eq!(rule.check_tool("file_read"), None);
+    }
+
+    #[test]
+    fn channel_rule_empty_lists_no_opinion() {
+        let rule = ChannelToolRule {
+            channel: "matrix".into(),
+            allowed_tools: vec![],
+            denied_tools: vec![],
+        };
+        assert_eq!(rule.check_tool("shell_exec"), None);
+    }
+
+    #[test]
+    fn channel_rule_validate_empty_channel() {
+        let rule = ChannelToolRule {
+            channel: "".into(),
+            allowed_tools: vec![],
+            denied_tools: vec![],
+        };
+        assert!(rule
+            .validate()
+            .unwrap_err()
+            .contains("channel must not be empty"));
+    }
+
+    #[test]
+    fn channel_rule_validate_invalid_tool_name() {
+        let rule = ChannelToolRule {
+            channel: "telegram".into(),
+            allowed_tools: vec!["bad-name".into()],
+            denied_tools: vec![],
+        };
+        assert!(rule.validate().unwrap_err().contains("alphanumeric"));
+    }
+
+    // -----------------------------------------------------------------------
+    // ApprovalPolicy — trusted_senders
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn policy_trusted_sender_check() {
+        let policy = ApprovalPolicy {
+            trusted_senders: vec!["admin_123".into(), "ops_456".into()],
+            ..Default::default()
+        };
+        assert!(policy.is_trusted_sender("admin_123"));
+        assert!(policy.is_trusted_sender("ops_456"));
+        assert!(!policy.is_trusted_sender("random_user"));
+    }
+
+    #[test]
+    fn policy_trusted_senders_empty_sender_rejected() {
+        let mut policy = valid_policy();
+        policy.trusted_senders = vec!["".into()];
+        let err = policy.validate().unwrap_err();
+        assert!(err.contains("trusted_senders[0]"), "{err}");
+        assert!(err.contains("empty"), "{err}");
+    }
+
+    // -----------------------------------------------------------------------
+    // ApprovalPolicy — channel_rules
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn policy_check_channel_tool() {
+        let policy = ApprovalPolicy {
+            channel_rules: vec![
+                ChannelToolRule {
+                    channel: "telegram".into(),
+                    allowed_tools: vec![],
+                    denied_tools: vec!["shell_exec".into()],
+                },
+                ChannelToolRule {
+                    channel: "discord".into(),
+                    allowed_tools: vec!["file_read".into()],
+                    denied_tools: vec![],
+                },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            policy.check_channel_tool("telegram", "shell_exec"),
+            Some(false)
+        );
+        assert_eq!(policy.check_channel_tool("telegram", "file_read"), None);
+        assert_eq!(
+            policy.check_channel_tool("discord", "file_read"),
+            Some(true)
+        );
+        assert_eq!(
+            policy.check_channel_tool("discord", "shell_exec"),
+            Some(false)
+        );
+        assert_eq!(policy.check_channel_tool("slack", "shell_exec"), None);
+    }
+
+    #[test]
+    fn policy_channel_rules_validate() {
+        let mut policy = valid_policy();
+        policy.channel_rules = vec![ChannelToolRule {
+            channel: "telegram".into(),
+            allowed_tools: vec!["file_read".into()],
+            denied_tools: vec![],
+        }];
+        assert!(policy.validate().is_ok());
+    }
+
+    #[test]
+    fn policy_channel_rules_invalid_propagates() {
+        let mut policy = valid_policy();
+        policy.channel_rules = vec![ChannelToolRule {
+            channel: "".into(),
+            allowed_tools: vec![],
+            denied_tools: vec![],
+        }];
+        let err = policy.validate().unwrap_err();
+        assert!(err.contains("channel_rules[0]"), "{err}");
+    }
+
+    #[test]
+    fn policy_default_has_empty_new_fields() {
+        let policy = ApprovalPolicy::default();
+        assert!(policy.trusted_senders.is_empty());
+        assert!(policy.channel_rules.is_empty());
+    }
+
+    #[test]
+    fn policy_serde_default_new_fields() {
+        let policy: ApprovalPolicy = serde_json::from_str("{}").unwrap();
+        assert!(policy.trusted_senders.is_empty());
+        assert!(policy.channel_rules.is_empty());
     }
 }

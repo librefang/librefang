@@ -786,6 +786,8 @@ pub async fn mcp_http(
                 None
             },
             Some(&*state.kernel.process_manager),
+            None, // sender_id (MCP HTTP has no sender context)
+            None, // channel
         )
         .await;
 
