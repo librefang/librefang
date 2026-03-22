@@ -28,6 +28,7 @@ const PluginsPage = lazy(() => import("./pages/PluginsPage").then(m => ({ defaul
 const ModelsPage = lazy(() => import("./pages/ModelsPage").then(m => ({ default: m.ModelsPage })));
 const NetworkPage = lazy(() => import("./pages/NetworkPage").then(m => ({ default: m.NetworkPage })));
 const A2APage = lazy(() => import("./pages/A2APage").then(m => ({ default: m.A2APage })));
+const TelemetryPage = lazy(() => import("./pages/TelemetryPage").then(m => ({ default: m.TelemetryPage })));
 
 // Suspense wrapper — shows nothing briefly while chunk loads (page transition animation covers it)
 function L({ children }: { children: React.ReactNode }) {
@@ -194,6 +195,12 @@ const a2aRoute = createRoute({
   component: () => <L><A2APage /></L>
 });
 
+const telemetryRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/telemetry",
+  component: () => <L><TelemetryPage /></L>
+});
+
 const routeTree = rootRoute.addChildren([
   indexRoute,
   overviewRoute,
@@ -220,6 +227,7 @@ const routeTree = rootRoute.addChildren([
   modelsRoute,
   networkRoute,
   a2aRoute,
+  telemetryRoute,
 ]);
 
 export const router = createRouter({

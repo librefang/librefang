@@ -752,6 +752,43 @@ impl Default for InboxConfig {
     }
 }
 
+/// Telemetry / observability configuration.
+///
+/// ```toml
+/// [telemetry]
+/// enabled = false
+/// otlp_endpoint = "http://localhost:4317"
+/// service_name = "librefang"
+/// sample_rate = 1.0
+/// prometheus_enabled = false
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TelemetryConfig {
+    /// Enable OpenTelemetry OTLP tracing export.
+    pub enabled: bool,
+    /// OTLP gRPC endpoint (default: "http://localhost:4317").
+    pub otlp_endpoint: String,
+    /// Service name reported to the OTel collector.
+    pub service_name: String,
+    /// Trace sampling rate (0.0 to 1.0). Default: 1.0 (sample everything).
+    pub sample_rate: f64,
+    /// Enable Prometheus metrics endpoint at /api/metrics.
+    pub prometheus_enabled: bool,
+}
+
+impl Default for TelemetryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            otlp_endpoint: "http://localhost:4317".to_string(),
+            service_name: "librefang".to_string(),
+            sample_rate: 1.0,
+            prometheus_enabled: false,
+        }
+    }
+}
+
 /// Canvas (Agent-to-UI) configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1469,6 +1506,9 @@ pub struct KernelConfig {
     /// Drop text files into a directory and they are dispatched to agents.
     #[serde(default)]
     pub inbox: InboxConfig,
+    /// Telemetry / observability configuration (OpenTelemetry + Prometheus).
+    #[serde(default)]
+    pub telemetry: TelemetryConfig,
 }
 
 /// Input sanitization mode for channel messages.
@@ -2290,6 +2330,7 @@ impl Default for KernelConfig {
             qwen_code_path: None,
             sanitize: SanitizeConfig::default(),
             inbox: InboxConfig::default(),
+            telemetry: TelemetryConfig::default(),
         }
     }
 }

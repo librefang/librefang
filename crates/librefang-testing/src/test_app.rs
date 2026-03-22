@@ -139,6 +139,7 @@ impl TestAppState {
             webhook_store: librefang_api::webhook_store::WebhookStore::load(
                 tmp.path().join("test_webhooks.json"),
             ),
+            prometheus_handle: None,
         })
     }
 }

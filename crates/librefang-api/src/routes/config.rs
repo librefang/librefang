@@ -206,6 +206,8 @@ pub async fn health_detail(State(state): State<Arc<AppState>>) -> impl IntoRespo
 /// - `librefang_tool_calls_total` — total tool calls (per agent)
 /// - `librefang_panics_total` — supervisor panic count
 /// - `librefang_restarts_total` — supervisor restart count
+/// - `librefang_http_requests_total` — HTTP request counts (with telemetry feature)
+/// - `librefang_http_request_duration_ms` — HTTP request latencies (with telemetry feature)
 #[utoipa::path(
     get,
     path = "/api/metrics",
@@ -215,7 +217,7 @@ pub async fn health_detail(State(state): State<Arc<AppState>>) -> impl IntoRespo
     )
 )]
 pub async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let mut out = String::with_capacity(2048);
+    let mut out = String::with_capacity(4096);
 
     // Uptime
     let uptime = state.started_at.elapsed().as_secs();
@@ -275,6 +277,16 @@ pub async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> impl Into
         "librefang_info{{version=\"{}\"}} 1\n",
         env!("CARGO_PKG_VERSION")
     ));
+
+    // Append metrics from the Prometheus recorder when the telemetry feature is
+    // enabled and the recorder has been initialized. This merges the hand-crafted
+    // LibreFang metrics above with standard `metrics` crate counters/histograms
+    // (e.g. HTTP request metrics from the telemetry middleware).
+    #[cfg(feature = "telemetry")]
+    if let Some(handle) = &state.prometheus_handle {
+        out.push_str("# --- metrics-exporter-prometheus output ---\n");
+        out.push_str(&handle.render());
+    }
 
     (
         StatusCode::OK,

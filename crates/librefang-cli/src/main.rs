@@ -1349,12 +1349,34 @@ enum SystemCommands {
 }
 
 fn init_tracing_stderr(log_level: &str) {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_level)),
-        )
-        .init();
+    // When the telemetry feature is enabled, we use the layered registry
+    // so we can optionally attach an OpenTelemetry span exporter.
+    // When disabled, we use the simpler fmt-only subscriber.
+    #[cfg(feature = "telemetry")]
+    {
+        use tracing_subscriber::layer::SubscriberExt;
+        use tracing_subscriber::util::SubscriberInitExt;
+
+        let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_level));
+
+        let fmt_layer = tracing_subscriber::fmt::layer();
+
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(fmt_layer)
+            .init();
+    }
+
+    #[cfg(not(feature = "telemetry"))]
+    {
+        tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_level)),
+            )
+            .init();
+    }
 }
 
 /// Get the LibreFang home directory, respecting LIBREFANG_HOME env var.

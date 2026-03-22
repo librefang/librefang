@@ -31,7 +31,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, instrument, warn};
 
 /// Maximum iterations in the agent loop before giving up.
 const MAX_ITERATIONS: u32 = 50;
@@ -369,6 +369,7 @@ fn serialize_session_messages(
 /// This is the core of LibreFang: it loads session context, recalls memories,
 /// runs the LLM in a tool-use loop, and saves the updated session.
 #[allow(clippy::too_many_arguments)]
+#[instrument(skip_all, fields(agent.name = %manifest.name, agent.id = %session.agent_id))]
 pub async fn run_agent_loop(
     manifest: &AgentManifest,
     user_message: &str,
@@ -1750,6 +1751,7 @@ async fn stream_with_retry(
 /// as tokens arrive from the LLM. Tool execution happens between LLM calls
 /// and is not streamed.
 #[allow(clippy::too_many_arguments)]
+#[instrument(skip_all, fields(agent.name = %manifest.name, agent.id = %session.agent_id))]
 pub async fn run_agent_loop_streaming(
     manifest: &AgentManifest,
     user_message: &str,
