@@ -168,8 +168,8 @@ jobs:
       - name: Sync version from tag
         run: |
           VERSION="${GITHUB_REF#refs/tags/v}"
-          # PEP 440: convert -beta1 → b1, -rc1 → rc1, -lts → .post0
-          PYPI_VERSION=$(echo "$VERSION" | sed 's/-beta/b/; s/-rc/rc/; s/-lts/.post0/')
+          # PEP 440: convert -beta1 → b1, -rc1 → rc1, strip -lts (no PEP 440 equivalent)
+          PYPI_VERSION=$(echo "$VERSION" | sed 's/-beta/b/; s/-rc/rc/; s/-lts//')
           sed -i "s/^version = .*/version = \"$PYPI_VERSION\"/" pyproject.toml
           echo "Publishing librefang-sdk==$PYPI_VERSION"
           grep '^version' pyproject.toml
