@@ -7,11 +7,9 @@
 //!
 //! API docs: <https://elevenlabs.io/docs/api-reference/text-to-speech>
 
+use super::{MediaDriver, MediaError};
 use async_trait::async_trait;
 use librefang_types::media::{MediaCapability, MediaTtsRequest, MediaTtsResult};
-use tracing::warn;
-
-use super::{MediaDriver, MediaError};
 
 /// Default ElevenLabs API base URL.
 const DEFAULT_BASE_URL: &str = "https://api.elevenlabs.io/v1";
