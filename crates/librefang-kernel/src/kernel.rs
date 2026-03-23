@@ -5412,6 +5412,13 @@ system_prompt = "You are a helpful assistant."
         for (role, hand_agent) in &def.agents {
             let mut manifest = hand_agent.manifest.clone();
 
+            // Reuse existing agent if one with the same name is already running
+            // (shared across hands — same memory, sessions, workspace)
+            if let Some(existing) = self.registry.find_by_name(&manifest.name) {
+                agent_ids_map.insert(role.clone(), existing.id);
+                continue;
+            }
+
             // Inherit kernel defaults when hand declares "default" provider/model
             if manifest.model.provider == "default" {
                 manifest.model.provider = self.config.default_model.provider.clone();
