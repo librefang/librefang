@@ -38,22 +38,24 @@ use std::sync::Arc;
     responses((status = 200, description = "Per-agent usage statistics", body = serde_json::Value))
 )]
 pub async fn usage_stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let usage_store = state.kernel.memory_substrate().usage();
     let agents: Vec<serde_json::Value> = state
         .kernel
         .agent_registry()
         .list()
         .iter()
         .map(|e| {
-            let snap = state
-                .kernel
-                .scheduler_ref()
-                .get_usage(e.id)
-                .unwrap_or_default();
+            // Read from persistent SQLite store (survives restarts)
+            let summary = usage_store.query_summary(Some(e.id)).unwrap_or_default();
             serde_json::json!({
                 "agent_id": e.id.to_string(),
                 "name": e.name,
-                "total_tokens": snap.total_tokens,
-                "tool_calls": snap.tool_calls,
+                "total_tokens": summary.total_input_tokens + summary.total_output_tokens,
+                "input_tokens": summary.total_input_tokens,
+                "output_tokens": summary.total_output_tokens,
+                "total_cost_usd": summary.total_cost_usd,
+                "call_count": summary.call_count,
+                "tool_calls": summary.total_tool_calls,
             })
         })
         .collect();
