@@ -76,10 +76,6 @@ fn read_workspace_version(root: &Path) -> Result<String, Box<dyn std::error::Err
     Ok(version)
 }
 
-fn find_latest_stable_tag(root: &Path) -> Option<String> {
-    find_latest_tag(root, false)
-}
-
 /// Find the latest tag, optionally including pre-releases (rc, beta).
 fn find_latest_tag(root: &Path, include_prerelease: bool) -> Option<String> {
     let output = Command::new("git")
