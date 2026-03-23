@@ -4021,19 +4021,39 @@ system_prompt = "You are a helpful assistant."
                 response_format: None,
             };
             let (complexity, routed_model) = router.select_model(&probe);
-            info!(
-                agent = %manifest.name,
-                complexity = %complexity,
-                routed_model = %routed_model,
-                "Model routing applied"
-            );
-            manifest.model.model = routed_model.clone();
-            // Also update provider if the routed model belongs to a different provider
+            // Check if the routed model's provider has a valid API key.
+            // If not, keep the current (default) provider instead of switching
+            // to one the user hasn't configured.
+            let mut use_routed = true;
             if let Ok(cat) = self.model_catalog.read() {
                 if let Some(entry) = cat.find_model(&routed_model) {
                     if entry.provider != manifest.model.provider {
-                        info!(old = %manifest.model.provider, new = %entry.provider, "Model routing changed provider");
-                        manifest.model.provider = entry.provider.clone();
+                        let key_env = self.config.resolve_api_key_env(&entry.provider);
+                        if std::env::var(&key_env).is_err() {
+                            warn!(
+                                agent = %manifest.name,
+                                routed_model = %routed_model,
+                                provider = %entry.provider,
+                                "Model routing skipped — provider API key not configured, using default"
+                            );
+                            use_routed = false;
+                        }
+                    }
+                }
+            }
+            if use_routed {
+                info!(
+                    agent = %manifest.name,
+                    complexity = %complexity,
+                    routed_model = %routed_model,
+                    "Model routing applied"
+                );
+                manifest.model.model = routed_model.clone();
+                if let Ok(cat) = self.model_catalog.read() {
+                    if let Some(entry) = cat.find_model(&routed_model) {
+                        if entry.provider != manifest.model.provider {
+                            manifest.model.provider = entry.provider.clone();
+                        }
                     }
                 }
             }
