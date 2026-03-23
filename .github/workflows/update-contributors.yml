@@ -21,20 +21,13 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.x"
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
 
-      - name: Generate contributors SVG
+      - name: Generate contributors and star history SVGs
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: python3 scripts/generate_contributors.py librefang/librefang web/public/assets/contributors.svg
-
-      - name: Generate star history SVG
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: python3 scripts/generate_star_history.py librefang/librefang web/public/assets/star-history.svg
+        run: cargo xtask contributors --repo librefang/librefang
 
       - name: Create PR with updated SVGs
         id: cpr

@@ -20,3 +20,6 @@ pub mod versioning;
 pub mod webchat;
 pub mod webhook_store;
 pub mod ws;
+
+#[cfg(feature = "telemetry")]
+pub mod telemetry;

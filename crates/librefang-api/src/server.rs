@@ -57,6 +57,7 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
         .merge(routes::budget::router())
         .merge(routes::goals::router())
         .merge(routes::inbox::router())
+        .merge(routes::media::router())
         // Dashboard credential login (handler defined locally in server.rs)
         .route(
             "/auth/dashboard-login",
@@ -127,6 +128,7 @@ fn resolve_dashboard_credential(
     config_value.to_string()
 }
 
+#[allow(deprecated)]
 pub(crate) fn dashboard_session_token(kernel: &LibreFangKernel) -> Option<String> {
     let cfg = kernel.config_ref();
     let username = resolve_dashboard_credential(
@@ -161,7 +163,7 @@ pub(crate) fn valid_api_tokens(kernel: &LibreFangKernel) -> Vec<String> {
 
 /// Dashboard credential login — validates username/password using Argon2id
 /// (with transparent fallback from legacy plaintext passwords) and returns
-/// a session token (HMAC-SHA256-derived from credentials).
+/// a randomly generated session token with expiration metadata.
 async fn dashboard_login(
     axum::extract::State(state): axum::extract::State<Arc<routes::AppState>>,
     axum::Json(body): axum::Json<serde_json::Value>,
@@ -211,9 +213,18 @@ async fn dashboard_login(
                 );
             }
 
+            // Store the session token so the auth middleware can validate it.
+            state
+                .active_sessions
+                .write()
+                .await
+                .insert(token.token.clone(), token.clone());
+
             axum::response::Json(serde_json::json!({
                 "ok": true,
-                "token": token,
+                "token": token.token,
+                "created_at": token.created_at,
+                "expires_at": token.created_at + crate::password_hash::DEFAULT_SESSION_TTL_SECS,
             }))
             .into_response()
         }
@@ -266,7 +277,18 @@ pub async fn build_router(
     // Start channel bridges (Telegram, etc.)
     let bridge = channel_bridge::start_channel_bridge(kernel.clone()).await;
 
+    // Initialize Prometheus metrics recorder if telemetry feature is enabled
+    // and the config has prometheus_enabled = true.
+    #[cfg(feature = "telemetry")]
+    let prom_handle = if kernel.config_ref().telemetry.prometheus_enabled {
+        info!("Initializing Prometheus metrics recorder");
+        Some(crate::telemetry::init_prometheus())
+    } else {
+        None
+    };
+
     let channels_config = kernel.config_ref().channels.clone();
+    let active_sessions = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
     let state = Arc::new(AppState {
         kernel: kernel.clone(),
         started_at: Instant::now(),
@@ -280,6 +302,12 @@ pub async fn build_router(
         webhook_store: crate::webhook_store::WebhookStore::load(
             kernel.config_ref().home_dir.join("webhooks.json"),
         ),
+        active_sessions: active_sessions.clone(),
+        media_drivers: librefang_runtime::media::MediaDriverCache::new_with_urls(
+            kernel.config_ref().provider_urls.clone(),
+        ),
+        #[cfg(feature = "telemetry")]
+        prometheus_handle: prom_handle,
     });
 
     // CORS: allow localhost origins by default, plus any configured in cors_origin.
@@ -318,6 +346,10 @@ pub async fn build_router(
     // Middleware accepts any token in this composite key.
     let api_key = valid_api_tokens(state.kernel.as_ref()).join("\n");
     let api_key_lock = Arc::new(tokio::sync::RwLock::new(api_key));
+    let auth_state = middleware::AuthState {
+        api_key_lock: api_key_lock.clone(),
+        active_sessions: active_sessions.clone(),
+    };
     let gcra_limiter = rate_limiter::create_rate_limiter();
 
     // Build the versioned API routes. All /api/* endpoints are defined once
@@ -367,7 +399,7 @@ pub async fn build_router(
             axum::routing::get(crate::openai_compat::list_models),
         )
         .layer(axum::middleware::from_fn_with_state(
-            api_key_lock,
+            auth_state,
             middleware::auth,
         ))
         .layer(axum::middleware::from_fn(middleware::accept_language))
@@ -387,8 +419,13 @@ pub async fn build_router(
         ))
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http())
-        .layer(cors)
-        .with_state(state.clone());
+        .layer(cors);
+
+    // NOTE: HTTP metrics are recorded inside `request_logging` middleware via
+    // `librefang_telemetry::metrics::record_http_request()`.  A separate metrics
+    // middleware layer is not needed (and would double-count requests).
+
+    let app = app.with_state(state.clone());
 
     (app, state)
 }
@@ -406,6 +443,20 @@ pub async fn run_daemon(
     let kernel = Arc::new(kernel);
     kernel.set_self_handle();
     kernel.start_background_agents().await;
+
+    // Initialize OpenTelemetry OTLP tracing when telemetry feature is compiled
+    // in and the config has `telemetry.enabled = true`.
+    #[cfg(feature = "telemetry")]
+    if kernel.config_ref().telemetry.enabled {
+        let cfg = &kernel.config_ref().telemetry;
+        if let Err(e) = crate::telemetry::init_otel_tracing(
+            &cfg.otlp_endpoint,
+            &cfg.service_name,
+            cfg.sample_rate,
+        ) {
+            tracing::warn!("Failed to initialize OpenTelemetry tracing: {e}");
+        }
+    }
 
     // Config file hot-reload watcher (polls every 30 seconds)
     {
@@ -486,6 +537,26 @@ pub async fn run_daemon(
     info!("WebChat UI available at http://{addr}/",);
     info!("WebSocket endpoint: ws://{addr}/api/agents/{{id}}/ws",);
 
+    // Auto-start observability stack (Prometheus + Grafana) if Docker is available
+    let observability_started = if kernel.config_ref().telemetry.enabled {
+        match start_observability_stack() {
+            Ok(true) => {
+                info!("Observability stack started (Prometheus :9090, Grafana :3000)");
+                true
+            }
+            Ok(false) => {
+                info!("Docker not available, skipping observability stack");
+                false
+            }
+            Err(e) => {
+                tracing::warn!("Failed to start observability stack: {e}");
+                false
+            }
+        }
+    } else {
+        false
+    };
+
     // Background: sync model catalog from community repo on startup, then every 24 hours
     {
         let kernel = state.kernel.clone();
@@ -554,11 +625,90 @@ pub async fn run_daemon(
         b.stop().await;
     }
 
+    // Stop observability stack
+    if observability_started {
+        if let Err(e) = stop_observability_stack() {
+            tracing::warn!("Failed to stop observability stack: {e}");
+        } else {
+            info!("Observability stack stopped");
+        }
+    }
+
     // Shutdown kernel
     kernel.shutdown();
 
     info!("LibreFang daemon stopped");
     Ok(())
+}
+
+/// Check if Docker is available and start the observability stack.
+/// Returns Ok(true) if started, Ok(false) if Docker not available.
+fn start_observability_stack() -> Result<bool, Box<dyn std::error::Error>> {
+    // Check if docker CLI exists
+    let docker_check = std::process::Command::new("docker")
+        .arg("version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+
+    match docker_check {
+        Ok(status) if status.success() => {}
+        _ => return Ok(false),
+    }
+
+    // Find the compose file relative to the executable or well-known paths
+    let compose_file = find_compose_file()?;
+
+    std::process::Command::new("docker")
+        .args(["compose", "-f"])
+        .arg(&compose_file)
+        .args(["up", "-d"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map_err(|e| format!("docker compose up failed: {e}"))?;
+
+    Ok(true)
+}
+
+/// Stop the observability stack.
+fn stop_observability_stack() -> Result<(), Box<dyn std::error::Error>> {
+    let compose_file = find_compose_file()?;
+
+    std::process::Command::new("docker")
+        .args(["compose", "-f"])
+        .arg(&compose_file)
+        .args(["down"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map_err(|e| format!("docker compose down failed: {e}"))?;
+
+    Ok(())
+}
+
+/// Locate the observability docker-compose file.
+fn find_compose_file() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    // Try relative to current exe
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            // Binary might be in target/release or target/debug
+            for ancestor in dir.ancestors().take(4) {
+                let candidate = ancestor.join("deploy/docker-compose.observability.yml");
+                if candidate.exists() {
+                    return Ok(candidate);
+                }
+            }
+        }
+    }
+
+    // Try current working directory
+    let cwd_candidate = std::path::PathBuf::from("deploy/docker-compose.observability.yml");
+    if cwd_candidate.exists() {
+        return Ok(cwd_candidate);
+    }
+
+    Err("Could not find deploy/docker-compose.observability.yml".into())
 }
 
 /// SECURITY: Restrict file permissions to owner-only (0600) on Unix.

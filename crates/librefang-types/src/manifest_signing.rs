@@ -110,11 +110,18 @@ impl SignedManifest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ed25519_dalek::ed25519::signature::rand_core::OsRng;
+
+    /// Create a deterministic signing key from a seed byte.
+    /// Tests don't need cryptographic randomness — they need reproducibility.
+    fn test_signing_key(seed: u8) -> SigningKey {
+        let mut bytes = [0u8; 32];
+        bytes[0] = seed;
+        SigningKey::from_bytes(&bytes)
+    }
 
     #[test]
     fn test_sign_and_verify() {
-        let signing_key = SigningKey::generate(&mut OsRng);
+        let signing_key = test_signing_key(1);
         let manifest = r#"
 [agent]
 name = "hello-world"
@@ -133,7 +140,7 @@ network = false
 
     #[test]
     fn test_tampered_fails() {
-        let signing_key = SigningKey::generate(&mut OsRng);
+        let signing_key = test_signing_key(2);
         let manifest = "[agent]\nname = \"secure-agent\"\n";
 
         let mut signed = SignedManifest::sign(manifest, &signing_key, "signer-1");
@@ -148,8 +155,8 @@ network = false
 
     #[test]
     fn test_wrong_key_fails() {
-        let signing_key = SigningKey::generate(&mut OsRng);
-        let wrong_key = SigningKey::generate(&mut OsRng);
+        let signing_key = test_signing_key(3);
+        let wrong_key = test_signing_key(4);
 
         let manifest = "[agent]\nname = \"test\"\n";
         let mut signed = SignedManifest::sign(manifest, &signing_key, "signer-a");

@@ -8,10 +8,20 @@ use crate::{
 use dashmap::DashMap;
 use librefang_types::agent::AgentId;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
 use tracing::{info, warn};
 use uuid::Uuid;
+
+/// Entry from persisted hand state used during daemon restart.
+#[derive(Debug, Clone)]
+pub struct HandStateEntry {
+    pub hand_id: String,
+    pub config: HashMap<String, serde_json::Value>,
+    pub old_agent_ids: BTreeMap<String, AgentId>,
+    pub coordinator_role: Option<String>,
+    pub status: HandStatus,
+}
 
 // ─── Settings availability types ────────────────────────────────────────────
 
@@ -78,13 +88,14 @@ impl HandRegistry {
                 serde_json::json!({
                     "hand_id": e.hand_id,
                     "config": e.config,
-                    "agent_id": e.agent_id,
+                    "agent_ids": e.agent_ids,
+                    "coordinator_role": e.coordinator_role,
                     "status": e.status,
                 })
             })
             .collect();
         let wrapper = serde_json::json!({
-            "version": 2,
+            "version": 3,
             "instances": entries,
         });
         let json = serde_json::to_string_pretty(&wrapper)
@@ -95,33 +106,23 @@ impl HandRegistry {
     }
 
     /// Load persisted hand state and re-activate hands.
-    /// Returns list of (hand_id, config, old_agent_id, status) that should be restored.
-    /// The `old_agent_id` is the agent UUID from before the restart, used to
-    /// reassign cron jobs to the newly spawned agent (issue #402).
-    #[allow(clippy::type_complexity)]
-    pub fn load_state(
-        path: &std::path::Path,
-    ) -> Vec<(
-        String,
-        HashMap<String, serde_json::Value>,
-        Option<AgentId>,
-        HandStatus,
-    )> {
+    /// Returns list of (hand_id, config, old_agent_ids, status) that should be restored.
+    /// The `old_agent_ids` are the agent UUIDs from before the restart, used to
+    /// reassign cron jobs to newly spawned agents (issue #402).
+    pub fn load_state(path: &std::path::Path) -> Vec<HandStateEntry> {
         let data = match std::fs::read_to_string(path) {
             Ok(d) => d,
             Err(_) => return Vec::new(),
         };
 
-        // Try v2 format first (with version field and status), then fall back
-        // to v1 format (bare array of {hand_id, config, agent_id}).
+        // Try v3/v2 format (with version field), then fall back to v1 (bare array).
         let entries: Vec<serde_json::Value> =
             if let Ok(wrapper) = serde_json::from_str::<serde_json::Value>(&data) {
                 if wrapper.get("version").is_some() {
-                    // v2 format
                     match wrapper.get("instances").cloned() {
                         Some(serde_json::Value::Array(arr)) => arr,
                         _ => {
-                            warn!("Hand state v2 file has no instances array");
+                            warn!("Hand state file has no instances array");
                             return Vec::new();
                         }
                     }
@@ -164,10 +165,36 @@ impl HandRegistry {
 
                 let config: HashMap<String, serde_json::Value> =
                     serde_json::from_value(e["config"].clone()).unwrap_or_default();
-                let old_agent_id: Option<AgentId> = e
-                    .get("agent_id")
-                    .and_then(|v| serde_json::from_value(v.clone()).ok());
-                Some((hand_id, config, old_agent_id, status))
+
+                // v3: agent_ids as BTreeMap<String, AgentId>
+                // v2: agent_id as single AgentId → convert to {"main": id}
+                // v1: agent_id as single AgentId → same conversion
+                let old_agent_ids: BTreeMap<String, AgentId> =
+                    if let Some(ids_val) = e.get("agent_ids") {
+                        serde_json::from_value(ids_val.clone()).unwrap_or_default()
+                    } else if let Some(id_val) = e.get("agent_id") {
+                        if let Ok(id) = serde_json::from_value::<AgentId>(id_val.clone()) {
+                            let mut map = BTreeMap::new();
+                            map.insert("main".to_string(), id);
+                            map
+                        } else {
+                            BTreeMap::new()
+                        }
+                    } else {
+                        BTreeMap::new()
+                    };
+                let coordinator_role = HandInstance::normalize_coordinator_role(
+                    &old_agent_ids,
+                    e.get("coordinator_role").and_then(|v| v.as_str()),
+                );
+
+                Some(HandStateEntry {
+                    hand_id,
+                    config,
+                    old_agent_ids,
+                    coordinator_role,
+                    status,
+                })
             })
             .collect()
     }
@@ -278,7 +305,7 @@ impl HandRegistry {
             )));
         }
 
-        let hand_dir = home_dir.join("hands").join(&def.id);
+        let hand_dir = home_dir.join("workspaces").join("hands").join(&def.id);
         std::fs::create_dir_all(&hand_dir)?;
         std::fs::write(hand_dir.join("HAND.toml"), toml_content)?;
         if !skill_content.is_empty() {
@@ -317,10 +344,9 @@ impl HandRegistry {
         hand_id: &str,
         config: HashMap<String, serde_json::Value>,
     ) -> HandResult<HandInstance> {
-        let def = self
-            .definitions
-            .get(hand_id)
-            .ok_or_else(|| HandError::NotFound(hand_id.to_string()))?;
+        if !self.definitions.contains_key(hand_id) {
+            return Err(HandError::NotFound(hand_id.to_string()));
+        }
 
         // Hold the lock for the duration of check + insert to prevent races.
         let _guard = self.activate_lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -332,7 +358,7 @@ impl HandRegistry {
             }
         }
 
-        let instance = HandInstance::new(hand_id, &def.agent.name, config);
+        let instance = HandInstance::new(hand_id, config);
         let id = instance.instance_id;
         self.instances.insert(id, instance.clone());
         info!(hand = %hand_id, instance = %id, "Hand activated");
@@ -371,21 +397,35 @@ impl HandRegistry {
         Ok(())
     }
 
-    /// Set the agent ID for an instance (called after kernel spawns the agent).
-    pub fn set_agent(&self, instance_id: Uuid, agent_id: AgentId) -> HandResult<()> {
+    /// Set all agent IDs for an instance (called after kernel spawns agents).
+    pub fn set_agents(
+        &self,
+        instance_id: Uuid,
+        agent_ids: BTreeMap<String, AgentId>,
+        coordinator_role: Option<String>,
+    ) -> HandResult<()> {
         let mut entry = self
             .instances
             .get_mut(&instance_id)
             .ok_or(HandError::InstanceNotFound(instance_id))?;
-        entry.agent_id = Some(agent_id);
+        entry.coordinator_role =
+            HandInstance::normalize_coordinator_role(&agent_ids, coordinator_role.as_deref());
+        entry.agent_ids = agent_ids;
         entry.updated_at = chrono::Utc::now();
         Ok(())
     }
 
-    /// Find the hand instance associated with an agent.
+    /// Backward-compatible: set a single agent ID under the "main" role.
+    pub fn set_agent(&self, instance_id: Uuid, agent_id: AgentId) -> HandResult<()> {
+        let mut map = BTreeMap::new();
+        map.insert("main".to_string(), agent_id);
+        self.set_agents(instance_id, map, Some("main".to_string()))
+    }
+
+    /// Find the hand instance associated with an agent (checks all roles).
     pub fn find_by_agent(&self, agent_id: AgentId) -> Option<HandInstance> {
         for entry in self.instances.iter() {
-            if entry.agent_id == Some(agent_id) {
+            if entry.agent_ids.values().any(|&id| id == agent_id) {
                 return Some(entry.clone());
             }
         }
@@ -422,11 +462,19 @@ impl HandRegistry {
     }
 
     /// Check availability of all settings options for a hand.
-    pub fn check_settings_availability(&self, hand_id: &str) -> HandResult<Vec<SettingStatus>> {
+    pub fn check_settings_availability(
+        &self,
+        hand_id: &str,
+        lang: Option<&str>,
+    ) -> HandResult<Vec<SettingStatus>> {
         let def = self
             .definitions
             .get(hand_id)
             .ok_or_else(|| HandError::NotFound(hand_id.to_string()))?;
+
+        let i18n_settings = lang
+            .and_then(|l| def.i18n.get(l))
+            .map(|entry| &entry.settings);
 
         Ok(def
             .settings
@@ -449,10 +497,21 @@ impl HandRegistry {
                         }
                     })
                     .collect();
+
+                let setting_i18n = i18n_settings.and_then(|s| s.get(&setting.key));
+                let label = setting_i18n
+                    .and_then(|si| si.label.as_deref())
+                    .unwrap_or(&setting.label)
+                    .to_string();
+                let description = setting_i18n
+                    .and_then(|si| si.description.as_deref())
+                    .unwrap_or(&setting.description)
+                    .to_string();
+
                 SettingStatus {
                     key: setting.key.clone(),
-                    label: setting.label.clone(),
-                    description: setting.description.clone(),
+                    label,
+                    description,
                     setting_type: setting.setting_type.clone(),
                     default: setting.default.clone(),
                     options,
@@ -794,8 +853,8 @@ system_prompt = "Test prompt"
 
         let saved = HandRegistry::load_state(&state_path);
         assert_eq!(saved.len(), 1);
-        assert_eq!(saved[0].0, "clip");
-        assert!(matches!(saved[0].3, HandStatus::Paused));
+        assert_eq!(saved[0].hand_id, "clip");
+        assert!(matches!(saved[0].status, HandStatus::Paused));
     }
 
     #[test]
@@ -814,6 +873,28 @@ system_prompt = "Test prompt"
         assert_eq!(found.unwrap().instance_id, id);
 
         reg.deactivate(id).unwrap();
+    }
+
+    #[test]
+    fn persist_and_load_explicit_coordinator_role() {
+        let reg = HandRegistry::new();
+        reg.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
+
+        let instance = reg.activate("clip", HashMap::new()).unwrap();
+        let id = instance.instance_id;
+        let mut agent_ids = BTreeMap::new();
+        agent_ids.insert("analyst".to_string(), AgentId::new());
+        agent_ids.insert("planner".to_string(), AgentId::new());
+        reg.set_agents(id, agent_ids, Some("planner".to_string()))
+            .unwrap();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let state_path = tmp.path().join("hand_state.json");
+        reg.persist_state(&state_path).unwrap();
+
+        let saved = HandRegistry::load_state(&state_path);
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].coordinator_role.as_deref(), Some("planner"));
     }
 
     #[test]
@@ -990,8 +1071,8 @@ system_prompt = "Test prompt"
         let _ = std::fs::remove_file(&path);
 
         assert_eq!(restored.len(), 1);
-        assert_eq!(restored[0].0, "lead");
-        assert!(matches!(restored[0].3, HandStatus::Paused));
+        assert_eq!(restored[0].hand_id, "lead");
+        assert!(matches!(restored[0].status, HandStatus::Paused));
     }
 
     #[test]

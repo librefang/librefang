@@ -8,13 +8,29 @@ use std::time::Instant;
 use tokio::task::JoinHandle;
 use tracing::debug;
 
+/// Snapshot of usage stats returned by [`AgentScheduler::get_usage`].
+#[derive(Debug, Clone, Default)]
+pub struct UsageSnapshot {
+    pub total_tokens: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub tool_calls: u64,
+    pub llm_calls: u64,
+}
+
 /// Tracks resource usage for an agent with a rolling hourly window.
 #[derive(Debug)]
 pub struct UsageTracker {
     /// Total tokens consumed within the current window.
     pub total_tokens: u64,
+    /// Input tokens consumed within the current window.
+    pub input_tokens: u64,
+    /// Output tokens consumed within the current window.
+    pub output_tokens: u64,
     /// Total tool calls made within the current window.
     pub tool_calls: u64,
+    /// Total LLM API calls made within the current window.
+    pub llm_calls: u64,
     /// Start of the current usage window.
     pub window_start: Instant,
 }
@@ -23,7 +39,10 @@ impl Default for UsageTracker {
     fn default() -> Self {
         Self {
             total_tokens: 0,
+            input_tokens: 0,
+            output_tokens: 0,
             tool_calls: 0,
+            llm_calls: 0,
             window_start: Instant::now(),
         }
     }
@@ -34,7 +53,10 @@ impl UsageTracker {
     fn reset_if_expired(&mut self) {
         if self.window_start.elapsed() >= std::time::Duration::from_secs(3600) {
             self.total_tokens = 0;
+            self.input_tokens = 0;
+            self.output_tokens = 0;
             self.tool_calls = 0;
+            self.llm_calls = 0;
             self.window_start = Instant::now();
         }
     }
@@ -71,6 +93,9 @@ impl AgentScheduler {
         if let Some(mut tracker) = self.usage.get_mut(&agent_id) {
             tracker.reset_if_expired();
             tracker.total_tokens += usage.total();
+            tracker.input_tokens += usage.input_tokens;
+            tracker.output_tokens += usage.output_tokens;
+            tracker.llm_calls += 1;
         }
     }
 
@@ -103,7 +128,10 @@ impl AgentScheduler {
     pub fn reset_usage(&self, agent_id: AgentId) {
         if let Some(mut tracker) = self.usage.get_mut(&agent_id) {
             tracker.total_tokens = 0;
+            tracker.input_tokens = 0;
+            tracker.output_tokens = 0;
             tracker.tool_calls = 0;
+            tracker.llm_calls = 0;
             tracker.window_start = Instant::now();
         }
     }
@@ -124,10 +152,14 @@ impl AgentScheduler {
     }
 
     /// Get usage stats for an agent.
-    pub fn get_usage(&self, agent_id: AgentId) -> Option<(u64, u64)> {
-        self.usage
-            .get(&agent_id)
-            .map(|t| (t.total_tokens, t.tool_calls))
+    pub fn get_usage(&self, agent_id: AgentId) -> Option<UsageSnapshot> {
+        self.usage.get(&agent_id).map(|t| UsageSnapshot {
+            total_tokens: t.total_tokens,
+            input_tokens: t.input_tokens,
+            output_tokens: t.output_tokens,
+            tool_calls: t.tool_calls,
+            llm_calls: t.llm_calls,
+        })
     }
 }
 
@@ -154,8 +186,11 @@ mod tests {
                 ..Default::default()
             },
         );
-        let (tokens, _) = scheduler.get_usage(id).unwrap();
-        assert_eq!(tokens, 150);
+        let snap = scheduler.get_usage(id).unwrap();
+        assert_eq!(snap.total_tokens, 150);
+        assert_eq!(snap.input_tokens, 100);
+        assert_eq!(snap.output_tokens, 50);
+        assert_eq!(snap.llm_calls, 1);
     }
 
     #[test]

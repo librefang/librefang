@@ -14,6 +14,7 @@ members = [
     "crates/librefang-desktop",
     "crates/librefang-hands",
     "crates/librefang-extensions",
+    "crates/librefang-telemetry",
     "xtask",
     "crates/librefang-testing",
 ]
@@ -47,7 +48,17 @@ crossbeam = "0.8"
 
 # Logging / Tracing
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "registry"] }
+
+# OpenTelemetry
+opentelemetry = "0.29"
+opentelemetry_sdk = { version = "0.29", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.29", features = ["grpc-tonic"] }
+tracing-opentelemetry = "0.30"
+
+# Prometheus metrics
+metrics = "0.24"
+metrics-exporter-prometheus = "0.16"
 
 # Time
 chrono = { version = "0.4", features = ["serde"] }
@@ -139,6 +150,7 @@ argon2 = { version = "0.5", features = ["rand"] }
 html-escape = "0.2"
 
 # Lightweight regex
+regex = "1"
 regex-lite = "0.1"
 
 # Socket options (SO_REUSEADDR)
@@ -180,3 +192,8 @@ lto = true
 codegen-units = 1
 strip = true
 opt-level = 3
+
+[profile.release-local]
+inherits = "release"
+lto = "thin"
+codegen-units = 4

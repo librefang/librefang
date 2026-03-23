@@ -63,6 +63,9 @@ async fn start_test_server() -> TestServer {
         webhook_store: librefang_api::webhook_store::WebhookStore::load(std::env::temp_dir().join(
             format!("librefang-test-webhooks-{}.json", uuid::Uuid::new_v4()),
         )),
+        active_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        prometheus_handle: None,
+        media_drivers: librefang_runtime::media::MediaDriverCache::new(),
     });
 
     let app = Router::new()

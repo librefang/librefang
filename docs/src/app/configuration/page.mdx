@@ -35,6 +35,7 @@ Complete reference for `config.toml`, covering every configurable field in the L
   - [\[canvas\]](#canvas)
   - [\[auto\_reply\]](#auto_reply)
   - [\[broadcast\]](#broadcast)
+  - [\[inbox\]](#inbox)
   - [\[\[bindings\]\]](#bindings)
   - [\[pairing\]](#pairing)
   - [\[extensions\]](#extensions)
@@ -2042,6 +2043,82 @@ routes = { "announcement-channel" = ["agent-a", "agent-b", "agent-c"] }
 |-------|------|---------|-------------|
 | `strategy` | string | `"parallel"` | Delivery strategy. `"parallel"` = send to all agents simultaneously; `"sequential"` = send one at a time in order. |
 | `routes` | map of string to list of strings | `{}` | Maps peer/channel identifiers to lists of agent names that receive the message. |
+
+---
+
+### `[inbox]`
+
+File-based input inbox for async external commands. Drop text files into a watched directory and they are dispatched as messages to agents. Processed files are moved to a `processed/` subdirectory to avoid redelivery.
+
+```toml
+[inbox]
+enabled = true
+directory = "~/.librefang/inbox/"
+poll_interval_secs = 5
+default_agent = "assistant"
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `false` | Enable the inbox directory watcher. |
+| `directory` | string or null | `null` | Directory to watch. Defaults to `$HOME_DIR/inbox/`. Supports `~` expansion. |
+| `poll_interval_secs` | u64 | `5` | How often (in seconds) to scan the directory for new files. Minimum 1. |
+| `default_agent` | string or null | `null` | Agent name to route files to when no `agent:` directive is found in the file. |
+
+**File format:** Plain text files (`.txt`, `.md`, `.json`, `.py`, etc.). The first line may contain an `agent:<name>` directive to target a specific agent; the rest is sent as the message body. Files without the directive use `default_agent`.
+
+**Safety limits:** Files larger than 1 MB are skipped. Binary files (non-text extensions) are skipped. Empty files are moved to `processed/` without sending.
+
+**Usage examples:**
+
+Target a specific agent:
+
+```bash
+cat > ~/.librefang/inbox/task.txt << 'EOF'
+agent:code-reviewer
+Please review this code for security issues:
+
+def login(user, password):
+    query = f"SELECT * FROM users WHERE name='{user}' AND pass='{password}'"
+    return db.execute(query)
+EOF
+```
+
+Send to the default agent:
+
+```bash
+echo "Summarize today's system logs" > ~/.librefang/inbox/summarize.txt
+```
+
+Cron job:
+
+```bash
+# crontab -e
+0 9 * * * grep ERROR /var/log/app.log > ~/.librefang/inbox/daily_errors.txt
+```
+
+CI/CD post-build:
+
+```bash
+echo "agent:devops
+Build failed, please analyze:
+$(tail -100 build.log)" > ~/.librefang/inbox/build_$(date +%s).txt
+```
+
+Batch processing:
+
+```bash
+for doc in ~/reports/*.md; do
+  cp "$doc" ~/.librefang/inbox/
+done
+```
+
+Check inbox status:
+
+```bash
+curl -s http://127.0.0.1:4545/api/inbox/status
+# {"enabled":true,"pending_count":3,"processed_count":12,...}
+```
 
 ---
 

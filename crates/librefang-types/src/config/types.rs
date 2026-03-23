@@ -62,6 +62,10 @@ pub struct ChannelOverrides {
     pub dm_policy: DmPolicy,
     /// Group message policy.
     pub group_policy: GroupPolicy,
+    /// Regex patterns that can trigger a reply in group chats when
+    /// `group_policy` is `mention_only`.
+    #[serde(default)]
+    pub group_trigger_patterns: Vec<String>,
     /// Global rate limit for this channel (messages per minute, 0 = unlimited).
     pub rate_limit_per_minute: u32,
     /// Per-user rate limit (messages per minute, 0 = unlimited).
@@ -748,6 +752,43 @@ impl Default for InboxConfig {
             directory: None,
             poll_interval_secs: 5,
             default_agent: None,
+        }
+    }
+}
+
+/// Telemetry / observability configuration.
+///
+/// ```toml
+/// [telemetry]
+/// enabled = true                              # OpenTelemetry OTLP tracing
+/// otlp_endpoint = "http://localhost:4317"
+/// service_name = "librefang"
+/// sample_rate = 1.0
+/// prometheus_enabled = true                   # Prometheus metrics at /api/metrics
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TelemetryConfig {
+    /// Enable OpenTelemetry OTLP tracing export.
+    pub enabled: bool,
+    /// OTLP gRPC endpoint (default: "http://localhost:4317").
+    pub otlp_endpoint: String,
+    /// Service name reported to the OTel collector.
+    pub service_name: String,
+    /// Trace sampling rate (0.0 to 1.0). Default: 1.0 (sample everything).
+    pub sample_rate: f64,
+    /// Enable Prometheus metrics endpoint at /api/metrics.
+    pub prometheus_enabled: bool,
+}
+
+impl Default for TelemetryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            otlp_endpoint: "http://localhost:4317".to_string(),
+            service_name: "librefang".to_string(),
+            sample_rate: 1.0,
+            prometheus_enabled: true,
         }
     }
 }
@@ -1469,6 +1510,9 @@ pub struct KernelConfig {
     /// Drop text files into a directory and they are dispatched to agents.
     #[serde(default)]
     pub inbox: InboxConfig,
+    /// Telemetry / observability configuration (OpenTelemetry + Prometheus).
+    #[serde(default)]
+    pub telemetry: TelemetryConfig,
 }
 
 /// Input sanitization mode for channel messages.
@@ -2290,6 +2334,7 @@ impl Default for KernelConfig {
             qwen_code_path: None,
             sanitize: SanitizeConfig::default(),
             inbox: InboxConfig::default(),
+            telemetry: TelemetryConfig::default(),
         }
     }
 }
@@ -2300,6 +2345,16 @@ impl KernelConfig {
         self.workspaces_dir
             .clone()
             .unwrap_or_else(|| self.home_dir.join("workspaces"))
+    }
+
+    /// Resolved directory for agent workspaces.
+    pub fn effective_agent_workspaces_dir(&self) -> PathBuf {
+        self.effective_workspaces_dir().join("agents")
+    }
+
+    /// Resolved directory for hand definitions and manifests.
+    pub fn effective_hands_dir(&self) -> PathBuf {
+        self.effective_workspaces_dir().join("hands")
     }
 
     /// Resolved global shared workspace directory for cross-session persistence.

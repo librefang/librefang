@@ -1,0 +1,13 @@
+[package]
+name = "librefang-telemetry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "OpenTelemetry + Prometheus metrics instrumentation for LibreFang"
+
+[dependencies]
+metrics = { workspace = true }
+librefang-types = { path = "../librefang-types" }
+
+[dev-dependencies]
+tokio-test = { workspace = true }

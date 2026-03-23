@@ -2225,8 +2225,8 @@ pub fn spawn_fetch_active_hands(backend: BackendRef, tx: mpsc::Sender<AppEvent>)
                     instance_id: i.instance_id.to_string(),
                     hand_id: i.hand_id.clone(),
                     status: i.status.to_string(),
-                    agent_name: i.agent_name.clone(),
-                    agent_id: i.agent_id.map(|a| a.to_string()).unwrap_or_default(),
+                    agent_name: i.agent_name().to_string(),
+                    agent_id: i.agent_id().map(|a| a.to_string()).unwrap_or_default(),
                     activated_at: i.activated_at.to_rfc3339(),
                 })
                 .collect();

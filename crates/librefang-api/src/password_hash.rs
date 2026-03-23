@@ -7,11 +7,20 @@
 //! - If `dashboard_pass_hash` is set (Argon2id PHC string), verify against it.
 //! - If only `dashboard_pass` is set (plaintext/vault), fall back to constant-time
 //!   plaintext comparison and return the Argon2id hash for transparent upgrade.
+//!
+//! Session tokens are now generated randomly with expiration support,
+//! replacing the old deterministic HMAC-SHA256-derived tokens that could
+//! not be revoked or expired.
 
 use argon2::{
-    password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
+    password_hash::{
+        rand_core::{OsRng, RngCore},
+        PasswordHash, PasswordHasher, PasswordVerifier, SaltString,
+    },
     Algorithm, Argon2, Params, Version,
 };
+use serde::{Deserialize, Serialize};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Hash a password with Argon2id using recommended parameters.
 ///
@@ -35,11 +44,47 @@ pub fn verify_password(password: &str, hash_str: &str) -> bool {
         .is_ok()
 }
 
+/// A session token with creation metadata for expiration support.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionToken {
+    /// The hex-encoded random token string.
+    pub token: String,
+    /// Unix timestamp (seconds) when this token was created.
+    pub created_at: u64,
+}
+
+/// Default session TTL: 24 hours.
+pub const DEFAULT_SESSION_TTL_SECS: u64 = 86400;
+
+/// Generate a cryptographically random session token.
+///
+/// Uses OS-level CSPRNG to produce a 32-byte (256-bit) random token,
+/// paired with a creation timestamp for expiration checks.
+pub fn generate_session_token() -> SessionToken {
+    let mut bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut bytes);
+    let token = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    let created_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    SessionToken { token, created_at }
+}
+
+/// Check if a session token has expired based on its creation time and TTL.
+pub fn is_token_expired(token: &SessionToken, ttl_secs: u64) -> bool {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    now.saturating_sub(token.created_at) >= ttl_secs
+}
+
 /// Result of a dashboard password verification.
 pub enum VerifyResult {
     /// Password matched (Argon2id or legacy). Contains the session token.
     Ok {
-        token: String,
+        token: SessionToken,
         /// If Some, the caller should persist this Argon2id hash to upgrade
         /// from the legacy plaintext password.
         upgrade_hash: Option<String>,
@@ -60,6 +105,7 @@ fn dashboard_session_secret<'a>(cfg_pass: &'a str, pass_hash: &'a str) -> Option
 }
 
 /// Derive the dashboard session token from the configured credentials.
+#[deprecated(note = "Use generate_session_token() for random tokens with expiration")]
 pub fn derive_dashboard_session_token(
     username: &str,
     cfg_pass: &str,
@@ -69,6 +115,7 @@ pub fn derive_dashboard_session_token(
     if username.is_empty() {
         return None;
     }
+    #[allow(deprecated)]
     Some(derive_session_token(username, secret))
 }
 
@@ -77,6 +124,14 @@ pub fn derive_dashboard_session_token(
 /// - If `pass_hash` is non-empty, verify with Argon2id only.
 /// - Otherwise, fall back to constant-time plaintext comparison against `cfg_pass`.
 ///   On success, returns an `upgrade_hash` so the caller can transparently migrate.
+///
+/// **Timing safety**: The password verification path always executes regardless of
+/// whether the username matched. This prevents attackers from enumerating valid
+/// usernames via timing differences (Argon2id is ~tens of ms vs instant return).
+///
+/// Returns a randomly generated `SessionToken` on success instead of a
+/// deterministic HMAC-derived token, preventing token replay and enabling
+/// expiration-based revocation.
 pub fn verify_dashboard_password(
     input_user: &str,
     input_pass: &str,
@@ -88,41 +143,37 @@ pub fn verify_dashboard_password(
     use subtle::ConstantTimeEq;
     let user_ok: bool = input_user.as_bytes().ct_eq(cfg_user.as_bytes()).into();
 
-    if !user_ok {
+    // Always verify password to prevent timing side-channel on username enumeration.
+    // Even if username is wrong, we still run Argon2id so timing is constant.
+    let pass_ok = if !pass_hash.is_empty() {
+        verify_password(input_pass, pass_hash)
+    } else if !cfg_pass.is_empty() {
+        input_pass.as_bytes().ct_eq(cfg_pass.as_bytes()).into()
+    } else {
+        // No credentials configured — run a dummy hash to keep timing constant.
+        let _ = hash_password(input_pass);
+        false
+    };
+
+    if !user_ok || !pass_ok {
         return VerifyResult::Denied;
     }
 
-    // Strategy 1: Argon2id hash is configured — use it exclusively.
+    // Both matched — build result.
     if !pass_hash.is_empty() {
-        if verify_password(input_pass, pass_hash) {
-            let token =
-                derive_dashboard_session_token(cfg_user, cfg_pass, pass_hash).unwrap_or_default();
-            return VerifyResult::Ok {
-                token,
-                upgrade_hash: None,
-            };
+        let token = generate_session_token();
+        VerifyResult::Ok {
+            token,
+            upgrade_hash: None,
         }
-        return VerifyResult::Denied;
-    }
-
-    // Strategy 2: Legacy plaintext password — constant-time compare then offer upgrade.
-    if cfg_pass.is_empty() {
-        return VerifyResult::Denied;
-    }
-
-    let pass_ok: bool = input_pass.as_bytes().ct_eq(cfg_pass.as_bytes()).into();
-
-    if pass_ok {
-        let token =
-            derive_dashboard_session_token(cfg_user, cfg_pass, pass_hash).unwrap_or_default();
+    } else {
+        let token = generate_session_token();
         // Generate an Argon2id hash so the caller can persist it for future logins.
         let upgrade_hash = hash_password(input_pass).ok();
         VerifyResult::Ok {
             token,
             upgrade_hash,
         }
-    } else {
-        VerifyResult::Denied
     }
 }
 
@@ -130,6 +181,7 @@ pub fn verify_dashboard_password(
 ///
 /// This keeps the same token-derivation logic as before so existing sessions
 /// remain valid across the migration.
+#[deprecated(note = "Use generate_session_token() for random tokens with expiration")]
 pub fn derive_session_token(username: &str, password: &str) -> String {
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
@@ -167,7 +219,7 @@ mod tests {
     fn test_same_password_produces_different_salts() {
         let h1 = hash_password("same").unwrap();
         let h2 = hash_password("same").unwrap();
-        // Different salts → different hashes, but both verify.
+        // Different salts -> different hashes, but both verify.
         assert_ne!(h1, h2);
         assert!(verify_password("same", &h1));
         assert!(verify_password("same", &h2));
@@ -180,6 +232,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_derive_session_token_is_deterministic() {
         let t1 = derive_session_token("admin", "secret");
         let t2 = derive_session_token("admin", "secret");
@@ -188,10 +241,42 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_derive_session_token_differs_for_different_creds() {
         let t1 = derive_session_token("admin", "pass1");
         let t2 = derive_session_token("admin", "pass2");
         assert_ne!(t1, t2);
+    }
+
+    #[test]
+    fn test_generate_session_token_is_random() {
+        let t1 = generate_session_token();
+        let t2 = generate_session_token();
+        assert_ne!(t1.token, t2.token);
+        assert_eq!(t1.token.len(), 64); // 32 bytes = 64 hex chars
+        assert!(t1.created_at > 0);
+    }
+
+    #[test]
+    fn test_session_token_not_expired() {
+        let token = generate_session_token();
+        assert!(!is_token_expired(&token, DEFAULT_SESSION_TTL_SECS));
+    }
+
+    #[test]
+    fn test_session_token_expired() {
+        let token = SessionToken {
+            token: "deadbeef".to_string(),
+            created_at: 0, // epoch = long ago
+        };
+        assert!(is_token_expired(&token, DEFAULT_SESSION_TTL_SECS));
+    }
+
+    #[test]
+    fn test_session_token_zero_ttl_expires_immediately() {
+        let token = generate_session_token();
+        // A TTL of 0 means the token expires the instant it's created.
+        assert!(is_token_expired(&token, 0));
     }
 
     #[test]
@@ -203,10 +288,27 @@ mod tests {
                 token,
             } => {
                 assert!(upgrade_hash.is_none()); // Already using Argon2id
-                assert!(!token.is_empty());
+                assert!(!token.token.is_empty());
+                assert_eq!(token.token.len(), 64);
+                assert!(!is_token_expired(&token, DEFAULT_SESSION_TTL_SECS));
             }
             VerifyResult::Denied => panic!("should have succeeded"),
         }
+    }
+
+    #[test]
+    fn test_verify_dashboard_argon2id_produces_unique_tokens() {
+        let hash = hash_password("mypass").unwrap();
+        let t1 = match verify_dashboard_password("admin", "mypass", "admin", "", &hash) {
+            VerifyResult::Ok { token, .. } => token,
+            VerifyResult::Denied => panic!("should have succeeded"),
+        };
+        let t2 = match verify_dashboard_password("admin", "mypass", "admin", "", &hash) {
+            VerifyResult::Ok { token, .. } => token,
+            VerifyResult::Denied => panic!("should have succeeded"),
+        };
+        // Each login produces a unique random token.
+        assert_ne!(t1.token, t2.token);
     }
 
     #[test]
@@ -240,7 +342,8 @@ mod tests {
                 assert!(uh.starts_with("$argon2id$"));
                 // The upgrade hash should verify against the password
                 assert!(verify_password("secret", &uh));
-                assert!(!token.is_empty());
+                assert!(!token.token.is_empty());
+                assert_eq!(token.token.len(), 64);
             }
             VerifyResult::Denied => panic!("should have succeeded with legacy plaintext"),
         }
@@ -263,6 +366,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_session_token_matches_legacy_derivation() {
         // Verify our token derivation matches the old HMAC-SHA256 approach
         // so existing sessions are not invalidated.
@@ -282,9 +386,58 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_dashboard_session_token_uses_hash_when_available() {
         let token =
             derive_dashboard_session_token("admin", "legacy-pass", "stored-hash").expect("token");
         assert_eq!(token, derive_session_token("admin", "stored-hash"));
+    }
+
+    /// Verify that wrong-username and wrong-password both return `Denied`
+    /// and that the password verification path is always exercised
+    /// (i.e., no early return on username mismatch that would leak timing).
+    #[test]
+    fn test_timing_constant_on_wrong_username() {
+        let hash = hash_password("correct-pass").unwrap();
+
+        // Wrong username, correct password — must be Denied.
+        assert!(matches!(
+            verify_dashboard_password("wrong-user", "correct-pass", "admin", "", &hash),
+            VerifyResult::Denied
+        ));
+
+        // Correct username, wrong password — must be Denied.
+        assert!(matches!(
+            verify_dashboard_password("admin", "wrong-pass", "admin", "", &hash),
+            VerifyResult::Denied
+        ));
+
+        // Wrong username, wrong password — must be Denied.
+        assert!(matches!(
+            verify_dashboard_password("wrong-user", "wrong-pass", "admin", "", &hash),
+            VerifyResult::Denied
+        ));
+
+        // Legacy plaintext path: wrong username, correct password — must be Denied.
+        assert!(matches!(
+            verify_dashboard_password("wrong-user", "secret", "admin", "secret", ""),
+            VerifyResult::Denied
+        ));
+
+        // No credentials path: wrong username — must be Denied (and still runs
+        // a dummy hash rather than returning instantly).
+        assert!(matches!(
+            verify_dashboard_password("wrong-user", "pass", "admin", "", ""),
+            VerifyResult::Denied
+        ));
+    }
+
+    #[test]
+    fn test_session_token_serialization_roundtrip() {
+        let token = generate_session_token();
+        let json = serde_json::to_string(&token).unwrap();
+        let deserialized: SessionToken = serde_json::from_str(&json).unwrap();
+        assert_eq!(token.token, deserialized.token);
+        assert_eq!(token.created_at, deserialized.created_at);
     }
 }

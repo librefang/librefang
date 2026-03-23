@@ -69,7 +69,7 @@ impl MockKernelBuilder {
         std::fs::create_dir_all(&data_dir).expect("failed to create data directory");
         std::fs::create_dir_all(home_dir.join("skills"))
             .expect("failed to create skills directory");
-        std::fs::create_dir_all(home_dir.join("workspaces"))
+        std::fs::create_dir_all(home_dir.join("workspaces").join("agents"))
             .expect("failed to create workspaces directory");
 
         // Configure minimal kernel

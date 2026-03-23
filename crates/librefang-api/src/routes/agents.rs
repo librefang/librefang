@@ -3805,14 +3805,15 @@ struct UploadResponse {
 }
 
 /// Metadata stored alongside uploaded files.
-struct UploadMeta {
+pub(crate) struct UploadMeta {
     #[allow(dead_code)]
-    filename: String,
-    content_type: String,
+    pub(crate) filename: String,
+    pub(crate) content_type: String,
 }
 
 /// In-memory upload metadata registry.
-static UPLOAD_REGISTRY: LazyLock<DashMap<String, UploadMeta>> = LazyLock::new(DashMap::new);
+pub(crate) static UPLOAD_REGISTRY: LazyLock<DashMap<String, UploadMeta>> =
+    LazyLock::new(DashMap::new);
 
 /// Maximum upload size: 10 MB.
 const MAX_UPLOAD_SIZE: usize = 10 * 1024 * 1024;
@@ -4414,11 +4415,12 @@ pub async fn agent_metrics(
     };
 
     // Session-level token/tool stats from the scheduler (in-memory, windowed).
-    let (sched_tokens, sched_tool_calls) = state
+    let sched_snap = state
         .kernel
         .scheduler_ref()
         .get_usage(agent_id)
-        .unwrap_or((0, 0));
+        .unwrap_or_default();
+    let (sched_tokens, sched_tool_calls) = (sched_snap.total_tokens, sched_snap.tool_calls);
 
     // Persistent usage summary from the UsageStore (SQLite).
     let usage_summary = state
@@ -4616,6 +4618,10 @@ mod monitoring_tests {
             skillhub_cache: dashmap::DashMap::new(),
             provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
             webhook_store: crate::webhook_store::WebhookStore::load(home_dir.join("webhooks.json")),
+            active_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            #[cfg(feature = "telemetry")]
+            prometheus_handle: None,
+            media_drivers: librefang_runtime::media::MediaDriverCache::new(),
         });
         (state, tmp)
     }

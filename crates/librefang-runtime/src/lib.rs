@@ -36,6 +36,7 @@ pub mod llm_errors;
 pub mod loop_guard;
 pub mod mcp;
 pub mod mcp_server;
+pub mod media;
 pub mod media_understanding;
 pub mod model_catalog;
 pub mod pii_filter;

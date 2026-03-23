@@ -401,32 +401,81 @@ cargo leptos --bin librefang-cli -- start
 
 ## 发布
 
-### 版本号
+### 版本规则
 
-遵循语义化版本 (SemVer):
+LibreFang 使用 [Calendar Versioning](https://calver.org/) — `YYYY.M.DDHH`。
 
-- **主版本** - 不兼容的 API 变更
-- **次版本** - 向后兼容的新功能
-- **补丁版本** - 向后兼容的 bug 修复
+| 类型 | 格式 | 示例 | 说明 |
+|------|------|------|------|
+| 稳定版 | `YYYY.M.DDHH` | `2026.3.2314` | 发布日期 + 小时 |
+| Beta | `YYYY.M.DDHH-betaN` | `2026.3.2314-beta1` | 测试预发布 |
+| RC | `YYYY.M.DDHH-rcN` | `2026.3.2314-rc1` | 发布候选 |
+| LTS | `YYYY.M.PATCH-lts` | `2026.3.0-lts` | 长期支持版本 |
 
 ### 发布流程
 
+所有发布通过 `cargo xtask release` 完成：
+
 ```bash
-# 1. 更新版本
-cargo version bump patch
-
-# 2. 更新 CHANGELOG
-vim CHANGELOG.md
-
-# 3. 创建 tag
-git tag v0.7.0
-
-# 4. 构建发布
-cargo build --release
-
-# 5. 发布到 crates.io
-cargo publish
+cargo xtask release
+#   1) stable  -> 2026.3.2314
+#   2) beta    -> 2026.3.2314-beta1
+#   3) rc      -> 2026.3.2314-rc1
+#   4) lts     -> 2026.3.0-lts
 ```
+
+该命令自动完成：
+- 从 git 历史生成 CHANGELOG
+- 同步版本号到 Cargo.toml、package.json、setup.py
+- 构建 React 面板
+- 创建 git tag 并推送
+- 创建版本 bump 的 PR
+
+使用 `--dry-run` 预览而不做任何修改：
+```bash
+cargo xtask release --dry-run --version "2026.3.0-lts"
+```
+
+### LTS 长期支持版本
+
+LTS 版本只接受安全修复和 bug 修复，不加新功能。
+
+**版本格式：**
+```
+v2026.3.0-lts     ← 初始 LTS
+v2026.3.1-lts     ← 补丁 1（bug 修复）
+v2026.3.2-lts     ← 补丁 2（安全修复）
+```
+
+**创建 LTS 版本：**
+```bash
+# 在 main 分支上，选择选项 4
+cargo xtask release
+```
+
+CI 自动完成：
+- 从 tag 创建 `release/2026.3` 分支
+- 设置分支保护（需要 PR 审查）
+- Docker 镜像打 `:lts` 标签
+- GitHub Release 标记为 LTS
+
+**发布 LTS 补丁：**
+```bash
+# 切换到 LTS 分支
+git checkout release/2026.3
+
+# 从 main 挑选修复
+git cherry-pick <commit-sha>
+
+# 发布补丁（自动递增补丁号）
+cargo xtask release --lts-patch
+```
+
+**规则：**
+- 只 cherry-pick 修复，不引入新功能
+- 每个补丁必须通过 `release/` 分支上的 PR 审查
+- LTS 分支维护到下一个 LTS 版本发布为止
+- Docker `:lts` 标签始终指向最新的 LTS 版本
 
 ---
 

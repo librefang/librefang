@@ -486,6 +486,16 @@ enum Commands {
         #[arg(long)]
         keep_config: bool,
     },
+    /// Generate an Argon2id password hash for dashboard authentication.
+    #[command(
+        name = "hash-password",
+        long_about = "Generate an Argon2id password hash for use with dashboard_pass_hash in config.toml.\n\nIf --password is not provided, prompts for interactive input.\n\nExamples:\n  librefang hash-password                       # Interactive prompt\n  librefang hash-password --password 'secret'   # Inline (less secure, visible in shell history)"
+    )]
+    HashPassword {
+        /// Password to hash (omit for interactive prompt).
+        #[arg(long)]
+        password: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1339,12 +1349,34 @@ enum SystemCommands {
 }
 
 fn init_tracing_stderr(log_level: &str) {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_level)),
-        )
-        .init();
+    // When the telemetry feature is enabled, we use the layered registry
+    // so we can optionally attach an OpenTelemetry span exporter.
+    // When disabled, we use the simpler fmt-only subscriber.
+    #[cfg(feature = "telemetry")]
+    {
+        use tracing_subscriber::layer::SubscriberExt;
+        use tracing_subscriber::util::SubscriberInitExt;
+
+        let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_level));
+
+        let fmt_layer = tracing_subscriber::fmt::layer();
+
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(fmt_layer)
+            .init();
+    }
+
+    #[cfg(not(feature = "telemetry"))]
+    {
+        tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_level)),
+            )
+            .init();
+    }
 }
 
 /// Get the LibreFang home directory, respecting LIBREFANG_HOME env var.
@@ -1695,6 +1727,7 @@ fn main() {
             confirm,
             keep_config,
         }) => cmd_uninstall(confirm, keep_config),
+        Some(Commands::HashPassword { password }) => cmd_hash_password(password),
     }
 }
 
@@ -7040,6 +7073,41 @@ fn cmd_vault_remove(key: &str) {
                 "vault-remove-failed",
                 &[("error", &e.to_string())],
             ));
+            std::process::exit(1);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// hash-password command
+// ---------------------------------------------------------------------------
+
+fn cmd_hash_password(password: Option<String>) {
+    let pass = match password {
+        Some(p) => p,
+        None => {
+            let p1 = prompt_input("Enter password: ");
+            if p1.is_empty() {
+                ui::error("Password cannot be empty.");
+                std::process::exit(1);
+            }
+            let p2 = prompt_input("Confirm password: ");
+            if p1 != p2 {
+                ui::error("Passwords do not match.");
+                std::process::exit(1);
+            }
+            p1
+        }
+    };
+
+    match librefang_api::password_hash::hash_password(&pass) {
+        Ok(hash) => {
+            println!("\n{hash}\n");
+            println!("Add to config.toml:");
+            println!("  dashboard_pass_hash = \"{hash}\"");
+        }
+        Err(e) => {
+            ui::error(&format!("Failed to hash password: {e}"));
             std::process::exit(1);
         }
     }

@@ -287,6 +287,8 @@ pub struct LibreFangKernel {
     pub(crate) media_engine: librefang_runtime::media_understanding::MediaEngine,
     /// Text-to-speech engine.
     pub(crate) tts_engine: librefang_runtime::tts::TtsEngine,
+    /// Media generation driver cache (video, music, etc.).
+    pub(crate) media_drivers: librefang_runtime::media::MediaDriverCache,
     /// Device pairing manager.
     pub(crate) pairing: crate::pairing::PairingManager,
     /// Embedding driver for vector similarity search (None = text fallback).
@@ -475,6 +477,62 @@ impl DeliveryTracker {
             .collect();
         s
     }
+}
+
+/// Migrate old directory layout to unified workspaces layout.
+/// Old: ~/.librefang/hands/, ~/.librefang/workspaces/<agent>/
+/// New: ~/.librefang/workspaces/hands/, ~/.librefang/workspaces/agents/<agent>/
+fn migrate_workspaces_layout(home_dir: &Path) -> KernelResult<()> {
+    let workspaces_dir = home_dir.join("workspaces");
+    let agents_dir = workspaces_dir.join("agents");
+    let new_hands_dir = workspaces_dir.join("hands");
+
+    // Migrate old hands/ to workspaces/hands/
+    let old_hands_dir = home_dir.join("hands");
+    if old_hands_dir.is_dir() && !new_hands_dir.exists() {
+        info!("Migrating hands/ → workspaces/hands/");
+        std::fs::create_dir_all(&workspaces_dir).ok();
+        if let Err(e) = std::fs::rename(&old_hands_dir, &new_hands_dir) {
+            warn!("Failed to migrate hands dir: {e}");
+        }
+    }
+
+    // Migrate old workspaces/<agent>/ → workspaces/agents/<agent>/
+    // Detect: if workspaces/ has entries that are NOT "agents" or "hands", they are old agent dirs
+    if workspaces_dir.is_dir() && !agents_dir.exists() {
+        let entries: Vec<_> = std::fs::read_dir(&workspaces_dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| {
+                let name = e.file_name();
+                let n = name.to_string_lossy();
+                n != "agents" && n != "hands" && e.path().is_dir()
+            })
+            .collect();
+        if !entries.is_empty() {
+            info!(
+                "Migrating {} agent workspace(s) → workspaces/agents/",
+                entries.len()
+            );
+            std::fs::create_dir_all(&agents_dir).map_err(|e| {
+                KernelError::LibreFang(LibreFangError::Internal(format!(
+                    "Failed to create agents dir: {e}"
+                )))
+            })?;
+            for entry in entries {
+                let dest = agents_dir.join(entry.file_name());
+                if let Err(e) = std::fs::rename(entry.path(), &dest) {
+                    warn!(
+                        "Failed to migrate agent workspace {}: {e}",
+                        entry.file_name().to_string_lossy()
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Create workspace directory structure for an agent.
@@ -923,6 +981,12 @@ impl LibreFangKernel {
         &self.tts_engine
     }
 
+    /// Media generation driver cache (video, music, etc.).
+    #[inline]
+    pub fn media_drivers(&self) -> &librefang_runtime::media::MediaDriverCache {
+        &self.media_drivers
+    }
+
     /// MCP server connections (Mutex — lazily initialized).
     #[inline]
     pub fn mcp_connections_ref(
@@ -1142,6 +1206,9 @@ impl LibreFangKernel {
         // Ensure data directory exists
         std::fs::create_dir_all(&config.data_dir)
             .map_err(|e| KernelError::BootFailed(format!("Failed to create data dir: {e}")))?;
+
+        // Migrate old directory layout (hands/, workspaces/<agent>/) to unified layout
+        migrate_workspaces_layout(&config.home_dir)?;
 
         // Ensure global shared workspace directory exists
         let workspace_dir = config.effective_workspace_dir();
@@ -1625,6 +1692,10 @@ impl LibreFangKernel {
         let media_engine =
             librefang_runtime::media_understanding::MediaEngine::new(config.media.clone());
         let tts_engine = librefang_runtime::tts::TtsEngine::new(config.tts.clone());
+        let media_drivers =
+            librefang_runtime::media::MediaDriverCache::new_with_urls(config.provider_urls.clone());
+        // Load media provider order from registry
+        media_drivers.load_providers_from_registry(model_catalog.list_providers());
         let mut pairing = crate::pairing::PairingManager::new(config.pairing.clone());
 
         // Load paired devices from database and set up persistence callback
@@ -1758,6 +1829,7 @@ impl LibreFangKernel {
             browser_ctx,
             media_engine,
             tts_engine,
+            media_drivers,
             pairing,
             embedding_driver,
             hand_registry,
@@ -2200,7 +2272,7 @@ system_prompt = "You are a helpful assistant."
         apply_budget_defaults(&self.config.budget, &mut manifest.resources);
 
         // Create workspace directory for the agent (name-based, so SOUL.md survives recreation)
-        let workspaces_root = self.config.effective_workspaces_dir();
+        let workspaces_root = self.config.effective_agent_workspaces_dir();
         let workspace_dir = resolve_workspace_dir(
             &workspaces_root,
             manifest.workspace.clone(),
@@ -2552,7 +2624,8 @@ system_prompt = "You are a helpful assistant."
             None, // no embeddings
             manifest.workspace.as_deref(),
             None, // no phase callback
-            None, // no media
+            None, // no media engine
+            None, // no media drivers
             None, // no TTS
             None, // no docker
             None, // no hooks
@@ -2902,7 +2975,7 @@ system_prompt = "You are a helpful assistant."
         // Lazy backfill: create workspace for existing agents spawned before workspaces
         if manifest.workspace.is_none() {
             let workspace_dir = resolve_workspace_dir(
-                &self.config.effective_workspaces_dir(),
+                &self.config.effective_agent_workspaces_dir(),
                 None,
                 &manifest.name,
                 agent_id,
@@ -3042,6 +3115,23 @@ system_prompt = "You are a helpful assistant."
             }
         }
 
+        // Inject sender context into manifest metadata so the tool runner can
+        // use it for per-sender trust and channel-specific authorization rules.
+        if let Some(ctx) = sender_context {
+            if !ctx.user_id.is_empty() {
+                manifest.metadata.insert(
+                    "sender_user_id".to_string(),
+                    serde_json::Value::String(ctx.user_id.clone()),
+                );
+            }
+            if !ctx.channel.is_empty() {
+                manifest.metadata.insert(
+                    "sender_channel".to_string(),
+                    serde_json::Value::String(ctx.channel.clone()),
+                );
+            }
+        }
+
         let memory = Arc::clone(&self.memory);
         // Build link context from user message (auto-extract URLs for the agent)
         let message_owned = if let Some(link_ctx) =
@@ -3129,6 +3219,7 @@ system_prompt = "You are a helpful assistant."
                 manifest.workspace.as_deref(),
                 Some(&phase_cb),
                 Some(&kernel_clone.media_engine),
+                Some(&kernel_clone.media_drivers),
                 if kernel_clone.config.tts.enabled {
                     Some(&kernel_clone.tts_engine)
                 } else {
@@ -3642,7 +3733,7 @@ system_prompt = "You are a helpful assistant."
         }
 
         let instance = self.activate_hand(hand_id, std::collections::HashMap::new())?;
-        instance.agent_id.ok_or_else(|| {
+        instance.agent_id().ok_or_else(|| {
             KernelError::LibreFang(LibreFangError::Internal(format!(
                 "Hand '{hand_id}' activated without an agent id"
             )))
@@ -3657,7 +3748,7 @@ system_prompt = "You are a helpful assistant."
                 instance.hand_id == hand_id
                     && instance.status == librefang_hands::HandStatus::Active
             })
-            .and_then(|instance| instance.agent_id)
+            .and_then(|instance| instance.agent_id())
     }
 
     fn hand_requirements_met(&self, hand_id: &str) -> bool {
@@ -3772,7 +3863,7 @@ system_prompt = "You are a helpful assistant."
         // Lazy backfill: create workspace for existing agents spawned before workspaces
         if manifest.workspace.is_none() {
             let workspace_dir = resolve_workspace_dir(
-                &self.config.effective_workspaces_dir(),
+                &self.config.effective_agent_workspaces_dir(),
                 None,
                 &manifest.name,
                 agent_id,
@@ -3994,6 +4085,23 @@ system_prompt = "You are a helpful assistant."
             message.to_string()
         };
 
+        // Inject sender context into manifest metadata so the tool runner can
+        // use it for per-sender trust and channel-specific authorization rules.
+        if let Some(ctx) = sender_context {
+            if !ctx.user_id.is_empty() {
+                manifest.metadata.insert(
+                    "sender_user_id".to_string(),
+                    serde_json::Value::String(ctx.user_id.clone()),
+                );
+            }
+            if !ctx.channel.is_empty() {
+                manifest.metadata.insert(
+                    "sender_channel".to_string(),
+                    serde_json::Value::String(ctx.channel.clone()),
+                );
+            }
+        }
+
         let proactive_memory = self.proactive_memory.get().cloned();
 
         // Set up mid-turn injection channel (#956)
@@ -4015,6 +4123,7 @@ system_prompt = "You are a helpful assistant."
             manifest.workspace.as_deref(),
             None, // on_phase callback
             Some(&self.media_engine),
+            Some(&self.media_drivers),
             if self.config.tts.enabled {
                 Some(&self.tts_engine)
             } else {
@@ -4940,8 +5049,7 @@ system_prompt = "You are a helpful assistant."
             .join("agent.toml");
         let hands_path = self
             .config
-            .home_dir
-            .join("hands")
+            .effective_hands_dir()
             .join(name)
             .join("agent.toml");
         let toml_path = if agents_path.exists() {
@@ -5222,69 +5330,8 @@ system_prompt = "You are a helpful assistant."
                 other => KernelError::LibreFang(LibreFangError::Internal(other.to_string())),
             })?;
 
-        // Start from the embedded AgentManifest (auto-converted from legacy format
-        // at TOML parse time) and apply Hand-specific overrides.
-        let mut manifest = def.agent.clone();
-
-        // Inherit kernel defaults when hand declares "default" provider/model.
-        if manifest.model.provider == "default" {
-            manifest.model.provider = self.config.default_model.provider.clone();
-            if manifest.model.api_key_env.is_none() {
-                manifest.model.api_key_env = Some(self.config.default_model.api_key_env.clone());
-            }
-            if manifest.model.base_url.is_none() {
-                manifest.model.base_url = self.config.default_model.base_url.clone();
-            }
-        }
-        if manifest.model.model == "default" {
-            manifest.model.model = self.config.default_model.model.clone();
-        }
-
-        // Hand-specific capability, tagging, and scheduling overrides.
-        manifest.capabilities = ManifestCapabilities {
-            tools: def.tools.clone(),
-            ..Default::default()
-        };
-        manifest.tags = vec![
-            format!("hand:{hand_id}"),
-            format!("hand_instance:{}", instance.instance_id),
-        ];
-        manifest.skills = def.skills.clone();
-        manifest.mcp_servers = def.mcp_servers.clone();
-
-        // Autonomous hands must run in Continuous mode so the background loop
-        // picks them up. Reactive (default) only fires on incoming messages.
-        if manifest.autonomous.is_some() {
-            manifest.schedule = ScheduleMode::Continuous {
-                check_interval_secs: 60,
-            };
-        }
-
-        // Hands are curated packages — if they declare shell_exec, grant full exec access.
-        if def.tools.iter().any(|t| t == "shell_exec") {
-            manifest.exec_policy = Some(librefang_types::config::ExecPolicy {
-                mode: librefang_types::config::ExecSecurityMode::Full,
-                timeout_secs: 300,
-                no_output_timeout_secs: 120,
-                ..Default::default()
-            });
-        }
-
-        // Custom profile avoids ToolProfile-based expansion overriding the
-        // explicit tool list.
-        if !def.tools.is_empty() {
-            manifest.profile = Some(ToolProfile::Custom);
-        }
-
-        // Resolve hand settings → prompt block + env vars
+        // Pre-compute shared overrides from hand definition
         let resolved = librefang_hands::resolve_settings(&def.settings, &instance.config);
-        if !resolved.prompt_block.is_empty() {
-            manifest.model.system_prompt = format!(
-                "{}\n\n---\n\n{}",
-                manifest.model.system_prompt, resolved.prompt_block
-            );
-        }
-        // Collect env vars from settings + from requires (api_key/env_var requirements)
         let mut allowed_env = resolved.env_vars;
         for req in &def.requires {
             match req.requirement_type {
@@ -5297,101 +5344,222 @@ system_prompt = "You are a helpful assistant."
                 _ => {}
             }
         }
-        if !allowed_env.is_empty() {
-            manifest.metadata.insert(
-                "hand_allowed_env".to_string(),
-                serde_json::to_value(&allowed_env).unwrap_or_default(),
-            );
-        }
 
-        // Inject skill content into system prompt
-        if let Some(ref skill_content) = def.skill_content {
-            manifest.model.system_prompt = format!(
-                "{}\n\n---\n\n## Reference Knowledge\n\n{}",
-                manifest.model.system_prompt, skill_content
-            );
-        }
+        let is_multi_agent = def.is_multi_agent();
+        let role_names: Vec<String> = def.agents.keys().cloned().collect();
+        let coordinator_role = def.coordinator().map(|(role, _)| role.to_string());
 
-        // If an agent with this hand's name already exists, remove it first.
-        // Save triggers before kill so they can be restored under the new ID
-        // (issue #519 — triggers were lost on agent restart).
-        let existing = self
-            .registry
-            .list()
-            .into_iter()
-            .find(|e| e.name == def.agent.name);
-        let old_agent_id = existing.as_ref().map(|e| e.id);
-        let saved_triggers = old_agent_id
-            .map(|id| self.triggers.take_agent_triggers(id))
-            .unwrap_or_default();
-        if let Some(old) = existing {
-            info!(agent = %old.name, id = %old.id, "Removing existing hand agent for reactivation");
-            if let Err(e) = self.kill_agent(old.id) {
-                warn!(agent = %old.name, id = %old.id, error = %e, "Failed to kill old hand agent, proceeding with reactivation");
-            }
-        }
-
-        // Spawn the agent
-        let safe_hand_name = safe_path_component(&manifest.name, "hand");
-        let hand_manifest_dir = self.config.home_dir.join("hands").join(safe_hand_name);
-        let hand_manifest_path = hand_manifest_dir.join("agent.toml");
-        if !hand_manifest_path.exists() {
-            if let Err(e) = std::fs::create_dir_all(&hand_manifest_dir) {
-                warn!(path = %hand_manifest_dir.display(), "Failed to create hand manifest directory: {e}");
-            } else if let Ok(toml_str) = toml::to_string_pretty(&manifest) {
-                if let Err(e) = std::fs::write(&hand_manifest_path, toml_str) {
-                    warn!(path = %hand_manifest_path.display(), "Failed to write hand manifest snapshot: {e}");
+        // Kill existing agents with matching hand tag (reactivation cleanup)
+        let hand_tag = format!("hand:{hand_id}");
+        let mut saved_triggers = std::collections::BTreeMap::new();
+        for entry in self.registry.list() {
+            if entry.tags.contains(&hand_tag) {
+                let old_id = entry.id;
+                // Extract role from tag (hand_role:xxx) to migrate cron to correct new agent
+                let old_role = entry
+                    .tags
+                    .iter()
+                    .find_map(|t| t.strip_prefix("hand_role:"))
+                    .unwrap_or("main")
+                    .to_string();
+                let taken_triggers = self.triggers.take_agent_triggers(entry.id);
+                if !taken_triggers.is_empty() {
+                    saved_triggers
+                        .entry(old_role.clone())
+                        .or_insert_with(Vec::new)
+                        .extend(taken_triggers);
+                }
+                if let Err(e) = self.kill_agent(old_id) {
+                    warn!(agent = %old_id, error = %e, "Failed to kill old hand agent");
+                }
+                // Migrate cron jobs to the same role in the new hand
+                let new_id = AgentId::from_hand_agent(hand_id, &old_role);
+                let migrated = self.cron_scheduler.reassign_agent_jobs(old_id, new_id);
+                if migrated > 0 {
+                    let _ = self.cron_scheduler.persist();
                 }
             }
         }
 
-        // Use a deterministic UUID derived from the hand_id so the same hand
-        // always gets the same agent ID across daemon restarts.  This keeps
-        // triggers and cron jobs that reference the UUID stable (#313).
-        let deterministic_id = AgentId::from_hand_id(hand_id);
-        let agent_id = self.spawn_agent_inner(
-            manifest,
-            None,
-            Some(hand_manifest_path.clone()),
-            Some(deterministic_id),
-        )?;
+        // Spawn an agent for each role in the hand definition
+        let mut agent_ids_map = std::collections::BTreeMap::new();
+        let mut last_manifest_path = None;
 
-        // Restore triggers from the old agent under the new agent ID (#519).
-        if !saved_triggers.is_empty() {
-            let restored = self.triggers.restore_triggers(agent_id, saved_triggers);
-            if restored > 0 {
-                info!(
-                    old_agent = %old_agent_id.unwrap(),
-                    new_agent = %agent_id,
-                    restored,
-                    "Reassigned triggers after hand reactivation"
+        for (role, hand_agent) in &def.agents {
+            let mut manifest = hand_agent.manifest.clone();
+
+            // Inherit kernel defaults when hand declares "default" provider/model
+            if manifest.model.provider == "default" {
+                manifest.model.provider = self.config.default_model.provider.clone();
+                if manifest.model.api_key_env.is_none() {
+                    manifest.model.api_key_env =
+                        Some(self.config.default_model.api_key_env.clone());
+                }
+                if manifest.model.base_url.is_none() {
+                    manifest.model.base_url = self.config.default_model.base_url.clone();
+                }
+            }
+            if manifest.model.model == "default" {
+                manifest.model.model = self.config.default_model.model.clone();
+            }
+
+            // Hand-level tool inheritance + agent_send for multi-agent hands
+            let mut tools = def.tools.clone();
+            if is_multi_agent && !tools.contains(&"agent_send".to_string()) {
+                tools.push("agent_send".to_string());
+            }
+            manifest.capabilities = ManifestCapabilities {
+                tools,
+                ..Default::default()
+            };
+
+            // Tags: hand, instance, role
+            manifest.tags = vec![
+                format!("hand:{hand_id}"),
+                format!("hand_instance:{}", instance.instance_id),
+                format!("hand_role:{role}"),
+            ];
+            manifest.skills = def.skills.clone();
+            manifest.mcp_servers = def.mcp_servers.clone();
+
+            // Autonomous scheduling
+            if manifest.autonomous.is_some() {
+                manifest.schedule = ScheduleMode::Continuous {
+                    check_interval_secs: 60,
+                };
+            }
+
+            // Shell exec policy
+            if def.tools.iter().any(|t| t == "shell_exec") {
+                manifest.exec_policy = Some(librefang_types::config::ExecPolicy {
+                    mode: librefang_types::config::ExecSecurityMode::Full,
+                    timeout_secs: 300,
+                    no_output_timeout_secs: 120,
+                    ..Default::default()
+                });
+            }
+
+            if !def.tools.is_empty() {
+                manifest.profile = Some(ToolProfile::Custom);
+            }
+
+            // Inject settings into system prompt
+            if !resolved.prompt_block.is_empty() {
+                manifest.model.system_prompt = format!(
+                    "{}\n\n---\n\n{}",
+                    manifest.model.system_prompt, resolved.prompt_block
                 );
             }
+
+            // Inject allowed env vars
+            if !allowed_env.is_empty() {
+                manifest.metadata.insert(
+                    "hand_allowed_env".to_string(),
+                    serde_json::to_value(&allowed_env).unwrap_or_default(),
+                );
+            }
+
+            // Inject skill content
+            if let Some(ref skill_content) = def.skill_content {
+                manifest.model.system_prompt = format!(
+                    "{}\n\n---\n\n## Reference Knowledge\n\n{}",
+                    manifest.model.system_prompt, skill_content
+                );
+            }
+
+            // For multi-agent hands: inject peer info into system prompt
+            if is_multi_agent {
+                let mut peer_lines = Vec::new();
+                for peer_role in &role_names {
+                    if peer_role == role {
+                        continue;
+                    }
+                    if let Some(peer_agent) = def.agents.get(peer_role) {
+                        let hint = peer_agent
+                            .invoke_hint
+                            .as_deref()
+                            .unwrap_or(&peer_agent.manifest.description);
+                        peer_lines.push(format!(
+                            "- **{peer_role}**: {hint} (use agent_send to message)"
+                        ));
+                    }
+                }
+                if !peer_lines.is_empty() {
+                    let team_block = format!("\n\n## Your Team\n\n{}", peer_lines.join("\n"));
+                    manifest.model.system_prompt =
+                        format!("{}{team_block}", manifest.model.system_prompt);
+                }
+            }
+
+            // Write manifest snapshot
+            let safe_hand_name = safe_path_component(&manifest.name, "hand");
+            let hand_manifest_dir = self.config.effective_hands_dir().join(safe_hand_name);
+            let hand_manifest_path = hand_manifest_dir.join("agent.toml");
+            if !hand_manifest_path.exists() {
+                if let Err(e) = std::fs::create_dir_all(&hand_manifest_dir) {
+                    warn!(path = %hand_manifest_dir.display(), "Failed to create dir: {e}");
+                } else if let Ok(toml_str) = toml::to_string_pretty(&manifest) {
+                    let _ = std::fs::write(&hand_manifest_path, &toml_str);
+                }
+            }
+            last_manifest_path = Some(hand_manifest_path.clone());
+
+            // Deterministic agent ID: hand_id + role
+            let deterministic_id = AgentId::from_hand_agent(hand_id, role);
+            let agent_id = self.spawn_agent_inner(
+                manifest,
+                None,
+                Some(hand_manifest_path),
+                Some(deterministic_id),
+            )?;
+
+            agent_ids_map.insert(role.clone(), agent_id);
         }
 
-        // Migrate cron jobs from old agent to new agent so they survive restarts.
-        // Without this, persisted cron jobs would reference the stale old UUID
-        // and fail silently (issue #461).
-        if let Some(old_id) = old_agent_id {
-            let migrated = self.cron_scheduler.reassign_agent_jobs(old_id, agent_id);
-            if migrated > 0 {
-                if let Err(e) = self.cron_scheduler.persist() {
-                    warn!("Failed to persist cron jobs after agent migration: {e}");
+        // Restore saved triggers to the same role after reactivation.
+        if !saved_triggers.is_empty() {
+            for (role, triggers) in saved_triggers {
+                if let Some(&new_id) = agent_ids_map.get(&role) {
+                    let restored = self.triggers.restore_triggers(new_id, triggers);
+                    if restored > 0 {
+                        info!(
+                            hand = %hand_id,
+                            role = %role,
+                            agent = %new_id,
+                            restored,
+                            "Restored triggers after hand reactivation"
+                        );
+                    }
+                } else {
+                    warn!(
+                        hand = %hand_id,
+                        role = %role,
+                        "Dropping saved triggers for removed hand role during reactivation"
+                    );
                 }
             }
         }
 
-        // Link agent to instance
+        // Link all agents to instance
         self.hand_registry
-            .set_agent(instance.instance_id, agent_id)
+            .set_agents(
+                instance.instance_id,
+                agent_ids_map.clone(),
+                coordinator_role.clone(),
+            )
             .map_err(|e| KernelError::LibreFang(LibreFangError::Internal(e.to_string())))?;
+
+        let display_manifest_path = last_manifest_path
+            .as_deref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
 
         info!(
             hand = %hand_id,
             instance = %instance.instance_id,
-            agent = %agent_id,
-            source = %hand_manifest_path.display(),
-            "Hand activated with agent"
+            agents = %agent_ids_map.len(),
+            source = %display_manifest_path,
+            "Hand activated with agent(s)"
         );
 
         // Persist hand state so it survives restarts
@@ -5411,12 +5579,15 @@ system_prompt = "You are a helpful assistant."
             .deactivate(instance_id)
             .map_err(|e| KernelError::LibreFang(LibreFangError::Internal(e.to_string())))?;
 
-        if let Some(agent_id) = instance.agent_id {
-            if let Err(e) = self.kill_agent(agent_id) {
-                warn!(agent = %agent_id, error = %e, "Failed to kill hand agent (may already be dead)");
+        // Kill all agents spawned by this hand (multi-agent support)
+        if !instance.agent_ids.is_empty() {
+            for &agent_id in instance.agent_ids.values() {
+                if let Err(e) = self.kill_agent(agent_id) {
+                    warn!(agent = %agent_id, error = %e, "Failed to kill hand agent (may already be dead)");
+                }
             }
         } else {
-            // Fallback: if agent_id was never set (incomplete activation), search by hand tag
+            // Fallback: if agent_ids was never set (incomplete activation), search by hand tag
             let hand_tag = format!("hand:{}", instance.hand_id);
             for entry in self.registry.list() {
                 if entry.tags.contains(&hand_tag) {
@@ -5450,9 +5621,9 @@ system_prompt = "You are a helpful assistant."
 
     /// Pause a hand (marks it paused and suspends background loop ticks).
     pub fn pause_hand(&self, instance_id: uuid::Uuid) -> KernelResult<()> {
-        // Pause the background loop for this hand's agent
+        // Pause the background loop for all of this hand's agents
         if let Some(instance) = self.hand_registry.get_instance(instance_id) {
-            if let Some(agent_id) = instance.agent_id {
+            for &agent_id in instance.agent_ids.values() {
                 self.background.pause_agent(agent_id);
             }
         }
@@ -5468,9 +5639,9 @@ system_prompt = "You are a helpful assistant."
         self.hand_registry
             .resume(instance_id)
             .map_err(|e| KernelError::LibreFang(LibreFangError::Internal(e.to_string())))?;
-        // Resume the background loop for this hand's agent
+        // Resume the background loop for all of this hand's agents
         if let Some(instance) = self.hand_registry.get_instance(instance_id) {
-            if let Some(agent_id) = instance.agent_id {
+            for &agent_id in instance.agent_ids.values() {
                 self.background.resume_agent(agent_id);
             }
         }
@@ -5570,7 +5741,7 @@ system_prompt = "You are a helpful assistant."
                 }
                 HotAction::ReloadProviderUrls => {
                     info!("Hot-reload: applying provider URL overrides");
-                    // Invalidate cached drivers — URLs/keys may have changed.
+                    // Invalidate cached LLM drivers — URLs/keys may have changed.
                     self.driver_cache.clear();
                     let mut catalog = self
                         .model_catalog
@@ -5600,6 +5771,9 @@ system_prompt = "You are a helpful assistant."
                     if !new_config.provider_urls.is_empty() {
                         catalog.apply_url_overrides(&new_config.provider_urls);
                     }
+                    // Also update media driver cache with new provider URLs
+                    self.media_drivers
+                        .update_provider_urls(new_config.provider_urls.clone());
                 }
                 HotAction::UpdateDefaultModel => {
                     info!(
@@ -5864,13 +6038,19 @@ system_prompt = "You are a helpful assistant."
         let saved_hands = librefang_hands::registry::HandRegistry::load_state(&state_path);
         if !saved_hands.is_empty() {
             info!("Restoring {} persisted hand(s)", saved_hands.len());
-            for (hand_id, config, old_agent_id, status) in saved_hands {
+            for saved_hand in saved_hands {
+                let hand_id = saved_hand.hand_id;
+                let config = saved_hand.config;
+                let old_agent_id = saved_hand.old_agent_ids;
+                let status = saved_hand.status;
+                // The persisted coordinator role is informational here.
+                // `activate_hand` always re-derives the coordinator from the
+                // latest hand definition before spawning agents.
                 // Check if hand's agent.toml has enabled=false — skip reactivation
                 let hand_agent_name = format!("{}-hand", hand_id);
                 let hand_toml = self
                     .config
-                    .home_dir
-                    .join("hands")
+                    .effective_hands_dir()
                     .join(&hand_agent_name)
                     .join("agent.toml");
                 if hand_toml.exists() {
@@ -5894,42 +6074,43 @@ system_prompt = "You are a helpful assistant."
                             info!(hand = %hand_id, instance = %inst.instance_id, status = %status, "Hand restored");
                         }
                         // Reassign cron jobs and triggers from the pre-restart
-                        // agent ID to the newly spawned agent so scheduled tasks
+                        // agent IDs to the newly spawned agents so scheduled tasks
                         // and event triggers survive daemon restarts (issues
                         // #402, #519). activate_hand only handles reassignment
                         // when an existing agent is found in the live registry,
                         // which is empty on a fresh boot.
-                        if let (Some(old_id), Some(new_id)) = (old_agent_id, inst.agent_id) {
-                            if old_id != new_id {
-                                let migrated =
-                                    self.cron_scheduler.reassign_agent_jobs(old_id, new_id);
-                                if migrated > 0 {
-                                    info!(
-                                        hand = %hand_id,
-                                        old_agent = %old_id,
-                                        new_agent = %new_id,
-                                        migrated,
-                                        "Reassigned cron jobs after restart"
-                                    );
-                                    if let Err(e) = self.cron_scheduler.persist() {
-                                        warn!(
-                                            "Failed to persist cron jobs after hand restore: {e}"
+                        for (role, old_id) in &old_agent_id {
+                            if let Some(&new_id) = inst.agent_ids.get(role) {
+                                if old_id.0 != new_id.0 {
+                                    let migrated =
+                                        self.cron_scheduler.reassign_agent_jobs(*old_id, new_id);
+                                    if migrated > 0 {
+                                        info!(
+                                            hand = %hand_id,
+                                            role = %role,
+                                            old_agent = %old_id,
+                                            new_agent = %new_id,
+                                            migrated,
+                                            "Reassigned cron jobs after restart"
+                                        );
+                                        if let Err(e) = self.cron_scheduler.persist() {
+                                            warn!(
+                                                "Failed to persist cron jobs after hand restore: {e}"
+                                            );
+                                        }
+                                    }
+                                    let t_migrated =
+                                        self.triggers.reassign_agent_triggers(*old_id, new_id);
+                                    if t_migrated > 0 {
+                                        info!(
+                                            hand = %hand_id,
+                                            role = %role,
+                                            old_agent = %old_id,
+                                            new_agent = %new_id,
+                                            migrated = t_migrated,
+                                            "Reassigned triggers after restart"
                                         );
                                     }
-                                }
-                                // Reassign triggers (#519). Currently a no-op on
-                                // cold boot (triggers are in-memory only), but
-                                // correct if trigger persistence is added later.
-                                let t_migrated =
-                                    self.triggers.reassign_agent_triggers(old_id, new_id);
-                                if t_migrated > 0 {
-                                    info!(
-                                        hand = %hand_id,
-                                        old_agent = %old_id,
-                                        new_agent = %new_id,
-                                        migrated = t_migrated,
-                                        "Reassigned triggers after restart"
-                                    );
                                 }
                             }
                         }
@@ -8104,7 +8285,7 @@ impl LibreFangKernel {
             .list_instances()
             .into_iter()
             .filter(|inst| inst.status == librefang_hands::HandStatus::Active)
-            .filter_map(|inst| inst.agent_id)
+            .filter_map(|inst| inst.agent_id())
             .collect();
 
         for agent_id in &hand_agents {
@@ -8430,7 +8611,7 @@ impl KernelHandle for LibreFangKernel {
                 Some(inst) => (
                     format!("{}", inst.status),
                     Some(inst.instance_id.to_string()),
-                    inst.agent_id.map(|a| a.to_string()),
+                    inst.agent_id().map(|a: AgentId| a.to_string()),
                 ),
                 None => ("available".to_string(), None, None),
             };
@@ -8486,8 +8667,8 @@ impl KernelHandle for LibreFangKernel {
         Ok(serde_json::json!({
             "instance_id": instance.instance_id.to_string(),
             "hand_id": instance.hand_id,
-            "agent_name": instance.agent_name,
-            "agent_id": instance.agent_id.map(|a| a.to_string()),
+            "agent_name": instance.agent_name(),
+            "agent_id": instance.agent_id().map(|a| a.to_string()),
             "status": format!("{}", instance.status),
         }))
     }
@@ -8509,8 +8690,8 @@ impl KernelHandle for LibreFangKernel {
             "icon": def_icon,
             "instance_id": instance.instance_id.to_string(),
             "status": format!("{}", instance.status),
-            "agent_id": instance.agent_id.map(|a| a.to_string()),
-            "agent_name": instance.agent_name,
+            "agent_id": instance.agent_id().map(|a| a.to_string()),
+            "agent_name": instance.agent_name(),
             "activated_at": instance.activated_at.to_rfc3339(),
             "updated_at": instance.updated_at.to_rfc3339(),
         }))
@@ -8524,6 +8705,26 @@ impl KernelHandle for LibreFangKernel {
 
     fn requires_approval(&self, tool_name: &str) -> bool {
         self.approval_manager.requires_approval(tool_name)
+    }
+
+    fn requires_approval_with_context(
+        &self,
+        tool_name: &str,
+        sender_id: Option<&str>,
+        channel: Option<&str>,
+    ) -> bool {
+        self.approval_manager
+            .requires_approval_with_context(tool_name, sender_id, channel)
+    }
+
+    fn is_tool_denied_with_context(
+        &self,
+        tool_name: &str,
+        sender_id: Option<&str>,
+        channel: Option<&str>,
+    ) -> bool {
+        self.approval_manager
+            .is_tool_denied_with_context(tool_name, sender_id, channel)
     }
 
     async fn request_approval(
@@ -8557,6 +8758,8 @@ impl KernelHandle for LibreFangKernel {
             risk_level,
             requested_at: chrono::Utc::now(),
             timeout_secs: policy.timeout_secs,
+            sender_id: None,
+            channel: None,
         };
 
         // Publish an ApprovalRequested event so channel adapters can notify users
@@ -9234,7 +9437,7 @@ mod tests {
             }
             Err(e) => panic!("apitester hand should activate: {e}"),
         };
-        let agent_id = instance.agent_id.expect("apitester hand agent id");
+        let agent_id = instance.agent_id().expect("apitester hand agent id");
         let entry = kernel
             .registry
             .get(agent_id)
@@ -9275,7 +9478,7 @@ mod tests {
             }
             Err(e) => panic!("apitester hand should activate the first time: {e}"),
         };
-        let first_agent_id = first_instance.agent_id.expect("first apitester agent id");
+        let first_agent_id = first_instance.agent_id().expect("first apitester agent id");
         let first_entry = kernel
             .registry
             .get(first_agent_id)
@@ -9295,7 +9498,9 @@ mod tests {
             }
             Err(e) => panic!("apitester hand should activate the second time: {e}"),
         };
-        let second_agent_id = second_instance.agent_id.expect("second apitester agent id");
+        let second_agent_id = second_instance
+            .agent_id()
+            .expect("second apitester agent id");
         let second_entry = kernel
             .registry
             .get(second_agent_id)

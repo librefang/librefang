@@ -3,6 +3,7 @@
 //! Provides:
 //! - Request ID generation and propagation
 //! - Per-endpoint structured request logging
+//! - HTTP metrics recording (when telemetry feature is enabled)
 //! - In-memory rate limiting (per IP)
 //! - Accept-Language header parsing for i18n error responses
 
@@ -10,8 +11,26 @@ use axum::body::Body;
 use axum::http::{Request, Response, StatusCode};
 use axum::middleware::Next;
 use librefang_types::i18n;
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Instant;
 use tracing::info;
+
+use librefang_telemetry::metrics;
+
+/// Shared state for the auth middleware.
+///
+/// Combines the static API key(s) with the active session store so the
+/// middleware can validate both legacy deterministic tokens and the new
+/// randomly generated session tokens in a single pass.
+#[derive(Clone)]
+pub struct AuthState {
+    /// Composite key string: multiple valid tokens separated by `\n`.
+    pub api_key_lock: Arc<tokio::sync::RwLock<String>>,
+    /// Active sessions issued by dashboard login, keyed by token string.
+    pub active_sessions:
+        Arc<tokio::sync::RwLock<HashMap<String, crate::password_hash::SessionToken>>>,
+}
 
 /// Request ID header name (standard).
 pub const REQUEST_ID_HEADER: &str = "x-request-id";
@@ -69,6 +88,8 @@ pub async fn request_logging(request: Request<Body>, next: Next) -> Response<Bod
         latency_ms = elapsed.as_millis() as u64,
         "API request"
     );
+
+    metrics::record_http_request(&uri, method.as_str(), status, elapsed);
 
     // Inject the request ID into the response
     if let Ok(header_val) = request_id.parse() {
@@ -154,14 +175,15 @@ pub async fn api_version_headers(request: Request<Body>, next: Next) -> Response
 /// endpoints must include `Authorization: Bearer <api_key>`.
 /// If the key is empty or whitespace-only, auth is disabled entirely
 /// (public/local development mode).
+///
+/// Also validates randomly generated session tokens from the active
+/// session store, cleaning up expired sessions on each check.
 pub async fn auth(
-    axum::extract::State(api_key_lock): axum::extract::State<
-        std::sync::Arc<tokio::sync::RwLock<String>>,
-    >,
+    axum::extract::State(auth_state): axum::extract::State<AuthState>,
     request: Request<Body>,
     next: Next,
 ) -> Response<Body> {
-    let api_key = api_key_lock.read().await.clone();
+    let api_key = auth_state.api_key_lock.read().await.clone();
     // SECURITY: Capture method early for method-aware public endpoint checks.
     let method = request.method().clone();
 
@@ -294,9 +316,27 @@ pub async fn auth(
     // SECURITY: Use constant-time comparison to prevent timing attacks.
     let query_auth = query_token.map(&matches_any);
 
-    // Accept if either auth method matches
+    // Accept if either auth method matches a static API key or legacy token
     if header_auth == Some(true) || query_auth == Some(true) {
         return next.run(request).await;
+    }
+
+    // Check the active session store for randomly generated dashboard tokens.
+    // Also prune expired sessions opportunistically.
+    let provided_token = api_token.or(query_token);
+    if let Some(token_str) = provided_token {
+        let mut sessions = auth_state.active_sessions.write().await;
+        // Remove expired sessions while we hold the lock
+        sessions.retain(|_, st| {
+            !crate::password_hash::is_token_expired(
+                st,
+                crate::password_hash::DEFAULT_SESSION_TTL_SECS,
+            )
+        });
+        if sessions.contains_key(token_str) {
+            drop(sessions);
+            return next.run(request).await;
+        }
     }
 
     // Determine error message: was a credential provided but wrong, or missing entirely?
@@ -453,12 +493,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_api_version_header_is_added_to_unauthorized_responses() {
+        let auth_state = AuthState {
+            api_key_lock: Arc::new(tokio::sync::RwLock::new("secret".to_string())),
+            active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+        };
         let app = Router::new()
             .route("/api/private", get(|| async { "ok" }))
-            .layer(axum::middleware::from_fn_with_state(
-                std::sync::Arc::new(tokio::sync::RwLock::new("secret".to_string())),
-                auth,
-            ))
+            .layer(axum::middleware::from_fn_with_state(auth_state, auth))
             .layer(axum::middleware::from_fn(api_version_headers));
 
         let response = app

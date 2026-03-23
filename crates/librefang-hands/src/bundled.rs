@@ -38,7 +38,7 @@ pub fn bundled_hands(
 
 pub(crate) fn disk_hands(home_dir: &std::path::Path) -> Vec<(String, String, String)> {
     let mut results = Vec::new();
-    let hands_dir = home_dir.join("hands");
+    let hands_dir = home_dir.join("workspaces").join("hands");
 
     if let Ok(entries) = std::fs::read_dir(&hands_dir) {
         for entry in entries.flatten() {

@@ -690,11 +690,39 @@ All skills pass through a security pipeline before activation:
 
 ---
 
+## Media Driver Abstraction
+
+The media generation subsystem (`librefang-runtime::media`) mirrors the LLM driver pattern, providing provider-agnostic access to image, TTS, video, and music generation.
+
+### Architecture
+
+- **`MediaDriver` trait** — async methods for each modality with default `NotSupported` implementations
+- **`MediaDriverCache`** — thread-safe `DashMap`-based lazy-init cache (same pattern as LLM `DriverCache`)
+- **`MediaCapability` enum** — `ImageGeneration`, `TextToSpeech`, `VideoGeneration`, `MusicGeneration`
+- **Auto-detection** — `detect_for_capability()` picks the first configured provider per modality
+
+### Provider Support
+
+| Provider | Image | TTS | Video | Music |
+|----------|-------|-----|-------|-------|
+| OpenAI | gpt-image-1, dall-e-3 | tts-1, tts-1-hd | -- | -- |
+| MiniMax | image-01 | speech-2.8-hd | T2V-01 | music-2.5 |
+
+### Video Generation Flow
+
+Video generation is asynchronous (submit/poll/retrieve):
+
+1. `submit_video()` → returns `task_id`
+2. `poll_video()` → returns `Pending` / `Processing` / `Completed` / `Failed`
+3. `get_video_result()` → returns file URL, dimensions, duration
+
+---
+
 ## Hands System
 
-The Hands system (`librefang-hands`) provides 14 built-in autonomous hand agents, each specialized for a particular domain.
+The Hands system (`librefang-hands`) provides 15 built-in autonomous hand agents, each specialized for a particular domain.
 
-### Built-in Hands (14)
+### Built-in Hands (15)
 
 | Hand | Domain |
 |------|--------|
@@ -703,6 +731,7 @@ The Hands system (`librefang-hands`) provides 14 built-in autonomous hand agents
 | `browser` | Web browsing and scraping via Playwright |
 | `clip` | Content clipping and extraction |
 | `collector` | Data collection and aggregation |
+| `creator` | Media generation (image, video, music, TTS) |
 | `devops` | CI/CD pipeline and infrastructure |
 | `lead` | Lead generation and outreach |
 | `linkedin` | LinkedIn professional networking automation |

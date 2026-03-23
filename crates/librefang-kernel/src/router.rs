@@ -189,7 +189,7 @@ fn build_hand_route_candidates(home_dir: Option<&Path>) -> Vec<HandRouteCandidat
 }
 
 fn load_user_hand_route_candidates(home_dir: &Path) -> Vec<HandRouteCandidate> {
-    let hands_dir = home_dir.join("hands");
+    let hands_dir = home_dir.join("workspaces").join("hands");
     let Ok(entries) = fs::read_dir(&hands_dir) else {
         return Vec::new();
     };
@@ -1208,7 +1208,7 @@ mod tests {
                 .join("bundled");
 
             let test_home = std::env::temp_dir().join("librefang-kernel-router-tests");
-            let hands_dir = test_home.join("hands");
+            let hands_dir = test_home.join("workspaces").join("hands");
             let _ = std::fs::create_dir_all(&hands_dir);
 
             if let Ok(entries) = std::fs::read_dir(&bundled) {
@@ -1243,7 +1243,7 @@ mod tests {
     }
 
     fn write_test_hand(home_dir: &Path, hand_id: &str, aliases: &[&str], weak_aliases: &[&str]) {
-        let hand_dir = home_dir.join("hands").join(hand_id);
+        let hand_dir = home_dir.join("workspaces").join("hands").join(hand_id);
         fs::create_dir_all(&hand_dir).unwrap();
 
         let aliases_toml = aliases
@@ -1708,7 +1708,7 @@ weak_aliases = ["changelog"]
     #[test]
     fn test_build_hand_route_candidates_ignores_invalid_user_hand_manifests() {
         let tmp = tempdir().unwrap();
-        let hand_dir = tmp.path().join("hands").join("broken");
+        let hand_dir = tmp.path().join("workspaces").join("hands").join("broken");
         fs::create_dir_all(&hand_dir).unwrap();
         fs::write(hand_dir.join("HAND.toml"), "not = valid = toml").unwrap();
 

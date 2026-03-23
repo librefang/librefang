@@ -380,6 +380,7 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
             "key_required": p.key_required,
             "api_key_env": p.api_key_env,
             "base_url": p.base_url,
+            "media_capabilities": p.media_capabilities,
         });
 
         // Attach region map so the dashboard can show available regions
@@ -1517,6 +1518,25 @@ mod tests {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(json["error"].as_str().unwrap().contains("not found"));
+    }
+
+    #[test]
+    fn test_provider_json_includes_media_capabilities() {
+        let provider = librefang_types::model_catalog::ProviderInfo {
+            id: "openai".into(),
+            display_name: "OpenAI".into(),
+            media_capabilities: vec!["image_generation".into(), "text_to_speech".into()],
+            ..Default::default()
+        };
+        let json = serde_json::json!({
+            "id": provider.id,
+            "display_name": provider.display_name,
+            "media_capabilities": provider.media_capabilities,
+        });
+        let caps = json["media_capabilities"].as_array().unwrap();
+        assert_eq!(caps.len(), 2);
+        assert_eq!(caps[0], "image_generation");
+        assert_eq!(caps[1], "text_to_speech");
     }
 
     #[tokio::test]

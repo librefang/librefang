@@ -31,7 +31,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, instrument, warn};
 
 /// Maximum iterations in the agent loop before giving up.
 const MAX_ITERATIONS: u32 = 50;
@@ -369,6 +369,7 @@ fn serialize_session_messages(
 /// This is the core of LibreFang: it loads session context, recalls memories,
 /// runs the LLM in a tool-use loop, and saves the updated session.
 #[allow(clippy::too_many_arguments)]
+#[instrument(skip_all, fields(agent.name = %manifest.name, agent.id = %session.agent_id))]
 pub async fn run_agent_loop(
     manifest: &AgentManifest,
     user_message: &str,
@@ -385,6 +386,7 @@ pub async fn run_agent_loop(
     workspace_root: Option<&Path>,
     on_phase: Option<&PhaseCallback>,
     media_engine: Option<&crate::media_understanding::MediaEngine>,
+    media_drivers: Option<&crate::media::MediaDriverCache>,
     tts_engine: Option<&crate::tts::TtsEngine>,
     docker_config: Option<&librefang_types::config::DockerSandboxConfig>,
     hooks: Option<&crate::hooks::HookRegistry>,
@@ -414,6 +416,19 @@ pub async fn run_agent_loop(
         .get("hand_allowed_env")
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
+
+    // Extract sender context from manifest metadata (set by kernel for per-sender
+    // trust and channel-specific tool authorization).
+    let sender_user_id: Option<String> = manifest
+        .metadata
+        .get("sender_user_id")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let sender_channel: Option<String> = manifest
+        .metadata
+        .get("sender_channel")
+        .and_then(|v| v.as_str())
+        .map(String::from);
 
     let stable_prefix_mode = stable_prefix_mode_enabled(manifest);
 
@@ -1177,10 +1192,13 @@ pub async fn run_agent_loop(
                             },
                             workspace_root,
                             media_engine,
+                            media_drivers,
                             effective_exec_policy,
                             tts_engine,
                             docker_config,
                             process_manager,
+                            sender_user_id.as_deref(),
+                            sender_channel.as_deref(),
                         ),
                     )
                     .await
@@ -1735,6 +1753,7 @@ async fn stream_with_retry(
 /// as tokens arrive from the LLM. Tool execution happens between LLM calls
 /// and is not streamed.
 #[allow(clippy::too_many_arguments)]
+#[instrument(skip_all, fields(agent.name = %manifest.name, agent.id = %session.agent_id))]
 pub async fn run_agent_loop_streaming(
     manifest: &AgentManifest,
     user_message: &str,
@@ -1752,6 +1771,7 @@ pub async fn run_agent_loop_streaming(
     workspace_root: Option<&Path>,
     on_phase: Option<&PhaseCallback>,
     media_engine: Option<&crate::media_understanding::MediaEngine>,
+    media_drivers: Option<&crate::media::MediaDriverCache>,
     tts_engine: Option<&crate::tts::TtsEngine>,
     docker_config: Option<&librefang_types::config::DockerSandboxConfig>,
     hooks: Option<&crate::hooks::HookRegistry>,
@@ -1780,6 +1800,19 @@ pub async fn run_agent_loop_streaming(
         .get("hand_allowed_env")
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
+
+    // Extract sender context from manifest metadata (set by kernel for per-sender
+    // trust and channel-specific tool authorization).
+    let sender_user_id: Option<String> = manifest
+        .metadata
+        .get("sender_user_id")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let sender_channel: Option<String> = manifest
+        .metadata
+        .get("sender_channel")
+        .and_then(|v| v.as_str())
+        .map(String::from);
 
     let stable_prefix_mode = stable_prefix_mode_enabled(manifest);
 
@@ -2553,10 +2586,13 @@ pub async fn run_agent_loop_streaming(
                             },
                             workspace_root,
                             media_engine,
+                            media_drivers,
                             effective_exec_policy,
                             tts_engine,
                             docker_config,
                             process_manager,
+                            sender_user_id.as_deref(),
+                            sender_channel.as_deref(),
                         ),
                     )
                     .await
@@ -3854,6 +3890,7 @@ mod tests {
             None,
             None, // on_phase
             None, // media_engine
+            None, // media_drivers
             None, // tts_engine
             None, // docker_config
             None, // hooks
@@ -3911,6 +3948,7 @@ mod tests {
             None,
             None, // on_phase
             None, // media_engine
+            None, // media_drivers
             None, // tts_engine
             None, // docker_config
             None, // hooks
@@ -3967,6 +4005,7 @@ mod tests {
             None,
             None, // on_phase
             None, // media_engine
+            None, // media_drivers
             None, // tts_engine
             None, // docker_config
             None, // hooks
@@ -4016,6 +4055,7 @@ mod tests {
             None,
             None, // on_phase
             None, // media_engine
+            None, // media_drivers
             None, // tts_engine
             None, // docker_config
             None, // hooks
@@ -4146,10 +4186,11 @@ mod tests {
             None,
             None,
             None,
-            None,
-            None,
-            None,
-            None,
+            None, // media_engine
+            None, // media_drivers
+            None, // tts_engine
+            None, // docker_config
+            None, // hooks
             None, // context_window_tokens
             None, // process_manager
             None, // user_content_blocks
@@ -4196,10 +4237,11 @@ mod tests {
             None,
             None,
             None,
-            None,
-            None,
-            None,
-            None,
+            None, // media_engine
+            None, // media_drivers
+            None, // tts_engine
+            None, // docker_config
+            None, // hooks
             None, // context_window_tokens
             None, // process_manager
             None, // user_content_blocks
@@ -4255,6 +4297,7 @@ mod tests {
             None,
             None, // on_phase
             None, // media_engine
+            None, // media_drivers
             None, // tts_engine
             None, // docker_config
             None, // hooks
@@ -5035,6 +5078,7 @@ mod tests {
             None,
             None, // on_phase
             None, // media_engine
+            None, // media_drivers
             None, // tts_engine
             None, // docker_config
             None, // hooks
@@ -5104,7 +5148,8 @@ mod tests {
             None,
             None,
             None,
-            None,
+            None, // media_engine
+            None, // media_drivers
             None,
             None,
             None,
@@ -5171,6 +5216,7 @@ mod tests {
             None,
             None, // on_phase
             None, // media_engine
+            None, // media_drivers
             None, // tts_engine
             None, // docker_config
             None, // hooks

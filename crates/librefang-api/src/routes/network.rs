@@ -825,6 +825,7 @@ pub async fn mcp_http(
             None,
             None,
             Some(state.kernel.media()),
+            None, // media_drivers
             None, // exec_policy
             if state.kernel.config_ref().tts.enabled {
                 Some(state.kernel.tts())
@@ -837,6 +838,8 @@ pub async fn mcp_http(
                 None
             },
             Some(state.kernel.processes()),
+            None, // sender_id (MCP HTTP has no sender context)
+            None, // channel
         )
         .await;
 

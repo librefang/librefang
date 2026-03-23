@@ -892,6 +892,17 @@ For Gemini specifically, either `GEMINI_API_KEY` or `GOOGLE_API_KEY` will work.
    export MINIMAX_CN_API_KEY="..."
    ```
 
+**Media Generation:** In addition to LLM chat models, MiniMax provides media generation capabilities when used with the Creator Hand or media API endpoints:
+
+| Modality | Model | Description |
+|----------|-------|-------------|
+| Image | `image-01` | Text-to-image generation |
+| TTS | `speech-2.8-hd` | High-quality text-to-speech |
+| Video | `T2V-01` | Text-to-video generation (async) |
+| Music | `music-2.5` | Music generation with optional lyrics |
+
+These are accessed via `/api/media/*` endpoints or through the `image_generate`, `video_generate`, `music_generate`, `text_to_speech` tools.
+
 **Notes:** MiniMax international (`minimax.io`) and China (`minimaxi.com`) use separate API keys. When selecting the `china` region, LibreFang automatically reads from `MINIMAX_CN_API_KEY` instead of `MINIMAX_API_KEY`.
 
 ---
