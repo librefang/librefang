@@ -32,26 +32,37 @@ const POLL_TIMEOUT_SECS: u64 = 30;
 
 pub struct MiniMaxMediaDriver {
     base_url: String,
+    /// Whether this driver is configured for the China region endpoint.
+    is_china: bool,
 }
 
 impl MiniMaxMediaDriver {
     pub fn new(base_url: Option<&str>) -> Self {
+        let url = base_url
+            .unwrap_or(DEFAULT_BASE_URL)
+            .trim_end_matches('/')
+            .to_string();
+        // China endpoint uses api.minimaxi.com (extra "i")
+        let is_china = url.contains("minimaxi.com");
         Self {
-            base_url: base_url
-                .unwrap_or(DEFAULT_BASE_URL)
-                .trim_end_matches('/')
-                .to_string(),
+            base_url: url,
+            is_china,
         }
     }
 
-    fn api_key() -> Result<String, MediaError> {
-        std::env::var("MINIMAX_API_KEY")
-            .or_else(|_| std::env::var("MINIMAX_CN_API_KEY"))
-            .map_err(|_| {
-                MediaError::MissingKey(
-                    "MINIMAX_API_KEY not set. Get one at https://platform.minimax.io".into(),
-                )
-            })
+    /// Select the correct API key based on region.
+    /// China endpoint prefers MINIMAX_CN_API_KEY; international prefers MINIMAX_API_KEY.
+    fn api_key(&self) -> Result<String, MediaError> {
+        if self.is_china {
+            std::env::var("MINIMAX_CN_API_KEY").or_else(|_| std::env::var("MINIMAX_API_KEY"))
+        } else {
+            std::env::var("MINIMAX_API_KEY").or_else(|_| std::env::var("MINIMAX_CN_API_KEY"))
+        }
+        .map_err(|_| {
+            MediaError::MissingKey(
+                "MINIMAX_API_KEY not set. Get one at https://platform.minimax.io".into(),
+            )
+        })
     }
 
     /// Parse the `base_resp` from MiniMax API responses.
@@ -94,7 +105,7 @@ impl MediaDriver for MiniMaxMediaDriver {
     }
 
     fn is_configured(&self) -> bool {
-        Self::api_key().is_ok()
+        self.api_key().is_ok()
     }
 
     fn provider_name(&self) -> &str {
@@ -109,7 +120,7 @@ impl MediaDriver for MiniMaxMediaDriver {
     ) -> Result<MediaImageResult, MediaError> {
         request.validate().map_err(MediaError::InvalidRequest)?;
 
-        let api_key = Self::api_key()?;
+        let api_key = self.api_key()?;
         let model = request.model.as_deref().unwrap_or("image-01");
 
         let mut body = serde_json::json!({
@@ -210,7 +221,7 @@ impl MediaDriver for MiniMaxMediaDriver {
     ) -> Result<MediaTtsResult, MediaError> {
         request.validate().map_err(MediaError::InvalidRequest)?;
 
-        let api_key = Self::api_key()?;
+        let api_key = self.api_key()?;
         let model = request.model.as_deref().unwrap_or("speech-2.8-hd");
         let voice_id = request.voice.as_deref().unwrap_or("English_Graceful_Lady");
 
@@ -220,7 +231,7 @@ impl MediaDriver for MiniMaxMediaDriver {
             "voice_setting": {
                 "voice_id": voice_id,
             },
-            "output_format": "url",
+            "output_format": "hex",
         });
 
         if let Some(speed) = request.speed {
@@ -310,7 +321,7 @@ impl MediaDriver for MiniMaxMediaDriver {
     ) -> Result<MediaVideoSubmitResult, MediaError> {
         request.validate().map_err(MediaError::InvalidRequest)?;
 
-        let api_key = Self::api_key()?;
+        let api_key = self.api_key()?;
         let model = request.model.as_deref().unwrap_or("MiniMax-Hailuo-2.3");
 
         let mut body = serde_json::json!({
@@ -369,7 +380,7 @@ impl MediaDriver for MiniMaxMediaDriver {
     }
 
     async fn poll_video(&self, task_id: &str) -> Result<MediaTaskStatus, MediaError> {
-        let api_key = Self::api_key()?;
+        let api_key = self.api_key()?;
 
         let url = format!(
             "{}/query/video_generation?task_id={}",
@@ -419,7 +430,7 @@ impl MediaDriver for MiniMaxMediaDriver {
     }
 
     async fn get_video_result(&self, task_id: &str) -> Result<MediaVideoResult, MediaError> {
-        let api_key = Self::api_key()?;
+        let api_key = self.api_key()?;
 
         // First poll to get the file_id
         let url = format!(
@@ -505,7 +516,7 @@ impl MediaDriver for MiniMaxMediaDriver {
     ) -> Result<MediaMusicResult, MediaError> {
         request.validate().map_err(MediaError::InvalidRequest)?;
 
-        let api_key = Self::api_key()?;
+        let api_key = self.api_key()?;
         let model = request.model.as_deref().unwrap_or("music-2.5");
 
         let mut body = serde_json::json!({

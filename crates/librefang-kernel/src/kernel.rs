@@ -287,6 +287,8 @@ pub struct LibreFangKernel {
     pub(crate) media_engine: librefang_runtime::media_understanding::MediaEngine,
     /// Text-to-speech engine.
     pub(crate) tts_engine: librefang_runtime::tts::TtsEngine,
+    /// Media generation driver cache (video, music, etc.).
+    pub(crate) media_drivers: librefang_runtime::media::MediaDriverCache,
     /// Device pairing manager.
     pub(crate) pairing: crate::pairing::PairingManager,
     /// Embedding driver for vector similarity search (None = text fallback).
@@ -921,6 +923,12 @@ impl LibreFangKernel {
     #[inline]
     pub fn tts(&self) -> &librefang_runtime::tts::TtsEngine {
         &self.tts_engine
+    }
+
+    /// Media generation driver cache (video, music, etc.).
+    #[inline]
+    pub fn media_drivers(&self) -> &librefang_runtime::media::MediaDriverCache {
+        &self.media_drivers
     }
 
     /// MCP server connections (Mutex — lazily initialized).
@@ -1625,6 +1633,8 @@ impl LibreFangKernel {
         let media_engine =
             librefang_runtime::media_understanding::MediaEngine::new(config.media.clone());
         let tts_engine = librefang_runtime::tts::TtsEngine::new(config.tts.clone());
+        let media_drivers =
+            librefang_runtime::media::MediaDriverCache::new_with_urls(config.provider_urls.clone());
         let mut pairing = crate::pairing::PairingManager::new(config.pairing.clone());
 
         // Load paired devices from database and set up persistence callback
@@ -1758,6 +1768,7 @@ impl LibreFangKernel {
             browser_ctx,
             media_engine,
             tts_engine,
+            media_drivers,
             pairing,
             embedding_driver,
             hand_registry,
@@ -2553,6 +2564,7 @@ system_prompt = "You are a helpful assistant."
             manifest.workspace.as_deref(),
             None, // no phase callback
             None, // no media
+            None, // no media_drivers
             None, // no TTS
             None, // no docker
             None, // no hooks
@@ -3146,6 +3158,7 @@ system_prompt = "You are a helpful assistant."
                 manifest.workspace.as_deref(),
                 Some(&phase_cb),
                 Some(&kernel_clone.media_engine),
+                Some(&kernel_clone.media_drivers),
                 if kernel_clone.config.tts.enabled {
                     Some(&kernel_clone.tts_engine)
                 } else {
@@ -4049,6 +4062,7 @@ system_prompt = "You are a helpful assistant."
             manifest.workspace.as_deref(),
             None, // on_phase callback
             Some(&self.media_engine),
+            Some(&self.media_drivers),
             if self.config.tts.enabled {
                 Some(&self.tts_engine)
             } else {
@@ -5667,7 +5681,7 @@ system_prompt = "You are a helpful assistant."
                 }
                 HotAction::ReloadProviderUrls => {
                     info!("Hot-reload: applying provider URL overrides");
-                    // Invalidate cached drivers — URLs/keys may have changed.
+                    // Invalidate cached LLM drivers — URLs/keys may have changed.
                     self.driver_cache.clear();
                     let mut catalog = self
                         .model_catalog
@@ -5697,6 +5711,9 @@ system_prompt = "You are a helpful assistant."
                     if !new_config.provider_urls.is_empty() {
                         catalog.apply_url_overrides(&new_config.provider_urls);
                     }
+                    // Also update media driver cache with new provider URLs
+                    self.media_drivers
+                        .update_provider_urls(new_config.provider_urls.clone());
                 }
                 HotAction::UpdateDefaultModel => {
                     info!(

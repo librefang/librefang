@@ -6,6 +6,7 @@
 //! - `MediaDriverCache` for lazy-init, thread-safe driver caching
 //! - Per-provider implementations in submodules
 
+pub mod gemini;
 pub mod minimax;
 pub mod openai;
 
@@ -16,8 +17,9 @@ use librefang_types::media::{
     MediaTaskStatus, MediaTtsRequest, MediaTtsResult, MediaVideoRequest, MediaVideoResult,
     MediaVideoSubmitResult,
 };
+use std::collections::HashMap;
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 // ── Error type ─────────────────────────────────────────────────────────
 
@@ -132,30 +134,72 @@ pub trait MediaDriver: Send + Sync {
 // ── Driver cache ───────────────────────────────────────────────────────
 
 /// Thread-safe, lazy-initializing cache for media drivers.
+///
+/// Holds an optional `provider_urls` map (from `KernelConfig`) so that
+/// custom base URLs (e.g. OpenAI proxies, MiniMax China endpoint) are
+/// respected when creating drivers.
 pub struct MediaDriverCache {
     cache: DashMap<String, Arc<dyn MediaDriver>>,
+    /// Provider name → custom base URL, sourced from config `[provider_urls]`.
+    /// Behind RwLock for hot-reload support (update URLs via `&self`).
+    provider_urls: RwLock<HashMap<String, String>>,
 }
 
 impl MediaDriverCache {
+    /// Create a cache with no provider URL overrides.
     pub fn new() -> Self {
         Self {
             cache: DashMap::new(),
+            provider_urls: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Create a cache that resolves base URLs from the given map.
+    ///
+    /// This mirrors how LLM drivers use `config.provider_urls` — when a
+    /// caller passes `base_url: None` to [`get_or_create`], the cache
+    /// checks `provider_urls` before falling back to the driver's hardcoded
+    /// default.
+    pub fn new_with_urls(provider_urls: HashMap<String, String>) -> Self {
+        Self {
+            cache: DashMap::new(),
+            provider_urls: RwLock::new(provider_urls),
         }
     }
 
     /// Get or create a cached driver for the given provider.
+    ///
+    /// If `base_url` is `None`, the cache checks its `provider_urls` map
+    /// for a configured override before using the driver's default.
     pub fn get_or_create(
         &self,
         provider: &str,
         base_url: Option<&str>,
     ) -> Result<Arc<dyn MediaDriver>, MediaError> {
-        let key = format!("{}|{}", provider, base_url.unwrap_or("default"));
+        // Resolve base_url: explicit arg > provider_urls map > driver default
+        let resolved_url = base_url.map(|u| u.to_string()).or_else(|| {
+            let urls = self.provider_urls.read().unwrap_or_else(|e| e.into_inner());
+            urls.get(provider)
+                .cloned()
+                // Also check the canonical name for aliases ("google" → "gemini")
+                .or_else(|| {
+                    let canonical = canonical_provider_name(provider);
+                    if canonical != provider {
+                        urls.get(canonical).cloned()
+                    } else {
+                        None
+                    }
+                })
+        });
+        let url_ref = resolved_url.as_deref();
+
+        let key = format!("{}|{}", provider, url_ref.unwrap_or("default"));
 
         if let Some(driver) = self.cache.get(&key) {
             return Ok(Arc::clone(driver.value()));
         }
 
-        let driver = create_media_driver(provider, base_url)?;
+        let driver = create_media_driver(provider, url_ref)?;
         self.cache.insert(key, Arc::clone(&driver));
         Ok(driver)
     }
@@ -183,6 +227,15 @@ impl MediaDriverCache {
     pub fn clear(&self) {
         self.cache.clear();
     }
+
+    /// Update the provider URL overrides and clear the driver cache so that
+    /// drivers are recreated with the new URLs on next access.
+    pub fn update_provider_urls(&self, urls: HashMap<String, String>) {
+        if let Ok(mut map) = self.provider_urls.write() {
+            *map = urls;
+        }
+        self.cache.clear();
+    }
 }
 
 impl Default for MediaDriverCache {
@@ -191,10 +244,18 @@ impl Default for MediaDriverCache {
     }
 }
 
+/// Map provider aliases to canonical names for URL lookup.
+fn canonical_provider_name(provider: &str) -> &str {
+    match provider {
+        "google" => "gemini",
+        _ => provider,
+    }
+}
+
 // ── Provider registry ──────────────────────────────────────────────────
 
 /// Provider preference order for auto-detection.
-static MEDIA_PROVIDER_ORDER: &[&str] = &["openai", "minimax", "elevenlabs"];
+static MEDIA_PROVIDER_ORDER: &[&str] = &["openai", "gemini", "minimax"];
 
 /// Create a media driver for a given provider name.
 fn create_media_driver(
@@ -202,10 +263,11 @@ fn create_media_driver(
     base_url: Option<&str>,
 ) -> Result<Arc<dyn MediaDriver>, MediaError> {
     match provider {
+        "gemini" | "google" => Ok(Arc::new(gemini::GeminiMediaDriver::new(base_url))),
         "minimax" => Ok(Arc::new(minimax::MiniMaxMediaDriver::new(base_url))),
         "openai" => Ok(Arc::new(openai::OpenAIMediaDriver::new(base_url))),
-        other => Err(MediaError::Other(format!(
-            "Unknown media provider: {other}"
+        other => Err(MediaError::InvalidRequest(format!(
+            "Unknown media provider: '{other}'. Available: openai, gemini, minimax"
         ))),
     }
 }
@@ -257,5 +319,48 @@ mod tests {
         let cache = MediaDriverCache::new();
         let result = cache.get_or_create("nonexistent", None);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_provider_urls_resolved() {
+        let mut urls = HashMap::new();
+        urls.insert(
+            "minimax".to_string(),
+            "https://custom.minimax.com/v1".to_string(),
+        );
+        let cache = MediaDriverCache::new_with_urls(urls);
+        let driver = cache.get_or_create("minimax", None).unwrap();
+        assert_eq!(driver.provider_name(), "minimax");
+    }
+
+    #[test]
+    fn test_provider_urls_alias_resolution() {
+        let mut urls = HashMap::new();
+        urls.insert(
+            "gemini".to_string(),
+            "https://custom.gemini.api/v1beta".to_string(),
+        );
+        let cache = MediaDriverCache::new_with_urls(urls);
+        // "google" is an alias for "gemini" — should resolve the URL
+        let driver = cache.get_or_create("google", None).unwrap();
+        assert_eq!(driver.provider_name(), "gemini");
+    }
+
+    #[test]
+    fn test_explicit_base_url_overrides_config() {
+        let mut urls = HashMap::new();
+        urls.insert(
+            "minimax".to_string(),
+            "https://config-url.com/v1".to_string(),
+        );
+        let cache = MediaDriverCache::new_with_urls(urls);
+        // Explicit base_url should take precedence over provider_urls
+        let driver = cache
+            .get_or_create("minimax", Some("https://explicit.com/v1"))
+            .unwrap();
+        assert_eq!(driver.provider_name(), "minimax");
+        // Different key means a separate cache entry from the config-resolved one
+        let driver2 = cache.get_or_create("minimax", None).unwrap();
+        assert!(!Arc::ptr_eq(&driver, &driver2));
     }
 }

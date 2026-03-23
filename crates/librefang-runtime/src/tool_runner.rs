@@ -320,16 +320,16 @@ pub async fn execute_tool(
         "media_describe" => tool_media_describe(input, media_engine).await,
         "media_transcribe" => tool_media_transcribe(input, media_engine).await,
 
-        // Image generation tool
-        "image_generate" => tool_image_generate(input, workspace_root).await,
-
-        // Video/music generation tools (MediaDriver-based)
+        // Media generation tools (MediaDriver-based)
+        "image_generate" => tool_image_generate(input, media_drivers, workspace_root).await,
         "video_generate" => tool_video_generate(input, media_drivers).await,
         "video_status" => tool_video_status(input, media_drivers).await,
         "music_generate" => tool_music_generate(input, media_drivers, workspace_root).await,
 
         // TTS/STT tools
-        "text_to_speech" => tool_text_to_speech(input, tts_engine, workspace_root).await,
+        "text_to_speech" => {
+            tool_text_to_speech(input, media_drivers, tts_engine, workspace_root).await
+        }
         "speech_to_text" => tool_speech_to_text(input, media_engine, workspace_root).await,
 
         // Docker sandbox tool
@@ -1005,15 +1005,18 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
         // --- Image generation tool ---
         ToolDefinition {
             name: "image_generate".to_string(),
-            description: "Generate images from a text prompt using DALL-E 3, DALL-E 2, or GPT-Image-1. Requires OPENAI_API_KEY. Generated images are saved to the workspace output/ directory.".to_string(),
+            description: "Generate images from a text prompt. Supports multiple providers: OpenAI (dall-e-3, gpt-image-1), Gemini (imagen-3.0), MiniMax (image-01). Auto-detects configured provider if not specified.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "prompt": { "type": "string", "description": "Text description of the image to generate (max 4000 chars)" },
-                    "model": { "type": "string", "description": "Model to use: 'dall-e-3' (default), 'dall-e-2', or 'gpt-image-1'" },
-                    "size": { "type": "string", "description": "Image size: '1024x1024' (default), '1024x1792', '1792x1024', '256x256', '512x512'" },
-                    "quality": { "type": "string", "description": "Quality: 'hd' (default for dall-e-3) or 'standard'" },
-                    "count": { "type": "integer", "description": "Number of images to generate (1-4, default: 1). DALL-E 3 only supports 1." }
+                    "model": { "type": "string", "description": "Model to use (e.g. 'dall-e-3', 'imagen-3.0-generate-002', 'image-01'). Uses provider default if not specified." },
+                    "aspect_ratio": { "type": "string", "description": "Aspect ratio: '1:1' (default), '16:9', '9:16'" },
+                    "width": { "type": "integer", "description": "Image width in pixels (provider-specific)" },
+                    "height": { "type": "integer", "description": "Image height in pixels (provider-specific)" },
+                    "quality": { "type": "string", "description": "Quality: 'hd', 'standard', etc." },
+                    "count": { "type": "integer", "description": "Number of images (1-4, default: 1)" },
+                    "provider": { "type": "string", "description": "Provider (openai, gemini, minimax). Auto-detects if not specified." }
                 },
                 "required": ["prompt"]
             }),
@@ -1021,17 +1024,18 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
         // --- Video/music generation tools ---
         ToolDefinition {
             name: "video_generate".to_string(),
-            description: "Generate a video from a text prompt. Returns a task_id for polling. Use video_status to check progress.".to_string(),
+            description: "Generate a video from a text prompt or reference image. Returns a task_id for polling. Use video_status to check progress.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "prompt": { "type": "string", "description": "Text description of the video to generate" },
-                    "model": { "type": "string", "description": "Model ID (default: MiniMax-Hailuo-2.3)" },
+                    "prompt": { "type": "string", "description": "Text description of the video to generate (required unless image_url is provided)" },
+                    "image_url": { "type": "string", "description": "Reference image URL for image-to-video generation" },
+                    "model": { "type": "string", "description": "Model ID (default: auto-detect)" },
                     "duration": { "type": "integer", "description": "Duration in seconds (default: 6)" },
                     "resolution": { "type": "string", "description": "Resolution (720P, 768P, 1080P)" },
-                    "provider": { "type": "string", "description": "Provider (default: auto-detect)" }
+                    "provider": { "type": "string", "description": "Provider (openai, gemini, minimax). Auto-detects if not specified." }
                 },
-                "required": ["prompt"]
+                "required": []
             }),
         },
         ToolDefinition {
@@ -1196,13 +1200,16 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
         // --- TTS/STT tools ---
         ToolDefinition {
             name: "text_to_speech".to_string(),
-            description: "Convert text to speech audio. Auto-selects OpenAI or ElevenLabs. Saves audio to workspace output/ directory.".to_string(),
+            description: "Convert text to speech audio. Supports multiple providers (OpenAI, Gemini, MiniMax). Saves audio to workspace output/ directory.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "text": { "type": "string", "description": "The text to convert to speech (max 4096 chars)" },
-                    "voice": { "type": "string", "description": "Voice name: 'alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer' (default: 'alloy')" },
-                    "format": { "type": "string", "description": "Output format: 'mp3', 'opus', 'aac', 'flac' (default: 'mp3')" }
+                    "voice": { "type": "string", "description": "Voice name (provider-specific). OpenAI: 'alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer'. Default: 'alloy'" },
+                    "format": { "type": "string", "description": "Output format: 'mp3', 'opus', 'aac', 'flac', 'wav' (default: 'mp3')" },
+                    "provider": { "type": "string", "description": "Provider: 'openai', 'gemini', 'minimax'. Auto-detected if omitted." },
+                    "model": { "type": "string", "description": "Model ID (provider-specific). OpenAI: 'tts-1', 'tts-1-hd'. Default varies by provider." },
+                    "speed": { "type": "number", "description": "Playback speed (0.25-4.0). OpenAI only. Default: 1.0" }
                 },
                 "required": ["text"]
             }),
@@ -2870,12 +2877,67 @@ async fn tool_media_transcribe(
 /// Generate images from a text prompt.
 async fn tool_image_generate(
     input: &serde_json::Value,
+    media_drivers: Option<&crate::media::MediaDriverCache>,
     workspace_root: Option<&Path>,
 ) -> Result<String, String> {
     let prompt = input["prompt"]
         .as_str()
         .ok_or("Missing 'prompt' parameter")?;
 
+    let provider = input["provider"].as_str().map(|s| s.to_string());
+    let model = input["model"].as_str().map(|s| s.to_string());
+    let aspect_ratio = input["aspect_ratio"].as_str().map(|s| s.to_string());
+    let width = input["width"].as_u64().map(|v| v as u32);
+    let height = input["height"].as_u64().map(|v| v as u32);
+    let quality = input["quality"].as_str().map(|s| s.to_string());
+    let count = input["count"].as_u64().unwrap_or(1).min(9) as u8;
+
+    // Use MediaDriverCache if available (multi-provider), fall back to old OpenAI-only path.
+    if let Some(cache) = media_drivers {
+        let request = librefang_types::media::MediaImageRequest {
+            prompt: prompt.to_string(),
+            provider: provider.clone(),
+            model,
+            width,
+            height,
+            aspect_ratio,
+            quality,
+            count,
+            seed: None,
+        };
+
+        request.validate().map_err(|e| e.to_string())?;
+
+        let driver = if let Some(ref name) = provider {
+            cache.get_or_create(name, None)
+        } else {
+            cache.detect_for_capability(librefang_types::media::MediaCapability::ImageGeneration)
+        }
+        .map_err(|e| e.to_string())?;
+
+        let result = driver
+            .generate_image(&request)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        // Save images to workspace and uploads dir
+        let saved_paths = save_media_images_to_workspace(&result.images, workspace_root);
+        let image_urls = save_media_images_to_uploads(&result.images);
+
+        let response = serde_json::json!({
+            "model": result.model,
+            "provider": result.provider,
+            "images_generated": result.images.len(),
+            "saved_to": saved_paths,
+            "revised_prompt": result.revised_prompt,
+            "image_urls": image_urls,
+        });
+
+        return serde_json::to_string_pretty(&response)
+            .map_err(|e| format!("Serialize error: {e}"));
+    }
+
+    // Fallback: old OpenAI-only path (when media_drivers is None)
     let model_str = input["model"].as_str().unwrap_or("dall-e-3");
     let model = match model_str {
         "dall-e-3" | "dalle3" | "dalle-3" => librefang_types::media::ImageGenModel::DallE3,
@@ -2889,20 +2951,19 @@ async fn tool_image_generate(
     };
 
     let size = input["size"].as_str().unwrap_or("1024x1024").to_string();
-    let quality = input["quality"].as_str().unwrap_or("hd").to_string();
-    let count = input["count"].as_u64().unwrap_or(1).min(4) as u8;
+    let quality_str = input["quality"].as_str().unwrap_or("hd").to_string();
+    let count_val = input["count"].as_u64().unwrap_or(1).min(4) as u8;
 
     let request = librefang_types::media::ImageGenRequest {
         prompt: prompt.to_string(),
         model,
         size,
-        quality,
-        count,
+        quality: quality_str,
+        count: count_val,
     };
 
     let result = crate::image_gen::generate_image(&request).await?;
 
-    // Save images to workspace if available
     let saved_paths = if let Some(workspace) = workspace_root {
         match crate::image_gen::save_images_to_workspace(&result, workspace) {
             Ok(paths) => paths,
@@ -2915,8 +2976,6 @@ async fn tool_image_generate(
         Vec::new()
     };
 
-    // Also save to the uploads temp dir so the web UI can serve them via
-    // GET /api/uploads/{file_id}.  Each image gets a UUID filename.
     let mut image_urls: Vec<String> = Vec::new();
     {
         use base64::Engine;
@@ -2934,7 +2993,6 @@ async fn tool_image_generate(
         }
     }
 
-    // Build response — include image_urls so the dashboard can render <img> tags
     let response = serde_json::json!({
         "model": result.model,
         "images_generated": result.images.len(),
@@ -2944,6 +3002,60 @@ async fn tool_image_generate(
     });
 
     serde_json::to_string_pretty(&response).map_err(|e| format!("Serialize error: {e}"))
+}
+
+/// Save MediaImageResult images to workspace output/ dir.
+fn save_media_images_to_workspace(
+    images: &[librefang_types::media::GeneratedImage],
+    workspace_root: Option<&Path>,
+) -> Vec<String> {
+    let Some(workspace) = workspace_root else {
+        return Vec::new();
+    };
+    use base64::Engine;
+    let output_dir = workspace.join("output");
+    let _ = std::fs::create_dir_all(&output_dir);
+    let mut paths = Vec::new();
+    for (i, img) in images.iter().enumerate() {
+        if img.data_base64.is_empty() {
+            continue;
+        }
+        if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(&img.data_base64) {
+            let filename = format!("image_{}.png", i);
+            let path = output_dir.join(&filename);
+            if std::fs::write(&path, &decoded).is_ok() {
+                paths.push(path.display().to_string());
+            }
+        }
+    }
+    paths
+}
+
+/// Save MediaImageResult images to uploads temp dir, returning /api/uploads/... URLs.
+fn save_media_images_to_uploads(images: &[librefang_types::media::GeneratedImage]) -> Vec<String> {
+    use base64::Engine;
+    let upload_dir = std::env::temp_dir().join("librefang_uploads");
+    let _ = std::fs::create_dir_all(&upload_dir);
+    let mut urls = Vec::new();
+    for img in images {
+        // If provider returned a URL directly, use it as-is
+        if img.data_base64.is_empty() {
+            if let Some(ref url) = img.url {
+                urls.push(url.clone());
+            }
+            continue;
+        }
+        let file_id = uuid::Uuid::new_v4().to_string();
+        if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(&img.data_base64) {
+            if !decoded.is_empty() {
+                let path = upload_dir.join(&file_id);
+                if std::fs::write(&path, &decoded).is_ok() {
+                    urls.push(format!("/api/uploads/{file_id}"));
+                }
+            }
+        }
+    }
+    urls
 }
 
 // ---------------------------------------------------------------------------
@@ -3105,11 +3217,10 @@ async fn tool_music_generate(
 
         Some(path.display().to_string())
     } else {
-        warn!("No workspace root available; music audio not saved to disk");
         None
     };
 
-    let response = serde_json::json!({
+    let mut response = serde_json::json!({
         "saved_to": saved_path,
         "format": result.format,
         "provider": result.provider,
@@ -3117,6 +3228,14 @@ async fn tool_music_generate(
         "duration_ms": result.duration_ms,
         "size_bytes": result.audio_data.len(),
     });
+
+    // When no workspace is available (e.g. MCP context), include base64-encoded
+    // audio so the caller can still retrieve the generated content.
+    if saved_path.is_none() && !result.audio_data.is_empty() {
+        use base64::Engine;
+        response["audio_base64"] =
+            serde_json::json!(base64::engine::general_purpose::STANDARD.encode(&result.audio_data));
+    }
 
     serde_json::to_string_pretty(&response).map_err(|e| format!("Serialize error: {e}"))
 }
@@ -3127,18 +3246,76 @@ async fn tool_music_generate(
 
 async fn tool_text_to_speech(
     input: &serde_json::Value,
+    media_drivers: Option<&crate::media::MediaDriverCache>,
     tts_engine: Option<&crate::tts::TtsEngine>,
     workspace_root: Option<&Path>,
 ) -> Result<String, String> {
-    let engine =
-        tts_engine.ok_or("TTS engine not available. Ensure tts.enabled=true in config.")?;
     let text = input["text"].as_str().ok_or("Missing 'text' parameter")?;
     let voice = input["voice"].as_str();
     let format = input["format"].as_str();
+    let provider = input["provider"].as_str();
+
+    // Try MediaDriverCache first (multi-provider: OpenAI, Gemini, MiniMax).
+    // Fall back to old TtsEngine for backwards compatibility.
+    if let Some(cache) = media_drivers {
+        let request = librefang_types::media::MediaTtsRequest {
+            text: text.to_string(),
+            provider: provider.map(String::from),
+            model: input["model"].as_str().map(String::from),
+            voice: voice.map(String::from),
+            format: format.map(String::from),
+            speed: input["speed"].as_f64().map(|v| v as f32),
+            language: input["language"].as_str().map(String::from),
+        };
+
+        let driver_result = if let Some(p) = provider {
+            cache.get_or_create(p, None)
+        } else {
+            cache.detect_for_capability(librefang_types::media::MediaCapability::TextToSpeech)
+        };
+
+        if let Ok(driver) = driver_result {
+            let result = driver
+                .synthesize_speech(&request)
+                .await
+                .map_err(|e| e.to_string())?;
+
+            return finish_tts_result(
+                &result.audio_data,
+                &result.format,
+                &result.provider,
+                result.duration_ms,
+                workspace_root,
+            )
+            .await;
+        }
+        // If no driver is configured for TTS, fall through to old TtsEngine
+    }
+
+    // Fallback: old TtsEngine (OpenAI / ElevenLabs only)
+    let engine =
+        tts_engine.ok_or("TTS not available. No media driver or TTS engine configured.")?;
 
     let result = engine.synthesize(text, voice, format).await?;
 
-    // Save audio to workspace
+    finish_tts_result(
+        &result.audio_data,
+        &result.format,
+        &result.provider,
+        Some(result.duration_estimate_ms),
+        workspace_root,
+    )
+    .await
+}
+
+/// Save TTS audio to workspace and build JSON response.
+async fn finish_tts_result(
+    audio_data: &[u8],
+    format: &str,
+    provider: &str,
+    duration_ms: Option<u64>,
+    workspace_root: Option<&Path>,
+) -> Result<String, String> {
     let saved_path = if let Some(workspace) = workspace_root {
         let output_dir = workspace.join("output");
         tokio::fs::create_dir_all(&output_dir)
@@ -3146,10 +3323,10 @@ async fn tool_text_to_speech(
             .map_err(|e| format!("Failed to create output dir: {e}"))?;
 
         let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
-        let filename = format!("tts_{timestamp}.{}", result.format);
+        let filename = format!("tts_{timestamp}.{format}");
         let path = output_dir.join(&filename);
 
-        tokio::fs::write(&path, &result.audio_data)
+        tokio::fs::write(&path, audio_data)
             .await
             .map_err(|e| format!("Failed to write audio file: {e}"))?;
 
@@ -3158,13 +3335,20 @@ async fn tool_text_to_speech(
         None
     };
 
-    let response = serde_json::json!({
+    let mut response = serde_json::json!({
         "saved_to": saved_path,
-        "format": result.format,
-        "provider": result.provider,
-        "duration_estimate_ms": result.duration_estimate_ms,
-        "size_bytes": result.audio_data.len(),
+        "format": format,
+        "provider": provider,
+        "duration_estimate_ms": duration_ms,
+        "size_bytes": audio_data.len(),
     });
+
+    // When no workspace is available (e.g. MCP context), include base64 audio
+    if saved_path.is_none() && !audio_data.is_empty() {
+        use base64::Engine;
+        response["audio_base64"] =
+            serde_json::json!(base64::engine::general_purpose::STANDARD.encode(audio_data));
+    }
 
     serde_json::to_string_pretty(&response).map_err(|e| format!("Serialize error: {e}"))
 }
