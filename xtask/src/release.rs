@@ -397,7 +397,7 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
             .status();
 
         // Re-compute prev_tag since we deleted the old one
-        prev_tag = find_latest_stable_tag(&root);
+        prev_tag = find_latest_tag(&root, true);
     }
 
     // --- Generate changelog ---
