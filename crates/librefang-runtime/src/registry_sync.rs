@@ -65,13 +65,23 @@ pub fn sync_registry(home_dir: &Path) {
         }
     }
 
-    // Pre-install the default assistant agent template
-    let assistant_src = registry_cache.join("agents").join("assistant");
-    if assistant_src.exists() {
-        let assistant_dest = home_dir.join("agents").join("assistant");
-        if !assistant_dest.exists() {
-            let _ = std::fs::create_dir_all(&assistant_dest);
-            let _ = copy_dir_recursive(&assistant_src, &assistant_dest);
+    // Pre-install all agent templates from registry
+    let agents_src = registry_cache.join("agents");
+    if agents_src.exists() {
+        let agents_dest = home_dir.join("agents");
+        if let Ok(entries) = std::fs::read_dir(&agents_src) {
+            for entry in entries.flatten() {
+                let src = entry.path();
+                if !src.is_dir() || !src.join("agent.toml").exists() {
+                    continue;
+                }
+                let name = src.file_name().unwrap_or_default();
+                let dest = agents_dest.join(name);
+                if !dest.exists() {
+                    let _ = std::fs::create_dir_all(&dest);
+                    let _ = copy_dir_recursive(&src, &dest);
+                }
+            }
         }
     }
 
@@ -84,10 +94,10 @@ pub fn sync_registry(home_dir: &Path) {
         }
     }
 
-    // Clean up stale hand directories in user's own hands dir
-    let hands_dir = home_dir.join("workspaces").join("hands");
-    if hands_dir.exists() {
-        cleanup_stale_dirs(&hands_dir);
+    // Clean up stale hand directories in workspaces
+    let workspaces_dir = home_dir.join("workspaces");
+    if workspaces_dir.exists() {
+        cleanup_stale_dirs(&workspaces_dir);
     }
 }
 
@@ -566,7 +576,7 @@ mod tests {
     #[test]
     fn test_cleanup_stale_dirs() {
         let tmp = tempfile::tempdir().unwrap();
-        let hands = tmp.path().join("workspaces").join("hands");
+        let hands = tmp.path().join("workspaces");
 
         // Stale: has agent.toml but no HAND.toml
         let stale = hands.join("old-hand");

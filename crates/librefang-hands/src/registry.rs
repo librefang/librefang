@@ -305,7 +305,7 @@ impl HandRegistry {
             )));
         }
 
-        let hand_dir = home_dir.join("workspaces").join("hands").join(&def.id);
+        let hand_dir = home_dir.join("workspaces").join(&def.id);
         std::fs::create_dir_all(&hand_dir)?;
         std::fs::write(hand_dir.join("HAND.toml"), toml_content)?;
         if !skill_content.is_empty() {
@@ -736,20 +736,11 @@ fn check_option_available(provider_env: Option<&str>, binary: Option<&str>) -> b
 mod tests {
     use super::*;
 
-    /// Ensure the test home dir has synced registry content and
-    /// migrated directory layout (hands/ → workspaces/hands/).
+    /// Ensure the test home dir has synced registry content.
     fn ensure_test_home() -> std::path::PathBuf {
         let home = librefang_runtime::registry_sync::resolve_home_dir_for_tests();
-        // Sync if needed
         if librefang_runtime::registry_sync::needs_sync(&home) {
             librefang_runtime::registry_sync::sync_registry(&home);
-        }
-        // Migrate old hands/ → workspaces/hands/ if needed
-        let old_hands = home.join("hands");
-        let new_hands = home.join("workspaces").join("hands");
-        if old_hands.is_dir() && !new_hands.exists() {
-            let _ = std::fs::create_dir_all(home.join("workspaces"));
-            let _ = std::fs::rename(&old_hands, &new_hands);
         }
         home
     }
@@ -813,11 +804,11 @@ system_prompt = "Test prompt"
         assert_eq!(def.id, "uptime-watcher");
         assert!(tmp
             .path()
-            .join("workspaces/hands/uptime-watcher/HAND.toml")
+            .join("workspaces/uptime-watcher/HAND.toml")
             .exists());
         assert!(tmp
             .path()
-            .join("workspaces/hands/uptime-watcher/SKILL.md")
+            .join("workspaces/uptime-watcher/SKILL.md")
             .exists());
         assert!(reg.get_definition("uptime-watcher").is_some());
     }
