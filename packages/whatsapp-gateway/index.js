@@ -11,7 +11,7 @@ const toml = require('toml');
 // SQLite Message Store (better-sqlite3)
 // ---------------------------------------------------------------------------
 const Database = require('better-sqlite3');
-const DB_PATH = path.join(__dirname, 'messages.db');
+const DB_PATH = process.env.WHATSAPP_DB_PATH || path.join(__dirname, 'messages.db');
 
 const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
@@ -432,12 +432,11 @@ function buildStrangerContext(pushName, phone, strangerJid) {
 // ---------------------------------------------------------------------------
 // Step C: Parse NOTIFY_OWNER tags from agent response
 // ---------------------------------------------------------------------------
-const NOTIFY_OWNER_REGEX = /\[NOTIFY_OWNER\]\s*(\{[\s\S]*?\})\s*\[\/NOTIFY_OWNER\]/g;
+const NOTIFY_OWNER_RE = /\[NOTIFY_OWNER\]\s*(\{[\s\S]*?\})\s*\[\/NOTIFY_OWNER\]/g;
 
 function extractNotifyOwner(responseText) {
   const notifications = [];
-  let match;
-  while ((match = NOTIFY_OWNER_REGEX.exec(responseText)) !== null) {
+  for (const match of responseText.matchAll(NOTIFY_OWNER_RE)) {
     try {
       const parsed = JSON.parse(match[1]);
       notifications.push({
@@ -448,11 +447,7 @@ function extractNotifyOwner(responseText) {
       console.error('[gateway] Failed to parse NOTIFY_OWNER JSON:', match[1]);
     }
   }
-  NOTIFY_OWNER_REGEX.lastIndex = 0;
-
-  const cleanedText = responseText.replace(NOTIFY_OWNER_REGEX, '').trim();
-  NOTIFY_OWNER_REGEX.lastIndex = 0;
-
+  const cleanedText = responseText.replace(NOTIFY_OWNER_RE, '').trim();
   return { notifications, cleanedText };
 }
 
@@ -462,16 +457,11 @@ function extractNotifyOwner(responseText) {
 
 // The agent can embed a relay command in its response using this JSON format:
 // [RELAY_TO_STRANGER]{"jid":"...@s.whatsapp.net","message":"..."}[/RELAY_TO_STRANGER]
-const RELAY_REGEX = /\[RELAY_TO_STRANGER\]\s*(\{[\s\S]*?\})\s*\[\/RELAY_TO_STRANGER\]/g;
+const RELAY_RE = /\[RELAY_TO_STRANGER\]\s*(\{[\s\S]*?\})\s*\[\/RELAY_TO_STRANGER\]/g;
 
-/**
- * Extract relay commands from agent response text.
- * Returns { relays: [{jid, message}], cleanedText: string }
- */
 function extractRelayCommands(responseText) {
   const relays = [];
-  let match;
-  while ((match = RELAY_REGEX.exec(responseText)) !== null) {
+  for (const match of responseText.matchAll(RELAY_RE)) {
     try {
       const parsed = JSON.parse(match[1]);
       if (parsed.jid && parsed.message) {
@@ -481,13 +471,7 @@ function extractRelayCommands(responseText) {
       console.error('[gateway] Failed to parse relay command JSON:', match[1]);
     }
   }
-  // Reset regex lastIndex for reuse
-  RELAY_REGEX.lastIndex = 0;
-
-  // Remove relay blocks from the text the owner sees
-  const cleanedText = responseText.replace(RELAY_REGEX, '').trim();
-  RELAY_REGEX.lastIndex = 0;
-
+  const cleanedText = responseText.replace(RELAY_RE, '').trim();
   return { relays, cleanedText };
 }
 
@@ -600,6 +584,16 @@ function resolveAgentId() {
 // ---------------------------------------------------------------------------
 // Baileys connection
 // ---------------------------------------------------------------------------
+async function cleanupSocket() {
+  if (!sock) return;
+  const previousSock = sock;
+  sock = null;
+  ownJid = null;
+  try { previousSock.ev?.removeAllListeners?.(); } catch {}
+  try { previousSock.ws?.close?.(); } catch {}
+  try { previousSock.end?.(); } catch {}
+}
+
 async function startConnection() {
   if (isConnecting) {
     console.log('[gateway] Connection attempt already in progress, skipping');
@@ -665,10 +659,8 @@ async function startConnection() {
         connStatus = 'disconnected';
         statusMessage = 'Logged out. Generate a new QR code to reconnect.';
         qrDataUrl = '';
-        sock = null;
-        ownJid = null;
+        await cleanupSocket();
         reconnectAttempts = 0;
-        // Invalidate cached agent ID so it re-resolves on next connect
         cachedAgentId = null;
         // Remove auth store so next connect gets a fresh QR
         const fs = require('node:fs');
@@ -682,8 +674,7 @@ async function startConnection() {
         connStatus = 'disconnected';
         statusMessage = `Disconnected: ${reason}. Use POST /login/start to reconnect.`;
         qrDataUrl = '';
-        sock = null;
-        ownJid = null;
+        await cleanupSocket();
       } else {
         // All other disconnect reasons are treated as recoverable
         reconnectAttempts += 1;
@@ -783,7 +774,7 @@ async function startConnection() {
         const locName = loc.name || loc.address || '';
         const locLabel = locName ? `${locName} — ` : '';
         // Override mediaDescriptor with enriched location text
-        const locationText = `[Posizione: ${locLabel}${lat}, ${lon} — https://maps.google.com/?q=${lat},${lon}]`;
+        const locationText = `[Location: ${locLabel}${lat}, ${lon} — https://maps.google.com/?q=${lat},${lon}]`;
         // Fall through to normal message processing with this text
         innerMsg._overrideMediaText = locationText;
       }
@@ -798,7 +789,7 @@ async function startConnection() {
         if (telMatch) contactPhone = telMatch[1].trim();
         const fnMatch = vcard.match(/FN:(.+)/i);
         if (fnMatch && !contactName) contactName = fnMatch[1].trim();
-        innerMsg._overrideMediaText = `[Contatto condiviso: ${contactName}${contactPhone ? ' ' + contactPhone : ''}]`;
+        innerMsg._overrideMediaText = `[Shared contact: ${contactName}${contactPhone ? ' ' + contactPhone : ''}]`;
       }
       if (innerMsg.contactsArrayMessage) {
         const contacts = innerMsg.contactsArrayMessage.contacts || [];
@@ -865,7 +856,7 @@ async function startConnection() {
             if (transcriptionText) {
               // Audio with transcription: use transcription as message text
               const ptt = innerMsg.audioMessage?.ptt;
-              messageText = `[${ptt ? 'Vocale' : 'Audio'} trascritto]: ${transcriptionText}`;
+              messageText = `[${ptt ? 'Voice' : 'Audio'} transcription]: ${transcriptionText}`;
             } else {
               messageText = innerMsg._overrideMediaText || getMediaFilename(downloadableMedia.type, downloadableMedia.msg);
             }
@@ -876,7 +867,7 @@ async function startConnection() {
         } else {
           // Download/upload failed — fall back to text descriptor
           console.warn(`[gateway] Media processing failed, falling back to text descriptor`);
-          messageText = messageText || innerMsg._overrideMediaText || mediaDescriptor || '[Media non processabile]';
+          messageText = messageText || innerMsg._overrideMediaText || mediaDescriptor || '[Unprocessable media]';
         }
       } else if (innerMsg._overrideMediaText) {
         // Location or contact — no downloadable media, just enriched text
@@ -913,7 +904,7 @@ async function startConnection() {
 
       // --- FASE 2: Forwarded message context ---
       if (contextInfo?.isForwarded) {
-        messageText = `[Messaggio inoltrato]\n${messageText}`;
+        messageText = `[Forwarded message]\n${messageText}`;
       }
 
       console.log(`[gateway] Incoming from ${pushName} (${phone}): ${messageText.substring(0, 80)}${attachments.length ? ` [+${attachments.length} attachment(s)]` : ''}`);
@@ -1000,7 +991,7 @@ async function startConnection() {
 
               const ownerNotif = notif.summary || `[${pushName}] ${notif.reason}`;
 
-              // Bug fix: Send to ALL owner JIDs (or use primary)
+              // Send notification to primary owner
               await sock.sendMessage(OWNER_JID, { text: ownerNotif });
               console.log(`[gateway] NOTIFY_OWNER sent for ${pushName}: ${notif.reason}`);
             }
@@ -1026,7 +1017,7 @@ async function startConnection() {
                 console.log(`[gateway] Relay delivered to ${r.recipient} (${r.phone})`);
               } else {
                 console.error(`[gateway] Relay failed: ${r.error}`);
-                const failLine = `\n✗ Invio fallito: ${r.error}`;
+                const failLine = `\n✗ Relay failed: ${r.error}`;
                 ownerReply = ownerReply ? ownerReply + failLine : failLine.trim();
               }
             }
@@ -1321,7 +1312,7 @@ async function processMediaMessage(fullMsg, innerMsg, agentId) {
     // Size check
     if (buffer.length > MAX_MEDIA_SIZE) {
       console.warn(`[gateway] Media too large: ${(buffer.length / 1024 / 1024).toFixed(1)}MB > ${MAX_MEDIA_SIZE / 1024 / 1024}MB`);
-      return { fallbackText: `[File troppo grande: ${(buffer.length / 1024 / 1024).toFixed(0)}MB, limite ${MAX_MEDIA_SIZE / 1024 / 1024}MB]` };
+      return { fallbackText: `[File too large: ${(buffer.length / 1024 / 1024).toFixed(0)}MB, limit ${MAX_MEDIA_SIZE / 1024 / 1024}MB]` };
     }
 
     const startTime = Date.now();
@@ -1371,7 +1362,9 @@ function buildRelaySystemInstruction() {
 // ---------------------------------------------------------------------------
 // Forward incoming message to LibreFang API, return agent response
 // ---------------------------------------------------------------------------
-async function forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, attachments) {
+const MAX_FORWARD_RETRIES = 1;
+
+async function forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, attachments, retryCount = 0) {
   // Resolve agent UUID if not cached (or if invalidated on reconnect)
   if (!cachedAgentId) {
     try {
@@ -1419,14 +1412,17 @@ async function forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, 
         res.on('end', () => {
           // If the agent UUID became stale (404), invalidate cache and retry once
           if (res.statusCode === 404) {
-            console.log('[gateway] Agent UUID stale (404), re-resolving...');
-            cachedAgentId = null;
-            // Retry once with fresh UUID
-            resolveAgentId()
-              .then(() => forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, attachments))
-              .then(resolve)
-              .catch(reject);
-            return;
+            if (retryCount < MAX_FORWARD_RETRIES) {
+              console.log('[gateway] Agent UUID stale (404), re-resolving...');
+              cachedAgentId = null;
+              resolveAgentId()
+                .then(() => forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, attachments, retryCount + 1))
+                .then(resolve)
+                .catch(reject);
+              return;
+            }
+            console.error('[gateway] Agent UUID still 404 after retry, giving up');
+            return reject(new Error('Agent not found after retry'));
           }
 
           try {
@@ -1560,13 +1556,16 @@ async function sendImage(to, imageUrl, caption) {
   const jid = to.replace(/^\+/, '').replace(/@.*$/, '') + '@s.whatsapp.net';
 
   // Fetch image into buffer (Baileys needs buffer or local file)
-  const https = imageUrl.startsWith('https') ? require('node:https') : require('node:http');
   const buffer = await new Promise((resolve, reject) => {
-    const request = (url) => {
+    const MAX_REDIRECTS = 5;
+    const request = (url, redirectCount = 0) => {
+      if (redirectCount > MAX_REDIRECTS) {
+        return reject(new Error(`Too many redirects (max ${MAX_REDIRECTS})`));
+      }
       const mod = url.startsWith('https') ? require('node:https') : require('node:http');
       mod.get(url, (resp) => {
         if (resp.statusCode >= 300 && resp.statusCode < 400 && resp.headers.location) {
-          return request(resp.headers.location); // follow redirects
+          return request(resp.headers.location, redirectCount + 1);
         }
         if (resp.statusCode !== 200) {
           return reject(new Error(`Failed to fetch image: HTTP ${resp.statusCode}`));
@@ -1601,10 +1600,20 @@ async function sendImage(to, imageUrl, caption) {
 // ---------------------------------------------------------------------------
 // HTTP server
 // ---------------------------------------------------------------------------
+const MAX_BODY_SIZE = 64 * 1024;
+
 function parseBody(req) {
   return new Promise((resolve, reject) => {
     let body = '';
-    req.on('data', (chunk) => (body += chunk));
+    let size = 0;
+    req.on('data', (chunk) => {
+      size += chunk.length;
+      if (size > MAX_BODY_SIZE) {
+        req.destroy();
+        return reject(new Error('Request body too large'));
+      }
+      body += chunk;
+    });
     req.on('end', () => {
       try {
         resolve(body ? JSON.parse(body) : {});
@@ -1616,12 +1625,28 @@ function parseBody(req) {
   });
 }
 
-function jsonResponse(res, status, data) {
+const ALLOWED_ORIGIN_RE = /^(https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?|tauri:\/\/localhost|app:\/\/localhost)$/i;
+
+function isAllowedOrigin(origin) {
+  return Boolean(origin && ALLOWED_ORIGIN_RE.test(origin));
+}
+
+function buildCorsHeaders(origin) {
+  if (!isAllowedOrigin(origin)) return {};
+  return {
+    'Access-Control-Allow-Origin': origin,
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type',
+    'Vary': 'Origin',
+  };
+}
+
+function jsonResponse(req, res, status, data) {
   const body = JSON.stringify(data);
   res.writeHead(status, {
     'Content-Type': 'application/json',
     'Content-Length': Buffer.byteLength(body),
-    'Access-Control-Allow-Origin': '*',
+    ...buildCorsHeaders(req.headers.origin),
   });
   res.end(body);
 }
@@ -1629,11 +1654,7 @@ function jsonResponse(res, status, data) {
 const server = http.createServer(async (req, res) => {
   // CORS preflight
   if (req.method === 'OPTIONS') {
-    res.writeHead(204, {
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type',
-    });
+    res.writeHead(204, buildCorsHeaders(req.headers.origin));
     return res.end();
   }
 
@@ -1645,7 +1666,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && path === '/login/start') {
       // If already connected, just return success
       if (connStatus === 'connected') {
-        return jsonResponse(res, 200, {
+        return jsonResponse(req, res, 200, {
           qr_data_url: '',
           session_id: sessionId,
           message: 'Already connected to WhatsApp',
@@ -1663,7 +1684,7 @@ const server = http.createServer(async (req, res) => {
         waited += 300;
       }
 
-      return jsonResponse(res, 200, {
+      return jsonResponse(req, res, 200, {
         qr_data_url: qrDataUrl,
         session_id: sessionId,
         message: statusMessage,
@@ -1673,7 +1694,7 @@ const server = http.createServer(async (req, res) => {
 
     // GET /login/status — poll for connection status
     if (req.method === 'GET' && path === '/login/status') {
-      return jsonResponse(res, 200, {
+      return jsonResponse(req, res, 200, {
         connected: connStatus === 'connected',
         message: statusMessage,
         expired: qrExpired,
@@ -1686,11 +1707,11 @@ const server = http.createServer(async (req, res) => {
       const { to, text } = body;
 
       if (!to || !text) {
-        return jsonResponse(res, 400, { error: 'Missing "to" or "text" field' });
+        return jsonResponse(req, res, 400, { error: 'Missing "to" or "text" field' });
       }
 
       await sendMessage(to, text);
-      return jsonResponse(res, 200, { success: true, message: 'Sent' });
+      return jsonResponse(req, res, 200, { success: true, message: 'Sent' });
     }
 
     // POST /message/send-image — send image via URL
@@ -1699,11 +1720,11 @@ const server = http.createServer(async (req, res) => {
       const { to, image_url, caption } = body;
 
       if (!to || !image_url) {
-        return jsonResponse(res, 400, { error: 'Missing "to" or "image_url" field' });
+        return jsonResponse(req, res, 400, { error: 'Missing "to" or "image_url" field' });
       }
 
       await sendImage(to, image_url, caption || '');
-      return jsonResponse(res, 200, { success: true, message: 'Image sent' });
+      return jsonResponse(req, res, 200, { success: true, message: 'Image sent' });
     }
 
     // GET /conversations — list active stranger conversations (Step B)
@@ -1736,14 +1757,14 @@ const server = http.createServer(async (req, res) => {
         retry_count: r.retry_count,
         raw_type: r.raw_type,
       }));
-      return jsonResponse(res, 200, { unprocessed });
+      return jsonResponse(req, res, 200, { unprocessed });
     }
 
     // GET /messages/:jid — message history for a specific chat (Fase 2.1)
     if (req.method === 'GET' && path.startsWith('/messages/')) {
       const jid = decodeURIComponent(path.slice('/messages/'.length));
       if (!jid) {
-        return jsonResponse(res, 400, { error: 'Missing JID in path' });
+        return jsonResponse(req, res, 400, { error: 'Missing JID in path' });
       }
       const limit = parseInt(url.searchParams.get('limit') || '20', 10);
       const since = parseInt(url.searchParams.get('since') || '0', 10);
@@ -1759,12 +1780,12 @@ const server = http.createServer(async (req, res) => {
         processed: r.processed === 1,
         raw_type: r.raw_type,
       }));
-      return jsonResponse(res, 200, { jid, messages });
+      return jsonResponse(req, res, 200, { jid, messages });
     }
 
     // GET /health — health check
     if (req.method === 'GET' && path === '/health') {
-      return jsonResponse(res, 200, {
+      return jsonResponse(req, res, 200, {
         status: 'ok',
         connected: connStatus === 'connected',
         session_id: sessionId || null,
@@ -1773,10 +1794,10 @@ const server = http.createServer(async (req, res) => {
     }
 
     // 404
-    jsonResponse(res, 404, { error: 'Not found' });
+    jsonResponse(req, res, 404, { error: 'Not found' });
   } catch (err) {
     console.error(`[gateway] ${req.method} ${path} error:`, err.message);
-    jsonResponse(res, 500, { error: err.message });
+    jsonResponse(req, res, 500, { error: err.message });
   }
 });
 
@@ -1821,3 +1842,15 @@ process.on('SIGTERM', () => {
   if (sock) sock.end();
   server.close(() => process.exit(0));
 });
+
+// Export for testing
+module.exports = {
+  extractNotifyOwner,
+  extractRelayCommands,
+  buildConversationsContext,
+  isRateLimited,
+  buildCorsHeaders,
+  isAllowedOrigin,
+  parseBody,
+  MAX_BODY_SIZE,
+};
