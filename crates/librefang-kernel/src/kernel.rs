@@ -3578,16 +3578,11 @@ system_prompt = "You are a helpful assistant."
         }
     }
 
-    /// Resolve a specialist agent by name — find existing standalone or spawn from template.
-    /// Does NOT reuse hand-shared agents (they have different system prompts and tools).
+    /// Resolve a specialist agent by name — find existing or spawn from template.
     fn resolve_or_spawn_specialist(&self, name: &str) -> KernelResult<AgentId> {
-        // Check if already running as a standalone agent (not part of a hand)
         if let Some(entry) = self.registry.find_by_name(name) {
-            if !entry.tags.iter().any(|t| t.starts_with("hand:")) {
-                return Ok(entry.id);
-            }
+            return Ok(entry.id);
         }
-        // Spawn from template
         let manifest = router::load_template_manifest(&self.config.home_dir, name)
             .map_err(|e| KernelError::LibreFang(LibreFangError::Internal(e)))?;
         let id = self.spawn_agent(manifest)?;
@@ -5402,8 +5397,11 @@ system_prompt = "You are a helpful assistant."
         for (role, hand_agent) in &def.agents {
             let mut manifest = hand_agent.manifest.clone();
 
-            // Reuse existing agent if one with the same name is already running
-            // (shared across hands — same memory, sessions, workspace)
+            // Prefix hand agent name with hand_id to avoid colliding with
+            // standalone specialist agents spawned by routing.
+            manifest.name = format!("{hand_id}:{}", manifest.name);
+
+            // Reuse existing hand agent if one with the same prefixed name is already running
             if let Some(existing) = self.registry.find_by_name(&manifest.name) {
                 agent_ids_map.insert(role.clone(), existing.id);
                 continue;
