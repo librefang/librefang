@@ -1,16 +1,18 @@
 name: "Release / LTS Branch"
 
-# When an LTS tag is pushed (e.g. v2026.3-lts), automatically create
-# a release/ branch for long-term maintenance. Patch fixes are cherry-picked
-# to this branch and tagged as v2026.3-lts.1, v2026.3-lts.2, etc.
+# When a .0-lts tag is pushed (e.g. v2026.3.0-lts), automatically create
+# a release/ branch for long-term maintenance. Patches are cherry-picked
+# to this branch and tagged as v2026.3.1-lts, v2026.3.2-lts, etc.
 #
-# The -lts tag should point to the last stable release of that month.
+# Version scheme: YYYY.M.PATCH-lts
+#   v2026.3.0-lts  → initial LTS, creates release/2026.3
+#   v2026.3.1-lts  → patch 1 on release/2026.3
+#   v2026.3.2-lts  → patch 2
 
 on:
   push:
     tags:
       - "v*-lts"
-      - "v*-lts.*"
 
 permissions:
   contents: write
@@ -19,22 +21,29 @@ jobs:
   create_lts_branch:
     name: Create LTS Branch
     runs-on: ubuntu-latest
-    # Only create branch for the initial -lts tag, not patch tags (-lts.N)
-    if: ${{ !contains(github.ref, '-lts.') }}
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
-      - name: Create release branch
+      - name: Create release branch (only for .0-lts)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
-          # Extract base version: v2026.3-lts -> 2026.3
+          # Extract: v2026.3.0-lts -> 2026.3.0
           BASE="${TAG#v}"
           BASE="${BASE%-lts}"
-          BRANCH="release/$BASE"
+          # YYYY.M from YYYY.M.PATCH
+          YEAR_MONTH="$(echo "$BASE" | cut -d. -f1,2)"
+          PATCH="$(echo "$BASE" | cut -d. -f3)"
+          BRANCH="release/$YEAR_MONTH"
+
+          # Only create branch for patch 0 (initial LTS)
+          if [ "$PATCH" != "0" ]; then
+            echo "Patch tag ($TAG), branch $BRANCH should already exist"
+            exit 0
+          fi
 
           if git ls-remote --heads origin "$BRANCH" | grep -q "$BRANCH"; then
             echo "Branch $BRANCH already exists, skipping"

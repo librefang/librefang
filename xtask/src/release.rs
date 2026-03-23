@@ -195,11 +195,24 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
             let next_beta = beta_count + 1;
             let next_rc = rc_count + 1;
 
-            // Compute LTS base: YYYY.M (no day/hour)
+            // Compute LTS: YYYY.M.PATCH-lts
             let lts_base = {
                 let now = chrono::Local::now();
                 format!("{}.{}", now.format("%Y"), now.format("%-m"))
             };
+            // Count existing LTS tags to auto-increment patch
+            let lts_count = Command::new("git")
+                .args(["tag", "-l", &format!("v{}.*-lts", lts_base)])
+                .current_dir(&root)
+                .output()
+                .map(|o| {
+                    String::from_utf8_lossy(&o.stdout)
+                        .lines()
+                        .filter(|l| !l.trim().is_empty())
+                        .count()
+                })
+                .unwrap_or(0);
+            let next_lts_patch = lts_count;
 
             println!();
             println!(
@@ -211,7 +224,7 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
             println!("  1) stable  -> {}", base_version);
             println!("  2) beta    -> {}-beta{}", base_version, next_beta);
             println!("  3) rc      -> {}-rc{}", base_version, next_rc);
-            println!("  4) lts     -> {}-lts", lts_base);
+            println!("  4) lts     -> {}.{}-lts", lts_base, next_lts_patch);
             println!();
 
             let choice = prompt("Choose [1/2/3/4]: ");
@@ -219,7 +232,7 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
                 "1" => base_version,
                 "2" => format!("{}-beta{}", base_version, next_beta),
                 "3" => format!("{}-rc{}", base_version, next_rc),
-                "4" => format!("{}-lts", lts_base),
+                "4" => format!("{}.{}-lts", lts_base, next_lts_patch),
                 _ => return Err("Invalid choice".into()),
             }
         }
@@ -257,10 +270,14 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
         println!("  Tag:     {}", tag);
         if is_lts {
             println!("  Type:    LTS (long-term support)");
-            let lts_branch = format!(
-                "release/{}",
-                version.split("-lts").next().unwrap_or(&version)
-            );
+            // v2026.3.0-lts -> release/2026.3, v2026.3.1-lts -> release/2026.3
+            let lts_ver = version.split("-lts").next().unwrap_or(&version);
+            let parts: Vec<&str> = lts_ver.split('.').collect();
+            let lts_branch = if parts.len() >= 2 {
+                format!("release/{}.{}", parts[0], parts[1])
+            } else {
+                format!("release/{}", lts_ver)
+            };
             println!("  Branch:  {} (auto-created on push)", lts_branch);
         } else if is_prerelease {
             println!("  Type:    pre-release");

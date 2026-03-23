@@ -114,11 +114,13 @@ jobs:
           fi
 
           # LTS releases get a special label
-          if echo "$TAG" | grep -qE '\-lts'; then
+          if echo "$TAG" | grep -qE '\-lts$'; then
+            # v2026.3.0-lts -> release/2026.3
             LTS_BASE="${TAG#v}"
-            LTS_BASE="${LTS_BASE%-lts*}"
+            LTS_BASE="${LTS_BASE%-lts}"
+            LTS_BRANCH="$(echo "$LTS_BASE" | cut -d. -f1,2)"
             echo "" >> /tmp/release-body.md
-            echo "> **LTS Release** — this version receives long-term security and bug fixes on the \`release/${LTS_BASE}\` branch." >> /tmp/release-body.md
+            echo "> **LTS Release** — this version receives long-term security and bug fixes on the \`release/${LTS_BRANCH}\` branch." >> /tmp/release-body.md
           fi
 
           if gh release view "$TAG" &>/dev/null; then
