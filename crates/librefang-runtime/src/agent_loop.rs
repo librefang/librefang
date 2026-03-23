@@ -416,6 +416,19 @@ pub async fn run_agent_loop(
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
 
+    // Extract sender context from manifest metadata (set by kernel for per-sender
+    // trust and channel-specific tool authorization).
+    let sender_user_id: Option<String> = manifest
+        .metadata
+        .get("sender_user_id")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let sender_channel: Option<String> = manifest
+        .metadata
+        .get("sender_channel")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
     let stable_prefix_mode = stable_prefix_mode_enabled(manifest);
 
     // Recall relevant memories — use context engine if available, else fallback to inline logic.
@@ -1183,6 +1196,8 @@ pub async fn run_agent_loop(
                             tts_engine,
                             docker_config,
                             process_manager,
+                            sender_user_id.as_deref(),
+                            sender_channel.as_deref(),
                         ),
                     )
                     .await
@@ -1783,6 +1798,19 @@ pub async fn run_agent_loop_streaming(
         .get("hand_allowed_env")
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
+
+    // Extract sender context from manifest metadata (set by kernel for per-sender
+    // trust and channel-specific tool authorization).
+    let sender_user_id: Option<String> = manifest
+        .metadata
+        .get("sender_user_id")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let sender_channel: Option<String> = manifest
+        .metadata
+        .get("sender_channel")
+        .and_then(|v| v.as_str())
+        .map(String::from);
 
     let stable_prefix_mode = stable_prefix_mode_enabled(manifest);
 
@@ -2561,6 +2589,8 @@ pub async fn run_agent_loop_streaming(
                             tts_engine,
                             docker_config,
                             process_manager,
+                            sender_user_id.as_deref(),
+                            sender_channel.as_deref(),
                         ),
                     )
                     .await

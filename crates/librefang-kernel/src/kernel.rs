@@ -3042,6 +3042,23 @@ system_prompt = "You are a helpful assistant."
             }
         }
 
+        // Inject sender context into manifest metadata so the tool runner can
+        // use it for per-sender trust and channel-specific authorization rules.
+        if let Some(ctx) = sender_context {
+            if !ctx.user_id.is_empty() {
+                manifest.metadata.insert(
+                    "sender_user_id".to_string(),
+                    serde_json::Value::String(ctx.user_id.clone()),
+                );
+            }
+            if !ctx.channel.is_empty() {
+                manifest.metadata.insert(
+                    "sender_channel".to_string(),
+                    serde_json::Value::String(ctx.channel.clone()),
+                );
+            }
+        }
+
         let memory = Arc::clone(&self.memory);
         // Build link context from user message (auto-extract URLs for the agent)
         let message_owned = if let Some(link_ctx) =
@@ -3993,6 +4010,23 @@ system_prompt = "You are a helpful assistant."
         } else {
             message.to_string()
         };
+
+        // Inject sender context into manifest metadata so the tool runner can
+        // use it for per-sender trust and channel-specific authorization rules.
+        if let Some(ctx) = sender_context {
+            if !ctx.user_id.is_empty() {
+                manifest.metadata.insert(
+                    "sender_user_id".to_string(),
+                    serde_json::Value::String(ctx.user_id.clone()),
+                );
+            }
+            if !ctx.channel.is_empty() {
+                manifest.metadata.insert(
+                    "sender_channel".to_string(),
+                    serde_json::Value::String(ctx.channel.clone()),
+                );
+            }
+        }
 
         let proactive_memory = self.proactive_memory.get().cloned();
 
@@ -8597,6 +8631,26 @@ impl KernelHandle for LibreFangKernel {
         self.approval_manager.requires_approval(tool_name)
     }
 
+    fn requires_approval_with_context(
+        &self,
+        tool_name: &str,
+        sender_id: Option<&str>,
+        channel: Option<&str>,
+    ) -> bool {
+        self.approval_manager
+            .requires_approval_with_context(tool_name, sender_id, channel)
+    }
+
+    fn is_tool_denied_with_context(
+        &self,
+        tool_name: &str,
+        sender_id: Option<&str>,
+        channel: Option<&str>,
+    ) -> bool {
+        self.approval_manager
+            .is_tool_denied_with_context(tool_name, sender_id, channel)
+    }
+
     async fn request_approval(
         &self,
         agent_id: &str,
@@ -8628,6 +8682,8 @@ impl KernelHandle for LibreFangKernel {
             risk_level,
             requested_at: chrono::Utc::now(),
             timeout_secs: policy.timeout_secs,
+            sender_id: None,
+            channel: None,
         };
 
         // Publish an ApprovalRequested event so channel adapters can notify users

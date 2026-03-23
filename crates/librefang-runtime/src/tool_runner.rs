@@ -115,6 +115,8 @@ pub async fn execute_tool(
     tts_engine: Option<&crate::tts::TtsEngine>,
     docker_config: Option<&librefang_types::config::DockerSandboxConfig>,
     process_manager: Option<&crate::process_manager::ProcessManager>,
+    sender_id: Option<&str>,
+    channel: Option<&str>,
 ) -> ToolResult {
     // Normalize the tool name through compat mappings so LLM-hallucinated aliases
     // (e.g. "fs-write" → "file_write") resolve to the canonical LibreFang name.
@@ -137,9 +139,23 @@ pub async fn execute_tool(
     let skip_approval_for_full_exec = tool_name == "shell_exec"
         && exec_policy.is_some_and(|p| p.mode == librefang_types::config::ExecSecurityMode::Full);
 
-    // Approval gate: check if this tool requires human approval before execution
+    // Approval gate: check if this tool requires human approval before execution.
+    // Uses sender/channel context for per-sender trust and channel-specific policies.
     if let Some(kh) = kernel {
-        if !skip_approval_for_full_exec && kh.requires_approval(tool_name) {
+        if kh.is_tool_denied_with_context(tool_name, sender_id, channel) {
+            warn!(tool_name, channel, "Execution denied by channel policy");
+            return ToolResult {
+                tool_use_id: tool_use_id.to_string(),
+                content: format!(
+                    "Execution denied: '{tool_name}' is blocked by the active channel policy."
+                ),
+                is_error: true,
+            };
+        }
+
+        if !skip_approval_for_full_exec
+            && kh.requires_approval_with_context(tool_name, sender_id, channel)
+        {
             let agent_id_str = caller_agent_id.unwrap_or("unknown");
             let input_str = input.to_string();
             let summary = format!(
@@ -3717,6 +3733,8 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // sender_id
+            None, // channel
         )
         .await;
         assert!(
@@ -3747,6 +3765,8 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // sender_id
+            None, // channel
         )
         .await;
         assert!(result.is_error);
@@ -3774,6 +3794,8 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // sender_id
+            None, // channel
         )
         .await;
         assert!(result.is_error);
@@ -3801,6 +3823,8 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // sender_id
+            None, // channel
         )
         .await;
         assert!(result.is_error);
@@ -3828,6 +3852,8 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // sender_id
+            None, // channel
         )
         .await;
         // web_search now attempts a real fetch; may succeed or fail depending on network
@@ -3855,6 +3881,8 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // sender_id
+            None, // channel
         )
         .await;
         assert!(result.is_error);
@@ -3882,6 +3910,8 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // sender_id
+            None, // channel
         )
         .await;
         assert!(result.is_error);
@@ -3910,6 +3940,8 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // sender_id
+            None, // channel
         )
         .await;
         assert!(result.is_error);
@@ -3942,6 +3974,8 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // sender_id
+            None, // channel
         )
         .await;
         // Should fail for file-not-found, NOT for permission denied
@@ -3990,6 +4024,8 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // sender_id
+            None, // channel
         )
         .await;
         assert!(
@@ -4023,6 +4059,8 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // sender_id
+            None, // channel
         )
         .await;
         assert!(result.is_error);
@@ -4063,6 +4101,8 @@ mod tests {
             None,
             None,
             None,
+            None, // sender_id
+            None, // channel
         )
         .await;
 
@@ -4104,6 +4144,8 @@ mod tests {
             None,
             None,
             None,
+            None, // sender_id
+            None, // channel
         )
         .await;
 
@@ -4273,6 +4315,8 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // sender_id
+            None, // channel
         )
         .await;
         assert!(result.is_error);
@@ -4319,6 +4363,8 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // sender_id
+            None, // channel
         )
         .await;
         assert!(result.is_error);
