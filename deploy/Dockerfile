@@ -28,8 +28,8 @@ COPY --from=dashboard-builder /build/static/react ./crates/librefang-api/static/
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/build/target \
-    cargo build --bin librefang && \
-    cp target/debug/librefang /usr/local/bin/librefang
+    cargo build --release --bin librefang && \
+    cp target/release/librefang /usr/local/bin/librefang
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
