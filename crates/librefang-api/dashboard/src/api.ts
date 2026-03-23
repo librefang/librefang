@@ -409,6 +409,19 @@ export interface UsageByModelItem {
   call_count?: number;
 }
 
+export interface ModelPerformanceItem {
+  model?: string;
+  total_cost_usd?: number;
+  total_input_tokens?: number;
+  total_output_tokens?: number;
+  call_count?: number;
+  avg_latency_ms?: number;
+  min_latency_ms?: number;
+  max_latency_ms?: number;
+  cost_per_call?: number;
+  avg_latency_per_call?: number;
+}
+
 export interface UsageByAgentItem {
   agent_id?: string;
   name?: string;
@@ -1181,6 +1194,11 @@ export async function listUsageByModel(): Promise<UsageByModelItem[]> {
   return data.models ?? [];
 }
 
+export async function getUsageByModelPerformance(): Promise<ModelPerformanceItem[]> {
+  const data = await get<{ models?: ModelPerformanceItem[] }>("/api/usage/by-model/performance");
+  return data.models ?? [];
+}
+
 export async function getUsageDaily(): Promise<UsageDailyResponse> {
   return get<UsageDailyResponse>("/api/usage/daily");
 }
@@ -1568,4 +1586,95 @@ export async function installPluginDeps(name: string): Promise<ApiActionResponse
 
 export async function listPluginRegistries(): Promise<{ registries: RegistryEntry[] }> {
   return get<{ registries: RegistryEntry[] }>("/api/plugins/registries");
+}
+
+export interface PromptVersion {
+  id: string;
+  agent_id: string;
+  version: number;
+  content_hash: string;
+  system_prompt: string;
+  tools: string[];
+  variables: string[];
+  created_at: string;
+  created_by: string;
+  is_active: boolean;
+  description?: string;
+}
+
+export interface PromptExperiment {
+  id: string;
+  name: string;
+  agent_id: string;
+  status: "draft" | "running" | "paused" | "completed";
+  traffic_split: number[];
+  success_criteria: {
+    require_user_helpful: boolean;
+    require_no_tool_errors: boolean;
+    require_non_empty: boolean;
+    custom_min_score?: number;
+  };
+  started_at?: string;
+  ended_at?: string;
+  created_at: string;
+  variants: ExperimentVariant[];
+}
+
+export interface ExperimentVariant {
+  id: string;
+  name: string;
+  prompt_version_id: string;
+  description?: string;
+}
+
+export interface ExperimentVariantMetrics {
+  variant_id: string;
+  variant_name: string;
+  total_requests: number;
+  successful_requests: number;
+  failed_requests: number;
+  success_rate: number;
+  avg_latency_ms: number;
+  avg_cost_usd: number;
+  total_cost_usd: number;
+}
+
+export async function listPromptVersions(agentId: string): Promise<PromptVersion[]> {
+  return get<PromptVersion[]>(`/api/agents/${encodeURIComponent(agentId)}/prompts/versions`);
+}
+
+export async function createPromptVersion(agentId: string, version: Omit<PromptVersion, "id" | "agent_id">): Promise<PromptVersion> {
+  return post<PromptVersion>(`/api/agents/${encodeURIComponent(agentId)}/prompts/versions`, version);
+}
+
+export async function deletePromptVersion(versionId: string): Promise<ApiActionResponse> {
+  return del<ApiActionResponse>(`/api/prompts/versions/${encodeURIComponent(versionId)}`);
+}
+
+export async function activatePromptVersion(versionId: string, agentId: string): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>(`/api/prompts/versions/${encodeURIComponent(versionId)}/activate`, { agent_id: agentId });
+}
+
+export async function listExperiments(agentId: string): Promise<PromptExperiment[]> {
+  return get<PromptExperiment[]>(`/api/agents/${encodeURIComponent(agentId)}/prompts/experiments`);
+}
+
+export async function createExperiment(agentId: string, experiment: Omit<PromptExperiment, "id" | "agent_id">): Promise<PromptExperiment> {
+  return post<PromptExperiment>(`/api/agents/${encodeURIComponent(agentId)}/prompts/experiments`, experiment);
+}
+
+export async function startExperiment(experimentId: string): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>(`/api/prompts/experiments/${encodeURIComponent(experimentId)}/start`, {});
+}
+
+export async function pauseExperiment(experimentId: string): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>(`/api/prompts/experiments/${encodeURIComponent(experimentId)}/pause`, {});
+}
+
+export async function completeExperiment(experimentId: string): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>(`/api/prompts/experiments/${encodeURIComponent(experimentId)}/complete`, {});
+}
+
+export async function getExperimentMetrics(experimentId: string): Promise<ExperimentVariantMetrics[]> {
+  return get<ExperimentVariantMetrics[]>(`/api/prompts/experiments/${encodeURIComponent(experimentId)}/metrics`);
 }

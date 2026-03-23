@@ -22,6 +22,8 @@ pub struct UsageRecord {
     pub cost_usd: f64,
     /// Number of tool calls in this interaction.
     pub tool_calls: u32,
+    /// Latency in milliseconds.
+    pub latency_ms: u64,
 }
 
 /// Summary of usage over a period.
@@ -52,6 +54,31 @@ pub struct ModelUsage {
     pub total_output_tokens: u64,
     /// Number of calls.
     pub call_count: u64,
+}
+
+/// Model performance metrics including latency statistics.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelPerformance {
+    /// Model name.
+    pub model: String,
+    /// Total cost for this model.
+    pub total_cost_usd: f64,
+    /// Total input tokens.
+    pub total_input_tokens: u64,
+    /// Total output tokens.
+    pub total_output_tokens: u64,
+    /// Number of calls.
+    pub call_count: u64,
+    /// Average latency in milliseconds.
+    pub avg_latency_ms: f64,
+    /// Minimum latency in milliseconds.
+    pub min_latency_ms: u64,
+    /// Maximum latency in milliseconds.
+    pub max_latency_ms: u64,
+    /// Cost per call in USD.
+    pub cost_per_call: f64,
+    /// Average latency per call in milliseconds.
+    pub avg_latency_per_call: f64,
 }
 
 /// Daily usage breakdown.
@@ -88,8 +115,8 @@ impl UsageStore {
         let id = uuid::Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
         conn.execute(
-            "INSERT INTO usage_events (id, agent_id, timestamp, model, input_tokens, output_tokens, cost_usd, tool_calls)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO usage_events (id, agent_id, timestamp, model, input_tokens, output_tokens, cost_usd, tool_calls, latency_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             rusqlite::params![
                 id,
                 record.agent_id.0.to_string(),
@@ -99,6 +126,7 @@ impl UsageStore {
                 record.output_tokens as i64,
                 record.cost_usd,
                 record.tool_calls as i64,
+                record.latency_ms as i64,
             ],
         )
         .map_err(|e| LibreFangError::Memory(e.to_string()))?;
@@ -264,6 +292,61 @@ impl UsageStore {
         Ok(results)
     }
 
+    /// Query model performance metrics including latency statistics.
+    pub fn query_model_performance(&self) -> LibreFangResult<Vec<ModelPerformance>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT model, 
+                        COALESCE(SUM(cost_usd), 0.0), 
+                        COALESCE(SUM(input_tokens), 0), 
+                        COALESCE(SUM(output_tokens), 0), 
+                        COUNT(*),
+                        COALESCE(AVG(latency_ms), 0),
+                        COALESCE(MIN(latency_ms), 0),
+                        COALESCE(MAX(latency_ms), 0)
+                 FROM usage_events 
+                 GROUP BY model 
+                 ORDER BY SUM(cost_usd) DESC",
+            )
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+
+        let rows = stmt
+            .query_map([], |row| {
+                let call_count: i64 = row.get(4)?;
+                let total_cost_usd: f64 = row.get(1)?;
+                let avg_latency_ms: f64 = row.get(5)?;
+
+                Ok(ModelPerformance {
+                    model: row.get(0)?,
+                    total_cost_usd,
+                    total_input_tokens: row.get::<_, i64>(2)? as u64,
+                    total_output_tokens: row.get::<_, i64>(3)? as u64,
+                    call_count: call_count as u64,
+                    avg_latency_ms,
+                    min_latency_ms: row.get::<_, i64>(6)? as u64,
+                    max_latency_ms: row.get::<_, i64>(7)? as u64,
+                    cost_per_call: if call_count > 0 {
+                        total_cost_usd / call_count as f64
+                    } else {
+                        0.0
+                    },
+                    avg_latency_per_call: avg_latency_ms,
+                })
+            })
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+
+        let mut results = Vec::new();
+        for row in rows {
+            results.push(row.map_err(|e| LibreFangError::Memory(e.to_string()))?);
+        }
+        Ok(results)
+    }
+
     /// Query daily usage breakdown for the last N days.
     pub fn query_daily_breakdown(&self, days: u32) -> LibreFangResult<Vec<DailyBreakdown>> {
         let conn = self
@@ -375,6 +458,7 @@ mod tests {
                 output_tokens: 50,
                 cost_usd: 0.001,
                 tool_calls: 2,
+                latency_ms: 150,
             })
             .unwrap();
 
@@ -386,6 +470,7 @@ mod tests {
                 output_tokens: 200,
                 cost_usd: 0.01,
                 tool_calls: 1,
+                latency_ms: 300,
             })
             .unwrap();
 
@@ -411,6 +496,7 @@ mod tests {
                 output_tokens: 50,
                 cost_usd: 0.001,
                 tool_calls: 0,
+                latency_ms: 100,
             })
             .unwrap();
 
@@ -422,6 +508,7 @@ mod tests {
                 output_tokens: 100,
                 cost_usd: 0.005,
                 tool_calls: 1,
+                latency_ms: 200,
             })
             .unwrap();
 
@@ -444,6 +531,7 @@ mod tests {
                     output_tokens: 50,
                     cost_usd: 0.001,
                     tool_calls: 0,
+                    latency_ms: 100,
                 })
                 .unwrap();
         }
@@ -456,6 +544,7 @@ mod tests {
                 output_tokens: 200,
                 cost_usd: 0.01,
                 tool_calls: 1,
+                latency_ms: 250,
             })
             .unwrap();
 
@@ -480,6 +569,7 @@ mod tests {
                 output_tokens: 50,
                 cost_usd: 0.05,
                 tool_calls: 0,
+                latency_ms: 150,
             })
             .unwrap();
 
@@ -500,6 +590,7 @@ mod tests {
                 output_tokens: 50,
                 cost_usd: 0.123,
                 tool_calls: 0,
+                latency_ms: 100,
             })
             .unwrap();
 
@@ -520,6 +611,7 @@ mod tests {
                 output_tokens: 50,
                 cost_usd: 0.001,
                 tool_calls: 0,
+                latency_ms: 100,
             })
             .unwrap();
 
@@ -537,5 +629,55 @@ mod tests {
         let summary = store.query_summary(None).unwrap();
         assert_eq!(summary.call_count, 0);
         assert_eq!(summary.total_cost_usd, 0.0);
+    }
+
+    #[test]
+    fn test_query_model_performance() {
+        let store = setup();
+        let agent_id = AgentId::new();
+
+        // Record usage events with different latencies
+        for (latency, cost) in [(100, 0.001), (200, 0.002), (300, 0.003)] {
+            store
+                .record(&UsageRecord {
+                    agent_id,
+                    model: "haiku".to_string(),
+                    input_tokens: 100,
+                    output_tokens: 50,
+                    cost_usd: cost,
+                    tool_calls: 0,
+                    latency_ms: latency,
+                })
+                .unwrap();
+        }
+
+        store
+            .record(&UsageRecord {
+                agent_id,
+                model: "sonnet".to_string(),
+                input_tokens: 500,
+                output_tokens: 200,
+                cost_usd: 0.01,
+                tool_calls: 1,
+                latency_ms: 500,
+            })
+            .unwrap();
+
+        let performance = store.query_model_performance().unwrap();
+        assert_eq!(performance.len(), 2);
+
+        // sonnet should be first (highest cost)
+        let sonnet = &performance[0];
+        assert_eq!(sonnet.model, "sonnet");
+        assert_eq!(sonnet.call_count, 1);
+        assert!((sonnet.avg_latency_ms - 500.0).abs() < 0.1);
+
+        let haiku = &performance[1];
+        assert_eq!(haiku.model, "haiku");
+        assert_eq!(haiku.call_count, 3);
+        // Average of 100, 200, 300 = 200
+        assert!((haiku.avg_latency_ms - 200.0).abs() < 0.1);
+        assert_eq!(haiku.min_latency_ms, 100);
+        assert_eq!(haiku.max_latency_ms, 300);
     }
 }

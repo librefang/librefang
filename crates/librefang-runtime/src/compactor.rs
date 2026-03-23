@@ -813,6 +813,7 @@ mod tests {
             messages: vec![Message::user("hello")],
             context_window_tokens: 0,
             label: None,
+            message_count: 1,
         };
         let config = CompactionConfig::default();
         assert!(!needs_compaction(&session, &config));
@@ -823,12 +824,14 @@ mod tests {
         let messages: Vec<Message> = (0..100)
             .map(|i| Message::user(format!("msg {i}")))
             .collect();
+        let messages_count = messages.len();
         let session = Session {
             id: librefang_types::agent::SessionId::new(),
             agent_id: librefang_types::agent::AgentId::new(),
             messages,
             context_window_tokens: 0,
             label: None,
+            message_count: messages_count as u64,
         };
         let config = CompactionConfig::default();
         assert!(needs_compaction(&session, &config));
@@ -879,6 +882,7 @@ mod tests {
             messages: vec![Message::user("hello"), Message::assistant("hi")],
             context_window_tokens: 0,
             label: None,
+            message_count: 2,
         };
         let config = CompactionConfig {
             threshold: 30,
@@ -969,6 +973,7 @@ mod tests {
             messages,
             context_window_tokens: 0,
             label: None,
+            message_count: 8,
         };
         let config = CompactionConfig {
             threshold: 5,
@@ -1041,6 +1046,7 @@ mod tests {
             messages,
             context_window_tokens: 0,
             label: None,
+            message_count: 100,
         };
         let config = CompactionConfig {
             threshold: 30,
@@ -1168,6 +1174,7 @@ mod tests {
             messages,
             context_window_tokens: 0,
             label: None,
+            message_count: 30,
         };
         let config = CompactionConfig {
             threshold: 10,

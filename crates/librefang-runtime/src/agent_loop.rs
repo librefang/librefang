@@ -293,6 +293,29 @@ pub struct AgentLoopResult {
     /// Distinct from `silent` (agent chose not to reply) — this means the system
     /// couldn't run the agent at all.
     pub provider_not_configured: bool,
+    /// Experiment tracking: when an A/B experiment is running, this holds the variant used.
+    pub experiment_context: Option<ExperimentContext>,
+    /// Latency in milliseconds for this request.
+    pub latency_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExperimentContext {
+    pub experiment_id: uuid::Uuid,
+    pub variant_id: uuid::Uuid,
+    pub variant_name: String,
+    pub request_start: std::time::Instant,
+}
+
+impl Default for ExperimentContext {
+    fn default() -> Self {
+        Self {
+            experiment_id: uuid::Uuid::default(),
+            variant_id: uuid::Uuid::default(),
+            variant_name: String::new(),
+            request_start: std::time::Instant::now(),
+        }
+    }
 }
 
 /// Check if stable_prefix_mode is enabled via manifest metadata.
@@ -399,15 +422,32 @@ pub async fn run_agent_loop(
 ) -> LibreFangResult<AgentLoopResult> {
     info!(agent = %manifest.name, "Starting agent loop");
 
-    // Skip agent loop if no LLM provider is configured (StubDriver).
-    // Return Ok (not Err) — this is a valid state, not a runtime error.
-    if !driver.is_configured() {
-        info!(agent = %manifest.name, "Skipping agent loop — no LLM provider configured");
-        return Ok(AgentLoopResult {
-            silent: true,
-            provider_not_configured: true,
-            ..Default::default()
-        });
+    // Check for running A/B experiment and select variant (round-robin)
+    #[allow(unused_variables, unused_assignments)]
+    let mut experiment_context: Option<ExperimentContext> = None;
+    #[allow(unused_variables, unused_assignments)]
+    if let Some(kernel) = kernel.as_ref() {
+        let agent_id = session.agent_id.to_string();
+        if let Ok(Some(exp)) = kernel.get_running_experiment(&agent_id) {
+            if !exp.variants.is_empty() {
+                // Round-robin: use session message count to pick variant
+                let variant_index = (session.messages.len()) % exp.variants.len();
+                let variant = &exp.variants[variant_index];
+                info!(
+                    agent = %manifest.name,
+                    experiment = %exp.name,
+                    variant = %variant.name,
+                    index = variant_index,
+                    "A/B experiment active - using variant"
+                );
+                experiment_context = Some(ExperimentContext {
+                    experiment_id: exp.id,
+                    variant_id: variant.id,
+                    variant_name: variant.name.clone(),
+                    request_start: std::time::Instant::now(),
+                });
+            }
+        }
     }
 
     // Extract hand-allowed env vars from manifest metadata (set by kernel for hand settings)
@@ -820,6 +860,8 @@ pub async fn run_agent_loop(
                         memories_used: memories_used.clone(),
                         memory_conflicts: Vec::new(),
                         provider_not_configured: false,
+                        experiment_context: None,
+                        latency_ms: 0,
                     });
                 }
 
@@ -1048,6 +1090,8 @@ pub async fn run_agent_loop(
                     memories_used,
                     memory_conflicts,
                     provider_not_configured: false,
+                    experiment_context: None,
+                    latency_ms: 0,
                 });
             }
             StopReason::ToolUse => {
@@ -1439,6 +1483,8 @@ pub async fn run_agent_loop(
                         memories_used: memories_used.clone(),
                         memory_conflicts: Vec::new(),
                         provider_not_configured: false,
+                        experiment_context: None,
+                        latency_ms: 0,
                     });
                 }
             }
@@ -1486,6 +1532,8 @@ pub async fn run_agent_loop(
                         memories_used,
                         memory_conflicts,
                         provider_not_configured: false,
+                        experiment_context: None,
+                        latency_ms: 0,
                     });
                 }
                 // Model hit token limit — add partial response and continue
@@ -1790,8 +1838,35 @@ pub async fn run_agent_loop_streaming(
         return Ok(AgentLoopResult {
             silent: true,
             provider_not_configured: true,
+            experiment_context: None,
             ..Default::default()
         });
+    }
+
+    // Check for running A/B experiment and select variant (round-robin)
+    #[allow(unused_variables, unused_assignments)]
+    let mut experiment_context: Option<ExperimentContext> = None;
+    if let Some(kernel) = kernel.as_ref() {
+        let agent_id = session.agent_id.to_string();
+        if let Ok(Some(exp)) = kernel.get_running_experiment(&agent_id) {
+            if !exp.variants.is_empty() {
+                let variant_index = (session.messages.len()) % exp.variants.len();
+                let variant = &exp.variants[variant_index];
+                info!(
+                    agent = %manifest.name,
+                    experiment = %exp.name,
+                    variant = %variant.name,
+                    index = variant_index,
+                    "A/B experiment active - using variant (streaming)"
+                );
+                experiment_context = Some(ExperimentContext {
+                    experiment_id: exp.id,
+                    variant_id: variant.id,
+                    variant_name: variant.name.clone(),
+                    request_start: std::time::Instant::now(),
+                });
+            }
+        }
     }
 
     // Extract hand-allowed env vars from manifest metadata (set by kernel for hand settings)
@@ -1924,6 +1999,29 @@ pub async fn run_agent_loop_streaming(
     // In stable_prefix_mode, memories are injected as a context message instead
     // (see below) to keep the system prompt prefix stable for caching.
     let mut system_prompt = manifest.model.system_prompt.clone();
+
+    // If running an A/B experiment, use the variant's system prompt instead
+    if let Some(ref ctx) = experiment_context {
+        if let Some(kernel) = kernel.as_ref() {
+            if let Ok(Some(exp)) = kernel.get_running_experiment(&session.agent_id.to_string()) {
+                if let Some(variant) = exp.variants.iter().find(|v| v.id == ctx.variant_id) {
+                    if let Ok(Some(prompt_version)) =
+                        kernel.get_prompt_version(&variant.prompt_version_id.to_string())
+                    {
+                        debug!(
+                            agent = %manifest.name,
+                            experiment = %exp.name,
+                            variant = %variant.name,
+                            version = prompt_version.version,
+                            "Using experiment variant prompt version (streaming)"
+                        );
+                        system_prompt = prompt_version.system_prompt.clone();
+                    }
+                }
+            }
+        }
+    }
+
     let memory_context_msg = if !memories.is_empty() {
         let mem_pairs: Vec<(String, String)> = memories
             .iter()
@@ -2223,6 +2321,8 @@ pub async fn run_agent_loop_streaming(
                         memories_used: memories_used.clone(),
                         memory_conflicts: Vec::new(),
                         provider_not_configured: false,
+                        experiment_context: None,
+                        latency_ms: 0,
                     });
                 }
 
@@ -2421,6 +2521,22 @@ pub async fn run_agent_loop_streaming(
                     }
                 }
 
+                // Record experiment metrics if running an experiment
+                if let Some(ref ctx) = experiment_context {
+                    let latency_ms = ctx.request_start.elapsed().as_millis() as u64;
+                    let cost_usd = 0.0;
+                    let success = !final_response.trim().is_empty();
+                    if let Some(kernel) = kernel.as_ref() {
+                        let _ = kernel.record_experiment_request(
+                            &ctx.experiment_id.to_string(),
+                            &ctx.variant_id.to_string(),
+                            latency_ms,
+                            cost_usd,
+                            success,
+                        );
+                    }
+                }
+
                 // Fire AgentLoopEnd hook
                 if let Some(hook_reg) = hooks {
                     let ctx = crate::hooks::HookContext {
@@ -2447,6 +2563,8 @@ pub async fn run_agent_loop_streaming(
                     memories_used,
                     memory_conflicts,
                     provider_not_configured: false,
+                    experiment_context: None,
+                    latency_ms: 0,
                 });
             }
             StopReason::ToolUse => {
@@ -2846,6 +2964,8 @@ pub async fn run_agent_loop_streaming(
                         memories_used: memories_used.clone(),
                         memory_conflicts: Vec::new(),
                         provider_not_configured: false,
+                        experiment_context: None,
+                        latency_ms: 0,
                     });
                 }
             }
@@ -2892,6 +3012,8 @@ pub async fn run_agent_loop_streaming(
                         memories_used,
                         memory_conflicts,
                         provider_not_configured: false,
+                        experiment_context: None,
+                        latency_ms: 0,
                     });
                 }
                 let text = response.text();
@@ -3870,6 +3992,7 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            message_count: 0,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(EmptyAfterToolUseDriver::new());
@@ -3928,6 +4051,7 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            message_count: 0,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(EmptyMaxTokensDriver);
@@ -3985,6 +4109,7 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            message_count: 0,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(NormalDriver);
@@ -4033,6 +4158,7 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            message_count: 0,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(EmptyAfterToolUseDriver::new());
@@ -4167,6 +4293,7 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            message_count: 0,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(EmptyThenNormalDriver::new());
@@ -4218,6 +4345,7 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            message_count: 0,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(AlwaysEmptyDriver);
@@ -4275,6 +4403,7 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            message_count: 0,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(EmptyMaxTokensDriver);
@@ -5046,6 +5175,7 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            message_count: 0,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(TextToolCallDriver::new());
@@ -5123,6 +5253,7 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            message_count: 0,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(NormalDriver);
@@ -5182,6 +5313,7 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            message_count: 0,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(TextToolCallDriver::new());

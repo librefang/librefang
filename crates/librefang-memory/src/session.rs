@@ -37,6 +37,8 @@ pub struct Session {
     pub context_window_tokens: u64,
     /// Optional human-readable session label.
     pub label: Option<String>,
+    /// Message count for round-robin experiment variant selection.
+    pub message_count: u64,
 }
 
 /// Portable session export for hibernation / session state transfer.
@@ -109,6 +111,7 @@ impl SessionStore {
                     messages,
                     context_window_tokens: tokens as u64,
                     label,
+                    message_count: 0,
                 }))
             }
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -152,6 +155,7 @@ impl SessionStore {
                         messages,
                         context_window_tokens: tokens as u64,
                         label,
+                        message_count: 0,
                     },
                     created_at,
                 )))
@@ -315,6 +319,7 @@ impl SessionStore {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            message_count: 0,
         };
         self.save_session(&session)?;
         Ok(session)
@@ -376,6 +381,7 @@ impl SessionStore {
                     messages,
                     context_window_tokens: tokens as u64,
                     label: lbl,
+                    message_count: 0,
                 }))
             }
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -437,6 +443,7 @@ impl SessionStore {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: label.map(|s| s.to_string()),
+            message_count: 0,
         };
         self.save_session(&session)?;
         Ok(session)

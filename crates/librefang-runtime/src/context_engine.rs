@@ -335,6 +335,7 @@ impl ContextEngine for DefaultContextEngine {
             messages: messages.to_vec(),
             context_window_tokens: context_window_tokens as u64,
             label: None,
+            message_count: 0,
         };
 
         let mut compaction_config = self.compaction_config.clone();

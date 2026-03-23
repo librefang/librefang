@@ -577,6 +577,7 @@ mod tests {
                 output_tokens: 50,
                 cost_usd: 0.001,
                 tool_calls: 0,
+                latency_ms: 150,
             })
             .unwrap();
 
@@ -600,6 +601,7 @@ mod tests {
                 output_tokens: 5000,
                 cost_usd: 0.05,
                 tool_calls: 0,
+                latency_ms: 300,
             })
             .unwrap();
 
@@ -627,6 +629,7 @@ mod tests {
                 output_tokens: 50000,
                 cost_usd: 100.0,
                 tool_calls: 0,
+                latency_ms: 500,
             })
             .unwrap();
 
@@ -857,6 +860,7 @@ mod tests {
                 output_tokens: 200,
                 cost_usd: 0.005,
                 tool_calls: 3,
+                latency_ms: 100,
             })
             .unwrap();
 
