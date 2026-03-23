@@ -1,7 +1,6 @@
 //! Skill definitions loaded from disk at runtime.
 //!
-//! Skills are read from `~/.librefang/skills/` (synced from the registry
-//! via `librefang init`). No compile-time embedding.
+//! Skills are read from `~/.librefang/skills/` (installed from dashboard or user custom).
 
 use crate::openclaw_compat::convert_skillmd_str;
 use crate::SkillManifest;

@@ -189,25 +189,42 @@ fn build_hand_route_candidates(home_dir: Option<&Path>) -> Vec<HandRouteCandidat
 }
 
 fn load_user_hand_route_candidates(home_dir: &Path) -> Vec<HandRouteCandidate> {
-    let hands_dir = home_dir.join("workspaces").join("hands");
-    let Ok(entries) = fs::read_dir(&hands_dir) else {
-        return Vec::new();
-    };
-
+    let mut seen = std::collections::HashSet::new();
     let mut candidates = Vec::new();
-    for entry in entries.flatten() {
-        let hand_dir = entry.path();
-        if !hand_dir.is_dir() {
+
+    // Activated hands first, then registry definitions
+    let dirs = [
+        home_dir.join("workspaces").join("hands"),
+        home_dir.join("registry").join("hands"),
+    ];
+
+    for hands_dir in &dirs {
+        let Ok(entries) = fs::read_dir(hands_dir) else {
             continue;
+        };
+        for entry in entries.flatten() {
+            let hand_dir = entry.path();
+            if !hand_dir.is_dir() {
+                continue;
+            }
+            let name = hand_dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default()
+                .to_string();
+            if !seen.insert(name) {
+                continue;
+            }
+            let hand_toml = hand_dir.join("HAND.toml");
+            let Ok(toml_content) = fs::read_to_string(&hand_toml) else {
+                continue;
+            };
+            let Ok(def) = librefang_hands::bundled::parse_bundled("custom", &toml_content, "")
+            else {
+                continue;
+            };
+            candidates.push(hand_route_candidate_from_definition(def));
         }
-        let hand_toml = hand_dir.join("HAND.toml");
-        let Ok(toml_content) = fs::read_to_string(&hand_toml) else {
-            continue;
-        };
-        let Ok(def) = librefang_hands::bundled::parse_bundled("custom", &toml_content, "") else {
-            continue;
-        };
-        candidates.push(hand_route_candidate_from_definition(def));
     }
 
     candidates
@@ -818,7 +835,6 @@ pub fn all_template_descriptions(agents_dir: &Path) -> Vec<(String, String)> {
         }
         if let Ok(manifest) = load_template_manifest_at(agents_dir, &template) {
             if !manifest.description.is_empty() {
-                // Combine name, description, and tags for richer embedding
                 let embed_text = format!(
                     "{}: {}. Tags: {}",
                     manifest.name,

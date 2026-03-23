@@ -95,7 +95,7 @@ When `LibreFangKernel::boot_with_config()` is called (either by the daemon or in
 
 5. Initialize model catalog
    - Build ModelCatalog with 130+ builtin models, 20+ aliases, 28 providers
-   - Load additional provider definitions from ~/.librefang/providers/*.toml (dynamic catalog)
+   - Load provider definitions from ~/.librefang/providers/*.toml (pre-installed from registry + user custom)
    - Run detect_auth() to check env var presence (never reads secrets)
    - Store as kernel.model_catalog
 
@@ -433,7 +433,7 @@ The `ModelCatalog` (`librefang-runtime/src/model_catalog.rs`) provides a registr
 - **130+ builtin models** across 28+ model families (Claude, GPT, Gemini, DeepSeek, Llama, Mixtral, Command, Jamba, Grok, etc.)
 - **20+ aliases** for convenience (e.g., `claude` -> `claude-sonnet-4-20250514`, `grok` -> `grok-2`)
 - **28 providers** with authentication status detection
-- **Dynamic catalog loading**: Additional provider and model definitions can be placed in `~/.librefang/providers/*.toml` and are merged at boot time, allowing user-defined providers without recompilation
+- **Dynamic catalog loading**: Provider definitions in `~/.librefang/providers/*.toml` (pre-installed from registry + user custom) are merged at boot time, allowing user-defined providers without recompilation
 
 ### Types
 

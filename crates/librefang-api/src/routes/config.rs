@@ -560,14 +560,6 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
             .as_ref()
             .map(|p| p.to_string_lossy().to_string())
     );
-    set!(
-        "workspace_dir",
-        config
-            .workspace_dir
-            .as_ref()
-            .map(|p| p.to_string_lossy().to_string())
-    );
-
     // ── Default Model ──
     set!("default_model", {
         "provider": config.default_model.provider,
@@ -1301,8 +1293,7 @@ pub async fn config_schema(State(state): State<Arc<AppState>>) -> impl IntoRespo
             "stable_prefix_mode": "boolean",
             "prompt_caching": "boolean",
             "max_cron_jobs": "number",
-            "workspaces_dir": "string",
-            "workspace_dir": "string"
+            "workspaces_dir": "string"
         }
     });
     sec!("default_model", {

@@ -2,7 +2,7 @@
 
 LibreFang ships with a comprehensive model catalog covering **3 native LLM drivers**, **49 providers**, **230+ builtin models**, and **23 aliases**. Every provider uses one of three battle-tested drivers: the native **Anthropic** driver, the native **Gemini** driver, or the universal **OpenAI-compatible** driver. This guide is the single source of truth for configuring, selecting, and managing LLM providers in LibreFang.
 
-The model catalog also supports **dynamic loading** — you can add custom provider definitions by placing TOML files in `~/.librefang/providers/`. Any file matching `~/.librefang/providers/*.toml` is merged into the catalog at boot, allowing you to add private endpoints, on-premises deployments, or new providers without modifying the core configuration.
+The model catalog also supports **dynamic loading** — official provider definitions are pre-installed to `~/.librefang/providers/` from the registry on first boot. You can add or override providers by placing custom TOML files in the same directory. All `~/.librefang/providers/*.toml` files are merged into the catalog at boot, allowing you to add private endpoints, on-premises deployments, or new providers without modifying the core configuration.
 
 ---
 
@@ -949,7 +949,7 @@ These are accessed via `/api/media/*` endpoints or through the `image_generate`,
 
 ## Dynamic Provider Loading
 
-Place custom provider definitions in `~/.librefang/providers/`. Each `.toml` file defines one provider:
+Official provider definitions are pre-installed to `~/.librefang/providers/` from the registry. To add or override providers, place custom `.toml` files in the same directory. Each file defines one provider:
 
 ```toml
 # ~/.librefang/providers/my-endpoint.toml

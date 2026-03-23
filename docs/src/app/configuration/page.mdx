@@ -478,7 +478,7 @@ These fields sit at the root of `config.toml` (not inside any `[section]`).
 | `prompt_caching` | bool | `true` | Enable LLM provider prompt caching. Adds cache hints to system prompts (Anthropic: `cache_control`, OpenAI: automatic prefix caching). |
 | `stable_prefix_mode` | bool | `false` | When enabled, avoids volatile system-prompt additions (recalled memory, canonical context) that change every turn, improving provider-side prompt cache hit rates. |
 | `max_cron_jobs` | usize | `500` | Global maximum number of cron jobs across all agents. |
-| `workspaces_dir` | path or null | `null` | Root directory for agent workspaces. Defaults to `~/.librefang/workspaces`. |
+| `workspaces_dir` | path or null | `null` | Root directory for agent workspaces. Defaults to `~/.librefang/workspaces`. Contains agent working directories and the `hands/` subdirectory for user custom hands. |
 | `include` | list of strings | `[]` | Config file includes (relative paths). See [Config Include Mechanism](#config-include-mechanism). |
 | `provider_urls` | map of string→string | `{}` | Provider base URL overrides. Maps provider ID to custom base URL (e.g., `ollama = "http://192.168.1.100:11434/v1"`). Useful for self-hosted or proxied endpoints. |
 | `provider_api_keys` | map of string→string | `{}` | Provider API key env var overrides. Maps provider ID to the name of an environment variable holding the key (e.g., `nvidia = "NVIDIA_API_KEY"`). When not set for a provider, the convention `{PROVIDER_UPPER}_API_KEY` is used. |

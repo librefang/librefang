@@ -535,6 +535,37 @@ fn migrate_workspaces_layout(home_dir: &Path) -> KernelResult<()> {
     Ok(())
 }
 
+/// Initialize a git repo in the home directory for config version control.
+fn init_git_if_missing(home_dir: &Path) {
+    if home_dir.join(".git").exists() {
+        return;
+    }
+    let ok = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(home_dir)
+        .status()
+        .is_ok_and(|s| s.success());
+    if !ok {
+        return;
+    }
+    let gitignore = home_dir.join(".gitignore");
+    if !gitignore.exists() {
+        let _ = std::fs::write(
+            &gitignore,
+            "secrets.env\nvault.enc\ndaemon.json\nlogs/\ncache/\nregistry/\ndata/\n*.db\n*.db-shm\n*.db-wal\n",
+        );
+    }
+    let _ = std::process::Command::new("git")
+        .args(["add", "-A"])
+        .current_dir(home_dir)
+        .status();
+    let _ = std::process::Command::new("git")
+        .args(["commit", "-q", "-m", "chore: initial librefang config"])
+        .current_dir(home_dir)
+        .status();
+    info!("Initialized git repo in {}", home_dir.display());
+}
+
 /// Create workspace directory structure for an agent.
 fn ensure_workspace(workspace: &Path) -> KernelResult<()> {
     for subdir in &["data", "output", "sessions", "skills", "logs", "memory"] {
@@ -1210,16 +1241,6 @@ impl LibreFangKernel {
         // Migrate old directory layout (hands/, workspaces/<agent>/) to unified layout
         migrate_workspaces_layout(&config.home_dir)?;
 
-        // Ensure global shared workspace directory exists
-        let workspace_dir = config.effective_workspace_dir();
-        std::fs::create_dir_all(&workspace_dir).map_err(|e| {
-            KernelError::BootFailed(format!(
-                "Failed to create workspace dir {}: {e}",
-                workspace_dir.display()
-            ))
-        })?;
-        info!("Global workspace dir: {}", workspace_dir.display());
-
         // Initialize memory substrate
         let db_path = config
             .memory
@@ -1440,8 +1461,11 @@ impl LibreFangKernel {
             info!("RBAC enabled with {} users", auth.user_count());
         }
 
+        // Initialize git repo for config version control (first boot)
+        init_git_if_missing(&config.home_dir);
+
         // Auto-sync registry content on first boot or after upgrade when
-        // critical directories (providers/, hands/, agents/) are missing.
+        // the registry cache is missing.
         if librefang_runtime::registry_sync::needs_sync(&config.home_dir) {
             info!("Registry content missing — running auto-sync from librefang-registry");
             librefang_runtime::registry_sync::sync_registry(&config.home_dir);
@@ -6023,15 +6047,6 @@ system_prompt = "You are a helpful assistant."
     /// `Continuous`, `Periodic`, or `Proactive` schedules.
     /// Hands activated on first boot when no `hand_state.json` exists yet.
     /// By default, NO hands are activated to prevent unexpected token consumption.
-    /// Users can manually activate hands as needed using:
-    ///   librefang hand activate <hand-id>
-    ///
-    /// Hands are designed for specific tasks (trading, prediction, lead generation, etc.)
-    /// and should only be activated when the user explicitly needs them.
-    const DEFAULT_HANDS: &'static [&'static str] = &[
-        // Empty by default - all hands opt-in
-    ];
-
     pub async fn start_background_agents(self: &Arc<Self>) {
         // Restore previously active hands from persisted state
         let state_path = self.config.home_dir.join("hand_state.json");
@@ -6119,37 +6134,26 @@ system_prompt = "You are a helpful assistant."
                 }
             }
         } else if !state_path.exists() {
-            // First boot
-            if Self::DEFAULT_HANDS.is_empty() {
-                // No default hands — show available hands so users know what's there
-                let defs = self.hand_registry.list_definitions();
-                if !defs.is_empty() {
-                    info!("First boot detected — no hands activated by default");
-                    info!(
-                        "Available hands ({}) — activate with: librefang hand activate <id>",
-                        defs.len()
-                    );
-                    for def in &defs {
-                        let icon = if def.icon.is_empty() {
-                            "".to_string()
-                        } else {
-                            format!("{} ", def.icon)
-                        };
-                        info!("  {icon}{id}: {desc}", id = def.id, desc = def.description);
-                    }
-                }
-            } else {
+            // First boot: activate all registry hands then pause them (pre-install).
+            // This creates full workspace structure (AGENT.json, SOUL.md, memory/, etc.)
+            // without leaving agents running.
+            let defs = self.hand_registry.list_definitions();
+            if !defs.is_empty() {
                 info!(
-                    "First boot detected — activating {} default hand(s)",
-                    Self::DEFAULT_HANDS.len()
+                    "First boot — pre-installing {} hand(s) (activate + pause)",
+                    defs.len()
                 );
-                for hand_id in Self::DEFAULT_HANDS {
-                    match self.activate_hand(hand_id, std::collections::HashMap::new()) {
+                for def in &defs {
+                    match self.activate_hand(&def.id, std::collections::HashMap::new()) {
                         Ok(inst) => {
-                            info!(hand = %hand_id, instance = %inst.instance_id, "Default hand activated");
+                            if let Err(e) = self.pause_hand(inst.instance_id) {
+                                warn!(hand = %def.id, error = %e, "Failed to pause pre-installed hand");
+                            } else {
+                                info!(hand = %def.id, "Pre-installed hand (paused)");
+                            }
                         }
                         Err(e) => {
-                            warn!(hand = %hand_id, error = %e, "Failed to activate default hand");
+                            warn!(hand = %def.id, error = %e, "Failed to pre-install hand");
                         }
                     }
                 }

@@ -19,10 +19,6 @@ pub struct ModelCatalog {
 impl ModelCatalog {
     /// Create a new catalog by loading providers from `home_dir/providers/`
     /// and aliases from `home_dir/aliases.toml`.
-    ///
-    /// The caller is responsible for passing the authoritative home directory
-    /// (typically `config.home_dir`). This ensures sync and load use the
-    /// same path — no independent re-parsing of `LIBREFANG_HOME`.
     pub fn new(home_dir: &std::path::Path) -> Self {
         let providers_dir = home_dir.join("providers");
         Self::new_from_dir(&providers_dir)
