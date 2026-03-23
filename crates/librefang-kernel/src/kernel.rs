@@ -5292,7 +5292,9 @@ system_prompt = "You are a helpful assistant."
             })?
             .clone();
 
-        // Check that all requirements (API keys, etc.) are satisfied before activating
+        // Check requirements — warn but don't block activation.
+        // Hands can still be activated and paused (pre-install); the user
+        // gets a degraded experience until dependencies are installed.
         if let Ok(results) = self.hand_registry.check_requirements(hand_id) {
             let missing: Vec<_> = results
                 .iter()
@@ -5300,10 +5302,11 @@ system_prompt = "You are a helpful assistant."
                 .map(|(req, _)| req.label.clone())
                 .collect();
             if !missing.is_empty() {
-                return Err(KernelError::LibreFang(LibreFangError::Internal(format!(
-                    "Hand '{hand_id}' has unsatisfied requirements: {}",
+                warn!(
+                    hand = %hand_id,
+                    "Hand has unsatisfied requirements (degraded): {}",
                     missing.join(", ")
-                ))));
+                );
             }
         }
 
