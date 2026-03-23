@@ -289,6 +289,7 @@ impl ModelCatalog {
                 model_count: 0,
                 signup_url: None,
                 regions: std::collections::HashMap::new(),
+                media_capabilities: Vec::new(),
             });
             // Re-detect auth for the newly added provider
             self.detect_auth();

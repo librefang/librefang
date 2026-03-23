@@ -144,6 +144,9 @@ pub struct MediaDriverCache {
     /// Provider name → custom base URL, sourced from config `[provider_urls]`.
     /// Behind RwLock for hot-reload support (update URLs via `&self`).
     provider_urls: RwLock<HashMap<String, String>>,
+    /// Provider IDs that support media, in preference order.
+    /// Loaded from the registry (providers/*.toml) at boot.
+    media_providers: RwLock<Vec<String>>,
 }
 
 impl MediaDriverCache {
@@ -152,6 +155,12 @@ impl MediaDriverCache {
         Self {
             cache: DashMap::new(),
             provider_urls: RwLock::new(HashMap::new()),
+            media_providers: RwLock::new(vec![
+                "openai".into(),
+                "gemini".into(),
+                "elevenlabs".into(),
+                "minimax".into(),
+            ]),
         }
     }
 
@@ -165,6 +174,34 @@ impl MediaDriverCache {
         Self {
             cache: DashMap::new(),
             provider_urls: RwLock::new(provider_urls),
+            media_providers: RwLock::new(vec![
+                "openai".into(),
+                "gemini".into(),
+                "elevenlabs".into(),
+                "minimax".into(),
+            ]),
+        }
+    }
+
+    /// Update the media provider list from registry data.
+    /// Providers that declare `media_capabilities` in their TOML are included.
+    /// Built-in providers are always appended as fallback.
+    pub fn load_providers_from_registry(
+        &self,
+        providers: &[librefang_types::model_catalog::ProviderInfo],
+    ) {
+        let mut media_provs: Vec<String> = providers
+            .iter()
+            .filter(|p| !p.media_capabilities.is_empty())
+            .map(|p| p.id.clone())
+            .collect();
+        for builtin in ["openai", "gemini", "elevenlabs", "minimax"] {
+            if !media_provs.iter().any(|p| p == builtin) {
+                media_provs.push(builtin.to_string());
+            }
+        }
+        if let Ok(mut list) = self.media_providers.write() {
+            *list = media_provs;
         }
     }
 
@@ -211,8 +248,11 @@ impl MediaDriverCache {
         &self,
         capability: MediaCapability,
     ) -> Result<Arc<dyn MediaDriver>, MediaError> {
-        // Try providers in preference order
-        for provider in MEDIA_PROVIDER_ORDER {
+        let providers = self
+            .media_providers
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        for provider in providers.iter() {
             if let Ok(driver) = self.get_or_create(provider, None) {
                 if driver.is_configured() && driver.capabilities().contains(&capability) {
                     return Ok(driver);
@@ -254,9 +294,6 @@ fn canonical_provider_name(provider: &str) -> &str {
 }
 
 // ── Provider registry ──────────────────────────────────────────────────
-
-/// Provider preference order for auto-detection.
-static MEDIA_PROVIDER_ORDER: &[&str] = &["openai", "gemini", "elevenlabs", "minimax"];
 
 /// Create a media driver for a given provider name.
 fn create_media_driver(

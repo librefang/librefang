@@ -210,6 +210,10 @@ pub struct ProviderInfo {
     /// e.g. `[provider.regions.us]` with `base_url = "https://..."`.
     #[serde(default)]
     pub regions: HashMap<String, RegionConfig>,
+    /// Media capabilities supported by this provider (e.g. "image_generation", "text_to_speech").
+    /// Populated from `providers/*.toml` in the registry.
+    #[serde(default)]
+    pub media_capabilities: Vec<String>,
 }
 
 impl Default for ProviderInfo {
@@ -224,6 +228,7 @@ impl Default for ProviderInfo {
             model_count: 0,
             signup_url: None,
             regions: HashMap::new(),
+            media_capabilities: Vec::new(),
         }
     }
 }
@@ -253,6 +258,9 @@ pub struct ProviderCatalogToml {
     /// e.g. `[provider.regions.us]` with `base_url = "https://..."`.
     #[serde(default)]
     pub regions: HashMap<String, RegionConfig>,
+    /// Media capabilities supported by this provider (e.g. "image_generation", "text_to_speech").
+    #[serde(default)]
+    pub media_capabilities: Vec<String>,
 }
 
 fn default_key_required() -> bool {
@@ -271,6 +279,7 @@ impl From<ProviderCatalogToml> for ProviderInfo {
             model_count: 0,
             signup_url: p.signup_url,
             regions: p.regions,
+            media_capabilities: p.media_capabilities,
         }
     }
 }
@@ -429,6 +438,7 @@ mod tests {
             model_count: 3,
             signup_url: None,
             regions: HashMap::new(),
+            media_capabilities: Vec::new(),
         };
         let json = serde_json::to_string(&info).unwrap();
         let parsed: ProviderInfo = serde_json::from_str(&json).unwrap();
@@ -504,6 +514,7 @@ aliases = []
             key_required: true,
             signup_url: Some("https://console.anthropic.com/settings/keys".to_string()),
             regions: HashMap::new(),
+            media_capabilities: Vec::new(),
         };
         let info: ProviderInfo = toml_provider.into();
         assert_eq!(info.id, "anthropic");
@@ -639,6 +650,7 @@ aliases = []
                     },
                 ),
             ]),
+            media_capabilities: Vec::new(),
         };
 
         // Simulate region selection: if user picks "us", use that region's base_url

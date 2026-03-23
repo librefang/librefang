@@ -1635,6 +1635,8 @@ impl LibreFangKernel {
         let tts_engine = librefang_runtime::tts::TtsEngine::new(config.tts.clone());
         let media_drivers =
             librefang_runtime::media::MediaDriverCache::new_with_urls(config.provider_urls.clone());
+        // Load media provider order from registry
+        media_drivers.load_providers_from_registry(model_catalog.list_providers());
         let mut pairing = crate::pairing::PairingManager::new(config.pairing.clone());
 
         // Load paired devices from database and set up persistence callback
