@@ -401,32 +401,81 @@ cargo leptos --bin librefang-cli -- start
 
 ## Release
 
-### Version Numbers
+### Versioning
 
-Follow Semantic Versioning (SemVer):
+LibreFang uses [Calendar Versioning](https://calver.org/) — `YYYY.M.DDHH`.
 
-- **Major** - Incompatible API changes
-- **Minor** - Backward-compatible new features
-- **Patch** - Backward-compatible bug fixes
+| Type | Format | Example | Description |
+|------|--------|---------|-------------|
+| Stable | `YYYY.M.DDHH` | `2026.3.2314` | Day + hour of release |
+| Beta | `YYYY.M.DDHH-betaN` | `2026.3.2314-beta1` | Pre-release for testing |
+| RC | `YYYY.M.DDHH-rcN` | `2026.3.2314-rc1` | Release candidate |
+| LTS | `YYYY.M.PATCH-lts` | `2026.3.0-lts` | Long-term support |
 
 ### Release Process
 
+All releases are done via `cargo xtask release`:
+
 ```bash
-# 1. Update version
-cargo version bump patch
-
-# 2. Update CHANGELOG
-vim CHANGELOG.md
-
-# 3. Create tag
-git tag v0.7.0
-
-# 4. Build release
-cargo build --release
-
-# 5. Publish to crates.io
-cargo publish
+cargo xtask release
+#   1) stable  -> 2026.3.2314
+#   2) beta    -> 2026.3.2314-beta1
+#   3) rc      -> 2026.3.2314-rc1
+#   4) lts     -> 2026.3.0-lts
 ```
+
+This command automatically:
+- Generates CHANGELOG from git history
+- Syncs version across Cargo.toml, package.json, setup.py
+- Builds React dashboard
+- Creates git tag and push
+- Opens a PR for the version bump
+
+Use `--dry-run` to preview without making changes:
+```bash
+cargo xtask release --dry-run --version "2026.3.0-lts"
+```
+
+### LTS Releases
+
+LTS (Long-Term Support) versions receive only security and bug fixes. No new features.
+
+**Version scheme:**
+```
+v2026.3.0-lts     ← initial LTS
+v2026.3.1-lts     ← patch 1 (bug fix)
+v2026.3.2-lts     ← patch 2 (security fix)
+```
+
+**Creating an LTS release:**
+```bash
+# On main branch — choose option 4
+cargo xtask release
+```
+
+CI automatically:
+- Creates a `release/2026.3` branch from the tag
+- Sets branch protection (requires PR review)
+- Tags Docker image with `:lts`
+- Marks the GitHub Release as LTS
+
+**Patching an LTS release:**
+```bash
+# Switch to the LTS branch
+git checkout release/2026.3
+
+# Cherry-pick the fix from main
+git cherry-pick <commit-sha>
+
+# Release the patch (auto-increments patch number)
+cargo xtask release --lts-patch
+```
+
+**Rules:**
+- Only cherry-pick fixes, never new features
+- Every patch must go through PR review on the `release/` branch
+- LTS branches are maintained until the next LTS is declared
+- Docker `:lts` tag always points to the latest LTS release
 
 ---
 
