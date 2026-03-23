@@ -3578,11 +3578,14 @@ system_prompt = "You are a helpful assistant."
         }
     }
 
-    /// Resolve a specialist agent by name — find existing or spawn from template.
+    /// Resolve a specialist agent by name — find existing standalone or spawn from template.
+    /// Does NOT reuse hand-shared agents (they have different system prompts and tools).
     fn resolve_or_spawn_specialist(&self, name: &str) -> KernelResult<AgentId> {
-        // Check if already running
+        // Check if already running as a standalone agent (not part of a hand)
         if let Some(entry) = self.registry.find_by_name(name) {
-            return Ok(entry.id);
+            if !entry.tags.iter().any(|t| t.starts_with("hand:")) {
+                return Ok(entry.id);
+            }
         }
         // Spawn from template
         let manifest = router::load_template_manifest(&self.config.home_dir, name)
