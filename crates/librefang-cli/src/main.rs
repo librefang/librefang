@@ -1906,6 +1906,13 @@ fn cmd_init(quick: bool) {
     } else {
         cmd_init_interactive(&librefang_dir);
     }
+
+    // Fallback: ensure config.toml exists even if wizard was cancelled/failed
+    let config_path = librefang_dir.join("config.toml");
+    if !config_path.exists() {
+        let (provider, api_key_env, model) = detect_best_provider();
+        write_config_if_missing(&librefang_dir, &provider, &model, &api_key_env);
+    }
 }
 
 /// Initialize vault if it doesn't exist yet (silent no-op if already initialized).

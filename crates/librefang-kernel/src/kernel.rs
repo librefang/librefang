@@ -6047,15 +6047,6 @@ system_prompt = "You are a helpful assistant."
     /// `Continuous`, `Periodic`, or `Proactive` schedules.
     /// Hands activated on first boot when no `hand_state.json` exists yet.
     /// By default, NO hands are activated to prevent unexpected token consumption.
-    /// Users can manually activate hands as needed using:
-    ///   librefang hand activate <hand-id>
-    ///
-    /// Hands are designed for specific tasks (trading, prediction, lead generation, etc.)
-    /// and should only be activated when the user explicitly needs them.
-    const DEFAULT_HANDS: &'static [&'static str] = &[
-        // Empty by default - all hands opt-in
-    ];
-
     pub async fn start_background_agents(self: &Arc<Self>) {
         // Restore previously active hands from persisted state
         let state_path = self.config.home_dir.join("hand_state.json");
