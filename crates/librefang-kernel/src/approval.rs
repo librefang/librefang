@@ -49,6 +49,80 @@ impl ApprovalManager {
         policy.require_approval.iter().any(|t| t == tool_name)
     }
 
+    /// Check whether a tool is hard-denied in the current sender/channel context.
+    pub fn is_tool_denied_with_context(
+        &self,
+        tool_name: &str,
+        sender_id: Option<&str>,
+        channel: Option<&str>,
+    ) -> bool {
+        let policy = self.policy.read().unwrap_or_else(|e| e.into_inner());
+
+        if let Some(sid) = sender_id {
+            if policy.is_trusted_sender(sid) {
+                debug!(
+                    sender_id = sid,
+                    tool_name, "Trusted sender — channel deny bypassed"
+                );
+                return false;
+            }
+        }
+
+        channel
+            .and_then(|ch| policy.check_channel_tool(ch, tool_name))
+            .is_some_and(|allowed| !allowed)
+    }
+
+    /// Check if a tool requires approval, taking sender and channel context
+    /// into account.
+    ///
+    /// Returns `false` (no approval needed) if:
+    /// 1. The sender is in the `trusted_senders` list, OR
+    /// 2. A channel rule explicitly allows the tool, OR
+    /// 3. The tool is not in the `require_approval` list.
+    ///
+    /// Returns `true` (approval needed) if:
+    /// 1. A channel rule explicitly denies the tool, OR
+    /// 2. The tool is in `require_approval` and none of the above bypasses apply.
+    pub fn requires_approval_with_context(
+        &self,
+        tool_name: &str,
+        sender_id: Option<&str>,
+        channel: Option<&str>,
+    ) -> bool {
+        let policy = self.policy.read().unwrap_or_else(|e| e.into_inner());
+
+        // Trusted sender bypass: auto-approve all tools.
+        if let Some(sid) = sender_id {
+            if policy.is_trusted_sender(sid) {
+                debug!(
+                    sender_id = sid,
+                    tool_name, "Trusted sender — approval bypassed"
+                );
+                return false;
+            }
+        }
+
+        // Channel-specific rules.
+        if let Some(ch) = channel {
+            if let Some(allowed) = policy.check_channel_tool(ch, tool_name) {
+                if !allowed {
+                    debug!(channel = ch, tool_name, "Channel rule denies tool");
+                    return true;
+                }
+                // Channel rule explicitly allows — bypass approval.
+                debug!(
+                    channel = ch,
+                    tool_name, "Channel rule allows tool — approval bypassed"
+                );
+                return false;
+            }
+        }
+
+        // Fall back to default require_approval list.
+        policy.require_approval.iter().any(|t| t == tool_name)
+    }
+
     /// Submit an approval request. Returns a future that resolves when approved/denied/timed out.
     pub async fn request_approval(&self, req: ApprovalRequest) -> ApprovalDecision {
         // Check per-agent pending limit
@@ -216,6 +290,8 @@ mod tests {
             risk_level: RiskLevel::High,
             requested_at: Utc::now(),
             timeout_secs,
+            sender_id: None,
+            channel: None,
         }
     }
 
@@ -237,6 +313,8 @@ mod tests {
             timeout_secs: 30,
             auto_approve_autonomous: false,
             auto_approve: false,
+            trusted_senders: Vec::new(),
+            channel_rules: Vec::new(),
         };
         let mgr = ApprovalManager::new(policy);
         assert!(mgr.requires_approval("file_write"));
@@ -316,6 +394,8 @@ mod tests {
             timeout_secs: 120,
             auto_approve_autonomous: true,
             auto_approve: false,
+            trusted_senders: Vec::new(),
+            channel_rules: Vec::new(),
         };
         mgr.update_policy(new_policy);
 
@@ -498,5 +578,118 @@ mod tests {
         assert_eq!(policy.require_approval, vec!["shell_exec".to_string()]);
         assert_eq!(policy.timeout_secs, 60);
         assert!(!policy.auto_approve_autonomous);
+    }
+
+    // -----------------------------------------------------------------------
+    // requires_approval_with_context
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_context_trusted_sender_bypasses_approval() {
+        let policy = ApprovalPolicy {
+            require_approval: vec!["shell_exec".to_string()],
+            trusted_senders: vec!["admin_123".to_string()],
+            ..Default::default()
+        };
+        let mgr = ApprovalManager::new(policy);
+
+        // Trusted sender should bypass even for shell_exec
+        assert!(!mgr.requires_approval_with_context("shell_exec", Some("admin_123"), None));
+
+        // Untrusted sender still requires approval
+        assert!(mgr.requires_approval_with_context("shell_exec", Some("random_user"), None));
+
+        // No sender context falls back to default
+        assert!(mgr.requires_approval_with_context("shell_exec", None, None));
+    }
+
+    #[test]
+    fn test_context_channel_rule_denies_tool() {
+        let policy = ApprovalPolicy {
+            require_approval: vec!["shell_exec".to_string()],
+            channel_rules: vec![librefang_types::approval::ChannelToolRule {
+                channel: "telegram".to_string(),
+                allowed_tools: vec![],
+                denied_tools: vec!["file_write".to_string()],
+            }],
+            ..Default::default()
+        };
+        let mgr = ApprovalManager::new(policy);
+
+        // file_write is not in require_approval, but telegram channel denies it
+        assert!(mgr.is_tool_denied_with_context("file_write", None, Some("telegram")));
+        assert!(mgr.requires_approval_with_context("file_write", None, Some("telegram")));
+
+        // file_write from other channels is not gated
+        assert!(!mgr.is_tool_denied_with_context("file_write", None, Some("discord")));
+        assert!(!mgr.requires_approval_with_context("file_write", None, Some("discord")));
+    }
+
+    #[test]
+    fn test_context_channel_rule_allows_tool() {
+        let policy = ApprovalPolicy {
+            require_approval: vec!["shell_exec".to_string()],
+            channel_rules: vec![librefang_types::approval::ChannelToolRule {
+                channel: "admin_cli".to_string(),
+                allowed_tools: vec!["shell_exec".to_string()],
+                denied_tools: vec![],
+            }],
+            ..Default::default()
+        };
+        let mgr = ApprovalManager::new(policy);
+
+        // shell_exec from admin_cli channel is explicitly allowed — bypass approval
+        assert!(!mgr.requires_approval_with_context("shell_exec", None, Some("admin_cli")));
+
+        // shell_exec from other channels still requires approval
+        assert!(mgr.requires_approval_with_context("shell_exec", None, Some("telegram")));
+    }
+
+    #[test]
+    fn test_context_trusted_sender_overrides_channel_deny() {
+        let policy = ApprovalPolicy {
+            require_approval: vec!["shell_exec".to_string()],
+            trusted_senders: vec!["admin_123".to_string()],
+            channel_rules: vec![librefang_types::approval::ChannelToolRule {
+                channel: "telegram".to_string(),
+                allowed_tools: vec![],
+                denied_tools: vec!["shell_exec".to_string()],
+            }],
+            ..Default::default()
+        };
+        let mgr = ApprovalManager::new(policy);
+
+        // Trusted sender bypasses even channel deny rules
+        assert!(!mgr.is_tool_denied_with_context(
+            "shell_exec",
+            Some("admin_123"),
+            Some("telegram")
+        ));
+        assert!(!mgr.requires_approval_with_context(
+            "shell_exec",
+            Some("admin_123"),
+            Some("telegram")
+        ));
+
+        // Untrusted sender from telegram is denied
+        assert!(mgr.is_tool_denied_with_context(
+            "shell_exec",
+            Some("random_user"),
+            Some("telegram")
+        ));
+        assert!(mgr.requires_approval_with_context(
+            "shell_exec",
+            Some("random_user"),
+            Some("telegram")
+        ));
+    }
+
+    #[test]
+    fn test_context_no_context_falls_back_to_default() {
+        let mgr = default_manager();
+
+        // No sender/channel context: behaves like requires_approval()
+        assert!(mgr.requires_approval_with_context("shell_exec", None, None));
+        assert!(!mgr.requires_approval_with_context("file_read", None, None));
     }
 }

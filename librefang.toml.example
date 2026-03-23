@@ -289,3 +289,37 @@ debounce_ms = 500
 # [vault]
 # enabled = true               # Auto-detected if vault.enc exists
 
+# ── HTTP-Compatible MCP Servers ────────────────────────────────
+# [[mcp_servers]]
+# name = "internal-http"
+# timeout_secs = 30
+# [mcp_servers.transport]
+# type = "http_compat"
+# base_url = "http://127.0.0.1:8080"
+# [[mcp_servers.transport.headers]]
+# name = "Authorization"
+# value_env = "INTERNAL_HTTP_TOKEN"
+# [[mcp_servers.transport.tools]]
+# name = "search"
+# path = "/search"
+# method = "get"
+# request_mode = "query"
+# response_mode = "json"
+
+# Execution approval policy
+# [approval]
+# require_approval = ["shell_exec"]       # Tools requiring human approval (default: ["shell_exec"])
+# timeout_secs = 60                       # Auto-deny after this many seconds (10..=300)
+# auto_approve = false                    # Set true to disable all approval gates
+#
+# # Trusted senders — these user IDs auto-approve all tools (bypass approval gate)
+# trusted_senders = ["admin_123", "ops_456"]
+#
+# # Per-channel tool authorization rules
+# [[approval.channel_rules]]
+# channel = "telegram"
+# denied_tools = ["shell_exec"]           # Block shell_exec from Telegram
+#
+# [[approval.channel_rules]]
+# channel = "admin_cli"
+# allowed_tools = ["shell_exec", "file_write", "file_delete"]  # Only these tools from admin CLI
