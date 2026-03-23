@@ -1677,4 +1677,68 @@ aliases = ["trm1"]
         let model = catalog.find_model("test-remote-model-1").unwrap();
         assert_eq!(model.provider, "test-remote");
     }
+
+    #[test]
+    fn test_media_capabilities_parsed_from_toml() {
+        let toml_content = r#"
+[provider]
+id = "testprov"
+display_name = "Test Provider"
+api_key_env = "TEST_KEY"
+base_url = "https://api.test.com/v1"
+key_required = true
+media_capabilities = ["image_generation", "text_to_speech"]
+
+[[models]]
+id = "test-model"
+display_name = "Test Model"
+tier = "smart"
+context_window = 128000
+max_output_tokens = 4096
+input_cost_per_m = 1.0
+output_cost_per_m = 2.0
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+"#;
+        let catalog = ModelCatalog::from_sources(&[toml_content.to_string()], None);
+        let providers = catalog.list_providers();
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].id, "testprov");
+        assert_eq!(providers[0].media_capabilities.len(), 2);
+        assert!(providers[0]
+            .media_capabilities
+            .contains(&"image_generation".to_string()));
+        assert!(providers[0]
+            .media_capabilities
+            .contains(&"text_to_speech".to_string()));
+    }
+
+    #[test]
+    fn test_media_capabilities_defaults_to_empty() {
+        let toml_content = r#"
+[provider]
+id = "noprov"
+display_name = "No Media"
+api_key_env = "NM_KEY"
+base_url = "https://api.nomedia.com"
+key_required = true
+
+[[models]]
+id = "nm-1"
+display_name = "NM 1"
+tier = "fast"
+context_window = 8000
+max_output_tokens = 2000
+input_cost_per_m = 0.5
+output_cost_per_m = 1.0
+supports_tools = false
+supports_vision = false
+supports_streaming = true
+"#;
+        let catalog = ModelCatalog::from_sources(&[toml_content.to_string()], None);
+        let providers = catalog.list_providers();
+        assert_eq!(providers.len(), 1);
+        assert!(providers[0].media_capabilities.is_empty());
+    }
 }

@@ -402,4 +402,70 @@ mod tests {
         let driver2 = cache.get_or_create("minimax", None).unwrap();
         assert!(!Arc::ptr_eq(&driver, &driver2));
     }
+
+    #[test]
+    fn test_load_providers_from_registry_filters_by_media_capabilities() {
+        let cache = MediaDriverCache::new();
+        let providers = vec![
+            librefang_types::model_catalog::ProviderInfo {
+                id: "openai".into(),
+                media_capabilities: vec!["image_generation".into(), "text_to_speech".into()],
+                ..Default::default()
+            },
+            librefang_types::model_catalog::ProviderInfo {
+                id: "anthropic".into(),
+                media_capabilities: vec![], // no media support
+                ..Default::default()
+            },
+            librefang_types::model_catalog::ProviderInfo {
+                id: "minimax".into(),
+                media_capabilities: vec!["video_generation".into()],
+                ..Default::default()
+            },
+        ];
+        cache.load_providers_from_registry(&providers);
+        let list = cache.media_providers.read().unwrap();
+        // openai and minimax from registry, plus builtins (gemini, elevenlabs) appended
+        assert!(list.iter().any(|p| p == "openai"));
+        assert!(list.iter().any(|p| p == "minimax"));
+        assert!(list.iter().any(|p| p == "gemini"));
+        assert!(list.iter().any(|p| p == "elevenlabs"));
+        // anthropic should NOT be in the list (no media capabilities)
+        assert!(!list.iter().any(|p| p == "anthropic"));
+    }
+
+    #[test]
+    fn test_load_providers_from_registry_preserves_order() {
+        let cache = MediaDriverCache::new();
+        let providers = vec![
+            librefang_types::model_catalog::ProviderInfo {
+                id: "minimax".into(),
+                media_capabilities: vec!["video_generation".into()],
+                ..Default::default()
+            },
+            librefang_types::model_catalog::ProviderInfo {
+                id: "openai".into(),
+                media_capabilities: vec!["image_generation".into()],
+                ..Default::default()
+            },
+        ];
+        cache.load_providers_from_registry(&providers);
+        let list = cache.media_providers.read().unwrap();
+        // Registry order should be preserved: minimax first, then openai
+        let minimax_pos = list.iter().position(|p| p == "minimax").unwrap();
+        let openai_pos = list.iter().position(|p| p == "openai").unwrap();
+        assert!(minimax_pos < openai_pos);
+    }
+
+    #[test]
+    fn test_load_providers_empty_registry_keeps_builtins() {
+        let cache = MediaDriverCache::new();
+        cache.load_providers_from_registry(&[]);
+        let list = cache.media_providers.read().unwrap();
+        assert_eq!(list.len(), 4);
+        assert!(list.contains(&"openai".to_string()));
+        assert!(list.contains(&"gemini".to_string()));
+        assert!(list.contains(&"elevenlabs".to_string()));
+        assert!(list.contains(&"minimax".to_string()));
+    }
 }

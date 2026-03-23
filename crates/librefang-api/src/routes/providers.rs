@@ -1520,6 +1520,25 @@ mod tests {
         assert!(json["error"].as_str().unwrap().contains("not found"));
     }
 
+    #[test]
+    fn test_provider_json_includes_media_capabilities() {
+        let provider = librefang_types::model_catalog::ProviderInfo {
+            id: "openai".into(),
+            display_name: "OpenAI".into(),
+            media_capabilities: vec!["image_generation".into(), "text_to_speech".into()],
+            ..Default::default()
+        };
+        let json = serde_json::json!({
+            "id": provider.id,
+            "display_name": provider.display_name,
+            "media_capabilities": provider.media_capabilities,
+        });
+        let caps = json["media_capabilities"].as_array().unwrap();
+        assert_eq!(caps.len(), 2);
+        assert_eq!(caps[0], "image_generation");
+        assert_eq!(caps[1], "text_to_speech");
+    }
+
     #[tokio::test]
     async fn test_list_profiles_returns_all() {
         let app = profile_router();
