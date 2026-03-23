@@ -1,0 +1,55 @@
+name: "Release / LTS Branch"
+
+# When an LTS tag is pushed (e.g. v2026.3.2201-lts), automatically create
+# a release/ branch for long-term maintenance. Patch fixes are cherry-picked
+# to this branch and tagged as v2026.3.2201-lts.1, v2026.3.2201-lts.2, etc.
+
+on:
+  push:
+    tags:
+      - "v*-lts"
+      - "v*-lts.*"
+
+permissions:
+  contents: write
+
+jobs:
+  create_lts_branch:
+    name: Create LTS Branch
+    runs-on: ubuntu-latest
+    # Only create branch for the initial -lts tag, not patch tags (-lts.N)
+    if: ${{ !contains(github.ref, '-lts.') }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Create release branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          # Extract base version: v2026.3.2201-lts -> 2026.3.2201
+          BASE="${TAG#v}"
+          BASE="${BASE%-lts}"
+          # Branch name: release/2026.3
+          BRANCH="release/$(echo "$BASE" | cut -d. -f1,2)"
+
+          if git ls-remote --heads origin "$BRANCH" | grep -q "$BRANCH"; then
+            echo "Branch $BRANCH already exists, skipping"
+          else
+            echo "Creating LTS branch: $BRANCH from $TAG"
+            git checkout -b "$BRANCH" "$TAG"
+            git push origin "$BRANCH"
+            echo "✓ Created $BRANCH"
+          fi
+
+          # Protect the branch
+          gh api repos/${{ github.repository }}/branches/$BRANCH/protection \
+            -X PUT \
+            -f "required_pull_request_reviews[dismiss_stale_reviews]=true" \
+            -f "required_pull_request_reviews[required_approving_review_count]=1" \
+            -f "enforce_admins=false" \
+            -f "restrictions=null" \
+            -f "required_status_checks=null" \
+            2>/dev/null || echo "::warning::Could not set branch protection (may need admin token)"
