@@ -120,6 +120,7 @@ async fn test_full_daemon_lifecycle() {
             format!("librefang-test-webhooks-{}.json", uuid::Uuid::new_v4()),
         )),
         prometheus_handle: None,
+        media_drivers: librefang_runtime::media::MediaDriverCache::new(),
     });
 
     let app = Router::new()
@@ -252,6 +253,7 @@ async fn test_server_immediate_responsiveness() {
             format!("librefang-test-webhooks-{}.json", uuid::Uuid::new_v4()),
         )),
         prometheus_handle: None,
+        media_drivers: librefang_runtime::media::MediaDriverCache::new(),
     });
 
     let app = Router::new()

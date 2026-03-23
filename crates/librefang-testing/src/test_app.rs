@@ -140,6 +140,7 @@ impl TestAppState {
                 tmp.path().join("test_webhooks.json"),
             ),
             prometheus_handle: None,
+            media_drivers: librefang_runtime::media::MediaDriverCache::new(),
         })
     }
 }

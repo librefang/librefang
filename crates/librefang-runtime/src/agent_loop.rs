@@ -1178,6 +1178,7 @@ pub async fn run_agent_loop(
                             },
                             workspace_root,
                             media_engine,
+                            None, // media_drivers
                             effective_exec_policy,
                             tts_engine,
                             docker_config,
@@ -2555,6 +2556,7 @@ pub async fn run_agent_loop_streaming(
                             },
                             workspace_root,
                             media_engine,
+                            None, // media_drivers
                             effective_exec_policy,
                             tts_engine,
                             docker_config,

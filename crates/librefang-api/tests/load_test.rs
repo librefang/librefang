@@ -64,6 +64,7 @@ async fn start_test_server() -> TestServer {
             format!("librefang-test-webhooks-{}.json", uuid::Uuid::new_v4()),
         )),
         prometheus_handle: None,
+        media_drivers: librefang_runtime::media::MediaDriverCache::new(),
     });
 
     let app = Router::new()

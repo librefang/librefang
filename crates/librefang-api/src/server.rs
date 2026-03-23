@@ -57,6 +57,7 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
         .merge(routes::budget::router())
         .merge(routes::goals::router())
         .merge(routes::inbox::router())
+        .merge(routes::media::router())
         // Dashboard credential login (handler defined locally in server.rs)
         .route(
             "/auth/dashboard-login",
@@ -290,6 +291,7 @@ pub async fn build_router(
         webhook_store: crate::webhook_store::WebhookStore::load(
             kernel.config_ref().home_dir.join("webhooks.json"),
         ),
+        media_drivers: librefang_runtime::media::MediaDriverCache::new(),
         #[cfg(feature = "telemetry")]
         prometheus_handle: prom_handle,
     });

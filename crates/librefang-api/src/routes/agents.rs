@@ -3805,14 +3805,15 @@ struct UploadResponse {
 }
 
 /// Metadata stored alongside uploaded files.
-struct UploadMeta {
+pub(crate) struct UploadMeta {
     #[allow(dead_code)]
-    filename: String,
-    content_type: String,
+    pub(crate) filename: String,
+    pub(crate) content_type: String,
 }
 
 /// In-memory upload metadata registry.
-static UPLOAD_REGISTRY: LazyLock<DashMap<String, UploadMeta>> = LazyLock::new(DashMap::new);
+pub(crate) static UPLOAD_REGISTRY: LazyLock<DashMap<String, UploadMeta>> =
+    LazyLock::new(DashMap::new);
 
 /// Maximum upload size: 10 MB.
 const MAX_UPLOAD_SIZE: usize = 10 * 1024 * 1024;
@@ -4618,6 +4619,7 @@ mod monitoring_tests {
             webhook_store: crate::webhook_store::WebhookStore::load(home_dir.join("webhooks.json")),
             #[cfg(feature = "telemetry")]
             prometheus_handle: None,
+            media_drivers: librefang_runtime::media::MediaDriverCache::new(),
         });
         (state, tmp)
     }

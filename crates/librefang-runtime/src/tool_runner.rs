@@ -110,6 +110,7 @@ pub async fn execute_tool(
     allowed_env_vars: Option<&[String]>,
     workspace_root: Option<&Path>,
     media_engine: Option<&crate::media_understanding::MediaEngine>,
+    media_drivers: Option<&crate::media::MediaDriverCache>,
     exec_policy: Option<&librefang_types::config::ExecPolicy>,
     tts_engine: Option<&crate::tts::TtsEngine>,
     docker_config: Option<&librefang_types::config::DockerSandboxConfig>,
@@ -305,6 +306,11 @@ pub async fn execute_tool(
 
         // Image generation tool
         "image_generate" => tool_image_generate(input, workspace_root).await,
+
+        // Video/music generation tools (MediaDriver-based)
+        "video_generate" => tool_video_generate(input, media_drivers).await,
+        "video_status" => tool_video_status(input, media_drivers).await,
+        "music_generate" => tool_music_generate(input, media_drivers, workspace_root).await,
 
         // TTS/STT tools
         "text_to_speech" => tool_text_to_speech(input, tts_engine, workspace_root).await,
@@ -994,6 +1000,48 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                     "count": { "type": "integer", "description": "Number of images to generate (1-4, default: 1). DALL-E 3 only supports 1." }
                 },
                 "required": ["prompt"]
+            }),
+        },
+        // --- Video/music generation tools ---
+        ToolDefinition {
+            name: "video_generate".to_string(),
+            description: "Generate a video from a text prompt. Returns a task_id for polling. Use video_status to check progress.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "prompt": { "type": "string", "description": "Text description of the video to generate" },
+                    "model": { "type": "string", "description": "Model ID (default: MiniMax-Hailuo-2.3)" },
+                    "duration": { "type": "integer", "description": "Duration in seconds (default: 6)" },
+                    "resolution": { "type": "string", "description": "Resolution (720P, 768P, 1080P)" },
+                    "provider": { "type": "string", "description": "Provider (default: auto-detect)" }
+                },
+                "required": ["prompt"]
+            }),
+        },
+        ToolDefinition {
+            name: "video_status".to_string(),
+            description: "Check the status of a video generation task. Returns status and download URL when complete.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string", "description": "Task ID from video_generate" },
+                    "provider": { "type": "string", "description": "Provider that created the task" }
+                },
+                "required": ["task_id"]
+            }),
+        },
+        ToolDefinition {
+            name: "music_generate".to_string(),
+            description: "Generate music from a prompt and/or lyrics. Saves audio to workspace output/ directory.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "prompt": { "type": "string", "description": "Style/mood description (e.g. 'upbeat pop song')" },
+                    "lyrics": { "type": "string", "description": "Song lyrics with optional [Verse], [Chorus] tags" },
+                    "model": { "type": "string", "description": "Model ID (default: music-2.5)" },
+                    "instrumental": { "type": "boolean", "description": "Generate instrumental only, no vocals" },
+                    "provider": { "type": "string", "description": "Provider (default: auto-detect)" }
+                }
             }),
         },
         // --- Cron scheduling tools ---
@@ -2883,6 +2931,181 @@ async fn tool_image_generate(
 }
 
 // ---------------------------------------------------------------------------
+// Video / Music generation tools (MediaDriver-based)
+// ---------------------------------------------------------------------------
+
+/// Generate a video from a text prompt. Returns a task_id for async polling.
+async fn tool_video_generate(
+    input: &serde_json::Value,
+    media_drivers: Option<&crate::media::MediaDriverCache>,
+) -> Result<String, String> {
+    let cache =
+        media_drivers.ok_or("Media drivers not available. Ensure media drivers are configured.")?;
+    let prompt = input["prompt"]
+        .as_str()
+        .ok_or("Missing 'prompt' parameter")?;
+
+    let request = librefang_types::media::MediaVideoRequest {
+        prompt: prompt.to_string(),
+        provider: input["provider"].as_str().map(String::from),
+        model: input["model"].as_str().map(String::from),
+        duration_secs: input["duration"].as_u64().map(|v| v as u32),
+        resolution: input["resolution"].as_str().map(String::from),
+        image_url: None,
+        optimize_prompt: None,
+    };
+
+    // Validate request parameters before sending to the provider
+    request
+        .validate()
+        .map_err(|e| format!("Invalid request: {e}"))?;
+
+    let driver = if let Some(p) = &request.provider {
+        cache.get_or_create(p, None).map_err(|e| e.to_string())?
+    } else {
+        cache
+            .detect_for_capability(librefang_types::media::MediaCapability::VideoGeneration)
+            .map_err(|e| e.to_string())?
+    };
+
+    let result = driver
+        .submit_video(&request)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let response = serde_json::json!({
+        "task_id": result.task_id,
+        "provider": result.provider,
+        "status": "submitted",
+        "note": "Use video_status tool with this task_id to check progress"
+    });
+
+    serde_json::to_string_pretty(&response).map_err(|e| format!("Serialize error: {e}"))
+}
+
+/// Check the status of a video generation task. Returns download URL when complete.
+async fn tool_video_status(
+    input: &serde_json::Value,
+    media_drivers: Option<&crate::media::MediaDriverCache>,
+) -> Result<String, String> {
+    let cache =
+        media_drivers.ok_or("Media drivers not available. Ensure media drivers are configured.")?;
+    let task_id = input["task_id"]
+        .as_str()
+        .ok_or("Missing 'task_id' parameter")?;
+    let provider = input["provider"].as_str();
+
+    let driver = if let Some(p) = provider {
+        cache.get_or_create(p, None).map_err(|e| e.to_string())?
+    } else {
+        cache
+            .detect_for_capability(librefang_types::media::MediaCapability::VideoGeneration)
+            .map_err(|e| e.to_string())?
+    };
+
+    let status = driver
+        .poll_video(task_id)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // If completed, also fetch the full result with download URL
+    if status == librefang_types::media::MediaTaskStatus::Completed {
+        let video_result = driver
+            .get_video_result(task_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        let response = serde_json::json!({
+            "status": "completed",
+            "file_url": video_result.file_url,
+            "width": video_result.width,
+            "height": video_result.height,
+            "duration_secs": video_result.duration_secs,
+            "provider": video_result.provider,
+            "model": video_result.model,
+        });
+        return serde_json::to_string_pretty(&response)
+            .map_err(|e| format!("Serialize error: {e}"));
+    }
+
+    let response = serde_json::json!({
+        "status": status.to_string(),
+        "task_id": task_id,
+        "note": "Task is still in progress. Poll again after a few seconds."
+    });
+
+    serde_json::to_string_pretty(&response).map_err(|e| format!("Serialize error: {e}"))
+}
+
+/// Generate music from a prompt and/or lyrics. Saves audio to workspace output/ directory.
+async fn tool_music_generate(
+    input: &serde_json::Value,
+    media_drivers: Option<&crate::media::MediaDriverCache>,
+    workspace_root: Option<&Path>,
+) -> Result<String, String> {
+    let cache =
+        media_drivers.ok_or("Media drivers not available. Ensure media drivers are configured.")?;
+
+    let request = librefang_types::media::MediaMusicRequest {
+        prompt: input["prompt"].as_str().map(String::from),
+        lyrics: input["lyrics"].as_str().map(String::from),
+        provider: input["provider"].as_str().map(String::from),
+        model: input["model"].as_str().map(String::from),
+        instrumental: input["instrumental"].as_bool().unwrap_or(false),
+        format: None,
+    };
+
+    // Validate request parameters before sending to the provider
+    request
+        .validate()
+        .map_err(|e| format!("Invalid request: {e}"))?;
+
+    let driver = if let Some(p) = &request.provider {
+        cache.get_or_create(p, None).map_err(|e| e.to_string())?
+    } else {
+        cache
+            .detect_for_capability(librefang_types::media::MediaCapability::MusicGeneration)
+            .map_err(|e| e.to_string())?
+    };
+
+    let result = driver
+        .generate_music(&request)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Save audio to workspace output/ directory (same pattern as text_to_speech)
+    let saved_path = if let Some(workspace) = workspace_root {
+        let output_dir = workspace.join("output");
+        tokio::fs::create_dir_all(&output_dir)
+            .await
+            .map_err(|e| format!("Failed to create output dir: {e}"))?;
+
+        let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
+        let filename = format!("music_{timestamp}.{}", result.format);
+        let path = output_dir.join(&filename);
+
+        tokio::fs::write(&path, &result.audio_data)
+            .await
+            .map_err(|e| format!("Failed to write audio file: {e}"))?;
+
+        Some(path.display().to_string())
+    } else {
+        warn!("No workspace root available; music audio not saved to disk");
+        None
+    };
+
+    let response = serde_json::json!({
+        "saved_to": saved_path,
+        "format": result.format,
+        "provider": result.provider,
+        "model": result.model,
+        "duration_ms": result.duration_ms,
+        "size_bytes": result.audio_data.len(),
+    });
+
+    serde_json::to_string_pretty(&response).map_err(|e| format!("Serialize error: {e}"))
+}
+
+// ---------------------------------------------------------------------------
 // TTS / STT tools
 // ---------------------------------------------------------------------------
 
@@ -3417,6 +3640,10 @@ mod tests {
         assert!(names.contains(&"media_describe"));
         assert!(names.contains(&"media_transcribe"));
         assert!(names.contains(&"image_generate"));
+        // 3 video/music generation tools
+        assert!(names.contains(&"video_generate"));
+        assert!(names.contains(&"video_status"));
+        assert!(names.contains(&"music_generate"));
         // 3 cron tools
         assert!(names.contains(&"cron_create"));
         assert!(names.contains(&"cron_list"));
@@ -3485,6 +3712,7 @@ mod tests {
             None,
             None,
             None, // media_engine
+            None, // media_drivers
             None, // exec_policy
             None, // tts_engine
             None, // docker_config
@@ -3514,6 +3742,7 @@ mod tests {
             None,
             None,
             None, // media_engine
+            None, // media_drivers
             None, // exec_policy
             None, // tts_engine
             None, // docker_config
@@ -3540,6 +3769,7 @@ mod tests {
             None,
             None,
             None, // media_engine
+            None, // media_drivers
             None, // exec_policy
             None, // tts_engine
             None, // docker_config
@@ -3566,6 +3796,7 @@ mod tests {
             None,
             None,
             None, // media_engine
+            None, // media_drivers
             None, // exec_policy
             None, // tts_engine
             None, // docker_config
@@ -3592,6 +3823,7 @@ mod tests {
             None,
             None,
             None, // media_engine
+            None, // media_drivers
             None, // exec_policy
             None, // tts_engine
             None, // docker_config
@@ -3618,6 +3850,7 @@ mod tests {
             None,
             None,
             None, // media_engine
+            None, // media_drivers
             None, // exec_policy
             None, // tts_engine
             None, // docker_config
@@ -3644,6 +3877,7 @@ mod tests {
             None,
             None,
             None, // media_engine
+            None, // media_drivers
             None, // exec_policy
             None, // tts_engine
             None, // docker_config
@@ -3671,6 +3905,7 @@ mod tests {
             None,
             None,
             None, // media_engine
+            None, // media_drivers
             None, // exec_policy
             None, // tts_engine
             None, // docker_config
@@ -3702,6 +3937,7 @@ mod tests {
             None,
             None,
             None, // media_engine
+            None, // media_drivers
             None, // exec_policy
             None, // tts_engine
             None, // docker_config
@@ -3749,6 +3985,7 @@ mod tests {
             None,
             Some(workspace.path()),
             None, // media_engine
+            None, // media_drivers
             None, // exec_policy
             None, // tts_engine
             None, // docker_config
@@ -3781,6 +4018,7 @@ mod tests {
             None,
             None,
             None, // media_engine
+            None, // media_drivers
             None, // exec_policy
             None, // tts_engine
             None, // docker_config
@@ -3819,7 +4057,8 @@ mod tests {
             None,
             None,
             Some(workspace.path()),
-            None,
+            None, // media_engine
+            None, // media_drivers
             Some(&policy),
             None,
             None,
@@ -3859,7 +4098,8 @@ mod tests {
             None,
             None,
             None,
-            None,
+            None, // media_engine
+            None, // media_drivers
             Some(&policy),
             None,
             None,
@@ -4028,6 +4268,7 @@ mod tests {
             None,
             None,
             None, // media_engine
+            None, // media_drivers
             None, // exec_policy
             None, // tts_engine
             None, // docker_config
@@ -4073,6 +4314,7 @@ mod tests {
             None,
             None,
             None, // media_engine
+            None, // media_drivers
             None, // exec_policy
             None, // tts_engine
             None, // docker_config
