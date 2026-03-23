@@ -54,6 +54,7 @@ pub async fn usage_stats(State(state): State<Arc<AppState>>) -> impl IntoRespons
                 "input_tokens": summary.total_input_tokens,
                 "output_tokens": summary.total_output_tokens,
                 "total_cost_usd": summary.total_cost_usd,
+                "cost": summary.total_cost_usd,
                 "call_count": summary.call_count,
                 "tool_calls": summary.total_tool_calls,
             })
