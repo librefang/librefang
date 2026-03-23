@@ -148,6 +148,10 @@ jobs:
           if ! echo "$VERSION" | grep -qE '-(beta|rc)[0-9]'; then
             TAGS="$TAGS -t $IMAGE:latest"
           fi
+          # LTS releases also get :lts tag
+          if echo "$VERSION" | grep -qE '\-lts'; then
+            TAGS="$TAGS -t $IMAGE:lts"
+          fi
           docker buildx imagetools create \
             $TAGS \
             $(printf "$IMAGE@sha256:%s " *)
