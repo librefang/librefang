@@ -5522,15 +5522,20 @@ system_prompt = "You are a helpful assistant."
                 }
             }
 
-            // Write manifest snapshot
+            // Write manifest snapshot + create full workspace structure for the hand
             let safe_hand_name = safe_path_component(&manifest.name, "hand");
             let hand_manifest_dir = self.config.effective_hands_dir().join(safe_hand_name);
             let hand_manifest_path = hand_manifest_dir.join("agent.toml");
             if !hand_manifest_path.exists() {
-                if let Err(e) = std::fs::create_dir_all(&hand_manifest_dir) {
-                    warn!(path = %hand_manifest_dir.display(), "Failed to create dir: {e}");
-                } else if let Ok(toml_str) = toml::to_string_pretty(&manifest) {
-                    let _ = std::fs::write(&hand_manifest_path, &toml_str);
+                if let Err(e) = ensure_workspace(&hand_manifest_dir) {
+                    warn!(path = %hand_manifest_dir.display(), "Failed to create hand workspace: {e}");
+                } else {
+                    if manifest.generate_identity_files {
+                        generate_identity_files(&hand_manifest_dir, &manifest);
+                    }
+                    if let Ok(toml_str) = toml::to_string_pretty(&manifest) {
+                        let _ = std::fs::write(&hand_manifest_path, &toml_str);
+                    }
                 }
             }
             last_manifest_path = Some(hand_manifest_path.clone());
