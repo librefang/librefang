@@ -26,6 +26,11 @@ pub struct ReleaseArgs {
     /// Local only — don't push or create PR
     #[arg(long)]
     pub no_push: bool,
+
+    /// Create an LTS patch release on the current release/ branch.
+    /// Auto-detects the LTS series from branch name and increments patch.
+    #[arg(long)]
+    pub lts_patch: bool,
 }
 
 fn git(root: &Path, args: &[&str]) -> Result<String, Box<dyn std::error::Error>> {
@@ -130,6 +135,11 @@ fn extract_changelog_section(content: &str, heading: &str) -> String {
 
 pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
     let root = repo_root();
+
+    // --- LTS patch shortcut ---
+    if args.lts_patch {
+        return run_lts_patch(&root, &args);
+    }
 
     // --- Preflight checks ---
     println!("Preflight checks...");
@@ -660,6 +670,100 @@ pip install librefang-sdk
     if !args.no_push {
         println!("Merge the PR to land the version bump on main.");
     }
+
+    Ok(())
+}
+
+/// LTS patch release: must be on a release/ branch, auto-increments patch number.
+fn run_lts_patch(root: &Path, args: &ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let branch = current_branch(root)?;
+    if !branch.starts_with("release/") {
+        return Err(format!(
+            "must be on a 'release/*' branch for --lts-patch (currently on '{}')",
+            branch
+        )
+        .into());
+    }
+
+    if !is_worktree_clean(root) {
+        return Err("working tree is dirty. Commit cherry-picked fixes first.".into());
+    }
+
+    // release/2026.3 -> 2026.3
+    let series = branch.strip_prefix("release/").unwrap();
+
+    // Find next patch number
+    let pattern = format!("v{}.*-lts", series);
+    let existing = Command::new("git")
+        .args(["tag", "-l", &pattern])
+        .current_dir(root)
+        .output()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .count()
+        })
+        .unwrap_or(0);
+
+    let patch = existing; // 0-lts exists → next is 1
+    let version = format!("{}.{}-lts", series, patch);
+    let tag = format!("v{}", version);
+
+    println!();
+    println!("=== LTS Patch Release ===");
+    println!("  Branch:  {}", branch);
+    println!("  Series:  {}-lts", series);
+    println!("  Version: {}", version);
+    println!("  Tag:     {}", tag);
+    println!();
+
+    if !args.no_confirm {
+        let confirm = prompt("Release? [Y/n]: ");
+        if confirm.starts_with('n') || confirm.starts_with('N') {
+            println!("Aborted.");
+            return Ok(());
+        }
+    }
+
+    // Sync version in Cargo.toml
+    sync_versions::run(sync_versions::SyncVersionsArgs {
+        version: Some(version.clone()),
+    })?;
+
+    // Update Cargo.lock
+    let _ = Command::new("cargo")
+        .args(["update", "--workspace"])
+        .current_dir(root)
+        .status();
+
+    // Commit version bump if there are changes
+    let has_changes = !Command::new("git")
+        .args(["diff", "--quiet"])
+        .current_dir(root)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(true);
+
+    if has_changes {
+        let _ = Command::new("git")
+            .args(["add", "Cargo.toml", "Cargo.lock"])
+            .current_dir(root)
+            .status();
+        git(root, &["commit", "-m", &format!("chore: bump to {}", tag)])?;
+    }
+
+    git(root, &["tag", &tag])?;
+    println!("Created tag {}", tag);
+
+    if !args.no_push {
+        git(root, &["push", "origin", &branch])?;
+        git(root, &["push", "origin", &tag])?;
+        println!("Pushed {} and {}", branch, tag);
+    }
+
+    println!();
+    println!("LTS patch {} released.", tag);
 
     Ok(())
 }
