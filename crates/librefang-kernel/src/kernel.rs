@@ -535,61 +535,6 @@ fn migrate_workspaces_layout(home_dir: &Path) -> KernelResult<()> {
     Ok(())
 }
 
-/// Pre-install hands from registry cache into workspaces/hands/ via the
-/// proper install mechanism (parse + write). Skips hands already installed.
-fn preinstall_registry_hands(
-    home_dir: &Path,
-    hand_registry: &librefang_hands::registry::HandRegistry,
-) {
-    let registry_hands = home_dir.join("registry").join("hands");
-    if !registry_hands.is_dir() {
-        return;
-    }
-    let Ok(entries) = std::fs::read_dir(&registry_hands) else {
-        return;
-    };
-    let dest_root = home_dir.join("workspaces").join("hands");
-    let mut installed = 0;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let toml_path = path.join("HAND.toml");
-        if !toml_path.exists() {
-            continue;
-        }
-        // Skip if already on disk (CLI init may have copied it already)
-        let id = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or_default();
-        if dest_root.join(id).join("HAND.toml").exists() {
-            continue;
-        }
-        let Ok(toml_content) = std::fs::read_to_string(&toml_path) else {
-            continue;
-        };
-        let skill_content = std::fs::read_to_string(path.join("SKILL.md")).unwrap_or_default();
-        match hand_registry.install_from_content_persisted(home_dir, &toml_content, &skill_content)
-        {
-            Ok(def) => {
-                info!(hand = %def.id, "Pre-installed hand from registry");
-                installed += 1;
-            }
-            Err(librefang_hands::HandError::AlreadyActive(_)) => {
-                // Already installed, skip
-            }
-            Err(e) => {
-                warn!("Failed to pre-install hand from registry: {e}");
-            }
-        }
-    }
-    if installed > 0 {
-        info!("Pre-installed {installed} hand(s) from registry");
-    }
-}
-
 /// Initialize a git repo in the home directory for config version control.
 fn init_git_if_missing(home_dir: &Path) {
     if home_dir.join(".git").exists() {
@@ -1597,11 +1542,6 @@ impl LibreFangKernel {
         // Initialize hand registry (curated autonomous packages)
         let hand_registry = librefang_hands::registry::HandRegistry::new();
         router::set_hand_route_home_dir(&config.home_dir);
-
-        // Pre-install hands from registry cache to workspaces/hands/
-        // (only new ones — existing user hands are preserved)
-        preinstall_registry_hands(&config.home_dir, &hand_registry);
-
         let hand_count = hand_registry.load_bundled(&config.home_dir);
         if hand_count > 0 {
             info!("Loaded {hand_count} bundled hand(s)");
@@ -6203,37 +6143,26 @@ system_prompt = "You are a helpful assistant."
                 }
             }
         } else if !state_path.exists() {
-            // First boot
-            if Self::DEFAULT_HANDS.is_empty() {
-                // No default hands — show available hands so users know what's there
-                let defs = self.hand_registry.list_definitions();
-                if !defs.is_empty() {
-                    info!("First boot detected — no hands activated by default");
-                    info!(
-                        "Available hands ({}) — activate with: librefang hand activate <id>",
-                        defs.len()
-                    );
-                    for def in &defs {
-                        let icon = if def.icon.is_empty() {
-                            "".to_string()
-                        } else {
-                            format!("{} ", def.icon)
-                        };
-                        info!("  {icon}{id}: {desc}", id = def.id, desc = def.description);
-                    }
-                }
-            } else {
+            // First boot: activate all registry hands then pause them (pre-install).
+            // This creates full workspace structure (AGENT.json, SOUL.md, memory/, etc.)
+            // without leaving agents running.
+            let defs = self.hand_registry.list_definitions();
+            if !defs.is_empty() {
                 info!(
-                    "First boot detected — activating {} default hand(s)",
-                    Self::DEFAULT_HANDS.len()
+                    "First boot — pre-installing {} hand(s) (activate + pause)",
+                    defs.len()
                 );
-                for hand_id in Self::DEFAULT_HANDS {
-                    match self.activate_hand(hand_id, std::collections::HashMap::new()) {
+                for def in &defs {
+                    match self.activate_hand(&def.id, std::collections::HashMap::new()) {
                         Ok(inst) => {
-                            info!(hand = %hand_id, instance = %inst.instance_id, "Default hand activated");
+                            if let Err(e) = self.pause_hand(inst.instance_id) {
+                                warn!(hand = %def.id, error = %e, "Failed to pause pre-installed hand");
+                            } else {
+                                info!(hand = %def.id, "Pre-installed hand (paused)");
+                            }
                         }
                         Err(e) => {
-                            warn!(hand = %hand_id, error = %e, "Failed to activate default hand");
+                            warn!(hand = %def.id, error = %e, "Failed to pre-install hand");
                         }
                     }
                 }

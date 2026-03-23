@@ -37,33 +37,44 @@ pub fn bundled_hands(
 }
 
 pub(crate) fn disk_hands(home_dir: &std::path::Path) -> Vec<(String, String, String)> {
+    let mut seen = std::collections::HashSet::new();
     let mut results = Vec::new();
-    let hands_dir = home_dir.join("workspaces").join("hands");
 
-    if let Ok(entries) = std::fs::read_dir(&hands_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            let id = match path.file_name().and_then(|n| n.to_str()) {
-                Some(n) => n.to_string(),
-                None => continue,
-            };
-            let toml_path = path.join("HAND.toml");
-            let skill_path = path.join("SKILL.md");
-            if !toml_path.exists() {
-                continue;
-            }
-            let toml = match std::fs::read_to_string(&toml_path) {
-                Ok(s) => s,
-                Err(e) => {
-                    warn!(path = %toml_path.display(), error = %e, "Failed to read HAND.toml");
+    // Activated/user-custom hands first, then registry definitions
+    let dirs = [
+        home_dir.join("workspaces").join("hands"),
+        home_dir.join("registry").join("hands"),
+    ];
+
+    for hands_dir in &dirs {
+        if let Ok(entries) = std::fs::read_dir(hands_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_dir() {
                     continue;
                 }
-            };
-            let skill = std::fs::read_to_string(&skill_path).unwrap_or_default();
-            results.push((id, toml, skill));
+                let id = match path.file_name().and_then(|n| n.to_str()) {
+                    Some(n) => n.to_string(),
+                    None => continue,
+                };
+                if !seen.insert(id.clone()) {
+                    continue;
+                }
+                let toml_path = path.join("HAND.toml");
+                let skill_path = path.join("SKILL.md");
+                if !toml_path.exists() {
+                    continue;
+                }
+                let toml = match std::fs::read_to_string(&toml_path) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        warn!(path = %toml_path.display(), error = %e, "Failed to read HAND.toml");
+                        continue;
+                    }
+                };
+                let skill = std::fs::read_to_string(&skill_path).unwrap_or_default();
+                results.push((id, toml, skill));
+            }
         }
     }
 
