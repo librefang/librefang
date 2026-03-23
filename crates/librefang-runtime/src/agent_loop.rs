@@ -386,6 +386,7 @@ pub async fn run_agent_loop(
     workspace_root: Option<&Path>,
     on_phase: Option<&PhaseCallback>,
     media_engine: Option<&crate::media_understanding::MediaEngine>,
+    media_drivers: Option<&crate::media::MediaDriverCache>,
     tts_engine: Option<&crate::tts::TtsEngine>,
     docker_config: Option<&librefang_types::config::DockerSandboxConfig>,
     hooks: Option<&crate::hooks::HookRegistry>,
@@ -1191,7 +1192,7 @@ pub async fn run_agent_loop(
                             },
                             workspace_root,
                             media_engine,
-                            None, // media_drivers
+                            media_drivers,
                             effective_exec_policy,
                             tts_engine,
                             docker_config,
@@ -1770,6 +1771,7 @@ pub async fn run_agent_loop_streaming(
     workspace_root: Option<&Path>,
     on_phase: Option<&PhaseCallback>,
     media_engine: Option<&crate::media_understanding::MediaEngine>,
+    media_drivers: Option<&crate::media::MediaDriverCache>,
     tts_engine: Option<&crate::tts::TtsEngine>,
     docker_config: Option<&librefang_types::config::DockerSandboxConfig>,
     hooks: Option<&crate::hooks::HookRegistry>,
@@ -2584,7 +2586,7 @@ pub async fn run_agent_loop_streaming(
                             },
                             workspace_root,
                             media_engine,
-                            None, // media_drivers
+                            media_drivers,
                             effective_exec_policy,
                             tts_engine,
                             docker_config,
@@ -3888,6 +3890,7 @@ mod tests {
             None,
             None, // on_phase
             None, // media_engine
+            None, // media_drivers
             None, // tts_engine
             None, // docker_config
             None, // hooks
@@ -3945,6 +3948,7 @@ mod tests {
             None,
             None, // on_phase
             None, // media_engine
+            None, // media_drivers
             None, // tts_engine
             None, // docker_config
             None, // hooks
@@ -4001,6 +4005,7 @@ mod tests {
             None,
             None, // on_phase
             None, // media_engine
+            None, // media_drivers
             None, // tts_engine
             None, // docker_config
             None, // hooks
@@ -4050,6 +4055,7 @@ mod tests {
             None,
             None, // on_phase
             None, // media_engine
+            None, // media_drivers
             None, // tts_engine
             None, // docker_config
             None, // hooks
@@ -4180,10 +4186,11 @@ mod tests {
             None,
             None,
             None,
-            None,
-            None,
-            None,
-            None,
+            None, // media_engine
+            None, // media_drivers
+            None, // tts_engine
+            None, // docker_config
+            None, // hooks
             None, // context_window_tokens
             None, // process_manager
             None, // user_content_blocks
@@ -4230,10 +4237,11 @@ mod tests {
             None,
             None,
             None,
-            None,
-            None,
-            None,
-            None,
+            None, // media_engine
+            None, // media_drivers
+            None, // tts_engine
+            None, // docker_config
+            None, // hooks
             None, // context_window_tokens
             None, // process_manager
             None, // user_content_blocks
@@ -4289,6 +4297,7 @@ mod tests {
             None,
             None, // on_phase
             None, // media_engine
+            None, // media_drivers
             None, // tts_engine
             None, // docker_config
             None, // hooks
@@ -5069,6 +5078,7 @@ mod tests {
             None,
             None, // on_phase
             None, // media_engine
+            None, // media_drivers
             None, // tts_engine
             None, // docker_config
             None, // hooks
@@ -5205,6 +5215,7 @@ mod tests {
             None,
             None, // on_phase
             None, // media_engine
+            None, // media_drivers
             None, // tts_engine
             None, // docker_config
             None, // hooks

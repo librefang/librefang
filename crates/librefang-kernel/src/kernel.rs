@@ -2563,7 +2563,8 @@ system_prompt = "You are a helpful assistant."
             None, // no embeddings
             manifest.workspace.as_deref(),
             None, // no phase callback
-            None, // no media
+            None, // no media engine
+            None, // no media drivers
             None, // no TTS
             None, // no docker
             None, // no hooks
@@ -3157,6 +3158,7 @@ system_prompt = "You are a helpful assistant."
                 manifest.workspace.as_deref(),
                 Some(&phase_cb),
                 Some(&kernel_clone.media_engine),
+                Some(&kernel_clone.media_drivers),
                 if kernel_clone.config.tts.enabled {
                     Some(&kernel_clone.tts_engine)
                 } else {
@@ -4060,6 +4062,7 @@ system_prompt = "You are a helpful assistant."
             manifest.workspace.as_deref(),
             None, // on_phase callback
             Some(&self.media_engine),
+            Some(&self.media_drivers),
             if self.config.tts.enabled {
                 Some(&self.tts_engine)
             } else {
