@@ -3,16 +3,10 @@
 //! This module is compiled only when the `telemetry` feature is enabled.
 //! It provides:
 //! - OpenTelemetry OTLP span export (layered on top of existing `tracing`)
-//! - A Prometheus metrics recorder with an HTTP handler for `/api/metrics`
-//! - An axum middleware that records HTTP request counters and duration histograms
+//! - A Prometheus metrics recorder for `/api/metrics`
 
-use axum::body::Body;
-use axum::extract::Request;
-use axum::middleware::Next;
-use axum::response::Response;
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use std::sync::OnceLock;
-use std::time::Instant;
 
 static PROMETHEUS_HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
 
@@ -112,35 +106,6 @@ pub fn init_otel_tracing(
     Ok(())
 }
 
-/// Axum middleware that records HTTP request metrics via the `metrics` crate.
-///
-/// Recorded metrics:
-/// - `librefang_http_requests_total` — counter with labels `method`, `path`, `status`
-/// - `librefang_http_request_duration_seconds` — histogram with labels `method`, `path`
-pub async fn http_metrics_middleware(request: Request<Body>, next: Next) -> Response {
-    let method = request.method().to_string();
-    let path = request.uri().path().to_string();
-
-    let start = Instant::now();
-    let response = next.run(request).await;
-    let duration = start.elapsed().as_secs_f64();
-
-    let status = response.status().as_u16().to_string();
-
-    metrics::counter!(
-        "librefang_http_requests_total",
-        "method" => method.clone(),
-        "path" => path.clone(),
-        "status" => status,
-    )
-    .increment(1);
-
-    metrics::histogram!(
-        "librefang_http_request_duration_seconds",
-        "method" => method,
-        "path" => path,
-    )
-    .record(duration);
-
-    response
-}
+// NOTE: HTTP metrics recording is handled by `request_logging` in middleware.rs
+// which calls `librefang_telemetry::metrics::record_http_request()`.
+// A separate middleware layer is not needed here.
