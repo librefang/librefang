@@ -4,6 +4,7 @@
 const http = require('node:http');
 const fs = require('node:fs');
 const { randomUUID } = require('node:crypto');
+const toml = require('toml');
 
 // ---------------------------------------------------------------------------
 // Read config.toml — the gateway reads its own config directly
@@ -14,38 +15,13 @@ function readWhatsAppConfig(configPath) {
   const defaults = { default_agent: 'assistant', owner_numbers: [], conversation_ttl_hours: 24 };
   try {
     const content = fs.readFileSync(configPath, 'utf8');
-    const lines = content.split('\n');
-    let inWhatsApp = false;
-    const cfg = { ...defaults };
-
-    for (const line of lines) {
-      const trimmed = line.trim();
-      // Detect section headers
-      if (/^\[/.test(trimmed)) {
-        inWhatsApp = trimmed === '[channels.whatsapp]';
-        continue;
-      }
-      if (!inWhatsApp) continue;
-
-      const m = trimmed.match(/^(\w+)\s*=\s*(.+)$/);
-      if (!m) continue;
-      const [, key, rawVal] = m;
-
-      if (key === 'default_agent') {
-        cfg.default_agent = rawVal.replace(/^["']|["']$/g, '');
-      } else if (key === 'owner_numbers') {
-        // Parse TOML array: ["393760105565", "393407682386"]
-        const arrMatch = rawVal.match(/\[([^\]]*)\]/);
-        if (arrMatch) {
-          cfg.owner_numbers = arrMatch[1]
-            .split(',')
-            .map(s => s.trim().replace(/^["']|["']$/g, ''))
-            .filter(Boolean);
-        }
-      } else if (key === 'conversation_ttl_hours') {
-        cfg.conversation_ttl_hours = parseInt(rawVal, 10) || defaults.conversation_ttl_hours;
-      }
-    }
+    const parsed = toml.parse(content);
+    const wa = parsed?.channels?.whatsapp || {};
+    const cfg = {
+      default_agent: wa.default_agent || defaults.default_agent,
+      owner_numbers: Array.isArray(wa.owner_numbers) ? wa.owner_numbers : defaults.owner_numbers,
+      conversation_ttl_hours: parseInt(wa.conversation_ttl_hours, 10) || defaults.conversation_ttl_hours,
+    };
     console.log(`[gateway] Read config from ${configPath}: default_agent="${cfg.default_agent}", owner_numbers=${JSON.stringify(cfg.owner_numbers)}, conversation_ttl_hours=${cfg.conversation_ttl_hours}`);
     return cfg;
   } catch (err) {
@@ -90,20 +66,6 @@ if (OWNER_NUMBERS.length > 0) {
   console.log('[gateway] Owner routing disabled (no owner_numbers configured)');
 }
 
-// Owner routing: responses to external DMs go to the owner, not back to the sender.
-// Set WHATSAPP_OWNER_JID to the owner's phone number (e.g. "393760105565").
-const OWNER_JID_RAW = process.env.WHATSAPP_OWNER_JID || '';
-const OWNER_JID = OWNER_JID_RAW ? OWNER_JID_RAW.replace(/^\+/, '') + '@s.whatsapp.net' : '';
-
-// Validate OWNER_JID format at startup
-if (OWNER_JID_RAW) {
-  const digits = OWNER_JID_RAW.replace(/^\+/, '');
-  if (!/^\d{7,15}$/.test(digits)) {
-    console.error(`[gateway] WARNING: WHATSAPP_OWNER_JID="${OWNER_JID_RAW}" looks invalid (expected 7-15 digits, optionally prefixed with +). Owner routing may not work.`);
-  } else {
-    console.log(`[gateway] Owner routing enabled → ${OWNER_JID}`);
-  }
-}
 
 // ---------------------------------------------------------------------------
 // State
@@ -281,6 +243,14 @@ function shouldDebounceEscalation(strangerJid) {
   lastEscalationTime.set(strangerJid, Date.now());
   return false;
 }
+
+// Cleanup stale escalation entries every 10 minutes
+setInterval(() => {
+  const now = Date.now();
+  for (const [jid, ts] of lastEscalationTime) {
+    if (now - ts > ESCALATION_DEBOUNCE_MS) lastEscalationTime.delete(jid);
+  }
+}, 10 * 60 * 1000);
 
 // ---------------------------------------------------------------------------
 // Step D: Build active conversations context block for owner messages
@@ -1145,7 +1115,7 @@ const server = http.createServer(async (req, res) => {
           lastMessage: convo.messages[convo.messages.length - 1] || null,
         });
       }
-      return jsonResponse(res, 200, { conversations });
+      return jsonResponse(req, res, 200, { conversations });
     }
 
     // GET /health — health check

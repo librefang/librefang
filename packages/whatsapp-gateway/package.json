@@ -12,8 +12,9 @@
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^6",
+    "pino": "^9",
     "qrcode": "^1.5",
-    "pino": "^9"
+    "toml": "^3.0.0"
   },
   "engines": {
     "node": ">=18"
