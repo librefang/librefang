@@ -299,7 +299,7 @@ librefang agent new [<TEMPLATE>]
 
 **Behavior:**
 
-- Templates are discovered from: the repo `agents/` directory (dev builds), `~/.librefang/agents/` (installed), and `LIBREFANG_AGENTS_DIR` (env override).
+- Templates are discovered from: the repo `agents/` directory (dev builds), `~/.librefang/agents/` (assistant pre-installed, others installed from dashboard), and `LIBREFANG_AGENTS_DIR` (env override).
 - Each template is a directory containing an `agent.toml` manifest.
 - In daemon mode: sends `POST /api/agents` with the manifest. Agent is persistent.
 - In standalone mode: boots an in-process kernel. Agent is ephemeral.
@@ -438,7 +438,7 @@ librefang hand list
 
 **Output columns:** ID, NAME, VERSION, STATUS, DESCRIPTION.
 
-Discovers hands from bundled modules and the `~/.librefang/hands/` directory.
+Discovers hands from `~/.librefang/workspaces/hands/` (pre-installed from registry on first boot). Users can activate hands from the dashboard.
 
 ---
 
@@ -808,7 +808,7 @@ librefang skill list
 
 **Output columns:** NAME, VERSION, TOOLS, DESCRIPTION.
 
-Loads skills from `~/.librefang/skills/` plus bundled skills compiled into the binary.
+Loads skills from `~/.librefang/skills/` (installed from dashboard or user custom).
 
 ---
 

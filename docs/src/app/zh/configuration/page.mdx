@@ -338,7 +338,7 @@ health_check_interval_secs = 60
 | `usage_footer` | Enum | `"full"` | 响应尾部用量信息：`off` / `tokens` / `cost` / `full` |
 | `stable_prefix_mode` | bool | `false` | 启用后避免每轮动态追加内容，提升提示缓存命中率 |
 | `prompt_caching` | bool | `true` | 启用 LLM 提供商提示缓存（Anthropic / OpenAI） |
-| `workspaces_dir` | Path | `~/.librefang/workspaces` | Agent 工作区根目录 |
+| `workspaces_dir` | Path | `~/.librefang/workspaces` | Agent 工作区根目录，包含 agent 工作目录和 `hands/` 子目录（用户自定义 hands） |
 | `max_cron_jobs` | Integer | `500` | 所有 Agent 的最大 Cron 任务总数 |
 | `include` | Array\<String\> | `[]` | 在主配置前合并的子配置文件路径（相对路径，禁止 `..`） |
 | `provider_urls` | Map | `{}` | Provider 基础 URL 覆盖（`provider_id` → 自定义 URL），如 `openai = "https://my-proxy.com/v1"` |

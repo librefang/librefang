@@ -3,7 +3,6 @@
 //! When a daemon is running (`librefang start`), the CLI talks to it over HTTP.
 //! Otherwise, commands boot an in-process kernel (single-shot mode).
 
-mod bundled_agents;
 mod dotenv;
 mod http_client;
 pub mod i18n;
@@ -1879,21 +1878,19 @@ fn cmd_init(quick: bool) {
         restrict_dir_permissions(&librefang_dir);
     }
 
-    for sub in ["data", "agents"] {
-        let dir = librefang_dir.join(sub);
-        if !dir.exists() {
-            std::fs::create_dir_all(&dir).unwrap_or_else(|e| {
-                eprintln!("Error creating {sub} dir: {e}");
-                std::process::exit(1);
-            });
-        }
+    let data_dir = librefang_dir.join("data");
+    if !data_dir.exists() {
+        std::fs::create_dir_all(&data_dir).unwrap_or_else(|e| {
+            eprintln!("Error creating data dir: {e}");
+            std::process::exit(1);
+        });
     }
-
-    // Sync agent templates from registry (skips existing ones to preserve user edits)
-    bundled_agents::sync_registry_agents(&librefang_dir);
 
     // Initialize vault if not already initialized
     init_vault_if_missing(&librefang_dir);
+
+    // Initialize git repo for config version control
+    init_git_if_missing(&librefang_dir);
 
     if quick {
         cmd_init_quick(&librefang_dir);
@@ -1920,6 +1917,45 @@ fn init_vault_if_missing(librefang_dir: &std::path::Path) {
         // Silently skip vault init on failure - it's optional
         tracing::debug!("vault init skipped: {e}");
     }
+}
+
+/// Initialize a git repo in ~/.librefang/ for config version control.
+fn init_git_if_missing(librefang_dir: &std::path::Path) {
+    if librefang_dir.join(".git").exists() {
+        return;
+    }
+
+    let Ok(status) = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(librefang_dir)
+        .status()
+    else {
+        tracing::debug!("git not available, skipping repo init");
+        return;
+    };
+    if !status.success() {
+        tracing::debug!("git init failed");
+        return;
+    }
+
+    // Write .gitignore for sensitive/temporary files
+    let gitignore = librefang_dir.join(".gitignore");
+    if !gitignore.exists() {
+        let _ = std::fs::write(
+            &gitignore,
+            "secrets.env\nvault.enc\ndaemon.json\nlogs/\ncache/\nregistry/\ndata/\n*.db\n*.db-shm\n*.db-wal\n",
+        );
+    }
+
+    // Initial commit
+    let _ = std::process::Command::new("git")
+        .args(["add", "-A"])
+        .current_dir(librefang_dir)
+        .status();
+    let _ = std::process::Command::new("git")
+        .args(["commit", "-q", "-m", "chore: initial librefang config"])
+        .current_dir(librefang_dir)
+        .status();
 }
 
 /// Quick init: no prompts, auto-detect, write config + .env, print next steps.
@@ -6320,7 +6356,6 @@ fn cmd_config_set(key: &str, value: &str) {
             "max_cron_jobs",
             "usage_footer",
             "workspaces_dir",
-            "workspace_dir",
         ];
         if !known_scalars.contains(&last_key) {
             ui::error_with_fix(

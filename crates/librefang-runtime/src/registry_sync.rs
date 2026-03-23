@@ -24,7 +24,8 @@ const TARBALL_PREFIX: &str = "librefang-registry-main/";
 /// How long (in seconds) before we re-download the registry.
 const CACHE_MAX_AGE_SECS: u64 = 24 * 60 * 60; // 24 hours
 
-/// Content directories to sync from the registry.
+/// Content directories available in the registry.
+#[cfg(test)]
 const SYNC_DIRS: &[(&str, &str)] = &[
     ("agents", "agent.toml"),
     ("hands", "HAND.toml"),
@@ -66,24 +67,23 @@ pub fn sync_registry(home_dir: &Path) {
         }
     }
 
-    for &(dir_name, manifest_file) in SYNC_DIRS {
+    // Pre-install core content users need out of the box.
+    // Skills and plugins stay in registry — users install via dashboard.
+    for &dir_name in &["providers", "integrations"] {
         let src_dir = registry_cache.join(dir_name);
-        if !src_dir.exists() {
-            continue;
-        }
-        let dest_dir = home_dir.join(dir_name);
-
-        if manifest_file.is_empty() {
-            sync_flat_files(&src_dir, &dest_dir, dir_name);
-        } else {
-            sync_subdirs(&src_dir, &dest_dir, manifest_file, dir_name);
+        if src_dir.exists() {
+            sync_flat_files(&src_dir, &home_dir.join(dir_name), dir_name);
         }
     }
 
-    // Clean up stale hand directories (agent.toml without HAND.toml)
-    let hands_dir = home_dir.join("workspaces").join("hands");
-    if hands_dir.exists() {
-        cleanup_stale_dirs(&hands_dir);
+    // Pre-install the default assistant agent template
+    let assistant_src = registry_cache.join("agents").join("assistant");
+    if assistant_src.exists() {
+        let assistant_dest = home_dir.join("agents").join("assistant");
+        if !assistant_dest.exists() {
+            let _ = std::fs::create_dir_all(&assistant_dest);
+            let _ = copy_dir_recursive(&assistant_src, &assistant_dest);
+        }
     }
 
     // Sync root-level files (aliases.toml, schema.toml)
@@ -93,6 +93,12 @@ pub fn sync_registry(home_dir: &Path) {
         if src.exists() && !dest.exists() {
             let _ = std::fs::copy(&src, &dest);
         }
+    }
+
+    // Clean up stale hand directories in user's own hands dir
+    let hands_dir = home_dir.join("workspaces").join("hands");
+    if hands_dir.exists() {
+        cleanup_stale_dirs(&hands_dir);
     }
 }
 
@@ -243,11 +249,8 @@ pub fn resolve_home_dir_for_tests() -> std::path::PathBuf {
 }
 
 pub fn needs_sync(home_dir: &Path) -> bool {
-    !home_dir.join("providers").exists()
-        || !home_dir.join("workspaces").join("hands").exists()
-        || !home_dir.join("agents").exists()
-        || !home_dir.join("skills").exists()
-        || !home_dir.join("integrations").exists()
+    // Only check if the registry cache is populated
+    !home_dir.join("registry").join("providers").exists()
 }
 
 /// Sync flat .toml files (e.g. integrations/, providers/).
@@ -332,7 +335,7 @@ fn version_newer_than(a: &str, b: &str) -> bool {
     false
 }
 
-/// Sync subdirectory-based content (e.g. agents/, hands/, skills/, plugins/).
+/// Sync subdirectory-based content (e.g. hands/).
 ///
 /// When a destination manifest already exists, compares `version` fields.
 /// If the source has a newer version, replaces the destination directory
@@ -446,23 +449,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_needs_sync_when_agents_dir_missing() {
+    fn test_needs_sync_when_registry_cache_missing() {
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join("providers")).unwrap();
-        std::fs::create_dir_all(tmp.path().join("workspaces").join("hands")).unwrap();
-
         assert!(needs_sync(tmp.path()));
     }
 
     #[test]
-    fn test_needs_sync_when_critical_dirs_exist() {
+    fn test_needs_sync_when_registry_cache_exists() {
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join("providers")).unwrap();
-        std::fs::create_dir_all(tmp.path().join("workspaces").join("hands")).unwrap();
-        std::fs::create_dir_all(tmp.path().join("agents")).unwrap();
-        std::fs::create_dir_all(tmp.path().join("skills")).unwrap();
-        std::fs::create_dir_all(tmp.path().join("integrations")).unwrap();
-
+        std::fs::create_dir_all(tmp.path().join("registry").join("providers")).unwrap();
         assert!(!needs_sync(tmp.path()));
     }
 

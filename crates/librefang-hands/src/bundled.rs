@@ -1,7 +1,7 @@
 //! Hand definitions loaded from disk at runtime.
 //!
-//! Hands are read from `~/.librefang/hands/` (synced from the registry
-//! via `librefang init`). No compile-time embedding.
+//! Hands are read from `~/.librefang/workspaces/hands/` (pre-installed from
+//! registry on first boot, plus user custom hands).
 
 use crate::{HandDefinition, HandError};
 use serde::Deserialize;

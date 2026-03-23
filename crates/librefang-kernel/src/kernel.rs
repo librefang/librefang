@@ -535,6 +535,83 @@ fn migrate_workspaces_layout(home_dir: &Path) -> KernelResult<()> {
     Ok(())
 }
 
+/// Pre-install hands from registry cache into workspaces/hands/ via the
+/// proper install mechanism (parse + write). Skips hands already installed.
+fn preinstall_registry_hands(
+    home_dir: &Path,
+    hand_registry: &librefang_hands::registry::HandRegistry,
+) {
+    let registry_hands = home_dir.join("registry").join("hands");
+    if !registry_hands.is_dir() {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(&registry_hands) else {
+        return;
+    };
+    let mut installed = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let toml_path = path.join("HAND.toml");
+        if !toml_path.exists() {
+            continue;
+        }
+        let Ok(toml_content) = std::fs::read_to_string(&toml_path) else {
+            continue;
+        };
+        let skill_content = std::fs::read_to_string(path.join("SKILL.md")).unwrap_or_default();
+        match hand_registry.install_from_content_persisted(home_dir, &toml_content, &skill_content)
+        {
+            Ok(def) => {
+                info!(hand = %def.id, "Pre-installed hand from registry");
+                installed += 1;
+            }
+            Err(librefang_hands::HandError::AlreadyActive(_)) => {
+                // Already installed, skip
+            }
+            Err(e) => {
+                warn!("Failed to pre-install hand from registry: {e}");
+            }
+        }
+    }
+    if installed > 0 {
+        info!("Pre-installed {installed} hand(s) from registry");
+    }
+}
+
+/// Initialize a git repo in the home directory for config version control.
+fn init_git_if_missing(home_dir: &Path) {
+    if home_dir.join(".git").exists() {
+        return;
+    }
+    let ok = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(home_dir)
+        .status()
+        .is_ok_and(|s| s.success());
+    if !ok {
+        return;
+    }
+    let gitignore = home_dir.join(".gitignore");
+    if !gitignore.exists() {
+        let _ = std::fs::write(
+            &gitignore,
+            "secrets.env\nvault.enc\ndaemon.json\nlogs/\ncache/\nregistry/\ndata/\n*.db\n*.db-shm\n*.db-wal\n",
+        );
+    }
+    let _ = std::process::Command::new("git")
+        .args(["add", "-A"])
+        .current_dir(home_dir)
+        .status();
+    let _ = std::process::Command::new("git")
+        .args(["commit", "-q", "-m", "chore: initial librefang config"])
+        .current_dir(home_dir)
+        .status();
+    info!("Initialized git repo in {}", home_dir.display());
+}
+
 /// Create workspace directory structure for an agent.
 fn ensure_workspace(workspace: &Path) -> KernelResult<()> {
     for subdir in &["data", "output", "sessions", "skills", "logs", "memory"] {
@@ -1210,16 +1287,6 @@ impl LibreFangKernel {
         // Migrate old directory layout (hands/, workspaces/<agent>/) to unified layout
         migrate_workspaces_layout(&config.home_dir)?;
 
-        // Ensure global shared workspace directory exists
-        let workspace_dir = config.effective_workspace_dir();
-        std::fs::create_dir_all(&workspace_dir).map_err(|e| {
-            KernelError::BootFailed(format!(
-                "Failed to create workspace dir {}: {e}",
-                workspace_dir.display()
-            ))
-        })?;
-        info!("Global workspace dir: {}", workspace_dir.display());
-
         // Initialize memory substrate
         let db_path = config
             .memory
@@ -1440,8 +1507,11 @@ impl LibreFangKernel {
             info!("RBAC enabled with {} users", auth.user_count());
         }
 
+        // Initialize git repo for config version control (first boot)
+        init_git_if_missing(&config.home_dir);
+
         // Auto-sync registry content on first boot or after upgrade when
-        // critical directories (providers/, hands/, agents/) are missing.
+        // the registry cache is missing.
         if librefang_runtime::registry_sync::needs_sync(&config.home_dir) {
             info!("Registry content missing — running auto-sync from librefang-registry");
             librefang_runtime::registry_sync::sync_registry(&config.home_dir);
@@ -1518,6 +1588,11 @@ impl LibreFangKernel {
         // Initialize hand registry (curated autonomous packages)
         let hand_registry = librefang_hands::registry::HandRegistry::new();
         router::set_hand_route_home_dir(&config.home_dir);
+
+        // Pre-install hands from registry cache to workspaces/hands/
+        // (only new ones — existing user hands are preserved)
+        preinstall_registry_hands(&config.home_dir, &hand_registry);
+
         let hand_count = hand_registry.load_bundled(&config.home_dir);
         if hand_count > 0 {
             info!("Loaded {hand_count} bundled hand(s)");

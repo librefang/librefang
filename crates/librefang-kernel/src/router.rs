@@ -818,7 +818,6 @@ pub fn all_template_descriptions(agents_dir: &Path) -> Vec<(String, String)> {
         }
         if let Ok(manifest) = load_template_manifest_at(agents_dir, &template) {
             if !manifest.description.is_empty() {
-                // Combine name, description, and tags for richer embedding
                 let embed_text = format!(
                     "{}: {}. Tags: {}",
                     manifest.name,
