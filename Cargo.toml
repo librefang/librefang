@@ -150,6 +150,7 @@ argon2 = { version = "0.5", features = ["rand"] }
 html-escape = "0.2"
 
 # Lightweight regex
+regex = "1"
 regex-lite = "0.1"
 
 # Socket options (SO_REUSEADDR)
