@@ -380,6 +380,7 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
             "key_required": p.key_required,
             "api_key_env": p.api_key_env,
             "base_url": p.base_url,
+            "media_capabilities": p.media_capabilities,
         });
 
         // Attach region map so the dashboard can show available regions

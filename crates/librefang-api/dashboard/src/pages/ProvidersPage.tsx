@@ -128,6 +128,15 @@ function ProviderCard({ provider: p, isSelected, pendingId, viewMode, onSelect, 
               <p className="text-[8px] uppercase text-text-dim">{t("providers.last_test")}</p>
             </div>
           )}
+          {p.media_capabilities && p.media_capabilities.length > 0 && (
+            <div className="flex flex-wrap gap-1">
+              {p.media_capabilities.map((cap: string) => (
+                <Badge key={cap} variant="outline" className="text-[8px] px-1 py-0">
+                  {cap.replace(/_/g, " ")}
+                </Badge>
+              ))}
+            </div>
+          )}
         </div>
 
         <div className="flex items-center gap-1 shrink-0 self-end sm:self-auto">
@@ -203,6 +212,17 @@ function ProviderCard({ provider: p, isSelected, pendingId, viewMode, onSelect, 
             </p>
           </div>
         </div>
+
+        {/* Media capabilities */}
+        {p.media_capabilities && p.media_capabilities.length > 0 && (
+          <div className="flex flex-wrap gap-1 mb-3">
+            {p.media_capabilities.map((cap: string) => (
+              <Badge key={cap} variant="outline" className="text-[8px] px-1.5 py-0.5">
+                {cap.replace(/_/g, " ")}
+              </Badge>
+            ))}
+          </div>
+        )}
 
         {/* Info */}
         <div className="space-y-1.5 mb-4 flex-1">

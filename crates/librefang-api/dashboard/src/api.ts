@@ -44,6 +44,45 @@ export interface ProviderItem {
   base_url?: string;
   key_required?: boolean;
   health?: string;
+  media_capabilities?: string[];
+}
+
+export interface MediaProvider {
+  id: string;
+  display_name: string;
+  capabilities: string[];
+  configured: boolean;
+}
+
+export interface MediaImageResult {
+  images: { data_base64: string; url?: string }[];
+  model: string;
+  provider: string;
+  revised_prompt?: string;
+}
+
+export interface MediaTtsResult {
+  format: string;
+  provider: string;
+  model: string;
+  duration_ms?: number;
+}
+
+export interface MediaVideoSubmitResult {
+  task_id: string;
+  provider: string;
+}
+
+export interface MediaVideoStatus {
+  state: string;
+  error?: string;
+}
+
+export interface MediaMusicResult {
+  format: string;
+  provider: string;
+  model: string;
+  duration_ms?: number;
 }
 
 export interface ChannelField {
@@ -675,6 +714,45 @@ export async function deleteProviderKey(providerId: string): Promise<ApiActionRe
 
 export async function setProviderUrl(providerId: string, baseUrl: string): Promise<ApiActionResponse> {
   return put<ApiActionResponse>(`/api/providers/${encodeURIComponent(providerId)}/url`, { base_url: baseUrl });
+}
+
+// ── Media generation API ──────────────────────────────────────────────
+
+export async function listMediaProviders(): Promise<MediaProvider[]> {
+  const data = await get<{ providers: MediaProvider[] }>("/api/media/providers");
+  return data.providers ?? [];
+}
+
+export async function generateImage(req: { prompt: string; provider?: string; model?: string; count?: number; aspect_ratio?: string }): Promise<MediaImageResult> {
+  return post<MediaImageResult>("/api/media/image", req);
+}
+
+export async function synthesizeSpeech(req: { text: string; provider?: string; model?: string; voice?: string; format?: string }): Promise<Blob> {
+  const resp = await fetch("/api/media/speech", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  });
+  if (!resp.ok) throw new Error(`TTS failed: ${resp.status}`);
+  return resp.blob();
+}
+
+export async function submitVideo(req: { prompt: string; provider?: string; model?: string }): Promise<MediaVideoSubmitResult> {
+  return post<MediaVideoSubmitResult>("/api/media/video", req);
+}
+
+export async function pollVideo(taskId: string): Promise<MediaVideoStatus> {
+  return get<MediaVideoStatus>(`/api/media/video/${encodeURIComponent(taskId)}`);
+}
+
+export async function generateMusic(req: { prompt?: string; lyrics?: string; provider?: string; model?: string; instrumental?: boolean }): Promise<Blob> {
+  const resp = await fetch("/api/media/music", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  });
+  if (!resp.ok) throw new Error(`Music generation failed: ${resp.status}`);
+  return resp.blob();
 }
 
 export async function listChannels(): Promise<ChannelItem[]> {
