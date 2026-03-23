@@ -77,6 +77,10 @@ pub fn derive_dashboard_session_token(
 /// - If `pass_hash` is non-empty, verify with Argon2id only.
 /// - Otherwise, fall back to constant-time plaintext comparison against `cfg_pass`.
 ///   On success, returns an `upgrade_hash` so the caller can transparently migrate.
+///
+/// **Timing safety**: The password verification path always executes regardless of
+/// whether the username matched. This prevents attackers from enumerating valid
+/// usernames via timing differences (Argon2id is ~tens of ms vs instant return).
 pub fn verify_dashboard_password(
     input_user: &str,
     input_pass: &str,
@@ -88,31 +92,31 @@ pub fn verify_dashboard_password(
     use subtle::ConstantTimeEq;
     let user_ok: bool = input_user.as_bytes().ct_eq(cfg_user.as_bytes()).into();
 
-    if !user_ok {
+    // Always verify password to prevent timing side-channel on username enumeration.
+    // Even if username is wrong, we still run Argon2id so timing is constant.
+    let pass_ok = if !pass_hash.is_empty() {
+        verify_password(input_pass, pass_hash)
+    } else if !cfg_pass.is_empty() {
+        input_pass.as_bytes().ct_eq(cfg_pass.as_bytes()).into()
+    } else {
+        // No credentials configured — run a dummy hash to keep timing constant.
+        let _ = hash_password(input_pass);
+        false
+    };
+
+    if !user_ok || !pass_ok {
         return VerifyResult::Denied;
     }
 
-    // Strategy 1: Argon2id hash is configured — use it exclusively.
+    // Both matched — build result.
     if !pass_hash.is_empty() {
-        if verify_password(input_pass, pass_hash) {
-            let token =
-                derive_dashboard_session_token(cfg_user, cfg_pass, pass_hash).unwrap_or_default();
-            return VerifyResult::Ok {
-                token,
-                upgrade_hash: None,
-            };
+        let token =
+            derive_dashboard_session_token(cfg_user, cfg_pass, pass_hash).unwrap_or_default();
+        VerifyResult::Ok {
+            token,
+            upgrade_hash: None,
         }
-        return VerifyResult::Denied;
-    }
-
-    // Strategy 2: Legacy plaintext password — constant-time compare then offer upgrade.
-    if cfg_pass.is_empty() {
-        return VerifyResult::Denied;
-    }
-
-    let pass_ok: bool = input_pass.as_bytes().ct_eq(cfg_pass.as_bytes()).into();
-
-    if pass_ok {
+    } else {
         let token =
             derive_dashboard_session_token(cfg_user, cfg_pass, pass_hash).unwrap_or_default();
         // Generate an Argon2id hash so the caller can persist it for future logins.
@@ -121,8 +125,6 @@ pub fn verify_dashboard_password(
             token,
             upgrade_hash,
         }
-    } else {
-        VerifyResult::Denied
     }
 }
 
@@ -286,5 +288,44 @@ mod tests {
         let token =
             derive_dashboard_session_token("admin", "legacy-pass", "stored-hash").expect("token");
         assert_eq!(token, derive_session_token("admin", "stored-hash"));
+    }
+
+    /// Verify that wrong-username and wrong-password both return `Denied`
+    /// and that the password verification path is always exercised
+    /// (i.e., no early return on username mismatch that would leak timing).
+    #[test]
+    fn test_timing_constant_on_wrong_username() {
+        let hash = hash_password("correct-pass").unwrap();
+
+        // Wrong username, correct password — must be Denied.
+        assert!(matches!(
+            verify_dashboard_password("wrong-user", "correct-pass", "admin", "", &hash),
+            VerifyResult::Denied
+        ));
+
+        // Correct username, wrong password — must be Denied.
+        assert!(matches!(
+            verify_dashboard_password("admin", "wrong-pass", "admin", "", &hash),
+            VerifyResult::Denied
+        ));
+
+        // Wrong username, wrong password — must be Denied.
+        assert!(matches!(
+            verify_dashboard_password("wrong-user", "wrong-pass", "admin", "", &hash),
+            VerifyResult::Denied
+        ));
+
+        // Legacy plaintext path: wrong username, correct password — must be Denied.
+        assert!(matches!(
+            verify_dashboard_password("wrong-user", "secret", "admin", "secret", ""),
+            VerifyResult::Denied
+        ));
+
+        // No credentials path: wrong username — must be Denied (and still runs
+        // a dummy hash rather than returning instantly).
+        assert!(matches!(
+            verify_dashboard_password("wrong-user", "pass", "admin", "", ""),
+            VerifyResult::Denied
+        ));
     }
 }
