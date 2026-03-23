@@ -1464,15 +1464,19 @@ export async function getA2ATaskStatus(taskId: string): Promise<A2ATaskStatus> {
 // ── Auth check ───────────────────────────────────────
 
 export async function checkAuthRequired(): Promise<boolean> {
-  try {
-    // Use /api/status (requires auth) instead of /api/health (public)
-    const response = await fetch("/api/status", {
-      headers: { ...authHeader() },
-    });
-    return response.status === 401;
-  } catch {
-    return false;
+  // Retry a few times in case daemon is still booting
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const response = await fetch("/api/status", {
+        headers: { ...authHeader() },
+      });
+      return response.status === 401;
+    } catch {
+      // Network error — daemon may not be up yet, wait and retry
+      await new Promise((r) => setTimeout(r, 1000));
+    }
   }
+  return false;
 }
 
 export function setApiKey(key: string) {

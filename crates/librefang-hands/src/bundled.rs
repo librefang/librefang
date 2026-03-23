@@ -1,7 +1,7 @@
 //! Hand definitions loaded from disk at runtime.
 //!
-//! Hands are read from `~/.librefang/workspaces/hands/` (pre-installed from
-//! registry on first boot, plus user custom hands).
+//! Hands are read from `~/.librefang/registry/hands/`. Agent workspaces
+//! are created under `~/.librefang/workspaces/<hand-id>/<role>/` on activation.
 
 use crate::{HandDefinition, HandError};
 use serde::Deserialize;
@@ -40,11 +40,8 @@ pub(crate) fn disk_hands(home_dir: &std::path::Path) -> Vec<(String, String, Str
     let mut seen = std::collections::HashSet::new();
     let mut results = Vec::new();
 
-    // Activated/user-custom hands first, then registry definitions
-    let dirs = [
-        home_dir.join("workspaces").join("hands"),
-        home_dir.join("registry").join("hands"),
-    ];
+    // Registry definitions + user custom hands in workspaces/
+    let dirs = [home_dir.join("registry").join("hands")];
 
     for hands_dir in &dirs {
         if let Ok(entries) = std::fs::read_dir(hands_dir) {

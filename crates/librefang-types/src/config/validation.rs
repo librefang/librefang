@@ -67,6 +67,11 @@ impl KernelConfig {
             "health_check",
             "plugins",
             "strict_config",
+            "dashboard_user",
+            "dashboard_pass",
+            "dashboard_pass_hash",
+            "log_dir",
+            "inbox",
         ]
     }
 
