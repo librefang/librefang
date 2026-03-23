@@ -195,6 +195,12 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
             let next_beta = beta_count + 1;
             let next_rc = rc_count + 1;
 
+            // Compute LTS base: YYYY.M (no day/hour)
+            let lts_base = {
+                let now = chrono::Local::now();
+                format!("{}.{}", now.format("%Y"), now.format("%-m"))
+            };
+
             println!();
             println!(
                 "Current version: {} (tag: {})",
@@ -205,23 +211,27 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
             println!("  1) stable  -> {}", base_version);
             println!("  2) beta    -> {}-beta{}", base_version, next_beta);
             println!("  3) rc      -> {}-rc{}", base_version, next_rc);
+            println!("  4) lts     -> {}-lts", lts_base);
             println!();
 
-            let choice = prompt("Choose [1/2/3]: ");
+            let choice = prompt("Choose [1/2/3/4]: ");
             match choice.as_str() {
                 "1" => base_version,
                 "2" => format!("{}-beta{}", base_version, next_beta),
                 "3" => format!("{}-rc{}", base_version, next_rc),
+                "4" => format!("{}-lts", lts_base),
                 _ => return Err("Invalid choice".into()),
             }
         }
     };
 
     // Validate CalVer early, before using version in git tags/branches
-    let calver_re = Regex::new(r"^[0-9]{4}\.[0-9]{1,2}\.[0-9]{2,4}(-(beta|rc)[0-9]+)?$").unwrap();
+    let calver_re =
+        Regex::new(r"^[0-9]{4}\.[0-9]{1,2}(\.[0-9]{2,4})?(-(beta|rc)[0-9]+|-lts(\.[0-9]+)?)?$")
+            .unwrap();
     if !calver_re.is_match(&version) {
         return Err(format!(
-            "'{}' is not a valid CalVer (expected: YYYY.M.DDHH e.g. 2026.3.2114)",
+            "'{}' is not a valid CalVer (expected: YYYY.M.DDHH, YYYY.M-lts, etc.)",
             version
         )
         .into());
@@ -229,6 +239,7 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     let tag = format!("v{}", version);
     let is_prerelease = version.contains("-beta") || version.contains("-rc");
+    let is_lts = version.contains("-lts");
 
     // --- Check if tag already exists ---
     let tag_exists = Command::new("git")
@@ -244,7 +255,14 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
         println!("=== Release Summary ===");
         println!("  Version: {} -> {}", current, version);
         println!("  Tag:     {}", tag);
-        if is_prerelease {
+        if is_lts {
+            println!("  Type:    LTS (long-term support)");
+            let lts_branch = format!(
+                "release/{}",
+                version.split("-lts").next().unwrap_or(&version)
+            );
+            println!("  Branch:  {} (auto-created on push)", lts_branch);
+        } else if is_prerelease {
             println!("  Type:    pre-release");
         }
         if tag_exists {
@@ -350,7 +368,7 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // --- Generate Dev.to article (skip for pre-releases or --no-article) ---
-    let article_path = if !args.no_article && !is_prerelease {
+    let article_path = if !args.no_article && !is_prerelease && !is_lts {
         let article = root.join(format!("articles/release-{}.md", changelog_version));
         if !article.exists() {
             let changelog_path = root.join("CHANGELOG.md");
@@ -452,9 +470,12 @@ pip install librefang-sdk
             Some(article)
         }
     } else {
-        if is_prerelease {
+        if is_prerelease || is_lts {
             println!();
-            println!("Skipping Dev.to article for pre-release");
+            println!(
+                "Skipping Dev.to article for {}",
+                if is_lts { "LTS release" } else { "pre-release" }
+            );
         }
         None
     };
