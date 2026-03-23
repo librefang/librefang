@@ -10,7 +10,7 @@
       "title": "Version",
       "type": "stat",
       "gridPos": { "h": 3, "w": 4, "x": 0, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "-- Grafana --" },
+      "datasource": { "type": "prometheus", "uid": "librefang-prometheus" },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "fixed", "fixedColor": "text" },
@@ -33,7 +33,7 @@
       "title": "Uptime",
       "type": "stat",
       "gridPos": { "h": 3, "w": 4, "x": 4, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "-- Grafana --" },
+      "datasource": { "type": "prometheus", "uid": "librefang-prometheus" },
       "fieldConfig": {
         "defaults": {
           "unit": "dtdurations",
@@ -55,7 +55,7 @@
       "title": "Active Agents",
       "type": "stat",
       "gridPos": { "h": 3, "w": 4, "x": 8, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "-- Grafana --" },
+      "datasource": { "type": "prometheus", "uid": "librefang-prometheus" },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "thresholds" },
@@ -80,7 +80,7 @@
       "title": "Total Agents",
       "type": "stat",
       "gridPos": { "h": 3, "w": 4, "x": 12, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "-- Grafana --" },
+      "datasource": { "type": "prometheus", "uid": "librefang-prometheus" },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "thresholds" },
@@ -101,7 +101,7 @@
       "title": "Active Sessions",
       "type": "stat",
       "gridPos": { "h": 3, "w": 4, "x": 16, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "-- Grafana --" },
+      "datasource": { "type": "prometheus", "uid": "librefang-prometheus" },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "thresholds" },
@@ -126,7 +126,7 @@
       "title": "Cost Today (USD)",
       "type": "stat",
       "gridPos": { "h": 3, "w": 4, "x": 20, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "-- Grafana --" },
+      "datasource": { "type": "prometheus", "uid": "librefang-prometheus" },
       "fieldConfig": {
         "defaults": {
           "unit": "currencyUSD",
@@ -153,7 +153,7 @@
       "title": "Panics",
       "type": "stat",
       "gridPos": { "h": 3, "w": 4, "x": 0, "y": 3 },
-      "datasource": { "type": "prometheus", "uid": "-- Grafana --" },
+      "datasource": { "type": "prometheus", "uid": "librefang-prometheus" },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "thresholds" },
@@ -178,7 +178,7 @@
       "title": "Restarts",
       "type": "stat",
       "gridPos": { "h": 3, "w": 4, "x": 4, "y": 3 },
-      "datasource": { "type": "prometheus", "uid": "-- Grafana --" },
+      "datasource": { "type": "prometheus", "uid": "librefang-prometheus" },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "thresholds" },
@@ -202,7 +202,7 @@
       "title": "Panics & Restarts Over Time",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
-      "datasource": { "type": "prometheus", "uid": "-- Grafana --" },
+      "datasource": { "type": "prometheus", "uid": "librefang-prometheus" },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" },
@@ -236,7 +236,7 @@
       "title": "Active vs Total Agents",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
-      "datasource": { "type": "prometheus", "uid": "-- Grafana --" },
+      "datasource": { "type": "prometheus", "uid": "librefang-prometheus" },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" },

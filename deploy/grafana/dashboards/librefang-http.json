@@ -10,7 +10,7 @@
       "title": "HTTP Request Rate",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "-- Grafana --" },
+      "datasource": { "type": "prometheus", "uid": "librefang-prometheus" },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" },
@@ -42,7 +42,7 @@
       "title": "Request Latency (p50 / p90 / p99)",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "-- Grafana --" },
+      "datasource": { "type": "prometheus", "uid": "librefang-prometheus" },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" },
@@ -79,7 +79,7 @@
       "title": "Request Rate by Status Code",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
-      "datasource": { "type": "prometheus", "uid": "-- Grafana --" },
+      "datasource": { "type": "prometheus", "uid": "librefang-prometheus" },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" },
@@ -111,7 +111,7 @@
       "description": "Client and server error rates over time",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
-      "datasource": { "type": "prometheus", "uid": "-- Grafana --" },
+      "datasource": { "type": "prometheus", "uid": "librefang-prometheus" },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" },
@@ -146,7 +146,7 @@
       "title": "Top Endpoints by Request Count",
       "type": "bargauge",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
-      "datasource": { "type": "prometheus", "uid": "-- Grafana --" },
+      "datasource": { "type": "prometheus", "uid": "librefang-prometheus" },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" },
@@ -179,7 +179,7 @@
       "description": "p99 latency per endpoint path",
       "type": "bargauge",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
-      "datasource": { "type": "prometheus", "uid": "-- Grafana --" },
+      "datasource": { "type": "prometheus", "uid": "librefang-prometheus" },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" },

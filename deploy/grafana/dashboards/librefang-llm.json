@@ -10,7 +10,7 @@
       "title": "Total Tokens (1h window)",
       "type": "stat",
       "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "-- Grafana --" },
+      "datasource": { "type": "prometheus", "uid": "librefang-prometheus" },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "thresholds" },
@@ -32,7 +32,7 @@
       "title": "Input Tokens (1h)",
       "type": "stat",
       "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "-- Grafana --" },
+      "datasource": { "type": "prometheus", "uid": "librefang-prometheus" },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "thresholds" },
@@ -54,7 +54,7 @@
       "title": "Output Tokens (1h)",
       "type": "stat",
       "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "-- Grafana --" },
+      "datasource": { "type": "prometheus", "uid": "librefang-prometheus" },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "thresholds" },
@@ -76,7 +76,7 @@
       "title": "LLM Calls (1h)",
       "type": "stat",
       "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "-- Grafana --" },
+      "datasource": { "type": "prometheus", "uid": "librefang-prometheus" },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "thresholds" },
@@ -98,7 +98,7 @@
       "title": "Tokens Consumed by Agent",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
-      "datasource": { "type": "prometheus", "uid": "-- Grafana --" },
+      "datasource": { "type": "prometheus", "uid": "librefang-prometheus" },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" },
@@ -129,7 +129,7 @@
       "title": "LLM Calls by Agent",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
-      "datasource": { "type": "prometheus", "uid": "-- Grafana --" },
+      "datasource": { "type": "prometheus", "uid": "librefang-prometheus" },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" },
@@ -161,7 +161,7 @@
       "description": "Stacked view of input (prompt) vs output (completion) tokens",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
-      "datasource": { "type": "prometheus", "uid": "-- Grafana --" },
+      "datasource": { "type": "prometheus", "uid": "librefang-prometheus" },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" },
@@ -197,7 +197,7 @@
       "description": "Token consumption grouped by LLM provider and model",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
-      "datasource": { "type": "prometheus", "uid": "-- Grafana --" },
+      "datasource": { "type": "prometheus", "uid": "librefang-prometheus" },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" },
@@ -228,7 +228,7 @@
       "title": "Agent Token Breakdown",
       "type": "piechart",
       "gridPos": { "h": 8, "w": 8, "x": 0, "y": 20 },
-      "datasource": { "type": "prometheus", "uid": "-- Grafana --" },
+      "datasource": { "type": "prometheus", "uid": "librefang-prometheus" },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" }
@@ -250,7 +250,7 @@
       "description": "Global ratio of input (prompt) vs output (completion) tokens",
       "type": "piechart",
       "gridPos": { "h": 8, "w": 8, "x": 8, "y": 20 },
-      "datasource": { "type": "prometheus", "uid": "-- Grafana --" },
+      "datasource": { "type": "prometheus", "uid": "librefang-prometheus" },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" }
@@ -275,7 +275,7 @@
       "title": "Tool Calls by Agent",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 8, "x": 16, "y": 20 },
-      "datasource": { "type": "prometheus", "uid": "-- Grafana --" },
+      "datasource": { "type": "prometheus", "uid": "librefang-prometheus" },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" },
