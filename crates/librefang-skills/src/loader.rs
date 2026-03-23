@@ -594,6 +594,7 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_validate_script_path_blocks_absolute_path() {
         use tempfile::TempDir;
@@ -601,12 +602,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
 
         // An absolute path to /etc/passwd should be blocked
-        // (on Unix, /etc/passwd exists and is outside any temp dir)
-        #[cfg(unix)]
-        {
-            let result = validate_script_path(dir.path(), "/etc/passwd");
-            assert!(result.is_err());
-        }
+        let result = validate_script_path(dir.path(), "/etc/passwd");
+        assert!(result.is_err());
     }
 
     #[cfg(unix)]
