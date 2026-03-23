@@ -293,6 +293,7 @@ fn sync_flat_files(src_dir: &Path, dest_dir: &Path, label: &str) {
 /// Avoids full TOML parse (which may fail on new-format files that older code
 /// can't deserialize). Returns `None` if the file can't be read or has no
 /// version field.
+#[cfg(test)]
 fn extract_version(path: &Path) -> Option<String> {
     let content = std::fs::read_to_string(path).ok()?;
     for line in content.lines() {
@@ -316,6 +317,7 @@ fn extract_version(path: &Path) -> Option<String> {
 ///
 /// Returns `true` if `a` is strictly newer than `b`. Non-numeric segments
 /// compare as 0 to avoid panics on malformed versions.
+#[cfg(test)]
 fn version_newer_than(a: &str, b: &str) -> bool {
     let parse = |s: &str| -> Vec<u64> {
         s.split('.')
@@ -340,6 +342,7 @@ fn version_newer_than(a: &str, b: &str) -> bool {
 /// When a destination manifest already exists, compares `version` fields.
 /// If the source has a newer version, replaces the destination directory
 /// (user settings live in `hand_state.json`, not in the manifest).
+#[cfg(test)]
 fn sync_subdirs(src_dir: &Path, dest_dir: &Path, manifest_file: &str, label: &str) {
     let entries = match std::fs::read_dir(src_dir) {
         Ok(e) => e,
