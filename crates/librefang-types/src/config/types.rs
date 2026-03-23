@@ -2940,9 +2940,17 @@ pub struct WhatsAppConfig {
     /// owner number with sender context, and the sender receives an auto-ack.
     #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
     pub owner_numbers: Vec<String>,
+    /// Conversation tracker TTL in hours (Web gateway mode).
+    /// Active stranger conversations expire after this period of inactivity.
+    #[serde(default = "default_conversation_ttl_hours")]
+    pub conversation_ttl_hours: u32,
     /// Per-channel behavior overrides.
     #[serde(default)]
     pub overrides: ChannelOverrides,
+}
+
+fn default_conversation_ttl_hours() -> u32 {
+    24
 }
 
 impl Default for WhatsAppConfig {
@@ -2957,6 +2965,7 @@ impl Default for WhatsAppConfig {
             account_id: None,
             default_agent: None,
             owner_numbers: vec![],
+            conversation_ttl_hours: default_conversation_ttl_hours(),
             overrides: ChannelOverrides::default(),
         }
     }
