@@ -4,6 +4,9 @@ on:
   push:
     tags:
       - "v*"
+  pull_request:
+    types: [closed]
+    branches: [main]
 
 permissions:
   contents: write
@@ -13,8 +16,33 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # When a release PR merges, create the tag on main
+  tag_on_merge:
+    name: Tag Release
+    if: >
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.merged == true &&
+      startsWith(github.event.pull_request.head.ref, 'chore/bump-version-')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Extract tag from PR body and create
+        run: |
+          TAG=$(echo "${{ github.event.pull_request.body }}" | grep -oP '(?<=<!-- release-tag:)(v[^ ]+)(?= -->)' || true)
+          if [ -z "$TAG" ]; then
+            echo "No release-tag marker found, skipping"
+            exit 0
+          fi
+          echo "Creating tag $TAG on main"
+          git tag "$TAG"
+          git push origin "$TAG"
+
   create_release:
     name: Create Release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
