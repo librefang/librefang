@@ -656,6 +656,10 @@ pub struct HandInstance {
     /// Empty until agents are spawned by the kernel.
     #[serde(default)]
     pub agent_ids: BTreeMap<String, AgentId>,
+    /// Role name of the coordinator agent that receives user messages.
+    /// Persisted explicitly so runtime routes do not have to guess.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coordinator_role: Option<String>,
     /// User-provided configuration overrides.
     pub config: HashMap<String, serde_json::Value>,
     /// When activated.
@@ -673,24 +677,38 @@ impl HandInstance {
             hand_id: hand_id.to_string(),
             status: HandStatus::Active,
             agent_ids: BTreeMap::new(),
+            coordinator_role: None,
             config,
             activated_at: now,
             updated_at: now,
         }
     }
 
+    pub(crate) fn normalize_coordinator_role(
+        agent_ids: &BTreeMap<String, AgentId>,
+        coordinator_role: Option<&str>,
+    ) -> Option<String> {
+        if let Some(role) = coordinator_role.filter(|role| agent_ids.contains_key(*role)) {
+            return Some(role.to_string());
+        }
+        if agent_ids.len() == 1 {
+            return agent_ids.keys().next().cloned();
+        }
+        if agent_ids.contains_key("main") {
+            return Some("main".to_string());
+        }
+        agent_ids.keys().next().cloned()
+    }
+
+    /// Get the coordinator role name (if agents have been spawned).
+    pub fn coordinator_role(&self) -> Option<String> {
+        Self::normalize_coordinator_role(&self.agent_ids, self.coordinator_role.as_deref())
+    }
+
     /// Get the coordinator agent ID (if agents have been spawned).
     pub fn coordinator_agent_id(&self) -> Option<AgentId> {
-        // For single-agent hands, return the only agent
-        if self.agent_ids.len() == 1 {
-            return self.agent_ids.values().next().copied();
-        }
-        // For multi-agent hands, "main" is typically the coordinator
-        if let Some(&id) = self.agent_ids.get("main") {
-            return Some(id);
-        }
-        // Fallback: first agent alphabetically by role
-        self.agent_ids.values().next().copied()
+        self.coordinator_role()
+            .and_then(|role| self.agent_ids.get(&role).copied())
     }
 
     /// Backward-compatible accessor: returns the single/first agent ID.
@@ -700,11 +718,7 @@ impl HandInstance {
 
     /// Backward-compatible accessor: returns the agent name (coordinator role).
     pub fn agent_name(&self) -> String {
-        if self.agent_ids.len() == 1 {
-            self.agent_ids.keys().next().cloned().unwrap_or_default()
-        } else {
-            "main".to_string()
-        }
+        self.coordinator_role().unwrap_or_default()
     }
 }
 
@@ -743,6 +757,22 @@ mod tests {
         assert_eq!(instance.hand_id, "clip");
         assert_eq!(instance.status, HandStatus::Active);
         assert!(instance.agent_ids.is_empty());
+        assert!(instance.coordinator_role.is_none());
+    }
+
+    #[test]
+    fn hand_instance_prefers_explicit_coordinator_role() {
+        let mut instance = HandInstance::new("research", HashMap::new());
+        instance
+            .agent_ids
+            .insert("analyst".to_string(), AgentId::new());
+        let planner_id = AgentId::new();
+        instance.agent_ids.insert("planner".to_string(), planner_id);
+        instance.coordinator_role = Some("planner".to_string());
+
+        assert_eq!(instance.coordinator_role(), Some("planner".to_string()));
+        assert_eq!(instance.coordinator_agent_id(), Some(planner_id));
+        assert_eq!(instance.agent_name(), "planner");
     }
 
     #[test]

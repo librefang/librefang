@@ -4,6 +4,7 @@
 //! The last test (`test_six_agent_fleet`) is a live LLM integration test
 //! that only runs when GROQ_API_KEY is set.
 
+use librefang_kernel::triggers::TriggerPattern;
 use librefang_kernel::LibreFangKernel;
 use librefang_types::agent::{AgentId, AgentManifest};
 use librefang_types::config::{DefaultModelConfig, KernelConfig};
@@ -76,6 +77,39 @@ module = "builtin:chat"
 system_prompt = "You are a devops agent."
 "#;
 
+const HAND_C: &str = r#"
+id = "test-research"
+name = "Test Research Hand"
+description = "A test hand with an explicit non-main coordinator"
+category = "data"
+icon = "🧠"
+tools = ["file_read"]
+
+[routing]
+aliases = ["test research"]
+
+[agents.analyst]
+name = "analyst-agent"
+description = "Analyzes information"
+module = "builtin:chat"
+
+[agents.analyst.model]
+provider = "default"
+model = "default"
+system_prompt = "You are an analyst."
+
+[agents.planner]
+coordinator = true
+name = "planner-agent"
+description = "Plans the work"
+module = "builtin:chat"
+
+[agents.planner.model]
+provider = "default"
+model = "default"
+system_prompt = "You are a planner."
+"#;
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[test]
@@ -109,6 +143,26 @@ fn test_deterministic_agent_id() {
         instance.agent_id().unwrap(),
         expected,
         "Agent ID should be deterministic from hand_id + role"
+    );
+
+    kernel.shutdown();
+}
+
+#[test]
+fn test_explicit_coordinator_role_used_for_routes() {
+    let kernel = LibreFangKernel::boot_with_config(test_config("explicit-coordinator")).unwrap();
+    install_hand(&kernel, HAND_C);
+
+    let instance = kernel
+        .activate_hand("test-research", HashMap::new())
+        .unwrap();
+
+    assert_eq!(instance.coordinator_role.as_deref(), Some("planner"));
+    assert_eq!(instance.agent_name(), "planner");
+    assert_eq!(
+        instance.agent_id(),
+        instance.agent_ids.get("planner").copied(),
+        "Hand routes should resolve to the explicit coordinator role"
     );
 
     kernel.shutdown();
@@ -296,6 +350,27 @@ fn test_hand_state_persistence() {
 }
 
 #[test]
+fn test_multi_agent_hand_state_persists_coordinator_role() {
+    let config = test_config("multi-persistence");
+    let state_path = config.home_dir.join("hand_state.json");
+
+    let kernel = LibreFangKernel::boot_with_config(config).unwrap();
+    install_hand(&kernel, HAND_C);
+
+    let instance = kernel
+        .activate_hand("test-research", HashMap::new())
+        .unwrap();
+    assert_eq!(instance.coordinator_role.as_deref(), Some("planner"));
+
+    let state_json = std::fs::read_to_string(&state_path).unwrap();
+    let state: serde_json::Value = serde_json::from_str(&state_json).unwrap();
+    let inst = &state["instances"].as_array().unwrap()[0];
+    assert_eq!(inst["coordinator_role"], "planner");
+
+    kernel.shutdown();
+}
+
+#[test]
 fn test_multiple_hands_coexist() {
     let kernel = LibreFangKernel::boot_with_config(test_config("coexist")).unwrap();
     install_hand(&kernel, HAND_A);
@@ -447,6 +522,67 @@ fn test_resume_nonexistent_instance_fails() {
     let result = kernel.resume_hand(fake_id);
     assert!(result.is_err(), "Resuming nonexistent instance should fail");
 
+    kernel.shutdown();
+}
+
+#[test]
+fn test_reactivation_restores_triggers_to_original_roles() {
+    let kernel = LibreFangKernel::boot_with_config(test_config("trigger-reactivation")).unwrap();
+    install_hand(&kernel, HAND_C);
+
+    let instance = kernel
+        .activate_hand("test-research", HashMap::new())
+        .unwrap();
+    let analyst_id = *instance
+        .agent_ids
+        .get("analyst")
+        .expect("analyst role agent id");
+    let planner_id = *instance
+        .agent_ids
+        .get("planner")
+        .expect("planner role agent id");
+
+    kernel
+        .register_trigger(
+            analyst_id,
+            TriggerPattern::System,
+            "wake analyst".to_string(),
+            0,
+        )
+        .unwrap();
+    assert_eq!(kernel.list_triggers(Some(analyst_id)).len(), 1);
+
+    // Remove the instance entry without killing the agents to force the
+    // activation path to clean up and migrate the stale hand agents.
+    kernel.hands().deactivate(instance.instance_id).unwrap();
+
+    let reactivated = kernel
+        .activate_hand("test-research", HashMap::new())
+        .unwrap();
+    let reactivated_analyst_id = *reactivated
+        .agent_ids
+        .get("analyst")
+        .expect("reactivated analyst role agent id");
+    let reactivated_planner_id = *reactivated
+        .agent_ids
+        .get("planner")
+        .expect("reactivated planner role agent id");
+
+    assert_eq!(reactivated_analyst_id, analyst_id);
+    assert_eq!(reactivated_planner_id, planner_id);
+    assert_eq!(
+        kernel.list_triggers(Some(reactivated_analyst_id)).len(),
+        1,
+        "Analyst triggers should stay attached to the analyst role after reactivation"
+    );
+    assert!(
+        kernel
+            .list_triggers(Some(reactivated_planner_id))
+            .is_empty(),
+        "Planner should not inherit analyst triggers during reactivation"
+    );
+
+    kernel.deactivate_hand(reactivated.instance_id).unwrap();
     kernel.shutdown();
 }
 

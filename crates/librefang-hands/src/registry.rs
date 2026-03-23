@@ -13,13 +13,15 @@ use std::sync::Mutex;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-/// Entry from persisted hand state: (hand_id, config, old_agent_ids, status).
-pub type HandStateEntry = (
-    String,
-    HashMap<String, serde_json::Value>,
-    BTreeMap<String, AgentId>,
-    HandStatus,
-);
+/// Entry from persisted hand state used during daemon restart.
+#[derive(Debug, Clone)]
+pub struct HandStateEntry {
+    pub hand_id: String,
+    pub config: HashMap<String, serde_json::Value>,
+    pub old_agent_ids: BTreeMap<String, AgentId>,
+    pub coordinator_role: Option<String>,
+    pub status: HandStatus,
+}
 
 // ─── Settings availability types ────────────────────────────────────────────
 
@@ -87,6 +89,7 @@ impl HandRegistry {
                     "hand_id": e.hand_id,
                     "config": e.config,
                     "agent_ids": e.agent_ids,
+                    "coordinator_role": e.coordinator_role,
                     "status": e.status,
                 })
             })
@@ -180,8 +183,18 @@ impl HandRegistry {
                     } else {
                         BTreeMap::new()
                     };
+                let coordinator_role = HandInstance::normalize_coordinator_role(
+                    &old_agent_ids,
+                    e.get("coordinator_role").and_then(|v| v.as_str()),
+                );
 
-                Some((hand_id, config, old_agent_ids, status))
+                Some(HandStateEntry {
+                    hand_id,
+                    config,
+                    old_agent_ids,
+                    coordinator_role,
+                    status,
+                })
             })
             .collect()
     }
@@ -389,11 +402,14 @@ impl HandRegistry {
         &self,
         instance_id: Uuid,
         agent_ids: BTreeMap<String, AgentId>,
+        coordinator_role: Option<String>,
     ) -> HandResult<()> {
         let mut entry = self
             .instances
             .get_mut(&instance_id)
             .ok_or(HandError::InstanceNotFound(instance_id))?;
+        entry.coordinator_role =
+            HandInstance::normalize_coordinator_role(&agent_ids, coordinator_role.as_deref());
         entry.agent_ids = agent_ids;
         entry.updated_at = chrono::Utc::now();
         Ok(())
@@ -403,7 +419,7 @@ impl HandRegistry {
     pub fn set_agent(&self, instance_id: Uuid, agent_id: AgentId) -> HandResult<()> {
         let mut map = BTreeMap::new();
         map.insert("main".to_string(), agent_id);
-        self.set_agents(instance_id, map)
+        self.set_agents(instance_id, map, Some("main".to_string()))
     }
 
     /// Find the hand instance associated with an agent (checks all roles).
@@ -837,8 +853,8 @@ system_prompt = "Test prompt"
 
         let saved = HandRegistry::load_state(&state_path);
         assert_eq!(saved.len(), 1);
-        assert_eq!(saved[0].0, "clip");
-        assert!(matches!(saved[0].3, HandStatus::Paused));
+        assert_eq!(saved[0].hand_id, "clip");
+        assert!(matches!(saved[0].status, HandStatus::Paused));
     }
 
     #[test]
@@ -857,6 +873,28 @@ system_prompt = "Test prompt"
         assert_eq!(found.unwrap().instance_id, id);
 
         reg.deactivate(id).unwrap();
+    }
+
+    #[test]
+    fn persist_and_load_explicit_coordinator_role() {
+        let reg = HandRegistry::new();
+        reg.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
+
+        let instance = reg.activate("clip", HashMap::new()).unwrap();
+        let id = instance.instance_id;
+        let mut agent_ids = BTreeMap::new();
+        agent_ids.insert("analyst".to_string(), AgentId::new());
+        agent_ids.insert("planner".to_string(), AgentId::new());
+        reg.set_agents(id, agent_ids, Some("planner".to_string()))
+            .unwrap();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let state_path = tmp.path().join("hand_state.json");
+        reg.persist_state(&state_path).unwrap();
+
+        let saved = HandRegistry::load_state(&state_path);
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].coordinator_role.as_deref(), Some("planner"));
     }
 
     #[test]
@@ -1033,8 +1071,8 @@ system_prompt = "Test prompt"
         let _ = std::fs::remove_file(&path);
 
         assert_eq!(restored.len(), 1);
-        assert_eq!(restored[0].0, "lead");
-        assert!(matches!(restored[0].3, HandStatus::Paused));
+        assert_eq!(restored[0].hand_id, "lead");
+        assert!(matches!(restored[0].status, HandStatus::Paused));
     }
 
     #[test]

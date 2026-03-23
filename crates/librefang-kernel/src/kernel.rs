@@ -5273,13 +5273,13 @@ system_prompt = "You are a helpful assistant."
 
         let is_multi_agent = def.is_multi_agent();
         let role_names: Vec<String> = def.agents.keys().cloned().collect();
+        let coordinator_role = def.coordinator().map(|(role, _)| role.to_string());
 
         // Kill existing agents with matching hand tag (reactivation cleanup)
         let hand_tag = format!("hand:{hand_id}");
-        let mut saved_triggers = Vec::new();
+        let mut saved_triggers = std::collections::BTreeMap::new();
         for entry in self.registry.list() {
             if entry.tags.contains(&hand_tag) {
-                saved_triggers.extend(self.triggers.take_agent_triggers(entry.id));
                 let old_id = entry.id;
                 // Extract role from tag (hand_role:xxx) to migrate cron to correct new agent
                 let old_role = entry
@@ -5288,6 +5288,13 @@ system_prompt = "You are a helpful assistant."
                     .find_map(|t| t.strip_prefix("hand_role:"))
                     .unwrap_or("main")
                     .to_string();
+                let taken_triggers = self.triggers.take_agent_triggers(entry.id);
+                if !taken_triggers.is_empty() {
+                    saved_triggers
+                        .entry(old_role.clone())
+                        .or_insert_with(Vec::new)
+                        .extend(taken_triggers);
+                }
                 if let Err(e) = self.kill_agent(old_id) {
                     warn!(agent = %old_id, error = %e, "Failed to kill old hand agent");
                 }
@@ -5435,24 +5442,37 @@ system_prompt = "You are a helpful assistant."
             agent_ids_map.insert(role.clone(), agent_id);
         }
 
-        // Restore saved triggers to coordinator agent
+        // Restore saved triggers to the same role after reactivation.
         if !saved_triggers.is_empty() {
-            if let Some(&coordinator_id) = agent_ids_map
-                .get("main")
-                .or_else(|| agent_ids_map.values().next())
-            {
-                let restored = self
-                    .triggers
-                    .restore_triggers(coordinator_id, saved_triggers);
-                if restored > 0 {
-                    info!(agent = %coordinator_id, restored, "Restored triggers after hand reactivation");
+            for (role, triggers) in saved_triggers {
+                if let Some(&new_id) = agent_ids_map.get(&role) {
+                    let restored = self.triggers.restore_triggers(new_id, triggers);
+                    if restored > 0 {
+                        info!(
+                            hand = %hand_id,
+                            role = %role,
+                            agent = %new_id,
+                            restored,
+                            "Restored triggers after hand reactivation"
+                        );
+                    }
+                } else {
+                    warn!(
+                        hand = %hand_id,
+                        role = %role,
+                        "Dropping saved triggers for removed hand role during reactivation"
+                    );
                 }
             }
         }
 
         // Link all agents to instance
         self.hand_registry
-            .set_agents(instance.instance_id, agent_ids_map.clone())
+            .set_agents(
+                instance.instance_id,
+                agent_ids_map.clone(),
+                coordinator_role.clone(),
+            )
             .map_err(|e| KernelError::LibreFang(LibreFangError::Internal(e.to_string())))?;
 
         let display_manifest_path = last_manifest_path
@@ -5941,7 +5961,14 @@ system_prompt = "You are a helpful assistant."
         let saved_hands = librefang_hands::registry::HandRegistry::load_state(&state_path);
         if !saved_hands.is_empty() {
             info!("Restoring {} persisted hand(s)", saved_hands.len());
-            for (hand_id, config, old_agent_id, status) in saved_hands {
+            for saved_hand in saved_hands {
+                let hand_id = saved_hand.hand_id;
+                let config = saved_hand.config;
+                let old_agent_id = saved_hand.old_agent_ids;
+                let status = saved_hand.status;
+                // The persisted coordinator role is informational here.
+                // `activate_hand` always re-derives the coordinator from the
+                // latest hand definition before spawning agents.
                 // Check if hand's agent.toml has enabled=false — skip reactivation
                 let hand_agent_name = format!("{}-hand", hand_id);
                 let hand_toml = self
