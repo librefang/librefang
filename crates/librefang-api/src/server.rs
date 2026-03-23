@@ -303,6 +303,7 @@ pub async fn build_router(
             kernel.config_ref().home_dir.join("webhooks.json"),
         ),
         active_sessions: active_sessions.clone(),
+        media_drivers: librefang_runtime::media::MediaDriverCache::new(),
         #[cfg(feature = "telemetry")]
         prometheus_handle: prom_handle,
     });
