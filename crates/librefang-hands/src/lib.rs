@@ -367,6 +367,41 @@ fn parse_single_agent_section(value: &toml::Value) -> Result<AgentManifest, Stri
     }
 }
 
+fn default_version() -> String {
+    "0.0.0".to_string()
+}
+
+/// Parse a single entry from `[agents.*]` into a `HandAgentManifest`.
+///
+/// Extracts `coordinator` and `invoke_hint` from the raw TOML value, then
+/// delegates to `parse_single_agent_section()` for the agent manifest proper.
+/// This gives multi-agent entries the same legacy flat-field fallback that
+/// single-agent `[agent]` already has.
+fn parse_multi_agent_entry(role: &str, value: &toml::Value) -> Result<HandAgentManifest, String> {
+    let table = value
+        .as_table()
+        .ok_or_else(|| format!("[agents.{role}] must be a table"))?;
+
+    let coordinator = table
+        .get("coordinator")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let invoke_hint = table
+        .get("invoke_hint")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let manifest =
+        parse_single_agent_section(value).map_err(|e| format!("[agents.{role}]: {e}"))?;
+
+    Ok(HandAgentManifest {
+        coordinator,
+        invoke_hint,
+        manifest,
+    })
+}
+
 fn default_module() -> String {
     "builtin:chat".to_string()
 }
@@ -437,6 +472,9 @@ pub struct HandI18n {
 pub struct HandDefinition {
     /// Unique hand identifier (e.g. "clip").
     pub id: String,
+    /// Semantic version from HAND.toml (e.g. "1.2.0"). Defaults to "0.0.0".
+    #[serde(default = "default_version")]
+    pub version: String,
     /// Human-readable name.
     pub name: String,
     /// What this Hand does.
@@ -505,6 +543,8 @@ impl HandDefinition {
 #[derive(Deserialize)]
 struct HandDefinitionRaw {
     id: String,
+    #[serde(default = "default_version")]
+    version: String,
     name: String,
     description: String,
     category: HandCategory,
@@ -524,8 +564,9 @@ struct HandDefinitionRaw {
     #[serde(default)]
     agent: Option<toml::Value>,
     /// Multi-agent format: `[agents.role1]`, `[agents.role2]`, ...
+    /// Deserialized as raw TOML values so we can apply legacy fallback per entry.
     #[serde(default)]
-    agents: Option<BTreeMap<String, HandAgentManifest>>,
+    agents: Option<BTreeMap<String, toml::Value>>,
     #[serde(default)]
     dashboard: HandDashboard,
     #[serde(default)]
@@ -543,12 +584,18 @@ impl<'de> Deserialize<'de> for HandDefinition {
     {
         let raw = HandDefinitionRaw::deserialize(deserializer)?;
 
-        let agents = if let Some(agents_map) = raw.agents {
-            // Multi-agent format: [agents.*]
-            if agents_map.is_empty() {
+        let agents = if let Some(raw_agents) = raw.agents {
+            // Multi-agent format: [agents.*] — parse each entry with legacy fallback
+            if raw_agents.is_empty() {
                 return Err(serde::de::Error::custom(
                     "Hand must define at least one agent in [agents.*]",
                 ));
+            }
+            let mut agents_map = BTreeMap::new();
+            for (role, value) in &raw_agents {
+                let agent =
+                    parse_multi_agent_entry(role, value).map_err(serde::de::Error::custom)?;
+                agents_map.insert(role.clone(), agent);
             }
             agents_map
         } else if let Some(agent_value) = raw.agent {
@@ -573,6 +620,7 @@ impl<'de> Deserialize<'de> for HandDefinition {
 
         Ok(HandDefinition {
             id: raw.id,
+            version: raw.version,
             name: raw.name,
             description: raw.description,
             category: raw.category,
@@ -1068,6 +1116,125 @@ metrics = []
         assert_eq!(def.requires.len(), 1);
         assert!(def.requires[0].description.is_none());
         assert!(def.requires[0].install.is_none());
+    }
+
+    #[test]
+    fn multi_agent_flat_model_format() {
+        let toml_str = r#"
+id = "research"
+version = "2.0.0"
+name = "Research Hand"
+description = "Multi-agent research"
+category = "content"
+tools = []
+
+[agents.planner]
+coordinator = true
+invoke_hint = "Use planner for task decomposition"
+name = "planner-agent"
+description = "Plans research tasks"
+model = "default"
+system_prompt = "You plan research."
+
+[agents.analyst]
+name = "analyst-agent"
+description = "Analyzes data"
+provider = "groq"
+model = "llama-3.3-70b-versatile"
+system_prompt = "You analyze data."
+
+[dashboard]
+metrics = []
+"#;
+        let def: HandDefinition = toml::from_str(toml_str).unwrap();
+        assert_eq!(def.id, "research");
+        assert_eq!(def.version, "2.0.0");
+        assert!(def.is_multi_agent());
+        assert_eq!(def.agents.len(), 2);
+
+        let (coord_role, coord) = def.coordinator().unwrap();
+        assert_eq!(coord_role, "planner");
+        assert!(coord.coordinator);
+        assert_eq!(
+            coord.invoke_hint.as_deref(),
+            Some("Use planner for task decomposition")
+        );
+        assert_eq!(coord.manifest.name, "planner-agent");
+
+        let analyst = &def.agents["analyst"];
+        assert!(!analyst.coordinator);
+        assert_eq!(analyst.manifest.name, "analyst-agent");
+        assert_eq!(analyst.manifest.model.provider, "groq");
+        assert_eq!(analyst.manifest.model.model, "llama-3.3-70b-versatile");
+    }
+
+    #[test]
+    fn multi_agent_nested_model_format() {
+        let toml_str = r#"
+id = "research"
+name = "Research Hand"
+description = "Multi-agent research"
+category = "content"
+tools = []
+
+[agents.planner]
+coordinator = true
+name = "planner-agent"
+description = "Plans research tasks"
+
+[agents.planner.model]
+provider = "anthropic"
+model = "claude-sonnet-4-20250514"
+max_tokens = 8192
+temperature = 0.5
+system_prompt = "You plan research."
+
+[agents.analyst]
+name = "analyst-agent"
+description = "Analyzes data"
+
+[agents.analyst.model]
+provider = "groq"
+model = "llama-3.3-70b-versatile"
+max_tokens = 4096
+temperature = 0.3
+system_prompt = "You analyze data."
+
+[dashboard]
+metrics = []
+"#;
+        let def: HandDefinition = toml::from_str(toml_str).unwrap();
+        assert_eq!(def.agents.len(), 2);
+
+        let planner = &def.agents["planner"];
+        assert!(planner.coordinator);
+        assert_eq!(planner.manifest.model.provider, "anthropic");
+        assert_eq!(planner.manifest.model.max_tokens, 8192);
+
+        let analyst = &def.agents["analyst"];
+        assert_eq!(analyst.manifest.model.provider, "groq");
+        assert_eq!(analyst.manifest.model.temperature, 0.3);
+    }
+
+    #[test]
+    fn hand_version_defaults_to_zero() {
+        let toml_str = r#"
+id = "test"
+name = "Test Hand"
+description = "A test"
+category = "content"
+tools = []
+
+[agent]
+name = "test-hand"
+description = "Test"
+system_prompt = "Test."
+
+[dashboard]
+metrics = []
+"#;
+        let def: HandDefinition = toml::from_str(toml_str).unwrap();
+        assert_eq!(def.version, "0.0.0");
     }
 
     #[test]
