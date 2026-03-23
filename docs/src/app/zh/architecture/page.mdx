@@ -246,6 +246,22 @@ LibreFang 使用多层稳定性保护：
 
 ---
 
+## 媒体驱动抽象
+
+媒体生成子系统（`librefang-runtime::media`）采用与 LLM 驱动相同的模式，提供跨提供商的图像、TTS、视频和音乐生成能力。
+
+- **`MediaDriver` trait** — 每种模态的异步方法，默认返回 `NotSupported`
+- **`MediaDriverCache`** — 线程安全、惰性初始化的驱动缓存（`DashMap`）
+- **`MediaCapability` 枚举** — `ImageGeneration`、`TextToSpeech`、`VideoGeneration`、`MusicGeneration`
+- **自动检测** — `detect_for_capability()` 自动选择首个已配置的提供商
+
+| 提供商 | 图像 | TTS | 视频 | 音乐 |
+|--------|------|-----|------|------|
+| OpenAI | gpt-image-1, dall-e-3 | tts-1, tts-1-hd | -- | -- |
+| MiniMax | image-01 | speech-2.8-hd | T2V-01 | music-2.5 |
+
+---
+
 ## MCP 和 A2A 协议
 
 ### MCP (Model Context Protocol)
