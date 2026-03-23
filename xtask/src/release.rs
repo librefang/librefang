@@ -600,9 +600,23 @@ pip install librefang-sdk
         .map(|s| s.success())
         .unwrap_or(true);
 
+    // --- Create release branch BEFORE committing ---
+    // This avoids committing on main (which has branch protection).
+    let release_branch = format!("chore/bump-version-{}", version);
+    if !args.no_push {
+        println!();
+        println!("Creating release branch '{}'...", release_branch);
+        git(&root, &["checkout", "-b", &release_branch])?;
+    }
+
     if has_changes {
         let commit_msg = format!("chore: bump version to {}", tag);
-        git(&root, &["commit", "-m", &commit_msg])?;
+        // First attempt — pre-commit hooks (e.g. cargo fmt) may reformat files
+        if git(&root, &["commit", "-m", &commit_msg]).is_err() {
+            println!("  Commit failed (likely formatter hook). Re-staging and retrying...");
+            git(&root, &["add", "-A"])?;
+            git(&root, &["commit", "-m", &commit_msg])?;
+        }
     } else {
         println!("  No file changes. Tagging current HEAD.");
     }
@@ -610,13 +624,8 @@ pip install librefang-sdk
     git(&root, &["tag", &tag])?;
     println!("Created tag {}", tag);
 
-    // --- Push and create PR ---
+    // --- Push ---
     if !args.no_push {
-        let release_branch = format!("chore/bump-version-{}", version);
-        println!();
-        println!("Creating release branch '{}'...", release_branch);
-
-        git(&root, &["checkout", "-b", &release_branch])?;
         git(&root, &["push", "-u", "origin", &release_branch])?;
         git(&root, &["push", "origin", &tag, "--force"])?;
 
@@ -791,7 +800,14 @@ fn run_lts_patch(root: &Path, args: &ReleaseArgs) -> Result<(), Box<dyn std::err
             .args(["add", "Cargo.toml", "Cargo.lock"])
             .current_dir(root)
             .status();
-        git(root, &["commit", "-m", &format!("chore: bump to {}", tag)])?;
+        let lts_msg = format!("chore: bump to {}", tag);
+        if git(root, &["commit", "-m", &lts_msg]).is_err() {
+            let _ = Command::new("git")
+                .args(["add", "-A"])
+                .current_dir(root)
+                .status();
+            git(root, &["commit", "-m", &lts_msg])?;
+        }
     }
 
     git(root, &["tag", &tag])?;
