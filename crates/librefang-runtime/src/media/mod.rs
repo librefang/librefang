@@ -6,6 +6,7 @@
 //! - `MediaDriverCache` for lazy-init, thread-safe driver caching
 //! - Per-provider implementations in submodules
 
+pub mod elevenlabs;
 pub mod gemini;
 pub mod minimax;
 pub mod openai;
@@ -255,7 +256,7 @@ fn canonical_provider_name(provider: &str) -> &str {
 // ── Provider registry ──────────────────────────────────────────────────
 
 /// Provider preference order for auto-detection.
-static MEDIA_PROVIDER_ORDER: &[&str] = &["openai", "gemini", "minimax"];
+static MEDIA_PROVIDER_ORDER: &[&str] = &["openai", "gemini", "elevenlabs", "minimax"];
 
 /// Create a media driver for a given provider name.
 fn create_media_driver(
@@ -263,11 +264,12 @@ fn create_media_driver(
     base_url: Option<&str>,
 ) -> Result<Arc<dyn MediaDriver>, MediaError> {
     match provider {
+        "elevenlabs" => Ok(Arc::new(elevenlabs::ElevenLabsMediaDriver::new(base_url))),
         "gemini" | "google" => Ok(Arc::new(gemini::GeminiMediaDriver::new(base_url))),
         "minimax" => Ok(Arc::new(minimax::MiniMaxMediaDriver::new(base_url))),
         "openai" => Ok(Arc::new(openai::OpenAIMediaDriver::new(base_url))),
         other => Err(MediaError::InvalidRequest(format!(
-            "Unknown media provider: '{other}'. Available: openai, gemini, minimax"
+            "Unknown media provider: '{other}'. Available: openai, gemini, elevenlabs, minimax"
         ))),
     }
 }

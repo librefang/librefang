@@ -29,7 +29,7 @@ pub fn router() -> axum::Router<Arc<AppState>> {
 
 /// Known media provider names, in preference order.
 /// Keep in sync with `librefang_runtime::media::MEDIA_PROVIDER_ORDER`.
-const KNOWN_MEDIA_PROVIDERS: &[&str] = &["openai", "minimax", "elevenlabs"];
+const KNOWN_MEDIA_PROVIDERS: &[&str] = &["openai", "gemini", "elevenlabs", "minimax"];
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
