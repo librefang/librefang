@@ -8990,9 +8990,11 @@ fn cmd_uninstall(confirm: bool, keep_config: bool) {
         }
     }
 
-    // Step 8: Remove the binary itself (must be last)
+    // Step 8: Remove the binary itself (skip if already removed with ~/.librefang/)
     if let Some(exe) = exe_path {
-        remove_self_binary(&exe);
+        if exe.exists() {
+            remove_self_binary(&exe);
+        }
     }
 
     println!();
