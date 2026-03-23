@@ -4415,11 +4415,12 @@ pub async fn agent_metrics(
     };
 
     // Session-level token/tool stats from the scheduler (in-memory, windowed).
-    let (sched_tokens, sched_tool_calls) = state
+    let sched_snap = state
         .kernel
         .scheduler_ref()
         .get_usage(agent_id)
-        .unwrap_or((0, 0));
+        .unwrap_or_default();
+    let (sched_tokens, sched_tool_calls) = (sched_snap.total_tokens, sched_snap.tool_calls);
 
     // Persistent usage summary from the UsageStore (SQLite).
     let usage_summary = state

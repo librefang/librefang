@@ -6,7 +6,7 @@ license.workspace = true
 description = "CLI tool for the LibreFang Agent OS"
 
 [features]
-default = ["librefang-api/all-channels"]
+default = ["librefang-api/all-channels", "telemetry"]
 all-channels = ["librefang-api/all-channels"]
 mini = ["librefang-api/mini"]
 telemetry = ["librefang-api/telemetry", "dep:opentelemetry_sdk", "dep:tracing-opentelemetry"]

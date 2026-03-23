@@ -421,15 +421,9 @@ pub async fn build_router(
         .layer(TraceLayer::new_for_http())
         .layer(cors);
 
-    // Add HTTP metrics middleware when telemetry feature is enabled and Prometheus is active.
-    #[cfg(feature = "telemetry")]
-    let app = if state.prometheus_handle.is_some() {
-        app.layer(axum::middleware::from_fn(
-            crate::telemetry::http_metrics_middleware,
-        ))
-    } else {
-        app
-    };
+    // NOTE: HTTP metrics are recorded inside `request_logging` middleware via
+    // `librefang_telemetry::metrics::record_http_request()`.  A separate metrics
+    // middleware layer is not needed (and would double-count requests).
 
     let app = app.with_state(state.clone());
 
@@ -449,6 +443,20 @@ pub async fn run_daemon(
     let kernel = Arc::new(kernel);
     kernel.set_self_handle();
     kernel.start_background_agents().await;
+
+    // Initialize OpenTelemetry OTLP tracing when telemetry feature is compiled
+    // in and the config has `telemetry.enabled = true`.
+    #[cfg(feature = "telemetry")]
+    if kernel.config_ref().telemetry.enabled {
+        let cfg = &kernel.config_ref().telemetry;
+        if let Err(e) = crate::telemetry::init_otel_tracing(
+            &cfg.otlp_endpoint,
+            &cfg.service_name,
+            cfg.sample_rate,
+        ) {
+            tracing::warn!("Failed to initialize OpenTelemetry tracing: {e}");
+        }
+    }
 
     // Config file hot-reload watcher (polls every 30 seconds)
     {

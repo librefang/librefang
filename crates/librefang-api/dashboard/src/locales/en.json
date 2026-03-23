@@ -219,11 +219,20 @@
     "system": "System Status", "queue": "Task Queue", "pending_tasks": "Pending", "running_tasks": "Running", "completed_today": "Completed Today", "active_agents": "Active Agents", "status": "Status"
   },
   "telemetry": {
-    "badge": "Observability", "title": "Telemetry", "subtitle": "HTTP request metrics and observability data.",
+    "badge": "Observability", "title": "Telemetry", "subtitle": "System metrics, LLM usage, and HTTP observability.",
     "total_requests": "Total Requests", "endpoints": "Endpoints", "avg_latency": "Avg Latency",
     "status": "Status", "collecting": "Collecting", "top_endpoints": "Top Endpoints",
     "latency": "Latency Distribution", "prometheus_endpoint": "Prometheus Endpoint", "view_raw": "View Raw",
-    "no_data": "No telemetry data yet. Make some API requests to see metrics."
+    "no_data": "No telemetry data yet. Make some API requests to see metrics.",
+    "llm_usage": "LLM & Token Usage",
+    "total_tokens": "Total Tokens", "input_tokens": "Input Tokens", "output_tokens": "Output Tokens",
+    "llm_calls": "LLM Calls", "tool_calls": "Tool Calls",
+    "cost_today": "Cost Today", "active_sessions": "Sessions",
+    "uptime": "Uptime", "agents_active": "Active Agents", "panics": "Panics", "restarts": "Restarts",
+    "system_health": "System Health",
+    "per_agent": "Per Agent",
+    "http_metrics": "HTTP Metrics",
+    "tokens_1h": "1h window"
   },
   "logs": {
     "title": "Logs", "subtitle": "Real-time diagnostic events.", "export_json": "Export JSON",

@@ -202,12 +202,17 @@ pub async fn health_detail(State(state): State<Arc<AppState>>) -> impl IntoRespo
 /// Returns counters and gauges for monitoring LibreFang in production:
 /// - `librefang_agents_active` — number of active agents
 /// - `librefang_uptime_seconds` — seconds since daemon started
-/// - `librefang_tokens_total` — total tokens consumed (per agent)
-/// - `librefang_tool_calls_total` — total tool calls (per agent)
+/// - `librefang_tokens` — total tokens consumed (per agent, rolling 1h gauge)
+/// - `librefang_tokens_input` — input tokens consumed (per agent, rolling 1h gauge)
+/// - `librefang_tokens_output` — output tokens consumed (per agent, rolling 1h gauge)
+/// - `librefang_tool_calls` — tool calls made (per agent, rolling 1h gauge)
+/// - `librefang_llm_calls` — LLM API calls made (per agent, rolling 1h gauge)
 /// - `librefang_panics_total` — supervisor panic count
 /// - `librefang_restarts_total` — supervisor restart count
+/// - `librefang_active_sessions` — number of active login sessions
+/// - `librefang_cost_usd_today` — total estimated cost for today (USD)
 /// - `librefang_http_requests_total` — HTTP request counts (with telemetry feature)
-/// - `librefang_http_request_duration_ms` — HTTP request latencies (with telemetry feature)
+/// - `librefang_http_request_duration_seconds` — HTTP request latencies (with telemetry feature)
 #[utoipa::path(
     get,
     path = "/api/metrics",
@@ -238,21 +243,42 @@ pub async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> impl Into
     out.push_str("# TYPE librefang_agents_total gauge\n");
     out.push_str(&format!("librefang_agents_total {}\n\n", agents.len()));
 
-    // Per-agent token and tool usage
-    out.push_str("# HELP librefang_tokens_total Total tokens consumed (rolling hourly window).\n");
-    out.push_str("# TYPE librefang_tokens_total gauge\n");
-    out.push_str("# HELP librefang_tool_calls_total Total tool calls (rolling hourly window).\n");
-    out.push_str("# TYPE librefang_tool_calls_total gauge\n");
+    // Per-agent token, tool, and LLM call usage (rolling 1h window — gauges, not counters)
+    out.push_str("# HELP librefang_tokens Tokens consumed (rolling 1h window).\n");
+    out.push_str("# TYPE librefang_tokens gauge\n");
+    out.push_str("# HELP librefang_tokens_input Input tokens consumed (rolling 1h window).\n");
+    out.push_str("# TYPE librefang_tokens_input gauge\n");
+    out.push_str("# HELP librefang_tokens_output Output tokens consumed (rolling 1h window).\n");
+    out.push_str("# TYPE librefang_tokens_output gauge\n");
+    out.push_str("# HELP librefang_tool_calls Tool calls made (rolling 1h window).\n");
+    out.push_str("# TYPE librefang_tool_calls gauge\n");
+    out.push_str("# HELP librefang_llm_calls LLM API calls made (rolling 1h window).\n");
+    out.push_str("# TYPE librefang_llm_calls gauge\n");
     for agent in &agents {
         let name = &agent.name;
         let provider = &agent.manifest.model.provider;
         let model = &agent.manifest.model.model;
-        if let Some((tokens, tools)) = state.kernel.scheduler_ref().get_usage(agent.id) {
+        if let Some(snap) = state.kernel.scheduler_ref().get_usage(agent.id) {
+            let labels = format!("agent=\"{name}\",provider=\"{provider}\",model=\"{model}\"");
             out.push_str(&format!(
-                "librefang_tokens_total{{agent=\"{name}\",provider=\"{provider}\",model=\"{model}\"}} {tokens}\n"
+                "librefang_tokens{{{labels}}} {}\n",
+                snap.total_tokens
             ));
             out.push_str(&format!(
-                "librefang_tool_calls_total{{agent=\"{name}\"}} {tools}\n"
+                "librefang_tokens_input{{{labels}}} {}\n",
+                snap.input_tokens
+            ));
+            out.push_str(&format!(
+                "librefang_tokens_output{{{labels}}} {}\n",
+                snap.output_tokens
+            ));
+            out.push_str(&format!(
+                "librefang_tool_calls{{{labels}}} {}\n",
+                snap.tool_calls
+            ));
+            out.push_str(&format!(
+                "librefang_llm_calls{{{labels}}} {}\n",
+                snap.llm_calls
             ));
         }
     }
@@ -274,9 +300,26 @@ pub async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> impl Into
     out.push_str("# HELP librefang_info LibreFang version and build info.\n");
     out.push_str("# TYPE librefang_info gauge\n");
     out.push_str(&format!(
-        "librefang_info{{version=\"{}\"}} 1\n",
+        "librefang_info{{version=\"{}\"}} 1\n\n",
         env!("CARGO_PKG_VERSION")
     ));
+
+    // Active sessions
+    let session_count = state.active_sessions.read().await.len();
+    out.push_str("# HELP librefang_active_sessions Number of active login sessions.\n");
+    out.push_str("# TYPE librefang_active_sessions gauge\n");
+    out.push_str(&format!("librefang_active_sessions {session_count}\n\n"));
+
+    // Today's estimated cost (from metering SQLite)
+    let today_cost = state
+        .kernel
+        .memory_substrate()
+        .usage()
+        .query_today_cost()
+        .unwrap_or(0.0);
+    out.push_str("# HELP librefang_cost_usd_today Estimated total cost for today (USD).\n");
+    out.push_str("# TYPE librefang_cost_usd_today gauge\n");
+    out.push_str(&format!("librefang_cost_usd_today {today_cost:.6}\n"));
 
     // Append metrics from the Prometheus recorder when the telemetry feature is
     // enabled and the recorder has been initialized. This merges the hand-crafted

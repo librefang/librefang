@@ -760,11 +760,11 @@ impl Default for InboxConfig {
 ///
 /// ```toml
 /// [telemetry]
-/// enabled = false
+/// enabled = true                              # OpenTelemetry OTLP tracing
 /// otlp_endpoint = "http://localhost:4317"
 /// service_name = "librefang"
 /// sample_rate = 1.0
-/// prometheus_enabled = false
+/// prometheus_enabled = true                   # Prometheus metrics at /api/metrics
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]

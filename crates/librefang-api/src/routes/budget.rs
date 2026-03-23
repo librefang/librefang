@@ -44,16 +44,16 @@ pub async fn usage_stats(State(state): State<Arc<AppState>>) -> impl IntoRespons
         .list()
         .iter()
         .map(|e| {
-            let (tokens, tool_calls) = state
+            let snap = state
                 .kernel
                 .scheduler_ref()
                 .get_usage(e.id)
-                .unwrap_or((0, 0));
+                .unwrap_or_default();
             serde_json::json!({
                 "agent_id": e.id.to_string(),
                 "name": e.name,
-                "total_tokens": tokens,
-                "tool_calls": tool_calls,
+                "total_tokens": snap.total_tokens,
+                "tool_calls": snap.tool_calls,
             })
         })
         .collect();
@@ -275,7 +275,7 @@ pub async fn agent_budget_status(
 
     // Token usage from scheduler
     let token_usage = state.kernel.scheduler_ref().get_usage(agent_id);
-    let tokens_used = token_usage.map(|(t, _)| t).unwrap_or(0);
+    let tokens_used = token_usage.map(|s| s.total_tokens).unwrap_or(0);
 
     (
         StatusCode::OK,
