@@ -24,17 +24,6 @@ const TARBALL_PREFIX: &str = "librefang-registry-main/";
 /// How long (in seconds) before we re-download the registry.
 const CACHE_MAX_AGE_SECS: u64 = 24 * 60 * 60; // 24 hours
 
-/// Content directories available in the registry.
-#[cfg(test)]
-const SYNC_DIRS: &[(&str, &str)] = &[
-    ("agents", "agent.toml"),
-    ("hands", "HAND.toml"),
-    ("skills", "SKILL.md"),
-    ("integrations", ""), // flat .toml files
-    ("providers", ""),    // flat .toml files
-    ("plugins", "plugin.toml"),
-];
-
 /// Sync all content from the registry to the local librefang home directory.
 ///
 /// Downloads the registry tarball via HTTP, extracts it, then copies items
