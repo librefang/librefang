@@ -509,6 +509,26 @@ pub async fn run_daemon(
     info!("WebChat UI available at http://{addr}/",);
     info!("WebSocket endpoint: ws://{addr}/api/agents/{{id}}/ws",);
 
+    // Auto-start observability stack (Prometheus + Grafana) if Docker is available
+    let observability_started = if kernel.config_ref().telemetry.enabled {
+        match start_observability_stack() {
+            Ok(true) => {
+                info!("Observability stack started (Prometheus :9090, Grafana :3000)");
+                true
+            }
+            Ok(false) => {
+                info!("Docker not available, skipping observability stack");
+                false
+            }
+            Err(e) => {
+                tracing::warn!("Failed to start observability stack: {e}");
+                false
+            }
+        }
+    } else {
+        false
+    };
+
     // Background: sync model catalog from community repo on startup, then every 24 hours
     {
         let kernel = state.kernel.clone();
@@ -577,11 +597,90 @@ pub async fn run_daemon(
         b.stop().await;
     }
 
+    // Stop observability stack
+    if observability_started {
+        if let Err(e) = stop_observability_stack() {
+            tracing::warn!("Failed to stop observability stack: {e}");
+        } else {
+            info!("Observability stack stopped");
+        }
+    }
+
     // Shutdown kernel
     kernel.shutdown();
 
     info!("LibreFang daemon stopped");
     Ok(())
+}
+
+/// Check if Docker is available and start the observability stack.
+/// Returns Ok(true) if started, Ok(false) if Docker not available.
+fn start_observability_stack() -> Result<bool, Box<dyn std::error::Error>> {
+    // Check if docker CLI exists
+    let docker_check = std::process::Command::new("docker")
+        .arg("version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+
+    match docker_check {
+        Ok(status) if status.success() => {}
+        _ => return Ok(false),
+    }
+
+    // Find the compose file relative to the executable or well-known paths
+    let compose_file = find_compose_file()?;
+
+    std::process::Command::new("docker")
+        .args(["compose", "-f"])
+        .arg(&compose_file)
+        .args(["up", "-d"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map_err(|e| format!("docker compose up failed: {e}"))?;
+
+    Ok(true)
+}
+
+/// Stop the observability stack.
+fn stop_observability_stack() -> Result<(), Box<dyn std::error::Error>> {
+    let compose_file = find_compose_file()?;
+
+    std::process::Command::new("docker")
+        .args(["compose", "-f"])
+        .arg(&compose_file)
+        .args(["down"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map_err(|e| format!("docker compose down failed: {e}"))?;
+
+    Ok(())
+}
+
+/// Locate the observability docker-compose file.
+fn find_compose_file() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    // Try relative to current exe
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            // Binary might be in target/release or target/debug
+            for ancestor in dir.ancestors().take(4) {
+                let candidate = ancestor.join("deploy/docker-compose.observability.yml");
+                if candidate.exists() {
+                    return Ok(candidate);
+                }
+            }
+        }
+    }
+
+    // Try current working directory
+    let cwd_candidate = std::path::PathBuf::from("deploy/docker-compose.observability.yml");
+    if cwd_candidate.exists() {
+        return Ok(cwd_candidate);
+    }
+
+    Err("Could not find deploy/docker-compose.observability.yml".into())
 }
 
 /// SECURITY: Restrict file permissions to owner-only (0600) on Unix.
