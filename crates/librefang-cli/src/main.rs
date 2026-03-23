@@ -1911,48 +1911,36 @@ fn cmd_init(quick: bool) {
     }
 }
 
-/// Pre-install hands from registry cache to workspaces/hands/ using HandRegistry.
+/// Pre-install hands from registry cache to workspaces/hands/.
+/// Copies HAND.toml + SKILL.md for each hand not already installed.
 fn preinstall_hands_from_registry(librefang_dir: &std::path::Path) {
     let registry_hands = librefang_dir.join("registry").join("hands");
     if !registry_hands.is_dir() {
         return;
     }
-    let hand_registry = librefang_hands::registry::HandRegistry::new();
+    let dest_root = librefang_dir.join("workspaces").join("hands");
     let Ok(entries) = std::fs::read_dir(&registry_hands) else {
         return;
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if !path.is_dir() {
+        if !path.is_dir() || !path.join("HAND.toml").exists() {
             continue;
         }
-        let toml_path = path.join("HAND.toml");
-        if !toml_path.exists() {
-            continue;
-        }
-        // Skip if already installed on disk
         let id = path
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or_default();
-        if librefang_dir
-            .join("workspaces")
-            .join("hands")
-            .join(id)
-            .join("HAND.toml")
-            .exists()
-        {
+        let dest = dest_root.join(id);
+        if dest.join("HAND.toml").exists() {
             continue;
         }
-        let Ok(toml_content) = std::fs::read_to_string(&toml_path) else {
-            continue;
-        };
-        let skill_content = std::fs::read_to_string(path.join("SKILL.md")).unwrap_or_default();
-        let _ = hand_registry.install_from_content_persisted(
-            librefang_dir,
-            &toml_content,
-            &skill_content,
-        );
+        let _ = std::fs::create_dir_all(&dest);
+        let _ = std::fs::copy(path.join("HAND.toml"), dest.join("HAND.toml"));
+        let skill_src = path.join("SKILL.md");
+        if skill_src.exists() {
+            let _ = std::fs::copy(&skill_src, dest.join("SKILL.md"));
+        }
     }
 }
 
