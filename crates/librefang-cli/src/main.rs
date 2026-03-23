@@ -1930,6 +1930,20 @@ fn preinstall_hands_from_registry(librefang_dir: &std::path::Path) {
         if !toml_path.exists() {
             continue;
         }
+        // Skip if already installed on disk
+        let id = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        if librefang_dir
+            .join("workspaces")
+            .join("hands")
+            .join(id)
+            .join("HAND.toml")
+            .exists()
+        {
+            continue;
+        }
         let Ok(toml_content) = std::fs::read_to_string(&toml_path) else {
             continue;
         };
