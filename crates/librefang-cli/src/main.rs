@@ -1886,6 +1886,12 @@ fn cmd_init(quick: bool) {
         });
     }
 
+    // Sync registry content (downloads to registry/, pre-installs providers/integrations/assistant)
+    librefang_runtime::registry_sync::sync_registry(&librefang_dir);
+
+    // Pre-install hands from registry to workspaces/hands/
+    preinstall_hands_from_registry(&librefang_dir);
+
     // Initialize vault if not already initialized
     init_vault_if_missing(&librefang_dir);
 
@@ -1902,6 +1908,37 @@ fn cmd_init(quick: bool) {
         cmd_init_quick(&librefang_dir);
     } else {
         cmd_init_interactive(&librefang_dir);
+    }
+}
+
+/// Pre-install hands from registry cache to workspaces/hands/ using HandRegistry.
+fn preinstall_hands_from_registry(librefang_dir: &std::path::Path) {
+    let registry_hands = librefang_dir.join("registry").join("hands");
+    if !registry_hands.is_dir() {
+        return;
+    }
+    let hand_registry = librefang_hands::registry::HandRegistry::new();
+    let Ok(entries) = std::fs::read_dir(&registry_hands) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let toml_path = path.join("HAND.toml");
+        if !toml_path.exists() {
+            continue;
+        }
+        let Ok(toml_content) = std::fs::read_to_string(&toml_path) else {
+            continue;
+        };
+        let skill_content = std::fs::read_to_string(path.join("SKILL.md")).unwrap_or_default();
+        let _ = hand_registry.install_from_content_persisted(
+            librefang_dir,
+            &toml_content,
+            &skill_content,
+        );
     }
 }
 
