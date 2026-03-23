@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use super::serde_helpers::{deserialize_string_or_int_vec, OneOrMany};
-use super::DEFAULT_API_LISTEN;
+use super::{CONFIG_VERSION, DEFAULT_API_LISTEN};
 
 /// DM (direct message) policy for a channel.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1259,6 +1259,9 @@ pub fn redact_proxy_url(url: &str) -> String {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct KernelConfig {
+    /// Top-level config schema version.
+    #[serde(default = "default_config_version")]
+    pub config_version: u32,
     /// LibreFang home directory (default: ~/.librefang).
     pub home_dir: PathBuf,
     /// Data directory for databases (default: ~/.librefang/data).
@@ -2255,10 +2258,15 @@ fn default_true() -> bool {
     true
 }
 
+fn default_config_version() -> u32 {
+    CONFIG_VERSION
+}
+
 impl Default for KernelConfig {
     fn default() -> Self {
         let home_dir = librefang_home_dir();
         Self {
+            config_version: CONFIG_VERSION,
             data_dir: home_dir.join("data"),
             home_dir,
             log_level: "info".to_string(),
@@ -2376,6 +2384,7 @@ impl KernelConfig {
 impl std::fmt::Debug for KernelConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("KernelConfig")
+            .field("config_version", &self.config_version)
             .field("home_dir", &self.home_dir)
             .field("data_dir", &self.data_dir)
             .field("log_level", &self.log_level)

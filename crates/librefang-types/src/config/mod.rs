@@ -30,6 +30,7 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = KernelConfig::default();
+        assert_eq!(config.config_version, CONFIG_VERSION);
         assert_eq!(config.log_level, "info");
         assert_eq!(config.api_listen, DEFAULT_API_LISTEN);
         assert!(!config.network_enabled);
@@ -693,6 +694,7 @@ mod tests {
     fn test_known_top_level_fields_not_empty() {
         let fields = KernelConfig::known_top_level_fields();
         assert!(fields.len() > 30, "expected many known fields");
+        assert!(fields.contains(&"config_version"));
         assert!(fields.contains(&"api_listen"));
         assert!(fields.contains(&"log_level"));
         assert!(fields.contains(&"strict_config"));
@@ -705,6 +707,7 @@ mod tests {
     fn test_detect_unknown_fields_clean() {
         let raw: toml::Value = toml::from_str(
             r#"
+            config_version = 2
             log_level = "info"
             api_listen = "0.0.0.0:4545"
         "#,

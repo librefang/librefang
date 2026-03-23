@@ -1,7 +1,7 @@
 //! Configuration version tracking, providing the foundation for future config migrations.
 
-/// Configuration file version number, used for future config migration support.
+/// Configuration file version number.
 ///
-/// TODO: When an incompatible change is made to the config format, increment this version
-/// and implement automatic migration logic in the loader (old version -> new version).
-pub const CONFIG_VERSION: u32 = 1;
+/// Version `2` migrates legacy configs that still store `api_key`,
+/// `api_listen`, or `log_level` under `[api]` into the top-level schema.
+pub const CONFIG_VERSION: u32 = 2;

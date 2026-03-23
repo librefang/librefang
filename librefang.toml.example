@@ -4,6 +4,8 @@
 # Docs: https://docs.librefang.ai/configuration
 # ══════════════════════════════════════════════════════════════
 
+config_version = 2
+
 # ── Server ────────────────────────────────────────────────────
 api_listen = "0.0.0.0:4545"    # Use "127.0.0.1:4545" for local-only
 log_level = "info"             # trace | debug | info | warn | error
@@ -288,4 +290,3 @@ debounce_ms = 500
 # ── Vault (Encrypted Credential Storage) ─────────────────────
 # [vault]
 # enabled = true               # Auto-detected if vault.enc exists
-

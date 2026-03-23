@@ -3,7 +3,7 @@
 //! Supports config includes: the `include` field specifies additional TOML files
 //! to load and deep-merge before the root config (root overrides includes).
 
-use librefang_types::config::KernelConfig;
+use librefang_types::config::{KernelConfig, CONFIG_VERSION};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use tracing::info;
@@ -50,26 +50,13 @@ pub fn load_config(path: Option<&Path>) -> KernelConfig {
                         tbl.remove("include");
                     }
 
-                    // Migrate misplaced api_key/api_listen from [api] section to root level.
-                    // The old config schema incorrectly grouped these under [api], so many
-                    // users have them in the wrong place. Move them up if not already at root.
-                    if let toml::Value::Table(ref mut tbl) = root_value {
-                        if let Some(toml::Value::Table(api_section)) = tbl.get("api").cloned() {
-                            for key in &["api_key", "api_listen", "log_level"] {
-                                if !tbl.contains_key(*key) {
-                                    if let Some(val) = api_section.get(*key) {
-                                        tracing::info!(
-                                            key,
-                                            "Migrating misplaced config field from [api] to root level"
-                                        );
-                                        tbl.insert(key.to_string(), val.clone());
-                                    }
-                                }
-                            }
-                            // Remove the legacy [api] section after migration so that
-                            // unknown-field detection does not flag it.
-                            tbl.remove("api");
-                        }
+                    if let Err(e) = migrate_config_value(&mut root_value) {
+                        tracing::warn!(
+                            error = %e,
+                            path = %config_path.display(),
+                            "Failed to migrate config, using defaults"
+                        );
+                        return KernelConfig::default();
                     }
 
                     // Detect unknown top-level fields before deserialization.
@@ -142,6 +129,72 @@ pub fn load_config(path: Option<&Path>) -> KernelConfig {
     }
 
     KernelConfig::default()
+}
+
+fn config_version_from_value(root_value: &toml::Value) -> u32 {
+    root_value
+        .as_table()
+        .and_then(|tbl| tbl.get("config_version"))
+        .and_then(|value| value.as_integer())
+        .filter(|value| *value > 0)
+        .map(|value| value as u32)
+        .unwrap_or(1)
+}
+
+fn migrate_v1_to_v2(root_value: &mut toml::Value) {
+    if let toml::Value::Table(tbl) = root_value {
+        if let Some(toml::Value::Table(api_section)) = tbl.get("api").cloned() {
+            for key in &["api_key", "api_listen", "log_level"] {
+                if !tbl.contains_key(*key) {
+                    if let Some(val) = api_section.get(*key) {
+                        tracing::info!(
+                            key,
+                            from_version = 1,
+                            to_version = 2,
+                            "Migrating misplaced config field from [api] to root level"
+                        );
+                        tbl.insert(key.to_string(), val.clone());
+                    }
+                }
+            }
+            tbl.remove("api");
+        }
+        tbl.insert("config_version".to_string(), toml::Value::Integer(2));
+    }
+}
+
+fn migrate_config_value(root_value: &mut toml::Value) -> Result<(), String> {
+    let current_version = config_version_from_value(root_value);
+    if current_version > CONFIG_VERSION {
+        tracing::warn!(
+            current_version,
+            supported_version = CONFIG_VERSION,
+            "Config version is newer than this build; loading without migration"
+        );
+        return Ok(());
+    }
+
+    let mut version = current_version;
+    while version < CONFIG_VERSION {
+        match version {
+            1 => migrate_v1_to_v2(root_value),
+            other => {
+                return Err(format!(
+                    "Unsupported config migration path from version {other}"
+                ));
+            }
+        }
+        version += 1;
+    }
+
+    if let toml::Value::Table(tbl) = root_value {
+        tbl.insert(
+            "config_version".to_string(),
+            toml::Value::Integer(CONFIG_VERSION as i64),
+        );
+    }
+
+    Ok(())
 }
 
 /// Resolve config includes by deep-merging included files into the root value.
@@ -333,6 +386,59 @@ mod tests {
         assert_eq!(base["log_level"].as_str(), Some("info"));
         assert_eq!(base["api_listen"].as_str(), Some("0.0.0.0:4545"));
         assert_eq!(base["network_enabled"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn test_config_version_defaults_to_current() {
+        let config = KernelConfig::default();
+        assert_eq!(config.config_version, CONFIG_VERSION);
+    }
+
+    #[test]
+    fn test_config_version_from_value_defaults_to_v1_when_missing() {
+        let raw: toml::Value = toml::from_str("log_level = \"info\"").unwrap();
+        assert_eq!(config_version_from_value(&raw), 1);
+    }
+
+    #[test]
+    fn test_migrate_v1_config_moves_api_fields_to_root() {
+        let mut raw: toml::Value = toml::from_str(
+            r#"
+            [api]
+            api_key = "secret"
+            api_listen = "0.0.0.0:4545"
+            log_level = "debug"
+        "#,
+        )
+        .unwrap();
+
+        migrate_config_value(&mut raw).unwrap();
+
+        let table = raw.as_table().unwrap();
+        assert_eq!(table["config_version"].as_integer(), Some(2));
+        assert_eq!(table["api_key"].as_str(), Some("secret"));
+        assert_eq!(table["api_listen"].as_str(), Some("0.0.0.0:4545"));
+        assert_eq!(table["log_level"].as_str(), Some("debug"));
+        assert!(!table.contains_key("api"));
+    }
+
+    #[test]
+    fn test_load_config_migrates_v1_api_section() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("config.toml");
+
+        let mut f = std::fs::File::create(&root).unwrap();
+        writeln!(f, "[api]").unwrap();
+        writeln!(f, "api_key = \"secret\"").unwrap();
+        writeln!(f, "api_listen = \"0.0.0.0:9999\"").unwrap();
+        writeln!(f, "log_level = \"debug\"").unwrap();
+        drop(f);
+
+        let config = load_config(Some(&root));
+        assert_eq!(config.config_version, CONFIG_VERSION);
+        assert_eq!(config.api_key, "secret");
+        assert_eq!(config.api_listen, "0.0.0.0:9999");
+        assert_eq!(config.log_level, "debug");
     }
 
     #[test]
