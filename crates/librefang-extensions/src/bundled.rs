@@ -1,7 +1,7 @@
 //! Integration templates loaded from disk at runtime.
 //!
-//! Integrations are read from `~/.librefang/integrations/` (synced from
-//! the registry via `librefang init`). No compile-time embedding.
+//! Integrations are read from `~/.librefang/integrations/` (pre-installed from
+//! registry on first boot, plus user custom integrations).
 
 /// Returns all integration templates found on disk as (id, TOML content) pairs.
 ///

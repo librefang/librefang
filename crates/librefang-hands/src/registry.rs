@@ -736,6 +736,24 @@ fn check_option_available(provider_env: Option<&str>, binary: Option<&str>) -> b
 mod tests {
     use super::*;
 
+    /// Ensure the test home dir has synced registry content and
+    /// migrated directory layout (hands/ → workspaces/hands/).
+    fn ensure_test_home() -> std::path::PathBuf {
+        let home = librefang_runtime::registry_sync::resolve_home_dir_for_tests();
+        // Sync if needed
+        if librefang_runtime::registry_sync::needs_sync(&home) {
+            librefang_runtime::registry_sync::sync_registry(&home);
+        }
+        // Migrate old hands/ → workspaces/hands/ if needed
+        let old_hands = home.join("hands");
+        let new_hands = home.join("workspaces").join("hands");
+        if old_hands.is_dir() && !new_hands.exists() {
+            let _ = std::fs::create_dir_all(home.join("workspaces"));
+            let _ = std::fs::rename(&old_hands, &new_hands);
+        }
+        home
+    }
+
     #[test]
     fn new_registry_is_empty() {
         let reg = HandRegistry::new();
@@ -746,8 +764,8 @@ mod tests {
     #[test]
     fn load_bundled_hands() {
         let reg = HandRegistry::new();
-        let count =
-            reg.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
+        let home = ensure_test_home();
+        let count = reg.load_bundled(&home);
         assert_eq!(count, 14);
         assert!(!reg.list_definitions().is_empty());
 
@@ -793,15 +811,21 @@ system_prompt = "Test prompt"
             .unwrap();
 
         assert_eq!(def.id, "uptime-watcher");
-        assert!(tmp.path().join("hands/uptime-watcher/HAND.toml").exists());
-        assert!(tmp.path().join("hands/uptime-watcher/SKILL.md").exists());
+        assert!(tmp
+            .path()
+            .join("workspaces/hands/uptime-watcher/HAND.toml")
+            .exists());
+        assert!(tmp
+            .path()
+            .join("workspaces/hands/uptime-watcher/SKILL.md")
+            .exists());
         assert!(reg.get_definition("uptime-watcher").is_some());
     }
 
     #[test]
     fn activate_and_deactivate() {
         let reg = HandRegistry::new();
-        reg.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
+        reg.load_bundled(&ensure_test_home());
 
         let instance = reg.activate("clip", HashMap::new()).unwrap();
         assert_eq!(instance.hand_id, "clip");
@@ -823,7 +847,7 @@ system_prompt = "Test prompt"
     #[test]
     fn pause_and_resume() {
         let reg = HandRegistry::new();
-        reg.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
+        reg.load_bundled(&ensure_test_home());
 
         let instance = reg.activate("clip", HashMap::new()).unwrap();
         let id = instance.instance_id;
@@ -842,7 +866,7 @@ system_prompt = "Test prompt"
     #[test]
     fn load_state_preserves_paused_instances() {
         let reg = HandRegistry::new();
-        reg.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
+        reg.load_bundled(&ensure_test_home());
 
         let instance = reg.activate("clip", HashMap::new()).unwrap();
         reg.pause(instance.instance_id).unwrap();
@@ -860,7 +884,7 @@ system_prompt = "Test prompt"
     #[test]
     fn set_agent() {
         let reg = HandRegistry::new();
-        reg.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
+        reg.load_bundled(&ensure_test_home());
 
         let instance = reg.activate("clip", HashMap::new()).unwrap();
         let id = instance.instance_id;
@@ -878,7 +902,7 @@ system_prompt = "Test prompt"
     #[test]
     fn persist_and_load_explicit_coordinator_role() {
         let reg = HandRegistry::new();
-        reg.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
+        reg.load_bundled(&ensure_test_home());
 
         let instance = reg.activate("clip", HashMap::new()).unwrap();
         let id = instance.instance_id;
@@ -900,7 +924,7 @@ system_prompt = "Test prompt"
     #[test]
     fn check_requirements() {
         let reg = HandRegistry::new();
-        reg.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
+        reg.load_bundled(&ensure_test_home());
 
         let results = reg.check_requirements("clip").unwrap();
         assert!(!results.is_empty());
@@ -925,7 +949,7 @@ system_prompt = "Test prompt"
     #[test]
     fn set_error_status() {
         let reg = HandRegistry::new();
-        reg.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
+        reg.load_bundled(&ensure_test_home());
 
         let instance = reg.activate("clip", HashMap::new()).unwrap();
         let id = instance.instance_id;
@@ -985,7 +1009,7 @@ system_prompt = "Test prompt"
     #[test]
     fn readiness_inactive_hand() {
         let reg = HandRegistry::new();
-        reg.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
+        reg.load_bundled(&ensure_test_home());
 
         // Lead hand has no requirements, so requirements_met = true
         let r = reg.readiness("lead").unwrap();
@@ -997,7 +1021,7 @@ system_prompt = "Test prompt"
     #[test]
     fn readiness_active_hand_all_met() {
         let reg = HandRegistry::new();
-        reg.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
+        reg.load_bundled(&ensure_test_home());
 
         // Lead hand has no requirements — activate it
         let instance = reg.activate("lead", HashMap::new()).unwrap();
@@ -1012,7 +1036,7 @@ system_prompt = "Test prompt"
     #[test]
     fn readiness_active_hand_degraded() {
         let reg = HandRegistry::new();
-        reg.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
+        reg.load_bundled(&ensure_test_home());
 
         // Browser hand requires python3 (mandatory) + chromium (optional).
         // Activate it — requirements_met only considers mandatory ones,
@@ -1037,7 +1061,7 @@ system_prompt = "Test prompt"
     #[test]
     fn readiness_paused_hand_not_active() {
         let reg = HandRegistry::new();
-        reg.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
+        reg.load_bundled(&ensure_test_home());
 
         let instance = reg.activate("lead", HashMap::new()).unwrap();
         reg.pause(instance.instance_id).unwrap();

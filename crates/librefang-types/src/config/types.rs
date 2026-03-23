@@ -1352,10 +1352,6 @@ pub struct KernelConfig {
     /// Root directory for agent workspaces. Default: `~/.librefang/workspaces`
     #[serde(default)]
     pub workspaces_dir: Option<PathBuf>,
-    /// Global shared workspace directory for cross-session file persistence.
-    /// Default: `~/.librefang/workspace`
-    #[serde(default)]
-    pub workspace_dir: Option<PathBuf>,
     /// Custom log directory. When set, log files are written here instead of
     /// the default `~/.librefang/` directory.
     #[serde(default)]
@@ -2289,7 +2285,6 @@ impl Default for KernelConfig {
             extensions: ExtensionsConfig::default(),
             vault: VaultConfig::default(),
             workspaces_dir: None,
-            workspace_dir: None,
             log_dir: None,
             media: crate::media::MediaConfig::default(),
             links: crate::media::LinkConfig::default(),
@@ -2357,13 +2352,6 @@ impl KernelConfig {
         self.effective_workspaces_dir().join("hands")
     }
 
-    /// Resolved global shared workspace directory for cross-session persistence.
-    pub fn effective_workspace_dir(&self) -> PathBuf {
-        self.workspace_dir
-            .clone()
-            .unwrap_or_else(|| self.home_dir.join("workspace"))
-    }
-
     /// Resolve the API key env var name for a provider.
     ///
     /// Checks: 1) explicit `provider_api_keys` mapping, 2) `auth_profiles` first entry,
@@ -2426,7 +2414,6 @@ impl std::fmt::Debug for KernelConfig {
             .field("extensions", &self.extensions)
             .field("vault", &format!("enabled={}", self.vault.enabled))
             .field("workspaces_dir", &self.workspaces_dir)
-            .field("workspace_dir", &self.workspace_dir)
             .field("log_dir", &self.log_dir)
             .field(
                 "media",
