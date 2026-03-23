@@ -77,6 +77,11 @@ fn read_workspace_version(root: &Path) -> Result<String, Box<dyn std::error::Err
 }
 
 fn find_latest_stable_tag(root: &Path) -> Option<String> {
+    find_latest_tag(root, false)
+}
+
+/// Find the latest tag, optionally including pre-releases (rc, beta).
+fn find_latest_tag(root: &Path, include_prerelease: bool) -> Option<String> {
     let output = Command::new("git")
         .args(["tag", "--sort=-creatordate"])
         .current_dir(root)
@@ -85,14 +90,15 @@ fn find_latest_stable_tag(root: &Path) -> Option<String> {
     let stdout = String::from_utf8_lossy(&output.stdout);
     for line in stdout.lines() {
         let tag = line.trim();
-        if tag.starts_with('v')
-            && tag.len() > 1
-            && tag.as_bytes()[1].is_ascii_digit()
-            && !tag.contains("alpha")
-            && !tag.contains("beta")
-            && !tag.contains("rc")
-        {
-            return Some(tag.to_string());
+        if tag.starts_with('v') && tag.len() > 1 && tag.as_bytes()[1].is_ascii_digit() {
+            if include_prerelease {
+                // Skip alpha but include rc and beta
+                if !tag.contains("alpha") {
+                    return Some(tag.to_string());
+                }
+            } else if !tag.contains("alpha") && !tag.contains("beta") && !tag.contains("rc") {
+                return Some(tag.to_string());
+            }
         }
     }
     None
@@ -203,7 +209,8 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
     git(&root, &["pull", "--rebase", "origin", "main"])?;
 
     let current = read_workspace_version(&root)?;
-    let prev_tag = find_latest_stable_tag(&root);
+    // Include prerelease tags so rc/beta compare against previous rc/beta
+    let prev_tag = find_latest_tag(&root, true);
 
     // --- Determine version ---
     let version = if let Some(v) = args.version {
