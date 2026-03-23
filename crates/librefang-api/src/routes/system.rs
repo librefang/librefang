@@ -1387,6 +1387,8 @@ pub async fn create_approval(
         risk_level: RiskLevel::High,
         requested_at: chrono::Utc::now(),
         timeout_secs: policy.timeout_secs,
+        sender_id: None,
+        channel: None,
     };
 
     // Spawn the request in the background (it will block until resolved or timed out)

@@ -80,6 +80,12 @@ pub fn sync_registry(home_dir: &Path) {
         }
     }
 
+    // Clean up stale hand directories (agent.toml without HAND.toml)
+    let hands_dir = home_dir.join("hands");
+    if hands_dir.exists() {
+        cleanup_stale_dirs(&hands_dir);
+    }
+
     // Sync root-level files (aliases.toml, schema.toml)
     for name in &["aliases.toml", "schema.toml"] {
         let src = registry_cache.join(name);
@@ -279,7 +285,58 @@ fn sync_flat_files(src_dir: &Path, dest_dir: &Path, label: &str) {
     }
 }
 
+/// Extract the `version = "X.Y.Z"` value from a manifest file via line scan.
+///
+/// Avoids full TOML parse (which may fail on new-format files that older code
+/// can't deserialize). Returns `None` if the file can't be read or has no
+/// version field.
+fn extract_version(path: &Path) -> Option<String> {
+    let content = std::fs::read_to_string(path).ok()?;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("version") {
+            let rest = rest.trim_start();
+            if let Some(rest) = rest.strip_prefix('=') {
+                let rest = rest.trim();
+                // Strip surrounding quotes
+                let ver = rest.trim_matches('"').trim_matches('\'');
+                if !ver.is_empty() {
+                    return Some(ver.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Compare two semver-like version strings numerically.
+///
+/// Returns `true` if `a` is strictly newer than `b`. Non-numeric segments
+/// compare as 0 to avoid panics on malformed versions.
+fn version_newer_than(a: &str, b: &str) -> bool {
+    let parse = |s: &str| -> Vec<u64> {
+        s.split('.')
+            .map(|part| part.parse::<u64>().unwrap_or(0))
+            .collect()
+    };
+    let va = parse(a);
+    let vb = parse(b);
+    let len = va.len().max(vb.len());
+    for i in 0..len {
+        let pa = va.get(i).copied().unwrap_or(0);
+        let pb = vb.get(i).copied().unwrap_or(0);
+        if pa != pb {
+            return pa > pb;
+        }
+    }
+    false
+}
+
 /// Sync subdirectory-based content (e.g. agents/, hands/, skills/, plugins/).
+///
+/// When a destination manifest already exists, compares `version` fields.
+/// If the source has a newer version, replaces the destination directory
+/// (user settings live in `hand_state.json`, not in the manifest).
 fn sync_subdirs(src_dir: &Path, dest_dir: &Path, manifest_file: &str, label: &str) {
     let entries = match std::fs::read_dir(src_dir) {
         Ok(e) => e,
@@ -287,6 +344,7 @@ fn sync_subdirs(src_dir: &Path, dest_dir: &Path, manifest_file: &str, label: &st
     };
 
     let mut synced = 0;
+    let mut updated = 0;
     let mut skipped = 0;
     for entry in entries.flatten() {
         let path = entry.path();
@@ -304,18 +362,66 @@ fn sync_subdirs(src_dir: &Path, dest_dir: &Path, manifest_file: &str, label: &st
 
         let item_dest = dest_dir.join(&name);
         let dest_manifest = item_dest.join(manifest_file);
-        if dest_manifest.exists() {
-            skipped += 1;
-            continue;
-        }
 
-        if copy_dir_recursive(&path, &item_dest).is_ok() {
+        if dest_manifest.exists() {
+            // Check if source version is newer
+            let src_ver = extract_version(&src_manifest).unwrap_or_default();
+            let dest_ver = extract_version(&dest_manifest).unwrap_or_default();
+
+            if !version_newer_than(&src_ver, &dest_ver) {
+                skipped += 1;
+                continue;
+            }
+
+            // Source is newer — replace destination
+            tracing::debug!("{label}/{name}: updating {dest_ver} → {src_ver}");
+            if std::fs::remove_dir_all(&item_dest).is_err() {
+                skipped += 1;
+                continue;
+            }
+            if copy_dir_recursive(&path, &item_dest).is_ok() {
+                updated += 1;
+            }
+        } else if copy_dir_recursive(&path, &item_dest).is_ok() {
             synced += 1;
         }
     }
 
-    if synced > 0 || skipped > 0 {
-        tracing::info!("{label} synced ({synced} new, {skipped} existing)");
+    if synced > 0 || updated > 0 || skipped > 0 {
+        tracing::info!("{label} synced ({synced} new, {updated} updated, {skipped} unchanged)");
+    }
+}
+
+/// Remove stale hand directories that have `agent.toml` but no `HAND.toml`.
+///
+/// These are remnants of the old `*-hand` naming convention where each hand
+/// was a plain agent directory. Now every hand must have a `HAND.toml`.
+fn cleanup_stale_dirs(hands_dir: &Path) {
+    let entries = match std::fs::read_dir(hands_dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let has_hand_toml = path.join("HAND.toml").exists();
+        let has_agent_toml = path.join("agent.toml").exists();
+
+        if has_agent_toml && !has_hand_toml {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+            tracing::info!("Removing stale hand directory: {name}");
+            if std::fs::remove_dir_all(&path).is_ok() {
+                removed += 1;
+            }
+        }
+    }
+
+    if removed > 0 {
+        tracing::info!("Cleaned up {removed} stale hand directories");
     }
 }
 
@@ -337,7 +443,7 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::needs_sync;
+    use super::*;
 
     #[test]
     fn test_needs_sync_when_agents_dir_missing() {
@@ -375,5 +481,126 @@ mod tests {
         std::fs::create_dir_all(&cache).unwrap();
         super::touch_marker(&cache);
         assert!(!super::should_refresh(&cache));
+    }
+
+    #[test]
+    fn test_extract_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("HAND.toml");
+
+        std::fs::write(&path, "id = \"test\"\nversion = \"1.2.3\"\nname = \"Test\"").unwrap();
+        assert_eq!(extract_version(&path), Some("1.2.3".to_string()));
+
+        std::fs::write(&path, "id = \"test\"\nname = \"Test\"").unwrap();
+        assert_eq!(extract_version(&path), None);
+
+        std::fs::write(&path, "  version  =  \"0.1.0\"  ").unwrap();
+        assert_eq!(extract_version(&path), Some("0.1.0".to_string()));
+    }
+
+    #[test]
+    fn test_version_newer_than() {
+        assert!(version_newer_than("1.0.0", "0.9.9"));
+        assert!(version_newer_than("2.0.0", "1.99.99"));
+        assert!(version_newer_than("1.1.0", "1.0.9"));
+        assert!(version_newer_than("1.0.1", "1.0.0"));
+
+        assert!(!version_newer_than("1.0.0", "1.0.0"));
+        assert!(!version_newer_than("0.9.0", "1.0.0"));
+        assert!(!version_newer_than("", "0.0.1"));
+
+        // Different segment counts
+        assert!(version_newer_than("1.0.0", "0.9"));
+        assert!(!version_newer_than("1.0", "1.0.0"));
+    }
+
+    #[test]
+    fn test_sync_subdirs_updates_newer_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src_hands");
+        let dest = tmp.path().join("dest_hands");
+
+        // Source: v2.0.0
+        let src_hand = src.join("clip");
+        std::fs::create_dir_all(&src_hand).unwrap();
+        std::fs::write(
+            src_hand.join("HAND.toml"),
+            "id = \"clip\"\nversion = \"2.0.0\"\nname = \"Clip v2\"",
+        )
+        .unwrap();
+
+        // Dest: v1.0.0
+        let dest_hand = dest.join("clip");
+        std::fs::create_dir_all(&dest_hand).unwrap();
+        std::fs::write(
+            dest_hand.join("HAND.toml"),
+            "id = \"clip\"\nversion = \"1.0.0\"\nname = \"Clip v1\"",
+        )
+        .unwrap();
+
+        sync_subdirs(&src, &dest, "HAND.toml", "hands");
+
+        let content = std::fs::read_to_string(dest_hand.join("HAND.toml")).unwrap();
+        assert!(content.contains("2.0.0"), "should have been updated to v2");
+        assert!(content.contains("Clip v2"));
+    }
+
+    #[test]
+    fn test_sync_subdirs_skips_same_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src_hands");
+        let dest = tmp.path().join("dest_hands");
+
+        let src_hand = src.join("clip");
+        std::fs::create_dir_all(&src_hand).unwrap();
+        std::fs::write(
+            src_hand.join("HAND.toml"),
+            "id = \"clip\"\nversion = \"1.0.0\"\nname = \"Clip src\"",
+        )
+        .unwrap();
+
+        let dest_hand = dest.join("clip");
+        std::fs::create_dir_all(&dest_hand).unwrap();
+        std::fs::write(
+            dest_hand.join("HAND.toml"),
+            "id = \"clip\"\nversion = \"1.0.0\"\nname = \"Clip dest\"",
+        )
+        .unwrap();
+
+        sync_subdirs(&src, &dest, "HAND.toml", "hands");
+
+        let content = std::fs::read_to_string(dest_hand.join("HAND.toml")).unwrap();
+        assert!(
+            content.contains("Clip dest"),
+            "should NOT have been overwritten"
+        );
+    }
+
+    #[test]
+    fn test_cleanup_stale_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hands = tmp.path().join("hands");
+
+        // Stale: has agent.toml but no HAND.toml
+        let stale = hands.join("old-hand");
+        std::fs::create_dir_all(&stale).unwrap();
+        std::fs::write(stale.join("agent.toml"), "name = \"old\"").unwrap();
+
+        // Valid: has HAND.toml
+        let valid = hands.join("new-hand");
+        std::fs::create_dir_all(&valid).unwrap();
+        std::fs::write(valid.join("HAND.toml"), "id = \"new\"").unwrap();
+
+        // Has both — should NOT be removed
+        let both = hands.join("migrated-hand");
+        std::fs::create_dir_all(&both).unwrap();
+        std::fs::write(both.join("agent.toml"), "name = \"m\"").unwrap();
+        std::fs::write(both.join("HAND.toml"), "id = \"m\"").unwrap();
+
+        cleanup_stale_dirs(&hands);
+
+        assert!(!stale.exists(), "stale dir should be removed");
+        assert!(valid.exists(), "valid dir should remain");
+        assert!(both.exists(), "dir with both files should remain");
     }
 }

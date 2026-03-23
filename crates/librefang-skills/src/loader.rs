@@ -6,6 +6,45 @@ use std::process::Stdio;
 use tokio::io::AsyncWriteExt;
 use tracing::{debug, error};
 
+/// Validate that a resolved script path stays within the skill directory.
+/// Prevents path traversal attacks via `../` in entry names.
+fn validate_script_path(skill_dir: &Path, entry: &str) -> Result<std::path::PathBuf, SkillError> {
+    let script_path = skill_dir.join(entry);
+
+    // Canonicalize both paths to resolve symlinks and `..` components.
+    let canonical_dir = skill_dir.canonicalize().map_err(|e| {
+        SkillError::ExecutionFailed(format!("Failed to resolve skill directory: {e}"))
+    })?;
+
+    // For the script path, we need to check if it exists first
+    let canonical_script = if script_path.exists() {
+        script_path.canonicalize().map_err(|e| {
+            SkillError::ExecutionFailed(format!("Failed to resolve script path: {e}"))
+        })?
+    } else {
+        // If file doesn't exist, normalize manually by resolving the parent
+        let parent = script_path
+            .parent()
+            .ok_or_else(|| SkillError::ExecutionFailed("Invalid script path".into()))?;
+        let canonical_parent = parent.canonicalize().map_err(|e| {
+            SkillError::ExecutionFailed(format!("Failed to resolve script parent directory: {e}"))
+        })?;
+        let file_name = script_path
+            .file_name()
+            .ok_or_else(|| SkillError::ExecutionFailed("Script path has no filename".into()))?;
+        canonical_parent.join(file_name)
+    };
+
+    if !canonical_script.starts_with(&canonical_dir) {
+        return Err(SkillError::ExecutionFailed(format!(
+            "Script path '{}' escapes skill directory",
+            entry
+        )));
+    }
+
+    Ok(canonical_script)
+}
+
 /// Execute a skill tool by spawning the appropriate runtime.
 pub async fn execute_skill_tool(
     manifest: &SkillManifest,
@@ -79,7 +118,8 @@ async fn execute_python(
     input: &serde_json::Value,
     config: &std::collections::HashMap<String, serde_json::Value>,
 ) -> Result<SkillToolResult, SkillError> {
-    let script_path = skill_dir.join(entry);
+    // SECURITY: Validate path containment before any filesystem access
+    let script_path = validate_script_path(skill_dir, entry)?;
     if !script_path.exists() {
         return Err(SkillError::ExecutionFailed(format!(
             "Python script not found: {}",
@@ -194,7 +234,8 @@ async fn execute_node(
     input: &serde_json::Value,
     config: &std::collections::HashMap<String, serde_json::Value>,
 ) -> Result<SkillToolResult, SkillError> {
-    let script_path = skill_dir.join(entry);
+    // SECURITY: Validate path containment before any filesystem access
+    let script_path = validate_script_path(skill_dir, entry)?;
     if !script_path.exists() {
         return Err(SkillError::ExecutionFailed(format!(
             "Node.js script not found: {}",
@@ -303,7 +344,8 @@ async fn execute_shell(
     input: &serde_json::Value,
     config: &std::collections::HashMap<String, serde_json::Value>,
 ) -> Result<SkillToolResult, SkillError> {
-    let script_path = skill_dir.join(entry);
+    // SECURITY: Validate path containment before any filesystem access
+    let script_path = validate_script_path(skill_dir, entry)?;
     if !script_path.exists() {
         return Err(SkillError::ExecutionFailed(format!(
             "Shell script not found: {}",
@@ -487,6 +529,103 @@ mod tests {
         assert!(result.is_some(), "Expected bash or sh to be found on Unix");
         #[cfg(not(unix))]
         let _ = result;
+    }
+
+    #[test]
+    fn test_validate_script_path_allows_normal_entry() {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("run.sh"), "#!/bin/bash\n").unwrap();
+
+        let result = validate_script_path(dir.path(), "run.sh");
+        assert!(result.is_ok());
+        let resolved = result.unwrap();
+        assert!(resolved.starts_with(dir.path().canonicalize().unwrap()));
+    }
+
+    #[test]
+    fn test_validate_script_path_allows_subdirectory() {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("scripts")).unwrap();
+        std::fs::write(dir.path().join("scripts/run.sh"), "#!/bin/bash\n").unwrap();
+
+        let result = validate_script_path(dir.path(), "scripts/run.sh");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_script_path_blocks_parent_traversal() {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        // Create the script file in the parent directory so canonicalize works
+        let parent = dir.path().parent().unwrap();
+        let evil_script = parent.join("evil.sh");
+        std::fs::write(&evil_script, "#!/bin/bash\nrm -rf /\n").unwrap();
+
+        let result = validate_script_path(dir.path(), "../evil.sh");
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("escapes skill directory"),
+            "Expected 'escapes skill directory' in error, got: {err_msg}"
+        );
+
+        // Cleanup
+        let _ = std::fs::remove_file(&evil_script);
+    }
+
+    #[test]
+    fn test_validate_script_path_blocks_deep_traversal() {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("sub")).unwrap();
+
+        // Create a file two levels above the subdirectory
+        let evil_path = dir.path().join("outside.sh");
+        std::fs::write(&evil_path, "#!/bin/bash\n").unwrap();
+
+        let result = validate_script_path(&dir.path().join("sub"), "../../outside.sh");
+        // This should fail because ../../ from sub/ goes above skill_dir (sub/)
+        assert!(result.is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_validate_script_path_blocks_absolute_path() {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+
+        // An absolute path to /etc/passwd should be blocked
+        let result = validate_script_path(dir.path(), "/etc/passwd");
+        assert!(result.is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_validate_script_path_blocks_symlink_escape() {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        std::fs::write(outside.path().join("secret.sh"), "#!/bin/bash\n").unwrap();
+
+        // Create a symlink inside skill_dir that points outside
+        std::os::unix::fs::symlink(outside.path().join("secret.sh"), dir.path().join("link.sh"))
+            .unwrap();
+
+        let result = validate_script_path(dir.path(), "link.sh");
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("escapes skill directory"),
+            "Expected 'escapes skill directory' in error, got: {err_msg}"
+        );
     }
 
     #[tokio::test]
@@ -733,5 +872,58 @@ echo '{"greeting": "hello from shell"}'
         assert!(!result.is_error);
         let note = result.output["note"].as_str().unwrap();
         assert!(note.contains("system prompt"));
+    }
+
+    #[tokio::test]
+    async fn test_path_traversal_blocked_in_shell_execution() {
+        use crate::{
+            SkillManifest, SkillMeta, SkillRequirements, SkillRuntimeConfig, SkillToolDef,
+            SkillTools,
+        };
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        // Create a malicious script in parent directory
+        let parent = dir.path().parent().unwrap();
+        let evil_script = parent.join("evil.sh");
+        std::fs::write(&evil_script, "#!/bin/bash\necho PWNED\n").unwrap();
+
+        let manifest = SkillManifest {
+            skill: SkillMeta {
+                name: "test-traversal".to_string(),
+                version: librefang_types::VERSION.to_string(),
+                description: "Path traversal test".to_string(),
+                author: String::new(),
+                license: String::new(),
+                tags: vec![],
+            },
+            runtime: SkillRuntimeConfig {
+                runtime_type: SkillRuntime::Shell,
+                entry: "../evil.sh".to_string(),
+            },
+            tools: SkillTools {
+                provided: vec![SkillToolDef {
+                    name: "evil_tool".to_string(),
+                    description: "Evil".to_string(),
+                    input_schema: serde_json::json!({"type": "object"}),
+                }],
+            },
+            requirements: SkillRequirements::default(),
+            prompt_context: None,
+            source: None,
+            config: std::collections::HashMap::new(),
+        };
+
+        let err = execute_skill_tool(&manifest, dir.path(), "evil_tool", &serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SkillError::ExecutionFailed(_)));
+        assert!(
+            err.to_string().contains("escapes skill directory"),
+            "Expected 'escapes skill directory' error, got: {err}",
+        );
+
+        // Cleanup
+        let _ = std::fs::remove_file(&evil_script);
     }
 }

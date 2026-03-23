@@ -62,6 +62,10 @@ pub struct ChannelOverrides {
     pub dm_policy: DmPolicy,
     /// Group message policy.
     pub group_policy: GroupPolicy,
+    /// Regex patterns that can trigger a reply in group chats when
+    /// `group_policy` is `mention_only`.
+    #[serde(default)]
+    pub group_trigger_patterns: Vec<String>,
     /// Global rate limit for this channel (messages per minute, 0 = unlimited).
     pub rate_limit_per_minute: u32,
     /// Per-user rate limit (messages per minute, 0 = unlimited).
@@ -756,11 +760,11 @@ impl Default for InboxConfig {
 ///
 /// ```toml
 /// [telemetry]
-/// enabled = false
+/// enabled = true                              # OpenTelemetry OTLP tracing
 /// otlp_endpoint = "http://localhost:4317"
 /// service_name = "librefang"
 /// sample_rate = 1.0
-/// prometheus_enabled = false
+/// prometheus_enabled = true                   # Prometheus metrics at /api/metrics
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]

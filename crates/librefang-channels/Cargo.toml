@@ -168,6 +168,7 @@ sha1 = { workspace = true }
 base64 = { workspace = true }
 hex = { workspace = true }
 html-escape = { workspace = true }
+regex = { workspace = true }
 regex-lite = { workspace = true }
 smallvec = { workspace = true }
 webpki-roots = { workspace = true }

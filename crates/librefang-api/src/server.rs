@@ -127,6 +127,7 @@ fn resolve_dashboard_credential(
     config_value.to_string()
 }
 
+#[allow(deprecated)]
 pub(crate) fn dashboard_session_token(kernel: &LibreFangKernel) -> Option<String> {
     let cfg = kernel.config_ref();
     let username = resolve_dashboard_credential(
@@ -161,7 +162,7 @@ pub(crate) fn valid_api_tokens(kernel: &LibreFangKernel) -> Vec<String> {
 
 /// Dashboard credential login — validates username/password using Argon2id
 /// (with transparent fallback from legacy plaintext passwords) and returns
-/// a session token (HMAC-SHA256-derived from credentials).
+/// a randomly generated session token with expiration metadata.
 async fn dashboard_login(
     axum::extract::State(state): axum::extract::State<Arc<routes::AppState>>,
     axum::Json(body): axum::Json<serde_json::Value>,
@@ -211,9 +212,18 @@ async fn dashboard_login(
                 );
             }
 
+            // Store the session token so the auth middleware can validate it.
+            state
+                .active_sessions
+                .write()
+                .await
+                .insert(token.token.clone(), token.clone());
+
             axum::response::Json(serde_json::json!({
                 "ok": true,
-                "token": token,
+                "token": token.token,
+                "created_at": token.created_at,
+                "expires_at": token.created_at + crate::password_hash::DEFAULT_SESSION_TTL_SECS,
             }))
             .into_response()
         }
@@ -277,6 +287,7 @@ pub async fn build_router(
     };
 
     let channels_config = kernel.config_ref().channels.clone();
+    let active_sessions = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
     let state = Arc::new(AppState {
         kernel: kernel.clone(),
         started_at: Instant::now(),
@@ -290,6 +301,7 @@ pub async fn build_router(
         webhook_store: crate::webhook_store::WebhookStore::load(
             kernel.config_ref().home_dir.join("webhooks.json"),
         ),
+        active_sessions: active_sessions.clone(),
         #[cfg(feature = "telemetry")]
         prometheus_handle: prom_handle,
     });
@@ -330,6 +342,10 @@ pub async fn build_router(
     // Middleware accepts any token in this composite key.
     let api_key = valid_api_tokens(state.kernel.as_ref()).join("\n");
     let api_key_lock = Arc::new(tokio::sync::RwLock::new(api_key));
+    let auth_state = middleware::AuthState {
+        api_key_lock: api_key_lock.clone(),
+        active_sessions: active_sessions.clone(),
+    };
     let gcra_limiter = rate_limiter::create_rate_limiter();
 
     // Build the versioned API routes. All /api/* endpoints are defined once
@@ -379,7 +395,7 @@ pub async fn build_router(
             axum::routing::get(crate::openai_compat::list_models),
         )
         .layer(axum::middleware::from_fn_with_state(
-            api_key_lock,
+            auth_state,
             middleware::auth,
         ))
         .layer(axum::middleware::from_fn(middleware::accept_language))
@@ -401,15 +417,9 @@ pub async fn build_router(
         .layer(TraceLayer::new_for_http())
         .layer(cors);
 
-    // Add HTTP metrics middleware when telemetry feature is enabled and Prometheus is active.
-    #[cfg(feature = "telemetry")]
-    let app = if state.prometheus_handle.is_some() {
-        app.layer(axum::middleware::from_fn(
-            crate::telemetry::http_metrics_middleware,
-        ))
-    } else {
-        app
-    };
+    // NOTE: HTTP metrics are recorded inside `request_logging` middleware via
+    // `librefang_telemetry::metrics::record_http_request()`.  A separate metrics
+    // middleware layer is not needed (and would double-count requests).
 
     let app = app.with_state(state.clone());
 
@@ -429,6 +439,20 @@ pub async fn run_daemon(
     let kernel = Arc::new(kernel);
     kernel.set_self_handle();
     kernel.start_background_agents().await;
+
+    // Initialize OpenTelemetry OTLP tracing when telemetry feature is compiled
+    // in and the config has `telemetry.enabled = true`.
+    #[cfg(feature = "telemetry")]
+    if kernel.config_ref().telemetry.enabled {
+        let cfg = &kernel.config_ref().telemetry;
+        if let Err(e) = crate::telemetry::init_otel_tracing(
+            &cfg.otlp_endpoint,
+            &cfg.service_name,
+            cfg.sample_rate,
+        ) {
+            tracing::warn!("Failed to initialize OpenTelemetry tracing: {e}");
+        }
+    }
 
     // Config file hot-reload watcher (polls every 30 seconds)
     {
