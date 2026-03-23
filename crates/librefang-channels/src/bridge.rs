@@ -16,7 +16,8 @@ use futures::StreamExt;
 use librefang_types::agent::AgentId;
 use librefang_types::config::{ChannelOverrides, DmPolicy, GroupPolicy, OutputFormat};
 use librefang_types::message::ContentBlock;
-use std::sync::Arc;
+use regex::RegexSet;
+use std::sync::{Arc, OnceLock};
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, error, info, warn};
 
@@ -599,6 +600,134 @@ fn channel_type_str(channel: &crate::types::ChannelType) -> &str {
 /// Metadata key for the actual sender user ID (distinct from platform_id in DMs).
 pub const SENDER_USER_ID_KEY: &str = "sender_user_id";
 
+#[derive(Debug)]
+struct CompiledGroupTriggerPatterns {
+    regex_set: Option<RegexSet>,
+}
+
+static GROUP_TRIGGER_PATTERN_CACHE: OnceLock<
+    dashmap::DashMap<String, Arc<CompiledGroupTriggerPatterns>>,
+> = OnceLock::new();
+
+fn group_trigger_pattern_cache(
+) -> &'static dashmap::DashMap<String, Arc<CompiledGroupTriggerPatterns>> {
+    GROUP_TRIGGER_PATTERN_CACHE.get_or_init(dashmap::DashMap::new)
+}
+
+fn compile_group_trigger_patterns(patterns: &[String]) -> Arc<CompiledGroupTriggerPatterns> {
+    let cache_key = patterns.join("\u{1f}");
+    if let Some(existing) = group_trigger_pattern_cache().get(&cache_key) {
+        return existing.clone();
+    }
+
+    let mut valid_patterns = Vec::new();
+    for pattern in patterns {
+        match regex::Regex::new(pattern) {
+            Ok(_) => valid_patterns.push(pattern.clone()),
+            Err(err) => {
+                error!(pattern = %pattern, error = %err, "Invalid group trigger regex pattern");
+            }
+        }
+    }
+
+    let compiled = Arc::new(CompiledGroupTriggerPatterns {
+        regex_set: if valid_patterns.is_empty() {
+            None
+        } else {
+            match RegexSet::new(&valid_patterns) {
+                Ok(regex_set) => Some(regex_set),
+                Err(err) => {
+                    error!(error = %err, "Failed to compile group trigger regex set");
+                    None
+                }
+            }
+        },
+    });
+
+    group_trigger_pattern_cache().insert(cache_key, compiled.clone());
+    compiled
+}
+
+fn text_content(message: &ChannelMessage) -> Option<&str> {
+    match &message.content {
+        ChannelContent::Text(text) => Some(text.as_str()),
+        _ => None,
+    }
+}
+
+fn matches_group_trigger_pattern(
+    ct_str: &str,
+    message: &ChannelMessage,
+    patterns: &[String],
+) -> bool {
+    let Some(text) = text_content(message) else {
+        return false;
+    };
+    let compiled = compile_group_trigger_patterns(patterns);
+    let Some(regex_set) = compiled.regex_set.as_ref() else {
+        return false;
+    };
+    let matched = regex_set.is_match(text);
+    if matched {
+        debug!(
+            channel = ct_str,
+            user = %message.sender.display_name,
+            "Group message matched regex trigger pattern"
+        );
+    }
+    matched
+}
+
+fn is_group_command(message: &ChannelMessage) -> bool {
+    matches!(&message.content, ChannelContent::Command { .. })
+        || matches!(&message.content, ChannelContent::Text(text) if text.starts_with('/'))
+}
+
+fn should_process_group_message(
+    ct_str: &str,
+    overrides: &ChannelOverrides,
+    message: &ChannelMessage,
+) -> bool {
+    match overrides.group_policy {
+        GroupPolicy::Ignore => {
+            debug!("Ignoring group message on {ct_str} (group_policy=ignore)");
+            false
+        }
+        GroupPolicy::CommandsOnly => {
+            if !is_group_command(message) {
+                debug!(
+                    "Ignoring non-command group message on {ct_str} (group_policy=commands_only)"
+                );
+                return false;
+            }
+            true
+        }
+        GroupPolicy::MentionOnly => {
+            let was_mentioned = message
+                .metadata
+                .get("was_mentioned")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let is_command = is_group_command(message);
+            let regex_triggered = !was_mentioned
+                && !is_command
+                && matches_group_trigger_pattern(
+                    ct_str,
+                    message,
+                    &overrides.group_trigger_patterns,
+                );
+            if !was_mentioned && !is_command && !regex_triggered {
+                debug!(
+                    "Ignoring group message on {ct_str} (group_policy=mention_only, not mentioned)"
+                );
+                return false;
+            }
+            true
+        }
+        GroupPolicy::All => true,
+    }
+}
+
 /// Build a `SenderContext` from an incoming `ChannelMessage`.
 fn build_sender_context(message: &ChannelMessage) -> SenderContext {
     SenderContext {
@@ -877,34 +1006,8 @@ async fn dispatch_message(
     // --- DM/Group policy check ---
     if let Some(ref ov) = overrides {
         if message.is_group {
-            match ov.group_policy {
-                GroupPolicy::Ignore => {
-                    debug!("Ignoring group message on {ct_str} (group_policy=ignore)");
-                    return;
-                }
-                GroupPolicy::CommandsOnly => {
-                    // Only allow slash commands and ChannelContent::Command
-                    let is_command = matches!(&message.content, ChannelContent::Command { .. })
-                        || matches!(&message.content, ChannelContent::Text(t) if t.starts_with('/'));
-                    if !is_command {
-                        debug!("Ignoring non-command group message on {ct_str} (group_policy=commands_only)");
-                        return;
-                    }
-                }
-                GroupPolicy::MentionOnly => {
-                    // Only allow messages where the bot was @mentioned or commands.
-                    let was_mentioned = message
-                        .metadata
-                        .get("was_mentioned")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false);
-                    let is_command = matches!(&message.content, ChannelContent::Command { .. });
-                    if !was_mentioned && !is_command {
-                        debug!("Ignoring group message on {ct_str} (group_policy=mention_only, not mentioned)");
-                        return;
-                    }
-                }
-                GroupPolicy::All => {}
+            if !should_process_group_message(ct_str, ov, message) {
+                return;
             }
         } else {
             // DM
@@ -2229,6 +2332,72 @@ mod tests {
         // Test that DmPolicy::Ignore would be checked
         assert_eq!(DmPolicy::default(), DmPolicy::Respond);
         assert_eq!(GroupPolicy::default(), GroupPolicy::MentionOnly);
+    }
+
+    fn group_text_message(text: &str) -> ChannelMessage {
+        ChannelMessage {
+            channel: ChannelType::WhatsApp,
+            platform_message_id: "m-1".to_string(),
+            sender: ChannelUser {
+                platform_id: "chat-1".to_string(),
+                display_name: "Alice".to_string(),
+                librefang_user: None,
+            },
+            content: ChannelContent::Text(text.to_string()),
+            target_agent: None,
+            timestamp: chrono::Utc::now(),
+            is_group: true,
+            thread_id: None,
+            metadata: std::collections::HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn test_mention_only_allows_regex_trigger_pattern() {
+        let message = group_text_message("hello MyAgent");
+        let overrides = ChannelOverrides {
+            group_trigger_patterns: vec!["(?i)\\bmyagent\\b".to_string()],
+            ..Default::default()
+        };
+        assert!(should_process_group_message(
+            "whatsapp", &overrides, &message
+        ));
+    }
+
+    #[test]
+    fn test_mention_only_rejects_partial_regex_match() {
+        let message = group_text_message("hello myagenttt");
+        let overrides = ChannelOverrides {
+            group_trigger_patterns: vec!["(?i)\\bmyagent\\b".to_string()],
+            ..Default::default()
+        };
+        assert!(!should_process_group_message(
+            "whatsapp", &overrides, &message
+        ));
+    }
+
+    #[test]
+    fn test_mention_only_skips_invalid_regex_patterns() {
+        let message = group_text_message("bot please reply");
+        let overrides = ChannelOverrides {
+            group_trigger_patterns: vec!["(".to_string(), "(?i)\\bbot\\b".to_string()],
+            ..Default::default()
+        };
+        assert!(should_process_group_message(
+            "telegram", &overrides, &message
+        ));
+    }
+
+    #[test]
+    fn test_mention_only_keeps_existing_mention_behavior() {
+        let mut message = group_text_message("hello there");
+        message
+            .metadata
+            .insert("was_mentioned".to_string(), serde_json::Value::Bool(true));
+        let overrides = ChannelOverrides::default();
+        assert!(should_process_group_message(
+            "telegram", &overrides, &message
+        ));
     }
 
     #[test]

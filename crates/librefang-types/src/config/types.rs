@@ -62,6 +62,10 @@ pub struct ChannelOverrides {
     pub dm_policy: DmPolicy,
     /// Group message policy.
     pub group_policy: GroupPolicy,
+    /// Regex patterns that can trigger a reply in group chats when
+    /// `group_policy` is `mention_only`.
+    #[serde(default)]
+    pub group_trigger_patterns: Vec<String>,
     /// Global rate limit for this channel (messages per minute, 0 = unlimited).
     pub rate_limit_per_minute: u32,
     /// Per-user rate limit (messages per minute, 0 = unlimited).
