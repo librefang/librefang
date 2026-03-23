@@ -3848,6 +3848,7 @@ dependencies = [
  "lettre",
  "librefang-types",
  "mailparse",
+ "regex",
  "regex-lite",
  "reqwest 0.13.2",
  "roxmltree",

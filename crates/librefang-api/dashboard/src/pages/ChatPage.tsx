@@ -109,7 +109,7 @@ function useWebSocket(agentId: string | null) {
     // Determine WS URL from current location
     const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
     const host = window.location.host;
-    const url = `${proto}//${host}/agents/${encodeURIComponent(agentId)}/ws`;
+    const url = `${proto}//${host}/api/agents/${encodeURIComponent(agentId)}/ws`;
 
     try {
       const ws = new WebSocket(url);
@@ -155,12 +155,26 @@ function useChatMessages(agentId: string | null, agents: any[] = []) {
     loadAgentSession(agentId)
       .then(session => {
         if (session.messages?.length) {
-          const historical: ChatMessage[] = session.messages.map((msg, idx) => ({
-            id: `hist-${idx}`,
-            role: msg.role === "user" ? "user" : "assistant",
-            content: typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content),
-            timestamp: new Date(),
-          }));
+          const historical: ChatMessage[] = session.messages.flatMap((msg, idx) => {
+            const content = typeof msg.content === "string"
+              ? msg.content
+              : msg.content == null
+                ? ""
+                : JSON.stringify(msg.content);
+
+            if (!content.trim()) return [];
+
+            return [{
+              id: `hist-${idx}`,
+              role: msg.role === "User"
+                ? "user"
+                : msg.role === "System"
+                  ? "system"
+                  : "assistant",
+              content,
+              timestamp: new Date(),
+            }];
+          });
           setMessages(historical);
         }
       })
@@ -224,47 +238,43 @@ function useChatMessages(agentId: string | null, agents: any[] = []) {
         const handleMessage = (event: MessageEvent) => {
           try {
             const data = JSON.parse(event.data as string);
-            if (data.type === "chunk" || data.delta) {
-              // Streaming chunk
-              const chunk = data.delta || data.content || data.text || "";
+            if (data.type === "text_delta") {
+              const chunk = data.content || "";
               setMessages(prev => prev.map(m =>
                 m.id === botMsg.id ? { ...m, content: m.content + chunk } : m
               ));
+            } else if (data.type === "typing") {
+              if (data.state === "stop") {
+                setMessages(prev => prev.map(m =>
+                  m.id === botMsg.id ? { ...m, isStreaming: false } : m
+                ));
+              }
             } else if (data.type === "tool_result") {
               // Persist tool output for display
               const entry = normalizeToolOutput(data);
               if (entry) {
                 addSkillOutput({ skillName: entry.tool, agentId: agentId || undefined, content: entry.content });
               }
-            } else if (data.type === "done" || data.done) {
-              // Stream complete
+            } else if (data.type === "silent_complete") {
+              setMessages(prev => prev.filter(m => m.id !== botMsg.id));
+              setIsLoading(false);
+              ws.current?.removeEventListener("message", handleMessage);
+            } else if (data.type === "error") {
+              const error = data.content || "WebSocket error";
+              setMessages(prev => prev.map(m =>
+                m.id === botMsg.id ? { ...m, isStreaming: false, error } : m
+              ));
+              setIsLoading(false);
+              ws.current?.removeEventListener("message", handleMessage);
+            } else if (data.type === "response") {
               setMessages(prev => prev.map(m =>
                 m.id === botMsg.id
                   ? {
-                      ...m, isStreaming: false,
+                      ...m, content: data.content || m.content, isStreaming: false,
                       tokens: { output: data.output_tokens, input: data.input_tokens },
                       cost_usd: data.cost_usd,
                       memories_saved: data.memories_saved,
                       memories_used: data.memories_used,
-                    }
-                  : m
-              ));
-              setIsLoading(false);
-              ws.current?.removeEventListener("message", handleMessage);
-            } else if (data.type === "error" || data.error) {
-              setMessages(prev => prev.map(m =>
-                m.id === botMsg.id ? { ...m, isStreaming: false, error: data.error || "WebSocket error" } : m
-              ));
-              setIsLoading(false);
-              ws.current?.removeEventListener("message", handleMessage);
-            } else if (data.response) {
-              // Full response (non-streaming WS)
-              setMessages(prev => prev.map(m =>
-                m.id === botMsg.id
-                  ? {
-                      ...m, content: data.response, isStreaming: false,
-                      tokens: { output: data.output_tokens, input: data.input_tokens },
-                      cost_usd: data.cost_usd,
                     }
                   : m
               ));
@@ -280,7 +290,7 @@ function useChatMessages(agentId: string | null, agents: any[] = []) {
         };
 
         ws.current.addEventListener("message", handleMessage);
-        ws.current.send(JSON.stringify({ message: trimmed }));
+        ws.current.send(JSON.stringify({ type: "message", content: trimmed }));
 
         // Timeout fallback - if no response in 60s, clean up
         setTimeout(() => {
@@ -393,11 +403,15 @@ function MessageBubble({ message }: { message: ChatMessage }) {
               : "bg-surface border border-border-subtle rounded-tl-md"
         }`}>
           {message.isStreaming ? (
-            <div className="flex items-center gap-1">
-              <span className="w-1.5 h-1.5 bg-brand/60 rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
-              <span className="w-1.5 h-1.5 bg-brand/60 rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
-              <span className="w-1.5 h-1.5 bg-brand/60 rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
-            </div>
+            message.content ? (
+              <Typewriter text={message.content} speed={10} />
+            ) : (
+              <div className="flex items-center gap-1">
+                <span className="w-1.5 h-1.5 bg-brand/60 rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
+                <span className="w-1.5 h-1.5 bg-brand/60 rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
+                <span className="w-1.5 h-1.5 bg-brand/60 rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
+              </div>
+            )
           ) : message.error ? (
             <div className="flex items-start gap-2">
               <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />

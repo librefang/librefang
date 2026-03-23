@@ -57,6 +57,7 @@ use crate::middleware::RequestLanguage;
 use dashmap::DashMap;
 use librefang_kernel::LibreFangKernel;
 use librefang_types::i18n::{self, ErrorTranslator};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -106,6 +107,10 @@ pub struct AppState {
     pub provider_probe_cache: librefang_runtime::provider_health::ProbeCache,
     /// Webhook subscription store for outbound event notifications.
     pub webhook_store: crate::webhook_store::WebhookStore,
+    /// Active session tokens issued by dashboard login.
+    /// Maps token string -> SessionToken (with creation timestamp for expiry checks).
+    pub active_sessions:
+        Arc<tokio::sync::RwLock<HashMap<String, crate::password_hash::SessionToken>>>,
     /// Media generation driver cache for image/TTS/video/music.
     pub media_drivers: librefang_runtime::media::MediaDriverCache,
     /// Prometheus metrics handle (only set when `telemetry` feature + config enabled).

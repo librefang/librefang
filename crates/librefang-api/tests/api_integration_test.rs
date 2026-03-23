@@ -104,6 +104,7 @@ async fn start_test_server_with_provider(
         webhook_store: librefang_api::webhook_store::WebhookStore::load(std::env::temp_dir().join(
             format!("librefang-test-webhooks-{}.json", uuid::Uuid::new_v4()),
         )),
+        active_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         #[cfg(feature = "telemetry")]
         prometheus_handle: None,
         media_drivers: librefang_runtime::media::MediaDriverCache::new(),
@@ -1368,14 +1369,18 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
         webhook_store: librefang_api::webhook_store::WebhookStore::load(std::env::temp_dir().join(
             format!("librefang-test-webhooks-{}.json", uuid::Uuid::new_v4()),
         )),
+        active_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         #[cfg(feature = "telemetry")]
         prometheus_handle: None,
         media_drivers: librefang_runtime::media::MediaDriverCache::new(),
     });
 
-    let api_key_state = std::sync::Arc::new(tokio::sync::RwLock::new(
-        state.kernel.config_ref().api_key.clone(),
-    ));
+    let api_key_state = middleware::AuthState {
+        api_key_lock: std::sync::Arc::new(tokio::sync::RwLock::new(
+            state.kernel.config_ref().api_key.clone(),
+        )),
+        active_sessions: state.active_sessions.clone(),
+    };
 
     let app = Router::new()
         .route("/api/health", axum::routing::get(routes::health))
