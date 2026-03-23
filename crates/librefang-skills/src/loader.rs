@@ -629,6 +629,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn test_shell_execution_json_output() {
         use crate::{
             SkillManifest, SkillMeta, SkillRequirements, SkillRuntimeConfig, SkillToolDef,
@@ -683,6 +684,7 @@ echo '{"greeting": "hello from shell"}'
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn test_shell_execution_plain_output() {
         use crate::{
             SkillManifest, SkillMeta, SkillRequirements, SkillRuntimeConfig, SkillToolDef,
@@ -732,6 +734,7 @@ echo '{"greeting": "hello from shell"}'
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn test_shell_execution_error() {
         use crate::{
             SkillManifest, SkillMeta, SkillRequirements, SkillRuntimeConfig, SkillToolDef,
