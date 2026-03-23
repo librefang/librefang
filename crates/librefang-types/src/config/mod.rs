@@ -351,6 +351,7 @@ mod tests {
         let ov = ChannelOverrides::default();
         assert_eq!(ov.dm_policy, DmPolicy::Respond);
         assert_eq!(ov.group_policy, GroupPolicy::MentionOnly);
+        assert!(ov.group_trigger_patterns.is_empty());
         assert_eq!(ov.rate_limit_per_user, 0);
         assert!(!ov.threading);
         assert!(ov.output_format.is_none());
@@ -402,6 +403,7 @@ mod tests {
         let ov = ChannelOverrides {
             dm_policy: DmPolicy::Ignore,
             group_policy: GroupPolicy::CommandsOnly,
+            group_trigger_patterns: vec!["(?i)\\bbot\\b".to_string()],
             rate_limit_per_user: 10,
             threading: true,
             output_format: Some(OutputFormat::TelegramHtml),
@@ -411,6 +413,7 @@ mod tests {
         let back: ChannelOverrides = serde_json::from_str(&json).unwrap();
         assert_eq!(back.dm_policy, DmPolicy::Ignore);
         assert_eq!(back.group_policy, GroupPolicy::CommandsOnly);
+        assert_eq!(back.group_trigger_patterns, vec!["(?i)\\bbot\\b"]);
         assert_eq!(back.rate_limit_per_user, 10);
         assert!(back.threading);
         assert_eq!(back.output_format, Some(OutputFormat::TelegramHtml));
