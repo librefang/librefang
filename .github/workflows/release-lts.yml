@@ -1,8 +1,10 @@
 name: "Release / LTS Branch"
 
-# When an LTS tag is pushed (e.g. v2026.3.2201-lts), automatically create
+# When an LTS tag is pushed (e.g. v2026.3-lts), automatically create
 # a release/ branch for long-term maintenance. Patch fixes are cherry-picked
-# to this branch and tagged as v2026.3.2201-lts.1, v2026.3.2201-lts.2, etc.
+# to this branch and tagged as v2026.3-lts.1, v2026.3-lts.2, etc.
+#
+# The -lts tag should point to the last stable release of that month.
 
 on:
   push:
@@ -29,11 +31,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
-          # Extract base version: v2026.3.2201-lts -> 2026.3.2201
+          # Extract base version: v2026.3-lts -> 2026.3
           BASE="${TAG#v}"
           BASE="${BASE%-lts}"
-          # Branch name: release/2026.3
-          BRANCH="release/$(echo "$BASE" | cut -d. -f1,2)"
+          BRANCH="release/$BASE"
 
           if git ls-remote --heads origin "$BRANCH" | grep -q "$BRANCH"; then
             echo "Branch $BRANCH already exists, skipping"
