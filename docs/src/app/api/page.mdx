@@ -39,6 +39,7 @@ All responses include security headers (CSP, X-Frame-Options, X-Content-Type-Opt
 - [Comms Endpoints](#comms-endpoints)
 - [Approvals Endpoints](#approvals-endpoints)
 - [Bindings & Commands Endpoints](#bindings--commands-endpoints)
+- [Media Generation Endpoints](#media-generation-endpoints)
 - [Network & Peers Endpoints](#network--peers-endpoints)
 - [Migration Endpoints](#migration-endpoints)
 - [WebSocket Protocol](#websocket-protocol)
@@ -2699,6 +2700,183 @@ Get details for a specific slash command.
 
 ---
 
+## Media Generation Endpoints
+
+Provider-agnostic media generation — image, text-to-speech, video, and music. LibreFang auto-detects the first configured provider for each capability, or you can specify a provider explicitly via the `provider` field.
+
+Supported providers: **OpenAI** (image, TTS), **MiniMax** (image, TTS, video, music).
+
+### POST /api/media/image
+
+Generate one or more images from a text prompt.
+
+**Request Body**:
+
+```json
+{
+  "prompt": "A futuristic city skyline at sunset",
+  "provider": "openai",
+  "model": "gpt-image-1",
+  "width": 1024,
+  "height": 1024,
+  "count": 1
+}
+```
+
+All fields except `prompt` are optional. If `provider` is omitted, the first configured provider with image capability is used.
+
+**Response** `200 OK`:
+
+```json
+{
+  "images": [
+    { "url": "/api/uploads/550e8400-..." }
+  ],
+  "model": "gpt-image-1",
+  "provider": "openai",
+  "revised_prompt": "A detailed futuristic city..."
+}
+```
+
+### POST /api/media/speech
+
+Synthesize speech from text (TTS).
+
+**Request Body**:
+
+```json
+{
+  "text": "Hello, welcome to LibreFang.",
+  "voice": "alloy",
+  "format": "mp3",
+  "speed": 1.0
+}
+```
+
+All fields except `text` are optional.
+
+**Response** `200 OK`:
+
+```json
+{
+  "url": "/api/uploads/550e8400-...",
+  "format": "mp3",
+  "provider": "openai",
+  "model": "tts-1",
+  "duration_ms": 2400,
+  "sample_rate": 24000
+}
+```
+
+### POST /api/media/video
+
+Submit an asynchronous video generation task. Returns a task ID for polling.
+
+**Request Body**:
+
+```json
+{
+  "prompt": "A cat playing piano in a jazz bar",
+  "provider": "minimax",
+  "duration_secs": 5
+}
+```
+
+All fields except `prompt` are optional.
+
+**Response** `202 Accepted`:
+
+```json
+{
+  "task_id": "task-abc123",
+  "provider": "minimax"
+}
+```
+
+### GET /api/media/video/&lbrace;task_id&rbrace;?provider=minimax
+
+Poll video generation task status. The `provider` query parameter is required.
+
+**Response** `200 OK` (in progress):
+
+```json
+{
+  "status": "processing",
+  "task_id": "task-abc123"
+}
+```
+
+**Response** `200 OK` (completed):
+
+```json
+{
+  "status": "completed",
+  "result": {
+    "file_url": "https://cdn.example.com/video.mp4",
+    "width": 1280,
+    "height": 720,
+    "duration_secs": 5.0,
+    "provider": "minimax",
+    "model": "T2V-01"
+  }
+}
+```
+
+### POST /api/media/music
+
+Generate music from a text prompt and/or lyrics.
+
+**Request Body**:
+
+```json
+{
+  "prompt": "Upbeat electronic dance track",
+  "lyrics": "",
+  "instrumental": true,
+  "format": "mp3"
+}
+```
+
+At least one of `prompt` or `lyrics` is required.
+
+**Response** `200 OK`:
+
+```json
+{
+  "url": "/api/uploads/550e8400-...",
+  "format": "mp3",
+  "duration_ms": 180000,
+  "provider": "minimax",
+  "model": "music-2.5",
+  "sample_rate": 44100
+}
+```
+
+### GET /api/media/providers
+
+List available media providers with their capabilities and configuration status.
+
+**Response** `200 OK`:
+
+```json
+{
+  "providers": [
+    {
+      "name": "openai",
+      "configured": true,
+      "capabilities": ["ImageGeneration", "TextToSpeech"]
+    },
+    {
+      "name": "minimax",
+      "configured": true,
+      "capabilities": ["ImageGeneration", "TextToSpeech", "VideoGeneration", "MusicGeneration"]
+    }
+  ]
+}
+```
+
+---
+
 ## Network & Peers Endpoints
 
 ### GET /api/peers
@@ -3186,7 +3364,7 @@ The `Retry-After` header indicates the window duration in seconds.
 
 ## Endpoint Summary
 
-**230+ endpoints total** across 34 groups.
+**230+ endpoints total** across 35 groups.
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -3497,6 +3675,13 @@ The `Retry-After` header indicates the window duration in seconds.
 | DELETE | `/api/bindings/{index}` | Remove binding |
 | GET | `/api/commands` | List slash commands |
 | GET | `/api/commands/{name}` | Get slash command |
+| **Media Generation** | | |
+| POST | `/api/media/image` | Generate images from text |
+| POST | `/api/media/speech` | Text-to-speech synthesis |
+| POST | `/api/media/video` | Submit video generation task |
+| GET | `/api/media/video/{task_id}` | Poll video task status |
+| POST | `/api/media/music` | Generate music from prompt/lyrics |
+| GET | `/api/media/providers` | List media providers & capabilities |
 | **Network & Peers** | | |
 | GET | `/api/peers` | List OFP peers |
 | GET | `/api/peers/{id}` | Get OFP peer |
