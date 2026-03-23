@@ -31,6 +31,10 @@ pub struct ReleaseArgs {
     /// Auto-detects the LTS series from branch name and increments patch.
     #[arg(long)]
     pub lts_patch: bool,
+
+    /// Dry run — print what would happen without making changes
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 fn git(root: &Path, args: &[&str]) -> Result<String, Box<dyn std::error::Error>> {
@@ -139,6 +143,38 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
     // --- LTS patch shortcut ---
     if args.lts_patch {
         return run_lts_patch(&root, &args);
+    }
+
+    // --- Dry run with explicit version: skip all preflight ---
+    if args.dry_run {
+        if let Some(ref v) = args.version {
+            let current = read_workspace_version(&root).unwrap_or_default();
+            let tag = format!("v{}", v);
+            let is_lts = v.contains("-lts");
+            let is_pre = v.contains("-beta") || v.contains("-rc");
+            println!();
+            println!("=== Dry Run ===");
+            println!("  Version: {} -> {}", current, v);
+            println!("  Tag:     {}", tag);
+            if is_lts {
+                let lts_ver = v.split("-lts").next().unwrap_or(v);
+                let parts: Vec<&str> = lts_ver.split('.').collect();
+                let branch = if parts.len() >= 2 {
+                    format!("release/{}.{}", parts[0], parts[1])
+                } else {
+                    format!("release/{}", lts_ver)
+                };
+                println!("  Type:    LTS");
+                println!("  Branch:  {} (auto-created by CI)", branch);
+            } else if is_pre {
+                println!("  Type:    pre-release");
+            } else {
+                println!("  Type:    stable");
+            }
+            println!();
+            println!("No changes made.");
+            return Ok(());
+        }
     }
 
     // --- Preflight checks ---
@@ -717,6 +753,11 @@ fn run_lts_patch(root: &Path, args: &ReleaseArgs) -> Result<(), Box<dyn std::err
     println!("  Version: {}", version);
     println!("  Tag:     {}", tag);
     println!();
+
+    if args.dry_run {
+        println!("No changes made.");
+        return Ok(());
+    }
 
     if !args.no_confirm {
         let confirm = prompt("Release? [Y/n]: ");
