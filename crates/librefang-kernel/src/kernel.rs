@@ -548,6 +548,7 @@ fn preinstall_registry_hands(
     let Ok(entries) = std::fs::read_dir(&registry_hands) else {
         return;
     };
+    let dest_root = home_dir.join("workspaces").join("hands");
     let mut installed = 0;
     for entry in entries.flatten() {
         let path = entry.path();
@@ -556,6 +557,14 @@ fn preinstall_registry_hands(
         }
         let toml_path = path.join("HAND.toml");
         if !toml_path.exists() {
+            continue;
+        }
+        // Skip if already on disk (CLI init may have copied it already)
+        let id = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        if dest_root.join(id).join("HAND.toml").exists() {
             continue;
         }
         let Ok(toml_content) = std::fs::read_to_string(&toml_path) else {
