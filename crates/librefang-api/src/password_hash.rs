@@ -77,7 +77,7 @@ pub fn is_token_expired(token: &SessionToken, ttl_secs: u64) -> bool {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    now.saturating_sub(token.created_at) > ttl_secs
+    now.saturating_sub(token.created_at) >= ttl_secs
 }
 
 /// Result of a dashboard password verification.
