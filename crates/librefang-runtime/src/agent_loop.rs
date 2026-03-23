@@ -5148,7 +5148,8 @@ mod tests {
             None,
             None,
             None,
-            None,
+            None, // media_engine
+            None, // media_drivers
             None,
             None,
             None,
