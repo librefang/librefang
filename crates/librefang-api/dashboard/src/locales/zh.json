@@ -301,10 +301,19 @@
     "deps": "依赖"
   },
   "telemetry": {
-    "badge": "可观测性", "title": "遥测", "subtitle": "HTTP 请求指标和可观测性数据。",
+    "badge": "可观测性", "title": "遥测", "subtitle": "系统指标、LLM 用量和 HTTP 可观测性数据。",
     "total_requests": "总请求数", "endpoints": "端点", "avg_latency": "平均延迟",
     "status": "状态", "collecting": "收集中", "top_endpoints": "热门端点",
     "latency": "延迟分布", "prometheus_endpoint": "Prometheus 端点", "view_raw": "查看原始数据",
-    "no_data": "暂无遥测数据。发起一些 API 请求以查看指标。"
+    "no_data": "暂无遥测数据。发起一些 API 请求以查看指标。",
+    "llm_usage": "LLM 与 Token 用量",
+    "total_tokens": "总 Token", "input_tokens": "输入 Token", "output_tokens": "输出 Token",
+    "llm_calls": "LLM 调用", "tool_calls": "工具调用",
+    "cost_today": "今日费用", "active_sessions": "会话数",
+    "uptime": "运行时间", "agents_active": "活跃 Agent", "panics": "Panic 次数", "restarts": "重启次数",
+    "system_health": "系统健康",
+    "per_agent": "按 Agent",
+    "http_metrics": "HTTP 指标",
+    "tokens_1h": "1小时窗口"
   }
 }

@@ -202,17 +202,17 @@ pub async fn health_detail(State(state): State<Arc<AppState>>) -> impl IntoRespo
 /// Returns counters and gauges for monitoring LibreFang in production:
 /// - `librefang_agents_active` — number of active agents
 /// - `librefang_uptime_seconds` — seconds since daemon started
-/// - `librefang_tokens_total` — total tokens consumed (per agent)
-/// - `librefang_tokens_input_total` — input tokens consumed (per agent)
-/// - `librefang_tokens_output_total` — output tokens consumed (per agent)
-/// - `librefang_tool_calls_total` — total tool calls (per agent)
-/// - `librefang_llm_calls_total` — total LLM API calls (per agent)
+/// - `librefang_tokens` — total tokens consumed (per agent, rolling 1h gauge)
+/// - `librefang_tokens_input` — input tokens consumed (per agent, rolling 1h gauge)
+/// - `librefang_tokens_output` — output tokens consumed (per agent, rolling 1h gauge)
+/// - `librefang_tool_calls` — tool calls made (per agent, rolling 1h gauge)
+/// - `librefang_llm_calls` — LLM API calls made (per agent, rolling 1h gauge)
 /// - `librefang_panics_total` — supervisor panic count
 /// - `librefang_restarts_total` — supervisor restart count
 /// - `librefang_active_sessions` — number of active login sessions
 /// - `librefang_cost_usd_today` — total estimated cost for today (USD)
 /// - `librefang_http_requests_total` — HTTP request counts (with telemetry feature)
-/// - `librefang_http_request_duration_ms` — HTTP request latencies (with telemetry feature)
+/// - `librefang_http_request_duration_seconds` — HTTP request latencies (with telemetry feature)
 #[utoipa::path(
     get,
     path = "/api/metrics",
@@ -243,21 +243,17 @@ pub async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> impl Into
     out.push_str("# TYPE librefang_agents_total gauge\n");
     out.push_str(&format!("librefang_agents_total {}\n\n", agents.len()));
 
-    // Per-agent token, tool, and LLM call usage
-    out.push_str("# HELP librefang_tokens_total Total tokens consumed (rolling hourly window).\n");
-    out.push_str("# TYPE librefang_tokens_total gauge\n");
-    out.push_str(
-        "# HELP librefang_tokens_input_total Input tokens consumed (rolling hourly window).\n",
-    );
-    out.push_str("# TYPE librefang_tokens_input_total gauge\n");
-    out.push_str(
-        "# HELP librefang_tokens_output_total Output tokens consumed (rolling hourly window).\n",
-    );
-    out.push_str("# TYPE librefang_tokens_output_total gauge\n");
-    out.push_str("# HELP librefang_tool_calls_total Total tool calls (rolling hourly window).\n");
-    out.push_str("# TYPE librefang_tool_calls_total gauge\n");
-    out.push_str("# HELP librefang_llm_calls_total Total LLM API calls (rolling hourly window).\n");
-    out.push_str("# TYPE librefang_llm_calls_total gauge\n");
+    // Per-agent token, tool, and LLM call usage (rolling 1h window — gauges, not counters)
+    out.push_str("# HELP librefang_tokens Tokens consumed (rolling 1h window).\n");
+    out.push_str("# TYPE librefang_tokens gauge\n");
+    out.push_str("# HELP librefang_tokens_input Input tokens consumed (rolling 1h window).\n");
+    out.push_str("# TYPE librefang_tokens_input gauge\n");
+    out.push_str("# HELP librefang_tokens_output Output tokens consumed (rolling 1h window).\n");
+    out.push_str("# TYPE librefang_tokens_output gauge\n");
+    out.push_str("# HELP librefang_tool_calls Tool calls made (rolling 1h window).\n");
+    out.push_str("# TYPE librefang_tool_calls gauge\n");
+    out.push_str("# HELP librefang_llm_calls LLM API calls made (rolling 1h window).\n");
+    out.push_str("# TYPE librefang_llm_calls gauge\n");
     for agent in &agents {
         let name = &agent.name;
         let provider = &agent.manifest.model.provider;
@@ -265,23 +261,23 @@ pub async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> impl Into
         if let Some(snap) = state.kernel.scheduler_ref().get_usage(agent.id) {
             let labels = format!("agent=\"{name}\",provider=\"{provider}\",model=\"{model}\"");
             out.push_str(&format!(
-                "librefang_tokens_total{{{labels}}} {}\n",
+                "librefang_tokens{{{labels}}} {}\n",
                 snap.total_tokens
             ));
             out.push_str(&format!(
-                "librefang_tokens_input_total{{{labels}}} {}\n",
+                "librefang_tokens_input{{{labels}}} {}\n",
                 snap.input_tokens
             ));
             out.push_str(&format!(
-                "librefang_tokens_output_total{{{labels}}} {}\n",
+                "librefang_tokens_output{{{labels}}} {}\n",
                 snap.output_tokens
             ));
             out.push_str(&format!(
-                "librefang_tool_calls_total{{agent=\"{name}\"}} {}\n",
+                "librefang_tool_calls{{{labels}}} {}\n",
                 snap.tool_calls
             ));
             out.push_str(&format!(
-                "librefang_llm_calls_total{{{labels}}} {}\n",
+                "librefang_llm_calls{{{labels}}} {}\n",
                 snap.llm_calls
             ));
         }

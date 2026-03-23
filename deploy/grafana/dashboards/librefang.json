@@ -4,7 +4,11 @@
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
   "id": null,
-  "links": [],
+  "links": [
+    { "title": "LLM & Tokens", "url": "/d/librefang-llm", "type": "link", "icon": "bolt", "tooltip": "LLM & Token Usage" },
+    { "title": "HTTP & API", "url": "/d/librefang-http", "type": "link", "icon": "cloud", "tooltip": "HTTP & API Metrics" },
+    { "title": "Cost & Budget", "url": "/d/librefang-cost", "type": "link", "icon": "calculator-alt", "tooltip": "Cost & Budget" }
+  ],
   "panels": [
     {
       "title": "Version",
@@ -275,5 +279,5 @@
   "timezone": "browser",
   "title": "LibreFang Overview",
   "uid": "librefang-overview",
-  "version": 2
+  "version": 3
 }

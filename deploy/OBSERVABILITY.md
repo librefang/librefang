@@ -41,11 +41,11 @@ Prometheus scrapes `http://host.docker.internal:4545/api/metrics` every 15 secon
 
 | Metric | Labels | Type | Description |
 |--------|--------|------|-------------|
-| `librefang_tokens_total` | agent, provider, model | gauge | Total tokens consumed |
-| `librefang_tokens_input_total` | agent, provider, model | gauge | Input (prompt) tokens |
-| `librefang_tokens_output_total` | agent, provider, model | gauge | Output (completion) tokens |
-| `librefang_tool_calls_total` | agent | gauge | Tool calls made |
-| `librefang_llm_calls_total` | agent, provider, model | gauge | LLM API invocations |
+| `librefang_tokens` | agent, provider, model | gauge | Total tokens consumed |
+| `librefang_tokens_input` | agent, provider, model | gauge | Input (prompt) tokens |
+| `librefang_tokens_output` | agent, provider, model | gauge | Output (completion) tokens |
+| `librefang_tool_calls` | agent, provider, model | gauge | Tool calls made |
+| `librefang_llm_calls` | agent, provider, model | gauge | LLM API invocations |
 
 ### HTTP (requires `telemetry` feature)
 
@@ -56,19 +56,19 @@ Prometheus scrapes `http://host.docker.internal:4545/api/metrics` every 15 secon
 
 ## Dashboards
 
-Four dashboards are bundled in `grafana/dashboards/` and auto-provisioned:
+Four dashboards are bundled in `grafana/dashboards/` and auto-provisioned. Each dashboard includes navigation links to the other three.
 
 ### LibreFang Overview (`librefang.json`)
 System-level health at a glance: version, uptime, agent counts, active sessions, daily cost, panics/restarts stats. Timeline panels for panics & restarts and active vs total agents.
 
 ### LLM & Token Usage (`librefang-llm.json`)
-LLM-specific metrics: total/input/output token stats, tokens consumed by agent (timeseries), LLM calls by agent (bar), input vs output token breakdown (stacked bar), tokens by provider/model, agent token share (pie), input/output ratio (pie), and tool calls by agent.
+LLM-specific metrics with **template variables** (Agent, Provider, Model) for interactive filtering. Panels: total/input/output token stats, tokens consumed by agent (timeseries), LLM calls by agent (bar), input vs output token breakdown (stacked bar), tokens by provider/model, agent token share (pie), input/output ratio (pie), and tool calls by agent.
 
 ### HTTP & API (`librefang-http.json`)
 API layer monitoring: request rate by method, latency percentiles (p50/p90/p99), status code distribution, 4xx/5xx error rate, top endpoints by request count, slowest endpoints by p99 latency.
 
 ### Cost & Budget (`librefang-cost.json`)
-Spending visibility: today's estimated cost (USD), cost trend over time, tokens by agent as cost proxy, token distribution by provider/model (pie), output token ranking per agent (output tokens cost 3-5x more), and input/output cost ratio.
+Spending visibility with **template variables** (Agent, Provider, Model) for drill-down. Panels: today's estimated cost (USD), cost trend over time, tokens by agent as cost proxy, token distribution by provider/model (pie), output token ranking per agent (output tokens cost 3-5x more), and input/output cost ratio.
 
 ## Configuration
 

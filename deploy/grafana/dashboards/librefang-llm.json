@@ -4,7 +4,11 @@
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
   "id": null,
-  "links": [],
+  "links": [
+    { "title": "Overview", "url": "/d/librefang-overview", "type": "link", "icon": "apps", "tooltip": "System Overview" },
+    { "title": "HTTP & API", "url": "/d/librefang-http", "type": "link", "icon": "cloud", "tooltip": "HTTP & API Metrics" },
+    { "title": "Cost & Budget", "url": "/d/librefang-cost", "type": "link", "icon": "calculator-alt", "tooltip": "Cost & Budget" }
+  ],
   "panels": [
     {
       "title": "Total Tokens (1h window)",
@@ -25,7 +29,7 @@
         "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
       },
       "targets": [
-        { "expr": "sum(librefang_tokens_total)", "legendFormat": "Tokens", "refId": "A" }
+        { "expr": "sum(librefang_tokens{agent=~\"$agent\",provider=~\"$provider\",model=~\"$model\"})", "legendFormat": "Tokens", "refId": "A" }
       ]
     },
     {
@@ -47,7 +51,7 @@
         "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
       },
       "targets": [
-        { "expr": "sum(librefang_tokens_input_total)", "legendFormat": "Input", "refId": "A" }
+        { "expr": "sum(librefang_tokens_input{agent=~\"$agent\",provider=~\"$provider\",model=~\"$model\"})", "legendFormat": "Input", "refId": "A" }
       ]
     },
     {
@@ -69,7 +73,7 @@
         "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
       },
       "targets": [
-        { "expr": "sum(librefang_tokens_output_total)", "legendFormat": "Output", "refId": "A" }
+        { "expr": "sum(librefang_tokens_output{agent=~\"$agent\",provider=~\"$provider\",model=~\"$model\"})", "legendFormat": "Output", "refId": "A" }
       ]
     },
     {
@@ -91,7 +95,7 @@
         "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
       },
       "targets": [
-        { "expr": "sum(librefang_llm_calls_total)", "legendFormat": "Calls", "refId": "A" }
+        { "expr": "sum(librefang_llm_calls{agent=~\"$agent\",provider=~\"$provider\",model=~\"$model\"})", "legendFormat": "Calls", "refId": "A" }
       ]
     },
     {
@@ -122,7 +126,7 @@
         "tooltip": { "mode": "multi", "sort": "desc" }
       },
       "targets": [
-        { "expr": "librefang_tokens_total", "legendFormat": "{{agent}} ({{provider}}/{{model}})", "refId": "A" }
+        { "expr": "librefang_tokens{agent=~\"$agent\",provider=~\"$provider\",model=~\"$model\"}", "legendFormat": "{{agent}} ({{provider}}/{{model}})", "refId": "A" }
       ]
     },
     {
@@ -153,7 +157,7 @@
         "tooltip": { "mode": "multi", "sort": "desc" }
       },
       "targets": [
-        { "expr": "librefang_llm_calls_total", "legendFormat": "{{agent}} ({{provider}}/{{model}})", "refId": "A" }
+        { "expr": "librefang_llm_calls{agent=~\"$agent\",provider=~\"$provider\",model=~\"$model\"}", "legendFormat": "{{agent}} ({{provider}}/{{model}})", "refId": "A" }
       ]
     },
     {
@@ -188,8 +192,8 @@
         "tooltip": { "mode": "multi", "sort": "desc" }
       },
       "targets": [
-        { "expr": "sum(librefang_tokens_input_total)", "legendFormat": "Input (prompt)", "refId": "A" },
-        { "expr": "sum(librefang_tokens_output_total)", "legendFormat": "Output (completion)", "refId": "B" }
+        { "expr": "sum(librefang_tokens_input{agent=~\"$agent\",provider=~\"$provider\",model=~\"$model\"})", "legendFormat": "Input (prompt)", "refId": "A" },
+        { "expr": "sum(librefang_tokens_output{agent=~\"$agent\",provider=~\"$provider\",model=~\"$model\"})", "legendFormat": "Output (completion)", "refId": "B" }
       ]
     },
     {
@@ -221,7 +225,7 @@
         "tooltip": { "mode": "multi", "sort": "desc" }
       },
       "targets": [
-        { "expr": "sum by (provider, model) (librefang_tokens_total)", "legendFormat": "{{provider}}/{{model}}", "refId": "A" }
+        { "expr": "sum by (provider, model) (librefang_tokens{provider=~\"$provider\",model=~\"$model\"})", "legendFormat": "{{provider}}/{{model}}", "refId": "A" }
       ]
     },
     {
@@ -242,7 +246,7 @@
         "tooltip": { "mode": "single" }
       },
       "targets": [
-        { "expr": "librefang_tokens_total", "legendFormat": "{{agent}}", "refId": "A", "instant": true }
+        { "expr": "librefang_tokens{agent=~\"$agent\",provider=~\"$provider\",model=~\"$model\"}", "legendFormat": "{{agent}}", "refId": "A", "instant": true }
       ]
     },
     {
@@ -267,8 +271,8 @@
         "tooltip": { "mode": "single" }
       },
       "targets": [
-        { "expr": "sum(librefang_tokens_input_total)", "legendFormat": "Input", "refId": "A", "instant": true },
-        { "expr": "sum(librefang_tokens_output_total)", "legendFormat": "Output", "refId": "B", "instant": true }
+        { "expr": "sum(librefang_tokens_input{agent=~\"$agent\",provider=~\"$provider\",model=~\"$model\"})", "legendFormat": "Input", "refId": "A", "instant": true },
+        { "expr": "sum(librefang_tokens_output{agent=~\"$agent\",provider=~\"$provider\",model=~\"$model\"})", "legendFormat": "Output", "refId": "B", "instant": true }
       ]
     },
     {
@@ -299,17 +303,59 @@
         "tooltip": { "mode": "multi", "sort": "desc" }
       },
       "targets": [
-        { "expr": "librefang_tool_calls_total", "legendFormat": "{{agent}}", "refId": "A" }
+        { "expr": "librefang_tool_calls{agent=~\"$agent\",provider=~\"$provider\",model=~\"$model\"}", "legendFormat": "{{agent}}", "refId": "A" }
       ]
     }
   ],
   "schemaVersion": 39,
   "tags": ["librefang", "llm", "tokens"],
-  "templating": { "list": [] },
+  "templating": {
+    "list": [
+      {
+        "name": "agent",
+        "label": "Agent",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "librefang-prometheus" },
+        "query": "label_values(librefang_tokens, agent)",
+        "refresh": 2,
+        "includeAll": true,
+        "allValue": ".*",
+        "current": { "selected": true, "text": "All", "value": "$__all" },
+        "multi": true,
+        "sort": 1
+      },
+      {
+        "name": "provider",
+        "label": "Provider",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "librefang-prometheus" },
+        "query": "label_values(librefang_tokens, provider)",
+        "refresh": 2,
+        "includeAll": true,
+        "allValue": ".*",
+        "current": { "selected": true, "text": "All", "value": "$__all" },
+        "multi": true,
+        "sort": 1
+      },
+      {
+        "name": "model",
+        "label": "Model",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "librefang-prometheus" },
+        "query": "label_values(librefang_tokens{provider=~\"$provider\"}, model)",
+        "refresh": 2,
+        "includeAll": true,
+        "allValue": ".*",
+        "current": { "selected": true, "text": "All", "value": "$__all" },
+        "multi": true,
+        "sort": 1
+      }
+    ]
+  },
   "time": { "from": "now-1h", "to": "now" },
   "timepicker": {},
   "timezone": "browser",
   "title": "LibreFang LLM & Token Usage",
   "uid": "librefang-llm",
-  "version": 1
+  "version": 2
 }
