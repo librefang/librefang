@@ -18,13 +18,19 @@ static PROMETHEUS_HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
 
 /// Initialize the Prometheus metrics recorder.
 ///
-/// Must be called once before any metrics are recorded.
-/// Returns the handle for rendering metrics output.
+/// Safe to call multiple times — the recorder is installed only once via
+/// `OnceLock` and subsequent calls return a clone of the existing handle.
+/// This is important for test environments where multiple tests may build
+/// their own app state in parallel within the same process.
 pub fn init_prometheus() -> PrometheusHandle {
-    let builder = PrometheusBuilder::new();
-    builder
-        .install_recorder()
-        .expect("failed to install prometheus recorder")
+    PROMETHEUS_HANDLE
+        .get_or_init(|| {
+            let builder = PrometheusBuilder::new();
+            builder
+                .install_recorder()
+                .expect("failed to install prometheus recorder")
+        })
+        .clone()
 }
 
 /// Get the global Prometheus handle (if initialized).
