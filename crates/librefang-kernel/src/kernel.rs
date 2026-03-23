@@ -479,59 +479,19 @@ impl DeliveryTracker {
     }
 }
 
-/// Migrate old directory layout to unified workspaces layout.
-/// Old: ~/.librefang/hands/, ~/.librefang/workspaces/<agent>/
-/// New: ~/.librefang/workspaces/hands/, ~/.librefang/workspaces/agents/<agent>/
-fn migrate_workspaces_layout(home_dir: &Path) -> KernelResult<()> {
+/// Ensure workspaces directory structure exists.
+fn ensure_workspaces_layout(home_dir: &Path) -> KernelResult<()> {
     let workspaces_dir = home_dir.join("workspaces");
     let agents_dir = workspaces_dir.join("agents");
-    let new_hands_dir = workspaces_dir.join("hands");
-
-    // Migrate old hands/ to workspaces/hands/
-    let old_hands_dir = home_dir.join("hands");
-    if old_hands_dir.is_dir() && !new_hands_dir.exists() {
-        info!("Migrating hands/ → workspaces/hands/");
-        std::fs::create_dir_all(&workspaces_dir).ok();
-        if let Err(e) = std::fs::rename(&old_hands_dir, &new_hands_dir) {
-            warn!("Failed to migrate hands dir: {e}");
-        }
+    let hands_dir = workspaces_dir.join("hands");
+    for dir in [&workspaces_dir, &agents_dir, &hands_dir] {
+        std::fs::create_dir_all(dir).map_err(|e| {
+            KernelError::LibreFang(LibreFangError::Internal(format!(
+                "Failed to create {}: {e}",
+                dir.display()
+            )))
+        })?;
     }
-
-    // Migrate old workspaces/<agent>/ → workspaces/agents/<agent>/
-    // Detect: if workspaces/ has entries that are NOT "agents" or "hands", they are old agent dirs
-    if workspaces_dir.is_dir() && !agents_dir.exists() {
-        let entries: Vec<_> = std::fs::read_dir(&workspaces_dir)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter(|e| {
-                let name = e.file_name();
-                let n = name.to_string_lossy();
-                n != "agents" && n != "hands" && e.path().is_dir()
-            })
-            .collect();
-        if !entries.is_empty() {
-            info!(
-                "Migrating {} agent workspace(s) → workspaces/agents/",
-                entries.len()
-            );
-            std::fs::create_dir_all(&agents_dir).map_err(|e| {
-                KernelError::LibreFang(LibreFangError::Internal(format!(
-                    "Failed to create agents dir: {e}"
-                )))
-            })?;
-            for entry in entries {
-                let dest = agents_dir.join(entry.file_name());
-                if let Err(e) = std::fs::rename(entry.path(), &dest) {
-                    warn!(
-                        "Failed to migrate agent workspace {}: {e}",
-                        entry.file_name().to_string_lossy()
-                    );
-                }
-            }
-        }
-    }
-
     Ok(())
 }
 
@@ -1239,7 +1199,7 @@ impl LibreFangKernel {
             .map_err(|e| KernelError::BootFailed(format!("Failed to create data dir: {e}")))?;
 
         // Migrate old directory layout (hands/, workspaces/<agent>/) to unified layout
-        migrate_workspaces_layout(&config.home_dir)?;
+        ensure_workspaces_layout(&config.home_dir)?;
 
         // Initialize memory substrate
         let db_path = config
@@ -1465,11 +1425,9 @@ impl LibreFangKernel {
         init_git_if_missing(&config.home_dir);
 
         // Auto-sync registry content on first boot or after upgrade when
-        // the registry cache is missing.
-        if librefang_runtime::registry_sync::needs_sync(&config.home_dir) {
-            info!("Registry content missing — running auto-sync from librefang-registry");
-            librefang_runtime::registry_sync::sync_registry(&config.home_dir);
-        }
+        // Sync registry: downloads if cache is stale, pre-installs providers/agents/integrations.
+        // Skips download if cache is fresh; skips copy if files already exist.
+        librefang_runtime::registry_sync::sync_registry(&config.home_dir);
 
         // Initialize model catalog, detect provider auth, and apply URL overrides
         let mut model_catalog =
@@ -2295,8 +2253,14 @@ system_prompt = "You are a helpful assistant."
         // Apply global budget defaults to agent resource quotas
         apply_budget_defaults(&self.config.budget, &mut manifest.resources);
 
-        // Create workspace directory for the agent (name-based, so SOUL.md survives recreation)
-        let workspaces_root = self.config.effective_agent_workspaces_dir();
+        // Create workspace directory for the agent.
+        // Hand agents set a relative workspace path (hands/<hand>/<role>) resolved
+        // against the workspaces root. Standalone agents go to workspaces/agents/<name>.
+        let workspaces_root = if manifest.workspace.is_some() {
+            self.config.effective_workspaces_dir()
+        } else {
+            self.config.effective_agent_workspaces_dir()
+        };
         let workspace_dir = resolve_workspace_dir(
             &workspaces_root,
             manifest.workspace.clone(),
@@ -3616,11 +3580,9 @@ system_prompt = "You are a helpful assistant."
 
     /// Resolve a specialist agent by name — find existing or spawn from template.
     fn resolve_or_spawn_specialist(&self, name: &str) -> KernelResult<AgentId> {
-        // Check if already running
         if let Some(entry) = self.registry.find_by_name(name) {
             return Ok(entry.id);
         }
-        // Spawn from template
         let manifest = router::load_template_manifest(&self.config.home_dir, name)
             .map_err(|e| KernelError::LibreFang(LibreFangError::Internal(e)))?;
         let id = self.spawn_agent(manifest)?;
@@ -4057,19 +4019,39 @@ system_prompt = "You are a helpful assistant."
                 response_format: None,
             };
             let (complexity, routed_model) = router.select_model(&probe);
-            info!(
-                agent = %manifest.name,
-                complexity = %complexity,
-                routed_model = %routed_model,
-                "Model routing applied"
-            );
-            manifest.model.model = routed_model.clone();
-            // Also update provider if the routed model belongs to a different provider
+            // Check if the routed model's provider has a valid API key.
+            // If not, keep the current (default) provider instead of switching
+            // to one the user hasn't configured.
+            let mut use_routed = true;
             if let Ok(cat) = self.model_catalog.read() {
                 if let Some(entry) = cat.find_model(&routed_model) {
                     if entry.provider != manifest.model.provider {
-                        info!(old = %manifest.model.provider, new = %entry.provider, "Model routing changed provider");
-                        manifest.model.provider = entry.provider.clone();
+                        let key_env = self.config.resolve_api_key_env(&entry.provider);
+                        if std::env::var(&key_env).is_err() {
+                            warn!(
+                                agent = %manifest.name,
+                                routed_model = %routed_model,
+                                provider = %entry.provider,
+                                "Model routing skipped — provider API key not configured, using default"
+                            );
+                            use_routed = false;
+                        }
+                    }
+                }
+            }
+            if use_routed {
+                info!(
+                    agent = %manifest.name,
+                    complexity = %complexity,
+                    routed_model = %routed_model,
+                    "Model routing applied"
+                );
+                manifest.model.model = routed_model.clone();
+                if let Ok(cat) = self.model_catalog.read() {
+                    if let Some(entry) = cat.find_model(&routed_model) {
+                        if entry.provider != manifest.model.provider {
+                            manifest.model.provider = entry.provider.clone();
+                        }
                     }
                 }
             }
@@ -5073,7 +5055,7 @@ system_prompt = "You are a helpful assistant."
             .join("agent.toml");
         let hands_path = self
             .config
-            .effective_hands_dir()
+            .effective_hands_workspaces_dir()
             .join(name)
             .join("agent.toml");
         let toml_path = if agents_path.exists() {
@@ -5328,7 +5310,9 @@ system_prompt = "You are a helpful assistant."
             })?
             .clone();
 
-        // Check that all requirements (API keys, etc.) are satisfied before activating
+        // Check requirements — warn but don't block activation.
+        // Hands can still be activated and paused (pre-install); the user
+        // gets a degraded experience until dependencies are installed.
         if let Ok(results) = self.hand_registry.check_requirements(hand_id) {
             let missing: Vec<_> = results
                 .iter()
@@ -5336,10 +5320,11 @@ system_prompt = "You are a helpful assistant."
                 .map(|(req, _)| req.label.clone())
                 .collect();
             if !missing.is_empty() {
-                return Err(KernelError::LibreFang(LibreFangError::Internal(format!(
-                    "Hand '{hand_id}' has unsatisfied requirements: {}",
+                warn!(
+                    hand = %hand_id,
+                    "Hand has unsatisfied requirements (degraded): {}",
                     missing.join(", ")
-                ))));
+                );
             }
         }
 
@@ -5411,6 +5396,16 @@ system_prompt = "You are a helpful assistant."
 
         for (role, hand_agent) in &def.agents {
             let mut manifest = hand_agent.manifest.clone();
+
+            // Prefix hand agent name with hand_id to avoid colliding with
+            // standalone specialist agents spawned by routing.
+            manifest.name = format!("{hand_id}:{}", manifest.name);
+
+            // Reuse existing hand agent if one with the same prefixed name is already running
+            if let Some(existing) = self.registry.find_by_name(&manifest.name) {
+                agent_ids_map.insert(role.clone(), existing.id);
+                continue;
+            }
 
             // Inherit kernel defaults when hand declares "default" provider/model
             if manifest.model.provider == "default" {
@@ -5515,25 +5510,38 @@ system_prompt = "You are a helpful assistant."
                 }
             }
 
-            // Write manifest snapshot
-            let safe_hand_name = safe_path_component(&manifest.name, "hand");
-            let hand_manifest_dir = self.config.effective_hands_dir().join(safe_hand_name);
-            let hand_manifest_path = hand_manifest_dir.join("agent.toml");
-            if !hand_manifest_path.exists() {
-                if let Err(e) = std::fs::create_dir_all(&hand_manifest_dir) {
-                    warn!(path = %hand_manifest_dir.display(), "Failed to create dir: {e}");
-                } else if let Ok(toml_str) = toml::to_string_pretty(&manifest) {
-                    let _ = std::fs::write(&hand_manifest_path, &toml_str);
+            // Hand workspace: workspaces/<hand-id>/
+            // Agent workspace nested under hand: workspaces/hands/<hand-id>/<role>/
+            let safe_hand = safe_path_component(hand_id, "hand");
+            let hand_dir = self
+                .config
+                .effective_hands_workspaces_dir()
+                .join(&safe_hand);
+
+            // Write hand definition to workspace
+            let hand_toml_path = hand_dir.join("hand.toml");
+            if !hand_toml_path.exists() {
+                if let Err(e) = std::fs::create_dir_all(&hand_dir) {
+                    warn!(path = %hand_dir.display(), "Failed to create dir: {e}");
+                } else if let Ok(toml_str) = toml::to_string_pretty(&def) {
+                    let _ = std::fs::write(&hand_toml_path, &toml_str);
                 }
             }
-            last_manifest_path = Some(hand_manifest_path.clone());
+            last_manifest_path = Some(hand_toml_path.clone());
+
+            // Relative path resolved by spawn_agent_inner against workspaces root:
+            // workspaces/ + hands/<hand>/<role> = workspaces/hands/<hand>/<role>/
+            let safe_role = safe_path_component(role, "agent");
+            manifest.workspace = Some(std::path::PathBuf::from(format!(
+                "hands/{safe_hand}/{safe_role}"
+            )));
 
             // Deterministic agent ID: hand_id + role
             let deterministic_id = AgentId::from_hand_agent(hand_id, role);
             let agent_id = self.spawn_agent_inner(
                 manifest,
                 None,
-                Some(hand_manifest_path),
+                Some(hand_toml_path),
                 Some(deterministic_id),
             )?;
 
@@ -6065,7 +6073,7 @@ system_prompt = "You are a helpful assistant."
                 let hand_agent_name = format!("{}-hand", hand_id);
                 let hand_toml = self
                     .config
-                    .effective_hands_dir()
+                    .effective_hands_workspaces_dir()
                     .join(&hand_agent_name)
                     .join("agent.toml");
                 if hand_toml.exists() {

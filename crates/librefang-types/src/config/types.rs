@@ -2385,13 +2385,13 @@ impl KernelConfig {
             .unwrap_or_else(|| self.home_dir.join("workspaces"))
     }
 
-    /// Resolved directory for agent workspaces.
+    /// Resolved directory for standalone agent workspaces.
     pub fn effective_agent_workspaces_dir(&self) -> PathBuf {
         self.effective_workspaces_dir().join("agents")
     }
 
-    /// Resolved directory for hand definitions and manifests.
-    pub fn effective_hands_dir(&self) -> PathBuf {
+    /// Resolved directory for hand workspaces.
+    pub fn effective_hands_workspaces_dir(&self) -> PathBuf {
         self.effective_workspaces_dir().join("hands")
     }
 
