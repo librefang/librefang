@@ -71,12 +71,59 @@ pub async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         .map(|s| s.len())
         .unwrap_or(0);
 
+    // Get process RSS memory in MB (best-effort, cross-platform)
+    let memory_used_mb: Option<u64> = {
+        #[cfg(unix)]
+        {
+            std::process::Command::new("ps")
+                .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+                .output()
+                .ok()
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .and_then(|s| s.trim().parse::<u64>().ok())
+                .map(|kb| kb / 1024)
+        }
+        #[cfg(windows)]
+        {
+            std::process::Command::new("tasklist")
+                .args([
+                    "/FI",
+                    &format!("PID eq {}", std::process::id()),
+                    "/FO",
+                    "CSV",
+                    "/NH",
+                ])
+                .output()
+                .ok()
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .and_then(|s| {
+                    // tasklist CSV: "name","pid","session","session#","mem usage"
+                    let fields: Vec<&str> = s.trim().split(',').collect();
+                    fields
+                        .last()
+                        .map(|v| {
+                            v.trim_matches('"')
+                                .replace(" K", "")
+                                .replace(",", "")
+                                .replace(" ", "")
+                        })
+                        .and_then(|v| v.parse::<u64>().ok())
+                        .map(|kb| kb / 1024)
+                })
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            None
+        }
+    };
+
     Json(serde_json::json!({
         "status": "running",
         "version": env!("CARGO_PKG_VERSION"),
         "agent_count": agent_count,
         "active_agent_count": active_agent_count,
         "session_count": session_count,
+        "memory_used_mb": memory_used_mb,
         "default_provider": state.kernel.config_ref().default_model.provider,
         "default_model": state.kernel.config_ref().default_model.model,
         "uptime_seconds": uptime,

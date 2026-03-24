@@ -375,7 +375,7 @@ pub async fn list_workflows(State(state): State<Arc<AppState>>) -> impl IntoResp
             })
         })
         .collect();
-    Json(list)
+    Json(serde_json::json!({ "workflows": list }))
 }
 
 /// GET /api/workflows/:id — Get a single workflow by ID.

@@ -52,7 +52,7 @@ dash:
 api: dashboard-build
     cd crates/librefang-api/dashboard && pnpm dev &
     LOCAL_IP=$(ipconfig getifaddr en0 2>/dev/null || hostname -I 2>/dev/null | awk '{print $1}' || echo "127.0.0.1") && \
-    (sleep 3 && open "http://${LOCAL_IP}:5173/dashboard/") &
+    (while ! curl -s http://127.0.0.1:4545/api/health >/dev/null 2>&1; do sleep 2; done && open "http://${LOCAL_IP}:5173/dashboard/") &
     cargo run -p librefang-cli -- start --foreground
 
 # Build release CLI and install to ~/.librefang/bin (uses thin LTO to avoid OOM)

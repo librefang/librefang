@@ -908,7 +908,8 @@ export async function instantiateTemplate(id: string, params: Record<string, unk
 }
 
 export async function listWorkflows(): Promise<WorkflowItem[]> {
-  return get<WorkflowItem[]>("/api/workflows");
+  const data = await get<{ workflows?: WorkflowItem[] }>("/api/workflows");
+  return data.workflows ?? [];
 }
 
 export async function createWorkflow(payload: {
