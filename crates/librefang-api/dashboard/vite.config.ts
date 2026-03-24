@@ -1,8 +1,16 @@
-import { defineConfig } from "vite";
+import { defineConfig, createLogger } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 
+const logger = createLogger();
+const origWarn = logger.warn.bind(logger);
+logger.warn = (msg, opts) => {
+  if (msg.includes("http proxy error")) return;
+  origWarn(msg, opts);
+};
+
 export default defineConfig({
+  customLogger: logger,
   plugins: [react(), tailwindcss()],
   base: "/dashboard/",
   server: {
