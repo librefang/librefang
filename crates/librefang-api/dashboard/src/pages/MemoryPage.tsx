@@ -174,6 +174,13 @@ export function MemoryPage() {
   const [page, setPage] = useState(0);
   const pageSize = 20;
 
+  const healthQuery = useQuery({
+    queryKey: ["health", "detail"],
+    queryFn: () => fetch("/api/health/detail").then(r => r.json()),
+    staleTime: 60000,
+  });
+  const memoryConfig = healthQuery.data?.memory;
+
   const memoryQuery = useQuery({
     queryKey: ["memory", "list", page, search],
     queryFn: () => search.trim()
@@ -249,6 +256,30 @@ export function MemoryPage() {
 
       {/* Stats */}
       {showStats && <MemoryStats stats={statsQuery.data ?? null} />}
+
+      {/* Memory Config */}
+      {memoryConfig && (
+        <Card padding="md">
+          <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-xs">
+            <div className="flex items-center gap-1.5">
+              <span className="text-text-dim">{t("memory.embedding_provider", { defaultValue: "Embedding" })}:</span>
+              <Badge variant={memoryConfig.embedding_available ? "success" : "warning"}>
+                {memoryConfig.embedding_provider || "auto"} / {memoryConfig.embedding_model || "-"}
+              </Badge>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <span className="text-text-dim">{t("memory.extraction_model", { defaultValue: "Extraction" })}:</span>
+              <Badge variant="brand">{memoryConfig.extraction_model || "-"}</Badge>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <span className="text-text-dim">{t("memory.proactive", { defaultValue: "Proactive" })}:</span>
+              <Badge variant={memoryConfig.proactive_memory_enabled ? "success" : "default"}>
+                {memoryConfig.proactive_memory_enabled ? "ON" : "OFF"}
+              </Badge>
+            </div>
+          </div>
+        </Card>
+      )}
 
       {/* Filters */}
       <div className="flex flex-col sm:flex-row gap-3">
