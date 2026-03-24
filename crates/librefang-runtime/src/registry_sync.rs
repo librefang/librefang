@@ -65,26 +65,6 @@ pub fn sync_registry(home_dir: &Path) {
         }
     }
 
-    // Pre-install all agent templates from registry
-    let agents_src = registry_cache.join("agents");
-    if agents_src.exists() {
-        let agents_dest = home_dir.join("agents");
-        if let Ok(entries) = std::fs::read_dir(&agents_src) {
-            for entry in entries.flatten() {
-                let src = entry.path();
-                if !src.is_dir() || !src.join("agent.toml").exists() {
-                    continue;
-                }
-                let name = src.file_name().unwrap_or_default();
-                let dest = agents_dest.join(name);
-                if !dest.exists() {
-                    let _ = std::fs::create_dir_all(&dest);
-                    let _ = copy_dir_recursive(&src, &dest);
-                }
-            }
-        }
-    }
-
     // Sync root-level files (aliases.toml, schema.toml)
     for name in &["aliases.toml", "schema.toml"] {
         let src = registry_cache.join(name);
