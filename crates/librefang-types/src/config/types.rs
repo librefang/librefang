@@ -2493,6 +2493,8 @@ pub struct DefaultModelConfig {
     /// Model identifier.
     pub model: String,
     /// Environment variable name for the API key.
+    /// Defaults to `"{PROVIDER}_API_KEY"` pattern when omitted.
+    #[serde(default)]
     pub api_key_env: String,
     /// Optional base URL override.
     pub base_url: Option<String>,

@@ -50,9 +50,11 @@ dash:
 
 # Start API daemon with dashboard dev server (hot reload)
 api: dashboard-build
-    cd crates/librefang-api/dashboard && pnpm dev &
-    LOCAL_IP=$(ipconfig getifaddr en0 2>/dev/null || hostname -I 2>/dev/null | awk '{print $1}' || echo "127.0.0.1") && \
-    (while ! curl -s http://127.0.0.1:4545/api/health >/dev/null 2>&1; do sleep 2; done && open "http://${LOCAL_IP}:5173/dashboard/") &
+    pkill -f "vite.*librefang-api/dashboard" 2>/dev/null || true
+    LOCAL_IP=$(ipconfig getifaddr en0 2>/dev/null || hostname -I 2>/dev/null | awk '{print $1}' || echo "127.0.0.1"); \
+    (while ! curl -s http://127.0.0.1:4545/api/health >/dev/null 2>&1; do sleep 2; done; \
+     cd crates/librefang-api/dashboard && pnpm dev & \
+     sleep 3 && open "http://${LOCAL_IP}:5173/dashboard/") &
     cargo run -p librefang-cli -- start --foreground
 
 # Build release CLI and install to ~/.librefang/bin (uses thin LTO to avoid OOM)
