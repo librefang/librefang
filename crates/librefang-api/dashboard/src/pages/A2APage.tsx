@@ -94,10 +94,11 @@ export function A2APage() {
         isFetching={agentsQuery.isFetching}
         onRefresh={() => void agentsQuery.refetch()}
         icon={<Globe className="h-4 w-4" />}
+        helpText={t("a2a.help")}
         actions={
           <button
             onClick={() => setShowDiscover((v) => !v)}
-            className="flex h-9 items-center gap-2 rounded-xl border border-brand/30 bg-brand/10 px-4 text-sm font-bold text-brand hover:bg-brand/20 transition-all"
+            className="flex h-9 items-center gap-2 rounded-xl border border-brand/30 bg-brand/10 px-4 text-sm font-bold text-brand hover:bg-brand/20 transition-colors"
           >
             <Search className="h-3.5 w-3.5" />
             {t("a2a.discover")}
@@ -121,7 +122,7 @@ export function A2APage() {
             <button
               onClick={handleDiscover}
               disabled={isDiscovering || !discoverUrl.trim()}
-              className="flex items-center gap-2 rounded-xl bg-brand px-5 py-2.5 text-sm font-bold text-white hover:bg-brand/90 disabled:opacity-40 transition-all"
+              className="flex items-center gap-2 rounded-xl bg-brand px-5 py-2.5 text-sm font-bold text-white hover:bg-brand/90 disabled:opacity-40 transition-colors"
             >
               {isDiscovering ? (
                 <Loader2 className="h-4 w-4 animate-spin" />
@@ -156,7 +157,7 @@ export function A2APage() {
                 action={
                   <button
                     onClick={() => setShowDiscover(true)}
-                    className="flex items-center gap-2 rounded-xl bg-brand px-5 py-2.5 text-sm font-bold text-white hover:bg-brand/90 transition-all"
+                    className="flex items-center gap-2 rounded-xl bg-brand px-5 py-2.5 text-sm font-bold text-white hover:bg-brand/90 transition-colors"
                   >
                     <Search className="h-4 w-4" />
                     {t("a2a.discover")}
@@ -199,7 +200,7 @@ export function A2APage() {
                     <div className="mt-3 flex justify-end">
                       <button
                         onClick={() => setTaskAgent(agent)}
-                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold text-brand hover:bg-brand/10 transition-all"
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold text-brand hover:bg-brand/10 transition-colors"
                       >
                         <Send className="h-3 w-3" />
                         {t("a2a.send_task")}
@@ -230,14 +231,14 @@ export function A2APage() {
                   <div className="flex justify-end gap-3 mt-4">
                     <button
                       onClick={() => setTaskAgent(null)}
-                      className="px-4 py-2 rounded-xl text-sm font-bold text-text-dim hover:bg-surface-hover transition-all"
+                      className="px-4 py-2 rounded-xl text-sm font-bold text-text-dim hover:bg-surface-hover transition-colors"
                     >
                       {t("common.cancel")}
                     </button>
                     <button
                       onClick={handleSendTask}
                       disabled={isSending || !taskMessage.trim()}
-                      className="flex items-center gap-2 rounded-xl bg-brand px-5 py-2 text-sm font-bold text-white hover:bg-brand/90 disabled:opacity-40 transition-all"
+                      className="flex items-center gap-2 rounded-xl bg-brand px-5 py-2 text-sm font-bold text-white hover:bg-brand/90 disabled:opacity-40 transition-colors"
                     >
                       {isSending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
                       {t("a2a.send")}

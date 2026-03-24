@@ -1,5 +1,5 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { listProviders, testProvider, setProviderKey, deleteProviderKey, setProviderUrl } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
@@ -66,6 +66,7 @@ interface Provider {
   health?: string;
   last_tested?: string;
   error_message?: string;
+  media_capabilities?: string[];
 }
 
 interface ProviderCardProps {
@@ -131,7 +132,7 @@ function ProviderCard({ provider: p, isSelected, pendingId, viewMode, onSelect, 
           {p.media_capabilities && p.media_capabilities.length > 0 && (
             <div className="flex flex-wrap gap-1">
               {p.media_capabilities.map((cap: string) => (
-                <Badge key={cap} variant="outline" className="text-[8px] px-1 py-0">
+                <Badge key={cap} variant="default" className="text-[8px] px-1 py-0">
                   {cap.replace(/_/g, " ")}
                 </Badge>
               ))}
@@ -217,7 +218,7 @@ function ProviderCard({ provider: p, isSelected, pendingId, viewMode, onSelect, 
         {p.media_capabilities && p.media_capabilities.length > 0 && (
           <div className="flex flex-wrap gap-1 mb-3">
             {p.media_capabilities.map((cap: string) => (
-              <Badge key={cap} variant="outline" className="text-[8px] px-1.5 py-0.5">
+              <Badge key={cap} variant="default" className="text-[8px] px-1.5 py-0.5">
                 {cap.replace(/_/g, " ")}
               </Badge>
             ))}
@@ -310,7 +311,7 @@ function DetailsModal({ provider, onClose, onTest, pendingId, t }: {
   const isConfigured = provider.auth_status === "configured";
 
   return (
-    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-black/50 backdrop-blur-xl backdrop-saturate-150" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-black/50 backdrop-blur-sm" onClick={onClose}>
       <div className="bg-surface rounded-2xl border border-border-subtle w-full sm:max-w-lg shadow-2xl rounded-t-2xl sm:rounded-2xl max-h-[90vh] overflow-y-auto animate-fade-in-scale" onClick={e => e.stopPropagation()}>
         {/* Header */}
         <div className={`h-2 bg-gradient-to-r ${isConfigured ? "from-success via-success/60 to-success/30" : "from-brand via-brand/60 to-brand/30"} rounded-t-2xl`} />
@@ -441,7 +442,7 @@ function FilterChips({ activeFilter, onChange, t }: {
         <button
           key={f.value}
           onClick={() => onChange(f.value)}
-          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-bold transition-all ${
+          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${
             activeFilter === f.value
               ? "bg-surface shadow-sm text-text-main"
               : "text-text-dim hover:text-text-main"
@@ -480,28 +481,31 @@ export function ProvidersPage() {
   const testMutation = useMutation({ mutationFn: testProvider });
 
   const providers = providersQuery.data ?? [];
-  const configuredCount = providers.filter(p => p.auth_status === "configured").length;
-  const unconfiguredCount = providers.filter(p => p.auth_status !== "configured").length;
+  const configuredCount = useMemo(() => providers.filter(p => p.auth_status === "configured").length, [providers]);
+  const unconfiguredCount = useMemo(() => providers.filter(p => p.auth_status !== "configured").length, [providers]);
 
   // Filter, search, and sort
-  const filteredProviders = [...providers]
-    .filter(p => {
-      const tabMatch = activeTab === "configured" ? p.auth_status === "configured" : p.auth_status !== "configured";
-      const searchMatch = !search || (p.display_name || p.id).toLowerCase().includes(search.toLowerCase()) || p.id.toLowerCase().includes(search.toLowerCase());
+  const filteredProviders = useMemo(
+    () => [...providers]
+      .filter(p => {
+        const tabMatch = activeTab === "configured" ? p.auth_status === "configured" : p.auth_status !== "configured";
+        const searchMatch = !search || (p.display_name || p.id).toLowerCase().includes(search.toLowerCase()) || p.id.toLowerCase().includes(search.toLowerCase());
 
-      let statusMatch = true;
-      if (filterStatus === "reachable") statusMatch = p.reachable === true;
-      else if (filterStatus === "unreachable") statusMatch = p.reachable === false;
+        let statusMatch = true;
+        if (filterStatus === "reachable") statusMatch = p.reachable === true;
+        else if (filterStatus === "unreachable") statusMatch = p.reachable === false;
 
-      return tabMatch && searchMatch && statusMatch;
-    })
-    .sort((a, b) => {
-      let cmp = 0;
-      if (sortField === "name") cmp = a.id.localeCompare(b.id);
-      else if (sortField === "models") cmp = (a.model_count ?? 0) - (b.model_count ?? 0);
-      else if (sortField === "latency") cmp = (a.latency_ms ?? 0) - (b.latency_ms ?? 0);
-      return sortOrder === "asc" ? cmp : -cmp;
-    });
+        return tabMatch && searchMatch && statusMatch;
+      })
+      .sort((a, b) => {
+        let cmp = 0;
+        if (sortField === "name") cmp = a.id.localeCompare(b.id);
+        else if (sortField === "models") cmp = (a.model_count ?? 0) - (b.model_count ?? 0);
+        else if (sortField === "latency") cmp = (a.latency_ms ?? 0) - (b.latency_ms ?? 0);
+        return sortOrder === "asc" ? cmp : -cmp;
+      }),
+    [providers, activeTab, search, filterStatus, sortField, sortOrder],
+  );
 
   const totalPages = Math.ceil(filteredProviders.length / ITEMS_PER_PAGE);
   const paginatedProviders = filteredProviders.slice(
@@ -639,6 +643,7 @@ export function ProvidersPage() {
         isFetching={providersQuery.isFetching}
         onRefresh={() => void providersQuery.refetch()}
         icon={<Server className="h-4 w-4" />}
+        helpText={t("providers.help")}
         actions={
           <div className="hidden rounded-full border border-border-subtle bg-surface px-3 py-1.5 text-[10px] font-bold uppercase text-text-dim sm:block">
             {t("providers.configured_count", { configured: configuredCount, total: providers.length })}
@@ -667,21 +672,21 @@ export function ProvidersPage() {
           <div className="flex gap-1 p-1 bg-main/30 rounded-lg">
             <button
               onClick={() => handleSort("name")}
-              className={`flex items-center gap-1 px-3 py-1.5 rounded-md text-xs font-bold transition-all ${sortField === "name" ? "bg-surface shadow-sm" : "text-text-dim hover:text-text-main"}`}
+              className={`flex items-center gap-1 px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${sortField === "name" ? "bg-surface shadow-sm" : "text-text-dim hover:text-text-main"}`}
             >
               {sortField === "name" && (sortOrder === "asc" ? <SortAsc className="w-3 h-3" /> : <SortDesc className="w-3 h-3" />)}
               {t("providers.name")}
             </button>
             <button
               onClick={() => handleSort("models")}
-              className={`flex items-center gap-1 px-3 py-1.5 rounded-md text-xs font-bold transition-all ${sortField === "models" ? "bg-surface shadow-sm" : "text-text-dim hover:text-text-main"}`}
+              className={`flex items-center gap-1 px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${sortField === "models" ? "bg-surface shadow-sm" : "text-text-dim hover:text-text-main"}`}
             >
               {sortField === "models" && (sortOrder === "asc" ? <SortAsc className="w-3 h-3" /> : <SortDesc className="w-3 h-3" />)}
               {t("providers.models")}
             </button>
             <button
               onClick={() => handleSort("latency")}
-              className={`flex items-center gap-1 px-3 py-1.5 rounded-md text-xs font-bold transition-all ${sortField === "latency" ? "bg-surface shadow-sm" : "text-text-dim hover:text-text-main"}`}
+              className={`flex items-center gap-1 px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${sortField === "latency" ? "bg-surface shadow-sm" : "text-text-dim hover:text-text-main"}`}
             >
               {sortField === "latency" && (sortOrder === "asc" ? <SortAsc className="w-3 h-3" /> : <SortDesc className="w-3 h-3" />)}
               {t("providers.latency")}
@@ -692,13 +697,13 @@ export function ProvidersPage() {
           <div className="flex gap-1 p-1 bg-main/30 rounded-lg">
             <button
               onClick={() => setViewMode("grid")}
-              className={`p-1.5 rounded-md transition-all ${viewMode === "grid" ? "bg-surface shadow-sm" : "text-text-dim hover:text-text-main"}`}
+              className={`p-1.5 rounded-md transition-colors ${viewMode === "grid" ? "bg-surface shadow-sm" : "text-text-dim hover:text-text-main"}`}
             >
               <Grid3X3 className="w-4 h-4" />
             </button>
             <button
               onClick={() => setViewMode("list")}
-              className={`p-1.5 rounded-md transition-all ${viewMode === "list" ? "bg-surface shadow-sm" : "text-text-dim hover:text-text-main"}`}
+              className={`p-1.5 rounded-md transition-colors ${viewMode === "list" ? "bg-surface shadow-sm" : "text-text-dim hover:text-text-main"}`}
             >
               <List className="w-4 h-4" />
             </button>
@@ -711,7 +716,7 @@ export function ProvidersPage() {
         <div className="flex gap-1 p-1 bg-main/30 rounded-xl w-fit">
           <button
             onClick={() => handleTabChange("configured")}
-            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all ${
+            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-colors ${
               activeTab === "configured" ? "bg-surface text-success shadow-sm" : "text-text-dim hover:text-text-main"
             }`}
           >
@@ -723,7 +728,7 @@ export function ProvidersPage() {
           </button>
           <button
             onClick={() => handleTabChange("unconfigured")}
-            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all ${
+            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-colors ${
               activeTab === "unconfigured" ? "bg-surface text-brand shadow-sm" : "text-text-dim hover:text-text-main"
             }`}
           >
@@ -815,7 +820,7 @@ export function ProvidersPage() {
 
       {/* API Key Config Modal */}
       {configProvider && (
-        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/30 backdrop-blur-xl backdrop-saturate-150" onClick={() => setConfigProvider(null)}>
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/30 backdrop-blur-sm" onClick={() => setConfigProvider(null)}>
           <div className="bg-surface rounded-2xl shadow-2xl border border-border-subtle w-[440px] max-w-[90vw] animate-fade-in-scale" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between px-5 py-3 border-b border-border-subtle">
               <div className="flex items-center gap-2">

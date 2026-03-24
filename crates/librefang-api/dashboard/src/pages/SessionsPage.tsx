@@ -90,6 +90,7 @@ export function SessionsPage() {
         isFetching={sessionsQuery.isFetching}
         onRefresh={() => void sessionsQuery.refetch()}
         icon={<Clock className="h-4 w-4" />}
+        helpText={t("sessions.help")}
         actions={
           <div className="flex items-center gap-3">
             <Badge variant="brand">{activeCount} {t("sessions.active_count")}</Badge>
@@ -117,7 +118,7 @@ export function SessionsPage() {
             <div className="w-20 h-20 rounded-3xl bg-brand/10 flex items-center justify-center">
               <MessageCircle className="w-10 h-10 text-brand" />
             </div>
-            <span className="absolute inset-0 rounded-3xl bg-brand/5 animate-ping" style={{ animationDuration: "3s" }} />
+            <span className="absolute inset-0 rounded-3xl bg-brand/5 animate-pulse" style={{ animationDuration: "3s" }} />
           </div>
           <h3 className="text-xl font-black tracking-tight">{t("sessions.empty_title")}</h3>
           <p className="text-sm text-text-dim mt-2 max-w-xs text-center">{t("sessions.empty_desc")}</p>
@@ -170,7 +171,7 @@ export function SessionsPage() {
                     </div>
                   ) : (
                     <button onClick={() => handleDelete(s.session_id)} disabled={pendingId === s.session_id}
-                      className="p-1.5 sm:p-2 rounded-lg text-text-dim/30 hover:text-error hover:bg-error/10 transition-all">
+                      className="p-1.5 sm:p-2 rounded-lg text-text-dim/30 hover:text-error hover:bg-error/10 transition-colors">
                       <Trash2 className="w-3.5 h-3.5" />
                     </button>
                   )}

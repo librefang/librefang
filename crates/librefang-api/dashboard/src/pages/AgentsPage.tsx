@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
 import { listAgents, getAgentDetail, spawnAgent, suspendAgent, resumeAgent } from "../api";
@@ -47,24 +47,20 @@ export function AgentsPage() {
   });
 
   const agents = agentsQuery.data ?? [];
-  const filteredAgents = agents
+  const filteredAgents = useMemo(() => agents
     .filter(a => a.name.toLowerCase().includes(search.toLowerCase()) || a.id.toLowerCase().includes(search.toLowerCase()))
     .sort((a, b) => {
-      // 1. Suspended agents last
       const aSusp = (a.state || "").toLowerCase() === "suspended" ? 1 : 0;
       const bSusp = (b.state || "").toLowerCase() === "suspended" ? 1 : 0;
       if (aSusp !== bSusp) return aSusp - bSusp;
-      // 2. Core agents first, hands second
       const aHand = a.name.includes("-hand") ? 1 : 0;
       const bHand = b.name.includes("-hand") ? 1 : 0;
       if (aHand !== bHand) return aHand - bHand;
-      // 3. Alphabetical
       return a.name.localeCompare(b.name);
-    });
+    }), [agents, search]);
 
-  // Group: core agents and hands
-  const coreAgents = filteredAgents.filter(a => !a.name.includes("-hand"));
-  const handAgents = filteredAgents.filter(a => a.name.includes("-hand"));
+  const coreAgents = useMemo(() => filteredAgents.filter(a => !a.name.includes("-hand")), [filteredAgents]);
+  const handAgents = useMemo(() => filteredAgents.filter(a => a.name.includes("-hand")), [filteredAgents]);
 
   const renderAgentCard = (agent: any) => {
     const isSuspended = (agent.state || "").toLowerCase() === "suspended";
@@ -134,6 +130,7 @@ export function AgentsPage() {
           isFetching={agentsQuery.isFetching}
           onRefresh={() => void agentsQuery.refetch()}
           icon={<Users className="h-4 w-4" />}
+          helpText={t("agents.help")}
         />
         <Button variant="primary" onClick={() => setShowCreate(true)} className="shrink-0">
           <Plus className="w-4 h-4" />
@@ -184,7 +181,7 @@ export function AgentsPage() {
                   const isSuspended = (agent.state || "").toLowerCase() === "suspended";
                   return (
                     <div key={agent.id}
-                      className={`flex items-center gap-3 sm:gap-4 p-3 sm:p-4 rounded-xl sm:rounded-2xl border border-border-subtle hover:border-brand/30 transition-all cursor-pointer ${isSuspended ? "opacity-60 hover:opacity-100" : "bg-surface"}`}
+                      className={`flex items-center gap-3 sm:gap-4 p-3 sm:p-4 rounded-xl sm:rounded-2xl border border-border-subtle hover:border-brand/30 transition-[colors,opacity] cursor-pointer ${isSuspended ? "opacity-60 hover:opacity-100" : "bg-surface"}`}
                       onClick={async () => {
                         setDetailLoading(true);
                         try { const d = await getAgentDetail(agent.id); setDetailAgent(d); } catch { setDetailAgent({ name: agent.name, id: agent.id }); }
@@ -229,10 +226,10 @@ export function AgentsPage() {
       )}
       {/* Agent Detail Modal */}
       {detailAgent && (
-        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40 backdrop-blur-xl backdrop-saturate-150" onClick={() => setDetailAgent(null)}>
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40 backdrop-blur-sm" onClick={() => setDetailAgent(null)}>
           <div className="bg-surface rounded-t-2xl sm:rounded-2xl shadow-2xl border border-border-subtle w-full sm:w-[560px] sm:max-w-[90vw] max-h-[85vh] sm:max-h-[80vh] overflow-y-auto animate-fade-in-scale" onClick={e => e.stopPropagation()}>
             {/* Modal Header */}
-            <div className="px-6 py-5 border-b border-border-subtle sticky top-0 bg-surface/95 backdrop-blur-xl backdrop-saturate-150 z-10">
+            <div className="px-6 py-5 border-b border-border-subtle sticky top-0 bg-surface/95 backdrop-blur-sm z-10">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-4">
                   <div className="relative">
@@ -363,7 +360,7 @@ export function AgentsPage() {
 
       {/* Create Agent Modal */}
       {showCreate && (
-        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/30 backdrop-blur-xl backdrop-saturate-150" onClick={() => setShowCreate(false)}>
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/30 backdrop-blur-sm" onClick={() => setShowCreate(false)}>
           <div className="bg-surface rounded-t-2xl sm:rounded-2xl shadow-2xl border border-border-subtle w-full sm:w-[480px] sm:max-w-[90vw] animate-fade-in-scale" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between px-5 py-3 border-b border-border-subtle">
               <h3 className="text-sm font-bold">{t("agents.create_agent")}</h3>

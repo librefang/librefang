@@ -45,6 +45,7 @@ export function ApprovalsPage() {
         isFetching={approvalsQuery.isFetching}
         onRefresh={() => void approvalsQuery.refetch()}
         icon={<CheckCircle className="h-4 w-4" />}
+        helpText={t("approvals.help")}
       />
 
       {approvalsQuery.isLoading ? (
@@ -55,7 +56,7 @@ export function ApprovalsPage() {
             <div className="w-20 h-20 rounded-3xl bg-success/10 flex items-center justify-center">
               <CheckCircle className="h-10 w-10 text-success" />
             </div>
-            <span className="absolute inset-0 rounded-3xl bg-success/5 animate-ping" style={{ animationDuration: "3s" }} />
+            <span className="absolute inset-0 rounded-3xl bg-success/5 animate-pulse" style={{ animationDuration: "3s" }} />
           </div>
           <h3 className="text-xl font-black tracking-tight">{t("approvals.queue_clear")}</h3>
           <p className="text-sm text-text-dim mt-2 max-w-xs text-center">{t("approvals.queue_clear_desc")}</p>

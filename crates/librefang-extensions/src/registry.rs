@@ -199,7 +199,7 @@ impl IntegrationRegistry {
                     .collect();
                 Some(McpServerConfigEntry {
                     name: inst.id.clone(),
-                    transport,
+                    transport: Some(transport),
                     timeout_secs: 30,
                     env,
                 })

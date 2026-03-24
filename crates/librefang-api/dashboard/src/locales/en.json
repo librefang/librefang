@@ -44,7 +44,8 @@
     "template_hint": "Templates are loaded from ~/.librefang/agents/{name}/agent.toml",
     "manifest_toml": "Agent Manifest (TOML)",
     "suspend": "Suspend", "resume": "Resume", "core_agents": "Core Agents", "hands": "Hands",
-    "hand_badge": "HAND", "tools_cap": "Tools", "network": "Network"
+    "hand_badge": "HAND", "tools_cap": "Tools", "network": "Network",
+    "help": "Manage all agents in the system. Create, suspend, resume, and delete agents. View their status and configuration."
   },
   "providers": {
     "title": "Providers", "subtitle": "Manage LLM API connections and health.",
@@ -60,7 +61,8 @@
     "configure_provider": "Configure Provider", "key_saved": "API Key saved", "key_removed": "API Key removed",
     "key_placeholder": "Enter API key...", "key_placeholder_existing": "Enter new key to replace...",
     "optional": "optional", "remove_key": "Remove Key",
-    "base_url": "Base URL", "api_key": "API Key"
+    "base_url": "Base URL", "api_key": "API Key",
+    "help": "Manage LLM provider connections. Test connectivity, configure API keys, and monitor provider health status."
   },
   "channels": {
     "title": "Channels", "subtitle": "Messaging adapters and integration gateways.",
@@ -71,7 +73,8 @@
     "setup_type": "Setup Type", "setup_steps": "Setup Steps", "required_fields": "Required Fields",
     "has_token": "Has Token", "no_token": "No Token", "no_fields_required": "No fields required",
     "update_config": "Update Config", "select_all": "Select All", "results": "results",
-    "no_results": "No matching channels", "no_configured": "No configured channels", "no_unconfigured": "No unconfigured channels"
+    "no_results": "No matching channels", "no_configured": "No configured channels", "no_unconfigured": "No unconfigured channels",
+    "help": "Configure messaging adapters and integration gateways. Set up channels like Slack, Discord, Telegram, and more."
   },
   "skills": {
     "title": "Skills", "subtitle": "Atomic capabilities that extend agent reasoning.",
@@ -82,14 +85,16 @@
     "sort_trending": "Trending", "sort_downloads": "Downloads", "sort_stars": "Stars", "sort_updated": "Updated", "sort_rating": "Rating",
     "no_results": "No skills found", "rate_limited": "Rate Limited", "rate_limited_desc": "ClawHub API rate limit exceeded. Please try again later.", "load_error": "Failed to load",
     "search_placeholder": "Search skills (e.g. python, web, ai...)",
-    "stars_count": "stars", "downloads_count": "downloads", "install_timeout": "Installation timed out"
+    "stars_count": "stars", "downloads_count": "downloads", "install_timeout": "Installation timed out",
+    "help": "Browse and install skills to extend agent capabilities. Manage installed skills and discover new ones from the marketplace."
   },
   "hands": {
     "title": "Hands", "subtitle": "Autonomous capability packages.",
     "available": "Available Hands", "instances": "Active Instances", "activate": "Activate", "deactivate": "Deactivate",
     "orchestration": "Capability Orchestration", "active_label": "active", "total_label": "total",
     "search_placeholder": "Search hands...", "ready": "Ready", "missing_req": "Missing Requirements",
-    "instance": "Instance"
+    "instance": "Instance",
+    "help": "Manage autonomous capability packages. Activate, deactivate, pause, and resume Hands to extend agent functionality."
   },
   "analytics": {
     "title": "Analytics", "subtitle": "Usage statistics and performance telemetry.",
@@ -105,7 +110,9 @@
     "token_limit": "Tokens/Hour", "alert_threshold": "Alert Threshold", "budget_saved": "Budget limits updated.",
     "usage_summary": "Usage Overview", "usage_summary_desc": "API call consumption statistics.",
     "total_requests": "Total Requests", "total_tokens": "Total Tokens", "total_cost": "Total Cost", "avg_latency": "Avg Latency",
-    "usage_by_agent": "Usage by Agent", "usage_by_agent_desc": "Consumption ranking by agent."
+    "usage_by_agent": "Usage by Agent", "usage_by_agent_desc": "Consumption ranking by agent.",
+    "no_agent_data": "No agent usage data yet", "no_model_data": "No model usage data yet",
+    "help": "View usage statistics and cost analytics. Monitor API calls, token consumption, and set budget limits to control spending."
   },
   "memory": {
     "title": "Memory", "subtitle": "Persistent vector storage for agent context.",
@@ -116,7 +123,11 @@
     "total_memories": "Total Memories", "importance": "Importance",
     "cleanup": "Cleanup", "decay": "Decay", "add": "Add",
     "filter_all": "All", "showing": "Showing {{count}} / {{total}}",
-    "no_memories": "No memories yet", "created": "Created"
+    "no_memories": "No memories yet", "created": "Created",
+    "config_title": "Memory Configuration", "config_desc": "Changes are written to config.toml. Restart required for full effect.",
+    "embedding_provider": "Embedding", "extraction_model": "Extraction", "proactive": "Proactive",
+    "proactive_enabled": "Enabled", "auto_memorize": "Auto Memorize", "auto_retrieve": "Auto Retrieve",
+    "help": "Manage agent memory storage. Add, edit, search, and delete memories. Configure embedding and proactive memory settings."
   },
   "comms": {
     "bus": "Communication Bus", "subtitle": "Real-time message traffic and connectivity.",
@@ -125,7 +136,8 @@
     "topology": "Network Topology", "topology_description": "High-performance event bus coordination.",
     "no_channels": "No communication channels discovered.",
     "total_channels": "Total Channels", "connected": "Connected", "events_today": "Events Today", "uptime": "Uptime",
-    "events": "Events", "events_desc": "Real-time message events.", "connections": "Connections"
+    "events": "Events", "events_desc": "Real-time message events.", "connections": "Connections",
+    "help": "Monitor the communication bus. View channel connectivity, agent network topology, and real-time message events."
   },
   "canvas": {
     "title": "Designer", "subtitle": "Design visual logic flows for autonomous agent behavior.", "node_library": "Node Library",
@@ -175,8 +187,9 @@
     "title": "Workflows", "subtitle": "Automation hub.", "all_workflows": "All Workflows", "run_workflow": "Run Workflow",
     "select_workflow": "Select workflow", "recent_runs": "Recent Runs", "no_runs": "No runs yet",
     "select_workflow_hint": "Select a workflow to view runs", "steps_count": "{{count}} steps", "nodes_unit": "nodes", "automation_hub": "Automation Hub",
-    "templates": "Templates", "use_template": "Use Template", "create_blank": "Create Blank",
+    "templates": "Templates", "template_library": "Template Library", "my_workflows": "My Workflows", "use_template": "Use Template", "create_blank": "Create Blank",
     "new_workflow": "New Workflow", "workflow_name": "Workflow Name", "description": "Description", "delete_confirm": "Are you sure you want to delete this workflow?", "open_workflows": "Workflow List", "untitled_workflow": "Untitled Workflow",
+    "help": "Create and manage automation workflows. Use templates or build from scratch with the visual canvas editor.",
     "search_placeholder": "Search workflows...", "empty_title": "No workflows yet", "empty_desc": "Create your first workflow from a template or start from scratch.",
     "template_details": {
       "content_pipeline": "Content Pipeline", "content_pipeline_desc": "Research → Write → Edit, produce polished articles",
@@ -210,19 +223,54 @@
     "schedules": "schedules", "triggers_label": "triggers", "cron_jobs": "cron jobs",
     "no_schedules": "No schedules yet. Create one to automate agent tasks.",
     "message": "Message", "message_placeholder": "Message to send to agent...",
-    "every_minute": "Every minute", "every_n_hours": "Every {{n}} hours", "weekly": "Weekly"
+    "every_minute": "Every minute", "every_n_hours": "Every {{n}} hours", "weekly": "Weekly",
+    "help": "Schedule automated tasks with cron expressions. Create, run, and delete scheduled jobs that trigger agent actions."
   },
   "runtime": {
     "title": "Runtime", "subtitle": "Engine status and resource management.", "kernel": "Kernel Execution Environment",
     "environment": "Environment", "engine_version": "Engine Version", "system_uptime": "System Uptime",
     "engine": "Engine Info", "git_hash": "Git Commit", "build_time": "Build Time",
-    "system": "System Status", "queue": "Task Queue", "pending_tasks": "Pending", "running_tasks": "Running", "completed_today": "Completed Today", "active_agents": "Active Agents", "status": "Status"
+    "system": "System Status", "queue": "Task Queue", "pending_tasks": "Pending", "running_tasks": "Running", "completed_today": "Completed Today", "active_agents": "Active Agents", "status": "Status",
+    "hostname": "Hostname", "platform": "Platform", "rust_version": "Rust Version",
+    "config": "Runtime Config", "default_provider": "Default Provider", "default_model": "Default Model",
+    "api_listen": "API Listen", "home_dir": "Home Directory", "log_level": "Log Level", "network_enabled": "Network",
+    "memory_used": "Memory", "sessions": "Sessions",
+    "health_checks": "Health Checks", "all_passed": "All Passed", "degraded": "Degraded",
+    "queue_config": "Queue Config", "max_depth_agent": "Max Depth / Agent", "max_depth_global": "Max Depth Global", "task_ttl": "Task TTL",
+    "lane": "Lane", "capacity": "Capacity", "no_lanes": "No queue lanes",
+    "enabled": "Enabled", "disabled": "Disabled",
+    "providers": "Providers", "channels": "Channels", "skills": "Skills", "workflows": "Workflows",
+    "resources": "Resource Summary",
+    "server_control": "Server Control",
+    "reload_config": "Reload Config", "reload_success": "Config reloaded ({{status}})", "reload_error": "Failed to reload config",
+    "shutdown": "Shutdown", "shutdown_confirm_title": "Shutdown Server", "shutdown_confirm_desc": "The server will stop and the dashboard will become unavailable.",
+    "shutdown_confirm": "Confirm Shutdown", "shutdown_error": "Failed to shutdown",
+    "help": "View engine status, system health, task queues, and resource usage. Reload configuration or shut down the server.",
+    "panics": "Panics", "restarts": "Restarts", "database": "Database", "embedding": "Embedding",
+    "proactive_memory": "Proactive Memory", "extraction_model": "Extraction Model", "config_warnings": "Config Warnings", "no_warnings": "No warnings",
+    "security": "Security Posture", "core_protections": "Core Protections", "rate_limiter": "Rate Limiter",
+    "websocket_limits": "WebSocket Limits", "wasm_sandbox": "WASM Sandbox", "auth_mode": "Auth Mode",
+    "audit_trail": "Audit Trail", "taint_tracking": "Taint Tracking", "manifest_signing": "Manifest Signing",
+    "features_enabled": "{{count}} features enabled",
+    "audit": "Audit Log", "audit_verify": "Verify Chain", "audit_valid": "Chain Valid", "audit_invalid": "Chain Broken",
+    "audit_entries": "{{count}} entries", "no_audit": "No audit events",
+    "backups": "Backups", "create_backup": "Create Backup", "restore": "Restore", "no_backups": "No backups",
+    "backup_created": "Backup created", "backup_error": "Backup failed", "restore_success": "Restore complete. Restart daemon for changes.",
+    "restore_error": "Restore failed", "delete_backup_confirm": "Delete this backup?",
+    "task_queue": "Task Queue", "total_tasks": "Total", "pending_count": "Pending", "in_progress_count": "In Progress",
+    "completed_count": "Completed", "failed_count": "Failed", "no_tasks": "No queued tasks",
+    "retry": "Retry", "cancel_task": "Cancel",
+    "cleanup_sessions": "Cleanup Sessions", "sessions_deleted": "{{count}} sessions deleted",
+    "tokens_per_min": "tok/min", "max_per_ip": "max/IP", "idle_timeout": "Idle Timeout",
+    "max_msg_size": "Max Msg Size", "max_msg_min": "Max Msg/Min",
+    "fuel_limit": "Fuel Limit", "timeout": "Timeout"
   },
   "telemetry": {
     "badge": "Observability", "title": "Telemetry", "subtitle": "System metrics, LLM usage, and HTTP observability.",
     "total_requests": "Total Requests", "endpoints": "Endpoints", "avg_latency": "Avg Latency",
     "status": "Status", "collecting": "Collecting", "top_endpoints": "Top Endpoints",
     "latency": "Latency Distribution", "prometheus_endpoint": "Prometheus Endpoint", "view_raw": "View Raw",
+    "help": "Monitor system metrics, LLM token usage, and HTTP request observability. View per-agent breakdowns and raw Prometheus data.",
     "no_data": "No telemetry data yet. Make some API requests to see metrics.",
     "llm_usage": "LLM & Token Usage",
     "total_tokens": "Total Tokens", "input_tokens": "Input Tokens", "output_tokens": "Output Tokens",
@@ -236,13 +284,15 @@
   },
   "logs": {
     "title": "Logs", "subtitle": "Real-time diagnostic events.", "export_json": "Export JSON",
-    "timestamp": "Timestamp", "module": "Module", "agent": "Agent", "message": "Message", "all_modules": "All Modules"
+    "timestamp": "Timestamp", "module": "Module", "agent": "Agent", "message": "Message", "all_modules": "All Modules",
+    "help": "View real-time diagnostic logs. Filter by module, search log content, and export logs as JSON for analysis."
   },
   "settings": {
     "title": "Settings", "subtitle": "System parameters.", "appearance": "Appearance",
     "theme": "Interface Theme", "language": "Language", "theme_light": "Light", "theme_dark": "Dark", "system_config": "System Configuration",
     "nav_layout": "Navigation Layout", "nav_grouped": "Grouped", "nav_collapsible": "Collapsible",
-    "tools_title": "Tools", "tools_search": "Search tools..."
+    "tools_title": "Tools", "tools_search": "Search tools...",
+    "help": "Configure system preferences. Switch theme, language, navigation layout, and browse available tools."
   },
   "chat": {
     "title": "Chat", "neural_terminal": "Neural Terminal", "select_agent": "Select Agent", "select_agent_desc": "Choose an agent from the list to establish a communication link.",
@@ -256,17 +306,22 @@
     "title": "Goals", "subtitle": "Strategic planning and task tracking.", "total": "Total", "pending": "Pending", "in_progress": "In Progress", "completed": "Completed",
     "create_goal": "Create Goal", "goal_title_placeholder": "Goal Title", "goal_desc_placeholder": "Description", "goal_tree": "Goal Tree",
     "title_label": "Title", "desc_label": "Description", "add_examples": "Add Examples", "add_example_goals": "Add Example Goals",
-    "toggle_reset": "Complete / Reset", "delete_confirm": "Are you sure you want to delete this goal?"
+    "toggle_reset": "Complete / Reset", "delete_confirm": "Are you sure you want to delete this goal?",
+    "pick_template": "Choose a Template", "pick_template_desc": "Pick a template to get started quickly with pre-defined goals.", "use_template": "Use Template",
+    "overall_progress": "Overall Progress", "clear_all": "Clear All", "clear_all_confirm": "Delete all goals?",
+    "help": "Set strategic goals and track progress. Create goal hierarchies, apply templates, and monitor completion status."
   },
   "sessions": {
     "title": "Sessions", "subtitle": "Active agent conversations and historical execution contexts.",
     "active_count": "active", "total": "total", "search_placeholder": "Search by agent name...",
     "empty_title": "No sessions", "empty_desc": "Sessions will appear when agents start conversations.",
-    "unknown_agent": "Unknown Agent", "just_now": "just now"
+    "unknown_agent": "Unknown Agent", "just_now": "just now",
+    "help": "View and manage agent conversation sessions. Switch active sessions, delete old ones, and monitor session activity."
   },
   "approvals": {
     "title": "Approvals", "subtitle": "Review and authorize critical agent actions.", "pending_review": "Pending Review", "approve": "Approve", "reject": "Reject",
-    "queue_clear": "Queue Clear", "queue_clear_desc": "No pending actions."
+    "queue_clear": "Queue Clear", "queue_clear_desc": "No pending actions.",
+    "help": "Review approval requests. When agents need human confirmation, requests appear here."
   },
   "wizard": {
     "welcome": "Welcome", "step_1": "Step 1", "connect_provider": "Connect Provider"
@@ -279,7 +334,8 @@
     "no_key": "No Key",
     "tier_all": "All", "tier_frontier": "Frontier", "tier_smart": "Smart", "tier_balanced": "Balanced", "tier_fast": "Fast", "tier_local": "Local", "tier_basic": "Basic", "tier_standard": "Standard", "tier_advanced": "Advanced", "tier_enterprise": "Enterprise",
     "col_model": "Model", "col_provider": "Provider", "col_tier": "Tier", "col_context": "Context", "col_input": "Input $/M",
-    "col_tools": "Tools", "col_vision": "Vision", "col_streaming": "Streaming"
+    "col_tools": "Tools", "col_vision": "Vision", "col_streaming": "Streaming",
+    "help": "Browse all available LLM models across providers. Filter by tier, provider, and availability. Compare capabilities and pricing."
   },
   "auth": {
     "title": "API Key Required",
@@ -292,7 +348,8 @@
     "section": "OFP Network", "title": "Network", "subtitle": "Open Federation Protocol network status and connected peers.",
     "status_label": "Status", "node_id": "Node ID", "protocol": "Protocol",
     "peers": "Connected Peers", "connected": "connected",
-    "no_peers": "No peers connected", "no_peers_desc": "No OFP peers are currently connected to this node."
+    "no_peers": "No peers connected", "no_peers_desc": "No OFP peers are currently connected to this node.",
+    "help": "View the Open Federation Protocol network status. Monitor connected peers, node identity, and protocol version."
   },
   "a2a": {
     "section": "Agent-to-Agent", "title": "A2A", "subtitle": "Discover and communicate with external A2A agents.",
@@ -302,7 +359,8 @@
     "no_agents": "No external agents", "no_agents_desc": "Discover A2A agents by entering their URL.",
     "send_task": "Send Task", "send_to": "Send task to",
     "task_placeholder": "Describe the task for this agent...",
-    "send": "Send", "tracked_tasks": "Tracked Tasks"
+    "send": "Send", "tracked_tasks": "Tracked Tasks",
+    "help": "Discover and interact with external A2A agents. Send tasks to remote agents and track their execution status."
   },
   "plugins": {
     "section": "Extensions", "title": "Plugins", "subtitle": "Extend agent capabilities with custom plugins.",
@@ -315,6 +373,7 @@
     "registry_optional": "Registry (optional)", "registry_placeholder": "owner/repo",
     "path": "Path", "url": "URL", "branch": "Branch",
     "scaffold_title": "Create New Plugin", "scaffold_desc": "What does this plugin do?", "create": "Create",
-    "deps": "Deps"
+    "deps": "Deps",
+    "help": "Install and manage plugins to extend agent capabilities. Add plugins from registries, local paths, or Git repositories."
   }
 }

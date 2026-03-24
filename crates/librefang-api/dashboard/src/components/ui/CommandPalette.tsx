@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { useTranslation } from "react-i18next";
 import { Search, Home, Layers, MessageCircle, Server, Network, Calendar, Shield, BarChart3, FileText, Settings, Bot, Clock, CheckCircle, Database, Activity, Hand, Puzzle, Cpu, Radio } from "lucide-react";
@@ -26,10 +26,10 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
   const [selectedIndex, setSelectedIndex] = useState(0);
   const isZh = i18n.language === "zh";
 
-  const commands: CommandItem[] = [
+  const commands = useMemo<CommandItem[]>(() => [
     { id: "overview", label: "Overview", labelZh: "概览", category: "Core", categoryZh: "核心", icon: Home, action: () => navigate({ to: "/overview" }) },
     { id: "workflows", label: "Workflows", labelZh: "工作流", category: "Core", categoryZh: "核心", icon: Layers, action: () => navigate({ to: "/workflows" }) },
-    { id: "canvas", label: "Canvas", labelZh: "画布", category: "Core", categoryZh: "核心", icon: Layers, action: () => navigate({ to: "/canvas", search: { t: Date.now() } }) },
+    { id: "canvas", label: "Canvas", labelZh: "画布", category: "Core", categoryZh: "核心", icon: Layers, action: () => navigate({ to: "/canvas", search: { t: Date.now(), wf: undefined } }) },
     { id: "chat", label: "Chat", labelZh: "对话", category: "Core", categoryZh: "核心", icon: MessageCircle, action: () => navigate({ to: "/chat", search: { agentId: undefined } }) },
     { id: "sessions", label: "Sessions", labelZh: "会话", category: "Core", categoryZh: "核心", icon: Clock, action: () => navigate({ to: "/sessions" }) },
     { id: "approvals", label: "Approvals", labelZh: "审批", category: "Core", categoryZh: "核心", icon: CheckCircle, action: () => navigate({ to: "/approvals" }) },
@@ -48,12 +48,17 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
     { id: "runtime", label: "Runtime", labelZh: "运行时", category: "System", categoryZh: "系统", icon: Activity, action: () => navigate({ to: "/runtime" }) },
     { id: "logs", label: "Logs", labelZh: "日志", category: "System", categoryZh: "系统", icon: FileText, action: () => navigate({ to: "/logs" }) },
     { id: "settings", label: "Settings", labelZh: "设置", category: "System", categoryZh: "系统", icon: Settings, action: () => navigate({ to: "/settings" }) },
-  ];
+  ], [navigate]);
 
-  const filteredCommands = commands.filter(cmd => {
+  const filteredCommands = useMemo(() => commands.filter(cmd => {
     const q = search.toLowerCase();
     return cmd.label.toLowerCase().includes(q) || cmd.labelZh.includes(search) || cmd.id.includes(q);
-  });
+  }), [commands, search]);
+
+  const filteredRef = useRef(filteredCommands);
+  filteredRef.current = filteredCommands;
+  const selectedRef = useRef(selectedIndex);
+  selectedRef.current = selectedIndex;
 
   useEffect(() => {
     if (!isOpen) {
@@ -68,13 +73,13 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
 
       if (e.key === "ArrowDown") {
         e.preventDefault();
-        setSelectedIndex(i => Math.min(i + 1, filteredCommands.length - 1));
+        setSelectedIndex(i => Math.min(i + 1, filteredRef.current.length - 1));
       } else if (e.key === "ArrowUp") {
         e.preventDefault();
         setSelectedIndex(i => Math.max(i - 1, 0));
-      } else if (e.key === "Enter" && filteredCommands[selectedIndex]) {
+      } else if (e.key === "Enter" && filteredRef.current[selectedRef.current]) {
         e.preventDefault();
-        filteredCommands[selectedIndex].action();
+        filteredRef.current[selectedRef.current].action();
         onClose();
       } else if (e.key === "Escape") {
         onClose();
@@ -83,7 +88,7 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [isOpen, filteredCommands, selectedIndex, onClose]);
+  }, [isOpen, onClose]);
 
   if (!isOpen) return null;
 
@@ -95,8 +100,8 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
   }, {} as Record<string, CommandItem[]>);
 
   return (
-    <div className="fixed inset-0 z-[100] flex items-start justify-center pt-[15vh]">
-      <div className="fixed inset-0 bg-black/60 backdrop-blur-xl backdrop-saturate-150" onClick={onClose} />
+    <div className="fixed inset-0 z-100 flex items-start justify-center pt-[15vh]">
+      <div className="fixed inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
       <div className="relative w-full max-w-xl max-w-[90vw] rounded-2xl border border-border-subtle bg-surface shadow-2xl overflow-hidden animate-fade-in-scale">
         <div className="flex items-center gap-3 border-b border-border-subtle px-4 py-4">
           <Search className="h-5 w-5 text-text-dim shrink-0" />
@@ -128,7 +133,7 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
                     <button
                       key={cmd.id}
                       onClick={() => { cmd.action(); onClose(); }}
-                      className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-left transition-all duration-200 ${globalIndex === selectedIndex ? 'bg-brand/10 text-brand' : 'hover:bg-surface-hover'}`}
+                      className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-left transition-colors duration-200 ${globalIndex === selectedIndex ? 'bg-brand/10 text-brand' : 'hover:bg-surface-hover'}`}
                     >
                       <cmd.icon className="h-4 w-4 shrink-0" />
                       <span className="flex-1 text-sm font-medium">{isZh ? cmd.labelZh : cmd.label}</span>

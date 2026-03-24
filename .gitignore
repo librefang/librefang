@@ -1,5 +1,6 @@
 # Build
 /target
+crates/librefang-api/static/react/
 /target-isolated
 /target-*
 **/*.rs.bk

@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { listModels } from "../api";
 import { Badge } from "../components/ui/Badge";
@@ -28,24 +28,36 @@ export function ModelsPage() {
   });
 
   // Available models first, unavailable last
-  const allModels = [...(modelsQuery.data?.models ?? [])].sort((a, b) => {
-    if (a.available && !b.available) return -1;
-    if (!a.available && b.available) return 1;
-    return 0;
-  });
+  const allModels = useMemo(
+    () => [...(modelsQuery.data?.models ?? [])].sort((a, b) => {
+      if (a.available && !b.available) return -1;
+      if (!a.available && b.available) return 1;
+      return 0;
+    }),
+    [modelsQuery.data],
+  );
   const totalAvailable = modelsQuery.data?.available ?? 0;
 
-  const providers = ["all", ...Array.from(new Set(allModels.map(m => m.provider))).sort()];
-  const tiers = ["all", ...Array.from(new Set(allModels.map(m => m.tier).filter(Boolean))).sort()];
+  const providers = useMemo(
+    () => ["all", ...Array.from(new Set(allModels.map(m => m.provider))).sort()],
+    [allModels],
+  );
+  const tiers = useMemo(
+    () => ["all", ...Array.from(new Set(allModels.map(m => m.tier).filter(Boolean))).sort()],
+    [allModels],
+  );
 
-  const filtered = allModels.filter(m => {
-    const q = search.toLowerCase();
-    if (search && !m.id.toLowerCase().includes(q) && !(m.display_name || "").toLowerCase().includes(q) && !m.provider.toLowerCase().includes(q)) return false;
-    if (tierFilter !== "all" && m.tier !== tierFilter) return false;
-    if (providerFilter !== "all" && m.provider !== providerFilter) return false;
-    if (availableOnly && !m.available) return false;
-    return true;
-  });
+  const filtered = useMemo(
+    () => allModels.filter(m => {
+      const q = search.toLowerCase();
+      if (search && !m.id.toLowerCase().includes(q) && !(m.display_name || "").toLowerCase().includes(q) && !m.provider.toLowerCase().includes(q)) return false;
+      if (tierFilter !== "all" && m.tier !== tierFilter) return false;
+      if (providerFilter !== "all" && m.provider !== providerFilter) return false;
+      if (availableOnly && !m.available) return false;
+      return true;
+    }),
+    [allModels, search, tierFilter, providerFilter, availableOnly],
+  );
 
   // Reset page when filters change
   useEffect(() => { setPage(0); }, [search, tierFilter, providerFilter, availableOnly]);
@@ -92,6 +104,7 @@ export function ModelsPage() {
         icon={<Cpu className="h-4 w-4" />}
         isFetching={modelsQuery.isFetching}
         onRefresh={() => modelsQuery.refetch()}
+        helpText={t("models.help")}
         actions={allModels.length > 0 ? <Badge variant="brand">{totalAvailable} / {allModels.length} {t("models.available")}</Badge> : undefined}
       />
       {/* Error state */}

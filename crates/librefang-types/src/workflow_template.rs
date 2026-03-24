@@ -6,6 +6,18 @@
 //! that are substituted at instantiation time.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+/// Localized name + description for a template.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct TemplateI18n {
+    /// Translated name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Translated description.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
 
 /// A reusable workflow blueprint with parameterized steps.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -28,6 +40,9 @@ pub struct WorkflowTemplate {
     pub tags: Vec<String>,
     /// ISO-8601 creation timestamp (set by the registry on insert).
     pub created_at: Option<String>,
+    /// Per-language overrides for name/description. Key is a BCP-47 tag (e.g. "zh", "ja").
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub i18n: HashMap<String, TemplateI18n>,
 }
 
 /// A single parameter declaration inside a workflow template.
@@ -107,6 +122,7 @@ mod tests {
             ],
             tags: vec!["nlp".into(), "translation".into()],
             created_at: Some("2025-01-01T00:00:00Z".into()),
+            i18n: Default::default(),
         };
 
         let json = serde_json::to_string(&tpl).expect("serialize");

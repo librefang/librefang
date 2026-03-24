@@ -18,7 +18,7 @@ export function NodeEditor({ node, onUpdate }: any) {
           <input 
             value={node.data.label} 
             onChange={(e) => onUpdate(node.id, { label: e.target.value })}
-            className="w-full rounded-xl border border-border-subtle bg-main px-4 py-2 text-sm focus:border-brand outline-none transition-all"
+            className="w-full rounded-xl border border-border-subtle bg-main px-4 py-2 text-sm focus:border-brand outline-none transition-colors"
           />
         </div>
         <div>

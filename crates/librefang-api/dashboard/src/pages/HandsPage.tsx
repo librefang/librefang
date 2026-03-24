@@ -1,8 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import Markdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+import { useNavigate } from "@tanstack/react-router";
+import { router } from "../router";
 import {
   activateHand,
   deactivateHand,
@@ -12,13 +12,10 @@ import {
   resumeHand,
   getHandStats,
   getHandSettings,
-  sendHandMessage,
-  getHandSession,
   type HandDefinitionItem,
   type HandInstanceItem,
   type HandStatsResponse,
   type HandSettingsResponse,
-  type HandSessionMessage,
 } from "../api";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
@@ -40,10 +37,6 @@ import {
   Wrench,
   Activity,
   MessageCircle,
-  Send,
-  User,
-  Bot,
-  AlertCircle,
   ChevronRight,
 } from "lucide-react";
 import { PageHeader } from "../components/ui/PageHeader";
@@ -64,35 +57,10 @@ if (typeof document !== "undefined" && !document.getElementById("hands-keyframes
   document.head.appendChild(style);
 }
 
-/* ── Markdown components for chat ─────────────────────────── */
-const mdComponents = {
-  p: ({ children }: Record<string, unknown>) => <p className="mb-1.5 last:mb-0">{children as React.ReactNode}</p>,
-  ul: ({ children }: Record<string, unknown>) => <ul className="list-disc pl-4 mb-1.5 space-y-0.5">{children as React.ReactNode}</ul>,
-  ol: ({ children }: Record<string, unknown>) => <ol className="list-decimal pl-4 mb-1.5 space-y-0.5">{children as React.ReactNode}</ol>,
-  li: ({ children }: Record<string, unknown>) => <li className="text-xs">{children as React.ReactNode}</li>,
-  code: (props: Record<string, unknown>) => {
-    const { children } = props;
-    const text = String(children);
-    const isBlock = text.includes("\n");
-    return isBlock
-      ? <pre className="p-2 rounded-lg bg-main font-mono text-[10px] overflow-x-auto mb-1.5"><code>{children as React.ReactNode}</code></pre>
-      : <code className="px-1 py-0.5 rounded bg-main font-mono text-[10px]">{children as React.ReactNode}</code>;
-  },
-  pre: ({ children }: Record<string, unknown>) => <>{children as React.ReactNode}</>,
-  strong: ({ children }: Record<string, unknown>) => <strong className="font-bold">{children as React.ReactNode}</strong>,
-};
 
 /* ── Inline metrics for active hand cards ─────────────────── */
 
-function HandMetricsInline({ instanceId }: { instanceId: string }) {
-  const statsQuery = useQuery({
-    queryKey: ["hands", "stats", instanceId],
-    queryFn: () => getHandStats(instanceId),
-    refetchInterval: REFRESH_MS,
-    enabled: !!instanceId,
-  });
-
-  const metrics = statsQuery.data?.metrics;
+function HandMetricsInline({ metrics }: { metrics?: Record<string, { value?: unknown; format?: string }> }) {
   if (!metrics || Object.keys(metrics).length === 0) return null;
 
   const entries = Object.entries(metrics).slice(0, 3);
@@ -105,258 +73,6 @@ function HandMetricsInline({ instanceId }: { instanceId: string }) {
           <span className="text-brand/80">{String(m.value ?? "-")}</span>
         </span>
       ))}
-    </div>
-  );
-}
-
-/* ── Chat panel for an active hand instance ──────────────── */
-
-interface ChatMsg {
-  id: string;
-  role: "user" | "assistant";
-  content: string;
-  timestamp: Date;
-  isLoading?: boolean;
-  error?: string;
-  tokens?: { input?: number; output?: number };
-  cost_usd?: number;
-}
-
-function HandChatPanel({
-  instanceId,
-  handName,
-  onClose,
-}: {
-  instanceId: string;
-  handName: string;
-  onClose: () => void;
-}) {
-  const { t } = useTranslation();
-  const [messages, setMessages] = useState<ChatMsg[]>([]);
-  const [input, setInput] = useState("");
-  const [sending, setSending] = useState(false);
-  const endRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLTextAreaElement>(null);
-
-  useEffect(() => {
-    getHandSession(instanceId)
-      .then((data) => {
-        if (data.messages?.length) {
-          const hist: ChatMsg[] = data.messages.map((m: HandSessionMessage, i: number) => ({
-            id: `hist-${i}`,
-            role: m.role === "user" ? "user" as const : "assistant" as const,
-            content: m.content || "",
-            timestamp: m.timestamp ? new Date(m.timestamp) : new Date(),
-          }));
-          setMessages(hist);
-        }
-      })
-      .catch(() => {});
-  }, [instanceId]);
-
-  useEffect(() => {
-    if (messages.length > 0) {
-      setTimeout(() => endRef.current?.scrollIntoView({ behavior: "smooth" }), 60);
-    }
-  }, [messages]);
-
-  useEffect(() => {
-    setTimeout(() => inputRef.current?.focus(), 100);
-  }, []);
-
-  const handleSend = useCallback(async () => {
-    const text = input.trim();
-    if (!text || sending) return;
-
-    const userMsg: ChatMsg = {
-      id: `u-${Date.now()}`,
-      role: "user",
-      content: text,
-      timestamp: new Date(),
-    };
-    const botMsg: ChatMsg = {
-      id: `b-${Date.now()}`,
-      role: "assistant",
-      content: "",
-      timestamp: new Date(),
-      isLoading: true,
-    };
-
-    setMessages((prev) => [...prev, userMsg, botMsg]);
-    setInput("");
-    setSending(true);
-
-    try {
-      const res = await sendHandMessage(instanceId, text);
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === botMsg.id
-            ? {
-                ...m,
-                content: res.response || "",
-                isLoading: false,
-                tokens: { input: res.input_tokens, output: res.output_tokens },
-                cost_usd: res.cost_usd,
-              }
-            : m
-        )
-      );
-    } catch (err) {
-      const errMsg = err instanceof Error ? err.message : "Error";
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === botMsg.id ? { ...m, isLoading: false, error: errMsg } : m
-        )
-      );
-    } finally {
-      setSending(false);
-      setTimeout(() => inputRef.current?.focus(), 50);
-    }
-  }, [input, sending, instanceId]);
-
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40 backdrop-blur-xl backdrop-saturate-150"
-      onClick={onClose}
-    >
-      <div
-        className="bg-surface rounded-t-2xl sm:rounded-2xl shadow-2xl border border-border-subtle w-full sm:w-[640px] sm:max-w-[92vw] h-[85vh] sm:h-[80vh] flex flex-col animate-fade-in-scale"
-        onClick={(e) => e.stopPropagation()}
-      >
-        {/* Header */}
-        <div className="px-5 py-3.5 border-b border-border-subtle flex items-center justify-between shrink-0">
-          <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-lg bg-brand/15 text-brand flex items-center justify-center">
-              <MessageCircle className="w-4 h-4" />
-            </div>
-            <div>
-              <h3 className="text-sm font-bold">{handName}</h3>
-              <p className="text-[9px] text-text-dim/60 font-mono">
-                {instanceId.slice(0, 12)}
-              </p>
-            </div>
-          </div>
-          <button
-            onClick={onClose}
-            className="p-1.5 rounded-lg text-text-dim hover:text-text hover:bg-main transition-colors"
-          >
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-
-        {/* Messages */}
-        <div className="flex-1 overflow-y-auto p-4 space-y-3 scrollbar-thin">
-          {messages.length === 0 && !sending && (
-            <div className="h-full flex flex-col items-center justify-center text-center">
-              <div className="w-14 h-14 rounded-xl bg-brand/10 flex items-center justify-center mb-3">
-                <Bot className="w-7 h-7 text-brand/60" />
-              </div>
-              <p className="text-sm font-bold">{handName}</p>
-              <p className="text-xs text-text-dim mt-1">{t("chat.welcome_system")}</p>
-            </div>
-          )}
-          {messages.map((msg) => (
-            <div
-              key={msg.id}
-              className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
-            >
-              <div className={`max-w-[85%] ${msg.role === "user" ? "items-end" : "items-start"}`}>
-                <div className={`flex items-center gap-1.5 mb-1 ${msg.role === "user" ? "justify-end" : ""}`}>
-                  <div className={`h-5 w-5 rounded-md flex items-center justify-center ${
-                    msg.role === "user"
-                      ? "bg-brand text-white"
-                      : "bg-surface border border-border-subtle"
-                  }`}>
-                    {msg.role === "user" ? (
-                      <User className="h-2.5 w-2.5" />
-                    ) : (
-                      <Bot className="h-2.5 w-2.5 text-brand" />
-                    )}
-                  </div>
-                  <span className="text-[9px] text-text-dim/50">
-                    {msg.timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-                  </span>
-                </div>
-                <div
-                  className={`px-3 py-2 rounded-xl text-xs leading-relaxed ${
-                    msg.role === "user"
-                      ? "bg-brand text-white rounded-tr-sm"
-                      : msg.error
-                        ? "bg-error/10 border border-error/20 text-error rounded-tl-sm"
-                        : "bg-surface border border-border-subtle rounded-tl-sm"
-                  }`}
-                >
-                  {msg.isLoading ? (
-                    <div className="flex items-center gap-1 py-1">
-                      <span className="w-1.5 h-1.5 bg-brand/60 rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
-                      <span className="w-1.5 h-1.5 bg-brand/60 rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
-                      <span className="w-1.5 h-1.5 bg-brand/60 rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
-                    </div>
-                  ) : msg.error ? (
-                    <div className="flex items-start gap-1.5">
-                      <AlertCircle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
-                      <span>{msg.error}</span>
-                    </div>
-                  ) : msg.role === "user" ? (
-                    <span>{msg.content}</span>
-                  ) : (
-                    <Markdown remarkPlugins={[remarkGfm]} components={mdComponents as Record<string, React.ComponentType>}>
-                      {msg.content}
-                    </Markdown>
-                  )}
-                </div>
-                {msg.tokens?.output && !msg.isLoading && (
-                  <div className="flex items-center gap-1.5 mt-1">
-                    <span className="text-[8px] text-text-dim/40 font-mono">
-                      {msg.tokens.output} tok
-                    </span>
-                    {msg.cost_usd !== undefined && msg.cost_usd > 0 && (
-                      <span className="text-[8px] text-success/60 font-mono">
-                        ${msg.cost_usd.toFixed(4)}
-                      </span>
-                    )}
-                  </div>
-                )}
-              </div>
-            </div>
-          ))}
-          <div ref={endRef} />
-        </div>
-
-        {/* Input */}
-        <div className="px-4 py-3 border-t border-border-subtle shrink-0">
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              handleSend();
-            }}
-            className="flex gap-2 items-end"
-          >
-            <textarea
-              ref={inputRef}
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
-                  handleSend();
-                }
-              }}
-              placeholder={t("chat.input_placeholder_with_agent", { name: handName })}
-              disabled={sending}
-              rows={1}
-              className="flex-1 min-h-[40px] max-h-[100px] rounded-xl border border-border-subtle bg-main px-3 py-2.5 text-sm focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none resize-none placeholder:text-text-dim/40"
-            />
-            <button
-              type="submit"
-              disabled={!input.trim() || sending}
-              className="px-3.5 py-2.5 rounded-xl bg-brand text-white font-bold text-sm shadow-lg shadow-brand/20 hover:shadow-brand/40 hover:-translate-y-0.5 transition-all disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:translate-y-0"
-            >
-              <Send className="h-4 w-4" />
-            </button>
-          </form>
-        </div>
-      </div>
     </div>
   );
 }
@@ -719,6 +435,7 @@ function ActiveHandCard({
   onDeactivate,
   onDetail,
   isPending,
+  metrics,
 }: {
   hand: HandDefinitionItem;
   instance: HandInstanceItem;
@@ -726,13 +443,14 @@ function ActiveHandCard({
   onDeactivate: (id: string) => void;
   onDetail: (hand: HandDefinitionItem) => void;
   isPending: boolean;
+  metrics?: Record<string, { value?: unknown; format?: string }>;
 }) {
   const { t } = useTranslation();
   const isPaused = instance.status === "paused";
 
   return (
     <div
-      className={`group relative flex items-center gap-3 px-4 py-3 rounded-2xl border cursor-pointer transition-all shrink-0 min-w-[240px] max-w-[320px] ${
+      className={`group relative flex items-center gap-3 px-4 py-3 rounded-2xl border cursor-pointer transition-colors shrink-0 min-w-[240px] max-w-[320px] ${
         isPaused
           ? "border-warning/30 bg-warning/5 hover:border-warning/50"
           : "border-success/30 bg-success/5 hover:border-success/50"
@@ -759,7 +477,7 @@ function ActiveHandCard({
           )}
         </div>
         {instance.instance_id && (
-          <HandMetricsInline instanceId={instance.instance_id} />
+          <HandMetricsInline metrics={metrics} />
         )}
       </div>
       <div
@@ -814,7 +532,7 @@ function HandCard({
 
   return (
     <div
-      className="group p-4 rounded-2xl border border-border-subtle hover:border-brand/30 bg-surface hover:bg-surface/80 transition-all cursor-pointer"
+      className="group p-4 rounded-2xl border border-border-subtle hover:border-brand/30 bg-surface hover:bg-surface/80 transition-colors cursor-pointer"
       onClick={() => onDetail(hand)}
       role="button"
       tabIndex={0}
@@ -845,7 +563,7 @@ function HandCard({
           {isActive && instance && !isPaused && (
             <button
               onClick={() => onChat(instance.instance_id, hand.name || hand.id)}
-              className="p-1.5 rounded-lg text-brand/60 hover:text-brand hover:bg-brand/10 opacity-0 group-hover:opacity-100 transition-all"
+              className="p-1.5 rounded-lg text-brand/60 hover:text-brand hover:bg-brand/10 opacity-0 group-hover:opacity-100 transition-[colors,opacity]"
               title={t("chat.title")}
             >
               <MessageCircle className="w-4 h-4" />
@@ -855,7 +573,7 @@ function HandCard({
             <button
               onClick={() => onDeactivate(instance.instance_id)}
               disabled={isPending}
-              className="p-1.5 rounded-lg text-text-dim/40 hover:text-error hover:bg-error/10 opacity-0 group-hover:opacity-100 transition-all disabled:opacity-40"
+              className="p-1.5 rounded-lg text-text-dim/40 hover:text-error hover:bg-error/10 opacity-0 group-hover:opacity-100 transition-[colors,opacity] disabled:opacity-40"
               title={t("hands.deactivate")}
             >
               {isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <PowerOff className="w-4 h-4" />}
@@ -864,7 +582,7 @@ function HandCard({
             <button
               onClick={() => onActivate(hand.id)}
               disabled={isPending || !hand.requirements_met}
-              className="p-1.5 rounded-lg text-text-dim/40 hover:text-brand hover:bg-brand/10 opacity-0 group-hover:opacity-100 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+              className="p-1.5 rounded-lg text-text-dim/40 hover:text-brand hover:bg-brand/10 opacity-0 group-hover:opacity-100 transition-[colors,opacity] disabled:opacity-40 disabled:cursor-not-allowed"
               title={t("hands.activate")}
             >
               {isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Power className="w-4 h-4" />}
@@ -930,7 +648,12 @@ export function HandsPage() {
   const [search, setSearch] = useState("");
   const [selectedCategory, setSelectedCategory] = useState<string>("all");
   const [detailHand, setDetailHand] = useState<HandDefinitionItem | null>(null);
-  const [chatInstance, setChatInstance] = useState<{ id: string; name: string } | null>(null);
+  const navigate = useNavigate();
+
+  // Preload ChatPage chunk so navigate is instant
+  useEffect(() => {
+    router.preloadRoute({ to: "/chat", search: { agentId: undefined } }).catch(() => {});
+  }, []);
 
   const handsQuery = useQuery({
     queryKey: ["hands", "list"],
@@ -958,6 +681,23 @@ export function HandsPage() {
 
   const hands = handsQuery.data ?? [];
   const instances = activeQuery.data ?? [];
+
+  // Batch-fetch stats for all active instances (avoids N+1 queries)
+  const activeInstanceIds = useMemo(() => instances.map(i => i.instance_id).filter(Boolean), [instances]);
+  const allStatsQuery = useQuery({
+    queryKey: ["hands", "stats", "batch", activeInstanceIds],
+    queryFn: async () => {
+      const results: Record<string, HandStatsResponse> = {};
+      await Promise.all(activeInstanceIds.map(async id => {
+        try { results[id] = await getHandStats(id); } catch { /* skip */ }
+      }));
+      return results;
+    },
+    refetchInterval: REFRESH_MS,
+    enabled: activeInstanceIds.length > 0,
+  });
+  const allStats = allStatsQuery.data ?? {};
+
   const activeHandIds = useMemo(
     () => new Set(instances.map((i) => i.hand_id).filter(Boolean)),
     [instances],
@@ -1085,6 +825,7 @@ export function HandsPage() {
           activeQuery.refetch();
         }}
         icon={<Hand className="h-4 w-4" />}
+        helpText={t("hands.help")}
         actions={
           <div className="flex items-center gap-3">
             <Badge variant="success" dot>
@@ -1112,10 +853,14 @@ export function HandsPage() {
                 key={instance.instance_id}
                 hand={hand}
                 instance={instance}
-                onChat={(id, name) => setChatInstance({ id, name })}
+                onChat={(instanceId) => {
+                  const inst = instances.find(i => i.instance_id === instanceId);
+                  navigate({ to: "/chat", search: { agentId: inst?.agent_id || instanceId } });
+                }}
                 onDeactivate={handleDeactivate}
                 onDetail={setDetailHand}
                 isPending={pendingId === hand.id || pendingId === instance.instance_id}
+                metrics={allStats[instance.instance_id]?.metrics}
               />
             ))}
           </div>
@@ -1129,7 +874,7 @@ export function HandsPage() {
           <div className="flex items-center gap-1.5 overflow-x-auto scrollbar-thin pb-1 shrink-0">
             <button
               onClick={() => setSelectedCategory("all")}
-              className={`px-3 py-1.5 rounded-xl text-[11px] font-bold whitespace-nowrap transition-all ${
+              className={`px-3 py-1.5 rounded-xl text-[11px] font-bold whitespace-nowrap transition-colors ${
                 selectedCategory === "all"
                   ? "bg-brand text-white shadow-sm shadow-brand/20"
                   : "bg-main text-text-dim hover:text-text hover:bg-main/80 border border-border-subtle"
@@ -1143,7 +888,7 @@ export function HandsPage() {
                 onClick={() =>
                   setSelectedCategory(selectedCategory === cat ? "all" : cat)
                 }
-                className={`px-3 py-1.5 rounded-xl text-[11px] font-bold whitespace-nowrap transition-all ${
+                className={`px-3 py-1.5 rounded-xl text-[11px] font-bold whitespace-nowrap transition-colors ${
                   selectedCategory === cat
                     ? "bg-brand text-white shadow-sm shadow-brand/20"
                     : "bg-main text-text-dim hover:text-text hover:bg-main/80 border border-border-subtle"
@@ -1198,7 +943,10 @@ export function HandsPage() {
                 onActivate={handleActivate}
                 onDeactivate={(id) => handleDeactivate(id)}
                 onDetail={setDetailHand}
-                onChat={(id, name) => setChatInstance({ id, name })}
+                onChat={(instanceId) => {
+                  const inst = instances.find(i => i.instance_id === instanceId);
+                  navigate({ to: "/chat", search: { agentId: inst?.agent_id || instanceId } });
+                }}
                 isPending={pendingId === h.id || (instance ? pendingId === instance.instance_id : false)}
               />
             );
@@ -1217,22 +965,14 @@ export function HandsPage() {
           onDeactivate={handleDeactivate}
           onPause={handlePause}
           onResume={handleResume}
-          onChat={(instanceId, handName) => {
-            setDetailHand(null);
-            setChatInstance({ id: instanceId, name: handName });
+          onChat={(instanceId) => {
+            const inst = instances.find(i => i.instance_id === instanceId);
+            navigate({ to: "/chat", search: { agentId: inst?.agent_id || instanceId } });
           }}
           isPending={pendingId === detailHand.id}
         />
       )}
 
-      {/* Chat panel */}
-      {chatInstance && (
-        <HandChatPanel
-          instanceId={chatInstance.id}
-          handName={chatInstance.name}
-          onClose={() => setChatInstance(null)}
-        />
-      )}
     </div>
   );
 }
