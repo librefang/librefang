@@ -1,7 +1,7 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { listMemories, searchMemories, deleteMemory, getMemoryStats, addMemoryFromText, updateMemory, cleanupMemories, decayMemories, type MemoryStatsResponse } from "../api";
+import { listMemories, searchMemories, deleteMemory, getMemoryStats, addMemoryFromText, updateMemory, cleanupMemories, decayMemories, type MemoryStatsResponse, type MemoryItem } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -174,18 +174,23 @@ export function MemoryPage() {
   const [page, setPage] = useState(0);
   const pageSize = 20;
 
-  const healthQuery = useQuery({
+  const healthQuery = useQuery<{ memory?: { embedding_available: boolean; embedding_provider: string; embedding_model: string; extraction_model: string; proactive_memory_enabled: boolean } }>({
     queryKey: ["health", "detail"],
     queryFn: () => fetch("/api/health/detail").then(r => r.json()),
     staleTime: 60000,
   });
   const memoryConfig = healthQuery.data?.memory;
 
-  const memoryQuery = useQuery({
+  const memoryQuery = useQuery<{ memories: MemoryItem[]; total: number }>({
     queryKey: ["memory", "list", page, search],
-    queryFn: () => search.trim()
-      ? searchMemories({ query: search.trim(), limit: 50 }).then(items => ({ memories: items, total: items.length }))
-      : listMemories({ offset: page * pageSize, limit: pageSize }),
+    queryFn: async () => {
+      if (search.trim()) {
+        const items = await searchMemories({ query: search.trim(), limit: 50 });
+        return { memories: items, total: items.length };
+      }
+      const res = await listMemories({ offset: page * pageSize, limit: pageSize });
+      return { memories: res.memories ?? [], total: res.total ?? 0 };
+    },
     refetchInterval: REFRESH_MS,
   });
   const statsQuery = useQuery({ queryKey: ["memory", "stats"], queryFn: () => getMemoryStats(), refetchInterval: REFRESH_MS * 2 });
@@ -336,7 +341,7 @@ export function MemoryPage() {
             <Card key={m.id} hover padding="md">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1 sm:gap-2 mb-2">
                 <div className="flex items-center gap-2 min-w-0 flex-wrap">
-                  <h2 className="text-xs sm:text-sm font-black truncate font-mono max-w-[180px] sm:max-w-none">{m.id}</h2>
+                  <h2 className="text-xs sm:text-sm font-black truncate font-mono max-w-45 sm:max-w-none">{m.id}</h2>
                   <Badge variant={m.level === "episodic" ? "success" : m.level === "semantic" ? "warning" : "info"}>
                     {m.level || "Vector"}
                   </Badge>
