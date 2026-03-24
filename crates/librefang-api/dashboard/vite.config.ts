@@ -13,6 +13,8 @@ export default defineConfig({
         changeOrigin: true,
         configure: (proxy) => {
           proxy.on("error", () => {});
+          proxy.on("proxyReq", (proxyReq) => { proxyReq.on("error", () => {}); });
+          proxy.on("proxyRes", (proxyRes) => { proxyRes.on("error", () => {}); });
         }
       }
     }
