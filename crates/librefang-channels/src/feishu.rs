@@ -1151,7 +1151,17 @@ fn parse_feishu_event(event: &serde_json::Value, region: FeishuRegion) -> Option
     // Parse the content JSON string
     let content_str = message["content"].as_str().unwrap_or("{}");
     let content_json: serde_json::Value = serde_json::from_str(content_str).unwrap_or_default();
-    let text = content_json["text"].as_str().unwrap_or("");
+    let mut text = content_json["text"].as_str().unwrap_or("").to_string();
+
+    // Strip mention placeholders like "@_user_1 " that Feishu injects for @mentions
+    if let Some(mentions) = message.get("mentions").and_then(|m| m.as_array()) {
+        for mention in mentions {
+            if let Some(key) = mention["key"].as_str() {
+                text = text.replace(key, "");
+            }
+        }
+    }
+    let text = text.trim();
     if text.is_empty() {
         return None;
     }
@@ -1213,9 +1223,21 @@ fn parse_feishu_event(event: &serde_json::Value, region: FeishuRegion) -> Option
         "region".to_string(),
         serde_json::Value::String(channel_label.clone()),
     );
+    // Check if the bot was @mentioned in group messages.
+    // Feishu puts mention info in the mentions array; each mention has a "name"
+    // field. The bot's own mention shows up with the key pattern "@_user_N".
+    let was_mentioned = message
+        .get("mentions")
+        .and_then(|m| m.as_array())
+        .map(|arr| !arr.is_empty())
+        .unwrap_or(false);
     if let Some(mentions) = message.get("mentions") {
         metadata.insert("mentions".to_string(), mentions.clone());
     }
+    metadata.insert(
+        "was_mentioned".to_string(),
+        serde_json::Value::Bool(was_mentioned),
+    );
 
     Some(ChannelMessage {
         channel: ChannelType::Custom(channel_label),
