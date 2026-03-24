@@ -149,8 +149,11 @@ function useChatMessages(agentId: string | null, agents: any[] = []) {
   const { ws, wsConnected } = useWebSocket(agentId);
   const addSkillOutput = useUIStore((s) => s.addSkillOutput);
 
-  // Load history
+  // Load history - clear messages when agent changes
   useEffect(() => {
+    // Clear messages when switching agents
+    setMessages([]);
+
     if (!agentId) return;
     loadAgentSession(agentId)
       .then(session => {
