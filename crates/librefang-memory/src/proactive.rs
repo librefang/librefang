@@ -1122,7 +1122,8 @@ impl ProactiveMemoryStore {
         let user_count = self.semantic.count(agent_id, Some(scopes::USER))? as usize;
         let session_count = self.semantic.count(agent_id, Some(scopes::SESSION))? as usize;
         let agent_count = self.semantic.count(agent_id, Some(scopes::AGENT))? as usize;
-        let total = user_count + session_count + agent_count;
+        let total_all = self.semantic.count(agent_id, None)? as usize;
+        let total = std::cmp::max(total_all, user_count + session_count + agent_count);
 
         // Use SQL GROUP BY to count categories without loading all items into memory
         let categories = self.semantic.count_by_category(Some(agent_id))?;
@@ -1148,7 +1149,9 @@ impl ProactiveMemoryStore {
         let user_count = self.semantic.count_all(Some(scopes::USER))? as usize;
         let session_count = self.semantic.count_all(Some(scopes::SESSION))? as usize;
         let agent_count = self.semantic.count_all(Some(scopes::AGENT))? as usize;
-        let total = user_count + session_count + agent_count;
+        // Include all scopes (e.g. "episodic") in total count
+        let total_all = self.semantic.count_all(None)? as usize;
+        let total = std::cmp::max(total_all, user_count + session_count + agent_count);
 
         // Use SQL GROUP BY to count categories without loading all items into memory
         let categories = self.semantic.count_by_category(None)?;
