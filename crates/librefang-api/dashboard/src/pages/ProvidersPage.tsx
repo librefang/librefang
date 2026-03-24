@@ -1,5 +1,5 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { listProviders, testProvider, setProviderKey, deleteProviderKey, setProviderUrl } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
@@ -481,28 +481,31 @@ export function ProvidersPage() {
   const testMutation = useMutation({ mutationFn: testProvider });
 
   const providers = providersQuery.data ?? [];
-  const configuredCount = providers.filter(p => p.auth_status === "configured").length;
-  const unconfiguredCount = providers.filter(p => p.auth_status !== "configured").length;
+  const configuredCount = useMemo(() => providers.filter(p => p.auth_status === "configured").length, [providers]);
+  const unconfiguredCount = useMemo(() => providers.filter(p => p.auth_status !== "configured").length, [providers]);
 
   // Filter, search, and sort
-  const filteredProviders = [...providers]
-    .filter(p => {
-      const tabMatch = activeTab === "configured" ? p.auth_status === "configured" : p.auth_status !== "configured";
-      const searchMatch = !search || (p.display_name || p.id).toLowerCase().includes(search.toLowerCase()) || p.id.toLowerCase().includes(search.toLowerCase());
+  const filteredProviders = useMemo(
+    () => [...providers]
+      .filter(p => {
+        const tabMatch = activeTab === "configured" ? p.auth_status === "configured" : p.auth_status !== "configured";
+        const searchMatch = !search || (p.display_name || p.id).toLowerCase().includes(search.toLowerCase()) || p.id.toLowerCase().includes(search.toLowerCase());
 
-      let statusMatch = true;
-      if (filterStatus === "reachable") statusMatch = p.reachable === true;
-      else if (filterStatus === "unreachable") statusMatch = p.reachable === false;
+        let statusMatch = true;
+        if (filterStatus === "reachable") statusMatch = p.reachable === true;
+        else if (filterStatus === "unreachable") statusMatch = p.reachable === false;
 
-      return tabMatch && searchMatch && statusMatch;
-    })
-    .sort((a, b) => {
-      let cmp = 0;
-      if (sortField === "name") cmp = a.id.localeCompare(b.id);
-      else if (sortField === "models") cmp = (a.model_count ?? 0) - (b.model_count ?? 0);
-      else if (sortField === "latency") cmp = (a.latency_ms ?? 0) - (b.latency_ms ?? 0);
-      return sortOrder === "asc" ? cmp : -cmp;
-    });
+        return tabMatch && searchMatch && statusMatch;
+      })
+      .sort((a, b) => {
+        let cmp = 0;
+        if (sortField === "name") cmp = a.id.localeCompare(b.id);
+        else if (sortField === "models") cmp = (a.model_count ?? 0) - (b.model_count ?? 0);
+        else if (sortField === "latency") cmp = (a.latency_ms ?? 0) - (b.latency_ms ?? 0);
+        return sortOrder === "asc" ? cmp : -cmp;
+      }),
+    [providers, activeTab, search, filterStatus, sortField, sortOrder],
+  );
 
   const totalPages = Math.ceil(filteredProviders.length / ITEMS_PER_PAGE);
   const paginatedProviders = filteredProviders.slice(

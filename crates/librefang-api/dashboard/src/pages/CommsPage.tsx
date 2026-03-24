@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { listChannels, loadDashboardSnapshot, getCommsTopology, listCommsEvents, type CommsEventItem } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
@@ -119,7 +119,8 @@ export function CommsPage() {
   const eventsQuery = useQuery({
     queryKey: ["comms", "events"],
     queryFn: () => listCommsEvents(50),
-    refetchInterval: 5000
+    refetchInterval: 5000,
+    enabled: activeTab === "events",
   });
 
   const channels = channelsQuery.data ?? [];
@@ -128,20 +129,26 @@ export function CommsPage() {
   const events = eventsQuery.data ?? [];
   const isLoading = channelsQuery.isLoading || snapshotQuery.isLoading;
 
-  const configuredCount = channels.filter(c => c.configured).length;
+  const configuredCount = useMemo(() => channels.filter(c => c.configured).length, [channels]);
 
-  const filteredChannels = channels
-    .filter(c => !search || (c.display_name || c.name).toLowerCase().includes(search.toLowerCase()))
-    .sort((a, b) => {
-      // Configured first
-      if (a.configured && !b.configured) return -1;
-      if (!a.configured && b.configured) return 1;
-      return (a.display_name || a.name).localeCompare(b.display_name || b.name);
-    });
+  const filteredChannels = useMemo(
+    () => channels
+      .filter(c => !search || (c.display_name || c.name).toLowerCase().includes(search.toLowerCase()))
+      .sort((a, b) => {
+        // Configured first
+        if (a.configured && !b.configured) return -1;
+        if (!a.configured && b.configured) return 1;
+        return (a.display_name || a.name).localeCompare(b.display_name || b.name);
+      }),
+    [channels, search],
+  );
 
-  const filteredEvents = events.filter(e =>
-    !search || (e.source_name || e.source_id || "").toLowerCase().includes(search.toLowerCase()) ||
-    (e.detail || "").toLowerCase().includes(search.toLowerCase())
+  const filteredEvents = useMemo(
+    () => events.filter(e =>
+      !search || (e.source_name || e.source_id || "").toLowerCase().includes(search.toLowerCase()) ||
+      (e.detail || "").toLowerCase().includes(search.toLowerCase())
+    ),
+    [events, search],
   );
 
   return (

@@ -1734,7 +1734,7 @@ function CanvasPageInner() {
         )}
 
         {/* Node library (collapsible) */}
-        <div className={`border-r border-border-subtle bg-surface/50 backdrop-blur overflow-y-auto transition-all duration-200 hidden sm:block ${sidebarCollapsed ? "w-10 px-1 py-2" : "w-52 p-3 space-y-4"
+        <div className={`border-r border-border-subtle bg-surface overflow-y-auto transition-all duration-200 hidden sm:block ${sidebarCollapsed ? "w-10 px-1 py-2" : "w-52 p-3 space-y-4"
           }`}>
           <button onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
             className="w-full flex items-center justify-center p-1.5 rounded-lg hover:bg-main transition-colors mb-1">
@@ -1775,10 +1775,10 @@ function CanvasPageInner() {
           <div className="absolute top-3 left-3 right-3 z-10 flex gap-2">
             <input type="text" value={workflowName} onChange={(e) => setWorkflowName(e.target.value)}
               placeholder={t("workflows.workflow_name")}
-              className="flex-1 max-w-xs rounded-xl border border-border-subtle bg-surface/90 backdrop-blur px-3 py-2 text-sm font-bold focus:border-brand focus:ring-2 focus:ring-brand/20 outline-none shadow-sm" />
+              className="flex-1 max-w-xs rounded-xl border border-border-subtle bg-surface px-3 py-2 text-sm font-bold focus:border-brand focus:ring-2 focus:ring-brand/20 outline-none shadow-sm" />
             <input type="text" value={workflowDescription} onChange={(e) => setWorkflowDescription(e.target.value)}
               placeholder={t("workflows.description")}
-              className="flex-1 max-w-sm rounded-xl border border-border-subtle bg-surface/90 backdrop-blur px-3 py-2 text-sm text-text-dim focus:border-brand focus:ring-2 focus:ring-brand/20 outline-none shadow-sm" />
+              className="flex-1 max-w-sm rounded-xl border border-border-subtle bg-surface px-3 py-2 text-sm text-text-dim focus:border-brand focus:ring-2 focus:ring-brand/20 outline-none shadow-sm" />
           </div>
 
           {/* Node configuration panel */}

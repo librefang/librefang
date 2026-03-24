@@ -35,7 +35,7 @@ function ToastItem({ message, type, onDismiss }: { message: string; type: "succe
 
   return (
     <div
-      className={`pointer-events-auto flex items-center gap-3 rounded-xl border px-4 py-3 shadow-lg backdrop-blur-md animate-in slide-in-from-right-5 ${styles[type]}`}
+      className={`pointer-events-auto flex items-center gap-3 rounded-xl border px-4 py-3 shadow-lg animate-in slide-in-from-right-5 ${styles[type]}`}
       role="alert"
     >
       {icons[type]}

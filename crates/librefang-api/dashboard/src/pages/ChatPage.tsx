@@ -35,45 +35,15 @@ const SLASH_COMMANDS = [
   { cmd: "/info", desc: "Show current agent info" },
 ];
 
-// Streaming typewriter effect + Markdown
-function Typewriter({ text, speed = 15 }: { text: string; speed?: number }) {
-  const [displayed, setDisplayed] = useState("");
-  const done = displayed.length >= text.length;
 
-  useEffect(() => {
-    if (!text) { setDisplayed(""); return; }
-    if (text.length <= displayed.length) { setDisplayed(text); return; }
-
-    const interval = setInterval(() => {
-      setDisplayed(prev => {
-        if (prev.length >= text.length) {
-          clearInterval(interval);
-          return text;
-        }
-        return text.slice(0, prev.length + 2);
-      });
-    }, speed);
-
-    return () => clearInterval(interval);
-  }, [text, speed]);
-
-  if (done) {
-    return (
-      <MarkdownContent
-        remarkPlugins={[remarkMath]}
-        rehypePlugins={[rehypeKatex]}
-      >
-        {text}
-      </MarkdownContent>
-    );
-  }
-  return <span>{displayed}</span>;
-}
-
-// WebSocket hook for real-time streaming
+// WebSocket hook with auto-reconnect
 function useWebSocket(agentId: string | null) {
   const wsRef = useRef<WebSocket | null>(null);
   const [wsConnected, setWsConnected] = useState(false);
+  const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const retriesRef = useRef(0);
+  // Callback fired when WS closes while a response is pending
+  const onDropRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     if (!agentId) {
@@ -81,40 +51,57 @@ function useWebSocket(agentId: string | null) {
       return;
     }
 
-    // Determine WS URL from current location
     const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
     const host = window.location.host;
     const url = `${proto}//${host}/api/agents/${encodeURIComponent(agentId)}/ws`;
 
-    try {
-      const ws = new WebSocket(url);
+    function connect() {
+      try {
+        const ws = new WebSocket(url);
 
-      ws.onopen = () => {
-        setWsConnected(true);
-      };
+        ws.onopen = () => {
+          setWsConnected(true);
+          retriesRef.current = 0;
+        };
 
-      ws.onclose = () => {
+        ws.onclose = () => {
+          setWsConnected(false);
+          // Notify pending response handler
+          if (onDropRef.current) {
+            onDropRef.current();
+            onDropRef.current = null;
+          }
+          // Auto-reconnect with exponential backoff (max 15s)
+          const delay = Math.min(1000 * 2 ** retriesRef.current, 15000);
+          retriesRef.current++;
+          reconnectTimer.current = setTimeout(connect, delay);
+        };
+
+        ws.onerror = () => {
+          // onclose will fire after onerror, reconnect handled there
+        };
+
+        wsRef.current = ws;
+      } catch {
         setWsConnected(false);
-      };
-
-      ws.onerror = () => {
-        setWsConnected(false);
-      };
-
-      wsRef.current = ws;
-    } catch {
-      setWsConnected(false);
+      }
     }
 
+    connect();
+
     return () => {
+      if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
+      retriesRef.current = 0;
+      onDropRef.current = null;
       if (wsRef.current) {
+        wsRef.current.onclose = null; // prevent reconnect on intentional close
         wsRef.current.close();
         wsRef.current = null;
       }
     };
   }, [agentId]);
 
-  return { ws: wsRef, wsConnected };
+  return { ws: wsRef, wsConnected, onDropRef };
 }
 
 // Per-agent session cache — survives agent switches within the same page lifecycle
@@ -124,7 +111,7 @@ const sessionCache = new Map<string, ChatMessage[]>();
 function useChatMessages(agentId: string | null, agents: any[] = []) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isLoading, setIsLoading] = useState(false);
-  const { ws, wsConnected } = useWebSocket(agentId);
+  const { ws, wsConnected, onDropRef } = useWebSocket(agentId);
   const addSkillOutput = useUIStore((s) => s.addSkillOutput);
 
   // Save current messages to cache when switching away
@@ -231,9 +218,49 @@ function useChatMessages(agentId: string | null, agents: any[] = []) {
     setMessages(prev => [...prev, userMsg, botMsg]);
     setIsLoading(true);
 
+    // Helper: send via HTTP (used as primary fallback and WS drop recovery)
+    const sendViaHttp = async () => {
+      try {
+        const response = await sendAgentMessage(agentId, trimmed);
+        const fullContent = response.response || "";
+        setMessages(prev => prev.map(m =>
+          m.id === botMsg.id
+            ? {
+                ...m, content: fullContent, isStreaming: false,
+                tokens: { output: response.output_tokens, input: response.input_tokens },
+                cost_usd: response.cost_usd,
+                memories_saved: response.memories_saved,
+                memories_used: response.memories_used,
+              }
+            : m
+        ));
+        if (response.memories_saved?.length) {
+          const agentName = agents.find(a => a.id === agentId)?.name;
+          response.memories_saved.forEach((mem: string) => {
+            addSkillOutput({ skillName: "memory", agentId: agentId || undefined, agentName, content: mem });
+          });
+        }
+      } catch (err) {
+        const errorMsg = err instanceof Error ? err.message : "Unknown error";
+        setMessages(prev => prev.map(m =>
+          m.id === botMsg.id ? { ...m, isStreaming: false, error: errorMsg } : m
+        ));
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
     // Try WebSocket streaming first
     if (wsConnected && ws.current && ws.current.readyState === WebSocket.OPEN) {
       try {
+        let responded = false;
+
+        const cleanup = () => {
+          responded = true;
+          onDropRef.current = null;
+          ws.current?.removeEventListener("message", handleMessage);
+        };
+
         // Set up message handler for this response
         const handleMessage = (event: MessageEvent) => {
           try {
@@ -250,7 +277,6 @@ function useChatMessages(agentId: string | null, agents: any[] = []) {
                 ));
               }
             } else if (data.type === "tool_result") {
-              // Persist tool output for display
               const entry = normalizeToolOutput(data);
               if (entry) {
                 addSkillOutput({ skillName: entry.tool, agentId: agentId || undefined, content: entry.content });
@@ -258,14 +284,14 @@ function useChatMessages(agentId: string | null, agents: any[] = []) {
             } else if (data.type === "silent_complete") {
               setMessages(prev => prev.filter(m => m.id !== botMsg.id));
               setIsLoading(false);
-              ws.current?.removeEventListener("message", handleMessage);
+              cleanup();
             } else if (data.type === "error") {
               const error = data.content || "WebSocket error";
               setMessages(prev => prev.map(m =>
                 m.id === botMsg.id ? { ...m, isStreaming: false, error } : m
               ));
               setIsLoading(false);
-              ws.current?.removeEventListener("message", handleMessage);
+              cleanup();
             } else if (data.type === "response") {
               setMessages(prev => prev.map(m =>
                 m.id === botMsg.id
@@ -279,7 +305,7 @@ function useChatMessages(agentId: string | null, agents: any[] = []) {
                   : m
               ));
               setIsLoading(false);
-              ws.current?.removeEventListener("message", handleMessage);
+              cleanup();
             }
           } catch {
             // Non-JSON text chunk
@@ -289,22 +315,23 @@ function useChatMessages(agentId: string | null, agents: any[] = []) {
           }
         };
 
+        // Register fallback: if WS drops mid-stream, retry via HTTP
+        onDropRef.current = () => {
+          if (!responded) {
+            ws.current?.removeEventListener("message", handleMessage);
+            sendViaHttp();
+          }
+        };
+
         ws.current.addEventListener("message", handleMessage);
         ws.current.send(JSON.stringify({ type: "message", content: trimmed }));
 
-        // Timeout fallback - if no response in 60s, clean up
+        // Timeout: if no response in 60s, fall back to HTTP
         setTimeout(() => {
-          ws.current?.removeEventListener("message", handleMessage);
-          setMessages(prev => {
-            const msg = prev.find(m => m.id === botMsg.id);
-            if (msg?.isStreaming) {
-              setIsLoading(false);
-              return prev.map(m =>
-                m.id === botMsg.id ? { ...m, isStreaming: false } : m
-              );
-            }
-            return prev;
-          });
+          if (!responded) {
+            cleanup();
+            sendViaHttp();
+          }
         }, 60000);
 
         return;
@@ -313,48 +340,8 @@ function useChatMessages(agentId: string | null, agents: any[] = []) {
       }
     }
 
-    // HTTP fallback
-    try {
-      const response = await sendAgentMessage(agentId, trimmed);
-      const fullContent = response.response || "";
-      let currentLength = 0;
-
-      const streamInterval = setInterval(() => {
-        if (currentLength < fullContent.length) {
-          currentLength += Math.min(3, fullContent.length - currentLength);
-          setMessages(prev => prev.map(m =>
-            m.id === botMsg.id ? { ...m, content: fullContent.slice(0, currentLength) } : m
-          ));
-        } else {
-          clearInterval(streamInterval);
-          setMessages(prev => prev.map(m =>
-            m.id === botMsg.id
-              ? {
-                  ...m, isStreaming: false,
-                  tokens: { output: response.output_tokens, input: response.input_tokens },
-                  cost_usd: response.cost_usd,
-                  memories_saved: response.memories_saved,
-                  memories_used: response.memories_used,
-                }
-              : m
-          ));
-          // Persist skill outputs
-          if (response.memories_saved?.length) {
-            const agentName = agents.find(a => a.id === agentId)?.name;
-            response.memories_saved.forEach((mem: string) => {
-              addSkillOutput({ skillName: "memory", agentId: agentId || undefined, agentName, content: mem });
-            });
-          }
-          setIsLoading(false);
-        }
-      }, 20);
-    } catch (err) {
-      const errorMsg = err instanceof Error ? err.message : "Unknown error";
-      setMessages(prev => prev.map(m =>
-        m.id === botMsg.id ? { ...m, isStreaming: false, error: errorMsg } : m
-      ));
-      setIsLoading(false);
-    }
+    // HTTP fallback — direct, no fake streaming
+    await sendViaHttp();
   }, [agentId, agents, wsConnected, ws]);
 
   const clearHistory = useCallback(() => setMessages([]), []);

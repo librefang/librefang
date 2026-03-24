@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { listAuditRecent } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
@@ -23,15 +23,21 @@ export function LogsPage() {
   const auditQuery = useQuery({ queryKey: ["audit", "recent", limit], queryFn: () => listAuditRecent(limit), refetchInterval: REFRESH_MS });
 
   const logs = auditQuery.data?.entries ?? [];
-  const modules = Array.from(new Set(logs.map((l: any) => l.action || l.source).filter(Boolean))) as string[];
+  const modules = useMemo(
+    () => Array.from(new Set(logs.map((l: any) => l.action || l.source).filter(Boolean))) as string[],
+    [logs],
+  );
   const [search, setSearch] = useState("");
   const [moduleFilter, setModuleFilter] = useState<string | null>(null);
 
-  const filteredLogs = logs.filter((l: any) => {
-    const matchesSearch = !search || (l.detail || l.outcome || l.message || "").toLowerCase().includes(search.toLowerCase());
-    const matchesModule = !moduleFilter || (l.action || l.source) === moduleFilter;
-    return matchesSearch && matchesModule;
-  });
+  const filteredLogs = useMemo(
+    () => logs.filter((l: any) => {
+      const matchesSearch = !search || (l.detail || l.outcome || l.message || "").toLowerCase().includes(search.toLowerCase());
+      const matchesModule = !moduleFilter || (l.action || l.source) === moduleFilter;
+      return matchesSearch && matchesModule;
+    }),
+    [logs, search, moduleFilter],
+  );
 
   const handleExport = () => {
     const blob = new Blob([JSON.stringify(logs, null, 2)], { type: "application/json" });

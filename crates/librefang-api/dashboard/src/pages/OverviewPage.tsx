@@ -131,7 +131,7 @@ export function OverviewPage() {
           <p className="mt-1 sm:mt-2 text-text-dim max-w-2xl font-medium text-xs sm:text-base hidden sm:block">{t("overview.description")}</p>
         </div>
         <div className="hidden sm:flex items-center gap-3">
-          <div className="flex items-center gap-2 rounded-full border border-border-subtle bg-surface px-4 py-1.5 backdrop-blur-md shadow-sm">
+          <div className="flex items-center gap-2 rounded-full border border-border-subtle bg-surface px-4 py-1.5 shadow-sm">
             <div className={`h-2 w-2 rounded-full ${snapshot?.health?.status === "ok" ? "bg-success shadow-[0_0_8px_var(--success-color)]" : "bg-warning animate-pulse"}`} />
             <span className="text-xs font-semibold text-slate-600 dark:text-slate-300">
               {snapshot?.health?.status === "ok" ? t("overview.operational") : t("overview.alert")}

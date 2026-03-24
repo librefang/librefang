@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { listSkills, uninstallSkill, clawhubSearch, clawhubInstall, clawhubGetSkill, skillhubSearch, skillhubBrowse, skillhubInstall, skillhubGetSkill, type ClawHubBrowseItem } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
@@ -373,21 +373,27 @@ export function SkillsPage() {
   const isSkillhubRateLimited = skillhubError?.message?.includes("429") || skillhubError?.message?.includes("rate") || skillhubError?.message?.includes("Rate limit") || skillhubError?.status === 429;
 
   // Filter & paginate ClawHub
-  const filteredMarketplace = marketplaceSkills
-    .map(s => ({
-      ...s,
-      is_installed: isInstalledFromMarketplace(s.slug, "clawhub")
-    }))
-    .filter(s => !search || s.name.toLowerCase().includes(search.toLowerCase()) || s.description?.toLowerCase().includes(search.toLowerCase()));
+  const filteredMarketplace = useMemo(
+    () => marketplaceSkills
+      .map(s => ({
+        ...s,
+        is_installed: isInstalledFromMarketplace(s.slug, "clawhub")
+      }))
+      .filter(s => !search || s.name.toLowerCase().includes(search.toLowerCase()) || s.description?.toLowerCase().includes(search.toLowerCase())),
+    [marketplaceSkills, installedSkills, search],
+  );
 
   const totalPages = Math.ceil(filteredMarketplace.length / ITEMS_PER_PAGE);
   const paginatedMarketplace = filteredMarketplace.slice((page - 1) * ITEMS_PER_PAGE, page * ITEMS_PER_PAGE);
 
   // Filter & paginate Skillhub
-  const filteredSkillhub = skillhubSkills.map(s => ({
-    ...s,
-    is_installed: isInstalledFromMarketplace(s.slug, "skillhub")
-  }));
+  const filteredSkillhub = useMemo(
+    () => skillhubSkills.map(s => ({
+      ...s,
+      is_installed: isInstalledFromMarketplace(s.slug, "skillhub")
+    })),
+    [skillhubSkills, installedSkills],
+  );
 
   const skillhubTotalPages = Math.ceil(filteredSkillhub.length / ITEMS_PER_PAGE);
   const paginatedSkillhub = filteredSkillhub.slice((page - 1) * ITEMS_PER_PAGE, page * ITEMS_PER_PAGE);

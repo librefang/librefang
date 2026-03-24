@@ -150,13 +150,13 @@ export function GoalsPage() {
     return result;
   }, [expandedById, goals]);
 
-  const stats = {
+  const stats = useMemo(() => ({
     total: goals.length,
     completed: goals.filter(g => g.status === "completed").length,
     inProgress: goals.filter(g => g.status === "in_progress").length,
     pending: goals.filter(g => g.status === "pending").length,
     pct: goals.length > 0 ? Math.round((goals.filter(g => g.status === "completed").length / goals.length) * 100) : 0,
-  };
+  }), [goals]);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
 
   const inputClass = "rounded-xl border border-border-subtle bg-main px-4 py-2 text-sm focus:border-brand outline-none transition-colors";

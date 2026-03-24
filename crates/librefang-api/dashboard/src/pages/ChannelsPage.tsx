@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { listChannels, configureChannel } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
@@ -438,22 +438,25 @@ export function ChannelsPage() {
   const channelsQuery = useQuery({ queryKey: ["channels", "list"], queryFn: listChannels, refetchInterval: REFRESH_MS });
 
   const channels = channelsQuery.data ?? [];
-  const configuredCount = channels.filter(c => c.configured).length;
-  const unconfiguredCount = channels.filter(c => !c.configured).length;
+  const configuredCount = useMemo(() => channels.filter(c => c.configured).length, [channels]);
+  const unconfiguredCount = useMemo(() => channels.filter(c => !c.configured).length, [channels]);
 
   // Filter, search, and sort
-  const filteredChannels = [...channels]
-    .filter(c => {
-      const tabMatch = activeTab === "configured" ? c.configured : !c.configured;
-      const searchMatch = !search || (c.display_name || c.name).toLowerCase().includes(search.toLowerCase()) || c.category?.toLowerCase().includes(search.toLowerCase());
-      return tabMatch && searchMatch;
-    })
-    .sort((a, b) => {
-      let cmp = 0;
-      if (sortField === "name") cmp = a.name.localeCompare(b.name);
-      else if (sortField === "category") cmp = (a.category || "").localeCompare(b.category || "");
-      return sortOrder === "asc" ? cmp : -cmp;
-    });
+  const filteredChannels = useMemo(
+    () => [...channels]
+      .filter(c => {
+        const tabMatch = activeTab === "configured" ? c.configured : !c.configured;
+        const searchMatch = !search || (c.display_name || c.name).toLowerCase().includes(search.toLowerCase()) || c.category?.toLowerCase().includes(search.toLowerCase());
+        return tabMatch && searchMatch;
+      })
+      .sort((a, b) => {
+        let cmp = 0;
+        if (sortField === "name") cmp = a.name.localeCompare(b.name);
+        else if (sortField === "category") cmp = (a.category || "").localeCompare(b.category || "");
+        return sortOrder === "asc" ? cmp : -cmp;
+      }),
+    [channels, activeTab, search, sortField, sortOrder],
+  );
 
   const totalPages = Math.ceil(filteredChannels.length / ITEMS_PER_PAGE);
   const paginatedChannels = filteredChannels.slice(
