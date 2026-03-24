@@ -8,10 +8,69 @@ use librefang_types::agent::{
     PromptVersion,
 };
 use librefang_types::error::{LibreFangError, LibreFangResult};
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, Row};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
+
+fn row_to_prompt_version(row: &Row) -> rusqlite::Result<PromptVersion> {
+    let id: String = row.get(0)?;
+    let agent_id: String = row.get(1)?;
+    let tools: String = row.get(5)?;
+    let variables: String = row.get(6)?;
+    let created_at: String = row.get(7)?;
+    let is_active: i32 = row.get(9)?;
+
+    Ok(PromptVersion {
+        id: Uuid::parse_str(&id).unwrap_or_default(),
+        agent_id: AgentId::from_str(&agent_id).unwrap_or_default(),
+        version: row.get::<_, i64>(2)? as u32,
+        content_hash: row.get(3)?,
+        system_prompt: row.get(4)?,
+        tools: serde_json::from_str(&tools).unwrap_or_default(),
+        variables: serde_json::from_str(&variables).unwrap_or_default(),
+        created_at: DateTime::parse_from_rfc3339(&created_at)
+            .map(|dt| dt.with_timezone(&Utc))
+            .unwrap_or_else(|_| Utc::now()),
+        created_by: row.get(8)?,
+        is_active: is_active != 0,
+        description: row.get(10)?,
+    })
+}
+
+fn row_to_prompt_experiment(row: &Row) -> rusqlite::Result<PromptExperiment> {
+    let id: String = row.get(0)?;
+    let agent_id: String = row.get(2)?;
+    let status: String = row.get(3)?;
+    let traffic_split: String = row.get(4)?;
+    let success_criteria: String = row.get(5)?;
+    let started_at: Option<String> = row.get(6)?;
+    let ended_at: Option<String> = row.get(7)?;
+    let created_at: String = row.get(8)?;
+
+    Ok(PromptExperiment {
+        id: Uuid::parse_str(&id).unwrap_or_default(),
+        name: row.get(1)?,
+        agent_id: AgentId::from_str(&agent_id).unwrap_or_default(),
+        status: serde_json::from_str(&status).unwrap_or(ExperimentStatus::Draft),
+        traffic_split: serde_json::from_str(&traffic_split).unwrap_or_default(),
+        success_criteria: serde_json::from_str(&success_criteria).unwrap_or_default(),
+        started_at: started_at.and_then(|s| {
+            DateTime::parse_from_rfc3339(&s)
+                .map(|dt| dt.with_timezone(&Utc))
+                .ok()
+        }),
+        ended_at: ended_at.and_then(|s| {
+            DateTime::parse_from_rfc3339(&s)
+                .map(|dt| dt.with_timezone(&Utc))
+                .ok()
+        }),
+        created_at: DateTime::parse_from_rfc3339(&created_at)
+            .map(|dt| dt.with_timezone(&Utc))
+            .unwrap_or_else(|_| Utc::now()),
+        variants: vec![],
+    })
+}
 
 #[derive(Clone)]
 pub struct PromptStore {
@@ -73,30 +132,7 @@ impl PromptStore {
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
         let rows = stmt
-            .query_map([agent_id.to_string()], |row| {
-                let id: String = row.get(0)?;
-                let agent_id: String = row.get(1)?;
-                let tools: String = row.get(5)?;
-                let variables: String = row.get(6)?;
-                let created_at: String = row.get(7)?;
-                let is_active: i32 = row.get(9)?;
-
-                Ok(PromptVersion {
-                    id: Uuid::parse_str(&id).unwrap_or_default(),
-                    agent_id: AgentId::from_str(&agent_id).unwrap_or_default(),
-                    version: row.get::<_, i64>(2)? as u32,
-                    content_hash: row.get(3)?,
-                    system_prompt: row.get(4)?,
-                    tools: serde_json::from_str(&tools).unwrap_or_default(),
-                    variables: serde_json::from_str(&variables).unwrap_or_default(),
-                    created_at: DateTime::parse_from_rfc3339(&created_at)
-                        .map(|dt| dt.with_timezone(&Utc))
-                        .unwrap_or_else(|_| Utc::now()),
-                    created_by: row.get(8)?,
-                    is_active: is_active != 0,
-                    description: row.get(10)?,
-                })
-            })
+            .query_map([agent_id.to_string()], row_to_prompt_version)
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
         let mut versions = Vec::new();
@@ -117,30 +153,7 @@ impl PromptStore {
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
         let result = stmt
-            .query_row([id.to_string()], |row| {
-                let id: String = row.get(0)?;
-                let agent_id: String = row.get(1)?;
-                let tools: String = row.get(5)?;
-                let variables: String = row.get(6)?;
-                let created_at: String = row.get(7)?;
-                let is_active: i32 = row.get(9)?;
-
-                Ok(PromptVersion {
-                    id: Uuid::parse_str(&id).unwrap_or_default(),
-                    agent_id: AgentId::from_str(&agent_id).unwrap_or_default(),
-                    version: row.get::<_, i64>(2)? as u32,
-                    content_hash: row.get(3)?,
-                    system_prompt: row.get(4)?,
-                    tools: serde_json::from_str(&tools).unwrap_or_default(),
-                    variables: serde_json::from_str(&variables).unwrap_or_default(),
-                    created_at: DateTime::parse_from_rfc3339(&created_at)
-                        .map(|dt| dt.with_timezone(&Utc))
-                        .unwrap_or_else(|_| Utc::now()),
-                    created_by: row.get(8)?,
-                    is_active: is_active != 0,
-                    description: row.get(10)?,
-                })
-            })
+            .query_row([id.to_string()], row_to_prompt_version)
             .optional()
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
@@ -158,30 +171,7 @@ impl PromptStore {
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
         let result = stmt
-            .query_row([agent_id.to_string()], |row| {
-                let id: String = row.get(0)?;
-                let agent_id: String = row.get(1)?;
-                let tools: String = row.get(5)?;
-                let variables: String = row.get(6)?;
-                let created_at: String = row.get(7)?;
-                let is_active: i32 = row.get(9)?;
-
-                Ok(PromptVersion {
-                    id: Uuid::parse_str(&id).unwrap_or_default(),
-                    agent_id: AgentId::from_str(&agent_id).unwrap_or_default(),
-                    version: row.get::<_, i64>(2)? as u32,
-                    content_hash: row.get(3)?,
-                    system_prompt: row.get(4)?,
-                    tools: serde_json::from_str(&tools).unwrap_or_default(),
-                    variables: serde_json::from_str(&variables).unwrap_or_default(),
-                    created_at: DateTime::parse_from_rfc3339(&created_at)
-                        .map(|dt| dt.with_timezone(&Utc))
-                        .unwrap_or_else(|_| Utc::now()),
-                    created_by: row.get(8)?,
-                    is_active: is_active != 0,
-                    description: row.get(10)?,
-                })
-            })
+            .query_row([agent_id.to_string()], row_to_prompt_version)
             .optional()
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
@@ -310,47 +300,12 @@ impl PromptStore {
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
         let rows = stmt
-            .query_map([agent_id.to_string()], |row| {
-                let id: String = row.get(0)?;
-                let agent_id: String = row.get(2)?;
-                let status: String = row.get(3)?;
-                let traffic_split: String = row.get(4)?;
-                let success_criteria: String = row.get(5)?;
-                let started_at: Option<String> = row.get(6)?;
-                let ended_at: Option<String> = row.get(7)?;
-                let created_at: String = row.get(8)?;
-
-                Ok(PromptExperiment {
-                    id: Uuid::parse_str(&id).unwrap_or_default(),
-                    name: row.get(1)?,
-                    agent_id: AgentId::from_str(&agent_id).unwrap_or_default(),
-                    status: serde_json::from_str(&status).unwrap_or(ExperimentStatus::Draft),
-                    traffic_split: serde_json::from_str(&traffic_split).unwrap_or_default(),
-                    success_criteria: serde_json::from_str(&success_criteria).unwrap_or_default(),
-                    started_at: started_at.and_then(|s| {
-                        DateTime::parse_from_rfc3339(&s)
-                            .ok()
-                            .map(|dt| dt.with_timezone(&Utc))
-                    }),
-                    ended_at: ended_at.and_then(|s| {
-                        DateTime::parse_from_rfc3339(&s)
-                            .ok()
-                            .map(|dt| dt.with_timezone(&Utc))
-                    }),
-                    created_at: DateTime::parse_from_rfc3339(&created_at)
-                        .map(|dt| dt.with_timezone(&Utc))
-                        .unwrap_or_else(|_| Utc::now()),
-                    variants: Vec::new(),
-                })
-            })
+            .query_map([agent_id.to_string()], row_to_prompt_experiment)
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
         let mut experiments = Vec::new();
-        for row in rows.filter_map(std::result::Result::ok) {
-            let variants = self.get_experiment_variants_internal(&conn, row.id)?;
-            let mut exp = row;
-            exp.variants = variants;
-            experiments.push(exp);
+        for row in rows.flatten() {
+            experiments.push(row);
         }
         Ok(experiments)
     }
@@ -396,48 +351,11 @@ impl PromptStore {
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
         let result = stmt
-            .query_row([id.to_string()], |row| {
-                let id: String = row.get(0)?;
-                let agent_id: String = row.get(2)?;
-                let status: String = row.get(3)?;
-                let traffic_split: String = row.get(4)?;
-                let success_criteria: String = row.get(5)?;
-                let started_at: Option<String> = row.get(6)?;
-                let ended_at: Option<String> = row.get(7)?;
-                let created_at: String = row.get(8)?;
-
-                Ok(PromptExperiment {
-                    id: Uuid::parse_str(&id).unwrap_or_default(),
-                    name: row.get(1)?,
-                    agent_id: AgentId::from_str(&agent_id).unwrap_or_default(),
-                    status: serde_json::from_str(&status).unwrap_or(ExperimentStatus::Draft),
-                    traffic_split: serde_json::from_str(&traffic_split).unwrap_or_default(),
-                    success_criteria: serde_json::from_str(&success_criteria).unwrap_or_default(),
-                    started_at: started_at.and_then(|s| {
-                        DateTime::parse_from_rfc3339(&s)
-                            .ok()
-                            .map(|dt| dt.with_timezone(&Utc))
-                    }),
-                    ended_at: ended_at.and_then(|s| {
-                        DateTime::parse_from_rfc3339(&s)
-                            .ok()
-                            .map(|dt| dt.with_timezone(&Utc))
-                    }),
-                    created_at: DateTime::parse_from_rfc3339(&created_at)
-                        .map(|dt| dt.with_timezone(&Utc))
-                        .unwrap_or_else(|_| Utc::now()),
-                    variants: Vec::new(),
-                })
-            })
+            .query_row([id.to_string()], row_to_prompt_experiment)
             .optional()
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
-        if let Some(mut exp) = result {
-            exp.variants = self.get_experiment_variants_internal(&conn, exp.id)?;
-            Ok(Some(exp))
-        } else {
-            Ok(None)
-        }
+        Ok(result)
     }
 
     pub fn update_experiment_status(
@@ -491,52 +409,15 @@ impl PromptStore {
                       FROM prompt_experiments WHERE agent_id = ?1 AND status = ?2 LIMIT 1")
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
-        let mut rows = stmt
-            .query_map(
+        let result = stmt
+            .query_row(
                 rusqlite::params![agent_id.to_string(), status_running],
-                |row| {
-                    let id: String = row.get(0)?;
-                    let agent_id: String = row.get(2)?;
-                    let status: String = row.get(3)?;
-                    let traffic_split: String = row.get(4)?;
-                    let success_criteria: String = row.get(5)?;
-                    let started_at: Option<String> = row.get(6)?;
-                    let ended_at: Option<String> = row.get(7)?;
-                    let created_at: String = row.get(8)?;
-
-                    Ok(PromptExperiment {
-                        id: Uuid::parse_str(&id).unwrap_or_default(),
-                        name: row.get(1)?,
-                        agent_id: AgentId::from_str(&agent_id).unwrap_or_default(),
-                        status: serde_json::from_str(&status).unwrap_or(ExperimentStatus::Draft),
-                        traffic_split: serde_json::from_str(&traffic_split).unwrap_or_default(),
-                        success_criteria: serde_json::from_str(&success_criteria)
-                            .unwrap_or_default(),
-                        started_at: started_at.and_then(|s| {
-                            DateTime::parse_from_rfc3339(&s)
-                                .ok()
-                                .map(|dt| dt.with_timezone(&Utc))
-                        }),
-                        ended_at: ended_at.and_then(|s| {
-                            DateTime::parse_from_rfc3339(&s)
-                                .ok()
-                                .map(|dt| dt.with_timezone(&Utc))
-                        }),
-                        created_at: DateTime::parse_from_rfc3339(&created_at)
-                            .map(|dt| dt.with_timezone(&Utc))
-                            .unwrap_or_else(|_| Utc::now()),
-                        variants: Vec::new(),
-                    })
-                },
+                row_to_prompt_experiment,
             )
+            .optional()
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
-        if let Some(Ok(mut exp)) = rows.next() {
-            exp.variants = self.get_experiment_variants_internal(&conn, exp.id)?;
-            Ok(Some(exp))
-        } else {
-            Ok(None)
-        }
+        Ok(result)
     }
 
     pub fn record_request(
