@@ -373,6 +373,13 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             .map_err(|e| format!("{e}"))?;
         // When the agent intentionally chose not to reply (NO_REPLY / [[silent]]),
         // return an empty string so the bridge skips sending a response to the channel.
+        tracing::debug!(
+            agent_id = %agent_id,
+            silent = result.silent,
+            response_len = result.response.len(),
+            provider_not_configured = result.provider_not_configured,
+            "Bridge send_message result"
+        );
         if result.silent {
             Ok(String::new())
         } else {
