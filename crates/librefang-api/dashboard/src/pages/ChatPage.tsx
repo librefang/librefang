@@ -12,6 +12,7 @@ import { normalizeToolOutput } from "../lib/chat";
 import { MessageCircle, Send, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, Zap, ShieldAlert, CheckCircle, XCircle } from "lucide-react";
 import { Badge } from "../components/ui/Badge";
 import { useUIStore } from "../lib/store";
+import { Typewriter_v2 } from "../components/Typewriter_v2";
 import "katex/dist/katex.min.css";
 
 interface ChatMessage {
@@ -404,7 +405,7 @@ function MessageBubble({ message }: { message: ChatMessage }) {
         }`}>
           {message.isStreaming ? (
             message.content ? (
-              <Typewriter text={message.content} speed={10} />
+              <Typewriter_v2 text={message.content} speed={10} />
             ) : (
               <div className="flex items-center gap-1">
                 <span className="w-1.5 h-1.5 bg-brand/60 rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
