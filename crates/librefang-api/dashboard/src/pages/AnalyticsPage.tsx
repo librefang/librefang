@@ -84,12 +84,12 @@ export function AnalyticsPage() {
               {usageByAgent.length === 0 ? (
                 <EmptyState icon={<Users />} title={t("common.no_data")} description={t("analytics.no_agent_data")} />
               ) : (
-                <ResponsiveContainer width="100%" height={Math.max(usageByAgent.slice(0, 8).length * 36, 100)}>
-                  <BarChart data={usageByAgent.slice(0, 8).map(u => ({ name: u.name || u.agent_id?.slice(0, 8), cost: u.cost ?? 0 }))} layout="vertical" margin={{ left: 0, right: 20 }}>
+                <ResponsiveContainer width="100%" height={Math.max(usageByAgent.length * 36, 100)}>
+                  <BarChart data={usageByAgent.map(u => ({ name: u.name || u.agent_id?.slice(0, 8), cost: u.cost ?? 0 }))} layout="vertical" margin={{ left: 0, right: 20 }}>
                     <CartesianGrid strokeDasharray="3 3" opacity={0.2} horizontal={false} />
                     <XAxis type="number" tick={{ fontSize: 10 }} tickFormatter={v => `$${v}`} axisLine={false} tickLine={false} />
                     <YAxis type="category" dataKey="name" tick={{ fontSize: 10 }} width={100} axisLine={false} tickLine={false} />
-                    <Tooltip contentStyle={{ borderRadius: 12, fontSize: 12 }} formatter={(v: any) => [`$${v.toFixed(4)}`, "Cost"]} />
+                    <Tooltip contentStyle={{ borderRadius: 12, fontSize: 12 }} formatter={(v: any) => [`$${v.toFixed(2)}`, "Cost"]} />
                     <Bar dataKey="cost" radius={[0, 6, 6, 0]} fill="#3b82f6" />
                   </BarChart>
                 </ResponsiveContainer>
@@ -103,12 +103,12 @@ export function AnalyticsPage() {
               {usageByModel.length === 0 ? (
                 <EmptyState icon={<Cpu />} title={t("common.no_data")} description={t("analytics.no_model_data")} />
               ) : (
-                <ResponsiveContainer width="100%" height={Math.max(usageByModel.slice(0, 8).length * 36, 100)}>
-                  <BarChart data={usageByModel.slice(0, 8).map(m => ({ name: m.model?.slice(0, 20), cost: m.total_cost_usd ?? 0 }))} layout="vertical" margin={{ left: 0, right: 20 }}>
+                <ResponsiveContainer width="100%" height={Math.max(usageByModel.length * 36, 100)}>
+                  <BarChart data={usageByModel.map(m => ({ name: m.model?.slice(0, 20), cost: m.total_cost_usd ?? 0 }))} layout="vertical" margin={{ left: 0, right: 20 }}>
                     <CartesianGrid strokeDasharray="3 3" opacity={0.2} horizontal={false} />
                     <XAxis type="number" tick={{ fontSize: 10 }} tickFormatter={v => `$${v}`} axisLine={false} tickLine={false} />
                     <YAxis type="category" dataKey="name" tick={{ fontSize: 10 }} width={120} axisLine={false} tickLine={false} />
-                    <Tooltip contentStyle={{ borderRadius: 12, fontSize: 12 }} formatter={(v: any) => [`$${v.toFixed(4)}`, "Cost"]} />
+                    <Tooltip contentStyle={{ borderRadius: 12, fontSize: 12 }} formatter={(v: any) => [`$${v.toFixed(2)}`, "Cost"]} />
                     <Bar dataKey="cost" radius={[0, 6, 6, 0]} fill="#a855f7" />
                   </BarChart>
                 </ResponsiveContainer>
