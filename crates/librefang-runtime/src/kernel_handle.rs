@@ -48,6 +48,9 @@ pub trait KernelHandle: Send + Sync {
     /// Recall a value from shared memory.
     fn memory_recall(&self, key: &str) -> Result<Option<serde_json::Value>, String>;
 
+    /// List all keys in shared memory.
+    fn memory_list(&self) -> Result<Vec<String>, String>;
+
     /// Find agents by query (matches on name substring, tag, or tool name; case-insensitive).
     fn find_agents(&self, query: &str) -> Vec<AgentInfo>;
 

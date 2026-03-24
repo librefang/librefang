@@ -285,7 +285,8 @@ pub fn build_canonical_context_message(ctx: &PromptContext) -> Option<String> {
 pub fn build_memory_section(memories: &[(String, String)]) -> String {
     let mut out = String::from(
         "## Memory\n\
-         - When the user asks about something from a previous conversation, use memory_recall first.\n\
+         - When the user asks about something from a previous conversation, Always call memory_list first to identify relevant memory keys.\n\
+         - Based on the list, use memory_recall with specific keys to fetch necessary details.\n\
          - Store important preferences, decisions, and context with memory_store for future use.",
     );
     if !memories.is_empty() {
@@ -690,6 +691,7 @@ mod tests {
                 "file_read".to_string(),
                 "file_write".to_string(),
                 "memory_store".to_string(),
+                "memory_list".to_string(),
                 "memory_recall".to_string(),
             ],
             ..Default::default()

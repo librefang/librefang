@@ -8395,6 +8395,13 @@ impl KernelHandle for LibreFangKernel {
             .map_err(|e| format!("Memory recall failed: {e}"))
     }
 
+    fn memory_list(&self) -> Result<Vec<String>, String> {
+        let agent_id = shared_memory_agent_id();
+        self.memory
+            .list_keys(agent_id)
+            .map_err(|e| format!("Memory list failed: {e}"))
+    }
+
     fn find_agents(&self, query: &str) -> Vec<kernel_handle::AgentInfo> {
         let q = query.to_lowercase();
         self.registry

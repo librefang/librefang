@@ -19,6 +19,7 @@ pub fn map_tool_name(openclaw_name: &str) -> Option<&'static str> {
         "WebSearch" | "web_search" => Some("web_search"),
         "WebFetch" | "fetch_url" | "web_fetch" => Some("web_fetch"),
         "browser_navigate" => Some("browser_navigate"),
+        "memory_all" | "memory_list" => Some("memory_list"),
         "memory_search" | "memory_recall" => Some("memory_recall"),
         "memory_save" | "memory_store" => Some("memory_store"),
         "sessions_send" | "agent_message" => Some("agent_send"),
@@ -60,6 +61,7 @@ pub fn is_known_librefang_tool(name: &str) -> bool {
             | "web_search"
             | "web_fetch"
             | "browser_navigate"
+            | "memory_list"
             | "memory_recall"
             | "memory_store"
             | "agent_send"
@@ -116,6 +118,8 @@ mod tests {
         assert_eq!(map_tool_name("browser_navigate"), Some("browser_navigate"));
         assert_eq!(map_tool_name("memory_search"), Some("memory_recall"));
         assert_eq!(map_tool_name("memory_recall"), Some("memory_recall"));
+        assert_eq!(map_tool_name("memory_all"), Some("memory_list"));
+        assert_eq!(map_tool_name("memory_list"), Some("memory_list"));
         assert_eq!(map_tool_name("memory_save"), Some("memory_store"));
         assert_eq!(map_tool_name("memory_store"), Some("memory_store"));
         assert_eq!(map_tool_name("sessions_send"), Some("agent_send"));
@@ -184,6 +188,7 @@ mod tests {
             "web_search",
             "web_fetch",
             "browser_navigate",
+            "memory_list",
             "memory_recall",
             "memory_store",
             "agent_send",
