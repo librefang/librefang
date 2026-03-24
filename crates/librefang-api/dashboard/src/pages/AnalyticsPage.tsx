@@ -31,7 +31,7 @@ export function AnalyticsPage() {
   const budgetMutation = useMutation({ mutationFn: updateBudget, onSuccess: () => queryClient.invalidateQueries({ queryKey: ["budget"] }) });
 
   const usage = usageQuery.data ?? null;
-  const usageByAgent = usageByAgentQuery.data ?? [];
+  const usageByAgent = [...(usageByAgentQuery.data ?? [])].sort((a: any, b: any) => (b.total_cost_usd ?? 0) - (a.total_cost_usd ?? 0));
   const usageByModel = usageByModelQuery.data ?? [];
   const daily = dailyQuery.data ?? null;
 
