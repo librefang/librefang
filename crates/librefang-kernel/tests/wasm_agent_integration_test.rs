@@ -147,7 +147,7 @@ memory_write = ["self.*"]
 // ---------------------------------------------------------------------------
 
 /// Test that a WASM agent can be spawned and returns a response.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_wasm_agent_hello_response() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(tmp.path().join("hello.wat"), HELLO_WAT).unwrap();
@@ -170,7 +170,7 @@ async fn test_wasm_agent_hello_response() {
 }
 
 /// Test that a WASM echo module returns input data.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_wasm_agent_echo() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(tmp.path().join("echo.wat"), ECHO_WAT).unwrap();
@@ -197,7 +197,7 @@ async fn test_wasm_agent_echo() {
 }
 
 /// Test that WASM fuel exhaustion is caught and reported as an error.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_wasm_agent_fuel_exhaustion() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(tmp.path().join("loop.wat"), INFINITE_LOOP_WAT).unwrap();
@@ -223,7 +223,7 @@ async fn test_wasm_agent_fuel_exhaustion() {
 }
 
 /// Test that a missing WASM module produces a clear error.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_wasm_agent_missing_module() {
     let tmp = tempfile::tempdir().unwrap();
     // Don't write any .wat file
@@ -246,7 +246,7 @@ async fn test_wasm_agent_missing_module() {
 }
 
 /// Test that host_call time_now works end-to-end through the kernel.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_wasm_agent_host_call_time() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(tmp.path().join("proxy.wat"), HOST_CALL_PROXY_WAT).unwrap();
@@ -290,7 +290,7 @@ memory_write = ["self.*"]
 }
 
 /// Test WASM agent with streaming (falls back to single event).
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_wasm_agent_streaming_fallback() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(tmp.path().join("hello.wat"), HELLO_WAT).unwrap();
@@ -326,7 +326,7 @@ async fn test_wasm_agent_streaming_fallback() {
 }
 
 /// Test that spawning multiple WASM agents works concurrently.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_multiple_wasm_agents() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(tmp.path().join("hello.wat"), HELLO_WAT).unwrap();
@@ -357,7 +357,7 @@ async fn test_multiple_wasm_agents() {
 }
 
 /// Test WASM agent alongside LLM agent (mixed fleet).
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_mixed_wasm_and_llm_agents() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(tmp.path().join("hello.wat"), HELLO_WAT).unwrap();
