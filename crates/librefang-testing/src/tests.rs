@@ -5,7 +5,7 @@ use axum::http::{Method, StatusCode};
 use tower::ServiceExt;
 
 /// Tests that GET /api/health returns 200 and contains a status field.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_health_endpoint() {
     let app = TestAppState::new();
     let router = app.router();
@@ -27,7 +27,7 @@ async fn test_health_endpoint() {
 }
 
 /// Tests that GET /api/agents returns an items array and a total field.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_list_agents() {
     let app = TestAppState::new();
     let router = app.router();
@@ -59,7 +59,7 @@ async fn test_list_agents() {
 }
 
 /// Tests that GET /api/agents/{id} with an invalid ID returns 400.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_get_agent_invalid_id() {
     let app = TestAppState::new();
     let router = app.router();
@@ -75,7 +75,7 @@ async fn test_get_agent_invalid_id() {
 }
 
 /// Tests that GET /api/agents/{id} with a valid but nonexistent UUID returns 404.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_get_agent_not_found() {
     let app = TestAppState::new();
     let router = app.router();
@@ -129,7 +129,7 @@ async fn test_mock_llm_driver_recording() {
 }
 
 /// Tests building a kernel with custom config.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_custom_config_kernel() {
     let app = TestAppState::with_builder(MockKernelBuilder::new().with_config(|cfg| {
         cfg.language = "zh".into();
@@ -140,7 +140,7 @@ async fn test_custom_config_kernel() {
 }
 
 /// Tests the GET /api/version endpoint.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_version_endpoint() {
     let app = TestAppState::new();
     let router = app.router();
@@ -158,7 +158,7 @@ async fn test_version_endpoint() {
 // -- POST / PUT / DELETE tests ------------------------------------------------
 
 /// Tests POST /api/agents — creates an agent using manifest_toml.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_spawn_agent_post() {
     let app = TestAppState::new();
     let router = app.router();
@@ -181,7 +181,7 @@ system_prompt = "You are a test bot."
 }
 
 /// Tests DELETE /api/agents/{id} — deleting a nonexistent agent should return an error.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_delete_agent_not_found() {
     let app = TestAppState::new();
     let router = app.router();
@@ -200,7 +200,7 @@ async fn test_delete_agent_not_found() {
 }
 
 /// Tests PUT /api/agents/{id}/model — setting model for a nonexistent agent should return an error.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_set_model_not_found() {
     let app = TestAppState::new();
     let router = app.router();
@@ -220,7 +220,7 @@ async fn test_set_model_not_found() {
 }
 
 /// Tests POST /api/agents/{id}/message — sending a message to a nonexistent agent should return an error.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_send_message_agent_not_found() {
     let app = TestAppState::new();
     let router = app.router();
@@ -239,7 +239,7 @@ async fn test_send_message_agent_not_found() {
 }
 
 /// Tests PATCH /api/agents/{id} — updating a nonexistent agent should return an error.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_patch_agent_not_found() {
     let app = TestAppState::new();
     let router = app.router();
