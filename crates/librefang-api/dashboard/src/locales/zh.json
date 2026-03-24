@@ -236,7 +236,11 @@
     "lane": "通道", "capacity": "容量", "no_lanes": "暂无队列通道",
     "enabled": "已启用", "disabled": "已禁用",
     "providers": "供应商", "channels": "通道", "skills": "技能", "workflows": "工作流",
-    "resources": "资源概览"
+    "resources": "资源概览",
+    "server_control": "服务器控制",
+    "reload_config": "重载配置", "reload_success": "配置已重载（{{status}}）", "reload_error": "重载配置失败",
+    "shutdown": "关闭服务器", "shutdown_confirm_title": "确认关闭服务器", "shutdown_confirm_desc": "服务器将停止运行，仪表盘将无法访问。",
+    "shutdown_confirm": "确认关闭", "shutdown_error": "关闭服务器失败"
   },
   "logs": {
     "title": "日志", "subtitle": "实时系统日志。", "export_json": "导出 JSON",

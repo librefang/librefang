@@ -66,6 +66,7 @@ interface Provider {
   health?: string;
   last_tested?: string;
   error_message?: string;
+  media_capabilities?: string[];
 }
 
 interface ProviderCardProps {
@@ -131,7 +132,7 @@ function ProviderCard({ provider: p, isSelected, pendingId, viewMode, onSelect, 
           {p.media_capabilities && p.media_capabilities.length > 0 && (
             <div className="flex flex-wrap gap-1">
               {p.media_capabilities.map((cap: string) => (
-                <Badge key={cap} variant="outline" className="text-[8px] px-1 py-0">
+                <Badge key={cap} variant="default" className="text-[8px] px-1 py-0">
                   {cap.replace(/_/g, " ")}
                 </Badge>
               ))}
@@ -217,7 +218,7 @@ function ProviderCard({ provider: p, isSelected, pendingId, viewMode, onSelect, 
         {p.media_capabilities && p.media_capabilities.length > 0 && (
           <div className="flex flex-wrap gap-1 mb-3">
             {p.media_capabilities.map((cap: string) => (
-              <Badge key={cap} variant="outline" className="text-[8px] px-1.5 py-0.5">
+              <Badge key={cap} variant="default" className="text-[8px] px-1.5 py-0.5">
                 {cap.replace(/_/g, " ")}
               </Badge>
             ))}

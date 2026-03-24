@@ -1,23 +1,25 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { createGoal, listGoals, updateGoal, deleteGoal, type GoalItem } from "../api";
+import { createGoal, listGoals, listGoalTemplates, updateGoal, deleteGoal, type GoalItem, type GoalTemplate } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
 import { ListSkeleton } from "../components/ui/Skeleton";
-import { EmptyState } from "../components/ui/EmptyState";
 import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { useUIStore } from "../lib/store";
-import { Shield, Trash2, Edit2, Plus, Target, Zap } from "lucide-react";
+import { Shield, Trash2, Edit2, Plus, Target, Zap, Rocket, Bot, Database, Users, AlertTriangle, Loader2 } from "lucide-react";
 
 const REFRESH_MS = 30000;
 
-const EXAMPLE_GOALS = [
-  { title: "Deploy Production", description: "Configure and deploy app to production server", status: "pending" as const },
-  { title: "Optimize DB Queries", description: "Analyze and optimize slow queries for performance", status: "pending" as const },
-  { title: "Write API Docs", description: "Generate documentation for all API endpoints", status: "pending" as const },
-];
+const TEMPLATE_ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
+  rocket: Rocket,
+  bot: Bot,
+  shield: Shield,
+  database: Database,
+  users: Users,
+  alert: AlertTriangle,
+};
 
 export function GoalsPage() {
   const { t } = useTranslation();
@@ -30,11 +32,14 @@ export function GoalsPage() {
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
   const goalsQuery = useQuery({ queryKey: ["goals", "list"], queryFn: listGoals, refetchInterval: REFRESH_MS });
+  const templatesQuery = useQuery({ queryKey: ["goals", "templates"], queryFn: listGoalTemplates });
+  const [applyingTemplate, setApplyingTemplate] = useState<string | null>(null);
 
   const createMutation = useMutation({ mutationFn: createGoal });
   const updateMutation = useMutation({ mutationFn: ({ id, data }: { id: string; data: any }) => updateGoal(id, data) });
   const deleteMutation = useMutation({ mutationFn: deleteGoal });
   const goals = goalsQuery.data ?? [];
+  const templates = templatesQuery.data ?? [];
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -49,15 +54,18 @@ export function GoalsPage() {
     }
   };
 
-  const handleAddExamples = async () => {
+  const handleApplyTemplate = async (tpl: GoalTemplate) => {
+    setApplyingTemplate(tpl.id);
     try {
-      for (const g of EXAMPLE_GOALS) {
+      for (const g of tpl.goals) {
         await createMutation.mutateAsync(g);
       }
       addToast(t("common.success"), "success");
       await queryClient.invalidateQueries({ queryKey: ["goals"] });
     } catch (err: any) {
       addToast(err.message || t("common.error"), "error");
+    } finally {
+      setApplyingTemplate(null);
     }
   };
 
@@ -152,16 +160,52 @@ export function GoalsPage() {
       {goalsQuery.isLoading ? (
         <ListSkeleton rows={4} />
       ) : goals.length === 0 ? (
-        <EmptyState
-          title={t("common.no_data")}
-          icon={<Shield className="h-6 w-6" />}
-          action={
-            <Button variant="secondary" onClick={handleAddExamples}>
-              <Plus className="h-4 w-4" />
-              {t("goals.add_example_goals")}
-            </Button>
-          }
-        />
+        <div className="flex flex-col gap-6">
+          <div className="text-center py-8">
+            <div className="w-14 h-14 rounded-2xl bg-brand/10 flex items-center justify-center mx-auto mb-4">
+              <Target className="h-7 w-7 text-brand" />
+            </div>
+            <h3 className="text-lg font-black tracking-tight mb-1">{t("goals.pick_template")}</h3>
+            <p className="text-sm text-text-dim">{t("goals.pick_template_desc")}</p>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 stagger-children">
+            {templates.map((tpl) => {
+              const Icon = TEMPLATE_ICONS[tpl.icon] ?? Target;
+              const isApplying = applyingTemplate === tpl.id;
+              return (
+                <Card key={tpl.id} hover padding="lg" className="flex flex-col">
+                  <div className="flex items-start gap-3 mb-3">
+                    <div className="w-10 h-10 rounded-xl bg-brand/10 flex items-center justify-center shrink-0">
+                      <Icon className="w-5 h-5 text-brand" />
+                    </div>
+                    <div className="min-w-0">
+                      <h4 className="text-sm font-black tracking-tight">{tpl.name}</h4>
+                      <p className="text-xs text-text-dim mt-0.5">{tpl.description}</p>
+                    </div>
+                  </div>
+                  <div className="flex-1 space-y-1.5 mb-4">
+                    {tpl.goals.map((g, i) => (
+                      <div key={i} className="flex items-center gap-2 text-xs text-text-dim">
+                        <span className="w-5 h-5 rounded-md bg-main flex items-center justify-center text-[10px] font-bold shrink-0">{i + 1}</span>
+                        <span className="truncate">{g.title}</span>
+                      </div>
+                    ))}
+                  </div>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    className="w-full"
+                    disabled={isApplying || applyingTemplate !== null}
+                    onClick={() => handleApplyTemplate(tpl)}
+                  >
+                    {isApplying ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
+                    {isApplying ? t("common.loading") : t("goals.use_template")}
+                  </Button>
+                </Card>
+              );
+            })}
+          </div>
+        </div>
       ) : (
         <>
           <div className="grid grid-cols-2 gap-2 sm:gap-4 xl:grid-cols-4 stagger-children">

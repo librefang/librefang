@@ -1,15 +1,17 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { DashboardSnapshot, VersionResponse, QueueStatusResponse, HealthCheck } from "../api";
-import { loadDashboardSnapshot, getVersionInfo, getQueueStatus } from "../api";
+import { loadDashboardSnapshot, getVersionInfo, getQueueStatus, shutdownServer, reloadConfig } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { Card } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
+import { Button } from "../components/ui/Button";
 import {
   Activity, Cpu, HardDrive, Zap, Timer, Layers, CheckCircle2, GitCommit,
   Calendar, Server, Monitor, Settings, HeartPulse, Box, Globe, FolderOpen,
-  FileText, Gauge, Network, XCircle,
+  FileText, Gauge, Network, XCircle, RefreshCw, Power, Loader2,
 } from "lucide-react";
 
 const REFRESH_MS = 30000;
@@ -43,6 +45,8 @@ function InfoRow({ icon: Icon, label, value, mono, color }: {
 
 export function RuntimePage() {
   const { t } = useTranslation();
+  const [showShutdownConfirm, setShowShutdownConfirm] = useState(false);
+  const [reloadResult, setReloadResult] = useState<string | null>(null);
 
   const snapshotQuery = useQuery<DashboardSnapshot>({
     queryKey: ["dashboard", "snapshot", "runtime"],
@@ -58,6 +62,19 @@ export function RuntimePage() {
     queryKey: ["queue", "status"],
     queryFn: getQueueStatus,
     refetchInterval: 5000,
+  });
+
+  const shutdownMutation = useMutation({
+    mutationFn: shutdownServer,
+    onSuccess: () => setShowShutdownConfirm(false),
+  });
+  const reloadMutation = useMutation({
+    mutationFn: reloadConfig,
+    onSuccess: (data) => {
+      setReloadResult(data.status);
+      setTimeout(() => setReloadResult(null), 5000);
+      snapshotQuery.refetch();
+    },
   });
 
   const snapshot = snapshotQuery.data ?? null;
@@ -267,7 +284,74 @@ export function RuntimePage() {
               </div>
             </Card>
           </div>
+
+          {/* Server Control */}
+          <Card padding="lg">
+            <div className="flex items-center gap-2 mb-5">
+              <div className="w-8 h-8 rounded-lg bg-error/10 flex items-center justify-center"><Server className="h-4 w-4 text-error" /></div>
+              <h2 className="text-sm font-black tracking-tight uppercase">{t("runtime.server_control")}</h2>
+            </div>
+            <div className="flex flex-wrap gap-3">
+              <Button
+                variant="secondary"
+                size="sm"
+                leftIcon={<RefreshCw className="w-3.5 h-3.5" />}
+                isLoading={reloadMutation.isPending}
+                onClick={() => reloadMutation.mutate()}
+              >
+                {t("runtime.reload_config")}
+              </Button>
+              <Button
+                variant="danger"
+                size="sm"
+                leftIcon={<Power className="w-3.5 h-3.5" />}
+                onClick={() => setShowShutdownConfirm(true)}
+              >
+                {t("runtime.shutdown")}
+              </Button>
+            </div>
+            {reloadResult && (
+              <p className="text-xs text-success mt-3">{t("runtime.reload_success", { status: reloadResult })}</p>
+            )}
+            {reloadMutation.isError && (
+              <p className="text-xs text-error mt-3">{t("runtime.reload_error")}</p>
+            )}
+            {shutdownMutation.isError && (
+              <p className="text-xs text-error mt-3">{t("runtime.shutdown_error")}</p>
+            )}
+          </Card>
         </>
+      )}
+
+      {/* Shutdown Confirm Dialog */}
+      {showShutdownConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm" onClick={() => setShowShutdownConfirm(false)}>
+          <div className="bg-surface border border-border-subtle rounded-2xl p-6 max-w-sm w-full mx-4 shadow-2xl" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-10 h-10 rounded-xl bg-error/10 flex items-center justify-center">
+                <Power className="w-5 h-5 text-error" />
+              </div>
+              <div>
+                <h3 className="text-sm font-black">{t("runtime.shutdown_confirm_title")}</h3>
+                <p className="text-xs text-text-dim">{t("runtime.shutdown_confirm_desc")}</p>
+              </div>
+            </div>
+            <div className="flex justify-end gap-2 mt-6">
+              <Button variant="ghost" size="sm" onClick={() => setShowShutdownConfirm(false)}>
+                {t("common.cancel")}
+              </Button>
+              <Button
+                variant="danger"
+                size="sm"
+                leftIcon={shutdownMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Power className="w-3.5 h-3.5" />}
+                disabled={shutdownMutation.isPending}
+                onClick={() => shutdownMutation.mutate()}
+              >
+                {t("runtime.shutdown_confirm")}
+              </Button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

@@ -1,7 +1,7 @@
 import type { ReactNode, ComponentType } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { PluggableList } from "unified";
+type PluggableList = any[];
 
 const defaultComponents: Record<string, ComponentType<any>> = {
   p: ({ children }: { children: ReactNode }) => <p className="mb-1.5 last:mb-0">{children}</p>,

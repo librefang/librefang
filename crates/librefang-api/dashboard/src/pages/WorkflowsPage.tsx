@@ -23,7 +23,6 @@ import {
   Calendar, FileText, Activity, Bot, ArrowRight, Loader2, Clock, ChevronRight
 } from "lucide-react";
 
-const iconMap: Record<string, React.ComponentType<{ className?: string }>> = { Calendar, FileText, Activity, Bot };
 const categoryIconMap: Record<string, React.ComponentType<{ className?: string }>> = {
   creation: FileText, language: Bot, thinking: Activity, business: Calendar,
 };
@@ -70,7 +69,7 @@ export function WorkflowsPage() {
   const handleNewWorkflow = () => {
     sessionStorage.removeItem("canvasNodes");
     sessionStorage.removeItem("workflowTemplate");
-    navigate({ to: "/canvas", search: { t: Date.now() } });
+    navigate({ to: "/canvas", search: { t: Date.now(), wf: undefined } });
   };
 
   const handleUseTemplate = async (tmpl: WorkflowTemplate) => {
@@ -79,7 +78,7 @@ export function WorkflowsPage() {
       // Template needs params — open canvas with TemplateBrowser
       sessionStorage.removeItem("canvasNodes");
       sessionStorage.removeItem("workflowTemplate");
-      navigate({ to: "/canvas", search: { t: Date.now(), openTemplates: "1" } });
+      navigate({ to: "/canvas", search: { t: Date.now(), wf: undefined } });
       return;
     }
     try {
@@ -92,7 +91,7 @@ export function WorkflowsPage() {
     } catch {
       sessionStorage.removeItem("canvasNodes");
       sessionStorage.removeItem("workflowTemplate");
-      navigate({ to: "/canvas", search: { t: Date.now() } });
+      navigate({ to: "/canvas", search: { t: Date.now(), wf: undefined } });
     }
   };
 
@@ -246,7 +245,7 @@ export function WorkflowsPage() {
                 </div>
                 {/* Actions */}
                 <div className="flex items-center gap-1 shrink-0" onClick={e => e.stopPropagation()}>
-                  <button onClick={() => { setScheduleWorkflowId(wf.id); setScheduleCron((wf as any).schedule?.cron || "0 9 * * *"); }}
+                  <button onClick={() => { setScheduleWorkflowId(wf.id); }}
                     className={`p-2 rounded-lg transition-all ${(wf as any).schedule ? "text-success hover:text-success hover:bg-success/10" : "text-text-dim/40 hover:text-brand hover:bg-brand/10"}`}
                     title={t("nav.scheduler")}>
                     <Calendar className="w-3.5 h-3.5" />

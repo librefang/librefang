@@ -1187,21 +1187,7 @@ impl ProactiveMemoryStore {
                     true
                 }
             })
-            .map(|frag| {
-                let level = MemoryLevel::from(frag.scope.as_str());
-                MemoryItem {
-                    id: frag.id.to_string(),
-                    content: frag.content,
-                    level,
-                    category: frag
-                        .metadata
-                        .get("category")
-                        .and_then(|v| v.as_str())
-                        .map(String::from),
-                    metadata: frag.metadata,
-                    created_at: frag.created_at,
-                }
-            })
+            .map(MemoryItem::from_fragment)
             .collect();
 
         Ok(items)
@@ -1225,21 +1211,7 @@ impl ProactiveMemoryStore {
 
         let items: Vec<MemoryItem> = results
             .into_iter()
-            .map(|frag| {
-                let level = MemoryLevel::from(frag.scope.as_str());
-                MemoryItem {
-                    id: frag.id.to_string(),
-                    content: frag.content,
-                    level,
-                    category: frag
-                        .metadata
-                        .get("category")
-                        .and_then(|v| v.as_str())
-                        .map(String::from),
-                    metadata: frag.metadata,
-                    created_at: frag.created_at,
-                }
-            })
+            .map(MemoryItem::from_fragment)
             .take(limit)
             .collect();
 
@@ -1493,21 +1465,7 @@ impl ProactiveMemoryStore {
             });
             let filter = scope_filter.unwrap_or_else(|| MemoryFilter::agent(agent_id));
             let frags = self.semantic.recall("", 500, Some(filter))?;
-            all_items = frags
-                .into_iter()
-                .map(|frag| MemoryItem {
-                    id: frag.id.to_string(),
-                    content: frag.content,
-                    level: MemoryLevel::from(frag.scope.as_str()),
-                    category: frag
-                        .metadata
-                        .get("category")
-                        .and_then(|v| v.as_str())
-                        .map(String::from),
-                    metadata: frag.metadata,
-                    created_at: frag.created_at,
-                })
-                .collect();
+            all_items = frags.into_iter().map(MemoryItem::from_fragment).collect();
         }
 
         // Limit to 100 most recent items to avoid O(n^2) blowup
@@ -1659,21 +1617,7 @@ impl ProactiveMemory for ProactiveMemoryStore {
 
         let mut items: Vec<MemoryItem> = results
             .into_iter()
-            .map(|frag| {
-                let level = MemoryLevel::from(frag.scope.as_str());
-                MemoryItem {
-                    id: frag.id.to_string(),
-                    content: frag.content,
-                    level,
-                    category: frag
-                        .metadata
-                        .get("category")
-                        .and_then(|v| v.as_str())
-                        .map(String::from),
-                    metadata: frag.metadata,
-                    created_at: frag.created_at,
-                }
-            })
+            .map(MemoryItem::from_fragment)
             .take(limit)
             .collect();
 
@@ -2299,24 +2243,7 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
             self.semantic.recall(query, cfg.max_retrieve, filter)?
         };
 
-        Ok(results
-            .into_iter()
-            .map(|frag| {
-                let level = MemoryLevel::from(frag.scope.as_str());
-                MemoryItem {
-                    id: frag.id.to_string(),
-                    content: frag.content,
-                    level,
-                    category: frag
-                        .metadata
-                        .get("category")
-                        .and_then(|v| v.as_str())
-                        .map(String::from),
-                    metadata: frag.metadata,
-                    created_at: frag.created_at,
-                }
-            })
-            .collect())
+        Ok(results.into_iter().map(MemoryItem::from_fragment).collect())
     }
 }
 

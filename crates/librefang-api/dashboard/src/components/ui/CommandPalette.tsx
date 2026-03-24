@@ -29,7 +29,7 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
   const commands: CommandItem[] = [
     { id: "overview", label: "Overview", labelZh: "概览", category: "Core", categoryZh: "核心", icon: Home, action: () => navigate({ to: "/overview" }) },
     { id: "workflows", label: "Workflows", labelZh: "工作流", category: "Core", categoryZh: "核心", icon: Layers, action: () => navigate({ to: "/workflows" }) },
-    { id: "canvas", label: "Canvas", labelZh: "画布", category: "Core", categoryZh: "核心", icon: Layers, action: () => navigate({ to: "/canvas", search: { t: Date.now() } }) },
+    { id: "canvas", label: "Canvas", labelZh: "画布", category: "Core", categoryZh: "核心", icon: Layers, action: () => navigate({ to: "/canvas", search: { t: Date.now(), wf: undefined } }) },
     { id: "chat", label: "Chat", labelZh: "对话", category: "Core", categoryZh: "核心", icon: MessageCircle, action: () => navigate({ to: "/chat", search: { agentId: undefined } }) },
     { id: "sessions", label: "Sessions", labelZh: "会话", category: "Core", categoryZh: "核心", icon: Clock, action: () => navigate({ to: "/sessions" }) },
     { id: "approvals", label: "Approvals", labelZh: "审批", category: "Core", categoryZh: "核心", icon: CheckCircle, action: () => navigate({ to: "/approvals" }) },

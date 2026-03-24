@@ -502,6 +502,11 @@ fn parse_llm_extraction_response(
                 category: Some(category),
                 metadata,
                 created_at: chrono::Utc::now(),
+                source: None,
+                confidence: None,
+                accessed_at: None,
+                access_count: None,
+                agent_id: None,
             })
         })
         .collect();

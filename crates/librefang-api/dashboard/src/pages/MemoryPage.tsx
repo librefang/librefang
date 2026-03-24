@@ -195,6 +195,7 @@ function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
   }, [configQuery.data, form]);
 
   const handleSave = async () => {
+    if (!form) return;
     setSaving(true);
     try {
       const res = await fetch("/api/memory/config", {

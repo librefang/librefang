@@ -230,7 +230,11 @@
     "lane": "Lane", "capacity": "Capacity", "no_lanes": "No queue lanes",
     "enabled": "Enabled", "disabled": "Disabled",
     "providers": "Providers", "channels": "Channels", "skills": "Skills", "workflows": "Workflows",
-    "resources": "Resource Summary"
+    "resources": "Resource Summary",
+    "server_control": "Server Control",
+    "reload_config": "Reload Config", "reload_success": "Config reloaded ({{status}})", "reload_error": "Failed to reload config",
+    "shutdown": "Shutdown", "shutdown_confirm_title": "Shutdown Server", "shutdown_confirm_desc": "The server will stop and the dashboard will become unavailable.",
+    "shutdown_confirm": "Confirm Shutdown", "shutdown_error": "Failed to shutdown"
   },
   "telemetry": {
     "badge": "Observability", "title": "Telemetry", "subtitle": "System metrics, LLM usage, and HTTP observability.",

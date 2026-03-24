@@ -373,6 +373,11 @@ export interface MemoryItem {
   category?: string | null;
   metadata?: Record<string, unknown>;
   created_at?: string;
+  source?: string;
+  confidence?: number;
+  accessed_at?: string;
+  access_count?: number;
+  agent_id?: string;
 }
 
 export interface MemoryListResponse {
@@ -1030,6 +1035,14 @@ export async function getQueueStatus(): Promise<QueueStatusResponse> {
   return get<QueueStatusResponse>("/api/queue/status");
 }
 
+export async function shutdownServer(): Promise<{ status: string }> {
+  return post<{ status: string }>("/api/shutdown", {});
+}
+
+export async function reloadConfig(): Promise<{ status: string; restart_required?: boolean; restart_reasons?: string[] }> {
+  return post<{ status: string; restart_required?: boolean; restart_reasons?: string[] }>("/api/config/reload", {});
+}
+
 export async function listAuditRecent(limit = 200): Promise<AuditRecentResponse> {
   const n = Number.isFinite(limit) ? Math.max(1, Math.min(1000, Math.floor(limit))) : 200;
   return get<AuditRecentResponse>(`/api/audit/recent?n=${encodeURIComponent(String(n))}`);
@@ -1361,6 +1374,19 @@ export async function getHandInstanceStatus(instanceId: string): Promise<HandIns
 export async function listGoals(): Promise<GoalItem[]> {
   const data = await get<{ goals?: GoalItem[]; total?: number }>("/api/goals");
   return data.goals ?? [];
+}
+
+export interface GoalTemplate {
+  id: string;
+  name: string;
+  icon: string;
+  description: string;
+  goals: { title: string; description: string; status: string }[];
+}
+
+export async function listGoalTemplates(): Promise<GoalTemplate[]> {
+  const data = await get<{ templates?: GoalTemplate[] }>("/api/goals/templates");
+  return data.templates ?? [];
 }
 
 export async function createGoal(payload: {
