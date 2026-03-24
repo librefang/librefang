@@ -21,14 +21,14 @@
   <rect x="12" y="12" width="776" height="296" rx="14" class="panel" />
   <text x="30" y="52" class="title">Star History</text>
   <text x="30" y="74" class="subtitle">librefang/librefang</text>
-  <text x="770" y="52" class="value" text-anchor="end">109</text>
-  <text x="770" y="74" class="subtitle" text-anchor="end">Updated 2026-03-23 09:04 UTC</text>
+  <text x="770" y="52" class="value" text-anchor="end">115</text>
+  <text x="770" y="74" class="subtitle" text-anchor="end">Updated 2026-03-24 08:59 UTC</text>
   <line x1="84" y1="274.00" x2="772.00" y2="274.00" class="axis" />
   <line x1="84" y1="104.00" x2="84" y2="274.00" class="axis" />
-  <path d="M 84.00,274.00 L 84.00,267.76 L 146.55,263.08 L 209.09,256.84 L 271.64,249.05 L 334.18,247.49 L 396.73,242.81 L 459.27,181.98 L 521.82,147.67 L 584.36,132.07 L 646.91,119.60 L 709.45,110.24 L 772.00,104.00 L 772.00,274.00 Z" class="area" />
-  <polyline points="84.00,267.76 146.55,263.08 209.09,256.84 271.64,249.05 334.18,247.49 396.73,242.81 459.27,181.98 521.82,147.67 584.36,132.07 646.91,119.60 709.45,110.24 772.00,104.00" class="line" />
+  <path d="M 84.00,274.00 L 84.00,268.09 L 141.33,263.65 L 198.67,257.74 L 256.00,250.35 L 313.33,248.87 L 370.67,244.43 L 428.00,186.78 L 485.33,154.26 L 542.67,139.48 L 600.00,127.65 L 657.33,118.78 L 714.67,106.96 L 772.00,104.00 L 772.00,274.00 Z" class="area" />
+  <polyline points="84.00,268.09 141.33,263.65 198.67,257.74 256.00,250.35 313.33,248.87 370.67,244.43 428.00,186.78 485.33,154.26 542.67,139.48 600.00,127.65 657.33,118.78 714.67,106.96 772.00,104.00" class="line" />
   <text x="84" y="306" class="axis-label" text-anchor="start">2026-03-12</text>
-  <text x="772.00" y="306" class="axis-label" text-anchor="end">2026-03-23</text>
-  <text x="74" y="108.00" class="axis-label" text-anchor="end">109</text>
+  <text x="772.00" y="306" class="axis-label" text-anchor="end">2026-03-24</text>
+  <text x="74" y="108.00" class="axis-label" text-anchor="end">115</text>
   <text x="74" y="278.00" class="axis-label" text-anchor="end">0</text>
 </svg>

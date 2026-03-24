@@ -5,6 +5,115 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DDHH).
 
+## [2026.3.24] - 2026-03-24
+
+### Added
+
+- Implement depends_on DAG execution for workflow steps (#1440) (@houko)
+- Add workflow template API endpoints (#1442) (@houko)
+- Wire thinking model configuration into agent loop (#1443) (@houko)
+- Mobile responsive + PWA + login + skill output persistence (#1445) (@houko)
+- Implement session context injection with multiple sources (#1448) (@houko)
+- Save existing workflow as reusable template (#1449) (@houko)
+- Add Shell/Bash skill runtime (#1450) (@houko)
+- Add push messaging API for agents to send to channels (#1451) (@houko)
+- Add /btw ephemeral side question command (#1452) (@houko)
+- Add structured output (JSON/JSON Schema) for agents (#1453) (@houko)
+- Add session export/import for context hibernation (#1454) (@houko)
+- Configurable heartbeat timeout and pruning per agent (#1455) (@houko)
+- Cross-session wake via target_agent on triggers (#1456) (@houko)
+- Add interactive message payloads for Telegram and Slack (#1457) (@houko)
+- Add PII privacy controls with pseudonymization and redaction (#1458) (@houko)
+- Tool-level authorization with per-sender and channel-specific policies (#1459) (@houko)
+- Subagent context inheritance in workflow steps (#1460) (@houko)
+- Lazy-load LLM driver cache for improved runtime performance (#1461) (@houko)
+- Add Amazon Bedrock embedding driver with SigV4 signing (#1462) (@houko)
+- FTS5 full-text session search with API endpoint (#1463) (@houko)
+- Message injection between tool calls (mid-turn interrupt) (#1464) (@houko)
+- Render LaTeX in chat (#1467) (@TechWizard9999)
+- Automatic memory chunking for long documents (#1468) (@houko)
+- Input sanitizer for prompt injection detection (#1469) (@houko)
+- Add Android (aarch64) cross-compilation for Termux users (#1470) (@houko)
+- Time-based memory decay for hierarchical memory management (#1471) (@houko)
+- File-based input inbox for async external commands (#1472) (@houko)
+- Interactive approval dialog in dashboard chat and channel events (#1474) (@houko)
+- Telegram thread-based agent routing (#1475) (@houko)
+- Pause/resume, busy guard, AgentManifest composition (#1482) (@houko)
+- Add librefang-testing crate with mock infrastructure (#1483) (@houko)
+- Show GitHub compare link before version confirmation (#1488) (@houko)
+- Integrate Skillhub marketplace as second skill source (#1504) (@houko)
+- Add WeChat personal account adapter via iLink protocol (#1506) (@houko)
+- Comprehensive build automation CLI with 31 subcommands (#1511) (@houko)
+- Enhance Hand system with i18n, pause/resume, and dashboard overhaul (#1515) (@houko)
+- Enable by default, add Grafana, auto-start with Docker (#1520) (@houko)
+- Multi-agent hand architecture (#1521) (@houko)
+- Add regex group trigger patterns (#1529) (@TechWizard9999)
+- Generic media generation drivers (image, TTS, video, music) (#1532) (@houko)
+- Extend Prometheus metrics and add Grafana dashboards (#1533) (@houko)
+- Add LTS version support (#1535) (@houko)
+
+### Fixed
+
+- Handle paginated /api/agents response (#1233) (@f-liva)
+- Preserve caption on Telegram voice messages (#1249) (@f-liva)
+- Detect and retry when LLM skips tool execution for action requests (#1413) (@houko)
+- Stop agent loop on tool execution failure (#948) (#1415) (@houko)
+- Complete ChatGPT Responses driver streaming/tool/reasoning mapping (#1405) (#1421) (@houko)
+- Use 2-digit year in Tauri version for WiX MSI compatibility (#1439) (@houko)
+- Harden workflow permissions and catalog path validation (#1444) (@SenZhangAI)
+- Stabilize nodeTypes to fix workflow builder editing (#1447) (@houko)
+- Harden reconnect and request handling (#1465) (@TechWizard9999)
+- CI shell injection, clippy warnings, init config, and review findings (#1473) (@houko)
+- Validate tool_use.input as dict in Anthropic and OpenAI drivers (#1476) (@houko)
+- Replace plaintext password with Argon2id hashing (#1477) (@houko)
+- Replace git-based registry sync with HTTP tarball download (#1479) (@houko)
+- Hand registry race condition, state persistence, and optional requirements (#1481) (@houko)
+- Resolve clippy errors blocking all PRs (#1486) (@houko)
+- Consolidate confirmations into single final prompt (#1491) (@houko)
+- Align chat websocket contract (#1498) (@poruru-code)
+- Exempt non-autonomous agents from timeout check (#1499) (@houko)
+- Stamp last_active before LLM call (#1500) (@houko)
+- Reset last_active on agent restore (#1501) (@houko)
+- Resolve clippy and compilation errors from merged PRs (#1502) (@houko)
+- Use tokio::test for callback query tests (#1503) (@houko)
+- Resolve compilation and clippy errors from recent merges (#1507) (@houko)
+- Update tool fallback assertions for capability enforcement (#1508) (@houko)
+- Follow up merged PR regressions (#1514) (@houko)
+- Use endpoint discovery API for Feishu WebSocket connection (#1518) (@houko)
+- Gitignore, channel logging, and xtask Windows CI (#1519) (@houko)
+- Preserve coordinator role and role-bound trigger migration (#1523) (@houko)
+- Restore --release flag in Dockerfile build (#1524) (@houko)
+- Eliminate username enumeration timing side-channel (#1525) (@houko)
+- Replace deterministic session token with random generation (#1526) (@houko)
+- Prevent path traversal in skill script execution (#1527) (@houko)
+- Make init_prometheus idempotent for parallel test safety (#1528) (@houko)
+- Multi-agent parsing compat + registry sync version update (#1530) (@houko)
+- Gate unix-only test behind #[cfg(unix)] (#1534) (@houko)
+- Release tool compares against latest tag including prereleases (#1547) (@houko)
+- Release tool retries commit after formatter hook (#1548) (@houko)
+- Release tool compares against latest tag including prereleases (#1547) (#1550) (@houko)
+- Remove unused find_latest_stable_tag in release.rs (#1551) (@houko)
+
+### Changed
+
+- Add facade getters and migrate API routes (#1478) (@houko)
+- Modularize route registration into per-domain routers (#1484) (@houko)
+- Split monolithic config.rs (5566 LOC) into modular sub-modules (#1485) (@houko)
+- Registry as catalog, pre-install core content only (#1537) (@houko)
+- Unified workspaces layout + hand/agent isolation + routing fixes (#1542) (@houko)
+
+### Maintenance
+
+- Cover claude code skip permissions args (#1364) (@TechWizard9999)
+- Fix 16 Dependabot security alerts (#1438) (@SenZhangAI)
+- Translate all Chinese comments to English (#1509) (@houko)
+
+### Other
+
+- Feature/opentel (#1516) (@Chukwuebuka-2003)
+- Feature/fix gitignore (#1517) (@houko)
+
+
 ## [2026.3.23] - 2026-03-23
 
 ### Added

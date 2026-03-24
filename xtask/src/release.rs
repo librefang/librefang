@@ -624,13 +624,12 @@ pip install librefang-sdk
         println!("  No file changes. Tagging current HEAD.");
     }
 
-    git(&root, &["tag", &tag])?;
-    println!("Created tag {}", tag);
+    // Tag is created by GitHub Action after PR merges (not here).
+    println!("Tag {} will be created when PR merges.", tag);
 
     // --- Push ---
     if !args.no_push {
         git(&root, &["push", "-u", "origin", &release_branch])?;
-        git(&root, &["push", "origin", &tag, "--force"])?;
 
         // Create PR via gh
         if Command::new("gh").arg("--version").output().is_ok() {
@@ -638,7 +637,8 @@ pip install librefang-sdk
             println!("Creating Pull Request...");
 
             // Build PR body with changelog content
-            let mut pr_body = format!("## Release {}", tag);
+            // <!-- release-tag:vX.Y.Z --> marker is used by the auto-tag workflow
+            let mut pr_body = format!("<!-- release-tag:{} -->\n## Release {}", tag, tag);
             let changelog_path = root.join("CHANGELOG.md");
             if changelog_path.exists() {
                 let cl_content = fs::read_to_string(&changelog_path).unwrap_or_default();

@@ -20,7 +20,7 @@ members = [
 ]
 
 [workspace.package]
-version = "2026.3.2314-rc1"
+version = "2026.3.2407-rc1"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/librefang/librefang"

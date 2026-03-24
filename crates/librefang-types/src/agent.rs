@@ -233,6 +233,7 @@ impl AgentMode {
                 let read_only = [
                     "file_read",
                     "file_list",
+                    "memory_list",
                     "memory_recall",
                     "web_fetch",
                     "web_search",
@@ -348,7 +349,13 @@ impl ToolProfile {
                 "web_fetch",
             ],
             Self::Research => vec!["web_fetch", "web_search", "file_read", "file_write"],
-            Self::Messaging => vec!["agent_send", "agent_list", "memory_store", "memory_recall"],
+            Self::Messaging => vec![
+                "agent_send",
+                "agent_list",
+                "memory_store",
+                "memory_list",
+                "memory_recall",
+            ],
             Self::Automation => vec![
                 "file_read",
                 "file_write",
@@ -359,6 +366,7 @@ impl ToolProfile {
                 "agent_send",
                 "agent_list",
                 "memory_store",
+                "memory_list",
                 "memory_recall",
             ],
             Self::Full | Self::Custom => vec!["*"],
@@ -885,13 +893,13 @@ mod tests {
         let tools = ToolProfile::Messaging.tools();
         assert!(tools.contains(&"agent_send".to_string()));
         assert!(tools.contains(&"memory_recall".to_string()));
-        assert_eq!(tools.len(), 4);
+        assert_eq!(tools.len(), 5);
     }
 
     #[test]
     fn test_tool_profile_automation() {
         let tools = ToolProfile::Automation.tools();
-        assert_eq!(tools.len(), 10);
+        assert_eq!(tools.len(), 11);
     }
 
     #[test]

@@ -17,6 +17,7 @@ const TOOL_OPTIONS: &[(&str, &str)] = &[
     ("file_list", "List directory contents"),
     ("memory_store", "Store data in agent memory"),
     ("memory_recall", "Recall data from memory"),
+    ("memory_list", "List all stored memory keys"),
     ("web_fetch", "Fetch web pages"),
     ("shell_exec", "Execute shell commands"),
     ("agent_send", "Send messages to other agents"),
@@ -213,16 +214,22 @@ impl AgentSelectState {
         if let Ok(resp) = client.get(format!("{base_url}/api/agents")).send() {
             if let Ok(body) = resp.json::<serde_json::Value>() {
                 self.daemon_agents.clear();
-                if let Some(arr) = body.as_array() {
-                    for a in arr {
-                        self.daemon_agents.push(DaemonAgent {
-                            id: a["id"].as_str().unwrap_or("?").to_string(),
-                            name: a["name"].as_str().unwrap_or("?").to_string(),
-                            state: a["state"].as_str().unwrap_or("?").to_string(),
-                            provider: a["model_provider"].as_str().unwrap_or("?").to_string(),
-                            model: a["model_name"].as_str().unwrap_or("?").to_string(),
-                        });
-                    }
+                // Handle both old format (direct array) and new format ({ "items": [...] })
+                let arr = if let Some(arr) = body.as_array() {
+                    arr.clone()
+                } else if let Some(items) = body.get("items").and_then(|v| v.as_array()) {
+                    items.clone()
+                } else {
+                    Vec::new()
+                };
+                for a in arr {
+                    self.daemon_agents.push(DaemonAgent {
+                        id: a["id"].as_str().unwrap_or("?").to_string(),
+                        name: a["name"].as_str().unwrap_or("?").to_string(),
+                        state: a["state"].as_str().unwrap_or("?").to_string(),
+                        provider: a["model_provider"].as_str().unwrap_or("?").to_string(),
+                        model: a["model_name"].as_str().unwrap_or("?").to_string(),
+                    });
                 }
             }
         }

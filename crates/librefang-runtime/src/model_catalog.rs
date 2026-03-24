@@ -547,7 +547,10 @@ impl ModelCatalog {
                 if let Some(existing) = self.providers.iter_mut().find(|p| p.id == provider_id) {
                     existing.base_url = prov_toml.base_url;
                     existing.display_name = prov_toml.display_name;
-                    existing.api_key_env = prov_toml.api_key_env;
+                    // Keep the previous env var when catalog payload omits/empties it.
+                    if !prov_toml.api_key_env.trim().is_empty() {
+                        existing.api_key_env = prov_toml.api_key_env;
+                    }
                     existing.key_required = prov_toml.key_required;
                 }
             } else {
@@ -1503,6 +1506,34 @@ aliases = ["tm1"]
         // Verify alias was registered
         let aliased = catalog.find_model("tm1").unwrap();
         assert_eq!(aliased.id, "test-model-1");
+    }
+
+    #[test]
+    fn test_merge_catalog_keeps_existing_api_key_env_when_incoming_empty() {
+        let mut catalog = test_catalog();
+        let original_env = catalog
+            .get_provider("deepseek")
+            .expect("deepseek provider should exist in test catalog")
+            .api_key_env
+            .clone();
+        assert!(!original_env.is_empty());
+
+        let toml_content = r#"
+[provider]
+id = "deepseek"
+display_name = "DeepSeek"
+api_key_env = ""
+base_url = "https://api.deepseek.com/v1"
+key_required = true
+"#;
+        let file: ModelCatalogFile = toml::from_str(toml_content).unwrap();
+        let added = catalog.merge_catalog_file(file);
+        assert_eq!(added, 0);
+
+        let merged = catalog
+            .get_provider("deepseek")
+            .expect("deepseek provider should still exist");
+        assert_eq!(merged.api_key_env, original_env);
     }
 
     #[test]

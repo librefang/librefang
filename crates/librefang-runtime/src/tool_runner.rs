@@ -294,6 +294,7 @@ pub async fn execute_tool(
         // Shared memory tools
         "memory_store" => tool_memory_store(input, kernel),
         "memory_recall" => tool_memory_recall(input, kernel),
+        "memory_list" => tool_memory_list(kernel),
 
         // Collaboration tools
         "agent_find" => tool_agent_find(input, kernel),
@@ -710,6 +711,14 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                     "key": { "type": "string", "description": "The storage key to recall" }
                 },
                 "required": ["key"]
+            }),
+        },
+        ToolDefinition {
+            name: "memory_list".to_string(),
+            description: "List all keys stored in shared memory.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {},
             }),
         },
         // --- Collaboration tools ---
@@ -1760,6 +1769,15 @@ fn tool_memory_recall(
         Some(val) => Ok(serde_json::to_string_pretty(&val).unwrap_or_else(|_| val.to_string())),
         None => Ok(format!("No value found for key '{key}'.")),
     }
+}
+
+fn tool_memory_list(kernel: Option<&Arc<dyn KernelHandle>>) -> Result<String, String> {
+    let kh = require_kernel(kernel)?;
+    let keys = kh.memory_list()?;
+    if keys.is_empty() {
+        return Ok("No entries found in shared memory.".to_string());
+    }
+    Ok(serde_json::to_string_pretty(&keys).unwrap_or_else(|_| format!("{:?}", keys)))
 }
 
 // ---------------------------------------------------------------------------
@@ -3715,6 +3733,10 @@ mod tests {
             Err("not used".to_string())
         }
 
+        fn memory_list(&self) -> Result<Vec<String>, String> {
+            Err("not used".to_string())
+        }
+
         fn find_agents(&self, _query: &str) -> Vec<AgentInfo> {
             vec![]
         }
@@ -3811,6 +3833,7 @@ mod tests {
         assert!(names.contains(&"agent_kill"));
         assert!(names.contains(&"memory_store"));
         assert!(names.contains(&"memory_recall"));
+        assert!(names.contains(&"memory_list"));
         // 6 collaboration tools
         assert!(names.contains(&"agent_find"));
         assert!(names.contains(&"task_post"));

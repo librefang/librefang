@@ -2044,15 +2044,23 @@ impl App {
                         let client = crate::daemon_client();
                         if let Ok(resp) = client.get(format!("{base_url}/api/agents")).send() {
                             if let Ok(body) = resp.json::<serde_json::Value>() {
-                                if let Some(arr) = body.as_array() {
-                                    for a in arr {
-                                        lines.push(format!(
-                                            "{} [{}] {}",
-                                            a["name"].as_str().unwrap_or("?"),
-                                            a["state"].as_str().unwrap_or("?"),
-                                            a["model_name"].as_str().unwrap_or("?"),
-                                        ));
-                                    }
+                                // Handle both old format (direct array) and new format ({ "items": [...] })
+                                let arr = if let Some(arr) = body.as_array() {
+                                    arr.clone()
+                                } else if let Some(items) =
+                                    body.get("items").and_then(|v| v.as_array())
+                                {
+                                    items.clone()
+                                } else {
+                                    Vec::new()
+                                };
+                                for a in arr {
+                                    lines.push(format!(
+                                        "{} [{}] {}",
+                                        a["name"].as_str().unwrap_or("?"),
+                                        a["state"].as_str().unwrap_or("?"),
+                                        a["model_name"].as_str().unwrap_or("?"),
+                                    ));
                                 }
                             }
                         }
