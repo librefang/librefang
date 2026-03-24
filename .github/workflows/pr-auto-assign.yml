@@ -12,6 +12,11 @@ jobs:
   assign:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v6
+        with:
+          sparse-checkout: .github/CODEOWNERS
+          sparse-checkout-cone-mode: false
+
       - name: Auto-assign PR author and request review
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -21,10 +26,12 @@ jobs:
           REPO="${{ github.repository }}"
 
           # Assign PR to author (skip if author is not a repo collaborator)
-          # External contributors cannot be assigned, so we only try and ignore errors
           gh pr edit "$PR" --repo "$REPO" --add-assignee "$AUTHOR" 2>/dev/null || true
 
-          # Request review from CODEOWNERS (skip if author is the owner)
-          if [ "$AUTHOR" != "houko" ]; then
-            gh pr edit "$PR" --repo "$REPO" --add-reviewer "houko"
-          fi
+          # Parse individual reviewers from CODEOWNERS (e.g. @houko, skip teams like @librefang/core)
+          REVIEWERS=$(grep -oP '(?<=@)[\w-]+' .github/CODEOWNERS | grep -v '^librefang/' | sort -u)
+          for reviewer in $REVIEWERS; do
+            if [ "$reviewer" != "$AUTHOR" ]; then
+              gh pr edit "$PR" --repo "$REPO" --add-reviewer "$reviewer" 2>/dev/null || true
+            fi
+          done
