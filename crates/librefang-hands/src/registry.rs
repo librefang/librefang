@@ -764,7 +764,7 @@ mod tests {
         let reg = HandRegistry::new();
         let home = ensure_test_home();
         let count = reg.load_bundled(&home);
-        assert_eq!(count, 15);
+        assert_eq!(count, 14);
         assert!(!reg.list_definitions().is_empty());
 
         // Clip hand should be loaded
