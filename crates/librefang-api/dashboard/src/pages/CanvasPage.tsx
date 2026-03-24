@@ -1666,7 +1666,7 @@ function CanvasPageInner() {
 
           {/* Primary actions */}
           <div className="flex items-center gap-1 sm:gap-1.5 pl-0.5 sm:pl-1">
-            <Button variant="primary" onClick={handleSave} disabled={!workflowName.trim() || agentStepCount === 0}>
+            <Button variant="primary" onClick={handleSave} disabled={!workflowName.trim() || nodes.length === 0}>
               <Save className="w-4 h-4" />
               <span className="hidden sm:inline ml-1">{t("common.save")}</span>
             </Button>

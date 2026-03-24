@@ -874,6 +874,11 @@ export interface TemplateParameter {
   required?: boolean;
 }
 
+export interface TemplateI18n {
+  name?: string;
+  description?: string;
+}
+
 export interface WorkflowTemplate {
   id: string;
   name: string;
@@ -882,6 +887,7 @@ export interface WorkflowTemplate {
   tags?: string[];
   parameters?: TemplateParameter[];
   steps?: WorkflowStep[];
+  i18n?: Record<string, TemplateI18n>;
 }
 
 export async function listWorkflowTemplates(q?: string, category?: string): Promise<WorkflowTemplate[]> {

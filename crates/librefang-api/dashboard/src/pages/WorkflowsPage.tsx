@@ -29,13 +29,14 @@ const categoryIconMap: Record<string, React.ComponentType<{ className?: string }
 const REFRESH_MS = 30000;
 
 export function WorkflowsPage() {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [selectedWorkflowId, setSelectedWorkflowId] = useState<string>("");
   const [runInput, setRunInput] = useState("");
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
+  const [activeTab, setActiveTab] = useState<"workflows" | "templates">("workflows");
 
   const workflowsQuery = useQuery({ queryKey: ["workflows", "list"], queryFn: listWorkflows, refetchInterval: REFRESH_MS });
   const runsQuery = useQuery({ queryKey: ["workflows", "runs", selectedWorkflowId], queryFn: () => listWorkflowRuns(selectedWorkflowId), enabled: Boolean(selectedWorkflowId) });
@@ -116,6 +117,9 @@ export function WorkflowsPage() {
 
   const templatesQuery = useQuery({ queryKey: ["workflow-templates"], queryFn: () => listWorkflowTemplates() });
   const apiTemplates = templatesQuery.data ?? [];
+  const lang = i18n.language?.split("-")[0] ?? "en";
+  const tmplName = (tmpl: WorkflowTemplate) => tmpl.i18n?.[lang]?.name || tmpl.name;
+  const tmplDesc = (tmpl: WorkflowTemplate) => tmpl.i18n?.[lang]?.description || tmpl.description;
 
   const hasWorkflows = workflows.length > 0;
 
@@ -128,57 +132,87 @@ export function WorkflowsPage() {
         isFetching={workflowsQuery.isFetching}
         onRefresh={() => void workflowsQuery.refetch()}
         icon={<Layers className="h-4 w-4" />}
-        actions={
+        actions={hasWorkflows ?
           <Button variant="primary" onClick={handleNewWorkflow}>
             <FilePlus className="h-4 w-4" />
             {t("workflows.create_blank")}
-          </Button>
+          </Button> : undefined
         }
       />
 
-      {/* Template Recommendations — loaded from API */}
-      {apiTemplates.length > 0 && (
-      <div>
-        <h2 className="text-xs font-bold uppercase tracking-widest text-text-dim/50 mb-3">{t("workflows.templates")}</h2>
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          {apiTemplates.map(tmpl => {
-            const Icon = categoryIconMap[tmpl.category || ""] || Layers;
-            const stepCount = tmpl.steps?.length ?? 0;
-            return (
-              <button key={tmpl.id} onClick={() => handleUseTemplate(tmpl)}
-                className="group text-left p-5 rounded-2xl border border-border-subtle bg-surface hover:border-brand/30 hover:shadow-lg hover:-translate-y-0.5 transition-all duration-300">
-                <div className="flex items-start gap-3">
-                  <div className="w-10 h-10 rounded-xl bg-brand/10 flex items-center justify-center shrink-0 group-hover:bg-brand/20 transition-colors">
-                    <Icon className="w-5 h-5 text-brand" />
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <p className="text-sm font-bold truncate group-hover:text-brand transition-colors">{tmpl.name}</p>
-                    <p className="text-[10px] text-text-dim mt-0.5 line-clamp-2">{tmpl.description}</p>
-                    <div className="flex items-center gap-2 mt-2 text-[9px] font-semibold text-text-dim/50">
-                      {stepCount > 0 && <span>{stepCount} {t("workflows.nodes_unit")}</span>}
-                      {tmpl.tags && tmpl.tags.length > 0 && <span>{tmpl.tags[0]}</span>}
-                      <ArrowRight className="w-3 h-3 text-brand/50 group-hover:translate-x-0.5 transition-transform" />
+      {/* Tabs */}
+      <div className="flex items-center gap-1 border-b border-border-subtle">
+        <button
+          onClick={() => setActiveTab("workflows")}
+          className={`px-4 py-2.5 text-sm font-bold transition-all border-b-2 -mb-px ${
+            activeTab === "workflows"
+              ? "border-brand text-brand"
+              : "border-transparent text-text-dim hover:text-brand/70"
+          }`}
+        >
+          {t("workflows.my_workflows")}
+          {workflows.length > 0 && <span className="ml-1.5 text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-brand/10 text-brand">{workflows.length}</span>}
+        </button>
+        <button
+          onClick={() => setActiveTab("templates")}
+          className={`px-4 py-2.5 text-sm font-bold transition-all border-b-2 -mb-px ${
+            activeTab === "templates"
+              ? "border-brand text-brand"
+              : "border-transparent text-text-dim hover:text-brand/70"
+          }`}
+        >
+          {t("workflows.template_library")}
+          {apiTemplates.length > 0 && <span className="ml-1.5 text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-brand/10 text-brand">{apiTemplates.length}</span>}
+        </button>
+      </div>
+
+      {/* Templates Tab */}
+      {activeTab === "templates" && (
+        apiTemplates.length > 0 ? (
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            {apiTemplates.map(tmpl => {
+              const Icon = categoryIconMap[tmpl.category || ""] || Layers;
+              const stepCount = tmpl.steps?.length ?? 0;
+              return (
+                <button key={tmpl.id} onClick={() => handleUseTemplate(tmpl)}
+                  className="group text-left p-5 rounded-2xl border border-border-subtle bg-surface hover:border-brand/30 hover:shadow-lg hover:-translate-y-0.5 transition-all duration-300">
+                  <div className="flex items-start gap-3">
+                    <div className="w-10 h-10 rounded-xl bg-brand/10 flex items-center justify-center shrink-0 group-hover:bg-brand/20 transition-colors">
+                      <Icon className="w-5 h-5 text-brand" />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <p className="text-sm font-bold truncate group-hover:text-brand transition-colors">{tmplName(tmpl)}</p>
+                      <p className="text-[10px] text-text-dim mt-0.5 line-clamp-2">{tmplDesc(tmpl)}</p>
+                      <div className="flex items-center gap-2 mt-2 text-[9px] font-semibold text-text-dim/50">
+                        {stepCount > 0 && <span>{stepCount} {t("workflows.nodes_unit")}</span>}
+                        {tmpl.tags && tmpl.tags.length > 0 && <span>{tmpl.tags[0]}</span>}
+                        <ArrowRight className="w-3 h-3 text-brand/50 group-hover:translate-x-0.5 transition-transform" />
+                      </div>
                     </div>
                   </div>
-                </div>
-              </button>
-            );
-          })}
-        </div>
-      </div>
+                </button>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="py-12 text-center text-text-dim text-sm">{t("common.no_data")}</div>
+        )
       )}
 
-      {/* Search Bar */}
-      {hasWorkflows && (
-        <Input value={searchQuery} onChange={e => setSearchQuery(e.target.value)}
-          placeholder={t("workflows.search_placeholder")}
-          leftIcon={<Search className="h-4 w-4" />} />
-      )}
+      {/* Workflows Tab */}
+      {activeTab === "workflows" && (
+        <>
+          {/* Search Bar */}
+          {hasWorkflows && (
+            <Input value={searchQuery} onChange={e => setSearchQuery(e.target.value)}
+              placeholder={t("workflows.search_placeholder")}
+              leftIcon={<Search className="h-4 w-4" />} />
+          )}
 
-      {/* Loading Skeleton */}
-      {workflowsQuery.isLoading && (
-        <ListSkeleton rows={3} />
-      )}
+          {/* Loading Skeleton */}
+          {workflowsQuery.isLoading && (
+            <ListSkeleton rows={3} />
+          )}
 
       {/* Main Content Area */}
       {hasWorkflows ? (
@@ -274,18 +308,28 @@ export function WorkflowsPage() {
       ) : (
         /* Empty State */
         !workflowsQuery.isLoading && (
-          <div className="text-center py-16">
+          <div className="text-center py-12">
             <div className="w-16 h-16 rounded-2xl bg-brand/10 flex items-center justify-center mx-auto mb-4">
               <Layers className="w-8 h-8 text-brand" />
             </div>
             <h3 className="text-lg font-bold">{t("workflows.empty_title")}</h3>
             <p className="text-sm text-text-dim mt-1 mb-6">{t("workflows.empty_desc")}</p>
-            <Button variant="primary" onClick={() => handleNewWorkflow()}>
-              <FilePlus className="w-4 h-4" />
-              {t("workflows.create_blank")}
-            </Button>
+            <div className="flex items-center justify-center gap-3">
+              <Button variant="primary" onClick={() => handleNewWorkflow()}>
+                <FilePlus className="w-4 h-4" />
+                {t("workflows.create_blank")}
+              </Button>
+              {apiTemplates.length > 0 && (
+                <Button variant="secondary" onClick={() => setActiveTab("templates")}>
+                  <Layers className="w-4 h-4" />
+                  {t("workflows.template_library")}
+                </Button>
+              )}
+            </div>
           </div>
         )
+      )}
+        </>
       )}
     </div>
   );

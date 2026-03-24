@@ -152,16 +152,16 @@ export function GoalsPage() {
       {goalsQuery.isLoading ? (
         <ListSkeleton rows={4} />
       ) : goals.length === 0 ? (
-        <div className="flex flex-col items-center gap-6 py-12">
-          <EmptyState
-            title={t("common.no_data")}
-            icon={<Shield className="h-6 w-6" />}
-          />
-          <Button variant="secondary" onClick={handleAddExamples}>
-            <Plus className="h-4 w-4" />
-            {t("goals.add_example_goals")}
-          </Button>
-        </div>
+        <EmptyState
+          title={t("common.no_data")}
+          icon={<Shield className="h-6 w-6" />}
+          action={
+            <Button variant="secondary" onClick={handleAddExamples}>
+              <Plus className="h-4 w-4" />
+              {t("goals.add_example_goals")}
+            </Button>
+          }
+        />
       ) : (
         <>
           <div className="grid grid-cols-2 gap-2 sm:gap-4 xl:grid-cols-4 stagger-children">

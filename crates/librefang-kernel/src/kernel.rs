@@ -2118,16 +2118,37 @@ system_prompt = "You are a helpful assistant."
             }
         }
 
-        // Load workflow templates from ~/.librefang/workflows/templates/
+        // Pre-install built-in workflow templates, then load
         {
+            let registry_dir = kernel.config.home_dir.join("registry").join("workflows");
             let user_dir = kernel.config.home_dir.join("workflows").join("templates");
-            let loaded = kernel.template_registry.load_templates_from_dir(&user_dir);
-            if loaded > 0 {
-                info!(
-                    "Loaded {loaded} workflow template(s) from {}",
-                    user_dir.display()
-                );
-            }
+
+            tokio::task::block_in_place(|| {
+                // Sync built-in templates to user directory (always overwrite)
+                let mut installed = 0usize;
+                if registry_dir.is_dir() {
+                    let _ = std::fs::create_dir_all(&user_dir);
+                    if let Ok(entries) = std::fs::read_dir(&registry_dir) {
+                        for entry in entries.flatten() {
+                            let path = entry.path();
+                            if path.extension().and_then(|e| e.to_str()) == Some("toml") {
+                                let dest = user_dir.join(path.file_name().unwrap());
+                                if std::fs::copy(&path, &dest).is_ok() {
+                                    installed += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+                if installed > 0 {
+                    info!("Pre-installed {installed} workflow template(s) from registry");
+                }
+
+                let loaded = kernel.template_registry.load_templates_from_dir(&user_dir);
+                if loaded > 0 {
+                    info!("Loaded {loaded} workflow template(s)");
+                }
+            });
         }
 
         // Validate routing configs against model catalog

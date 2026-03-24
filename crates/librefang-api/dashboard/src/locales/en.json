@@ -175,7 +175,7 @@
     "title": "Workflows", "subtitle": "Automation hub.", "all_workflows": "All Workflows", "run_workflow": "Run Workflow",
     "select_workflow": "Select workflow", "recent_runs": "Recent Runs", "no_runs": "No runs yet",
     "select_workflow_hint": "Select a workflow to view runs", "steps_count": "{{count}} steps", "nodes_unit": "nodes", "automation_hub": "Automation Hub",
-    "templates": "Templates", "use_template": "Use Template", "create_blank": "Create Blank",
+    "templates": "Templates", "template_library": "Template Library", "my_workflows": "My Workflows", "use_template": "Use Template", "create_blank": "Create Blank",
     "new_workflow": "New Workflow", "workflow_name": "Workflow Name", "description": "Description", "delete_confirm": "Are you sure you want to delete this workflow?", "open_workflows": "Workflow List", "untitled_workflow": "Untitled Workflow",
     "search_placeholder": "Search workflows...", "empty_title": "No workflows yet", "empty_desc": "Create your first workflow from a template or start from scratch.",
     "template_details": {
