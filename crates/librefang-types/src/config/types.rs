@@ -2577,7 +2577,7 @@ impl Default for MemoryConfig {
     fn default() -> Self {
         Self {
             sqlite_path: None,
-            embedding_model: "all-MiniLM-L6-v2".to_string(),
+            embedding_model: "text-embedding-3-small".to_string(),
             consolidation_threshold: 10_000,
             decay_rate: 0.1,
             embedding_provider: None,

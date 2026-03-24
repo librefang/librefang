@@ -1592,7 +1592,9 @@ impl LibreFangKernel {
                 // If the user left embedding_model at the default ("all-MiniLM-L6-v2"),
                 // pick a sensible default for the chosen provider so we don't send a
                 // local model name to a cloud API.
-                let model = if configured_model == "all-MiniLM-L6-v2" {
+                let model = if configured_model == "all-MiniLM-L6-v2"
+                    || configured_model == "text-embedding-3-small"
+                {
                     default_embedding_model_for_provider(provider)
                 } else {
                     configured_model.as_str()
@@ -1619,7 +1621,9 @@ impl LibreFangKernel {
                     }
                 }
             } else if std::env::var("OPENAI_API_KEY").is_ok() {
-                let model = if configured_model == "all-MiniLM-L6-v2" {
+                let model = if configured_model == "all-MiniLM-L6-v2"
+                    || configured_model == "text-embedding-3-small"
+                {
                     default_embedding_model_for_provider("openai")
                 } else {
                     configured_model.as_str()
@@ -1643,7 +1647,9 @@ impl LibreFangKernel {
                 }
             } else {
                 // Try Ollama (local, no key needed)
-                let model = if configured_model == "all-MiniLM-L6-v2" {
+                let model = if configured_model == "all-MiniLM-L6-v2"
+                    || configured_model == "text-embedding-3-small"
+                {
                     default_embedding_model_for_provider("ollama")
                 } else {
                     configured_model.as_str()

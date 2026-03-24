@@ -214,9 +214,15 @@ pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 
     let status = if db_ok { "ok" } else { "degraded" };
 
+    let embedding_ok = state.kernel.embedding_driver().is_some();
+
     Json(serde_json::json!({
         "status": status,
         "version": env!("CARGO_PKG_VERSION"),
+        "checks": [
+            { "name": "database", "status": if db_ok { "ok" } else { "error" } },
+            { "name": "embedding", "status": if embedding_ok { "ok" } else { "warn" } },
+        ],
     }))
 }
 
@@ -252,6 +258,13 @@ pub async fn health_detail(State(state): State<Arc<AppState>>) -> impl IntoRespo
         "restart_count": health.restart_count,
         "agent_count": state.kernel.agent_registry().count(),
         "database": if db_ok { "connected" } else { "error" },
+        "memory": {
+            "embedding_available": state.kernel.embedding_driver().is_some(),
+            "embedding_provider": state.kernel.config_ref().memory.embedding_provider,
+            "embedding_model": &state.kernel.config_ref().memory.embedding_model,
+            "proactive_memory_enabled": state.kernel.config_ref().proactive_memory.enabled,
+            "extraction_model": &state.kernel.config_ref().proactive_memory.extraction_model,
+        },
         "config_warnings": config_warnings,
     }))
 }
