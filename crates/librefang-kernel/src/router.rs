@@ -1742,7 +1742,11 @@ weak_aliases = ["changelog"]
     #[test]
     fn test_load_template_manifest_from_disk() {
         let tmp = tempdir().unwrap();
-        let template_dir = tmp.path().join("agents").join("assistant");
+        let template_dir = tmp
+            .path()
+            .join("workspaces")
+            .join("agents")
+            .join("assistant");
         fs::create_dir_all(&template_dir).unwrap();
         fs::write(
             template_dir.join("agent.toml"),

@@ -580,6 +580,8 @@ impl FeishuAdapter {
                         }
                     };
 
+                debug!("{label}: WS endpoint URL: {ws_url}");
+                debug!("{label}: WS client_config: {client_config:?}");
                 info!("{label}: connecting to WebSocket event gateway...");
 
                 // Step 2: Connect to the returned WebSocket URL.
@@ -631,7 +633,7 @@ impl FeishuAdapter {
                         msg = ws_rx.next() => {
                             match msg {
                                 Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text))) => {
-                                    debug!("{label}: WS recv: {}", &text[..text.len().min(500)]);
+                                    debug!("{label}: WS recv text frame, len={}: {}", text.len(), &text[..text.len().min(500)]);
                                     let payload: serde_json::Value = match serde_json::from_str(&text) {
                                         Ok(v) => v,
                                         Err(e) => {
@@ -666,9 +668,65 @@ impl FeishuAdapter {
                                         }
                                     }
                                 }
-                                Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_))) => {
-                                    info!("{label}: WebSocket closed by server");
+                                Some(Ok(tokio_tungstenite::tungstenite::Message::Close(frame))) => {
+                                    info!("{label}: WebSocket closed by server: {frame:?}");
                                     break;
+                                }
+                                Some(Ok(tokio_tungstenite::tungstenite::Message::Ping(data))) => {
+                                    debug!("{label}: WS recv ping frame, len={}", data.len());
+                                }
+                                Some(Ok(tokio_tungstenite::tungstenite::Message::Pong(data))) => {
+                                    debug!("{label}: WS recv pong frame, len={}", data.len());
+                                }
+                                Some(Ok(tokio_tungstenite::tungstenite::Message::Binary(data))) => {
+                                    debug!("{label}: WS recv binary frame, len={}", data.len());
+
+                                    // Feishu sends events as protobuf-wrapped binary frames.
+                                    // Extract the embedded JSON payload by scanning for the
+                                    // first '{' that starts a valid JSON object.
+                                    let json_payload = data.iter()
+                                        .position(|&b| b == b'{')
+                                        .and_then(|start| {
+                                            // Find the matching closing brace by scanning backwards
+                                            let slice = &data[start..];
+                                            std::str::from_utf8(slice).ok()
+                                        })
+                                        .and_then(|text| {
+                                            // The JSON may be followed by protobuf trailer bytes;
+                                            // find the last '}' to get the real JSON boundary.
+                                            text.rfind('}').map(|end| &text[..=end])
+                                        });
+
+                                    if let Some(json_str) = json_payload {
+                                        debug!("{label}: WS binary JSON extracted, len={}", json_str.len());
+                                        let payload: serde_json::Value = match serde_json::from_str(json_str) {
+                                            Ok(v) => v,
+                                            Err(e) => {
+                                                warn!("{label}: WS binary JSON parse error: {e}");
+                                                continue;
+                                            }
+                                        };
+
+                                        let parsed = parse_feishu_event(&payload, region)
+                                            .or_else(|| parse_card_action(&payload, region));
+                                        if let Some(mut channel_msg) = parsed {
+                                            if let Some(ref aid) = *account_id {
+                                                channel_msg.metadata.insert(
+                                                    "account_id".to_string(),
+                                                    serde_json::json!(aid),
+                                                );
+                                            }
+                                            if tx.send(channel_msg).await.is_err() {
+                                                info!("{label}: channel receiver dropped, exiting WS loop");
+                                                return;
+                                            }
+                                        }
+                                    } else {
+                                        debug!("{label}: WS binary frame has no JSON payload");
+                                    }
+                                }
+                                Some(Ok(other)) => {
+                                    debug!("{label}: WS recv unknown frame type: {other:?}");
                                 }
                                 Some(Err(e)) => {
                                     warn!("{label}: WebSocket error: {e}");
@@ -678,7 +736,6 @@ impl FeishuAdapter {
                                     info!("{label}: WebSocket stream ended");
                                     break;
                                 }
-                                _ => {} // Ping/Pong/Binary handled by tungstenite
                             }
                         }
                     }
@@ -712,7 +769,7 @@ struct WsEndpointData {
     client_config: Option<WsClientConfig>,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 #[allow(dead_code)]
 struct WsClientConfig {
     #[serde(rename = "ReconnectCount", default)]
