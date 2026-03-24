@@ -181,17 +181,24 @@ impl PromptStore {
             .lock()
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
-        conn.execute(
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+
+        tx.execute(
             "UPDATE prompt_versions SET is_active = 0 WHERE agent_id = ?1",
             [agent_id.to_string()],
         )
         .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
-        conn.execute(
+        tx.execute(
             "UPDATE prompt_versions SET is_active = 1 WHERE id = ?1",
             [id.to_string()],
         )
         .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+
+        tx.commit()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
         Ok(())
     }
@@ -448,7 +455,7 @@ impl PromptStore {
 
         let status_str = serde_json::to_string(&status).unwrap_or_default();
         conn.execute(
-            "UPDATE prompt_experiments SET status = ?1, started_at = ?2, ended_at = ?3 WHERE id = ?4",
+            "UPDATE prompt_experiments SET status = ?1, started_at = COALESCE(?2, started_at), ended_at = COALESCE(?3, ended_at) WHERE id = ?4",
             rusqlite::params![status_str, started_at, ended_at, id.to_string()],
         )
         .map_err(|e| LibreFangError::Internal(e.to_string()))?;

@@ -2598,7 +2598,6 @@ system_prompt = "You are a helpful assistant."
             messages: Vec::new(),
             context_window_tokens: 0,
             label: Some("ephemeral /btw".to_string()),
-            message_count: 0,
         };
 
         info!(
@@ -2661,6 +2660,18 @@ system_prompt = "You are a helpful assistant."
             tool_calls: result.iterations.saturating_sub(1),
             latency_ms,
         });
+
+        // Record experiment metrics if running an experiment (kernel has cost info)
+        if let Some(ref ctx) = result.experiment_context {
+            let success = !result.response.trim().is_empty();
+            let _ = self.record_experiment_request(
+                &ctx.experiment_id.to_string(),
+                &ctx.variant_id.to_string(),
+                latency_ms,
+                cost,
+                success,
+            );
+        }
 
         let mut result = result;
         result.cost_usd = if cost > 0.0 { Some(cost) } else { None };
@@ -2930,7 +2941,6 @@ system_prompt = "You are a helpful assistant."
                 messages: Vec::new(),
                 context_window_tokens: 0,
                 label: None,
-                message_count: 0,
             });
 
         // Check if auto-compaction is needed: message-count OR token-count trigger
@@ -3847,7 +3857,6 @@ system_prompt = "You are a helpful assistant."
                 messages: Vec::new(),
                 context_window_tokens: 0,
                 label: None,
-                message_count: 0,
             });
 
         let messages_before = session.messages.len();
@@ -4576,7 +4585,6 @@ system_prompt = "You are a helpful assistant."
             messages: export.messages.clone(),
             context_window_tokens: export.context_window_tokens,
             label: export.label,
-            message_count: export.messages.len() as u64,
         };
 
         self.memory
@@ -5144,7 +5152,6 @@ system_prompt = "You are a helpful assistant."
                 messages: Vec::new(),
                 context_window_tokens: 0,
                 label: None,
-                message_count: 0,
             });
 
         let config = CompactionConfig::default();
@@ -5259,7 +5266,6 @@ system_prompt = "You are a helpful assistant."
                 messages: Vec::new(),
                 context_window_tokens: 0,
                 label: None,
-                message_count: 0,
             });
 
         let system_prompt = &entry.manifest.model.system_prompt;

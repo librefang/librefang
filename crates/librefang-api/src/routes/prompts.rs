@@ -128,9 +128,20 @@ async fn delete_prompt_version(
 
 async fn activate_prompt_version(
     State(state): State<Arc<AppState>>,
-    Path((id, agent_id)): Path<(String, String)>,
+    Path(id): Path<String>,
+    Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    match state.kernel.set_active_prompt_version(&id, &agent_id) {
+    let agent_id = match body.get("agent_id").and_then(|v| v.as_str()) {
+        Some(id) => id,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "agent_id required in body"})),
+            )
+                .into_response()
+        }
+    };
+    match state.kernel.set_active_prompt_version(&id, agent_id) {
         Ok(_) => Json(serde_json::json!({"success": true})).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,

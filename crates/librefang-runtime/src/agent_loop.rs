@@ -422,6 +422,15 @@ pub async fn run_agent_loop(
 ) -> LibreFangResult<AgentLoopResult> {
     info!(agent = %manifest.name, "Starting agent loop");
 
+    // Early return if driver is not configured
+    if !driver.is_configured() {
+        return Ok(AgentLoopResult {
+            silent: true,
+            provider_not_configured: true,
+            ..Default::default()
+        });
+    }
+
     // Check for running A/B experiment and select variant (round-robin)
     #[allow(unused_variables, unused_assignments)]
     let mut experiment_context: Option<ExperimentContext> = None;
@@ -2521,21 +2530,8 @@ pub async fn run_agent_loop_streaming(
                     }
                 }
 
-                // Record experiment metrics if running an experiment
-                if let Some(ref ctx) = experiment_context {
-                    let latency_ms = ctx.request_start.elapsed().as_millis() as u64;
-                    let cost_usd = 0.0;
-                    let success = !final_response.trim().is_empty();
-                    if let Some(kernel) = kernel.as_ref() {
-                        let _ = kernel.record_experiment_request(
-                            &ctx.experiment_id.to_string(),
-                            &ctx.variant_id.to_string(),
-                            latency_ms,
-                            cost_usd,
-                            success,
-                        );
-                    }
-                }
+                // Experiment metrics are recorded by the kernel after cost calculation
+                // (agent_loop doesn't have access to pricing information)
 
                 // Fire AgentLoopEnd hook
                 if let Some(hook_reg) = hooks {
@@ -2563,7 +2559,7 @@ pub async fn run_agent_loop_streaming(
                     memories_used,
                     memory_conflicts,
                     provider_not_configured: false,
-                    experiment_context: None,
+                    experiment_context,
                     latency_ms: 0,
                 });
             }
@@ -3992,7 +3988,6 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
-            message_count: 0,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(EmptyAfterToolUseDriver::new());
@@ -4051,7 +4046,6 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
-            message_count: 0,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(EmptyMaxTokensDriver);
@@ -4109,7 +4103,6 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
-            message_count: 0,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(NormalDriver);
@@ -4158,7 +4151,6 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
-            message_count: 0,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(EmptyAfterToolUseDriver::new());
@@ -4293,7 +4285,6 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
-            message_count: 0,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(EmptyThenNormalDriver::new());
@@ -4345,7 +4336,6 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
-            message_count: 0,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(AlwaysEmptyDriver);
@@ -4403,7 +4393,6 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
-            message_count: 0,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(EmptyMaxTokensDriver);
@@ -5175,7 +5164,6 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
-            message_count: 0,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(TextToolCallDriver::new());
@@ -5253,7 +5241,6 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
-            message_count: 0,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(NormalDriver);
@@ -5313,7 +5300,6 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
-            message_count: 0,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(TextToolCallDriver::new());

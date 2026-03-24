@@ -926,7 +926,6 @@ pub fn inject_attachments_into_session(
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
-            message_count: 0,
         },
     };
 
