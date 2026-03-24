@@ -753,7 +753,7 @@ export function ChannelsPage() {
                 isSelected={selectedIds.has(c.name)}
                 viewMode={viewMode}
                 onSelect={handleSelect}
-                onConfigure={setConfiguringChannel}
+                onConfigure={(ch) => ch.setup_type === "qr" ? setQrLoginChannel(ch) : setConfiguringChannel(ch)}
                 onViewDetails={setDetailsChannel}
                 t={t}
               />
