@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useRef, useState, useCallback } from "react";
+import { memo, useEffect, useMemo, useRef, useState, useCallback } from "react";
 import rehypeKatex from "rehype-katex";
 import remarkMath from "remark-math";
 import { useTranslation } from "react-i18next";
@@ -362,8 +362,8 @@ function useChatMessages(agentId: string | null, agents: any[] = []) {
   return { messages, isLoading, sendMessage, clearHistory, wsConnected };
 }
 
-// Message bubble component
-function MessageBubble({ message }: { message: ChatMessage }) {
+// Message bubble component — memoized to skip re-render during streaming of other messages
+const MessageBubble = memo(function MessageBubble({ message }: { message: ChatMessage }) {
   const { t } = useTranslation();
   const isUser = message.role === "user";
 
@@ -453,7 +453,7 @@ function MessageBubble({ message }: { message: ChatMessage }) {
       </div>
     </div>
   );
-}
+});
 
 // Input box - with shortcut hints
 function ChatInput({ onSend, disabled, placeholder }: { onSend: (msg: string) => void; disabled: boolean; placeholder: string }) {
@@ -563,43 +563,25 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, wsConnecte
 }
 
 // ---------------------------------------------------------------------------
-// Approval polling — polls pending approvals for the current agent
+// Approval polling — uses React Query for caching, background pause, dedup
 // ---------------------------------------------------------------------------
-const APPROVAL_POLL_MS = 2000;
-
 function useApprovalPoller(agentId: string | null) {
-  const [pendingApprovals, setPendingApprovals] = useState<ApprovalItem[]>([]);
-
-  useEffect(() => {
-    if (!agentId) {
-      setPendingApprovals([]);
-      return;
-    }
-
-    let cancelled = false;
-
-    const poll = async () => {
-      try {
-        const items = await listPendingApprovals(agentId);
-        if (!cancelled) setPendingApprovals(items);
-      } catch {
-        // Silently ignore — API may be temporarily unavailable
-      }
-    };
-
-    poll();
-    const timer = setInterval(poll, APPROVAL_POLL_MS);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-  }, [agentId]);
+  const queryClient = useQueryClient();
+  const approvalsQuery = useQuery({
+    queryKey: ["approvals", "pending", agentId],
+    queryFn: () => listPendingApprovals(agentId!),
+    enabled: !!agentId,
+    refetchInterval: 5000,
+  });
 
   const remove = useCallback((id: string) => {
-    setPendingApprovals((prev) => prev.filter((a) => a.id !== id));
-  }, []);
+    queryClient.setQueryData<ApprovalItem[]>(
+      ["approvals", "pending", agentId],
+      (prev) => prev?.filter((a) => a.id !== id) ?? [],
+    );
+  }, [agentId, queryClient]);
 
-  return { pendingApprovals, removeApproval: remove };
+  return { pendingApprovals: approvalsQuery.data ?? [], removeApproval: remove };
 }
 
 // ---------------------------------------------------------------------------
@@ -713,17 +695,15 @@ export function ChatPage() {
   }, [navigate]);
 
   const agentsQuery = useQuery({ queryKey: ["agents", "list", "chat"], queryFn: listAgents, staleTime: 30000 });
-  const agents = (agentsQuery.data ?? []).sort((a, b) => {
-    // Suspended last
+  const agents = useMemo(() => [...(agentsQuery.data ?? [])].sort((a, b) => {
     const aSusp = (a.state || "").toLowerCase() === "suspended" ? 1 : 0;
     const bSusp = (b.state || "").toLowerCase() === "suspended" ? 1 : 0;
     if (aSusp !== bSusp) return aSusp - bSusp;
-    // Core agents first, hands second
     const aHand = a.name.includes("-hand") ? 1 : 0;
     const bHand = b.name.includes("-hand") ? 1 : 0;
     if (aHand !== bHand) return aHand - bHand;
     return a.name.localeCompare(b.name);
-  });
+  }), [agentsQuery.data]);
   const { messages, isLoading, sendMessage, clearHistory, wsConnected } = useChatMessages(selectedAgentId || null, agents);
   const { pendingApprovals, removeApproval } = useApprovalPoller(selectedAgentId || null);
   const selectedAgent = agents.find(a => a.id === selectedAgentId);

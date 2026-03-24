@@ -1,5 +1,5 @@
 import { Link, Outlet } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Globe, Sun, Moon, Search, ChevronLeft, ChevronRight, ChevronDown, Menu, Home, Layers, MessageCircle, Clock, CheckCircle, Calendar, Shield, Users, Server, Network, Bell, Hand, BarChart3, Database, Activity, FileText, Settings, Puzzle, Cpu, Lock, Share2, Gauge } from "lucide-react";
 import { useUIStore } from "./lib/store";
@@ -65,7 +65,17 @@ function AuthDialog({ onAuthenticated }: { onAuthenticated: () => void }) {
 
 export function App() {
   const { t } = useTranslation();
-  const { theme, toggleTheme, language, setLanguage, isMobileMenuOpen, setMobileMenuOpen, isSidebarCollapsed, toggleSidebar, navLayout, collapsedNavGroups, toggleNavGroup } = useUIStore();
+  const theme = useUIStore((s) => s.theme);
+  const toggleTheme = useUIStore((s) => s.toggleTheme);
+  const language = useUIStore((s) => s.language);
+  const setLanguage = useUIStore((s) => s.setLanguage);
+  const isMobileMenuOpen = useUIStore((s) => s.isMobileMenuOpen);
+  const setMobileMenuOpen = useUIStore((s) => s.setMobileMenuOpen);
+  const isSidebarCollapsed = useUIStore((s) => s.isSidebarCollapsed);
+  const toggleSidebar = useUIStore((s) => s.toggleSidebar);
+  const navLayout = useUIStore((s) => s.navLayout);
+  const collapsedNavGroups = useUIStore((s) => s.collapsedNavGroups);
+  const toggleNavGroup = useUIStore((s) => s.toggleNavGroup);
   const { isOpen: isPaletteOpen, setIsOpen: setPaletteOpen } = useCommandPalette();
   const [authNeeded, setAuthNeeded] = useState(false);
   const [authChecked, setAuthChecked] = useState(false);
@@ -93,12 +103,12 @@ export function App() {
     }
   }, [theme]);
 
-  const navBase = `flex items-center rounded-xl border border-transparent py-2.5 text-sm text-text-dim transition-all duration-300 hover:bg-surface-hover hover:text-brand group ${
+  const navBase = `flex items-center rounded-xl border border-transparent py-2.5 text-sm text-text-dim transition-colors duration-200 hover:bg-surface-hover hover:text-brand group ${
     isSidebarCollapsed ? "lg:justify-center lg:px-2 lg:gap-0" : "px-3 gap-3"
   }`;
   const navActive = "border-brand/20 bg-brand/10 text-brand font-semibold shadow-sm shadow-brand/5";
 
-  const navGroups = [
+  const navGroups = useMemo(() => [
     {
       key: "core",
       label: t("nav.core"),
@@ -145,7 +155,7 @@ export function App() {
         { to: "/logs", label: t("nav.logs"), icon: FileText },
       ],
     },
-  ];
+  ], [t]);
 
   return (
     <div className="flex h-screen flex-col bg-main text-slate-900 dark:text-slate-100 lg:flex-row transition-colors duration-300 overflow-hidden">

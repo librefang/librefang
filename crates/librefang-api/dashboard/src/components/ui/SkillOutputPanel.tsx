@@ -5,7 +5,11 @@ import { useUIStore } from "../../lib/store";
 
 export function SkillOutputPanel() {
   const { t } = useTranslation();
-  const { skillOutputs, dismissSkillOutput, clearSkillOutputs, isSidebarCollapsed, isMobileMenuOpen } = useUIStore();
+  const skillOutputs = useUIStore((s) => s.skillOutputs);
+  const dismissSkillOutput = useUIStore((s) => s.dismissSkillOutput);
+  const clearSkillOutputs = useUIStore((s) => s.clearSkillOutputs);
+  const isSidebarCollapsed = useUIStore((s) => s.isSidebarCollapsed);
+  const isMobileMenuOpen = useUIStore((s) => s.isMobileMenuOpen);
   const [collapsed, setCollapsed] = useState(false);
 
   if (skillOutputs.length === 0) return null;

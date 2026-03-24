@@ -2611,6 +2611,7 @@ id = "{id}"
             }],
             tags: vec![],
             created_at: None,
+            i18n: Default::default(),
         }
     }
 

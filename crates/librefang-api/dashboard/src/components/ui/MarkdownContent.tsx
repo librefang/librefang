@@ -1,3 +1,4 @@
+import { memo, useMemo } from "react";
 import type { ReactNode, ComponentType } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -26,6 +27,9 @@ const defaultComponents: Record<string, ComponentType<any>> = {
   a: ({ href, children }: { href?: string; children: ReactNode }) => <a href={href} className="text-brand underline" target="_blank" rel="noopener noreferrer">{children}</a>,
 };
 
+// Stable default plugin array — never changes between renders
+const defaultPlugins: PluggableList = [remarkGfm];
+
 interface MarkdownContentProps {
   children: string;
   className?: string;
@@ -34,15 +38,21 @@ interface MarkdownContentProps {
   components?: Record<string, ComponentType<any>>;
 }
 
-export function MarkdownContent({
+export const MarkdownContent = memo(function MarkdownContent({
   children,
   className,
   remarkPlugins,
   rehypePlugins,
   components,
 }: MarkdownContentProps) {
-  const merged = components ? { ...defaultComponents, ...components } : defaultComponents;
-  const plugins: PluggableList = remarkPlugins ? [remarkGfm, ...remarkPlugins] : [remarkGfm];
+  const merged = useMemo(
+    () => components ? { ...defaultComponents, ...components } : defaultComponents,
+    [components],
+  );
+  const plugins = useMemo(
+    () => remarkPlugins ? [remarkGfm, ...remarkPlugins] : defaultPlugins,
+    [remarkPlugins],
+  );
 
   return (
     <div className={className}>
@@ -55,4 +65,4 @@ export function MarkdownContent({
       </Markdown>
     </div>
   );
-}
+});
