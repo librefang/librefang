@@ -9,6 +9,7 @@ import { Card } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
 import { Input } from "../components/ui/Input";
 import { Button } from "../components/ui/Button";
+import { Pagination } from "../components/ui/Pagination";
 import { useUIStore } from "../lib/store";
 import { Database, Search, Trash2, Plus, X, Sparkles, Zap, Clock, RefreshCw, Edit2, Loader2, BarChart3 } from "lucide-react";
 
@@ -170,8 +171,10 @@ export function MemoryPage() {
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [editingMemory, setEditingMemory] = useState<{ id: string; content?: string } | null>(null);
   const [showStats, setShowStats] = useState(true);
+  const [page, setPage] = useState(0);
+  const pageSize = 20;
 
-  const memoryQuery = useQuery({ queryKey: ["memory", "list"], queryFn: () => listMemories(), refetchInterval: REFRESH_MS });
+  const memoryQuery = useQuery({ queryKey: ["memory", "list", page], queryFn: () => listMemories({ offset: page * pageSize, limit: pageSize }), refetchInterval: REFRESH_MS });
   const statsQuery = useQuery({ queryKey: ["memory", "stats"], queryFn: () => getMemoryStats(), refetchInterval: REFRESH_MS * 2 });
 
   const deleteMutation = useMutation({
@@ -327,6 +330,15 @@ export function MemoryPage() {
             </Card>
           ))}
         </div>
+      )}
+
+      {/* Pagination */}
+      {totalCount > pageSize && (
+        <Pagination
+          currentPage={page + 1}
+          totalPages={Math.ceil(totalCount / pageSize)}
+          onPageChange={(p) => setPage(p - 1)}
+        />
       )}
 
       {/* Dialogs */}
