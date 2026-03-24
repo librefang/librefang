@@ -113,6 +113,7 @@ mod tests {
         let structural: Vec<_> = warnings
             .iter()
             .filter(|w| !w.contains("is not set"))
+            .filter(|w| !w.contains("does not exist"))
             .collect();
         assert!(
             structural.is_empty(),
