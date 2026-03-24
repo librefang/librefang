@@ -8,9 +8,9 @@ import {
   listWorkflowRuns,
   listWorkflows,
   runWorkflow,
-  getWorkflow,
   listWorkflowTemplates,
   instantiateTemplate,
+  createSchedule,
   type WorkflowTemplate,
 } from "../api";
 import { Card } from "../components/ui/Card";
@@ -18,25 +18,27 @@ import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
 import { PageHeader } from "../components/ui/PageHeader";
 import { ListSkeleton } from "../components/ui/Skeleton";
+import { ScheduleModal } from "../components/ui/ScheduleModal";
 import {
   Layers, Trash2, FilePlus, Play, Search,
   Calendar, FileText, Activity, Bot, ArrowRight, Loader2, Clock, ChevronRight
 } from "lucide-react";
 
-const iconMap: Record<string, React.ComponentType<{ className?: string }>> = { Calendar, FileText, Activity, Bot };
 const categoryIconMap: Record<string, React.ComponentType<{ className?: string }>> = {
   creation: FileText, language: Bot, thinking: Activity, business: Calendar,
 };
 const REFRESH_MS = 30000;
 
 export function WorkflowsPage() {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [selectedWorkflowId, setSelectedWorkflowId] = useState<string>("");
   const [runInput, setRunInput] = useState("");
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
+  const [activeTab, setActiveTab] = useState<"workflows" | "templates">("workflows");
+  const [scheduleWorkflowId, setScheduleWorkflowId] = useState<string | null>(null);
 
   const workflowsQuery = useQuery({ queryKey: ["workflows", "list"], queryFn: listWorkflows, refetchInterval: REFRESH_MS });
   const runsQuery = useQuery({ queryKey: ["workflows", "runs", selectedWorkflowId], queryFn: () => listWorkflowRuns(selectedWorkflowId), enabled: Boolean(selectedWorkflowId) });
@@ -58,6 +60,7 @@ export function WorkflowsPage() {
     } catch { /* ignore */ }
   };
 
+
   const handleDelete = async (id: string) => {
     if (confirmDeleteId !== id) { setConfirmDeleteId(id); return; }
     setConfirmDeleteId(null);
@@ -67,7 +70,7 @@ export function WorkflowsPage() {
   const handleNewWorkflow = () => {
     sessionStorage.removeItem("canvasNodes");
     sessionStorage.removeItem("workflowTemplate");
-    navigate({ to: "/canvas", search: { t: Date.now() } });
+    navigate({ to: "/canvas", search: { t: Date.now(), wf: undefined } });
   };
 
   const handleUseTemplate = async (tmpl: WorkflowTemplate) => {
@@ -76,7 +79,7 @@ export function WorkflowsPage() {
       // Template needs params — open canvas with TemplateBrowser
       sessionStorage.removeItem("canvasNodes");
       sessionStorage.removeItem("workflowTemplate");
-      navigate({ to: "/canvas", search: { t: Date.now(), openTemplates: "1" } });
+      navigate({ to: "/canvas", search: { t: Date.now(), wf: undefined } });
       return;
     }
     try {
@@ -89,34 +92,21 @@ export function WorkflowsPage() {
     } catch {
       sessionStorage.removeItem("canvasNodes");
       sessionStorage.removeItem("workflowTemplate");
-      navigate({ to: "/canvas", search: { t: Date.now() } });
+      navigate({ to: "/canvas", search: { t: Date.now(), wf: undefined } });
     }
   };
 
-  const openWorkflow = async (wfId: string) => {
-    try {
-      const detail = await getWorkflow(wfId);
-      let nodes, edges;
-      if (detail.layout?.nodes) {
-        nodes = detail.layout.nodes;
-        edges = detail.layout.edges || [];
-      } else {
-        const steps = Array.isArray(detail.steps) ? detail.steps : [];
-        nodes = steps.map((s: any, idx: number) => {
-          const p = s.prompt_template || s.prompt || "";
-          return { id: `node-${idx}`, type: "custom", position: { x: 50, y: idx * 80 },
-            data: { label: s.name, description: p.length > 40 ? p.slice(0, 40) + "..." : p, prompt: p, nodeType: "agent", agentId: s.agent?.agent_id, agentName: s.agent?.name } };
-        });
-        edges = nodes.slice(0, -1).map((_: any, i: number) => ({ id: `e-${i}`, source: `node-${i}`, target: `node-${i + 1}` }));
-      }
-      sessionStorage.removeItem("canvasNodes");
-      sessionStorage.setItem("workflowTemplate", JSON.stringify({ nodes, edges, name: detail.name, description: detail.description, workflowId: wfId }));
-      navigate({ to: "/canvas", search: { t: Date.now() } });
-    } catch (e) { console.error("Failed to load workflow:", e); }
+  const openWorkflow = (wfId: string) => {
+    sessionStorage.removeItem("canvasNodes");
+    sessionStorage.removeItem("workflowTemplate");
+    navigate({ to: "/canvas", search: { t: undefined, wf: wfId } });
   };
 
   const templatesQuery = useQuery({ queryKey: ["workflow-templates"], queryFn: () => listWorkflowTemplates() });
   const apiTemplates = templatesQuery.data ?? [];
+  const lang = i18n.language?.split("-")[0] ?? "en";
+  const tmplName = (tmpl: WorkflowTemplate) => tmpl.i18n?.[lang]?.name || tmpl.name;
+  const tmplDesc = (tmpl: WorkflowTemplate) => tmpl.i18n?.[lang]?.description || tmpl.description;
 
   const hasWorkflows = workflows.length > 0;
 
@@ -129,57 +119,88 @@ export function WorkflowsPage() {
         isFetching={workflowsQuery.isFetching}
         onRefresh={() => void workflowsQuery.refetch()}
         icon={<Layers className="h-4 w-4" />}
-        actions={
+        helpText={t("workflows.help")}
+        actions={hasWorkflows ?
           <Button variant="primary" onClick={handleNewWorkflow}>
             <FilePlus className="h-4 w-4" />
             {t("workflows.create_blank")}
-          </Button>
+          </Button> : undefined
         }
       />
 
-      {/* Template Recommendations — loaded from API */}
-      {apiTemplates.length > 0 && (
-      <div>
-        <h2 className="text-xs font-bold uppercase tracking-widest text-text-dim/50 mb-3">{t("workflows.templates")}</h2>
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          {apiTemplates.map(tmpl => {
-            const Icon = categoryIconMap[tmpl.category || ""] || Layers;
-            const stepCount = tmpl.steps?.length ?? 0;
-            return (
-              <button key={tmpl.id} onClick={() => handleUseTemplate(tmpl)}
-                className="group text-left p-5 rounded-2xl border border-border-subtle bg-surface hover:border-brand/30 hover:shadow-lg hover:-translate-y-0.5 transition-all duration-300">
-                <div className="flex items-start gap-3">
-                  <div className="w-10 h-10 rounded-xl bg-brand/10 flex items-center justify-center shrink-0 group-hover:bg-brand/20 transition-colors">
-                    <Icon className="w-5 h-5 text-brand" />
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <p className="text-sm font-bold truncate group-hover:text-brand transition-colors">{tmpl.name}</p>
-                    <p className="text-[10px] text-text-dim mt-0.5 line-clamp-2">{tmpl.description}</p>
-                    <div className="flex items-center gap-2 mt-2 text-[9px] font-semibold text-text-dim/50">
-                      {stepCount > 0 && <span>{stepCount} {t("workflows.nodes_unit")}</span>}
-                      {tmpl.tags && tmpl.tags.length > 0 && <span>{tmpl.tags[0]}</span>}
-                      <ArrowRight className="w-3 h-3 text-brand/50 group-hover:translate-x-0.5 transition-transform" />
+      {/* Tabs */}
+      <div className="flex items-center gap-1 border-b border-border-subtle">
+        <button
+          onClick={() => setActiveTab("workflows")}
+          className={`px-4 py-2.5 text-sm font-bold transition-colors border-b-2 -mb-px ${
+            activeTab === "workflows"
+              ? "border-brand text-brand"
+              : "border-transparent text-text-dim hover:text-brand/70"
+          }`}
+        >
+          {t("workflows.my_workflows")}
+          {workflows.length > 0 && <span className="ml-1.5 text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-brand/10 text-brand">{workflows.length}</span>}
+        </button>
+        <button
+          onClick={() => setActiveTab("templates")}
+          className={`px-4 py-2.5 text-sm font-bold transition-colors border-b-2 -mb-px ${
+            activeTab === "templates"
+              ? "border-brand text-brand"
+              : "border-transparent text-text-dim hover:text-brand/70"
+          }`}
+        >
+          {t("workflows.template_library")}
+          {apiTemplates.length > 0 && <span className="ml-1.5 text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-brand/10 text-brand">{apiTemplates.length}</span>}
+        </button>
+      </div>
+
+      {/* Templates Tab */}
+      {activeTab === "templates" && (
+        apiTemplates.length > 0 ? (
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            {apiTemplates.map(tmpl => {
+              const Icon = categoryIconMap[tmpl.category || ""] || Layers;
+              const stepCount = tmpl.steps?.length ?? 0;
+              return (
+                <button key={tmpl.id} onClick={() => handleUseTemplate(tmpl)}
+                  className="group text-left p-5 rounded-2xl border border-border-subtle bg-surface hover:border-brand/30 hover:shadow-lg hover:-translate-y-0.5 transition-all duration-300">
+                  <div className="flex items-start gap-3">
+                    <div className="w-10 h-10 rounded-xl bg-brand/10 flex items-center justify-center shrink-0 group-hover:bg-brand/20 transition-colors">
+                      <Icon className="w-5 h-5 text-brand" />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <p className="text-sm font-bold truncate group-hover:text-brand transition-colors">{tmplName(tmpl)}</p>
+                      <p className="text-[10px] text-text-dim mt-0.5 line-clamp-2">{tmplDesc(tmpl)}</p>
+                      <div className="flex items-center gap-2 mt-2 text-[9px] font-semibold text-text-dim/50">
+                        {stepCount > 0 && <span>{stepCount} {t("workflows.nodes_unit")}</span>}
+                        {tmpl.tags && tmpl.tags.length > 0 && <span>{tmpl.tags[0]}</span>}
+                        <ArrowRight className="w-3 h-3 text-brand/50 group-hover:translate-x-0.5 transition-transform" />
+                      </div>
                     </div>
                   </div>
-                </div>
-              </button>
-            );
-          })}
-        </div>
-      </div>
+                </button>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="py-12 text-center text-text-dim text-sm">{t("common.no_data")}</div>
+        )
       )}
 
-      {/* Search Bar */}
-      {hasWorkflows && (
-        <Input value={searchQuery} onChange={e => setSearchQuery(e.target.value)}
-          placeholder={t("workflows.search_placeholder")}
-          leftIcon={<Search className="h-4 w-4" />} />
-      )}
+      {/* Workflows Tab */}
+      {activeTab === "workflows" && (
+        <>
+          {/* Search Bar */}
+          {hasWorkflows && (
+            <Input value={searchQuery} onChange={e => setSearchQuery(e.target.value)}
+              placeholder={t("workflows.search_placeholder")}
+              leftIcon={<Search className="h-4 w-4" />} />
+          )}
 
-      {/* Loading Skeleton */}
-      {workflowsQuery.isLoading && (
-        <ListSkeleton rows={3} />
-      )}
+          {/* Loading Skeleton */}
+          {workflowsQuery.isLoading && (
+            <ListSkeleton rows={3} />
+          )}
 
       {/* Main Content Area */}
       {hasWorkflows ? (
@@ -193,7 +214,7 @@ export function WorkflowsPage() {
               <div key={wf.id}
                 onClick={() => setSelectedWorkflowId(wf.id)}
                 onDoubleClick={() => openWorkflow(wf.id)}
-                className={`group flex items-center gap-4 p-4 rounded-2xl border cursor-pointer transition-all ${
+                className={`group flex items-center gap-4 p-4 rounded-2xl border cursor-pointer transition-colors ${
                   selectedWorkflowId === wf.id
                     ? "border-brand bg-brand/5 shadow-sm"
                     : "border-border-subtle bg-surface hover:border-brand/30 hover:shadow-sm"
@@ -213,15 +234,26 @@ export function WorkflowsPage() {
                     </span>
                   </div>
                   <p className="text-[10px] text-text-dim mt-0.5 truncate">{wf.description || t("common.no_data")}</p>
-                  <div className="flex items-center gap-2 mt-1.5 text-[9px] text-text-dim/50">
-                    <Clock className="w-3 h-3" />
-                    <span>{formatDate(wf.created_at)}</span>
+                  <div className="flex items-center gap-3 mt-1.5 text-[9px] text-text-dim/50">
+                    <span className="flex items-center gap-1"><Clock className="w-3 h-3" />{formatDate(wf.created_at)}</span>
+                    <span className="flex items-center gap-1"><Play className="w-3 h-3" />{(wf as any).run_count ?? 0} {t("workflows.runs_label", { defaultValue: "runs" })}</span>
+                    {(wf as any).schedule && (
+                      <span className={`flex items-center gap-1 px-1.5 py-0.5 rounded-full ${(wf as any).schedule.enabled ? "bg-success/10 text-success" : "bg-main text-text-dim"}`}>
+                        <Calendar className="w-3 h-3" />
+                        {(wf as any).schedule.cron}
+                      </span>
+                    )}
                   </div>
                 </div>
                 {/* Actions */}
                 <div className="flex items-center gap-1 shrink-0" onClick={e => e.stopPropagation()}>
+                  <button onClick={() => { setScheduleWorkflowId(wf.id); }}
+                    className={`p-2 rounded-lg transition-colors ${(wf as any).schedule ? "text-success hover:text-success hover:bg-success/10" : "text-text-dim/40 hover:text-brand hover:bg-brand/10"}`}
+                    title={t("nav.scheduler")}>
+                    <Calendar className="w-3.5 h-3.5" />
+                  </button>
                   <button onClick={() => openWorkflow(wf.id)}
-                    className="p-2 rounded-lg text-text-dim/40 hover:text-brand hover:bg-brand/10 transition-all"
+                    className="p-2 rounded-lg text-text-dim/40 hover:text-brand hover:bg-brand/10 transition-colors"
                     title={t("canvas.ctx_edit")}>
                     <ChevronRight className="w-4 h-4" />
                   </button>
@@ -232,7 +264,7 @@ export function WorkflowsPage() {
                     </div>
                   ) : (
                     <button onClick={() => handleDelete(wf.id)}
-                      className="p-2 rounded-lg text-text-dim/30 hover:text-error hover:bg-error/10 transition-all">
+                      className="p-2 rounded-lg text-text-dim/30 hover:text-error hover:bg-error/10 transition-colors">
                       <Trash2 className="w-3.5 h-3.5" />
                     </button>
                   )}
@@ -275,18 +307,45 @@ export function WorkflowsPage() {
       ) : (
         /* Empty State */
         !workflowsQuery.isLoading && (
-          <div className="text-center py-16">
+          <div className="text-center py-12">
             <div className="w-16 h-16 rounded-2xl bg-brand/10 flex items-center justify-center mx-auto mb-4">
               <Layers className="w-8 h-8 text-brand" />
             </div>
             <h3 className="text-lg font-bold">{t("workflows.empty_title")}</h3>
             <p className="text-sm text-text-dim mt-1 mb-6">{t("workflows.empty_desc")}</p>
-            <Button variant="primary" onClick={() => handleNewWorkflow()}>
-              <FilePlus className="w-4 h-4" />
-              {t("workflows.create_blank")}
-            </Button>
+            <div className="flex items-center justify-center gap-3">
+              <Button variant="primary" onClick={() => handleNewWorkflow()}>
+                <FilePlus className="w-4 h-4" />
+                {t("workflows.create_blank")}
+              </Button>
+              {apiTemplates.length > 0 && (
+                <Button variant="secondary" onClick={() => setActiveTab("templates")}>
+                  <Layers className="w-4 h-4" />
+                  {t("workflows.template_library")}
+                </Button>
+              )}
+            </div>
           </div>
         )
+      )}
+        </>
+      )}
+      {/* Schedule Modal */}
+      {scheduleWorkflowId && (
+        <ScheduleModal
+          title={t("nav.scheduler")}
+          subtitle={workflows.find(w => w.id === scheduleWorkflowId)?.name}
+          initialCron={(workflows.find(w => w.id === scheduleWorkflowId) as any)?.schedule?.cron || "0 9 * * *"}
+          onSave={async (cron) => {
+            const wf = workflows.find(w => w.id === scheduleWorkflowId);
+            try {
+              await createSchedule({ name: `${wf?.name || "workflow"} schedule`, cron, workflow_id: scheduleWorkflowId, enabled: true });
+              setScheduleWorkflowId(null);
+              await queryClient.invalidateQueries({ queryKey: ["workflows"] });
+            } catch { /* ignore */ }
+          }}
+          onClose={() => setScheduleWorkflowId(null)}
+        />
       )}
     </div>
   );

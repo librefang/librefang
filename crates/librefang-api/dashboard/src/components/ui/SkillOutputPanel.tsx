@@ -5,7 +5,11 @@ import { useUIStore } from "../../lib/store";
 
 export function SkillOutputPanel() {
   const { t } = useTranslation();
-  const { skillOutputs, dismissSkillOutput, clearSkillOutputs, isSidebarCollapsed, isMobileMenuOpen } = useUIStore();
+  const skillOutputs = useUIStore((s) => s.skillOutputs);
+  const dismissSkillOutput = useUIStore((s) => s.dismissSkillOutput);
+  const clearSkillOutputs = useUIStore((s) => s.clearSkillOutputs);
+  const isSidebarCollapsed = useUIStore((s) => s.isSidebarCollapsed);
+  const isMobileMenuOpen = useUIStore((s) => s.isMobileMenuOpen);
   const [collapsed, setCollapsed] = useState(false);
 
   if (skillOutputs.length === 0) return null;
@@ -13,7 +17,7 @@ export function SkillOutputPanel() {
   return (
     <div className={`fixed bottom-0 left-0 right-0 pointer-events-none ${isMobileMenuOpen ? "z-[30]" : "z-[90]"} ${isSidebarCollapsed ? "lg:left-[72px]" : "lg:left-[280px]"}`}>
       <div className="mx-auto max-w-7xl px-3 sm:px-4 lg:px-8 pb-[env(safe-area-inset-bottom,8px)]">
-        <div className="pointer-events-auto rounded-t-xl border border-b-0 border-border-subtle bg-surface/95 backdrop-blur-xl shadow-2xl">
+        <div className="pointer-events-auto rounded-t-xl border border-b-0 border-border-subtle bg-surface shadow-2xl">
           {/* Header */}
           <div className="flex items-center justify-between px-3 sm:px-4 py-2 border-b border-border-subtle/50">
             <button
@@ -29,7 +33,7 @@ export function SkillOutputPanel() {
             </button>
             <button
               onClick={clearSkillOutputs}
-              className="p-1.5 rounded-lg text-text-dim/40 hover:text-error hover:bg-error/10 transition-all"
+              className="p-1.5 rounded-lg text-text-dim/40 hover:text-error hover:bg-error/10 transition-colors"
               title={t("common.clear", { defaultValue: "Clear" })}
             >
               <Trash2 className="w-3.5 h-3.5" />
@@ -64,7 +68,7 @@ export function SkillOutputPanel() {
                   </div>
                   <button
                     onClick={() => dismissSkillOutput(output.id)}
-                    className="p-1 rounded text-text-dim/20 hover:text-text-dim opacity-0 group-hover:opacity-100 transition-all shrink-0"
+                    className="p-1 rounded text-text-dim/20 hover:text-text-dim opacity-0 group-hover:opacity-100 transition-[colors,opacity] shrink-0"
                   >
                     <X className="w-3 h-3" />
                   </button>

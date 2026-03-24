@@ -42,7 +42,7 @@ interface UIState {
 export const useUIStore = create<UIState>()(
   persist(
     (set) => ({
-      theme: "dark",
+      theme: (typeof window !== "undefined" && window.matchMedia?.("(prefers-color-scheme: light)").matches) ? "light" : "dark",
       language: i18n.language || "en",
       isMobileMenuOpen: false,
       isSidebarCollapsed: false,

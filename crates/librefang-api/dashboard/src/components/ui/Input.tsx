@@ -29,7 +29,7 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(
               focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/10
               hover:border-brand/20
               disabled:opacity-50 disabled:cursor-not-allowed
-              transition-all duration-200 shadow-sm
+              transition-colors duration-200 shadow-sm
               ${leftIcon ? "pl-11" : ""}
               ${rightIcon ? "pr-11" : ""}
               ${className}

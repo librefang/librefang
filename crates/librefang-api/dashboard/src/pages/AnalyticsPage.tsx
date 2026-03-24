@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { formatCompact, formatCost } from "../lib/format";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { getUsageSummary, listUsageByAgent, listUsageByModel, getUsageDaily, getBudgetStatus, updateBudget } from "../api";
 import { Card } from "../components/ui/Card";
@@ -9,7 +9,6 @@ import { PageHeader } from "../components/ui/PageHeader";
 import { EmptyState } from "../components/ui/EmptyState";
 import { BarChart3, DollarSign, Shield, Save, Loader2, Cpu, Users, Zap, TrendingUp } from "lucide-react";
 import { CardSkeleton } from "../components/ui/Skeleton";
-import { truncateId } from "../lib/string";
 import { AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts";
 
 const REFRESH_MS = 30000;
@@ -26,9 +25,13 @@ export function AnalyticsPage() {
   const budgetMutation = useMutation({ mutationFn: updateBudget, onSuccess: () => queryClient.invalidateQueries({ queryKey: ["budget"] }) });
 
   const usage = usageQuery.data ?? null;
-  const usageByAgent = usageByAgentQuery.data ?? [];
+  const usageByAgent = useMemo(() => [...(usageByAgentQuery.data ?? [])].sort((a: any, b: any) => (b.total_cost_usd ?? 0) - (a.total_cost_usd ?? 0)), [usageByAgentQuery.data]);
   const usageByModel = usageByModelQuery.data ?? [];
   const daily = dailyQuery.data ?? null;
+
+  const agentChartData = useMemo(() => usageByAgent.map(u => ({ name: u.name || u.agent_id?.slice(0, 8), cost: u.cost ?? 0 })), [usageByAgent]);
+  const modelChartData = useMemo(() => (usageByModel as any[]).map(m => ({ name: m.model?.slice(0, 20), cost: m.total_cost_usd ?? 0 })), [usageByModel]);
+  const dailyChartData = useMemo(() => (daily?.days || []).slice(-30).map((d: any) => ({ ...d, date: (d.date || "").slice(5), cost: d.cost_usd || 0 })), [daily]);
 
   const [budgetForm, setBudgetForm] = useState<Record<string, string>>({});
 
@@ -44,6 +47,7 @@ export function AnalyticsPage() {
         subtitle={t("analytics.subtitle")}
         isFetching={usageQuery.isFetching}
         onRefresh={() => { usageQuery.refetch(); usageByAgentQuery.refetch(); usageByModelQuery.refetch(); dailyQuery.refetch(); }}
+        helpText={t("analytics.help")}
       />
 
       {isLoading ? (
@@ -55,7 +59,7 @@ export function AnalyticsPage() {
           {/* KPI Cards */}
           <div className="grid grid-cols-2 gap-2 sm:gap-4 md:grid-cols-4 stagger-children">
             {[
-              { icon: Zap, label: t("analytics.total_calls"), value: usage?.call_count ?? 0, color: "text-brand", bg: "bg-brand/10" },
+              { icon: Zap, label: t("analytics.total_calls"), value: formatCompact(usage?.call_count ?? 0), color: "text-brand", bg: "bg-brand/10" },
               { icon: Cpu, label: t("analytics.total_tokens_label"), value: formatCompact((usage?.total_input_tokens ?? 0) + (usage?.total_output_tokens ?? 0)), color: "text-purple-500", bg: "bg-purple-500/10" },
               { icon: DollarSign, label: t("analytics.total_cost"), value: formatCost(usage?.total_cost_usd ?? 0), color: "text-success", bg: "bg-success/10" },
               { icon: TrendingUp, label: t("analytics.today_cost"), value: formatCost(daily?.today_cost_usd ?? 0), color: "text-warning", bg: "bg-warning/10" },
@@ -79,8 +83,8 @@ export function AnalyticsPage() {
               {usageByAgent.length === 0 ? (
                 <EmptyState icon={<Users />} title={t("common.no_data")} description={t("analytics.no_agent_data")} />
               ) : (
-                <ResponsiveContainer width="100%" height={Math.max(usageByAgent.slice(0, 8).length * 36, 100)}>
-                  <BarChart data={usageByAgent.slice(0, 8).map(u => ({ name: u.name || truncateId(u.agent_id), cost: u.cost ?? 0 }))} layout="vertical" margin={{ left: 0, right: 20 }}>
+                <ResponsiveContainer width="100%" height={Math.max(usageByAgent.length * 36, 100)}>
+                  <BarChart data={agentChartData} layout="vertical" margin={{ left: 0, right: 20 }}>
                     <CartesianGrid strokeDasharray="3 3" opacity={0.2} horizontal={false} />
                     <XAxis type="number" tick={{ fontSize: 10 }} tickFormatter={v => `$${v}`} axisLine={false} tickLine={false} />
                     <YAxis type="category" dataKey="name" tick={{ fontSize: 10 }} width={100} axisLine={false} tickLine={false} />
@@ -98,8 +102,8 @@ export function AnalyticsPage() {
               {usageByModel.length === 0 ? (
                 <EmptyState icon={<Cpu />} title={t("common.no_data")} description={t("analytics.no_model_data")} />
               ) : (
-                <ResponsiveContainer width="100%" height={Math.max(usageByModel.slice(0, 8).length * 36, 100)}>
-                  <BarChart data={usageByModel.slice(0, 8).map(m => ({ name: m.model?.slice(0, 20), cost: m.total_cost_usd ?? 0 }))} layout="vertical" margin={{ left: 0, right: 20 }}>
+                <ResponsiveContainer width="100%" height={Math.max(usageByModel.length * 36, 100)}>
+                  <BarChart data={modelChartData} layout="vertical" margin={{ left: 0, right: 20 }}>
                     <CartesianGrid strokeDasharray="3 3" opacity={0.2} horizontal={false} />
                     <XAxis type="number" tick={{ fontSize: 10 }} tickFormatter={v => `$${v}`} axisLine={false} tickLine={false} />
                     <YAxis type="category" dataKey="name" tick={{ fontSize: 10 }} width={120} axisLine={false} tickLine={false} />
@@ -120,7 +124,7 @@ export function AnalyticsPage() {
               <EmptyState icon={<TrendingUp />} title={t("common.no_data")} description={t("analytics.no_trend_data")} />
             ) : (
               <ResponsiveContainer width="100%" height={200}>
-                <AreaChart data={(daily.days || []).slice(-30).map(d => ({ ...d, date: (d.date || "").slice(5), cost: d.cost_usd || 0 }))}>
+                <AreaChart data={dailyChartData}>
                   <defs>
                     <linearGradient id="costGrad" x1="0" y1="0" x2="0" y2="1">
                       <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.3} />

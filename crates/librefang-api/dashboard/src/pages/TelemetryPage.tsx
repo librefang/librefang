@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { formatCompact } from "../lib/format";
 import { formatUptime } from "../lib/datetime";
+import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { PageHeader } from "../components/ui/PageHeader";
 import { Card } from "../components/ui/Card";
@@ -166,16 +167,32 @@ export function TelemetryPage() {
     refetchInterval: REFRESH_MS,
   });
 
-  const parsed = metricsQuery.data
-    ? parseMetrics(metricsQuery.data)
-    : { requests: [], agents: [], system: { uptime: 0, agentsActive: 0, agentsTotal: 0, activeSessions: 0, costToday: 0, panics: 0, restarts: 0, version: "" } };
+  const parsed = useMemo(
+    () =>
+      metricsQuery.data
+        ? parseMetrics(metricsQuery.data)
+        : { requests: [], agents: [], system: { uptime: 0, agentsActive: 0, agentsTotal: 0, activeSessions: 0, costToday: 0, panics: 0, restarts: 0, version: "" } },
+    [metricsQuery.data],
+  );
 
-  const totalRequests = parsed.requests.reduce((sum, r) => sum + r.count, 0);
-  const totalTokens = parsed.agents.reduce((sum, a) => sum + a.tokens, 0);
-  const totalInput = parsed.agents.reduce((sum, a) => sum + a.inputTokens, 0);
-  const totalOutput = parsed.agents.reduce((sum, a) => sum + a.outputTokens, 0);
-  const totalLlmCalls = parsed.agents.reduce((sum, a) => sum + a.llmCalls, 0);
-  const totalToolCalls = parsed.agents.reduce((sum, a) => sum + a.toolCalls, 0);
+  const { totalRequests, totalTokens, totalInput, totalOutput, totalLlmCalls, totalToolCalls } = useMemo(() => ({
+    totalRequests: parsed.requests.reduce((sum, r) => sum + r.count, 0),
+    totalTokens: parsed.agents.reduce((sum, a) => sum + a.tokens, 0),
+    totalInput: parsed.agents.reduce((sum, a) => sum + a.inputTokens, 0),
+    totalOutput: parsed.agents.reduce((sum, a) => sum + a.outputTokens, 0),
+    totalLlmCalls: parsed.agents.reduce((sum, a) => sum + a.llmCalls, 0),
+    totalToolCalls: parsed.agents.reduce((sum, a) => sum + a.toolCalls, 0),
+  }), [parsed]);
+
+  const agentsByTokens = useMemo(
+    () => [...parsed.agents].sort((a, b) => b.tokens - a.tokens),
+    [parsed.agents],
+  );
+
+  const requestsByCount = useMemo(
+    () => [...parsed.requests].sort((a, b) => b.count - a.count).slice(0, 10),
+    [parsed.requests],
+  );
 
   return (
     <div className="flex flex-col gap-6 transition-colors duration-300">
@@ -186,6 +203,7 @@ export function TelemetryPage() {
         isFetching={metricsQuery.isFetching}
         onRefresh={() => void metricsQuery.refetch()}
         icon={<Activity className="h-4 w-4" />}
+        helpText={t("telemetry.help")}
       />
 
       {metricsQuery.isLoading ? (
@@ -264,7 +282,7 @@ export function TelemetryPage() {
               </div>
               <div className="mt-1 flex items-center gap-2">
                 <span className="relative flex h-2 w-2">
-                  <span className="absolute inline-flex h-full w-full rounded-full bg-success opacity-75 animate-ping" />
+                  <span className="absolute inline-flex h-full w-full rounded-full bg-success opacity-75 animate-pulse" />
                   <span className="relative inline-flex rounded-full h-2 w-2 bg-success" />
                 </span>
                 <Badge variant="success">{t("telemetry.collecting")}</Badge>
@@ -328,9 +346,7 @@ export function TelemetryPage() {
                 <p className="text-sm text-text-dim text-center py-8">{t("telemetry.no_data")}</p>
               ) : (
                 <div className="space-y-3">
-                  {parsed.agents
-                    .sort((a, b) => b.tokens - a.tokens)
-                    .map((a, i) => (
+                  {agentsByTokens.map((a, i) => (
                       <div key={i} className="flex items-center gap-3">
                         <span className="text-sm font-semibold flex-1 truncate">{a.agent}</span>
                         <Badge variant="default" className="font-mono text-xs">{a.provider}/{a.model}</Badge>
@@ -351,10 +367,7 @@ export function TelemetryPage() {
                 <p className="text-sm text-text-dim text-center py-8">{t("telemetry.no_data")}</p>
               ) : (
                 <div className="space-y-3">
-                  {parsed.requests
-                    .sort((a, b) => b.count - a.count)
-                    .slice(0, 10)
-                    .map((r, i) => (
+                  {requestsByCount.map((r, i) => (
                       <div key={i} className="flex items-center gap-3">
                         <Badge variant="default" className="font-mono text-xs w-16 justify-center">{r.method}</Badge>
                         <span className="text-sm font-mono flex-1 truncate">{r.path}</span>

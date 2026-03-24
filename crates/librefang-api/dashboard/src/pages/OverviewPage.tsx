@@ -1,12 +1,12 @@
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { useTranslation } from "react-i18next";
-import type { DashboardSnapshot, HealthCheck } from "../api";
-import { loadDashboardSnapshot } from "../api";
+import type { DashboardSnapshot, HealthCheck, VersionResponse } from "../api";
+import { loadDashboardSnapshot, getVersionInfo } from "../api";
 import { Card } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
 import { CardSkeleton } from "../components/ui/Skeleton";
-import { Home, RefreshCw, Users, Layers, Server, Network, Zap, MessageCircle, User, Clock, Shield, Sparkles, Calendar, HardDrive, Activity } from "lucide-react";
+import { Home, RefreshCw, Users, Layers, Server, Network, Zap, MessageCircle, User, Clock, Shield, Sparkles, Calendar, HardDrive, Activity, Globe } from "lucide-react";
 import { truncateId } from "../lib/string";
 import { getStatusVariant } from "../lib/status";
 
@@ -21,7 +21,14 @@ export function OverviewPage() {
     refetchInterval: REFRESH_MS
   });
 
+  const versionQuery = useQuery<VersionResponse>({
+    queryKey: ["version"],
+    queryFn: getVersionInfo,
+    staleTime: Infinity,
+  });
+
   const snapshot = snapshotQuery.data ?? null;
+  const versionInfo = versionQuery.data;
   const isLoading = snapshotQuery.isLoading;
 
   const agentsActive = snapshot?.status?.active_agent_count ?? 0;
@@ -117,7 +124,7 @@ export function OverviewPage() {
           <p className="mt-1 sm:mt-2 text-text-dim max-w-2xl font-medium text-xs sm:text-base hidden sm:block">{t("overview.description")}</p>
         </div>
         <div className="hidden sm:flex items-center gap-3">
-          <div className="flex items-center gap-2 rounded-full border border-border-subtle bg-surface px-4 py-1.5 backdrop-blur-md shadow-sm">
+          <div className="flex items-center gap-2 rounded-full border border-border-subtle bg-surface px-4 py-1.5 shadow-sm">
             <div className={`h-2 w-2 rounded-full ${snapshot?.health?.status === "ok" ? "bg-success shadow-[0_0_8px_var(--success-color)]" : "bg-warning animate-pulse"}`} />
             <span className="text-xs font-semibold text-slate-600 dark:text-slate-300">
               {snapshot?.health?.status === "ok" ? t("overview.operational") : t("overview.alert")}
@@ -125,7 +132,7 @@ export function OverviewPage() {
           </div>
           <button
             onClick={() => void snapshotQuery.refetch()}
-            className="flex h-9 w-9 items-center justify-center rounded-full border border-border-subtle bg-surface text-text-dim hover:text-brand transition-all shadow-sm"
+            className="flex h-9 w-9 items-center justify-center rounded-full border border-border-subtle bg-surface text-text-dim hover:text-brand transition-colors shadow-sm"
           >
             <RefreshCw className={`h-4 w-4 ${snapshotQuery.isFetching ? "animate-spin" : ""}`} />
           </button>
@@ -208,7 +215,7 @@ export function OverviewPage() {
               <h3 className="text-xs font-bold uppercase tracking-wider text-text-dim">{t("overview.recent_agents")}</h3>
               <button
                 onClick={() => navigate({ to: "/agents" })}
-                className="text-xs font-bold text-brand hover:underline transition-all"
+                className="text-xs font-bold text-brand hover:underline transition-colors"
               >
                 {t("overview.view_all")} →
               </button>
@@ -258,7 +265,7 @@ export function OverviewPage() {
               <h3 className="text-xs font-bold uppercase tracking-wider text-text-dim">{t("nav.sessions")}</h3>
               <button
                 onClick={() => navigate({ to: "/sessions" })}
-                className="text-xs font-bold text-brand hover:underline transition-all"
+                className="text-xs font-bold text-brand hover:underline transition-colors"
               >
                 {t("overview.view_all")} →
               </button>
@@ -306,7 +313,12 @@ export function OverviewPage() {
               <div className="flex items-center gap-3 p-2.5 rounded-lg bg-main/40">
                 <div className="w-8 h-8 rounded-lg bg-warning/10 flex items-center justify-center shrink-0"><Activity className="w-4 h-4 text-warning" /></div>
                 <span className="text-xs text-text-dim flex-1">{t("overview.version")}</span>
-                <span className="text-sm font-mono font-black text-brand">{snapshot?.status?.version || "-"}</span>
+                <span className="text-sm font-mono font-black text-brand">{versionInfo?.version || snapshot?.status?.version || "-"}</span>
+              </div>
+              <div className="flex items-center gap-3 p-2.5 rounded-lg bg-main/40">
+                <div className="w-8 h-8 rounded-lg bg-brand/10 flex items-center justify-center shrink-0"><Globe className="w-4 h-4 text-brand" /></div>
+                <span className="text-xs text-text-dim flex-1">Hostname</span>
+                <span className="text-sm font-mono font-black truncate max-w-[140px]" title={versionInfo?.hostname}>{versionInfo?.hostname || "-"}</span>
               </div>
               <div className="flex items-center gap-3 p-2.5 rounded-lg bg-main/40">
                 <div className="w-8 h-8 rounded-lg bg-accent/10 flex items-center justify-center shrink-0"><User className="w-4 h-4 text-accent" /></div>
@@ -324,7 +336,7 @@ export function OverviewPage() {
                 {snapshot.health.checks.map((check: HealthCheck, i: number) => (
                   <div key={i} className="flex items-center gap-3 p-2 rounded-lg hover:bg-main/40 transition-colors">
                     <div className={`relative h-2.5 w-2.5 rounded-full ${check.status === "ok" ? "bg-success" : "bg-warning"}`}>
-                      {check.status === "ok" && <span className="absolute inset-0 rounded-full bg-success/40 animate-ping" />}
+                      {check.status === "ok" && <span className="absolute inset-0 rounded-full bg-success/40 animate-pulse" />}
                     </div>
                     <span className="flex-1 text-xs font-medium">{check.name}</span>
                     <Badge variant={check.status === "ok" ? "success" : "warning"}>
@@ -339,28 +351,20 @@ export function OverviewPage() {
                   <div className="w-10 h-10 rounded-full bg-success/10 flex items-center justify-center">
                     <Shield className="w-5 h-5 text-success" />
                   </div>
-                  <span className="absolute inset-0 rounded-full bg-success/10 animate-ping" />
+                  <span className="absolute inset-0 rounded-full bg-success/10 animate-pulse" />
                 </div>
                 <p className="text-xs font-bold text-success">{t("common.daemon_online")}</p>
               </div>
             )}
           </Card>
 
-          {/* Pro Tip */}
-          <Card padding="lg" className="bg-gradient-to-br from-brand/5 to-transparent border-brand/10">
-            <div className="flex items-start gap-3">
-              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-brand/10 shrink-0">
-                <Sparkles className="h-5 w-5 text-brand" />
-              </div>
-              <div>
-                <h4 className="text-xs font-bold uppercase tracking-wider text-brand mb-1">{t("overview.pro_tip")}</h4>
-                <p className="text-xs leading-relaxed text-text-dim">
-                  {t("overview.pro_tip_shortcut")}
-                </p>
-              </div>
-            </div>
-          </Card>
         </div>
+      </div>
+
+      {/* Pro Tip */}
+      <div className="hidden sm:flex items-center gap-3 rounded-xl border border-brand/10 bg-gradient-to-r from-brand/5 to-transparent px-4 py-3">
+        <Sparkles className="h-4 w-4 text-brand shrink-0" />
+        <span className="text-xs text-text-dim"><span className="font-bold text-brand">{t("overview.pro_tip")}</span> — {t("overview.pro_tip_shortcut")}</span>
       </div>
     </div>
   );

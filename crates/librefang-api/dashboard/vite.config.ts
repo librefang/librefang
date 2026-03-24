@@ -1,8 +1,16 @@
-import { defineConfig } from "vite";
+import { defineConfig, createLogger } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 
+const logger = createLogger();
+const origError = logger.error.bind(logger);
+logger.error = (msg, opts) => {
+  if (typeof msg === "string" && msg.includes("proxy error")) return;
+  origError(msg, opts);
+};
+
 export default defineConfig({
+  customLogger: logger,
   plugins: [react(), tailwindcss()],
   base: "/dashboard/",
   server: {
@@ -10,7 +18,14 @@ export default defineConfig({
     proxy: {
       "/api": {
         target: "http://127.0.0.1:4545",
-        changeOrigin: true
+        changeOrigin: true,
+        configure: (proxy) => {
+          type Emitter = { on(event: string, fn: (...args: never[]) => void): void };
+          const p = proxy as unknown as Emitter;
+          p.on("error", () => {});
+          p.on("proxyReq", (proxyReq: Emitter) => { proxyReq.on("error", () => {}); });
+          p.on("proxyRes", (proxyRes: Emitter) => { proxyRes.on("error", () => {}); });
+        }
       }
     }
   },

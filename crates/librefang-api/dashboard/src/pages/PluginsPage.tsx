@@ -95,6 +95,7 @@ export function PluginsPage() {
         isFetching={pluginsQuery.isFetching}
         onRefresh={() => { pluginsQuery.refetch(); registriesQuery.refetch(); }}
         icon={<Puzzle className="h-4 w-4" />}
+        helpText={t("plugins.help")}
         actions={
           <div className="flex gap-2">
             <Button variant="secondary" onClick={() => setShowScaffold(true)}>
@@ -140,7 +141,7 @@ export function PluginsPage() {
           ) : (
             <div className="space-y-2 stagger-children">
               {plugins.map(p => (
-                <div key={p.name} className="flex items-center gap-3 p-3 sm:p-4 rounded-xl sm:rounded-2xl border border-border-subtle bg-surface hover:border-brand/30 transition-all">
+                <div key={p.name} className="flex items-center gap-3 p-3 sm:p-4 rounded-xl sm:rounded-2xl border border-border-subtle bg-surface hover:border-brand/30 transition-colors">
                   <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-lg sm:rounded-xl bg-brand/10 flex items-center justify-center shrink-0">
                     <Puzzle className="w-4 h-4 sm:w-5 sm:h-5 text-brand" />
                   </div>
@@ -171,7 +172,7 @@ export function PluginsPage() {
                         <button onClick={() => setConfirmDelete(null)} className="px-2 py-1 rounded-lg bg-main text-text-dim text-[10px] font-bold">{t("common.cancel")}</button>
                       </div>
                     ) : (
-                      <button onClick={() => handleDelete(p.name)} className="p-2 rounded-lg text-text-dim/30 hover:text-error hover:bg-error/10 transition-all">
+                      <button onClick={() => handleDelete(p.name)} className="p-2 rounded-lg text-text-dim/30 hover:text-error hover:bg-error/10 transition-colors">
                         <Trash2 className="w-3.5 h-3.5" />
                       </button>
                     )}
@@ -238,7 +239,7 @@ export function PluginsPage() {
 
       {/* Install Modal */}
       {showInstall && (
-        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/30 backdrop-blur-xl backdrop-saturate-150" onClick={() => setShowInstall(false)}>
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/30 backdrop-blur-sm" onClick={() => setShowInstall(false)}>
           <div className="bg-surface rounded-2xl shadow-2xl border border-border-subtle w-full sm:w-[440px] sm:max-w-[90vw] animate-fade-in-scale" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between px-5 py-3 border-b border-border-subtle">
               <h3 className="text-sm font-bold">{t("plugins.install_title")}</h3>
@@ -313,7 +314,7 @@ export function PluginsPage() {
 
       {/* Scaffold Modal */}
       {showScaffold && (
-        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/30 backdrop-blur-xl backdrop-saturate-150" onClick={() => setShowScaffold(false)}>
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/30 backdrop-blur-sm" onClick={() => setShowScaffold(false)}>
           <div className="bg-surface rounded-2xl shadow-2xl border border-border-subtle w-full sm:w-[400px] sm:max-w-[90vw] animate-fade-in-scale" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between px-5 py-3 border-b border-border-subtle">
               <h3 className="text-sm font-bold">{t("plugins.scaffold_title")}</h3>

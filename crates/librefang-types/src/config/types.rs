@@ -2155,8 +2155,8 @@ fn default_prompt_caching() -> bool {
 pub struct McpServerConfigEntry {
     /// Display name for this server.
     pub name: String,
-    /// Transport configuration.
-    pub transport: McpTransportEntry,
+    /// Transport configuration. Optional — entries without transport are skipped at boot.
+    pub transport: Option<McpTransportEntry>,
     /// Request timeout in seconds.
     #[serde(default = "default_mcp_timeout")]
     pub timeout_secs: u64,
@@ -2537,6 +2537,8 @@ pub struct DefaultModelConfig {
     /// Model identifier.
     pub model: String,
     /// Environment variable name for the API key.
+    /// Defaults to `"{PROVIDER}_API_KEY"` pattern when omitted.
+    #[serde(default)]
     pub api_key_env: String,
     /// Optional base URL override.
     pub base_url: Option<String>,
@@ -2619,7 +2621,7 @@ impl Default for MemoryConfig {
     fn default() -> Self {
         Self {
             sqlite_path: None,
-            embedding_model: "all-MiniLM-L6-v2".to_string(),
+            embedding_model: "text-embedding-3-small".to_string(),
             consolidation_threshold: 10_000,
             decay_rate: 0.1,
             embedding_provider: None,

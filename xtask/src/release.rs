@@ -579,7 +579,7 @@ pip install librefang-sdk
         let path = root.join(file);
         if path.exists() {
             let _ = Command::new("git")
-                .args(["add", file])
+                .args(["add", "-f", file])
                 .current_dir(&root)
                 .status();
         }

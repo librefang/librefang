@@ -14,6 +14,10 @@ pub fn router() -> axum::Router<Arc<AppState>> {
         )
         .route("/memory/search", axum::routing::get(memory_search))
         .route("/memory/stats", axum::routing::get(memory_stats))
+        .route(
+            "/memory/config",
+            axum::routing::get(memory_config_get).patch(memory_config_patch),
+        )
         .route("/memory/cleanup", axum::routing::post(memory_cleanup))
         .route("/memory/decay", axum::routing::post(memory_decay))
         .route(
@@ -1097,4 +1101,126 @@ pub async fn memory_query_relations(
         }
         Err(e) => internal_error(e),
     }
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/memory/config — Get memory configuration
+// ---------------------------------------------------------------------------
+
+#[utoipa::path(get, path = "/api/memory/config", tag = "memory", responses((status = 200, description = "Memory configuration", body = serde_json::Value)))]
+pub async fn memory_config_get(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let config = state.kernel.config_ref();
+    Json(serde_json::json!({
+        "embedding_provider": config.memory.embedding_provider,
+        "embedding_model": &config.memory.embedding_model,
+        "embedding_api_key_env": config.memory.embedding_api_key_env,
+        "decay_rate": config.memory.decay_rate,
+        "proactive_memory": {
+            "enabled": config.proactive_memory.enabled,
+            "auto_memorize": config.proactive_memory.auto_memorize,
+            "auto_retrieve": config.proactive_memory.auto_retrieve,
+            "extraction_model": &config.proactive_memory.extraction_model,
+            "max_retrieve": config.proactive_memory.max_retrieve,
+        },
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// PATCH /api/memory/config — Update memory configuration (writes config.toml)
+// ---------------------------------------------------------------------------
+
+#[utoipa::path(patch, path = "/api/memory/config", tag = "memory", request_body = serde_json::Value, responses((status = 200, description = "Memory configuration updated", body = serde_json::Value)))]
+pub async fn memory_config_patch(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let config_path = state.kernel.home_dir().join("config.toml");
+
+    let content = match std::fs::read_to_string(&config_path) {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("Failed to read config: {e}")})),
+            );
+        }
+    };
+    let mut table: toml::Value = match toml::from_str(&content) {
+        Ok(t) => t,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("Failed to parse config: {e}")})),
+            );
+        }
+    };
+
+    let root = table.as_table_mut().unwrap();
+
+    // Update [memory] section
+    let memory_tbl = root
+        .entry("memory")
+        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()))
+        .as_table_mut()
+        .unwrap();
+    if let Some(v) = req.get("embedding_provider").and_then(|v| v.as_str()) {
+        memory_tbl.insert(
+            "embedding_provider".into(),
+            toml::Value::String(v.to_string()),
+        );
+    }
+    if let Some(v) = req.get("embedding_model").and_then(|v| v.as_str()) {
+        memory_tbl.insert("embedding_model".into(), toml::Value::String(v.to_string()));
+    }
+    if let Some(v) = req.get("embedding_api_key_env").and_then(|v| v.as_str()) {
+        memory_tbl.insert(
+            "embedding_api_key_env".into(),
+            toml::Value::String(v.to_string()),
+        );
+    }
+    if let Some(v) = req.get("decay_rate").and_then(|v| v.as_f64()) {
+        memory_tbl.insert("decay_rate".into(), toml::Value::Float(v));
+    }
+
+    // Update [proactive_memory] section
+    if let Some(pm) = req.get("proactive_memory") {
+        let pm_tbl = root
+            .entry("proactive_memory")
+            .or_insert_with(|| toml::Value::Table(toml::map::Map::new()))
+            .as_table_mut()
+            .unwrap();
+        if let Some(v) = pm.get("enabled").and_then(|v| v.as_bool()) {
+            pm_tbl.insert("enabled".into(), toml::Value::Boolean(v));
+        }
+        if let Some(v) = pm.get("auto_memorize").and_then(|v| v.as_bool()) {
+            pm_tbl.insert("auto_memorize".into(), toml::Value::Boolean(v));
+        }
+        if let Some(v) = pm.get("auto_retrieve").and_then(|v| v.as_bool()) {
+            pm_tbl.insert("auto_retrieve".into(), toml::Value::Boolean(v));
+        }
+        if let Some(v) = pm.get("extraction_model").and_then(|v| v.as_str()) {
+            pm_tbl.insert(
+                "extraction_model".into(),
+                toml::Value::String(v.to_string()),
+            );
+        }
+        if let Some(v) = pm.get("max_retrieve").and_then(|v| v.as_u64()) {
+            pm_tbl.insert("max_retrieve".into(), toml::Value::Integer(v as i64));
+        }
+    }
+
+    let new_content = toml::to_string_pretty(&table).unwrap_or_default();
+    if let Err(e) = std::fs::write(&config_path, &new_content) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("Failed to write config: {e}")})),
+        );
+    }
+
+    tracing::info!("Memory config updated via API");
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({"status": "updated", "note": "Restart required for full effect"})),
+    )
 }

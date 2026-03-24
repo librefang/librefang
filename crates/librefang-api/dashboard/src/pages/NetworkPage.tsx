@@ -42,6 +42,7 @@ export function NetworkPage() {
           void peersQuery.refetch();
         }}
         icon={<Network className="h-4 w-4" />}
+        helpText={t("network.help")}
       />
 
       {isLoading ? (

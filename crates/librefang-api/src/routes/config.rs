@@ -57,11 +57,73 @@ pub async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 
     let uptime = state.started_at.elapsed().as_secs();
     let agent_count = agents.len();
+    let active_agent_count = state
+        .kernel
+        .agent_registry()
+        .list()
+        .iter()
+        .filter(|e| matches!(e.state, librefang_types::agent::AgentState::Running))
+        .count();
+    let session_count = state
+        .kernel
+        .memory_substrate()
+        .list_sessions()
+        .map(|s| s.len())
+        .unwrap_or(0);
+
+    // Get process RSS memory in MB (best-effort, cross-platform)
+    let memory_used_mb: Option<u64> = {
+        #[cfg(unix)]
+        {
+            std::process::Command::new("ps")
+                .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+                .output()
+                .ok()
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .and_then(|s| s.trim().parse::<u64>().ok())
+                .map(|kb| kb / 1024)
+        }
+        #[cfg(windows)]
+        {
+            std::process::Command::new("tasklist")
+                .args([
+                    "/FI",
+                    &format!("PID eq {}", std::process::id()),
+                    "/FO",
+                    "CSV",
+                    "/NH",
+                ])
+                .output()
+                .ok()
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .and_then(|s| {
+                    // tasklist CSV: "name","pid","session","session#","mem usage"
+                    let fields: Vec<&str> = s.trim().split(',').collect();
+                    fields
+                        .last()
+                        .map(|v| {
+                            v.trim_matches('"')
+                                .replace(" K", "")
+                                .replace(",", "")
+                                .replace(" ", "")
+                        })
+                        .and_then(|v| v.parse::<u64>().ok())
+                        .map(|kb| kb / 1024)
+                })
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            None
+        }
+    };
 
     Json(serde_json::json!({
         "status": "running",
         "version": env!("CARGO_PKG_VERSION"),
         "agent_count": agent_count,
+        "active_agent_count": active_agent_count,
+        "session_count": session_count,
+        "memory_used_mb": memory_used_mb,
         "default_provider": state.kernel.config_ref().default_model.provider,
         "default_model": state.kernel.config_ref().default_model.model,
         "uptime_seconds": uptime,
@@ -119,6 +181,7 @@ pub async fn version() -> impl IntoResponse {
         "rust_version": option_env!("RUSTC_VERSION").unwrap_or("unknown"),
         "platform": std::env::consts::OS,
         "arch": std::env::consts::ARCH,
+        "hostname": super::system::hostname_string(),
         "api": {
             "current": crate::versioning::CURRENT_VERSION,
             "supported": crate::versioning::SUPPORTED_VERSIONS,
@@ -151,9 +214,15 @@ pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 
     let status = if db_ok { "ok" } else { "degraded" };
 
+    let embedding_ok = state.kernel.embedding().is_some();
+
     Json(serde_json::json!({
         "status": status,
         "version": env!("CARGO_PKG_VERSION"),
+        "checks": [
+            { "name": "database", "status": if db_ok { "ok" } else { "error" } },
+            { "name": "embedding", "status": if embedding_ok { "ok" } else { "warn" } },
+        ],
     }))
 }
 
@@ -189,6 +258,13 @@ pub async fn health_detail(State(state): State<Arc<AppState>>) -> impl IntoRespo
         "restart_count": health.restart_count,
         "agent_count": state.kernel.agent_registry().count(),
         "database": if db_ok { "connected" } else { "error" },
+        "memory": {
+            "embedding_available": state.kernel.embedding().is_some(),
+            "embedding_provider": state.kernel.config_ref().memory.embedding_provider,
+            "embedding_model": &state.kernel.config_ref().memory.embedding_model,
+            "proactive_memory_enabled": state.kernel.config_ref().proactive_memory.enabled,
+            "extraction_model": &state.kernel.config_ref().proactive_memory.extraction_model,
+        },
         "config_warnings": config_warnings,
     }))
 }
@@ -423,15 +499,18 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
         .iter()
         .map(|s| {
             let transport_summary = match &s.transport {
-                librefang_types::config::McpTransportEntry::Stdio { command, args } => {
+                Some(librefang_types::config::McpTransportEntry::Stdio { command, args }) => {
                     serde_json::json!({ "type": "stdio", "command": command, "args": args })
                 }
-                librefang_types::config::McpTransportEntry::Sse { url } => {
+                Some(librefang_types::config::McpTransportEntry::Sse { url }) => {
                     serde_json::json!({ "type": "sse", "url": url })
                 }
-                librefang_types::config::McpTransportEntry::HttpCompat { base_url, .. } => {
+                Some(librefang_types::config::McpTransportEntry::HttpCompat {
+                    base_url, ..
+                }) => {
                     serde_json::json!({ "type": "http_compat", "base_url": base_url })
                 }
+                None => serde_json::json!({ "type": "none" }),
             };
             serde_json::json!({
                 "name": s.name,

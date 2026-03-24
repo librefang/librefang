@@ -1590,6 +1590,7 @@ impl WorkflowEngine {
             steps,
             tags: vec![],
             created_at: Some(chrono::Utc::now().to_rfc3339()),
+            i18n: Default::default(),
         }
     }
 }
@@ -2610,6 +2611,7 @@ id = "{id}"
             }],
             tags: vec![],
             created_at: None,
+            i18n: Default::default(),
         }
     }
 

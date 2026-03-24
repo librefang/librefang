@@ -1,8 +1,8 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { formatDateTime } from "../lib/datetime";
-import { useState } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { useTranslation } from "react-i18next";
-import { listMemories, deleteMemory, getMemoryStats, addMemoryFromText, updateMemory, cleanupMemories, decayMemories, type MemoryStatsResponse } from "../api";
+import { listMemories, searchMemories, deleteMemory, getMemoryStats, addMemoryFromText, updateMemory, cleanupMemories, type MemoryStatsResponse, type MemoryItem } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -10,8 +10,10 @@ import { Card } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
 import { Input } from "../components/ui/Input";
 import { Button } from "../components/ui/Button";
+import { Pagination } from "../components/ui/Pagination";
+import { MarkdownContent } from "../components/ui/MarkdownContent";
 import { useUIStore } from "../lib/store";
-import { Database, Search, Trash2, Plus, X, Sparkles, Zap, Clock, RefreshCw, Edit2, Loader2, BarChart3 } from "lucide-react";
+import { Database, Search, Trash2, Plus, X, Sparkles, Zap, Clock, Edit2, Loader2, Settings } from "lucide-react";
 
 const REFRESH_MS = 30000;
 
@@ -32,7 +34,7 @@ function AddMemoryDialog({ onClose }: { onClose: () => void }) {
   });
 
   return (
-    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-black/50 backdrop-blur-xl backdrop-saturate-150" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-black/50 backdrop-blur-sm" onClick={onClose}>
       <div className="bg-surface rounded-2xl border border-border-subtle w-full sm:max-w-md p-4 sm:p-6 rounded-t-2xl sm:rounded-2xl shadow-2xl animate-fade-in-scale" onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-4">
           <h3 className="text-lg font-black">{t("memory.add_memory")}</h3>
@@ -106,7 +108,7 @@ function EditMemoryDialog({ memory, onClose }: { memory: { id: string; content?:
   });
 
   return (
-    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-black/50 backdrop-blur-xl backdrop-saturate-150" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-black/50 backdrop-blur-sm" onClick={onClose}>
       <div className="bg-surface rounded-2xl border border-border-subtle w-full sm:max-w-md p-4 sm:p-6 rounded-t-2xl sm:rounded-2xl shadow-2xl animate-fade-in-scale" onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-4">
           <h3 className="text-lg font-black">{t("memory.edit_memory")}</h3>
@@ -162,6 +164,167 @@ function MemoryStats({ stats }: { stats: MemoryStatsResponse | null }) {
   );
 }
 
+function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
+  const { t } = useTranslation();
+  const queryClient = useQueryClient();
+  const addToast = useUIStore((s) => s.addToast);
+
+  const configQuery = useQuery({
+    queryKey: ["memory", "config"],
+    queryFn: () => fetch("/api/memory/config").then(r => r.json()),
+  });
+
+  const [form, setForm] = useState<Record<string, any> | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  // Init form from API data
+  useEffect(() => {
+    const data = configQuery.data;
+    if (data && !form) {
+      setForm({
+        embedding_provider: data.embedding_provider || "",
+        embedding_model: data.embedding_model || "",
+        embedding_api_key_env: data.embedding_api_key_env || "",
+        decay_rate: data.decay_rate ?? 0.05,
+        pm_enabled: data.proactive_memory?.enabled ?? true,
+        pm_auto_memorize: data.proactive_memory?.auto_memorize ?? true,
+        pm_auto_retrieve: data.proactive_memory?.auto_retrieve ?? true,
+        pm_extraction_model: data.proactive_memory?.extraction_model || "",
+        pm_max_retrieve: data.proactive_memory?.max_retrieve ?? 10,
+      });
+    }
+  }, [configQuery.data, form]);
+
+  const handleSave = async () => {
+    if (!form) return;
+    setSaving(true);
+    try {
+      const res = await fetch("/api/memory/config", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          embedding_provider: form.embedding_provider || undefined,
+          embedding_model: form.embedding_model || undefined,
+          embedding_api_key_env: form.embedding_api_key_env || undefined,
+          decay_rate: parseFloat(form.decay_rate) || 0.05,
+          proactive_memory: {
+            enabled: form.pm_enabled,
+            auto_memorize: form.pm_auto_memorize,
+            auto_retrieve: form.pm_auto_retrieve,
+            extraction_model: form.pm_extraction_model || undefined,
+            max_retrieve: parseInt(form.pm_max_retrieve) || 10,
+          },
+        }),
+      });
+      if (res.ok) {
+        addToast(t("common.success"), "success");
+        queryClient.invalidateQueries({ queryKey: ["memory"] });
+        queryClient.invalidateQueries({ queryKey: ["health"] });
+        onClose();
+      } else {
+        const err = await res.json();
+        addToast(err.error || "Failed", "error");
+      }
+    } catch {
+      addToast("Failed to save", "error");
+    }
+    setSaving(false);
+  };
+
+  const inputCls = "w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-brand";
+  const labelCls = "text-[10px] font-bold uppercase tracking-widest text-text-dim mb-1 block";
+
+  return (
+    <div className="fixed inset-0 z-100 flex items-center justify-center bg-black/50 backdrop-blur-sm" onClick={onClose}>
+      <div className="w-full max-w-lg mx-4 rounded-2xl bg-surface border border-border-subtle shadow-2xl animate-fade-in-scale overflow-hidden" onClick={e => e.stopPropagation()}>
+        <div className="p-6 pb-4">
+          <h3 className="text-lg font-black">{t("memory.config_title", { defaultValue: "Memory Configuration" })}</h3>
+          <p className="text-xs text-text-dim mt-0.5">{t("memory.config_desc", { defaultValue: "Changes are written to config.toml. Restart required for full effect." })}</p>
+        </div>
+
+        {configQuery.isLoading || !form ? (
+          <div className="p-6 text-center"><Loader2 className="w-5 h-5 animate-spin mx-auto" /></div>
+        ) : (
+          <div className="px-6 pb-4 space-y-4 max-h-[60vh] overflow-y-auto">
+            {/* Embedding */}
+            <div>
+              <h4 className="text-xs font-bold mb-3">Embedding</h4>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <span className={labelCls}>Provider</span>
+                  <select value={form.embedding_provider ?? ""} onChange={e => setForm({ ...form, embedding_provider: e.target.value })} className={inputCls}>
+                    <option value="">Auto-detect</option>
+                    <option value="openai">OpenAI</option>
+                    <option value="ollama">Ollama</option>
+                    <option value="gemini">Gemini</option>
+                    <option value="minimax">MiniMax</option>
+                  </select>
+                </div>
+                <div>
+                  <span className={labelCls}>Model</span>
+                  <input value={form.embedding_model ?? ""} onChange={e => setForm({ ...form, embedding_model: e.target.value })}
+                    placeholder="text-embedding-3-small" className={inputCls} />
+                </div>
+              </div>
+              <div className="mt-2">
+                <span className={labelCls}>API Key Env</span>
+                <input value={form.embedding_api_key_env ?? ""} onChange={e => setForm({ ...form, embedding_api_key_env: e.target.value })}
+                  placeholder="OPENAI_API_KEY" className={inputCls} />
+              </div>
+            </div>
+
+            {/* Proactive Memory */}
+            <div>
+              <h4 className="text-xs font-bold mb-3">Proactive Memory</h4>
+              <div className="space-y-2">
+                {[
+                  { key: "pm_enabled", label: t("memory.proactive_enabled", { defaultValue: "Enabled" }) },
+                  { key: "pm_auto_memorize", label: t("memory.auto_memorize", { defaultValue: "Auto Memorize" }) },
+                  { key: "pm_auto_retrieve", label: t("memory.auto_retrieve", { defaultValue: "Auto Retrieve" }) },
+                ].map(opt => (
+                  <label key={opt.key} className="flex items-center justify-between rounded-lg bg-main/50 px-3 py-2">
+                    <span className="text-xs font-medium">{opt.label}</span>
+                    <button onClick={() => setForm({ ...form, [opt.key]: !form[opt.key] })}
+                      className={`w-10 h-5 rounded-full transition-colors ${form[opt.key] ? "bg-brand" : "bg-border-subtle"}`}>
+                      <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${form[opt.key] ? "translate-x-5" : "translate-x-0.5"}`} />
+                    </button>
+                  </label>
+                ))}
+              </div>
+              <div className="grid grid-cols-2 gap-3 mt-3">
+                <div>
+                  <span className={labelCls}>Extraction Model</span>
+                  <input value={form.pm_extraction_model ?? ""} onChange={e => setForm({ ...form, pm_extraction_model: e.target.value })}
+                    placeholder="MiniMax-M2.7-highspeed" className={inputCls} />
+                </div>
+                <div>
+                  <span className={labelCls}>Max Retrieve</span>
+                  <input type="number" min={1} max={50} value={form.pm_max_retrieve ?? 10}
+                    onChange={e => setForm({ ...form, pm_max_retrieve: e.target.value })} className={inputCls} />
+                </div>
+              </div>
+            </div>
+
+            {/* Decay */}
+            <div>
+              <span className={labelCls}>Decay Rate</span>
+              <input type="number" step={0.01} min={0} max={1} value={form.decay_rate ?? 0.05}
+                onChange={e => setForm({ ...form, decay_rate: e.target.value })} className={inputCls} />
+            </div>
+          </div>
+        )}
+
+        <div className="flex gap-2 p-6 pt-3">
+          <Button variant="primary" className="flex-1" onClick={handleSave} disabled={saving}>
+            {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : t("common.save")}
+          </Button>
+          <Button variant="secondary" className="flex-1" onClick={onClose}>{t("common.cancel")}</Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function MemoryPage() {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
@@ -169,10 +332,31 @@ export function MemoryPage() {
   const [search, setSearch] = useState("");
   const [levelFilter, setLevelFilter] = useState<string>("all");
   const [showAddDialog, setShowAddDialog] = useState(false);
+  const [showConfigDialog, setShowConfigDialog] = useState(false);
   const [editingMemory, setEditingMemory] = useState<{ id: string; content?: string } | null>(null);
-  const [showStats, setShowStats] = useState(true);
 
-  const memoryQuery = useQuery({ queryKey: ["memory", "list"], queryFn: () => listMemories(), refetchInterval: REFRESH_MS });
+  const [page, setPage] = useState(0);
+  const pageSize = 20;
+
+  const healthQuery = useQuery<{ memory?: { embedding_available: boolean; embedding_provider: string; embedding_model: string; extraction_model: string; proactive_memory_enabled: boolean } }>({
+    queryKey: ["health", "detail"],
+    queryFn: () => fetch("/api/health/detail").then(r => r.json()),
+    staleTime: 60000,
+  });
+  const memoryConfig = healthQuery.data?.memory;
+
+  const memoryQuery = useQuery<{ memories: MemoryItem[]; total: number }>({
+    queryKey: ["memory", "list", page, search],
+    queryFn: async () => {
+      if (search.trim()) {
+        const items = await searchMemories({ query: search.trim(), limit: 50 });
+        return { memories: items, total: items.length };
+      }
+      const res = await listMemories({ offset: page * pageSize, limit: pageSize });
+      return { memories: res.memories ?? [], total: res.total ?? 0 };
+    },
+    refetchInterval: REFRESH_MS,
+  });
   const statsQuery = useQuery({ queryKey: ["memory", "stats"], queryFn: () => getMemoryStats(), refetchInterval: REFRESH_MS * 2 });
 
   const deleteMutation = useMutation({
@@ -191,26 +375,22 @@ export function MemoryPage() {
     }
   });
 
-  const decayMutation = useMutation({
-    mutationFn: decayMemories,
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["memory"] });
-      addToast(t("common.success"), "success");
-    }
-  });
 
   const memories = memoryQuery.data?.memories ?? [];
   const totalCount = memoryQuery.data?.total ?? 0;
 
-  const filteredMemories = memories.filter(m => {
-    const matchesSearch = !search ||
-      m.id.toLowerCase().includes(search.toLowerCase()) ||
-      (m.content || "").toLowerCase().includes(search.toLowerCase());
-    const matchesLevel = levelFilter === "all" || m.level === levelFilter;
-    return matchesSearch && matchesLevel;
-  });
+  const filteredMemories = useMemo(
+    () => memories.filter(m => {
+      const matchesLevel = levelFilter === "all" || m.level === levelFilter;
+      return matchesLevel;
+    }),
+    [memories, levelFilter],
+  );
 
-  const levels = Array.from(new Set(memories.map(m => m.level).filter(Boolean)));
+  const levels = useMemo(
+    () => Array.from(new Set(memories.map(m => m.level).filter(Boolean))),
+    [memories],
+  );
 
   return (
     <div className="flex flex-col gap-6 transition-colors duration-300">
@@ -221,20 +401,17 @@ export function MemoryPage() {
         isFetching={memoryQuery.isFetching}
         onRefresh={() => void memoryQuery.refetch()}
         icon={<Database className="h-4 w-4" />}
+        helpText={t("memory.help")}
         actions={
           <div className="flex items-center gap-1 sm:gap-2 flex-wrap">
-            <Button variant="secondary" size="sm" onClick={() => setShowStats(!showStats)}>
-              <BarChart3 className="w-4 h-4" />
+<Button variant="secondary" size="sm" onClick={() => setShowConfigDialog(true)}>
+              <Settings className="w-4 h-4" />
             </Button>
             <Button variant="secondary" size="sm" onClick={() => cleanupMutation.mutate()} disabled={cleanupMutation.isPending}>
               {cleanupMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
               <span className="hidden sm:inline">{t("memory.cleanup")}</span>
             </Button>
-            <Button variant="secondary" size="sm" onClick={() => decayMutation.mutate()} disabled={decayMutation.isPending}>
-              {decayMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
-              <span className="hidden sm:inline">{t("memory.decay")}</span>
-            </Button>
-            <Button variant="primary" size="sm" onClick={() => setShowAddDialog(true)}>
+<Button variant="primary" size="sm" onClick={() => setShowAddDialog(true)}>
               <Plus className="w-4 h-4" />
               <span className="hidden sm:inline ml-1">{t("memory.add")}</span>
             </Button>
@@ -243,14 +420,38 @@ export function MemoryPage() {
       />
 
       {/* Stats */}
-      {showStats && <MemoryStats stats={statsQuery.data ?? null} />}
+      <MemoryStats stats={statsQuery.data ?? null} />
+
+      {/* Memory Config */}
+      {memoryConfig && (
+        <Card padding="md">
+          <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-xs">
+            <div className="flex items-center gap-1.5">
+              <span className="text-text-dim">{t("memory.embedding_provider", { defaultValue: "Embedding" })}:</span>
+              <Badge variant={memoryConfig.embedding_available ? "success" : "warning"}>
+                {memoryConfig.embedding_provider || "auto"} / {memoryConfig.embedding_model || "-"}
+              </Badge>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <span className="text-text-dim">{t("memory.extraction_model", { defaultValue: "Extraction" })}:</span>
+              <Badge variant="brand">{memoryConfig.extraction_model || "-"}</Badge>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <span className="text-text-dim">{t("memory.proactive", { defaultValue: "Proactive" })}:</span>
+              <Badge variant={memoryConfig.proactive_memory_enabled ? "success" : "default"}>
+                {memoryConfig.proactive_memory_enabled ? "ON" : "OFF"}
+              </Badge>
+            </div>
+          </div>
+        </Card>
+      )}
 
       {/* Filters */}
       <div className="flex flex-col sm:flex-row gap-3">
         <div className="flex-1">
           <Input
             value={search}
-            onChange={(e) => setSearch(e.target.value)}
+            onChange={(e) => { setSearch(e.target.value); setPage(0); }}
             placeholder={t("common.search")}
             leftIcon={<Search className="w-4 h-4" />}
             rightIcon={search && (
@@ -263,7 +464,7 @@ export function MemoryPage() {
         <div className="flex gap-1 p-1 bg-main/30 rounded-lg">
           <button
             onClick={() => setLevelFilter("all")}
-            className={`px-3 py-1.5 rounded-md text-xs font-bold transition-all ${levelFilter === "all" ? "bg-surface shadow-sm" : "text-text-dim hover:text-text-main"}`}
+            className={`px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${levelFilter === "all" ? "bg-surface shadow-sm" : "text-text-dim hover:text-text-main"}`}
           >
             {t("memory.filter_all")}
           </button>
@@ -271,7 +472,7 @@ export function MemoryPage() {
             <button
               key={level}
               onClick={() => setLevelFilter(level || "all")}
-              className={`px-3 py-1.5 rounded-md text-xs font-bold transition-all ${levelFilter === level ? "bg-surface shadow-sm" : "text-text-dim hover:text-text-main"}`}
+              className={`px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${levelFilter === level ? "bg-surface shadow-sm" : "text-text-dim hover:text-text-main"}`}
             >
               {level}
             </button>
@@ -300,13 +501,16 @@ export function MemoryPage() {
             <Card key={m.id} hover padding="md">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1 sm:gap-2 mb-2">
                 <div className="flex items-center gap-2 min-w-0 flex-wrap">
-                  <h2 className="text-xs sm:text-sm font-black truncate font-mono max-w-[180px] sm:max-w-none">{m.id}</h2>
-                  <Badge variant={m.level === "episodic" ? "success" : m.level === "semantic" ? "warning" : "info"}>
-                    {m.level || "Vector"}
+                  <h2 className="text-xs sm:text-sm font-black truncate font-mono max-w-45 sm:max-w-none">{m.id}</h2>
+                  <Badge variant={m.level === "user" ? "success" : m.level === "agent" ? "warning" : "info"}>
+                    {m.level || "session"}
                   </Badge>
-                  {(m as any).importance !== undefined && (
-                    <Badge variant={(m as any).importance > 0.7 ? "error" : (m as any).importance > 0.3 ? "warning" : "default"}>
-                      {Math.round((m as any).importance * 100)}%
+                  {m.source && (
+                    <Badge variant="default">{m.source}</Badge>
+                  )}
+                  {m.confidence != null && (
+                    <Badge variant={m.confidence > 0.7 ? "success" : m.confidence > 0.3 ? "warning" : "default"}>
+                      {Math.round(m.confidence * 100)}%
                     </Badge>
                   )}
                 </div>
@@ -314,25 +518,49 @@ export function MemoryPage() {
                   <Button variant="ghost" size="sm" onClick={() => setEditingMemory(m)}>
                     <Edit2 className="h-3.5 w-3.5" />
                   </Button>
-                  <Button variant="ghost" size="sm" className="!text-error hover:!bg-error/10" onClick={() => deleteMutation.mutate(m.id)}>
+                  <Button variant="ghost" size="sm" className="text-error! hover:bg-error/10!" onClick={() => deleteMutation.mutate(m.id)}>
                     <Trash2 className="h-3.5 w-3.5" />
                   </Button>
                 </div>
               </div>
-              <p className="text-xs text-text-dim line-clamp-3 leading-relaxed whitespace-pre-wrap">{m.content || t("common.no_data")}</p>
-              {m.created_at && (
-                <div className="mt-2 text-[10px] text-text-dim/50">
-                  {t("memory.created")}: {formatDateTime(m.created_at)}
-                </div>
-              )}
+              <MarkdownContent className="text-xs text-text-dim leading-relaxed h-16 overflow-y-auto">
+                {m.content || t("common.no_data")}
+              </MarkdownContent>
+              <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] text-text-dim/50">
+                {m.created_at && (
+                  <span>{t("memory.created")}: {formatDateTime(m.created_at)}</span>
+                )}
+                {m.accessed_at && (
+                  <span>{t("memory.last_access", { defaultValue: "Last access" })}: {formatDateTime(m.accessed_at)}</span>
+                )}
+                {m.access_count != null && m.access_count > 0 && (
+                  <span>{t("memory.access_count", { defaultValue: "Accessed" })}: {m.access_count}x</span>
+                )}
+                {m.agent_id && (
+                  <span>Agent: <span className="font-mono">{m.agent_id.slice(0, 8)}</span></span>
+                )}
+                {m.category && (
+                  <span>{t("memory.category", { defaultValue: "Category" })}: {m.category}</span>
+                )}
+              </div>
             </Card>
           ))}
         </div>
       )}
 
+      {/* Pagination */}
+      {!search.trim() && totalCount > pageSize && (
+        <Pagination
+          currentPage={page + 1}
+          totalPages={Math.ceil(totalCount / pageSize)}
+          onPageChange={(p) => setPage(p - 1)}
+        />
+      )}
+
       {/* Dialogs */}
       {showAddDialog && <AddMemoryDialog onClose={() => setShowAddDialog(false)} />}
       {editingMemory && <EditMemoryDialog memory={editingMemory} onClose={() => setEditingMemory(null)} />}
+      {showConfigDialog && <MemoryConfigDialog onClose={() => setShowConfigDialog(false)} />}
     </div>
   );
 }

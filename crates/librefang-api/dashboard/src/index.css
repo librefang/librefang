@@ -86,9 +86,6 @@ body {
     #020617;
 }
 
-.glass {
-  @apply border border-border-subtle bg-surface backdrop-blur-xl shadow-sm dark:shadow-none;
-}
 
 @custom-variant dark (&:where(.dark, .dark *));
 
@@ -149,14 +146,12 @@ body {
 
 .animate-fade-in-scale {
   animation: fade-in-scale 0.5s var(--apple-bounce);
-  will-change: transform, opacity, filter;
 }
 
 /* ── Staggered children (Apple cascade) ─────────── */
 .stagger-children > * {
   opacity: 0;
   animation: fade-in-up 0.5s var(--apple-spring) forwards;
-  will-change: transform, opacity, filter;
 }
 .stagger-children > *:nth-child(1) { animation-delay: 0ms; }
 .stagger-children > *:nth-child(2) { animation-delay: 40ms; }
@@ -182,7 +177,6 @@ body {
   transition: transform 0.4s var(--apple-spring),
               box-shadow 0.4s var(--apple-ease),
               border-color 0.3s ease;
-  will-change: transform, box-shadow;
 }
 
 .card-glow:hover {

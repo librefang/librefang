@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { formatTime } from "../lib/datetime";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { listChannels, loadDashboardSnapshot, getCommsTopology, listCommsEvents, type CommsEventItem } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
@@ -80,7 +80,7 @@ function TopologyNode({ node, onClick }: { node: { id: string; name?: string; st
   return (
     <div
       onClick={onClick}
-      className="flex flex-col items-center gap-2 p-4 rounded-xl bg-surface border border-border-subtle hover:border-brand transition-all cursor-pointer"
+      className="flex flex-col items-center gap-2 p-4 rounded-xl bg-surface border border-border-subtle hover:border-brand transition-colors cursor-pointer"
     >
       <div className={`w-12 h-12 rounded-xl bg-gradient-to-br ${getNodeColor()} flex items-center justify-center shadow-lg`}>
         <Users className="w-6 h-6 text-white" />
@@ -120,7 +120,8 @@ export function CommsPage() {
   const eventsQuery = useQuery({
     queryKey: ["comms", "events"],
     queryFn: () => listCommsEvents(50),
-    refetchInterval: 5000
+    refetchInterval: 5000,
+    enabled: activeTab === "events",
   });
 
   const channels = channelsQuery.data ?? [];
@@ -129,20 +130,26 @@ export function CommsPage() {
   const events = eventsQuery.data ?? [];
   const isLoading = channelsQuery.isLoading || snapshotQuery.isLoading;
 
-  const configuredCount = channels.filter(c => c.configured).length;
+  const configuredCount = useMemo(() => channels.filter(c => c.configured).length, [channels]);
 
-  const filteredChannels = channels
-    .filter(c => !search || (c.display_name || c.name).toLowerCase().includes(search.toLowerCase()))
-    .sort((a, b) => {
-      // Configured first
-      if (a.configured && !b.configured) return -1;
-      if (!a.configured && b.configured) return 1;
-      return (a.display_name || a.name).localeCompare(b.display_name || b.name);
-    });
+  const filteredChannels = useMemo(
+    () => channels
+      .filter(c => !search || (c.display_name || c.name).toLowerCase().includes(search.toLowerCase()))
+      .sort((a, b) => {
+        // Configured first
+        if (a.configured && !b.configured) return -1;
+        if (!a.configured && b.configured) return 1;
+        return (a.display_name || a.name).localeCompare(b.display_name || b.name);
+      }),
+    [channels, search],
+  );
 
-  const filteredEvents = events.filter(e =>
-    !search || (e.source_name || e.source_id || "").toLowerCase().includes(search.toLowerCase()) ||
-    (e.detail || "").toLowerCase().includes(search.toLowerCase())
+  const filteredEvents = useMemo(
+    () => events.filter(e =>
+      !search || (e.source_name || e.source_id || "").toLowerCase().includes(search.toLowerCase()) ||
+      (e.detail || "").toLowerCase().includes(search.toLowerCase())
+    ),
+    [events, search],
   );
 
   return (
@@ -159,6 +166,7 @@ export function CommsPage() {
           void eventsQuery.refetch();
         }}
         icon={<Radio className="h-4 w-4" />}
+        helpText={t("comms.help")}
         actions={
           <div className="flex items-center gap-3">
             <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-success/10 border border-success/20">
@@ -176,7 +184,7 @@ export function CommsPage() {
       <div className="flex gap-1 p-1 bg-main/30 rounded-xl w-fit overflow-x-auto">
         <button
           onClick={() => setActiveTab("channels")}
-          className={`flex items-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-2 rounded-lg text-xs sm:text-sm font-bold transition-all whitespace-nowrap ${
+          className={`flex items-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-2 rounded-lg text-xs sm:text-sm font-bold transition-colors whitespace-nowrap ${
             activeTab === "channels" ? "bg-surface text-brand shadow-sm" : "text-text-dim hover:text-text-main"
           }`}
         >
@@ -185,7 +193,7 @@ export function CommsPage() {
         </button>
         <button
           onClick={() => setActiveTab("topology")}
-          className={`flex items-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-2 rounded-lg text-xs sm:text-sm font-bold transition-all whitespace-nowrap ${
+          className={`flex items-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-2 rounded-lg text-xs sm:text-sm font-bold transition-colors whitespace-nowrap ${
             activeTab === "topology" ? "bg-surface text-brand shadow-sm" : "text-text-dim hover:text-text-main"
           }`}
         >
@@ -194,7 +202,7 @@ export function CommsPage() {
         </button>
         <button
           onClick={() => setActiveTab("events")}
-          className={`flex items-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-2 rounded-lg text-xs sm:text-sm font-bold transition-all whitespace-nowrap ${
+          className={`flex items-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-2 rounded-lg text-xs sm:text-sm font-bold transition-colors whitespace-nowrap ${
             activeTab === "events" ? "bg-surface text-brand shadow-sm" : "text-text-dim hover:text-text-main"
           }`}
         >

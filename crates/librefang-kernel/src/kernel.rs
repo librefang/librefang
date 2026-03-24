@@ -1592,7 +1592,9 @@ impl LibreFangKernel {
                 // If the user left embedding_model at the default ("all-MiniLM-L6-v2"),
                 // pick a sensible default for the chosen provider so we don't send a
                 // local model name to a cloud API.
-                let model = if configured_model == "all-MiniLM-L6-v2" {
+                let model = if configured_model == "all-MiniLM-L6-v2"
+                    || configured_model == "text-embedding-3-small"
+                {
                     default_embedding_model_for_provider(provider)
                 } else {
                     configured_model.as_str()
@@ -1619,7 +1621,9 @@ impl LibreFangKernel {
                     }
                 }
             } else if std::env::var("OPENAI_API_KEY").is_ok() {
-                let model = if configured_model == "all-MiniLM-L6-v2" {
+                let model = if configured_model == "all-MiniLM-L6-v2"
+                    || configured_model == "text-embedding-3-small"
+                {
                     default_embedding_model_for_provider("openai")
                 } else {
                     configured_model.as_str()
@@ -1643,7 +1647,9 @@ impl LibreFangKernel {
                 }
             } else {
                 // Try Ollama (local, no key needed)
-                let model = if configured_model == "all-MiniLM-L6-v2" {
+                let model = if configured_model == "all-MiniLM-L6-v2"
+                    || configured_model == "text-embedding-3-small"
+                {
                     default_embedding_model_for_provider("ollama")
                 } else {
                     configured_model.as_str()
@@ -2109,7 +2115,8 @@ system_prompt = "You are a helpful assistant."
         // Auto-register workflow definitions from ~/.librefang/workflows/
         {
             let workflows_dir = kernel.config.home_dir.join("workflows");
-            let loaded = kernel.workflows.load_from_dir_sync(&workflows_dir);
+            let loaded =
+                tokio::task::block_in_place(|| kernel.workflows.load_from_dir_sync(&workflows_dir));
             if loaded > 0 {
                 info!(
                     "Auto-registered {loaded} workflow(s) from {}",
@@ -2118,16 +2125,37 @@ system_prompt = "You are a helpful assistant."
             }
         }
 
-        // Load workflow templates from ~/.librefang/workflows/templates/
+        // Pre-install built-in workflow templates, then load
         {
+            let registry_dir = kernel.config.home_dir.join("registry").join("workflows");
             let user_dir = kernel.config.home_dir.join("workflows").join("templates");
-            let loaded = kernel.template_registry.load_templates_from_dir(&user_dir);
-            if loaded > 0 {
-                info!(
-                    "Loaded {loaded} workflow template(s) from {}",
-                    user_dir.display()
-                );
-            }
+
+            tokio::task::block_in_place(|| {
+                // Sync built-in templates to user directory (always overwrite)
+                let mut installed = 0usize;
+                if registry_dir.is_dir() {
+                    let _ = std::fs::create_dir_all(&user_dir);
+                    if let Ok(entries) = std::fs::read_dir(&registry_dir) {
+                        for entry in entries.flatten() {
+                            let path = entry.path();
+                            if path.extension().and_then(|e| e.to_str()) == Some("toml") {
+                                let dest = user_dir.join(path.file_name().unwrap());
+                                if std::fs::copy(&path, &dest).is_ok() {
+                                    installed += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+                if installed > 0 {
+                    info!("Pre-installed {installed} workflow template(s) from registry");
+                }
+
+                let loaded = kernel.template_registry.load_templates_from_dir(&user_dir);
+                if loaded > 0 {
+                    info!("Loaded {loaded} workflow template(s)");
+                }
+            });
         }
 
         // Validate routing configs against model catalog
@@ -7177,7 +7205,14 @@ system_prompt = "You are a helpful assistant."
             .unwrap_or_default();
 
         for server_config in &servers {
-            let transport = match &server_config.transport {
+            let transport_entry = match &server_config.transport {
+                Some(t) => t,
+                None => {
+                    tracing::warn!(name = %server_config.name, "MCP server has no transport configured, skipping");
+                    continue;
+                }
+            };
+            let transport = match transport_entry {
                 McpTransportEntry::Stdio { command, args } => McpTransport::Stdio {
                     command: command.clone(),
                     args: args.clone(),
@@ -7294,7 +7329,13 @@ system_prompt = "You are a helpful assistant."
         // 5. Connect new servers
         let mut connected_count = 0;
         for server_config in &new_servers {
-            let transport = match &server_config.transport {
+            let transport_entry = match &server_config.transport {
+                Some(t) => t,
+                None => {
+                    continue;
+                }
+            };
+            let transport = match transport_entry {
                 McpTransportEntry::Stdio { command, args } => McpTransport::Stdio {
                     command: command.clone(),
                     args: args.clone(),
@@ -7421,7 +7462,16 @@ system_prompt = "You are a helpful assistant."
 
         self.extension_health.mark_reconnecting(id);
 
-        let transport = match &server_config.transport {
+        let transport_entry = match &server_config.transport {
+            Some(t) => t,
+            None => {
+                return Err(format!(
+                    "MCP server '{}' has no transport configured",
+                    server_config.name
+                ));
+            }
+        };
+        let transport = match transport_entry {
             McpTransportEntry::Stdio { command, args } => McpTransport::Stdio {
                 command: command.clone(),
                 args: args.clone(),

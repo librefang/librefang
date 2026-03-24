@@ -67,6 +67,21 @@ pub struct MemoryItem {
     pub metadata: HashMap<String, serde_json::Value>,
     /// When this memory was created.
     pub created_at: DateTime<Utc>,
+    /// How this memory was created.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// Confidence score (0.0 - 1.0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f32>,
+    /// When this memory was last accessed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accessed_at: Option<DateTime<Utc>>,
+    /// How many times this memory has been accessed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access_count: Option<u64>,
+    /// Which agent owns this memory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
 }
 
 impl MemoryItem {
@@ -79,6 +94,11 @@ impl MemoryItem {
             category: None,
             metadata: HashMap::new(),
             created_at: Utc::now(),
+            source: None,
+            confidence: None,
+            accessed_at: None,
+            access_count: None,
+            agent_id: None,
         }
     }
 
@@ -107,6 +127,31 @@ impl MemoryItem {
     pub fn with_metadata(mut self, key: impl Into<String>, value: serde_json::Value) -> Self {
         self.metadata.insert(key.into(), value);
         self
+    }
+
+    /// Create from a MemoryFragment.
+    pub fn from_fragment(frag: MemoryFragment) -> Self {
+        let level = MemoryLevel::from(frag.scope.as_str());
+        let source_str = serde_json::to_value(&frag.source)
+            .ok()
+            .and_then(|v| v.as_str().map(String::from));
+        Self {
+            id: frag.id.to_string(),
+            content: frag.content,
+            level,
+            category: frag
+                .metadata
+                .get("category")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            source: source_str,
+            confidence: Some(frag.confidence),
+            accessed_at: Some(frag.accessed_at),
+            access_count: Some(frag.access_count),
+            agent_id: Some(frag.agent_id.to_string()),
+            created_at: frag.created_at,
+            metadata: frag.metadata,
+        }
     }
 }
 
@@ -490,6 +535,11 @@ fn push_memory(
         category: Some(category.to_string()),
         metadata,
         created_at: Utc::now(),
+        source: None,
+        confidence: None,
+        accessed_at: None,
+        access_count: None,
+        agent_id: None,
     });
 }
 

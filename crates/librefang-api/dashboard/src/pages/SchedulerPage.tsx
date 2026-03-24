@@ -80,6 +80,7 @@ export function SchedulerPage() {
         isFetching={schedulesQuery.isFetching}
         onRefresh={() => { schedulesQuery.refetch(); triggersQuery.refetch(); cronJobsQuery.refetch(); }}
         icon={<Calendar className="h-4 w-4" />}
+        helpText={t("scheduler.help")}
         actions={
           <Button variant="primary" onClick={() => setShowCreate(true)}>
             <Plus className="w-4 h-4" /> {t("scheduler.create_job")}
@@ -109,7 +110,7 @@ export function SchedulerPage() {
             {schedules.map(s => {
               const agent = agentMap.get(s.agent_id || "");
               return (
-                <div key={s.id} className="p-3 sm:p-4 rounded-xl sm:rounded-2xl border border-border-subtle hover:border-brand/30 transition-all space-y-1.5">
+                <div key={s.id} className="p-3 sm:p-4 rounded-xl sm:rounded-2xl border border-border-subtle hover:border-brand/30 transition-colors space-y-1.5">
                   {/* Row 1: icon + name + badge + actions — all same line */}
                   <div className="flex items-center gap-2 sm:gap-3">
                     <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-lg bg-brand/10 flex items-center justify-center shrink-0">
@@ -127,7 +128,7 @@ export function SchedulerPage() {
                           <button onClick={() => setConfirmDeleteId(null)} className="px-2 py-1 rounded-lg bg-main text-text-dim text-[10px] font-bold">{t("common.cancel")}</button>
                         </div>
                       ) : (
-                        <button onClick={() => handleDelete(s.id)} className="p-1.5 rounded-lg text-text-dim/30 hover:text-error hover:bg-error/10 transition-all">
+                        <button onClick={() => handleDelete(s.id)} className="p-1.5 rounded-lg text-text-dim/30 hover:text-error hover:bg-error/10 transition-colors">
                           <Trash2 className="w-3.5 h-3.5" />
                         </button>
                       )}
@@ -161,7 +162,7 @@ export function SchedulerPage() {
           ) : (
             <div className="space-y-1.5">
               {triggers.map((tr: any) => (
-                <div key={tr.id} className="flex items-center gap-3 p-3 rounded-xl border border-border-subtle hover:border-brand/30 transition-all">
+                <div key={tr.id} className="flex items-center gap-3 p-3 rounded-xl border border-border-subtle hover:border-brand/30 transition-colors">
                   <Zap className="w-4 h-4 text-warning shrink-0" />
                   <div className="min-w-0 flex-1">
                     <p className="text-xs font-bold truncate">{tr.pattern || tr.name || truncateId(tr.id, 12)}</p>
@@ -185,7 +186,7 @@ export function SchedulerPage() {
           ) : (
             <div className="space-y-1.5">
               {cronJobs.map((j: any, i: number) => (
-                <div key={j.id || i} className="flex items-center gap-3 p-3 rounded-xl border border-border-subtle hover:border-brand/30 transition-all">
+                <div key={j.id || i} className="flex items-center gap-3 p-3 rounded-xl border border-border-subtle hover:border-brand/30 transition-colors">
                   <Clock className="w-4 h-4 text-brand shrink-0" />
                   <div className="min-w-0 flex-1">
                     <p className="text-xs font-bold truncate">{j.name || truncateId(j.id, 12)}</p>
@@ -201,7 +202,7 @@ export function SchedulerPage() {
 
       {/* Create Modal */}
       {showCreate && (
-        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/30 backdrop-blur-xl backdrop-saturate-150" onClick={() => setShowCreate(false)}>
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/30 backdrop-blur-sm" onClick={() => setShowCreate(false)}>
           <div className="bg-surface rounded-t-2xl sm:rounded-2xl shadow-2xl border border-border-subtle w-full sm:w-[440px] sm:max-w-[90vw] animate-fade-in-scale" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between px-5 py-3 border-b border-border-subtle">
               <h3 className="text-sm font-bold">{t("scheduler.create_job")}</h3>

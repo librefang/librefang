@@ -6,6 +6,7 @@ use super::AppState;
 pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
     axum::Router::new()
         .route("/goals", axum::routing::get(list_goals).post(create_goal))
+        .route("/goals/templates", axum::routing::get(list_goal_templates))
         .route(
             "/goals/{id}",
             axum::routing::get(get_goal)
@@ -468,4 +469,96 @@ pub async fn delete_goal(
         StatusCode::OK,
         Json(serde_json::json!({"status": "removed", "goal_id": id, "removed_count": removed})),
     )
+}
+
+/// GET /api/goals/templates — List built-in goal templates.
+#[utoipa::path(
+    get,
+    path = "/api/goals/templates",
+    tag = "goals",
+    responses(
+        (status = 200, description = "Goal templates", body = serde_json::Value)
+    )
+)]
+pub async fn list_goal_templates() -> impl IntoResponse {
+    let templates = serde_json::json!([
+        {
+            "id": "product_launch",
+            "name": "Product Launch",
+            "icon": "rocket",
+            "description": "Plan and execute a product launch from ideation to release.",
+            "goals": [
+                { "title": "Define Product Requirements", "description": "Gather stakeholder input and finalize the PRD.", "status": "pending" },
+                { "title": "Design & Prototyping", "description": "Create wireframes, mockups, and interactive prototypes.", "status": "pending" },
+                { "title": "Development Sprint", "description": "Implement core features and integrate APIs.", "status": "pending" },
+                { "title": "QA & Testing", "description": "Run integration tests, load tests, and UAT.", "status": "pending" },
+                { "title": "Launch & Monitor", "description": "Deploy to production, monitor metrics, and collect feedback.", "status": "pending" }
+            ]
+        },
+        {
+            "id": "agent_deployment",
+            "name": "Agent Deployment",
+            "icon": "bot",
+            "description": "Deploy and configure an autonomous agent from scratch.",
+            "goals": [
+                { "title": "Choose Model & Provider", "description": "Select the LLM provider and model for the agent.", "status": "pending" },
+                { "title": "Configure Agent Manifest", "description": "Set system prompt, tools, and memory settings.", "status": "pending" },
+                { "title": "Connect Channels", "description": "Wire up Slack, Discord, or other communication channels.", "status": "pending" },
+                { "title": "Test Conversations", "description": "Run test dialogues and verify tool usage.", "status": "pending" },
+                { "title": "Go Live", "description": "Enable the agent for end users and monitor performance.", "status": "pending" }
+            ]
+        },
+        {
+            "id": "security_audit",
+            "name": "Security Audit",
+            "icon": "shield",
+            "description": "Conduct a security review of the system.",
+            "goals": [
+                { "title": "Dependency Scan", "description": "Audit all dependencies for known CVEs.", "status": "pending" },
+                { "title": "API Security Review", "description": "Check authentication, authorization, and input validation.", "status": "pending" },
+                { "title": "Secret Management", "description": "Verify no secrets are hardcoded or exposed.", "status": "pending" },
+                { "title": "Penetration Testing", "description": "Run automated and manual penetration tests.", "status": "pending" },
+                { "title": "Remediation Plan", "description": "Document findings and create fix timeline.", "status": "pending" }
+            ]
+        },
+        {
+            "id": "data_pipeline",
+            "name": "Data Pipeline",
+            "icon": "database",
+            "description": "Build an end-to-end data processing pipeline.",
+            "goals": [
+                { "title": "Data Source Integration", "description": "Connect to data sources and define ingestion schedule.", "status": "pending" },
+                { "title": "Transform & Clean", "description": "Build ETL jobs for data normalization.", "status": "pending" },
+                { "title": "Storage & Indexing", "description": "Set up database schema and indexing strategy.", "status": "pending" },
+                { "title": "Monitoring & Alerts", "description": "Add pipeline health checks and failure alerts.", "status": "pending" }
+            ]
+        },
+        {
+            "id": "team_onboarding",
+            "name": "Team Onboarding",
+            "icon": "users",
+            "description": "Onboard a new team member step by step.",
+            "goals": [
+                { "title": "Access & Accounts", "description": "Set up email, VPN, Git, and internal tool access.", "status": "pending" },
+                { "title": "Codebase Walkthrough", "description": "Review architecture, key modules, and coding conventions.", "status": "pending" },
+                { "title": "First Task", "description": "Assign a starter task and pair with a mentor.", "status": "pending" },
+                { "title": "First PR Merged", "description": "Complete code review cycle and merge first contribution.", "status": "pending" }
+            ]
+        },
+        {
+            "id": "incident_response",
+            "name": "Incident Response",
+            "icon": "alert",
+            "description": "Handle a production incident from detection to postmortem.",
+            "goals": [
+                { "title": "Detect & Triage", "description": "Identify severity, assign incident commander.", "status": "pending" },
+                { "title": "Investigate Root Cause", "description": "Analyze logs, traces, and metrics to find the cause.", "status": "pending" },
+                { "title": "Mitigate", "description": "Apply hotfix or rollback to restore service.", "status": "pending" },
+                { "title": "Communicate", "description": "Update stakeholders and post status page updates.", "status": "pending" },
+                { "title": "Postmortem", "description": "Write incident report with timeline and action items.", "status": "pending" }
+            ]
+        }
+    ]);
+
+    Json(serde_json::json!({ "templates": templates }))
 }

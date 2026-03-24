@@ -3,8 +3,8 @@ import { formatDateTime } from "../lib/datetime";
 import { formatCost } from "../lib/format";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import Markdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+import { useNavigate } from "@tanstack/react-router";
+import { router } from "../router";
 import {
   activateHand,
   deactivateHand,
@@ -14,13 +14,10 @@ import {
   resumeHand,
   getHandStats,
   getHandSettings,
-  sendHandMessage,
-  getHandSession,
   type HandDefinitionItem,
   type HandInstanceItem,
   type HandStatsResponse,
   type HandSettingsResponse,
-  type HandSessionMessage,
 } from "../api";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
@@ -42,10 +39,6 @@ import {
   Wrench,
   Activity,
   MessageCircle,
-  Send,
-  User,
-  Bot,
-  AlertCircle,
   ChevronRight,
 } from "lucide-react";
 import { PageHeader } from "../components/ui/PageHeader";
@@ -67,35 +60,10 @@ if (typeof document !== "undefined" && !document.getElementById("hands-keyframes
   document.head.appendChild(style);
 }
 
-/* ── Markdown components for chat ─────────────────────────── */
-const mdComponents = {
-  p: ({ children }: Record<string, unknown>) => <p className="mb-1.5 last:mb-0">{children as React.ReactNode}</p>,
-  ul: ({ children }: Record<string, unknown>) => <ul className="list-disc pl-4 mb-1.5 space-y-0.5">{children as React.ReactNode}</ul>,
-  ol: ({ children }: Record<string, unknown>) => <ol className="list-decimal pl-4 mb-1.5 space-y-0.5">{children as React.ReactNode}</ol>,
-  li: ({ children }: Record<string, unknown>) => <li className="text-xs">{children as React.ReactNode}</li>,
-  code: (props: Record<string, unknown>) => {
-    const { children } = props;
-    const text = String(children);
-    const isBlock = text.includes("\n");
-    return isBlock
-      ? <pre className="p-2 rounded-lg bg-main font-mono text-[10px] overflow-x-auto mb-1.5"><code>{children as React.ReactNode}</code></pre>
-      : <code className="px-1 py-0.5 rounded bg-main font-mono text-[10px]">{children as React.ReactNode}</code>;
-  },
-  pre: ({ children }: Record<string, unknown>) => <>{children as React.ReactNode}</>,
-  strong: ({ children }: Record<string, unknown>) => <strong className="font-bold">{children as React.ReactNode}</strong>,
-};
 
 /* ── Inline metrics for active hand cards ─────────────────── */
 
-function HandMetricsInline({ instanceId }: { instanceId: string }) {
-  const statsQuery = useQuery({
-    queryKey: ["hands", "stats", instanceId],
-    queryFn: () => getHandStats(instanceId),
-    refetchInterval: REFRESH_MS,
-    enabled: !!instanceId,
-  });
-
-  const metrics = statsQuery.data?.metrics;
+function HandMetricsInline({ metrics }: { metrics?: Record<string, { value?: unknown; format?: string }> }) {
   if (!metrics || Object.keys(metrics).length === 0) return null;
 
   const entries = Object.entries(metrics).slice(0, 3);
@@ -722,6 +690,7 @@ function ActiveHandCard({
   onDeactivate,
   onDetail,
   isPending,
+  metrics,
 }: {
   hand: HandDefinitionItem;
   instance: HandInstanceItem;
@@ -729,13 +698,14 @@ function ActiveHandCard({
   onDeactivate: (id: string) => void;
   onDetail: (hand: HandDefinitionItem) => void;
   isPending: boolean;
+  metrics?: Record<string, { value?: unknown; format?: string }>;
 }) {
   const { t } = useTranslation();
   const isPaused = instance.status === "paused";
 
   return (
     <div
-      className={`group relative flex items-center gap-3 px-4 py-3 rounded-2xl border cursor-pointer transition-all shrink-0 min-w-[240px] max-w-[320px] ${
+      className={`group relative flex items-center gap-3 px-4 py-3 rounded-2xl border cursor-pointer transition-colors shrink-0 min-w-[240px] max-w-[320px] ${
         isPaused
           ? "border-warning/30 bg-warning/5 hover:border-warning/50"
           : "border-success/30 bg-success/5 hover:border-success/50"
@@ -762,7 +732,7 @@ function ActiveHandCard({
           )}
         </div>
         {instance.instance_id && (
-          <HandMetricsInline instanceId={instance.instance_id} />
+          <HandMetricsInline metrics={metrics} />
         )}
       </div>
       <div
@@ -817,7 +787,7 @@ function HandCard({
 
   return (
     <div
-      className="group p-4 rounded-2xl border border-border-subtle hover:border-brand/30 bg-surface hover:bg-surface/80 transition-all cursor-pointer"
+      className="group p-4 rounded-2xl border border-border-subtle hover:border-brand/30 bg-surface hover:bg-surface/80 transition-colors cursor-pointer"
       onClick={() => onDetail(hand)}
       role="button"
       tabIndex={0}
@@ -848,7 +818,7 @@ function HandCard({
           {isActive && instance && !isPaused && (
             <button
               onClick={() => onChat(instance.instance_id, hand.name || hand.id)}
-              className="p-1.5 rounded-lg text-brand/60 hover:text-brand hover:bg-brand/10 opacity-0 group-hover:opacity-100 transition-all"
+              className="p-1.5 rounded-lg text-brand/60 hover:text-brand hover:bg-brand/10 opacity-0 group-hover:opacity-100 transition-[colors,opacity]"
               title={t("chat.title")}
             >
               <MessageCircle className="w-4 h-4" />
@@ -858,7 +828,7 @@ function HandCard({
             <button
               onClick={() => onDeactivate(instance.instance_id)}
               disabled={isPending}
-              className="p-1.5 rounded-lg text-text-dim/40 hover:text-error hover:bg-error/10 opacity-0 group-hover:opacity-100 transition-all disabled:opacity-40"
+              className="p-1.5 rounded-lg text-text-dim/40 hover:text-error hover:bg-error/10 opacity-0 group-hover:opacity-100 transition-[colors,opacity] disabled:opacity-40"
               title={t("hands.deactivate")}
             >
               {isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <PowerOff className="w-4 h-4" />}
@@ -867,7 +837,7 @@ function HandCard({
             <button
               onClick={() => onActivate(hand.id)}
               disabled={isPending || !hand.requirements_met}
-              className="p-1.5 rounded-lg text-text-dim/40 hover:text-brand hover:bg-brand/10 opacity-0 group-hover:opacity-100 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+              className="p-1.5 rounded-lg text-text-dim/40 hover:text-brand hover:bg-brand/10 opacity-0 group-hover:opacity-100 transition-[colors,opacity] disabled:opacity-40 disabled:cursor-not-allowed"
               title={t("hands.activate")}
             >
               {isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Power className="w-4 h-4" />}
@@ -933,7 +903,12 @@ export function HandsPage() {
   const [search, setSearch] = useState("");
   const [selectedCategory, setSelectedCategory] = useState<string>("all");
   const [detailHand, setDetailHand] = useState<HandDefinitionItem | null>(null);
-  const [chatInstance, setChatInstance] = useState<{ id: string; name: string } | null>(null);
+  const navigate = useNavigate();
+
+  // Preload ChatPage chunk so navigate is instant
+  useEffect(() => {
+    router.preloadRoute({ to: "/chat", search: { agentId: undefined } }).catch(() => {});
+  }, []);
 
   const handsQuery = useQuery({
     queryKey: ["hands", "list"],
@@ -961,6 +936,23 @@ export function HandsPage() {
 
   const hands = handsQuery.data ?? [];
   const instances = activeQuery.data ?? [];
+
+  // Batch-fetch stats for all active instances (avoids N+1 queries)
+  const activeInstanceIds = useMemo(() => instances.map(i => i.instance_id).filter(Boolean), [instances]);
+  const allStatsQuery = useQuery({
+    queryKey: ["hands", "stats", "batch", activeInstanceIds],
+    queryFn: async () => {
+      const results: Record<string, HandStatsResponse> = {};
+      await Promise.all(activeInstanceIds.map(async id => {
+        try { results[id] = await getHandStats(id); } catch { /* skip */ }
+      }));
+      return results;
+    },
+    refetchInterval: REFRESH_MS,
+    enabled: activeInstanceIds.length > 0,
+  });
+  const allStats = allStatsQuery.data ?? {};
+
   const activeHandIds = useMemo(
     () => new Set(instances.map((i) => i.hand_id).filter(Boolean)),
     [instances],
@@ -1088,6 +1080,7 @@ export function HandsPage() {
           activeQuery.refetch();
         }}
         icon={<Hand className="h-4 w-4" />}
+        helpText={t("hands.help")}
         actions={
           <div className="flex items-center gap-3">
             <Badge variant="success" dot>
@@ -1115,10 +1108,14 @@ export function HandsPage() {
                 key={instance.instance_id}
                 hand={hand}
                 instance={instance}
-                onChat={(id, name) => setChatInstance({ id, name })}
+                onChat={(instanceId) => {
+                  const inst = instances.find(i => i.instance_id === instanceId);
+                  navigate({ to: "/chat", search: { agentId: inst?.agent_id || instanceId } });
+                }}
                 onDeactivate={handleDeactivate}
                 onDetail={setDetailHand}
                 isPending={pendingId === hand.id || pendingId === instance.instance_id}
+                metrics={allStats[instance.instance_id]?.metrics}
               />
             ))}
           </div>
@@ -1132,7 +1129,7 @@ export function HandsPage() {
           <div className="flex items-center gap-1.5 overflow-x-auto scrollbar-thin pb-1 shrink-0">
             <button
               onClick={() => setSelectedCategory("all")}
-              className={`px-3 py-1.5 rounded-xl text-[11px] font-bold whitespace-nowrap transition-all ${
+              className={`px-3 py-1.5 rounded-xl text-[11px] font-bold whitespace-nowrap transition-colors ${
                 selectedCategory === "all"
                   ? "bg-brand text-white shadow-sm shadow-brand/20"
                   : "bg-main text-text-dim hover:text-text hover:bg-main/80 border border-border-subtle"
@@ -1146,7 +1143,7 @@ export function HandsPage() {
                 onClick={() =>
                   setSelectedCategory(selectedCategory === cat ? "all" : cat)
                 }
-                className={`px-3 py-1.5 rounded-xl text-[11px] font-bold whitespace-nowrap transition-all ${
+                className={`px-3 py-1.5 rounded-xl text-[11px] font-bold whitespace-nowrap transition-colors ${
                   selectedCategory === cat
                     ? "bg-brand text-white shadow-sm shadow-brand/20"
                     : "bg-main text-text-dim hover:text-text hover:bg-main/80 border border-border-subtle"
@@ -1201,7 +1198,10 @@ export function HandsPage() {
                 onActivate={handleActivate}
                 onDeactivate={(id) => handleDeactivate(id)}
                 onDetail={setDetailHand}
-                onChat={(id, name) => setChatInstance({ id, name })}
+                onChat={(instanceId) => {
+                  const inst = instances.find(i => i.instance_id === instanceId);
+                  navigate({ to: "/chat", search: { agentId: inst?.agent_id || instanceId } });
+                }}
                 isPending={pendingId === h.id || (instance ? pendingId === instance.instance_id : false)}
               />
             );
@@ -1220,22 +1220,14 @@ export function HandsPage() {
           onDeactivate={handleDeactivate}
           onPause={handlePause}
           onResume={handleResume}
-          onChat={(instanceId, handName) => {
-            setDetailHand(null);
-            setChatInstance({ id: instanceId, name: handName });
+          onChat={(instanceId) => {
+            const inst = instances.find(i => i.instance_id === instanceId);
+            navigate({ to: "/chat", search: { agentId: inst?.agent_id || instanceId } });
           }}
           isPending={pendingId === detailHand.id}
         />
       )}
 
-      {/* Chat panel */}
-      {chatInstance && (
-        <HandChatPanel
-          instanceId={chatInstance.id}
-          handName={chatInstance.name}
-          onClose={() => setChatInstance(null)}
-        />
-      )}
     </div>
   );
 }

@@ -362,20 +362,50 @@ pub async fn create_workflow(
     )
 )]
 pub async fn list_workflows(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let workflows = state.kernel.workflow_engine().list_workflows().await;
+    let engine = state.kernel.workflow_engine();
+    let workflows = engine.list_workflows().await;
+    let all_runs = engine.list_runs(None).await;
+
+    // Count runs per workflow
+    let mut run_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for r in &all_runs {
+        *run_counts.entry(r.workflow_id.to_string()).or_default() += 1;
+    }
+
+    // Load schedules to find workflow-bound ones
+    let shared_id = schedule_shared_agent_id();
+    let schedules: Vec<serde_json::Value> = match state
+        .kernel
+        .memory_substrate()
+        .structured_get(shared_id, SCHEDULES_KEY)
+    {
+        Ok(Some(serde_json::Value::Array(arr))) => arr,
+        _ => Vec::new(),
+    };
+
     let list: Vec<serde_json::Value> = workflows
         .iter()
         .map(|w| {
+            let wid = w.id.to_string();
+            let schedule = schedules
+                .iter()
+                .find(|s| s["workflow_id"].as_str() == Some(&wid));
             serde_json::json!({
-                "id": w.id.to_string(),
+                "id": wid,
                 "name": w.name,
                 "description": w.description,
                 "steps": w.steps.len(),
+                "run_count": run_counts.get(&wid).copied().unwrap_or(0),
                 "created_at": w.created_at.to_rfc3339(),
+                "schedule": schedule.map(|s| serde_json::json!({
+                    "cron": s["cron"],
+                    "enabled": s["enabled"],
+                    "last_run": s["last_run"],
+                })),
             })
         })
         .collect();
-    Json(list)
+    Json(serde_json::json!({ "workflows": list }))
 }
 
 /// GET /api/workflows/:id — Get a single workflow by ID.
@@ -1104,29 +1134,61 @@ pub async fn create_schedule(
     }
 
     let agent_id_str = req["agent_id"].as_str().unwrap_or("").to_string();
-    if agent_id_str.is_empty() {
+    let workflow_id_str = req["workflow_id"].as_str().unwrap_or("").to_string();
+
+    // Must have either agent_id or workflow_id
+    if agent_id_str.is_empty() && workflow_id_str.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Missing required field: agent_id"})),
+            Json(serde_json::json!({"error": "Must provide either agent_id or workflow_id"})),
         );
     }
-    // Validate agent exists (UUID or name lookup)
-    let agent_exists = if let Ok(aid) = agent_id_str.parse::<AgentId>() {
-        state.kernel.agent_registry().get(aid).is_some()
-    } else {
-        state
-            .kernel
-            .agent_registry()
-            .list()
-            .iter()
-            .any(|a| a.name == agent_id_str)
-    };
-    if !agent_exists {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": format!("Agent not found: {agent_id_str}")})),
-        );
+
+    // Validate agent exists if provided
+    if !agent_id_str.is_empty() {
+        let agent_exists = if let Ok(aid) = agent_id_str.parse::<AgentId>() {
+            state.kernel.agent_registry().get(aid).is_some()
+        } else {
+            state
+                .kernel
+                .agent_registry()
+                .list()
+                .iter()
+                .any(|a| a.name == agent_id_str)
+        };
+        if !agent_exists {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": format!("Agent not found: {agent_id_str}")})),
+            );
+        }
     }
+
+    // Validate workflow exists if provided
+    if !workflow_id_str.is_empty() {
+        if let Ok(wid) = workflow_id_str.parse::<uuid::Uuid>() {
+            if state
+                .kernel
+                .workflow_engine()
+                .get_workflow(WorkflowId(wid))
+                .await
+                .is_none()
+            {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(
+                        serde_json::json!({"error": format!("Workflow not found: {workflow_id_str}")}),
+                    ),
+                );
+            }
+        } else {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Invalid workflow_id format"})),
+            );
+        }
+    }
+
     let message = req["message"].as_str().unwrap_or("").to_string();
     let enabled = req.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
 
@@ -1136,6 +1198,7 @@ pub async fn create_schedule(
         "name": name,
         "cron": cron,
         "agent_id": agent_id_str,
+        "workflow_id": workflow_id_str,
         "message": message,
         "enabled": enabled,
         "created_at": chrono::Utc::now().to_rfc3339(),
@@ -1310,49 +1373,11 @@ pub async fn run_schedule(
     };
 
     let agent_id_str = schedule["agent_id"].as_str().unwrap_or("");
+    let workflow_id_str = schedule["workflow_id"].as_str().unwrap_or("");
     let message = schedule["message"]
         .as_str()
         .unwrap_or("Scheduled task triggered manually.");
     let name = schedule["name"].as_str().unwrap_or("(unnamed)");
-
-    // Find the target agent — require explicit agent_id, no silent fallback
-    let target_agent = if !agent_id_str.is_empty() {
-        if let Ok(aid) = agent_id_str.parse::<AgentId>() {
-            if state.kernel.agent_registry().get(aid).is_some() {
-                Some(aid)
-            } else {
-                None
-            }
-        } else {
-            state
-                .kernel
-                .agent_registry()
-                .list()
-                .iter()
-                .find(|a| a.name == agent_id_str)
-                .map(|a| a.id)
-        }
-    } else {
-        None
-    };
-
-    let target_agent = match target_agent {
-        Some(a) => a,
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(
-                    serde_json::json!({"error": "No target agent found. Specify an agent_id or start an agent first."}),
-                ),
-            );
-        }
-    };
-
-    let run_message = if message.is_empty() {
-        format!("[Scheduled task '{}' triggered manually]", name)
-    } else {
-        message.to_string()
-    };
 
     // Update last_run and run_count
     let mut schedules_updated: Vec<serde_json::Value> = match state
@@ -1379,29 +1404,107 @@ pub async fn run_schedule(
         tracing::warn!("Failed to save structured data: {e}");
     }
 
-    let kernel_handle: Arc<dyn KernelHandle> = state.kernel.clone() as Arc<dyn KernelHandle>;
-    match state
-        .kernel
-        .send_message_with_handle(target_agent, &run_message, Some(kernel_handle))
-        .await
-    {
-        Ok(result) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "status": "completed",
-                "schedule_id": id,
-                "agent_id": target_agent.to_string(),
-                "response": result.response,
-            })),
-        ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({
-                "status": "failed",
-                "schedule_id": id,
-                "error": format!("{e}"),
-            })),
-        ),
+    // Route: workflow execution or agent message
+    if !workflow_id_str.is_empty() {
+        // Run workflow
+        let wid = match workflow_id_str.parse::<uuid::Uuid>() {
+            Ok(u) => WorkflowId(u),
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": "Invalid workflow_id"})),
+                );
+            }
+        };
+        let input = if message.is_empty() {
+            format!("[Scheduled workflow '{}' triggered]", name)
+        } else {
+            message.to_string()
+        };
+        match state.kernel.run_workflow(wid, input).await {
+            Ok((run_id, output)) => (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "status": "completed",
+                    "schedule_id": id,
+                    "workflow_id": workflow_id_str,
+                    "run_id": run_id.to_string(),
+                    "output": output,
+                })),
+            ),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "status": "failed",
+                    "schedule_id": id,
+                    "error": format!("{e}"),
+                })),
+            ),
+        }
+    } else {
+        // Send message to agent
+        let target_agent = if !agent_id_str.is_empty() {
+            if let Ok(aid) = agent_id_str.parse::<AgentId>() {
+                if state.kernel.agent_registry().get(aid).is_some() {
+                    Some(aid)
+                } else {
+                    None
+                }
+            } else {
+                state
+                    .kernel
+                    .agent_registry()
+                    .list()
+                    .iter()
+                    .find(|a| a.name == agent_id_str)
+                    .map(|a| a.id)
+            }
+        } else {
+            None
+        };
+
+        let target_agent = match target_agent {
+            Some(a) => a,
+            None => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(
+                        serde_json::json!({"error": "No target agent found. Specify an agent_id or start an agent first."}),
+                    ),
+                );
+            }
+        };
+
+        let run_message = if message.is_empty() {
+            format!("[Scheduled task '{}' triggered]", name)
+        } else {
+            message.to_string()
+        };
+
+        let kernel_handle: Arc<dyn KernelHandle> = state.kernel.clone() as Arc<dyn KernelHandle>;
+        match state
+            .kernel
+            .send_message_with_handle(target_agent, &run_message, Some(kernel_handle))
+            .await
+        {
+            Ok(result) => (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "status": "completed",
+                    "schedule_id": id,
+                    "agent_id": target_agent.to_string(),
+                    "response": result.response,
+                })),
+            ),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "status": "failed",
+                    "schedule_id": id,
+                    "error": format!("{e}"),
+                })),
+            ),
+        }
     }
 }
 

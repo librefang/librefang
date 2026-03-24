@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { listChannels, configureChannel } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
@@ -129,7 +129,7 @@ function ChannelCard({ channel: c, isSelected, viewMode, onSelect, onConfigure, 
   // Grid view
   return (
     <Card hover padding="none" className={`flex flex-col overflow-hidden group transition-all ${isSelected ? "ring-2 ring-brand" : ""}`}>
-      <div className={`h-1.5 bg-gradient-to-r ${c.configured ? "from-success via-success/60 to-success/30" : "from-brand via-brand/60 to-brand/30"}`} />
+      <div className={`h-1.5 bg-linear-to-r ${c.configured ? "from-success via-success/60 to-success/30" : "from-brand via-brand/60 to-brand/30"}`} />
       <div className="p-5 flex-1 flex flex-col">
         {/* Header */}
         <div className="flex items-start justify-between gap-3 mb-4">
@@ -140,7 +140,7 @@ function ChannelCard({ channel: c, isSelected, viewMode, onSelect, onConfigure, 
             >
               {isSelected ? <CheckSquare className="w-5 h-5 text-brand" /> : <Square className="w-5 h-5" />}
             </button>
-            <div className={`w-10 h-10 rounded-lg flex items-center justify-center text-xl shadow-sm ${c.configured ? "bg-gradient-to-br from-success/10 to-success/5 border border-success/20" : "bg-gradient-to-br from-brand/10 to-brand/5 border border-brand/20"}`}>
+            <div className={`w-10 h-10 rounded-lg flex items-center justify-center text-xl shadow-sm ${c.configured ? "bg-linear-to-br from-success/10 to-success/5 border border-success/20" : "bg-linear-to-br from-brand/10 to-brand/5 border border-brand/20"}`}>
               {getChannelIcon(c.name)}
             </div>
             <div className="min-w-0">
@@ -197,10 +197,10 @@ function DetailsModal({ channel, onClose, onConfigure, t }: {
   t: (key: string) => string
 }) {
   return (
-    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-black/50 backdrop-blur-xl backdrop-saturate-150" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-black/50 backdrop-blur-sm" onClick={onClose}>
       <div className="bg-surface rounded-2xl border border-border-subtle w-full sm:max-w-lg shadow-2xl rounded-t-2xl sm:rounded-2xl max-h-[90vh] overflow-y-auto animate-fade-in-scale" onClick={e => e.stopPropagation()}>
         {/* Header */}
-        <div className={`h-2 bg-gradient-to-r ${channel.configured ? "from-success via-success/60 to-success/30" : "from-brand via-brand/60 to-brand/30"} rounded-t-2xl`} />
+        <div className={`h-2 bg-linear-to-r ${channel.configured ? "from-success via-success/60 to-success/30" : "from-brand via-brand/60 to-brand/30"} rounded-t-2xl`} />
         <div className="p-6 border-b border-border-subtle">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
@@ -347,7 +347,7 @@ function ConfigDialog({ channel, onClose, t }: { channel: Channel; onClose: () =
   };
 
   return (
-    <div className="fixed inset-0 bg-black/40 flex items-end sm:items-center justify-center z-50 backdrop-blur-xl backdrop-saturate-150" onClick={onClose}>
+    <div className="fixed inset-0 bg-black/40 flex items-end sm:items-center justify-center z-50 backdrop-blur-sm" onClick={onClose}>
       <div className="bg-surface border border-border-subtle rounded-2xl w-full sm:max-w-md shadow-2xl rounded-t-2xl sm:rounded-2xl animate-fade-in-scale" onClick={e => e.stopPropagation()}>
         <div className="px-6 py-5 border-b border-border-subtle">
           <div className="flex items-center justify-between">
@@ -438,22 +438,25 @@ export function ChannelsPage() {
   const channelsQuery = useQuery({ queryKey: ["channels", "list"], queryFn: listChannels, refetchInterval: REFRESH_MS });
 
   const channels = channelsQuery.data ?? [];
-  const configuredCount = channels.filter(c => c.configured).length;
-  const unconfiguredCount = channels.filter(c => !c.configured).length;
+  const configuredCount = useMemo(() => channels.filter(c => c.configured).length, [channels]);
+  const unconfiguredCount = useMemo(() => channels.filter(c => !c.configured).length, [channels]);
 
   // Filter, search, and sort
-  const filteredChannels = [...channels]
-    .filter(c => {
-      const tabMatch = activeTab === "configured" ? c.configured : !c.configured;
-      const searchMatch = !search || (c.display_name || c.name).toLowerCase().includes(search.toLowerCase()) || c.category?.toLowerCase().includes(search.toLowerCase());
-      return tabMatch && searchMatch;
-    })
-    .sort((a, b) => {
-      let cmp = 0;
-      if (sortField === "name") cmp = a.name.localeCompare(b.name);
-      else if (sortField === "category") cmp = (a.category || "").localeCompare(b.category || "");
-      return sortOrder === "asc" ? cmp : -cmp;
-    });
+  const filteredChannels = useMemo(
+    () => [...channels]
+      .filter(c => {
+        const tabMatch = activeTab === "configured" ? c.configured : !c.configured;
+        const searchMatch = !search || (c.display_name || c.name).toLowerCase().includes(search.toLowerCase()) || c.category?.toLowerCase().includes(search.toLowerCase());
+        return tabMatch && searchMatch;
+      })
+      .sort((a, b) => {
+        let cmp = 0;
+        if (sortField === "name") cmp = a.name.localeCompare(b.name);
+        else if (sortField === "category") cmp = (a.category || "").localeCompare(b.category || "");
+        return sortOrder === "asc" ? cmp : -cmp;
+      }),
+    [channels, activeTab, search, sortField, sortOrder],
+  );
 
   const totalPages = Math.ceil(filteredChannels.length / ITEMS_PER_PAGE);
   const paginatedChannels = filteredChannels.slice(
@@ -504,6 +507,7 @@ export function ChannelsPage() {
         isFetching={channelsQuery.isFetching}
         onRefresh={() => void channelsQuery.refetch()}
         icon={<Network className="h-4 w-4" />}
+        helpText={t("channels.help")}
         actions={
           <div className="hidden rounded-full border border-border-subtle bg-surface px-3 py-1.5 text-[10px] font-bold uppercase text-text-dim sm:block">
             {t("channels.configured_count", { count: configuredCount })}
@@ -532,13 +536,13 @@ export function ChannelsPage() {
           <div className="flex gap-1 p-1 bg-main/30 rounded-lg">
             <button
               onClick={() => handleSort("name")}
-              className={`flex items-center gap-1 px-3 py-1.5 rounded-md text-xs font-bold transition-all ${sortField === "name" ? "bg-surface shadow-sm" : "text-text-dim hover:text-text-main"}`}
+              className={`flex items-center gap-1 px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${sortField === "name" ? "bg-surface shadow-sm" : "text-text-dim hover:text-text-main"}`}
             >
               {t("channels.name")}
             </button>
             <button
               onClick={() => handleSort("category")}
-              className={`flex items-center gap-1 px-3 py-1.5 rounded-md text-xs font-bold transition-all ${sortField === "category" ? "bg-surface shadow-sm" : "text-text-dim hover:text-text-main"}`}
+              className={`flex items-center gap-1 px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${sortField === "category" ? "bg-surface shadow-sm" : "text-text-dim hover:text-text-main"}`}
             >
               {t("channels.category")}
             </button>
@@ -548,13 +552,13 @@ export function ChannelsPage() {
           <div className="flex gap-1 p-1 bg-main/30 rounded-lg">
             <button
               onClick={() => setViewMode("grid")}
-              className={`p-1.5 rounded-md transition-all ${viewMode === "grid" ? "bg-surface shadow-sm" : "text-text-dim hover:text-text-main"}`}
+              className={`p-1.5 rounded-md transition-colors ${viewMode === "grid" ? "bg-surface shadow-sm" : "text-text-dim hover:text-text-main"}`}
             >
               <Grid3X3 className="w-4 h-4" />
             </button>
             <button
               onClick={() => setViewMode("list")}
-              className={`p-1.5 rounded-md transition-all ${viewMode === "list" ? "bg-surface shadow-sm" : "text-text-dim hover:text-text-main"}`}
+              className={`p-1.5 rounded-md transition-colors ${viewMode === "list" ? "bg-surface shadow-sm" : "text-text-dim hover:text-text-main"}`}
             >
               <List className="w-4 h-4" />
             </button>
@@ -567,7 +571,7 @@ export function ChannelsPage() {
         <div className="flex gap-1 p-1 bg-main/30 rounded-xl w-fit">
           <button
             onClick={() => handleTabChange("configured")}
-            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all ${
+            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-colors ${
               activeTab === "configured" ? "bg-surface text-success shadow-sm" : "text-text-dim hover:text-text-main"
             }`}
           >
@@ -579,7 +583,7 @@ export function ChannelsPage() {
           </button>
           <button
             onClick={() => handleTabChange("unconfigured")}
-            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all ${
+            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-colors ${
               activeTab === "unconfigured" ? "bg-surface text-brand shadow-sm" : "text-text-dim hover:text-text-main"
             }`}
           >
