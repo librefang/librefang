@@ -32,6 +32,17 @@ cargo build --release -p librefang-cli
 docker run -it librefang/librefang:latest
 ```
 
+### Homebrew (macOS)
+
+```bash
+brew tap librefang/tap
+brew install librefang              # CLI (stable)
+brew install --cask librefang       # Desktop (stable)
+# Beta/RC channels:
+# brew install librefang-beta       # or librefang-rc
+# brew install --cask librefang-rc  # or librefang-beta
+```
+
 ### Shell installer
 
 ```bash
@@ -223,6 +234,47 @@ librefang doctor
 librefang doctor --repair
 
 librefang doctor --json
+```
+
+---
+
+### librefang update
+
+Update the CLI binary to the latest release for your configured update channel.
+
+```
+librefang update [--check] [--version <TAG>] [--channel <CHANNEL>]
+```
+
+**Options:**
+
+| Option | Description |
+|---|---|
+| `--check` | Check whether a newer release exists without installing it. |
+| `--version <TAG>` | Install a specific GitHub release tag (e.g. `v2026.3.2407`). |
+| `--channel <CHANNEL>` | Override the update channel for this invocation (`stable`, `beta`, or `rc`). |
+
+**Update channels:**
+
+LibreFang supports Apple-style update channels. Set a persistent default in `config.toml`:
+
+```toml
+update_channel = "stable"   # stable | beta | rc
+```
+
+| Channel | Receives |
+|---|---|
+| `stable` | Stable releases only (default) |
+| `beta` | Stable + beta releases |
+| `rc` | All releases including release candidates |
+
+**Examples:**
+
+```bash
+librefang update                    # Install latest for your channel
+librefang update --check            # Check for updates only
+librefang update --channel rc       # Use rc channel for this update
+librefang update --version v0.7.0   # Install a specific version
 ```
 
 ---

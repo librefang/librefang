@@ -34,6 +34,17 @@ cargo build --release -p librefang-cli
 docker run -it librefang/librefang:latest
 ```
 
+### Homebrew (macOS)
+
+```bash
+brew tap librefang/tap
+brew install librefang              # CLI (stable)
+brew install --cask librefang       # 桌面应用 (stable)
+# Beta/RC 频道:
+# brew install librefang-beta       # 或 librefang-rc
+# brew install --cask librefang-rc  # 或 librefang-beta
+```
+
 ---
 
 ## 全局选项
@@ -117,6 +128,36 @@ librefang status
 ```
 librefang doctor
 ```
+
+### librefang update
+
+更新 CLI 到配置频道的最新版本。
+
+```
+librefang update [--check] [--version <TAG>] [--channel <CHANNEL>]
+```
+
+**选项:**
+
+| 选项 | 说明 |
+|------|------|
+| `--check` | 仅检查是否有新版本，不安装 |
+| `--version <TAG>` | 安装指定的 GitHub Release 标签 |
+| `--channel <CHANNEL>` | 临时覆盖更新频道 (`stable`、`beta`、`rc`) |
+
+**更新频道:**
+
+在 `config.toml` 中设置默认频道：
+
+```toml
+update_channel = "stable"   # stable | beta | rc
+```
+
+| 频道 | 接收的版本 |
+|------|-----------|
+| `stable` | 仅稳定版（默认） |
+| `beta` | 稳定版 + beta 版 |
+| `rc` | 所有版本，包括 release candidate |
 
 ### librefang tui
 
