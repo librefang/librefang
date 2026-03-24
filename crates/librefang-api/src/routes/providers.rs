@@ -675,6 +675,7 @@ pub async fn set_provider_key(
         catalog
             .get_provider(&name)
             .map(|p| p.api_key_env.clone())
+            .filter(|env| !env.trim().is_empty())
             .unwrap_or_else(|| {
                 // Custom provider — derive env var: MY_PROVIDER → MY_PROVIDER_API_KEY
                 format!("{}_API_KEY", name.to_uppercase().replace('-', "_"))
@@ -849,6 +850,7 @@ pub async fn delete_provider_key(
         catalog
             .get_provider(&name)
             .map(|p| p.api_key_env.clone())
+            .filter(|env| !env.trim().is_empty())
             .unwrap_or_else(|| {
                 // Custom/unknown provider — derive env var from convention
                 format!("{}_API_KEY", name.to_uppercase().replace('-', "_"))
