@@ -31,11 +31,6 @@ export function AgentsPage() {
   const [templateName, setTemplateName] = useState("");
   const [manifestToml, setManifestToml] = useState("");
   const [showPrompts, setShowPrompts] = useState(false);
-  const [showExperiments, setShowExperiments] = useState(false);
-  const [newPromptSystemPrompt, setNewPromptSystemPrompt] = useState("");
-  const [newPromptDescription, setNewPromptDescription] = useState("");
-  const [newExperimentName, setNewExperimentName] = useState("");
-  const [selectedMetrics, setSelectedMetrics] = useState<string | null>(null);
   const queryClient = useQueryClient();
   const spawnMutation = useMutation({
     mutationFn: spawnAgent,

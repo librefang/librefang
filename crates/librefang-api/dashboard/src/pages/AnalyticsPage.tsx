@@ -201,14 +201,29 @@ export function AnalyticsPage() {
                     <BarChart data={modelPerformance.slice(0, 8).map(m => ({ 
                       name: m.model?.slice(0, 18) ?? "Unknown", 
                       costPerCall: m.cost_per_call ?? 0,
-                      avgLatency: m.avg_latency_ms ?? 0,
                     }))} layout="vertical" margin={{ left: 0, right: 20 }}>
                       <CartesianGrid strokeDasharray="3 3" opacity={0.2} horizontal={false} />
                       <XAxis type="number" tick={{ fontSize: 10 }} tickFormatter={v => `$${v.toFixed(4)}`} axisLine={false} tickLine={false} />
                       <YAxis type="category" dataKey="name" tick={{ fontSize: 10 }} width={120} axisLine={false} tickLine={false} />
-                      <Tooltip contentStyle={{ borderRadius: 12, fontSize: 12 }} formatter={(v: any, name: string) => name === "costPerCall" ? [`$${v.toFixed(4)}`, "Cost/Call"] : [`${v}ms`, "Avg Latency"]} />
-                      <Legend />
+                      <Tooltip contentStyle={{ borderRadius: 12, fontSize: 12 }} formatter={(v: any) => [`$${v.toFixed(4)}`, "Cost/Call"]} />
                       <Bar dataKey="costPerCall" name="Cost/Call" radius={[0, 4, 4, 0]} fill="#a855f7" />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </Card>
+
+                <Card padding="lg" hover>
+                  <h2 className="text-sm font-bold mb-4 flex items-center gap-2">
+                    <Zap className="w-4 h-4 text-blue-500" /> {t("analytics.avg_latency") || "Avg Latency"}
+                  </h2>
+                  <ResponsiveContainer width="100%" height={Math.max(modelPerformance.slice(0, 8).length * 40, 120)}>
+                    <BarChart data={modelPerformance.slice(0, 8).map(m => ({ 
+                      name: m.model?.slice(0, 18) ?? "Unknown", 
+                      avgLatency: m.avg_latency_ms ?? 0,
+                    }))} layout="vertical" margin={{ left: 0, right: 20 }}>
+                      <CartesianGrid strokeDasharray="3 3" opacity={0.2} horizontal={false} />
+                      <XAxis type="number" tick={{ fontSize: 10 }} tickFormatter={v => `${v}ms`} axisLine={false} tickLine={false} />
+                      <YAxis type="category" dataKey="name" tick={{ fontSize: 10 }} width={120} axisLine={false} tickLine={false} />
+                      <Tooltip contentStyle={{ borderRadius: 12, fontSize: 12 }} formatter={(v: any) => [`${v}ms`, "Avg Latency"]} />
                       <Bar dataKey="avgLatency" name="Avg Latency" radius={[0, 4, 4, 0]} fill="#3b82f6" />
                     </BarChart>
                   </ResponsiveContainer>

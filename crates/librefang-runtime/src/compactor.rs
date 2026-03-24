@@ -823,7 +823,6 @@ mod tests {
         let messages: Vec<Message> = (0..100)
             .map(|i| Message::user(format!("msg {i}")))
             .collect();
-        let _messages_count = messages.len();
         let session = Session {
             id: librefang_types::agent::SessionId::new(),
             agent_id: librefang_types::agent::AgentId::new(),

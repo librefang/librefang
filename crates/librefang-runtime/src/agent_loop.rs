@@ -431,16 +431,14 @@ pub async fn run_agent_loop(
         });
     }
 
-    // Check for running A/B experiment and select variant (round-robin)
-    #[allow(unused_variables, unused_assignments)]
+    // Check for running A/B experiment and select variant
     let mut experiment_context: Option<ExperimentContext> = None;
-    #[allow(unused_variables, unused_assignments)]
     if let Some(kernel) = kernel.as_ref() {
         let agent_id = session.agent_id.to_string();
         if let Ok(Some(exp)) = kernel.get_running_experiment(&agent_id) {
             if !exp.variants.is_empty() {
-                // Round-robin: use session message count to pick variant
-                let variant_index = (session.messages.len()) % exp.variants.len();
+                // Use session ID hash for consistent variant assignment across requests
+                let variant_index = (session.id.0.as_u128() as usize) % exp.variants.len();
                 let variant = &exp.variants[variant_index];
                 info!(
                     agent = %manifest.name,
@@ -869,7 +867,7 @@ pub async fn run_agent_loop(
                         memories_used: memories_used.clone(),
                         memory_conflicts: Vec::new(),
                         provider_not_configured: false,
-                        experiment_context: None,
+                        experiment_context: experiment_context.clone(),
                         latency_ms: 0,
                     });
                 }
@@ -1099,7 +1097,7 @@ pub async fn run_agent_loop(
                     memories_used,
                     memory_conflicts,
                     provider_not_configured: false,
-                    experiment_context: None,
+                    experiment_context: experiment_context.clone(),
                     latency_ms: 0,
                 });
             }
@@ -1492,7 +1490,7 @@ pub async fn run_agent_loop(
                         memories_used: memories_used.clone(),
                         memory_conflicts: Vec::new(),
                         provider_not_configured: false,
-                        experiment_context: None,
+                        experiment_context: experiment_context.clone(),
                         latency_ms: 0,
                     });
                 }
@@ -1541,7 +1539,7 @@ pub async fn run_agent_loop(
                         memories_used,
                         memory_conflicts,
                         provider_not_configured: false,
-                        experiment_context: None,
+                        experiment_context: experiment_context.clone(),
                         latency_ms: 0,
                     });
                 }
@@ -1852,14 +1850,14 @@ pub async fn run_agent_loop_streaming(
         });
     }
 
-    // Check for running A/B experiment and select variant (round-robin)
-    #[allow(unused_variables, unused_assignments)]
+    // Check for running A/B experiment and select variant
     let mut experiment_context: Option<ExperimentContext> = None;
     if let Some(kernel) = kernel.as_ref() {
         let agent_id = session.agent_id.to_string();
         if let Ok(Some(exp)) = kernel.get_running_experiment(&agent_id) {
             if !exp.variants.is_empty() {
-                let variant_index = (session.messages.len()) % exp.variants.len();
+                // Use session ID hash for consistent variant assignment across requests
+                let variant_index = (session.id.0.as_u128() as usize) % exp.variants.len();
                 let variant = &exp.variants[variant_index];
                 info!(
                     agent = %manifest.name,
@@ -2330,7 +2328,7 @@ pub async fn run_agent_loop_streaming(
                         memories_used: memories_used.clone(),
                         memory_conflicts: Vec::new(),
                         provider_not_configured: false,
-                        experiment_context: None,
+                        experiment_context: experiment_context.clone(),
                         latency_ms: 0,
                     });
                 }
@@ -2960,7 +2958,7 @@ pub async fn run_agent_loop_streaming(
                         memories_used: memories_used.clone(),
                         memory_conflicts: Vec::new(),
                         provider_not_configured: false,
-                        experiment_context: None,
+                        experiment_context: experiment_context.clone(),
                         latency_ms: 0,
                     });
                 }
@@ -3008,7 +3006,7 @@ pub async fn run_agent_loop_streaming(
                         memories_used,
                         memory_conflicts,
                         provider_not_configured: false,
-                        experiment_context: None,
+                        experiment_context: experiment_context.clone(),
                         latency_ms: 0,
                     });
                 }

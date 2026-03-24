@@ -837,6 +837,7 @@ impl Default for TelemetryConfig {
 #[serde(default)]
 pub struct PromptIntelligenceConfig {
     /// Enable prompt versioning and A/B testing. Default: false.
+    /// TODO: Wire this up in agent_loop to gate experiments behind config flag.
     pub enabled: bool,
     /// Hash prompts using SHA-256 for version identification. Default: true.
     pub hash_prompts: bool,
