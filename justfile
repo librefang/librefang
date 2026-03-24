@@ -50,7 +50,7 @@ dash:
 
 # Start API daemon with dashboard dev server (hot reload)
 api:
-    for p in 5173 5174 5175 5176 5177 5178; do lsof -ti :$$p 2>/dev/null | xargs kill -9 2>/dev/null; done || true
+    for p in 5173 5174 5175 5176 5177 5178; do lsof -ti :$$p 2>/dev/null | xargs kill -9 2>/dev/null; done; sleep 1
     cd crates/librefang-api/dashboard && pnpm dev &
     (while ! curl -s http://127.0.0.1:5173/dashboard/ >/dev/null 2>&1; do sleep 2; done; \
      open "http://$(ipconfig getifaddr en0 2>/dev/null || hostname -I 2>/dev/null | awk '{print $1}' || echo 127.0.0.1):5173/dashboard/") &
