@@ -58,7 +58,7 @@ api:
     cargo run -p librefang-cli -- start --foreground
 
 # Build release CLI and install to ~/.librefang/bin (uses thin LTO to avoid OOM)
-install:
+install: dashboard-build
     cargo build --profile release-local -p librefang-cli
     mkdir -p ~/.librefang/bin
     cp target/release-local/librefang ~/.librefang/bin/librefang
