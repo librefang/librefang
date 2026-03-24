@@ -2,7 +2,6 @@ import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Card } from "../components/ui/Card";
-import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { Input } from "../components/ui/Input";
 import { PageHeader } from "../components/ui/PageHeader";
@@ -39,6 +38,22 @@ const toolDescZh: Record<string, string> = {
   agent_send: "向智能体发送消息", agent_list: "列出所有智能体",
 };
 
+function OptionCard({ active, icon: Icon, label, onClick }: { active: boolean; icon: any; label: string; onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      className={`flex flex-1 items-center justify-center gap-2 rounded-xl border py-2.5 text-sm font-bold transition-all duration-300 ${
+        active
+          ? "border-brand/30 bg-brand/10 text-brand shadow-sm shadow-brand/10"
+          : "border-border-subtle bg-surface text-text-dim hover:border-brand/20 hover:text-brand"
+      }`}
+    >
+      <Icon className="h-4 w-4" />
+      <span className="truncate">{label}</span>
+    </button>
+  );
+}
+
 export function SettingsPage() {
   const { t, i18n } = useTranslation();
   const { theme, toggleTheme, language, setLanguage, navLayout, setNavLayout } = useUIStore();
@@ -52,10 +67,10 @@ export function SettingsPage() {
     [tools, toolSearch]
   );
 
-  const labelClass = "text-[10px] font-black uppercase tracking-widest text-text-dim mb-2 block";
+  const labelClass = "text-[10px] font-black uppercase tracking-widest text-text-dim mb-2.5 block";
 
   return (
-    <div className="flex flex-col gap-6 transition-colors duration-300">
+    <div className="flex flex-col gap-4 sm:gap-6 transition-colors duration-300">
       <PageHeader
         badge={t("settings.system_config")}
         title={t("settings.title")}
@@ -65,50 +80,38 @@ export function SettingsPage() {
 
       <div className="grid gap-4 sm:gap-6 lg:grid-cols-2">
         {/* Appearance Settings */}
-        <Card padding="lg" hover>
-          <h2 className="text-lg font-black tracking-tight mb-6">{t("settings.appearance")}</h2>
-          <div className="space-y-8">
+        <Card padding="lg" hover className="min-w-0 overflow-hidden">
+          <h2 className="text-base sm:text-lg font-black tracking-tight mb-5 sm:mb-6">{t("settings.appearance")}</h2>
+          <div className="space-y-5 sm:space-y-8">
             <div>
               <span className={labelClass}>{t("settings.theme")}</span>
-              <div className="flex gap-3">
-                <Button variant={theme === "light" ? "primary" : "secondary"} onClick={() => theme !== "light" && toggleTheme()}>
-                  <Sun className="h-4 w-4" /> {t("settings.theme_light")}
-                </Button>
-                <Button variant={theme === "dark" ? "primary" : "secondary"} onClick={() => theme !== "dark" && toggleTheme()}>
-                  <Moon className="h-4 w-4" /> {t("settings.theme_dark")}
-                </Button>
+              <div className="flex gap-2 sm:gap-3">
+                <OptionCard active={theme === "light"} icon={Sun} label={t("settings.theme_light")} onClick={() => theme !== "light" && toggleTheme()} />
+                <OptionCard active={theme === "dark"} icon={Moon} label={t("settings.theme_dark")} onClick={() => theme !== "dark" && toggleTheme()} />
               </div>
             </div>
             <div>
               <span className={labelClass}>{t("settings.language")}</span>
-              <div className="flex gap-3">
-                <Button variant={language === "en" ? "primary" : "secondary"} onClick={() => setLanguage("en")}>
-                  <Globe className="h-4 w-4" /> English
-                </Button>
-                <Button variant={language === "zh" ? "primary" : "secondary"} onClick={() => setLanguage("zh")}>
-                  <Globe className="h-4 w-4" /> 中文
-                </Button>
+              <div className="flex gap-2 sm:gap-3">
+                <OptionCard active={language === "en"} icon={Globe} label="English" onClick={() => setLanguage("en")} />
+                <OptionCard active={language === "zh"} icon={Globe} label="中文" onClick={() => setLanguage("zh")} />
               </div>
             </div>
             <div>
               <span className={labelClass}>{t("settings.nav_layout")}</span>
-              <div className="flex gap-3">
-                <Button variant={navLayout === "grouped" ? "primary" : "secondary"} onClick={() => setNavLayout("grouped")}>
-                  <PanelLeft className="h-4 w-4" /> {t("settings.nav_grouped")}
-                </Button>
-                <Button variant={navLayout === "collapsible" ? "primary" : "secondary"} onClick={() => setNavLayout("collapsible")}>
-                  <PanelLeftClose className="h-4 w-4" /> {t("settings.nav_collapsible")}
-                </Button>
+              <div className="flex gap-2 sm:gap-3">
+                <OptionCard active={navLayout === "grouped"} icon={PanelLeft} label={t("settings.nav_grouped")} onClick={() => setNavLayout("grouped")} />
+                <OptionCard active={navLayout === "collapsible"} icon={PanelLeftClose} label={t("settings.nav_collapsible")} onClick={() => setNavLayout("collapsible")} />
               </div>
             </div>
           </div>
         </Card>
 
         {/* Tools Management */}
-        <Card padding="lg" hover>
+        <Card padding="lg" hover className="min-w-0 overflow-hidden">
           <div className="flex items-center justify-between mb-4">
-            <h2 className="text-lg font-black tracking-tight flex items-center gap-2">
-              <Wrench className="w-5 h-5 text-brand" />
+            <h2 className="text-base sm:text-lg font-black tracking-tight flex items-center gap-2">
+              <Wrench className="w-4 h-4 sm:w-5 sm:h-5 text-brand" />
               {t("settings.tools_title")}
             </h2>
             <div className="flex items-center gap-2">
@@ -126,22 +129,24 @@ export function SettingsPage() {
               className="!text-xs" />
           </div>
 
-          <div className="space-y-1.5 max-h-80 overflow-y-auto scrollbar-thin">
+          <div className="space-y-1 sm:max-h-80 sm:overflow-y-auto scrollbar-thin">
             {toolsQuery.isLoading ? (
               <ListSkeleton rows={3} />
             ) : filteredTools.length === 0 ? (
               <p className="text-xs text-text-dim italic text-center py-4">{t("common.no_data")}</p>
             ) : (
               filteredTools.map((tool: any, i: number) => (
-                <div key={tool.name || i} className="flex items-center gap-2.5 px-3 py-2 rounded-lg hover:bg-main transition-colors">
-                  <div className="w-6 h-6 rounded-md bg-brand/10 flex items-center justify-center shrink-0">
-                    <Wrench className="w-3 h-3 text-brand" />
+                <div key={tool.name || i} className="flex items-center gap-2 sm:gap-2.5 px-2 sm:px-3 py-2 rounded-lg hover:bg-main transition-colors group">
+                  <div className="w-7 h-7 sm:w-6 sm:h-6 rounded-lg sm:rounded-md bg-brand/10 flex items-center justify-center shrink-0">
+                    <Wrench className="w-3.5 h-3.5 sm:w-3 sm:h-3 text-brand" />
                   </div>
                   <div className="min-w-0 flex-1">
-                    <p className="text-xs font-bold truncate">{isZh ? (toolNameZh[tool.name] || tool.name) : (tool.name || tool.id)}</p>
-                    {tool.description && <p className="text-[9px] text-text-dim truncate">{isZh ? (toolDescZh[tool.name] || tool.description) : tool.description}</p>}
+                    <div className="flex items-center gap-1.5">
+                      <p className="text-xs font-bold truncate">{isZh ? (toolNameZh[tool.name] || tool.name) : (tool.name || tool.id)}</p>
+                      {tool.source && <span className="text-[7px] sm:text-[8px] px-1 sm:px-1.5 py-0.5 rounded-md bg-brand/5 text-brand/60 shrink-0 font-medium">{tool.source}</span>}
+                    </div>
+                    {tool.description && <p className="text-[10px] sm:text-[9px] text-text-dim truncate mt-0.5">{isZh ? (toolDescZh[tool.name] || tool.description) : tool.description}</p>}
                   </div>
-                  {tool.source && <span className="text-[8px] px-1.5 py-0.5 rounded bg-main text-text-dim/60 shrink-0">{tool.source}</span>}
                 </div>
               ))
             )}

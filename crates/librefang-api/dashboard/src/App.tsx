@@ -4,7 +4,7 @@ import { useTranslation } from "react-i18next";
 import { Globe, Sun, Moon, Search, ChevronLeft, ChevronRight, ChevronDown, Menu, Home, Layers, MessageCircle, Clock, CheckCircle, Calendar, Shield, Users, Server, Network, Bell, Hand, BarChart3, Database, Activity, FileText, Settings, Puzzle, Cpu, Lock, Share2, Gauge } from "lucide-react";
 import { useUIStore } from "./lib/store";
 import { CommandPalette, useCommandPalette } from "./components/ui/CommandPalette";
-import { checkAuthRequired, setApiKey } from "./api";
+import { checkAuthRequired, setApiKey, getVersionInfo } from "./api";
 
 function AuthDialog({ onAuthenticated }: { onAuthenticated: () => void }) {
   const { t } = useTranslation();
@@ -71,6 +71,8 @@ export function App() {
 
   const [authNeeded, setAuthNeeded] = useState(false);
   const [authChecked, setAuthChecked] = useState(false);
+  const [appVersion, setAppVersion] = useState("");
+  const [hostname, setHostname] = useState("");
 
   // Check auth on mount
   useEffect(() => {
@@ -78,6 +80,10 @@ export function App() {
       setAuthNeeded(needed);
       setAuthChecked(true);
     });
+    getVersionInfo().then((v) => {
+      setAppVersion(v.version ?? "");
+      setHostname(v.hostname ?? "");
+    }).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -155,7 +161,7 @@ export function App() {
 
       {/* Sidebar */}
       <aside className={`
-        fixed inset-y-0 left-0 z-50 flex flex-col border-r border-border-subtle bg-surface/80 backdrop-blur-xl lg:static lg:translate-x-0
+        fixed inset-y-0 left-0 z-50 flex w-[220px] flex-col border-r border-border-subtle bg-surface/80 backdrop-blur-xl lg:static lg:translate-x-0
         transition-[width,transform] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]
         ${isMobileMenuOpen ? "translate-x-0 shadow-2xl" : "-translate-x-full"}
         ${isSidebarCollapsed ? "lg:w-[72px]" : "lg:w-[280px]"}
@@ -251,16 +257,22 @@ export function App() {
         </nav>
 
         {/* Sidebar Footer */}
-        <div className={`border-t border-border-subtle p-4 ${isSidebarCollapsed ? "lg:max-h-0 lg:opacity-0 lg:overflow-hidden lg:!p-0 lg:!m-0 lg:!mb-0" : "lg:max-h-20 lg:opacity-100"} transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] overflow-hidden`}>
+        <div className={`border-t border-border-subtle p-4 ${isSidebarCollapsed ? "lg:max-h-0 lg:opacity-0 lg:overflow-hidden lg:!p-0 lg:!m-0 lg:!mb-0" : "lg:max-h-28 lg:opacity-100"} transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] overflow-hidden`}>
           <div className="rounded-xl bg-gradient-to-r from-success/5 to-transparent p-3 border border-success/10">
             <p className="text-[10px] font-bold text-text-dim uppercase tracking-wider">{t("common.status")}</p>
             <div className="mt-2 flex items-center gap-2">
-              <span className="relative flex h-2 w-2">
+              <span className="relative flex h-2 w-2 shrink-0">
                 <span className="absolute inline-flex h-full w-full rounded-full bg-success opacity-75 animate-ping" />
                 <span className="relative inline-flex rounded-full h-2 w-2 bg-success" />
               </span>
               <span className="text-xs font-semibold text-success">{t("common.daemon_online")}</span>
             </div>
+            {(appVersion || hostname) && (
+              <div className="mt-1.5 space-y-0.5 text-[10px] font-mono text-text-dim">
+                {appVersion && <p className="truncate">v{appVersion}</p>}
+                {hostname && <p className="truncate">{hostname}</p>}
+              </div>
+            )}
           </div>
         </div>
       </aside>
@@ -268,10 +280,22 @@ export function App() {
       {/* Main Content Area */}
       <div className="flex flex-1 flex-col overflow-hidden">
         {/* Top Header */}
-        <header className="flex h-16 shrink-0 items-center justify-between border-b border-border-subtle bg-surface/80 px-6 backdrop-blur-xl">
-          <div className="flex items-center gap-3">
+        <header className="flex h-14 sm:h-16 shrink-0 items-center justify-between border-b border-border-subtle bg-surface/80 px-3 sm:px-6 backdrop-blur-xl">
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setMobileMenuOpen(true)}
+              className="flex h-9 w-9 items-center justify-center rounded-xl text-text-dim hover:text-brand hover:bg-surface-hover transition-all duration-200 lg:hidden"
+            >
+              <Menu className="h-5 w-5" />
+            </button>
+            <div className="flex items-center gap-2 lg:hidden">
+              <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-brand/20 ring-1 ring-brand/40 shrink-0">
+                <div className="h-2.5 w-2.5 rounded-full bg-brand animate-pulse" />
+              </div>
+              <strong className="text-sm font-bold tracking-tight">LibreFang</strong>
+            </div>
           </div>
-          <div className="flex items-center gap-1.5">
+          <div className="flex items-center gap-1">
             <Link
               to="/settings"
               className="flex h-9 w-9 items-center justify-center rounded-xl text-text-dim hover:text-brand hover:bg-surface-hover transition-all duration-200"
@@ -293,17 +317,11 @@ export function App() {
             >
               {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
             </button>
-            <button
-              onClick={() => setMobileMenuOpen(true)}
-              className="flex h-9 w-9 items-center justify-center rounded-xl text-text-dim hover:text-brand hover:bg-surface-hover transition-all duration-200 lg:hidden"
-            >
-              <Menu className="h-5 w-5" />
-            </button>
           </div>
         </header>
 
         {/* Main Content */}
-        <main className="flex-1 overflow-auto bg-main">
+        <main className="flex-1 overflow-y-auto overflow-x-hidden bg-main">
           <div key={location.pathname} className="mx-auto max-w-7xl p-3 sm:p-4 lg:p-8 animate-fade-in-up">
             <Outlet />
           </div>

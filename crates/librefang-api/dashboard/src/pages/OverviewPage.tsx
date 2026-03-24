@@ -1,12 +1,12 @@
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { useTranslation } from "react-i18next";
-import type { DashboardSnapshot, HealthCheck } from "../api";
-import { loadDashboardSnapshot } from "../api";
+import type { DashboardSnapshot, HealthCheck, VersionResponse } from "../api";
+import { loadDashboardSnapshot, getVersionInfo } from "../api";
 import { Card } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
 import { CardSkeleton } from "../components/ui/Skeleton";
-import { Home, RefreshCw, Users, Layers, Server, Network, Zap, MessageCircle, User, Clock, Shield, Sparkles, Calendar, HardDrive, Activity } from "lucide-react";
+import { Home, RefreshCw, Users, Layers, Server, Network, Zap, MessageCircle, User, Clock, Shield, Sparkles, Calendar, HardDrive, Activity, Globe } from "lucide-react";
 
 const REFRESH_MS = 30000;
 
@@ -19,7 +19,14 @@ export function OverviewPage() {
     refetchInterval: REFRESH_MS
   });
 
+  const versionQuery = useQuery<VersionResponse>({
+    queryKey: ["version"],
+    queryFn: getVersionInfo,
+    staleTime: Infinity,
+  });
+
   const snapshot = snapshotQuery.data ?? null;
+  const versionInfo = versionQuery.data;
   const isLoading = snapshotQuery.isLoading;
 
   const agentsActive = snapshot?.status?.active_agent_count ?? 0;
@@ -313,7 +320,12 @@ export function OverviewPage() {
               <div className="flex items-center gap-3 p-2.5 rounded-lg bg-main/40">
                 <div className="w-8 h-8 rounded-lg bg-warning/10 flex items-center justify-center shrink-0"><Activity className="w-4 h-4 text-warning" /></div>
                 <span className="text-xs text-text-dim flex-1">{t("overview.version")}</span>
-                <span className="text-sm font-mono font-black text-brand">{snapshot?.status?.version || "-"}</span>
+                <span className="text-sm font-mono font-black text-brand">{versionInfo?.version || snapshot?.status?.version || "-"}</span>
+              </div>
+              <div className="flex items-center gap-3 p-2.5 rounded-lg bg-main/40">
+                <div className="w-8 h-8 rounded-lg bg-brand/10 flex items-center justify-center shrink-0"><Globe className="w-4 h-4 text-brand" /></div>
+                <span className="text-xs text-text-dim flex-1">Hostname</span>
+                <span className="text-sm font-mono font-black truncate max-w-[140px]" title={versionInfo?.hostname}>{versionInfo?.hostname || "-"}</span>
               </div>
               <div className="flex items-center gap-3 p-2.5 rounded-lg bg-main/40">
                 <div className="w-8 h-8 rounded-lg bg-accent/10 flex items-center justify-center shrink-0"><User className="w-4 h-4 text-accent" /></div>
@@ -353,21 +365,13 @@ export function OverviewPage() {
             )}
           </Card>
 
-          {/* Pro Tip */}
-          <Card padding="lg" className="bg-gradient-to-br from-brand/5 to-transparent border-brand/10">
-            <div className="flex items-start gap-3">
-              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-brand/10 shrink-0">
-                <Sparkles className="h-5 w-5 text-brand" />
-              </div>
-              <div>
-                <h4 className="text-xs font-bold uppercase tracking-wider text-brand mb-1">{t("overview.pro_tip")}</h4>
-                <p className="text-xs leading-relaxed text-text-dim">
-                  {t("overview.pro_tip_shortcut")}
-                </p>
-              </div>
-            </div>
-          </Card>
         </div>
+      </div>
+
+      {/* Pro Tip */}
+      <div className="hidden sm:flex items-center gap-3 rounded-xl border border-brand/10 bg-gradient-to-r from-brand/5 to-transparent px-4 py-3">
+        <Sparkles className="h-4 w-4 text-brand shrink-0" />
+        <span className="text-xs text-text-dim"><span className="font-bold text-brand">{t("overview.pro_tip")}</span> — {t("overview.pro_tip_shortcut")}</span>
       </div>
     </div>
   );

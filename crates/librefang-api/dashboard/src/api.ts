@@ -31,6 +31,7 @@ export interface VersionResponse {
   rust_version?: string;
   platform?: string;
   arch?: string;
+  hostname?: string;
 }
 
 export interface ProviderItem {

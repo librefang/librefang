@@ -119,6 +119,7 @@ pub async fn version() -> impl IntoResponse {
         "rust_version": option_env!("RUSTC_VERSION").unwrap_or("unknown"),
         "platform": std::env::consts::OS,
         "arch": std::env::consts::ARCH,
+        "hostname": super::system::hostname_string(),
         "api": {
             "current": crate::versioning::CURRENT_VERSION,
             "supported": crate::versioning::SUPPORTED_VERSIONS,

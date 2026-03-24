@@ -2617,9 +2617,15 @@ pub async fn queue_status(State(state): State<Arc<AppState>>) -> impl IntoRespon
 }
 
 /// Get the machine hostname (best-effort).
-fn hostname_string() -> String {
+pub(crate) fn hostname_string() -> String {
     std::env::var("HOSTNAME")
         .or_else(|_| std::env::var("COMPUTERNAME"))
+        .or_else(|_| {
+            std::process::Command::new("hostname")
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .map_err(|_| std::env::VarError::NotPresent)
+        })
         .unwrap_or_else(|_| "unknown".to_string())
 }
 
