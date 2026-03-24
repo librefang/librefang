@@ -5,6 +5,35 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DDHH).
 
+## [2026.3.25] - 2026-03-25
+
+### Added
+
+- Version display, mobile optimization, workflow scheduling, and config resilience (#1557) (@houko)
+- Add-memory-tool-memory_list (#1565) (@aimlyo)
+- Webui-chat-output-by-line (#1569) (@aimlyo)
+- Homebrew channels, CLI update_channel, dashboard utility extraction (#1576) (@houko)
+
+### Fixed
+
+- Ignore broken pipe on skill stdin write (#1554) (@houko)
+- Create release tag after PR merge, not before (#1555) (@houko)
+- Agent-list-presentation-of-tui (#1561) (@aimlyo)
+- Make provider key save resilient to empty api_key_env (#1563) (@TechWizard9999)
+- Wrap channel config payload in fields object (#1564) (@TechWizard9999)
+- Webui-chat-history-to-using-md (#1568) (@aimlyo)
+- Webui-chat-change-agent-show-history (#1570) (@aimlyo)
+- Reduce Ubuntu test memory pressure to prevent OOM kill (#1571) (@houko)
+- Display WeChat QR code for iLink login (#1572) (@houko)
+- Add 8GB swap to prevent Ubuntu OOM kill (exit 143) (#1573) (@houko)
+- Split runtime tests to prevent Ubuntu OOM kill (#1574) (@houko)
+- Feishu WS endpoint fails to parse negative ClientConfig values (#1578) (@houko)
+
+### Performance
+
+- Run test jobs in parallel with quality checks (#1579) (@houko)
+
+
 ## [2026.3.24] - 2026-03-24
 
 ### Added
