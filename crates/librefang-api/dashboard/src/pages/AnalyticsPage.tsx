@@ -62,8 +62,8 @@ export function AnalyticsPage() {
             {[
               { icon: Zap, label: t("analytics.total_calls"), value: formatNumber(usage?.call_count ?? 0), color: "text-brand", bg: "bg-brand/10" },
               { icon: Cpu, label: t("analytics.total_tokens_label"), value: formatNumber((usage?.total_input_tokens ?? 0) + (usage?.total_output_tokens ?? 0)), color: "text-purple-500", bg: "bg-purple-500/10" },
-              { icon: DollarSign, label: t("analytics.total_cost"), value: `$${(usage?.total_cost_usd ?? 0).toFixed(4)}`, color: "text-success", bg: "bg-success/10" },
-              { icon: TrendingUp, label: t("analytics.today_cost"), value: `$${(daily?.today_cost_usd ?? 0).toFixed(4)}`, color: "text-warning", bg: "bg-warning/10" },
+              { icon: DollarSign, label: t("analytics.total_cost"), value: `$${(usage?.total_cost_usd ?? 0).toFixed(2)}`, color: "text-success", bg: "bg-success/10" },
+              { icon: TrendingUp, label: t("analytics.today_cost"), value: `$${(daily?.today_cost_usd ?? 0).toFixed(2)}`, color: "text-warning", bg: "bg-warning/10" },
             ].map((kpi, i) => (
               <Card key={i} hover padding="md">
                 <div className="flex items-center justify-between">
