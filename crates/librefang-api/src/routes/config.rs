@@ -57,11 +57,26 @@ pub async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 
     let uptime = state.started_at.elapsed().as_secs();
     let agent_count = agents.len();
+    let active_agent_count = state
+        .kernel
+        .agent_registry()
+        .list()
+        .iter()
+        .filter(|e| matches!(e.state, librefang_types::agent::AgentState::Running))
+        .count();
+    let session_count = state
+        .kernel
+        .memory_substrate()
+        .list_sessions()
+        .map(|s| s.len())
+        .unwrap_or(0);
 
     Json(serde_json::json!({
         "status": "running",
         "version": env!("CARGO_PKG_VERSION"),
         "agent_count": agent_count,
+        "active_agent_count": active_agent_count,
+        "session_count": session_count,
         "default_provider": state.kernel.config_ref().default_model.provider,
         "default_model": state.kernel.config_ref().default_model.model,
         "uptime_seconds": uptime,

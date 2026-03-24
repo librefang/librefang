@@ -122,6 +122,7 @@ mod tests {
             ],
             tags: vec!["nlp".into(), "translation".into()],
             created_at: Some("2025-01-01T00:00:00Z".into()),
+            i18n: Default::default(),
         };
 
         let json = serde_json::to_string(&tpl).expect("serialize");
