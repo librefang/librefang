@@ -34,7 +34,7 @@ runs:
           PRERELEASE_FLAG="--prerelease"
         fi
         gh release create "$TAG" \
-          --title "LibreFang $TAG" \
+          --title "$TAG" \
           --notes "$CHANGES" \
           $PRERELEASE_FLAG \
           --repo "${{ github.repository }}" || true
