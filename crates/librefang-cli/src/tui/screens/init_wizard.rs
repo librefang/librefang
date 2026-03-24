@@ -675,7 +675,7 @@ pub fn run() -> InitResult {
                     Some(path) if path.exists() && path.is_dir() => {
                         // OpenFang uses the same format — just check it has files
                         let has_content = path.join("config.toml").exists()
-                            || path.join("agents").exists()
+                            || path.join("workspaces").join("agents").exists()
                             || path.join("skills").exists();
                         if has_content {
                             state.openfang_path = Some(path);
@@ -1129,7 +1129,7 @@ fn save_config(state: &mut State) {
             }
         }
     };
-    let _ = std::fs::create_dir_all(librefang_dir.join("agents"));
+    let _ = std::fs::create_dir_all(librefang_dir.join("workspaces").join("agents"));
     let _ = std::fs::create_dir_all(librefang_dir.join("data"));
     crate::restrict_dir_permissions(&librefang_dir);
 

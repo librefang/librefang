@@ -11,7 +11,7 @@
   "common": {
     "refresh": "刷新", "status": "状态", "daemon_online": "守护进程在线", "infrastructure": "控制台",
     "toggle_theme": "切换主题", "change_language": "切换语言", "delete": "删除", "cancel": "取消",
-    "save": "保存", "saving": "保存中...", "edit": "编辑", "confirm": "确认", "loading": "加载中...", "search": "搜索", "back": "返回",
+    "save": "保存", "saving": "保存中...", "edit": "编辑", "confirm": "确认", "loading": "加载中...", "search": "搜索", "back": "返回", "retry": "重试",
     "actions": "操作", "clear": "清空", "load": "加载", "active": "活跃", "idle": "空闲", "running": "运行中",
     "online": "在线", "offline": "离线", "setup": "需配置", "ok": "正常", "config": "配置", "interact": "交互",
     "never": "从不", "unknown": "未知", "no_data": "暂无数据", "resume": "恢复", "close": "关闭", "yes": "是", "no": "否", "details": "详情",
@@ -70,7 +70,7 @@
     "configure": "配置通道", "config_key": "键", "config_value": "值",
     "configured": "已配置", "unconfigured": "未配置", "config": "配置",
     "name": "名称", "category": "类别", "difficulty": "难度", "setup_time": "设置时间",
-    "setup_type": "设置类型", "setup_steps": "设置步骤", "required_fields": "必填字段",
+    "setup_type": "设置类型", "setup_steps": "设置步骤", "required_fields": "必填字段", "qr_login": "扫码登录",
     "has_token": "已有令牌", "no_token": "无令牌", "no_fields_required": "无需字段",
     "update_config": "更新配置", "select_all": "全选", "results": "结果",
     "no_results": "没有匹配的通道", "no_configured": "暂无已配置的通道", "no_unconfigured": "暂无未配置的通道",

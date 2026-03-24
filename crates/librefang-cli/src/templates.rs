@@ -28,7 +28,7 @@ pub fn discover_template_dirs() -> Vec<PathBuf> {
         std::env::temp_dir().join(".librefang")
     };
     {
-        let agents = of_home.join("agents");
+        let agents = of_home.join("workspaces").join("agents");
         if agents.is_dir() && !dirs.contains(&agents) {
             dirs.push(agents);
         }

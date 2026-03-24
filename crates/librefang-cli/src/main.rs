@@ -1352,34 +1352,30 @@ enum SystemCommands {
 }
 
 fn init_tracing_stderr(log_level: &str) {
-    // When the telemetry feature is enabled, we use the layered registry
-    // so we can optionally attach an OpenTelemetry span exporter.
-    // When disabled, we use the simpler fmt-only subscriber.
-    #[cfg(feature = "telemetry")]
-    {
-        use tracing_subscriber::layer::SubscriberExt;
-        use tracing_subscriber::util::SubscriberInitExt;
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
 
-        let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_level));
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_level));
 
-        let fmt_layer = tracing_subscriber::fmt::layer();
+    let fmt_layer = tracing_subscriber::fmt::layer();
 
-        tracing_subscriber::registry()
-            .with(env_filter)
-            .with(fmt_layer)
-            .init();
-    }
+    // Also write logs to ~/.librefang/daemon.log
+    let log_dir = cli_librefang_home();
+    let _ = std::fs::create_dir_all(&log_dir);
+    let file_layer = std::fs::File::create(log_dir.join("daemon.log"))
+        .ok()
+        .map(|file| {
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer(std::sync::Mutex::new(file))
+        });
 
-    #[cfg(not(feature = "telemetry"))]
-    {
-        tracing_subscriber::fmt()
-            .with_env_filter(
-                tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_level)),
-            )
-            .init();
-    }
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(fmt_layer)
+        .with(file_layer)
+        .init();
 }
 
 /// Get the LibreFang home directory, respecting LIBREFANG_HOME env var.
@@ -3538,7 +3534,7 @@ fn cmd_doctor(json: bool, repair: bool) {
         }
 
         // --- Check 8: Agent manifests parse correctly ---
-        let agents_dir = librefang_dir.join("agents");
+        let agents_dir = librefang_dir.join("workspaces").join("agents");
         if agents_dir.exists() {
             let mut agent_errors = Vec::new();
             if let Ok(entries) = std::fs::read_dir(&agents_dir) {

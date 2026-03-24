@@ -65,10 +65,10 @@ pub fn sync_registry(home_dir: &Path) {
         }
     }
 
-    // Pre-install all agent templates from registry
+    // Pre-install agent templates from registry (e.g. hello-world)
     let agents_src = registry_cache.join("agents");
     if agents_src.exists() {
-        let agents_dest = home_dir.join("agents");
+        let agents_dest = home_dir.join("workspaces").join("agents");
         if let Ok(entries) = std::fs::read_dir(&agents_src) {
             for entry in entries.flatten() {
                 let src = entry.path();

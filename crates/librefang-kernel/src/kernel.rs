@@ -3545,8 +3545,9 @@ system_prompt = "You are a helpful assistant."
             return None;
         }
 
-        let dynamic_choices =
-            router::all_template_descriptions(&self.config.home_dir.join("agents"));
+        let dynamic_choices = router::all_template_descriptions(
+            &self.config.home_dir.join("workspaces").join("agents"),
+        );
         let routable_names: HashSet<String> = dynamic_choices
             .iter()
             .map(|(name, _)| name.clone())
@@ -3709,8 +3710,11 @@ system_prompt = "You are a helpful assistant."
 
     fn route_assistant_by_metadata(&self, message: &str) -> Option<AssistantRouteTarget> {
         let hand_selection = router::auto_select_hand(message, None);
-        let template_selection =
-            router::auto_select_template(message, &self.config.home_dir.join("agents"), None);
+        let template_selection = router::auto_select_template(
+            message,
+            &self.config.home_dir.join("workspaces").join("agents"),
+            None,
+        );
 
         let hand_candidate = hand_selection
             .hand_id
@@ -9691,7 +9695,7 @@ mod tests {
         kernel.shutdown();
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_send_message_ephemeral_unknown_agent_returns_not_found() {
         let dir = tempfile::tempdir().unwrap();
         let home_dir = dir.path().to_path_buf();
@@ -9716,7 +9720,7 @@ mod tests {
         kernel.shutdown();
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_send_message_ephemeral_does_not_modify_session() {
         let dir = tempfile::tempdir().unwrap();
         let home_dir = dir.path().to_path_buf();

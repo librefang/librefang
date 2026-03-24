@@ -4644,7 +4644,7 @@ mod monitoring_tests {
         (status, json)
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_agent_metrics_returns_json_shape_for_existing_agent() {
         let (state, _tmp) = monitoring_test_app_state();
         let agent_id = spawn_monitoring_test_agent(&state, "metrics-shape");
@@ -4660,7 +4660,7 @@ mod monitoring_tests {
         assert!(body.get("avg_response_time_ms").is_some());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_agent_metrics_returns_not_found_for_unknown_agent() {
         let (state, _tmp) = monitoring_test_app_state();
 
@@ -4673,7 +4673,7 @@ mod monitoring_tests {
         assert_eq!(body["error"], "Agent not found");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_agent_logs_filters_level_by_exact_match() {
         let (state, _tmp) = monitoring_test_app_state();
         let agent_id = spawn_monitoring_test_agent(&state, "logs-filter");

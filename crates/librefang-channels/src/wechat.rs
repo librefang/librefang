@@ -289,15 +289,22 @@ impl WeChatAdapter {
         let token_guard = self.bot_token.read().await;
         let token = token_guard.as_ref().ok_or("WeChat: not logged in")?;
 
+        debug!("WeChat ilink_send_text: to={}, context_token_len={}, text_len={}, bot_token_prefix={}...",
+            to_user_id, context_token.len(), text.len(),
+            &token.as_str().chars().take(10).collect::<String>());
+
         let headers = self.ilink_headers(token.as_str());
         let url = format!("{}/ilink/bot/sendmessage", ILINK_BASE);
 
         // Split long messages
         let chunks = split_message(text, MAX_MESSAGE_LEN);
         for chunk in chunks {
+            let client_id = uuid::Uuid::new_v4().to_string();
             let body = serde_json::json!({
                 "msg": {
+                    "from_user_id": "",
                     "to_user_id": to_user_id,
+                    "client_id": client_id,
                     "message_type": 2,
                     "message_state": 2,
                     "context_token": context_token,
@@ -307,8 +314,16 @@ impl WeChatAdapter {
                             "text": chunk,
                         }
                     }]
+                },
+                "base_info": {
+                    "channel_version": CHANNEL_VERSION,
                 }
             });
+
+            debug!(
+                "WeChat sendmessage request: {}",
+                serde_json::to_string(&body).unwrap_or_default()
+            );
 
             let resp = self
                 .client
@@ -318,9 +333,10 @@ impl WeChatAdapter {
                 .send()
                 .await?;
 
-            if !resp.status().is_success() {
-                let status = resp.status();
-                let resp_text = resp.text().await.unwrap_or_default();
+            let status = resp.status();
+            let resp_text = resp.text().await.unwrap_or_default();
+            debug!("WeChat sendmessage response ({status}): {resp_text}");
+            if !status.is_success() {
                 error!("WeChat sendmessage failed ({status}): {resp_text}");
                 return Err(format!("WeChat sendmessage error {status}: {resp_text}").into());
             }
@@ -590,7 +606,12 @@ impl ChannelAdapter for WeChatAdapter {
 
                         // Process messages
                         if let Some(msgs) = data["msgs"].as_array() {
+                            debug!("WeChat: poll returned {} message(s)", msgs.len());
                             for msg in msgs {
+                                debug!(
+                                    "WeChat: raw msg: {}",
+                                    serde_json::to_string(msg).unwrap_or_default()
+                                );
                                 if let Some(channel_msg) =
                                     Self::parse_message(msg, account_id.as_deref())
                                 {
@@ -666,6 +687,7 @@ impl ChannelAdapter for WeChatAdapter {
         user: &ChannelUser,
         content: ChannelContent,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        debug!("WeChat: send() called for user={}", user.platform_id);
         // Look up the most recent context_token for this user.
         // The polling loop tracks it per user_id for reply association.
         // For proactive messages (no prior inbound), falls back to empty.
@@ -676,6 +698,11 @@ impl ChannelAdapter for WeChatAdapter {
             .get(&user.platform_id)
             .cloned()
             .unwrap_or_default();
+
+        debug!(
+            "WeChat: context_token for user={}: {:?}",
+            user.platform_id, context_token
+        );
 
         match content {
             ChannelContent::Text(text) => {

@@ -172,6 +172,8 @@ use crate::types;
         routes::reload_channels,
         routes::whatsapp_qr_start,
         routes::whatsapp_qr_status,
+        routes::wechat_qr_start,
+        routes::wechat_qr_status,
 
         // ── Workflows / Triggers / Schedules / Cron ──
         routes::list_workflows,

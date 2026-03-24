@@ -7,7 +7,7 @@
       "name": "Apache-2.0",
       "url": "https://www.apache.org/licenses/LICENSE-2.0"
     },
-    "version": "2026.3.2201"
+    "version": "2026.3.2407-rc1"
   },
   "paths": {
     "/.well-known/agent.json": {
@@ -2550,6 +2550,55 @@
         }
       }
     },
+    "/api/channels/wechat/qr/start": {
+      "post": {
+        "tags": [
+          "channels"
+        ],
+        "summary": "POST /api/channels/wechat/qr/start — Request a QR code from iLink for WeChat login.",
+        "operationId": "wechat_qr_start",
+        "responses": {
+          "200": {
+            "description": "WeChat QR login initiated",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/channels/wechat/qr/status": {
+      "get": {
+        "tags": [
+          "channels"
+        ],
+        "summary": "GET /api/channels/wechat/qr/status — Poll iLink for QR scan confirmation.",
+        "operationId": "wechat_qr_status",
+        "parameters": [
+          {
+            "name": "qr_code",
+            "in": "query",
+            "description": "QR code value from /qr/start",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "WeChat QR scan status",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/channels/whatsapp/qr/start": {
       "post": {
         "tags": [
@@ -3643,6 +3692,25 @@
         "responses": {
           "200": {
             "description": "Get dashboard stats for a hand instance",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/hands/reload": {
+      "post": {
+        "tags": [
+          "hands"
+        ],
+        "summary": "POST /api/hands/reload — Reload hand definitions from disk.",
+        "operationId": "reload_hands",
+        "responses": {
+          "200": {
+            "description": "Reload hand definitions from disk",
             "content": {
               "application/json": {
                 "schema": {}
@@ -5093,7 +5161,7 @@
           "system"
         ],
         "summary": "GET /api/metrics — Prometheus text-format metrics.",
-        "description": "Returns counters and gauges for monitoring LibreFang in production:\n- `librefang_agents_active` — number of active agents\n- `librefang_uptime_seconds` — seconds since daemon started\n- `librefang_tokens_total` — total tokens consumed (per agent)\n- `librefang_tool_calls_total` — total tool calls (per agent)\n- `librefang_panics_total` — supervisor panic count\n- `librefang_restarts_total` — supervisor restart count",
+        "description": "Returns counters and gauges for monitoring LibreFang in production:\n- `librefang_agents_active` — number of active agents\n- `librefang_uptime_seconds` — seconds since daemon started\n- `librefang_tokens` — total tokens consumed (per agent, rolling 1h gauge)\n- `librefang_tokens_input` — input tokens consumed (per agent, rolling 1h gauge)\n- `librefang_tokens_output` — output tokens consumed (per agent, rolling 1h gauge)\n- `librefang_tool_calls` — tool calls made (per agent, rolling 1h gauge)\n- `librefang_llm_calls` — LLM API calls made (per agent, rolling 1h gauge)\n- `librefang_panics_total` — supervisor panic count\n- `librefang_restarts_total` — supervisor restart count\n- `librefang_active_sessions` — number of active login sessions\n- `librefang_cost_usd_today` — total estimated cost for today (USD)\n- `librefang_http_requests_total` — HTTP request counts (with telemetry feature)\n- `librefang_http_request_duration_seconds` — HTTP request latencies (with telemetry feature)",
         "operationId": "prometheus_metrics",
         "responses": {
           "200": {
@@ -6886,6 +6954,39 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/api/workflows/{id}/save-as-template": {
+      "post": {
+        "tags": [
+          "workflows"
+        ],
+        "summary": "POST /api/workflows/:id/save-as-template — Convert a workflow into a reusable template.",
+        "operationId": "save_workflow_as_template",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Workflow ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Template created",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "Workflow not found"
           }
         }
       }

@@ -778,6 +778,28 @@ export async function reloadChannels(): Promise<ApiActionResponse> {
   return post<ApiActionResponse>("/api/channels/reload", {});
 }
 
+export interface QrStartResponse {
+  available: boolean;
+  qr_code?: string;
+  qr_url?: string;
+  message?: string;
+}
+
+export interface QrStatusResponse {
+  connected: boolean;
+  expired: boolean;
+  message?: string;
+  bot_token?: string;
+}
+
+export async function wechatQrStart(): Promise<QrStartResponse> {
+  return post<QrStartResponse>("/api/channels/wechat/qr/start", {});
+}
+
+export async function wechatQrStatus(qrCode: string): Promise<QrStatusResponse> {
+  return get<QrStatusResponse>(`/api/channels/wechat/qr/status?qr_code=${encodeURIComponent(qrCode)}`);
+}
+
 export async function listSkills(): Promise<SkillItem[]> {
   const data = await get<SkillsResponse>("/api/skills");
   return data.skills ?? [];

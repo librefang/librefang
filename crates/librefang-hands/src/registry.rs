@@ -632,6 +632,13 @@ fn check_requirement(req: &HandRequirement) -> bool {
                 .map(|v| !v.is_empty())
                 .unwrap_or(false)
         }
+        RequirementType::AnyEnvVar => {
+            // check_value is comma-separated list of env var names; any one being set is enough
+            req.check_value
+                .split(',')
+                .map(str::trim)
+                .any(|var| std::env::var(var).map(|v| !v.is_empty()).unwrap_or(false))
+        }
     }
 }
 
