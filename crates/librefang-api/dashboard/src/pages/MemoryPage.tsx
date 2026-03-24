@@ -1,7 +1,7 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState, useEffect } from "react";
 import { useTranslation } from "react-i18next";
-import { listMemories, searchMemories, deleteMemory, getMemoryStats, addMemoryFromText, updateMemory, cleanupMemories, decayMemories, type MemoryStatsResponse, type MemoryItem } from "../api";
+import { listMemories, searchMemories, deleteMemory, getMemoryStats, addMemoryFromText, updateMemory, cleanupMemories, type MemoryStatsResponse, type MemoryItem } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -12,7 +12,7 @@ import { Button } from "../components/ui/Button";
 import { Pagination } from "../components/ui/Pagination";
 import { MarkdownContent } from "../components/ui/MarkdownContent";
 import { useUIStore } from "../lib/store";
-import { Database, Search, Trash2, Plus, X, Sparkles, Zap, Clock, RefreshCw, Edit2, Loader2, BarChart3, Settings } from "lucide-react";
+import { Database, Search, Trash2, Plus, X, Sparkles, Zap, Clock, Edit2, Loader2, Settings } from "lucide-react";
 
 const REFRESH_MS = 30000;
 
@@ -332,7 +332,7 @@ export function MemoryPage() {
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [showConfigDialog, setShowConfigDialog] = useState(false);
   const [editingMemory, setEditingMemory] = useState<{ id: string; content?: string } | null>(null);
-  const [showStats, setShowStats] = useState(true);
+
   const [page, setPage] = useState(0);
   const pageSize = 20;
 
@@ -373,13 +373,6 @@ export function MemoryPage() {
     }
   });
 
-  const decayMutation = useMutation({
-    mutationFn: decayMemories,
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["memory"] });
-      addToast(t("common.success"), "success");
-    }
-  });
 
   const memories = memoryQuery.data?.memories ?? [];
   const totalCount = memoryQuery.data?.total ?? 0;
@@ -402,21 +395,14 @@ export function MemoryPage() {
         icon={<Database className="h-4 w-4" />}
         actions={
           <div className="flex items-center gap-1 sm:gap-2 flex-wrap">
-            <Button variant="secondary" size="sm" onClick={() => setShowStats(!showStats)}>
-              <BarChart3 className="w-4 h-4" />
-            </Button>
-            <Button variant="secondary" size="sm" onClick={() => setShowConfigDialog(true)}>
+<Button variant="secondary" size="sm" onClick={() => setShowConfigDialog(true)}>
               <Settings className="w-4 h-4" />
             </Button>
             <Button variant="secondary" size="sm" onClick={() => cleanupMutation.mutate()} disabled={cleanupMutation.isPending}>
               {cleanupMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
               <span className="hidden sm:inline">{t("memory.cleanup")}</span>
             </Button>
-            <Button variant="secondary" size="sm" onClick={() => decayMutation.mutate()} disabled={decayMutation.isPending}>
-              {decayMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
-              <span className="hidden sm:inline">{t("memory.decay")}</span>
-            </Button>
-            <Button variant="primary" size="sm" onClick={() => setShowAddDialog(true)}>
+<Button variant="primary" size="sm" onClick={() => setShowAddDialog(true)}>
               <Plus className="w-4 h-4" />
               <span className="hidden sm:inline ml-1">{t("memory.add")}</span>
             </Button>
@@ -425,7 +411,7 @@ export function MemoryPage() {
       />
 
       {/* Stats */}
-      {showStats && <MemoryStats stats={statsQuery.data ?? null} />}
+      <MemoryStats stats={statsQuery.data ?? null} />
 
       {/* Memory Config */}
       {memoryConfig && (
@@ -525,7 +511,7 @@ export function MemoryPage() {
                   </Button>
                 </div>
               </div>
-              <MarkdownContent className="text-xs text-text-dim leading-relaxed h-16 overflow-y-auto">
+              <MarkdownContent className="text-xs text-text-dim leading-relaxed line-clamp-3">
                 {m.content || t("common.no_data")}
               </MarkdownContent>
               {m.created_at && (
