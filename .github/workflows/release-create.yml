@@ -53,12 +53,8 @@ jobs:
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
           VERSION="${TAG#v}"
-          # Strip pre-release suffix (-betaN / -rcN) then strip hour for CHANGELOG
+          # Strip pre-release suffix (-betaN / -rcN) for CHANGELOG lookup
           VERSION=$(echo "$VERSION" | sed 's/-.*//')
-          PATCH=$(echo "$VERSION" | cut -d. -f3)
-          if [ ${#PATCH} -eq 4 ]; then
-            VERSION="$(echo "$VERSION" | cut -d. -f1,2).${PATCH:0:2}"
-          fi
 
           # Extract this version's changelog section
           CHANGES=$(awk '/^## \['"$VERSION"'\]/{found=1; next} found && /^## \[/{exit} found{print}' CHANGELOG.md)

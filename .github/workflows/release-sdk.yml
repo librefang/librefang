@@ -205,15 +205,13 @@ jobs:
           VERSION="${GITHUB_REF#refs/tags/v}"
           REPO="${{ github.repository }}"
 
-          # Map CalVer to Go-compatible v0.YYYYMMDD.HH (keeps major=0, no /v2026 import path)
-          # e.g. 2026.3.2114 → v0.20260321.14, 2026.3.2114-rc1 → v0.20260321.14-rc1
+          # Map CalVer to Go-compatible v0.YYYYMMDD.0 (keeps major=0, no /v2026 import path)
+          # e.g. 2026.3.21 → v0.20260321.0, 2026.3.21-rc1 → v0.20260321.0-rc1
           YEAR=$(echo "$VERSION" | cut -d. -f1)
           MONTH=$(printf '%02d' "$(echo "$VERSION" | cut -d. -f2)")
-          DDHH=$(echo "$VERSION" | cut -d. -f3 | sed 's/-.*//')
+          DD=$(echo "$VERSION" | cut -d. -f3 | sed 's/-.*//')
           PRERELEASE=$(echo "$VERSION" | grep -oE '\-.*' || true)
-          DD=${DDHH:0:2}
-          HH=$((10#${DDHH:2:2}))  # strip leading zero (SemVer forbids 01, 02, etc.)
-          GO_VERSION="0.${YEAR}${MONTH}${DD}.${HH}${PRERELEASE}"
+          GO_VERSION="0.${YEAR}${MONTH}${DD}.0${PRERELEASE}"
           GO_TAG="sdk/go/v${GO_VERSION}"
 
           # Check if tag already exists

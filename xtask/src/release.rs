@@ -111,11 +111,10 @@ fn prompt(message: &str) -> String {
 fn compute_calver() -> String {
     let now = chrono::Local::now();
     format!(
-        "{}.{}.{}{}",
+        "{}.{}.{}",
         now.format("%Y"),
         now.format("%-m"),
         now.format("%d"),
-        now.format("%H"),
     )
 }
 
@@ -218,7 +217,7 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
             // Default to stable
             base_version
         } else {
-            // Count existing tags to auto-increment
+            // Count existing tags for this day to auto-increment rc/beta numbers
             let beta_count = Command::new("git")
                 .args(["tag", "-l", &format!("v{}-beta*", base_version)])
                 .current_dir(&root)
@@ -293,7 +292,7 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
             .unwrap();
     if !calver_re.is_match(&version) {
         return Err(format!(
-            "'{}' is not a valid CalVer (expected: YYYY.M.DDHH, YYYY.M-lts, etc.)",
+            "'{}' is not a valid CalVer (expected: YYYY.M.DD, YYYY.M-lts, etc.)",
             version
         )
         .into());
@@ -399,16 +398,7 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
     // --- Generate changelog ---
     println!();
     println!("Generating changelog...");
-    let changelog_version = {
-        let base = version.split('-').next().unwrap_or(&version);
-        let parts: Vec<&str> = base.split('.').collect();
-        if parts.len() == 3 && parts[2].len() == 4 {
-            // Strip hour from DDHH -> DD
-            format!("{}.{}.{}", parts[0], parts[1], &parts[2][..2])
-        } else {
-            base.to_string()
-        }
-    };
+    let changelog_version = version.split('-').next().unwrap_or(&version).to_string();
     changelog::run(changelog::ChangelogArgs {
         version: changelog_version.clone(),
         base_tag: prev_tag.clone(),
