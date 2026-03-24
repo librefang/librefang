@@ -10,8 +10,9 @@ import { Badge } from "../components/ui/Badge";
 import { Input } from "../components/ui/Input";
 import { Button } from "../components/ui/Button";
 import { Pagination } from "../components/ui/Pagination";
+import { MarkdownContent } from "../components/ui/MarkdownContent";
 import { useUIStore } from "../lib/store";
-import { Database, Search, Trash2, Plus, X, Sparkles, Zap, Clock, RefreshCw, Edit2, Loader2, BarChart3 } from "lucide-react";
+import { Database, Search, Trash2, Plus, X, Sparkles, Zap, Clock, RefreshCw, Edit2, Loader2, BarChart3, Settings } from "lucide-react";
 
 const REFRESH_MS = 30000;
 
@@ -162,6 +163,159 @@ function MemoryStats({ stats }: { stats: MemoryStatsResponse | null }) {
   );
 }
 
+function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
+  const { t } = useTranslation();
+  const queryClient = useQueryClient();
+  const addToast = useUIStore((s) => s.addToast);
+
+  const configQuery = useQuery({
+    queryKey: ["memory", "config"],
+    queryFn: () => fetch("/api/memory/config").then(r => r.json()),
+  });
+
+  const [form, setForm] = useState<Record<string, any>>({});
+  const [saving, setSaving] = useState(false);
+
+  // Init form from API data
+  const data = configQuery.data;
+  if (data && Object.keys(form).length === 0) {
+    setForm({
+      embedding_provider: data.embedding_provider || "",
+      embedding_model: data.embedding_model || "",
+      embedding_api_key_env: data.embedding_api_key_env || "",
+      decay_rate: data.decay_rate ?? 0.05,
+      pm_enabled: data.proactive_memory?.enabled ?? true,
+      pm_auto_memorize: data.proactive_memory?.auto_memorize ?? true,
+      pm_auto_retrieve: data.proactive_memory?.auto_retrieve ?? true,
+      pm_extraction_model: data.proactive_memory?.extraction_model || "",
+      pm_max_retrieve: data.proactive_memory?.max_retrieve ?? 10,
+    });
+  }
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      const res = await fetch("/api/memory/config", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          embedding_provider: form.embedding_provider || undefined,
+          embedding_model: form.embedding_model || undefined,
+          embedding_api_key_env: form.embedding_api_key_env || undefined,
+          decay_rate: parseFloat(form.decay_rate) || 0.05,
+          proactive_memory: {
+            enabled: form.pm_enabled,
+            auto_memorize: form.pm_auto_memorize,
+            auto_retrieve: form.pm_auto_retrieve,
+            extraction_model: form.pm_extraction_model || undefined,
+            max_retrieve: parseInt(form.pm_max_retrieve) || 10,
+          },
+        }),
+      });
+      if (res.ok) {
+        addToast(t("common.success"), "success");
+        queryClient.invalidateQueries({ queryKey: ["memory"] });
+        queryClient.invalidateQueries({ queryKey: ["health"] });
+        onClose();
+      } else {
+        const err = await res.json();
+        addToast(err.error || "Failed", "error");
+      }
+    } catch {
+      addToast("Failed to save", "error");
+    }
+    setSaving(false);
+  };
+
+  const inputCls = "w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-brand";
+  const labelCls = "text-[10px] font-bold uppercase tracking-widest text-text-dim mb-1 block";
+
+  return (
+    <div className="fixed inset-0 z-100 flex items-center justify-center bg-black/50 backdrop-blur-sm" onClick={onClose}>
+      <div className="w-full max-w-lg mx-4 rounded-2xl bg-surface border border-border-subtle shadow-2xl animate-fade-in-scale overflow-hidden" onClick={e => e.stopPropagation()}>
+        <div className="p-6 pb-4">
+          <h3 className="text-lg font-black">{t("memory.config_title", { defaultValue: "Memory Configuration" })}</h3>
+          <p className="text-xs text-text-dim mt-0.5">{t("memory.config_desc", { defaultValue: "Changes are written to config.toml. Restart required for full effect." })}</p>
+        </div>
+
+        {configQuery.isLoading ? (
+          <div className="p-6 text-center"><Loader2 className="w-5 h-5 animate-spin mx-auto" /></div>
+        ) : (
+          <div className="px-6 pb-4 space-y-4 max-h-[60vh] overflow-y-auto">
+            {/* Embedding */}
+            <div>
+              <h4 className="text-xs font-bold mb-3">Embedding</h4>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <span className={labelCls}>Provider</span>
+                  <input value={form.embedding_provider ?? ""} onChange={e => setForm({ ...form, embedding_provider: e.target.value })}
+                    placeholder="openai" className={inputCls} />
+                </div>
+                <div>
+                  <span className={labelCls}>Model</span>
+                  <input value={form.embedding_model ?? ""} onChange={e => setForm({ ...form, embedding_model: e.target.value })}
+                    placeholder="text-embedding-3-small" className={inputCls} />
+                </div>
+              </div>
+              <div className="mt-2">
+                <span className={labelCls}>API Key Env</span>
+                <input value={form.embedding_api_key_env ?? ""} onChange={e => setForm({ ...form, embedding_api_key_env: e.target.value })}
+                  placeholder="OPENAI_API_KEY" className={inputCls} />
+              </div>
+            </div>
+
+            {/* Proactive Memory */}
+            <div>
+              <h4 className="text-xs font-bold mb-3">Proactive Memory</h4>
+              <div className="space-y-2">
+                {[
+                  { key: "pm_enabled", label: t("memory.proactive_enabled", { defaultValue: "Enabled" }) },
+                  { key: "pm_auto_memorize", label: t("memory.auto_memorize", { defaultValue: "Auto Memorize" }) },
+                  { key: "pm_auto_retrieve", label: t("memory.auto_retrieve", { defaultValue: "Auto Retrieve" }) },
+                ].map(opt => (
+                  <label key={opt.key} className="flex items-center justify-between rounded-lg bg-main/50 px-3 py-2">
+                    <span className="text-xs font-medium">{opt.label}</span>
+                    <button onClick={() => setForm({ ...form, [opt.key]: !form[opt.key] })}
+                      className={`w-10 h-5 rounded-full transition-colors ${form[opt.key] ? "bg-brand" : "bg-border-subtle"}`}>
+                      <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${form[opt.key] ? "translate-x-5" : "translate-x-0.5"}`} />
+                    </button>
+                  </label>
+                ))}
+              </div>
+              <div className="grid grid-cols-2 gap-3 mt-3">
+                <div>
+                  <span className={labelCls}>Extraction Model</span>
+                  <input value={form.pm_extraction_model ?? ""} onChange={e => setForm({ ...form, pm_extraction_model: e.target.value })}
+                    placeholder="MiniMax-M2.7-highspeed" className={inputCls} />
+                </div>
+                <div>
+                  <span className={labelCls}>Max Retrieve</span>
+                  <input type="number" min={1} max={50} value={form.pm_max_retrieve ?? 10}
+                    onChange={e => setForm({ ...form, pm_max_retrieve: e.target.value })} className={inputCls} />
+                </div>
+              </div>
+            </div>
+
+            {/* Decay */}
+            <div>
+              <span className={labelCls}>Decay Rate</span>
+              <input type="number" step={0.01} min={0} max={1} value={form.decay_rate ?? 0.05}
+                onChange={e => setForm({ ...form, decay_rate: e.target.value })} className={inputCls} />
+            </div>
+          </div>
+        )}
+
+        <div className="flex gap-2 p-6 pt-3">
+          <Button variant="primary" className="flex-1" onClick={handleSave} disabled={saving}>
+            {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : t("common.save")}
+          </Button>
+          <Button variant="secondary" className="flex-1" onClick={onClose}>{t("common.cancel")}</Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function MemoryPage() {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
@@ -169,6 +323,7 @@ export function MemoryPage() {
   const [search, setSearch] = useState("");
   const [levelFilter, setLevelFilter] = useState<string>("all");
   const [showAddDialog, setShowAddDialog] = useState(false);
+  const [showConfigDialog, setShowConfigDialog] = useState(false);
   const [editingMemory, setEditingMemory] = useState<{ id: string; content?: string } | null>(null);
   const [showStats, setShowStats] = useState(true);
   const [page, setPage] = useState(0);
@@ -242,6 +397,9 @@ export function MemoryPage() {
           <div className="flex items-center gap-1 sm:gap-2 flex-wrap">
             <Button variant="secondary" size="sm" onClick={() => setShowStats(!showStats)}>
               <BarChart3 className="w-4 h-4" />
+            </Button>
+            <Button variant="secondary" size="sm" onClick={() => setShowConfigDialog(true)}>
+              <Settings className="w-4 h-4" />
             </Button>
             <Button variant="secondary" size="sm" onClick={() => cleanupMutation.mutate()} disabled={cleanupMutation.isPending}>
               {cleanupMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
@@ -360,7 +518,9 @@ export function MemoryPage() {
                   </Button>
                 </div>
               </div>
-              <p className="text-xs text-text-dim line-clamp-3 leading-relaxed whitespace-pre-wrap">{m.content || t("common.no_data")}</p>
+              <MarkdownContent className="text-xs text-text-dim leading-relaxed">
+                {m.content || t("common.no_data")}
+              </MarkdownContent>
               {m.created_at && (
                 <div className="mt-2 text-[10px] text-text-dim/50">
                   {t("memory.created")}: {new Date(m.created_at).toLocaleString()}
@@ -383,6 +543,7 @@ export function MemoryPage() {
       {/* Dialogs */}
       {showAddDialog && <AddMemoryDialog onClose={() => setShowAddDialog(false)} />}
       {editingMemory && <EditMemoryDialog memory={editingMemory} onClose={() => setEditingMemory(null)} />}
+      {showConfigDialog && <MemoryConfigDialog onClose={() => setShowConfigDialog(false)} />}
     </div>
   );
 }
