@@ -331,7 +331,7 @@ pub fn parse_cron_to_secs(cron: &str) -> u64 {
     }
 
     // Try standard 5-field cron: min hour dom month dow
-    let parts: Vec<&str> = cron.trim().split_whitespace().collect();
+    let parts: Vec<&str> = cron.split_whitespace().collect();
     if parts.len() == 5 {
         let min_field = parts[0];
         let hour_field = parts[1];
