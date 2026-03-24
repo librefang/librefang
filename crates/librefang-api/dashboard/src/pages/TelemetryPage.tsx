@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { formatCompact } from "../lib/format";
 import { useTranslation } from "react-i18next";
 import { PageHeader } from "../components/ui/PageHeader";
 import { Card } from "../components/ui/Card";
@@ -153,12 +154,6 @@ function formatUptime(seconds: number): string {
   return `${Math.floor(seconds / 86400)}d ${Math.floor((seconds % 86400) / 3600)}h`;
 }
 
-function formatCompact(n: number): string {
-  if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(1)}B`;
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
-  return n.toLocaleString();
-}
 
 // ── Component ────────────────────────────────────────────────────────
 

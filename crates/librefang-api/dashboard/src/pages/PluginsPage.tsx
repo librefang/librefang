@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { formatBytes } from "../lib/format";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
@@ -81,11 +82,7 @@ export function PluginsPage() {
     uninstallMutation.mutate(name);
   };
 
-  const formatSize = (bytes: number) => {
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-  };
+  const formatSize = formatBytes;
 
   const inputClass = "w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-brand focus:ring-1 focus:ring-brand/20";
 

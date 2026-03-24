@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { formatCost } from "../lib/format";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import Markdown from "react-markdown";
@@ -312,7 +313,7 @@ function HandChatPanel({
                     </span>
                     {msg.cost_usd !== undefined && msg.cost_usd > 0 && (
                       <span className="text-[8px] text-success/60 font-mono">
-                        ${msg.cost_usd.toFixed(4)}
+                        {formatCost(msg.cost_usd)}
                       </span>
                     )}
                   </div>

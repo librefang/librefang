@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { formatCompact, formatCost as formatCostUtil } from "../lib/format";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { listModels } from "../api";
@@ -71,15 +72,12 @@ export function ModelsPage() {
   const formatCost = (cost?: number) => {
     if (cost === undefined || cost === null) return "-";
     if (cost === 0) return t("models.free");
-    if (cost < 0.01) return `$${cost.toFixed(4)}`;
-    return `$${cost.toFixed(2)}`;
+    return formatCostUtil(cost);
   };
 
   const formatCtx = (tokens?: number) => {
     if (!tokens) return "-";
-    if (tokens >= 1000000) return `${(tokens / 1000000).toFixed(1)}M`;
-    if (tokens >= 1000) return `${Math.round(tokens / 1000)}K`;
-    return String(tokens);
+    return formatCompact(tokens);
   };
 
   return (
