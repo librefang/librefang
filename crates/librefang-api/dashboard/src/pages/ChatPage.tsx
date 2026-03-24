@@ -1,16 +1,15 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState, useCallback } from "react";
-import Markdown from "react-markdown";
 import rehypeKatex from "rehype-katex";
-import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import { useTranslation } from "react-i18next";
-import { useSearch } from "@tanstack/react-router";
+import { useNavigate, useSearch } from "@tanstack/react-router";
 import { listAgents, sendAgentMessage, loadAgentSession, listPendingApprovals, resolveApproval } from "../api";
 import type { ApprovalItem } from "../api";
 import { normalizeToolOutput } from "../lib/chat";
 import { MessageCircle, Send, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, Zap, ShieldAlert, CheckCircle, XCircle } from "lucide-react";
 import { Badge } from "../components/ui/Badge";
+import { MarkdownContent } from "../components/ui/MarkdownContent";
 import { useUIStore } from "../lib/store";
 import { Typewriter_v2 } from "../components/Typewriter_v2";
 import "katex/dist/katex.min.css";
@@ -36,30 +35,6 @@ const SLASH_COMMANDS = [
   { cmd: "/info", desc: "Show current agent info" },
 ];
 
-// Markdown styles
-const mdComponents = {
-  p: ({ children }: any) => <p className="mb-2 last:mb-0">{children}</p>,
-  h1: ({ children }: any) => <h1 className="text-lg font-bold mb-2">{children}</h1>,
-  h2: ({ children }: any) => <h2 className="text-base font-bold mb-1.5">{children}</h2>,
-  h3: ({ children }: any) => <h3 className="text-sm font-bold mb-1">{children}</h3>,
-  ul: ({ children }: any) => <ul className="list-disc pl-4 mb-2 space-y-0.5">{children}</ul>,
-  ol: ({ children }: any) => <ol className="list-decimal pl-4 mb-2 space-y-0.5">{children}</ol>,
-  li: ({ children }: any) => <li className="text-sm">{children}</li>,
-  code: ({ node, children, ...props }: any) => {
-    const isBlock = node?.position?.start?.line !== node?.position?.end?.line || String(children).includes("\n");
-    return isBlock
-      ? <pre className="p-2 rounded-lg bg-main font-mono text-[11px] overflow-x-auto mb-2"><code>{children}</code></pre>
-      : <code className="px-1 py-0.5 rounded bg-main font-mono text-[11px]" {...props}>{children}</code>;
-  },
-  pre: ({ children }: any) => <>{children}</>,
-  table: ({ children }: any) => <table className="w-full text-xs border-collapse mb-2">{children}</table>,
-  th: ({ children }: any) => <th className="border border-border-subtle px-2 py-1 bg-main font-bold text-left">{children}</th>,
-  td: ({ children }: any) => <td className="border border-border-subtle px-2 py-1">{children}</td>,
-  blockquote: ({ children }: any) => <blockquote className="border-l-2 border-brand pl-3 italic text-text-dim mb-2">{children}</blockquote>,
-  strong: ({ children }: any) => <strong className="font-bold">{children}</strong>,
-  a: ({ href, children }: any) => <a href={href} className="text-brand underline" target="_blank" rel="noopener noreferrer">{children}</a>,
-};
-
 // Streaming typewriter effect + Markdown
 function Typewriter({ text, speed = 15 }: { text: string; speed?: number }) {
   const [displayed, setDisplayed] = useState("");
@@ -84,13 +59,12 @@ function Typewriter({ text, speed = 15 }: { text: string; speed?: number }) {
 
   if (done) {
     return (
-      <Markdown
-        remarkPlugins={[remarkGfm, remarkMath]}
+      <MarkdownContent
+        remarkPlugins={[remarkMath]}
         rehypePlugins={[rehypeKatex]}
-        components={mdComponents}
       >
         {text}
-      </Markdown>
+      </MarkdownContent>
     );
   }
   return <span>{displayed}</span>;
@@ -143,6 +117,9 @@ function useWebSocket(agentId: string | null) {
   return { ws: wsRef, wsConnected };
 }
 
+// Per-agent session cache — survives agent switches within the same page lifecycle
+const sessionCache = new Map<string, ChatMessage[]>();
+
 // Chat message management - includes history loading and sending (with WS streaming)
 function useChatMessages(agentId: string | null, agents: any[] = []) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -150,12 +127,29 @@ function useChatMessages(agentId: string | null, agents: any[] = []) {
   const { ws, wsConnected } = useWebSocket(agentId);
   const addSkillOutput = useUIStore((s) => s.addSkillOutput);
 
-  // Load history - clear messages when agent changes
+  // Save current messages to cache when switching away
+  const prevAgentRef = useRef<string | null>(null);
   useEffect(() => {
-    // Clear messages when switching agents
-    setMessages([]);
+    return () => {
+      if (prevAgentRef.current) {
+        sessionCache.set(prevAgentRef.current, messages);
+      }
+    };
+  });
+  useEffect(() => { prevAgentRef.current = agentId; }, [agentId]);
 
-    if (!agentId) return;
+  // Load history — use cache if available, otherwise fetch
+  useEffect(() => {
+    if (!agentId) { setMessages([]); return; }
+
+    const cached = sessionCache.get(agentId);
+    if (cached) {
+      setMessages(cached);
+      return;
+    }
+
+    setMessages([]);
+    setIsLoading(true);
     loadAgentSession(agentId)
       .then(session => {
         if (session.messages?.length) {
@@ -180,9 +174,11 @@ function useChatMessages(agentId: string | null, agents: any[] = []) {
             }];
           });
           setMessages(historical);
+          sessionCache.set(agentId, historical);
         }
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => setIsLoading(false));
   }, [agentId]);
 
   // Send message - WS first, HTTP fallback
@@ -422,13 +418,12 @@ function MessageBubble({ message }: { message: ChatMessage }) {
               <span>{message.error}</span>
             </div>
           ) : (
-            <Markdown
-              remarkPlugins={[remarkGfm, remarkMath]}
+            <MarkdownContent
+              remarkPlugins={[remarkMath]}
               rehypePlugins={[rehypeKatex]}
-              components={mdComponents}
             >
               {message.content}
-            </Markdown>
+            </MarkdownContent>
           )}
         </div>
 
@@ -705,10 +700,17 @@ function ApprovalCard({ approval, onResolved }: { approval: ApprovalItem; onReso
 export function ChatPage() {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
   const search = useSearch({ from: "/chat" });
   const initialAgentId = search?.agentId || "";
   const [selectedAgentId, setSelectedAgentId] = useState(initialAgentId);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  // Sync agent selection to URL search params
+  const selectAgent = useCallback((id: string) => {
+    setSelectedAgentId(id);
+    navigate({ to: "/chat", search: { agentId: id }, replace: true });
+  }, [navigate]);
 
   const agentsQuery = useQuery({ queryKey: ["agents", "list", "chat"], queryFn: listAgents, staleTime: 30000 });
   const agents = (agentsQuery.data ?? []).sort((a, b) => {
@@ -730,17 +732,20 @@ export function ChatPage() {
     // Auto-select first running agent
     if (!selectedAgentId && agents.length > 0) {
       const firstRunning = agents.find(a => (a.state || "").toLowerCase() === "running");
-      setSelectedAgentId((firstRunning || agents[0]).id);
+      selectAgent((firstRunning || agents[0]).id);
     }
-  }, [agents, selectedAgentId]);
+  }, [agents, selectedAgentId, selectAgent]);
 
-  // Scroll to latest message
+  // Scroll to latest message — instant on agent switch, smooth on new messages
+  const prevMsgCountRef = useRef(0);
   useEffect(() => {
     if (messages.length > 0) {
+      const behavior = prevMsgCountRef.current === 0 ? "instant" as const : "smooth" as const;
       setTimeout(() => {
-        messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-      }, 100);
+        messagesEndRef.current?.scrollIntoView({ behavior, block: "end" });
+      }, 30);
     }
+    prevMsgCountRef.current = messages.length;
   }, [messages]);
 
   return (
@@ -779,7 +784,7 @@ export function ChatPage() {
               agents.map(agent => (
                 <button
                   key={agent.id}
-                  onClick={() => setSelectedAgentId(agent.id)}
+                  onClick={() => selectAgent(agent.id)}
                   className={`w-full flex items-center gap-3 p-3 rounded-xl transition-all text-left group ${
                     selectedAgentId === agent.id
                       ? "bg-brand text-white shadow-lg shadow-brand/20"
@@ -823,7 +828,7 @@ export function ChatPage() {
           <div className="md:hidden px-3 py-2 border-b border-border-subtle bg-surface/80">
             <select
               value={selectedAgentId}
-              onChange={(e) => setSelectedAgentId(e.target.value)}
+              onChange={(e) => selectAgent(e.target.value)}
               className="w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-sm font-bold outline-none focus:border-brand"
             >
               <option value="">{t("chat.select_agent")}</option>

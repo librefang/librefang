@@ -1,8 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import Markdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+import { useNavigate } from "@tanstack/react-router";
+import { router } from "../router";
+import { MarkdownContent } from "../components/ui/MarkdownContent";
 import {
   activateHand,
   deactivateHand,
@@ -64,23 +65,6 @@ if (typeof document !== "undefined" && !document.getElementById("hands-keyframes
   document.head.appendChild(style);
 }
 
-/* ── Markdown components for chat ─────────────────────────── */
-const mdComponents = {
-  p: ({ children }: Record<string, unknown>) => <p className="mb-1.5 last:mb-0">{children as React.ReactNode}</p>,
-  ul: ({ children }: Record<string, unknown>) => <ul className="list-disc pl-4 mb-1.5 space-y-0.5">{children as React.ReactNode}</ul>,
-  ol: ({ children }: Record<string, unknown>) => <ol className="list-decimal pl-4 mb-1.5 space-y-0.5">{children as React.ReactNode}</ol>,
-  li: ({ children }: Record<string, unknown>) => <li className="text-xs">{children as React.ReactNode}</li>,
-  code: (props: Record<string, unknown>) => {
-    const { children } = props;
-    const text = String(children);
-    const isBlock = text.includes("\n");
-    return isBlock
-      ? <pre className="p-2 rounded-lg bg-main font-mono text-[10px] overflow-x-auto mb-1.5"><code>{children as React.ReactNode}</code></pre>
-      : <code className="px-1 py-0.5 rounded bg-main font-mono text-[10px]">{children as React.ReactNode}</code>;
-  },
-  pre: ({ children }: Record<string, unknown>) => <>{children as React.ReactNode}</>,
-  strong: ({ children }: Record<string, unknown>) => <strong className="font-bold">{children as React.ReactNode}</strong>,
-};
 
 /* ── Inline metrics for active hand cards ─────────────────── */
 
@@ -300,9 +284,9 @@ function HandChatPanel({
                   ) : msg.role === "user" ? (
                     <span>{msg.content}</span>
                   ) : (
-                    <Markdown remarkPlugins={[remarkGfm]} components={mdComponents as Record<string, React.ComponentType>}>
+                    <MarkdownContent>
                       {msg.content}
-                    </Markdown>
+                    </MarkdownContent>
                   )}
                 </div>
                 {msg.tokens?.output && !msg.isLoading && (
@@ -930,7 +914,12 @@ export function HandsPage() {
   const [search, setSearch] = useState("");
   const [selectedCategory, setSelectedCategory] = useState<string>("all");
   const [detailHand, setDetailHand] = useState<HandDefinitionItem | null>(null);
-  const [chatInstance, setChatInstance] = useState<{ id: string; name: string } | null>(null);
+  const navigate = useNavigate();
+
+  // Preload ChatPage chunk so navigate is instant
+  useEffect(() => {
+    router.preloadRoute({ to: "/chat" }).catch(() => {});
+  }, []);
 
   const handsQuery = useQuery({
     queryKey: ["hands", "list"],
@@ -1112,7 +1101,10 @@ export function HandsPage() {
                 key={instance.instance_id}
                 hand={hand}
                 instance={instance}
-                onChat={(id, name) => setChatInstance({ id, name })}
+                onChat={(instanceId) => {
+                  const inst = instances.find(i => i.instance_id === instanceId);
+                  navigate({ to: "/chat", search: { agentId: inst?.agent_id || instanceId } });
+                }}
                 onDeactivate={handleDeactivate}
                 onDetail={setDetailHand}
                 isPending={pendingId === hand.id || pendingId === instance.instance_id}
@@ -1198,7 +1190,10 @@ export function HandsPage() {
                 onActivate={handleActivate}
                 onDeactivate={(id) => handleDeactivate(id)}
                 onDetail={setDetailHand}
-                onChat={(id, name) => setChatInstance({ id, name })}
+                onChat={(instanceId) => {
+                  const inst = instances.find(i => i.instance_id === instanceId);
+                  navigate({ to: "/chat", search: { agentId: inst?.agent_id || instanceId } });
+                }}
                 isPending={pendingId === h.id || (instance ? pendingId === instance.instance_id : false)}
               />
             );
@@ -1217,22 +1212,14 @@ export function HandsPage() {
           onDeactivate={handleDeactivate}
           onPause={handlePause}
           onResume={handleResume}
-          onChat={(instanceId, handName) => {
-            setDetailHand(null);
-            setChatInstance({ id: instanceId, name: handName });
+          onChat={(instanceId) => {
+            const inst = instances.find(i => i.instance_id === instanceId);
+            navigate({ to: "/chat", search: { agentId: inst?.agent_id || instanceId } });
           }}
           isPending={pendingId === detailHand.id}
         />
       )}
 
-      {/* Chat panel */}
-      {chatInstance && (
-        <HandChatPanel
-          instanceId={chatInstance.id}
-          handName={chatInstance.name}
-          onClose={() => setChatInstance(null)}
-        />
-      )}
     </div>
   );
 }
