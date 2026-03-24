@@ -524,7 +524,7 @@ fn init_git_if_missing(home_dir: &Path) {
             "-c",
             "user.name=LibreFang",
             "-c",
-            "user.email=noreply@librefang.org",
+            "user.email=noreply@librefang.ai",
             "commit",
             "-q",
             "-m",
