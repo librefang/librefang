@@ -11,7 +11,7 @@
   "common": {
     "refresh": "Refresh", "status": "Status", "daemon_online": "Daemon Online", "infrastructure": "Infrastructure",
     "toggle_theme": "Toggle theme", "change_language": "Change language", "delete": "Delete", "cancel": "Cancel",
-    "save": "Save", "saving": "Saving...", "edit": "Edit", "confirm": "Confirm", "loading": "Loading...", "search": "Search", "back": "Back",
+    "save": "Save", "saving": "Saving...", "edit": "Edit", "confirm": "Confirm", "loading": "Loading...", "search": "Search", "back": "Back", "retry": "Retry",
     "actions": "Actions", "clear": "Clear", "load": "Load", "active": "Active", "idle": "Idle", "running": "Running",
     "online": "Online", "offline": "Offline", "setup": "Setup", "ok": "OK", "config": "Config", "interact": "Interact",
     "never": "Never", "unknown": "Unknown", "no_data": "No data", "resume": "Resume", "close": "Close", "yes": "Yes", "no": "No", "details": "Details",
