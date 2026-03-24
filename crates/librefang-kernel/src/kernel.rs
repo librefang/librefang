@@ -520,7 +520,16 @@ fn init_git_if_missing(home_dir: &Path) {
         .current_dir(home_dir)
         .status();
     let _ = std::process::Command::new("git")
-        .args(["commit", "-q", "-m", "chore: initial librefang config"])
+        .args([
+            "-c",
+            "user.name=LibreFang",
+            "-c",
+            "user.email=noreply@librefang.org",
+            "commit",
+            "-q",
+            "-m",
+            "chore: initial librefang config",
+        ])
         .current_dir(home_dir)
         .status();
     info!("Initialized git repo in {}", home_dir.display());
