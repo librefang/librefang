@@ -7,9 +7,9 @@ import {
   listWorkflowRuns,
   listWorkflows,
   runWorkflow,
-  getWorkflow,
   listWorkflowTemplates,
   instantiateTemplate,
+  createSchedule,
   type WorkflowTemplate,
 } from "../api";
 import { Card } from "../components/ui/Card";
@@ -17,6 +17,7 @@ import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
 import { PageHeader } from "../components/ui/PageHeader";
 import { ListSkeleton } from "../components/ui/Skeleton";
+import { ScheduleModal } from "../components/ui/ScheduleModal";
 import {
   Layers, Trash2, FilePlus, Play, Search,
   Calendar, FileText, Activity, Bot, ArrowRight, Loader2, Clock, ChevronRight
@@ -37,6 +38,8 @@ export function WorkflowsPage() {
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [activeTab, setActiveTab] = useState<"workflows" | "templates">("workflows");
+  const [scheduleWorkflowId, setScheduleWorkflowId] = useState<string | null>(null);
+  const [scheduleCron, setScheduleCron] = useState("0 9 * * *");
 
   const workflowsQuery = useQuery({ queryKey: ["workflows", "list"], queryFn: listWorkflows, refetchInterval: REFRESH_MS });
   const runsQuery = useQuery({ queryKey: ["workflows", "runs", selectedWorkflowId], queryFn: () => listWorkflowRuns(selectedWorkflowId), enabled: Boolean(selectedWorkflowId) });
@@ -55,6 +58,21 @@ export function WorkflowsPage() {
     try {
       await runMutation.mutateAsync({ workflowId: selectedWorkflowId, input: runInput });
       await runsQuery.refetch();
+    } catch { /* ignore */ }
+  };
+
+  const handleCreateSchedule = async () => {
+    if (!scheduleWorkflowId || !scheduleCron.trim()) return;
+    const wf = workflows.find(w => w.id === scheduleWorkflowId);
+    try {
+      await createSchedule({
+        name: `${wf?.name || "workflow"} schedule`,
+        cron: scheduleCron.trim(),
+        workflow_id: scheduleWorkflowId,
+        enabled: true,
+      });
+      setScheduleWorkflowId(null);
+      await queryClient.invalidateQueries({ queryKey: ["workflows"] });
     } catch { /* ignore */ }
   };
 
@@ -93,26 +111,10 @@ export function WorkflowsPage() {
     }
   };
 
-  const openWorkflow = async (wfId: string) => {
-    try {
-      const detail = await getWorkflow(wfId);
-      let nodes, edges;
-      if (detail.layout?.nodes) {
-        nodes = detail.layout.nodes;
-        edges = detail.layout.edges || [];
-      } else {
-        const steps = Array.isArray(detail.steps) ? detail.steps : [];
-        nodes = steps.map((s: any, idx: number) => {
-          const p = s.prompt_template || s.prompt || "";
-          return { id: `node-${idx}`, type: "custom", position: { x: 50, y: idx * 80 },
-            data: { label: s.name, description: p.length > 40 ? p.slice(0, 40) + "..." : p, prompt: p, nodeType: "agent", agentId: s.agent?.agent_id, agentName: s.agent?.name } };
-        });
-        edges = nodes.slice(0, -1).map((_: any, i: number) => ({ id: `e-${i}`, source: `node-${i}`, target: `node-${i + 1}` }));
-      }
-      sessionStorage.removeItem("canvasNodes");
-      sessionStorage.setItem("workflowTemplate", JSON.stringify({ nodes, edges, name: detail.name, description: detail.description, workflowId: wfId }));
-      navigate({ to: "/canvas", search: { t: Date.now() } });
-    } catch (e) { console.error("Failed to load workflow:", e); }
+  const openWorkflow = (wfId: string) => {
+    sessionStorage.removeItem("canvasNodes");
+    sessionStorage.removeItem("workflowTemplate");
+    navigate({ to: "/canvas", search: { t: undefined, wf: wfId } });
   };
 
   const templatesQuery = useQuery({ queryKey: ["workflow-templates"], queryFn: () => listWorkflowTemplates() });
@@ -246,13 +248,24 @@ export function WorkflowsPage() {
                     </span>
                   </div>
                   <p className="text-[10px] text-text-dim mt-0.5 truncate">{wf.description || t("common.no_data")}</p>
-                  <div className="flex items-center gap-2 mt-1.5 text-[9px] text-text-dim/50">
-                    <Clock className="w-3 h-3" />
-                    <span>{new Date(wf.created_at || "").toLocaleDateString()}</span>
+                  <div className="flex items-center gap-3 mt-1.5 text-[9px] text-text-dim/50">
+                    <span className="flex items-center gap-1"><Clock className="w-3 h-3" />{new Date(wf.created_at || "").toLocaleDateString()}</span>
+                    <span className="flex items-center gap-1"><Play className="w-3 h-3" />{(wf as any).run_count ?? 0} {t("workflows.runs_label", { defaultValue: "runs" })}</span>
+                    {(wf as any).schedule && (
+                      <span className={`flex items-center gap-1 px-1.5 py-0.5 rounded-full ${(wf as any).schedule.enabled ? "bg-success/10 text-success" : "bg-main text-text-dim"}`}>
+                        <Calendar className="w-3 h-3" />
+                        {(wf as any).schedule.cron}
+                      </span>
+                    )}
                   </div>
                 </div>
                 {/* Actions */}
                 <div className="flex items-center gap-1 shrink-0" onClick={e => e.stopPropagation()}>
+                  <button onClick={() => { setScheduleWorkflowId(wf.id); setScheduleCron((wf as any).schedule?.cron || "0 9 * * *"); }}
+                    className={`p-2 rounded-lg transition-all ${(wf as any).schedule ? "text-success hover:text-success hover:bg-success/10" : "text-text-dim/40 hover:text-brand hover:bg-brand/10"}`}
+                    title={t("nav.scheduler")}>
+                    <Calendar className="w-3.5 h-3.5" />
+                  </button>
                   <button onClick={() => openWorkflow(wf.id)}
                     className="p-2 rounded-lg text-text-dim/40 hover:text-brand hover:bg-brand/10 transition-all"
                     title={t("canvas.ctx_edit")}>
@@ -330,6 +343,23 @@ export function WorkflowsPage() {
         )
       )}
         </>
+      )}
+      {/* Schedule Modal */}
+      {scheduleWorkflowId && (
+        <ScheduleModal
+          title={t("nav.scheduler")}
+          subtitle={workflows.find(w => w.id === scheduleWorkflowId)?.name}
+          initialCron={(workflows.find(w => w.id === scheduleWorkflowId) as any)?.schedule?.cron || "0 9 * * *"}
+          onSave={async (cron) => {
+            const wf = workflows.find(w => w.id === scheduleWorkflowId);
+            try {
+              await createSchedule({ name: `${wf?.name || "workflow"} schedule`, cron, workflow_id: scheduleWorkflowId, enabled: true });
+              setScheduleWorkflowId(null);
+              await queryClient.invalidateQueries({ queryKey: ["workflows"] });
+            } catch { /* ignore */ }
+          }}
+          onClose={() => setScheduleWorkflowId(null)}
+        />
       )}
     </div>
   );

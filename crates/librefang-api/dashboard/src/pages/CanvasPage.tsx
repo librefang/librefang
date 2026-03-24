@@ -23,8 +23,9 @@ import {
   ConnectionLineType,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { listAgents, listWorkflows, createWorkflow, updateWorkflow, deleteWorkflow, runWorkflow, listWorkflowTemplates, instantiateTemplate, saveWorkflowAsTemplate, type AgentItem, type WorkflowItem, type WorkflowTemplate as ApiWorkflowTemplate } from "../api";
+import { listAgents, listWorkflows, createWorkflow, updateWorkflow, deleteWorkflow, runWorkflow, getWorkflow, listWorkflowTemplates, instantiateTemplate, saveWorkflowAsTemplate, createSchedule, type AgentItem, type WorkflowItem, type WorkflowTemplate as ApiWorkflowTemplate } from "../api";
 import { Card } from "../components/ui/Card";
+import { ScheduleModal } from "../components/ui/ScheduleModal";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { useUIStore } from "../lib/store";
@@ -32,7 +33,7 @@ import {
   Play, Save, Trash2, Plus, FolderOpen, Loader2,
   Maximize2, Minimize2, ArrowLeft, X, Group, ChevronDown, ChevronRight,
   Copy, ClipboardPaste, LayoutGrid,
-  Download, Upload, HelpCircle, Scan, Check, LayoutTemplate, Search, Tag, BookCopy
+  Download, Upload, HelpCircle, Scan, Check, LayoutTemplate, Search, Tag, BookCopy, Calendar
 } from "lucide-react";
 
 // Node type configuration — n8n-style color scheme
@@ -68,27 +69,26 @@ function CustomNode({ data, type: nodeTypeKey, t }: { data: any; type: string; t
 
   const borderColor = runState === "done" ? "#10b981"
     : runState === "running" ? config.color
-    : missingAgent ? "#f59e0b"
-    : "transparent";
+      : missingAgent ? "#f59e0b"
+        : "transparent";
   const ringStyle = runState === "running"
     ? { boxShadow: `0 0 0 3px ${config.color}40, 0 8px 24px ${config.color}30` }
     : runState === "done"
-    ? { boxShadow: `0 0 0 3px #10b98140, 0 4px 12px #10b98120` }
-    : missingAgent
-    ? { boxShadow: "0 0 0 2px #f59e0b30" }
-    : { boxShadow: "0 2px 8px rgba(0,0,0,0.08), 0 1px 2px rgba(0,0,0,0.06)" };
+      ? { boxShadow: `0 0 0 3px #10b98140, 0 4px 12px #10b98120` }
+      : missingAgent
+        ? { boxShadow: "0 0 0 2px #f59e0b30" }
+        : { boxShadow: "0 2px 8px rgba(0,0,0,0.08), 0 1px 2px rgba(0,0,0,0.06)" };
 
   return (
     <div
-      className={`rounded-2xl bg-surface min-w-[140px] max-w-[200px] overflow-hidden relative transition-all duration-200 border border-border-subtle hover:scale-[1.02] hover:shadow-lg ${
-        runState === "running" ? "animate-pulse" : ""
-      }`}
+      className={`rounded-2xl bg-surface min-w-[140px] max-w-[200px] overflow-hidden relative transition-all duration-200 border border-border-subtle hover:scale-[1.02] hover:shadow-lg ${runState === "running" ? "animate-pulse" : ""
+        }`}
       style={{ border: `2px ${missingAgent ? "dashed" : "solid"} ${borderColor}`, ...ringStyle }}
     >
       {/* Target Handle */}
       {!isStart && (
         <Handle type="target" position={Position.Top}
-          className="!w-3 !h-3 !rounded-full !border-2 !border-surface"
+          className="w-3! h-3! rounded-full! border-2! border-surface!"
           style={{ backgroundColor: config.color }} />
       )}
 
@@ -99,7 +99,7 @@ function CustomNode({ data, type: nodeTypeKey, t }: { data: any; type: string; t
           style={{ backgroundColor: config.color }}
         >
           {runState === "running" ? <Loader2 className="w-4 h-4 animate-spin" /> :
-           runState === "done" ? "✓" : config.icon}
+            runState === "done" ? "✓" : config.icon}
         </div>
         <div className="min-w-0 flex-1">
           <p className="text-xs font-bold text-text truncate leading-tight">{data.label || t(config.labelKey)}</p>
@@ -141,9 +141,8 @@ function GroupNodeComponent({ data, id }: { data: any; id: string }) {
   const expanded = data._expanded !== false;
   return (
     <div
-      className={`rounded-2xl border-2 border-dashed transition-all ${
-        expanded ? "border-brand/30 bg-brand/5" : "border-brand bg-surface shadow-lg"
-      }`}
+      className={`rounded-2xl border-2 border-dashed transition-all ${expanded ? "border-brand/30 bg-brand/5" : "border-brand bg-surface shadow-lg"
+        }`}
       style={expanded
         ? { width: "100%", height: "100%", pointerEvents: "none" }
         : { width: 180 }}
@@ -207,9 +206,8 @@ function WorkflowList({
         ) : (
           workflows.map(w => (
             <div key={w.id} onClick={() => onSelect(w)}
-              className={`p-3 rounded-xl border cursor-pointer transition-all ${
-                selectedId === w.id ? "border-brand bg-brand/5" : "border-border-subtle hover:border-brand/50 bg-surface"
-              }`}>
+              className={`p-3 rounded-xl border cursor-pointer transition-all ${selectedId === w.id ? "border-brand bg-brand/5" : "border-border-subtle hover:border-brand/50 bg-surface"
+                }`}>
               {confirmId === w.id ? (
                 <div className="flex items-center justify-between gap-2">
                   <span className="text-xs text-text-dim truncate">{t("workflows.delete_confirm")}</span>
@@ -635,7 +633,7 @@ export function CanvasPage() {
 function CanvasPageInner() {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const { t: routeTimestamp } = useSearch({ from: "/canvas" });
+  const { t: routeTimestamp, wf: routeWorkflowId } = useSearch({ from: "/canvas" });
   const { theme } = useUIStore();
   const { fitView } = useReactFlow();
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
@@ -660,6 +658,8 @@ function CanvasPageInner() {
   const [toast, setToast] = useState<string | null>(null);
   const [showHelp, setShowHelp] = useState(false);
   const [showTemplateBrowser, setShowTemplateBrowser] = useState(false);
+  const [showScheduleModal, setShowScheduleModal] = useState(false);
+  const [scheduleCron, setScheduleCron] = useState("0 9 * * *");
 
   // Undo/redo history
   const historyRef = useRef<{ nodes: Node[]; edges: Edge[] }[]>([]);
@@ -855,13 +855,13 @@ function CanvasPageInner() {
   }, []);
 
   // Shortcut key refs
-  const createGroupRef = useRef<() => void>(() => {});
-  const ungroupRef = useRef<(id: string) => void>(() => {});
+  const createGroupRef = useRef<() => void>(() => { });
+  const ungroupRef = useRef<(id: string) => void>(() => { });
 
   // Stable refs for group callbacks — prevents nodeTypes from changing on every render
-  const toggleGroupRef = useRef<(id: string) => void>(() => {});
-  const ungroupNodesRef = useRef<(id: string) => void>(() => {});
-  const deleteGroupAndChildrenRef = useRef<(id: string) => void>(() => {});
+  const toggleGroupRef = useRef<(id: string) => void>(() => { });
+  const ungroupNodesRef = useRef<(id: string) => void>(() => { });
+  const deleteGroupAndChildrenRef = useRef<(id: string) => void>(() => { });
   const tRef = useRef(t);
 
   useEffect(() => {
@@ -1023,7 +1023,7 @@ function CanvasPageInner() {
       _onUngroup: (id: string) => ungroupNodesRef.current(id),
       _onDeleteGroup: (id: string) => deleteGroupAndChildrenRef.current(id),
     }} />,
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }), []);
 
   // Node types that require an agent (all backend steps need an agent)
@@ -1087,22 +1087,46 @@ function CanvasPageInner() {
     return false;
   }, [t, setNodes, setEdges]);
 
-  // Load agents, workflows, then load template
+  // Load agents, workflows, then load template or workflow from URL
   useEffect(() => {
     Promise.all([listAgents(), listWorkflows()])
-      .then(([a, w]) => {
+      .then(async ([a, w]) => {
         setAgents(a);
         setWorkflows(w);
-        // Load template after agents are ready
-        if (!loadTemplate(a)) {
-          const savedNodes = sessionStorage.getItem("canvasNodes");
-          if (savedNodes) {
-            try { setNodes(JSON.parse(savedNodes)); } catch { /* ignore */ }
-          }
+        // 1. Try loading from sessionStorage template
+        if (loadTemplate(a)) return;
+        // 2. Try loading from URL ?wf= parameter
+        if (routeWorkflowId) {
+          try {
+            const detail = await getWorkflow(routeWorkflowId);
+            let wfNodes, wfEdges;
+            if (detail.layout?.nodes) {
+              wfNodes = detail.layout.nodes;
+              wfEdges = detail.layout.edges || [];
+            } else {
+              const steps = Array.isArray(detail.steps) ? detail.steps : [];
+              wfNodes = steps.map((s: any, idx: number) => ({
+                id: `node-${idx}`, type: "custom", position: { x: 50, y: idx * 80 },
+                data: { label: s.name, prompt: s.prompt_template || "", nodeType: "agent", agentId: s.agent?.id, agentName: s.agent?.name }
+              }));
+              wfEdges = wfNodes.slice(0, -1).map((_: any, i: number) => ({ id: `e-${i}`, source: `node-${i}`, target: `node-${i + 1}` }));
+            }
+            setNodes(wfNodes);
+            setEdges(wfEdges.map((e: any) => ({ ...e, markerEnd: { type: MarkerType.ArrowClosed } })));
+            setWorkflowName(detail.name || "");
+            setWorkflowDescription(detail.description || "");
+            setSelectedWorkflow({ id: routeWorkflowId, name: detail.name || "", description: detail.description || "" } as WorkflowItem);
+            return;
+          } catch { /* ignore */ }
+        }
+        // 3. Fallback: restore from sessionStorage
+        const savedNodes = sessionStorage.getItem("canvasNodes");
+        if (savedNodes) {
+          try { setNodes(JSON.parse(savedNodes)); } catch { /* ignore */ }
         }
       })
-      .catch(() => {});
-  }, [routeTimestamp, loadTemplate]);
+      .catch(() => { });
+  }, [routeTimestamp, routeWorkflowId, loadTemplate]);
 
   // Save nodes to sessionStorage
   useEffect(() => {
@@ -1343,7 +1367,12 @@ function CanvasPageInner() {
       setWorkflows(workflowsData);
       if (!selectedWorkflow?.id) {
         const newest = [...workflowsData].sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""))[0];
-        if (newest) setSelectedWorkflow(newest);
+        if (newest) {
+          setSelectedWorkflow(newest);
+          navigate({ to: "/canvas", search: { t: undefined, wf: newest.id }, replace: true });
+        }
+      } else {
+        navigate({ to: "/canvas", search: { t: undefined, wf: selectedWorkflow.id }, replace: true });
       }
       setErrorMsg(null);
       showToast(t("canvas.saved"));
@@ -1365,6 +1394,23 @@ function CanvasPageInner() {
       showError(e?.message || String(e));
     }
   }, [selectedWorkflow, t, showError, showToast]);
+
+  // Schedule workflow
+  const handleSchedule = useCallback(async () => {
+    if (!selectedWorkflow?.id || !scheduleCron.trim()) return;
+    try {
+      await createSchedule({
+        name: `${workflowName || "workflow"} schedule`,
+        cron: scheduleCron.trim(),
+        workflow_id: selectedWorkflow.id,
+        enabled: true,
+      });
+      setShowScheduleModal(false);
+      showToast(t("canvas.scheduled", { defaultValue: "Schedule created" }));
+    } catch (e: any) {
+      showError(e?.message || String(e));
+    }
+  }, [selectedWorkflow, scheduleCron, workflowName, t, showError, showToast]);
 
   // Click run -> show input dialog
   const handleRunClick = useCallback((id?: string) => {
@@ -1506,19 +1552,19 @@ function CanvasPageInner() {
     const newNodes: Node[] = stepsArray.map((step: any, idx: number) => {
       const fullPrompt = step.prompt_template || step.prompt || "";
       return {
-      id: `node-${idx}`,
-      type: "custom",
-      position: { x: 50, y: idx * 80 },
-      data: {
-        label: step.name,
-        description: fullPrompt.length > 40 ? fullPrompt.slice(0, 40) + "..." : fullPrompt,
-        prompt: fullPrompt,
-        agentId: step.agent_id || step.agent?.agent_id,
-        agentName: step.agent_name || step.agent?.name,
-        nodeType: "agent",
-        dependsOn: step.depends_on || [],
-      }
-    };
+        id: `node-${idx}`,
+        type: "custom",
+        position: { x: 50, y: idx * 80 },
+        data: {
+          label: step.name,
+          description: fullPrompt.length > 40 ? fullPrompt.slice(0, 40) + "..." : fullPrompt,
+          prompt: fullPrompt,
+          agentId: step.agent_id || step.agent?.agent_id,
+          agentName: step.agent_name || step.agent?.name,
+          nodeType: "agent",
+          dependsOn: step.depends_on || [],
+        }
+      };
     });
     setNodes(newNodes);
 
@@ -1587,7 +1633,7 @@ function CanvasPageInner() {
 
   return (
     <div className={`flex flex-col transition-all duration-300 ${isFullscreen ? "fixed inset-0 z-[100] bg-main" : "h-[calc(100vh-140px)]"}`}>
-      <header className="flex flex-wrap justify-between items-end gap-2 pb-2 sm:pb-4">
+      <header className="flex flex-wrap justify-between items-center gap-2 pb-2 sm:pb-4">
         <div className="flex items-center gap-2 sm:gap-4">
           {isFullscreen && (
             <Button variant="ghost" size="sm" onClick={() => navigate({ to: "/workflows" })}>
@@ -1673,7 +1719,12 @@ function CanvasPageInner() {
             <Button variant="ghost" onClick={handleSaveAsTemplate} disabled={!selectedWorkflow?.id}
               title={t("canvas.save_as_template")}>
               <BookCopy className="w-4 h-4 mr-1" />
-              {t("canvas.save_as_template")}
+              <span className="hidden sm:inline">{t("canvas.save_as_template")}</span>
+            </Button>
+            <Button variant="ghost" onClick={() => setShowScheduleModal(true)} disabled={!selectedWorkflow?.id}
+              title={t("nav.scheduler")}>
+              <Calendar className="w-4 h-4 mr-1" />
+              <span className="hidden sm:inline">{t("nav.scheduler")}</span>
             </Button>
             <Button variant="primary" onClick={() => handleRunClick()}
               disabled={(!selectedWorkflow && agentStepCount === 0) || !!runningWorkflowId}>
@@ -1699,9 +1750,8 @@ function CanvasPageInner() {
         )}
 
         {/* Node library (collapsible) */}
-        <div className={`border-r border-border-subtle bg-surface/50 backdrop-blur overflow-y-auto transition-all duration-200 hidden sm:block ${
-          sidebarCollapsed ? "w-10 px-1 py-2" : "w-52 p-3 space-y-4"
-        }`}>
+        <div className={`border-r border-border-subtle bg-surface/50 backdrop-blur overflow-y-auto transition-all duration-200 hidden sm:block ${sidebarCollapsed ? "w-10 px-1 py-2" : "w-52 p-3 space-y-4"
+          }`}>
           <button onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
             className="w-full flex items-center justify-center p-1.5 rounded-lg hover:bg-main transition-colors mb-1">
             {sidebarCollapsed
@@ -1816,7 +1866,6 @@ function CanvasPageInner() {
             // Interaction: default drag = box select, space + drag = pan
             panOnDrag={spacePressed}
             selectionOnDrag={!spacePressed}
-            panOnScroll
             selectionMode={SelectionMode.Partial}
             zoomOnScroll
             className={`!bg-transparent ${spacePressed ? "!cursor-grab" : ""}`}
@@ -1968,6 +2017,24 @@ function CanvasPageInner() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Schedule Modal */}
+      {showScheduleModal && (
+        <ScheduleModal
+          title={t("nav.scheduler")}
+          subtitle={workflowName}
+          initialCron="0 9 * * *"
+          onSave={async (cron) => {
+            if (!selectedWorkflow?.id) return;
+            try {
+              await createSchedule({ name: `${workflowName || "workflow"} schedule`, cron, workflow_id: selectedWorkflow.id, enabled: true });
+              setShowScheduleModal(false);
+              showToast(t("canvas.scheduled", { defaultValue: "Schedule created" }));
+            } catch (e: any) { showError(e?.message || String(e)); }
+          }}
+          onClose={() => setShowScheduleModal(false)}
+        />
       )}
     </div>
   );

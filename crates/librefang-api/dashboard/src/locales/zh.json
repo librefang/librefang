@@ -178,7 +178,7 @@
     "select_workflow_hint": "请选择一个工作流以查看记录", "steps_count": "{{count}} 步", "nodes_unit": "个节点", "automation_hub": "自动化中心",
     "templates": "模板", "template_library": "模板库", "my_workflows": "我的工作流", "use_template": "使用模板", "create_blank": "创建空白工作流",
     "new_workflow": "新建工作流", "workflow_name": "工作流名称", "description": "描述", "delete_confirm": "确定要删除此工作流吗？", "open_workflows": "工作流列表", "untitled_workflow": "未命名工作流",
-    "search_placeholder": "搜索工作流...", "empty_title": "还没有工作流", "empty_desc": "从模板快速创建，或从空白开始设计。",
+    "search_placeholder": "搜索工作流...", "runs_label": "次运行", "empty_title": "还没有工作流", "empty_desc": "从模板快速创建，或从空白开始设计。",
     "template_details": {
       "content_pipeline": "内容创作流水线", "content_pipeline_desc": "调研 → 写作 → 编辑，产出精品文章",
       "translate_polish": "翻译润色", "translate_polish_desc": "自动识别语言，翻译并润色",
@@ -211,7 +211,12 @@
     "schedules": "个调度", "triggers_label": "个触发器", "cron_jobs": "个定时",
     "no_schedules": "暂无调度任务。创建一个来自动化智能体任务。",
     "message": "消息", "message_placeholder": "发送给智能体的消息...",
-    "every_minute": "每分钟", "every_n_hours": "每 {{n}} 小时", "weekly": "每周"
+    "every_minute": "每分钟", "every_n_hours": "每 {{n}} 小时", "weekly": "每周",
+    "presets": "快捷预设", "custom_cron": "自定义 Cron", "cron_format": "格式：分 时 日 月 星期",
+    "type_interval_min": "每 N 分钟", "type_interval_hour": "每 N 小时", "type_daily": "每天", "type_weekday": "工作日", "type_weekly": "每周", "type_monthly": "每月", "type_custom": "自定义",
+    "every": "每", "minutes": "分钟", "hours": "小时", "daily_at": "每天", "weekdays_at": "工作日", "at": "时间", "every_month_on": "每月第",
+    "field_min": "分", "field_hour": "时", "field_day": "日", "field_month": "月", "field_weekday": "星期",
+    "cron_invalid": "格式错误：每个字段支持 数字、*、*/N、N-N、N,N"
   },
   "runtime": {
     "title": "运行时", "subtitle": "引擎状态与资源管理。", "kernel": "运行时环境",

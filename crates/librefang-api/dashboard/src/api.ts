@@ -972,8 +972,9 @@ export async function listSchedules(): Promise<ScheduleItem[]> {
 export async function createSchedule(payload: {
   name: string;
   cron: string;
-  agent_id: string;
-  message: string;
+  agent_id?: string;
+  workflow_id?: string;
+  message?: string;
   enabled?: boolean;
 }): Promise<ScheduleItem> {
   return post<ScheduleItem>("/api/schedules", payload);
