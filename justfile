@@ -49,7 +49,7 @@ dash:
     cd crates/librefang-api/dashboard && pnpm dev
 
 # Start API daemon with dashboard dev server (hot reload)
-api: dashboard-build
+api:
     pkill -f "vite.*librefang-api/dashboard" 2>/dev/null || true
     LOCAL_IP=$(ipconfig getifaddr en0 2>/dev/null || hostname -I 2>/dev/null | awk '{print $1}' || echo "127.0.0.1"); \
     (while ! curl -s http://127.0.0.1:4545/api/health >/dev/null 2>&1; do sleep 2; done; \
