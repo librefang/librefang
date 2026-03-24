@@ -4614,7 +4614,7 @@ system_prompt = "You are a helpful assistant."
         let new_session = librefang_memory::session::Session {
             id: SessionId::new(),
             agent_id,
-            messages: export.messages.clone(),
+            messages: export.messages,
             context_window_tokens: export.context_window_tokens,
             label: export.label,
         };
