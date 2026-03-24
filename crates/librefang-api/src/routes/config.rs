@@ -214,7 +214,7 @@ pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 
     let status = if db_ok { "ok" } else { "degraded" };
 
-    let embedding_ok = state.kernel.embedding_driver().is_some();
+    let embedding_ok = state.kernel.embedding().is_some();
 
     Json(serde_json::json!({
         "status": status,
@@ -259,7 +259,7 @@ pub async fn health_detail(State(state): State<Arc<AppState>>) -> impl IntoRespo
         "agent_count": state.kernel.agent_registry().count(),
         "database": if db_ok { "connected" } else { "error" },
         "memory": {
-            "embedding_available": state.kernel.embedding_driver().is_some(),
+            "embedding_available": state.kernel.embedding().is_some(),
             "embedding_provider": state.kernel.config_ref().memory.embedding_provider,
             "embedding_model": &state.kernel.config_ref().memory.embedding_model,
             "proactive_memory_enabled": state.kernel.config_ref().proactive_memory.enabled,
@@ -499,15 +499,18 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
         .iter()
         .map(|s| {
             let transport_summary = match &s.transport {
-                librefang_types::config::McpTransportEntry::Stdio { command, args } => {
+                Some(librefang_types::config::McpTransportEntry::Stdio { command, args }) => {
                     serde_json::json!({ "type": "stdio", "command": command, "args": args })
                 }
-                librefang_types::config::McpTransportEntry::Sse { url } => {
+                Some(librefang_types::config::McpTransportEntry::Sse { url }) => {
                     serde_json::json!({ "type": "sse", "url": url })
                 }
-                librefang_types::config::McpTransportEntry::HttpCompat { base_url, .. } => {
+                Some(librefang_types::config::McpTransportEntry::HttpCompat {
+                    base_url, ..
+                }) => {
                     serde_json::json!({ "type": "http_compat", "base_url": base_url })
                 }
+                None => serde_json::json!({ "type": "none" }),
             };
             serde_json::json!({
                 "name": s.name,
