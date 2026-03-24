@@ -3808,7 +3808,10 @@ fn cmd_doctor(json: bool, repair: bool) {
                         }
                         for server in &cfg.mcp_servers {
                             // Validate transport config
-                            match &server.transport {
+                            let Some(ref transport) = server.transport else {
+                                continue;
+                            };
+                            match transport {
                                 librefang_types::config::McpTransportEntry::Stdio {
                                     command,
                                     ..
@@ -9616,7 +9619,7 @@ args = ["-y", "@modelcontextprotocol/server-github"]
         let config: librefang_types::config::KernelConfig = toml::from_str(config_toml).unwrap();
         assert_eq!(config.mcp_servers.len(), 1);
         assert_eq!(config.mcp_servers[0].name, "github");
-        match &config.mcp_servers[0].transport {
+        match config.mcp_servers[0].transport.as_ref().unwrap() {
             librefang_types::config::McpTransportEntry::Stdio { command, args } => {
                 assert_eq!(command, "npx");
                 assert_eq!(args.len(), 2);
@@ -9659,7 +9662,7 @@ input_schema = { type = "object" }
         let config: librefang_types::config::KernelConfig = toml::from_str(config_toml).unwrap();
         assert_eq!(config.mcp_servers.len(), 1);
         assert_eq!(config.mcp_servers[0].name, "http-tools");
-        match &config.mcp_servers[0].transport {
+        match config.mcp_servers[0].transport.as_ref().unwrap() {
             librefang_types::config::McpTransportEntry::HttpCompat {
                 base_url,
                 headers,

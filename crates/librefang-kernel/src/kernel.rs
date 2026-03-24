@@ -7199,7 +7199,14 @@ system_prompt = "You are a helpful assistant."
             .unwrap_or_default();
 
         for server_config in &servers {
-            let transport = match &server_config.transport {
+            let transport_entry = match &server_config.transport {
+                Some(t) => t,
+                None => {
+                    tracing::warn!(name = %server_config.name, "MCP server has no transport configured, skipping");
+                    continue;
+                }
+            };
+            let transport = match transport_entry {
                 McpTransportEntry::Stdio { command, args } => McpTransport::Stdio {
                     command: command.clone(),
                     args: args.clone(),
@@ -7316,7 +7323,13 @@ system_prompt = "You are a helpful assistant."
         // 5. Connect new servers
         let mut connected_count = 0;
         for server_config in &new_servers {
-            let transport = match &server_config.transport {
+            let transport_entry = match &server_config.transport {
+                Some(t) => t,
+                None => {
+                    continue;
+                }
+            };
+            let transport = match transport_entry {
                 McpTransportEntry::Stdio { command, args } => McpTransport::Stdio {
                     command: command.clone(),
                     args: args.clone(),
@@ -7443,7 +7456,16 @@ system_prompt = "You are a helpful assistant."
 
         self.extension_health.mark_reconnecting(id);
 
-        let transport = match &server_config.transport {
+        let transport_entry = match &server_config.transport {
+            Some(t) => t,
+            None => {
+                return Err(LibreFangError::Config(format!(
+                    "MCP server '{}' has no transport configured",
+                    server_config.name
+                )));
+            }
+        };
+        let transport = match transport_entry {
             McpTransportEntry::Stdio { command, args } => McpTransport::Stdio {
                 command: command.clone(),
                 args: args.clone(),

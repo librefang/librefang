@@ -2112,8 +2112,8 @@ fn default_prompt_caching() -> bool {
 pub struct McpServerConfigEntry {
     /// Display name for this server.
     pub name: String,
-    /// Transport configuration.
-    pub transport: McpTransportEntry,
+    /// Transport configuration. Optional — entries without transport are skipped at boot.
+    pub transport: Option<McpTransportEntry>,
     /// Request timeout in seconds.
     #[serde(default = "default_mcp_timeout")]
     pub timeout_secs: u64,
