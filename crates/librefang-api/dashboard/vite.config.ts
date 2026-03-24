@@ -3,10 +3,10 @@ import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 
 const logger = createLogger();
-const origWarn = logger.warn.bind(logger);
-logger.warn = (msg, opts) => {
-  if (msg.includes("http proxy error")) return;
-  origWarn(msg, opts);
+const origError = logger.error.bind(logger);
+logger.error = (msg, opts) => {
+  if (typeof msg === "string" && msg.includes("proxy error")) return;
+  origError(msg, opts);
 };
 
 export default defineConfig({
