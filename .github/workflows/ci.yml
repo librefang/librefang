@@ -145,6 +145,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: test-ubuntu-${{ hashFiles('**/Cargo.lock') }}
+      - name: Add swap space
+        run: |
+          sudo fallocate -l 8G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
       - name: Install Tauri system deps
         run: |
           sudo apt-get update
@@ -158,5 +164,5 @@ jobs:
         run: cargo test --workspace --no-run
       - name: Run tests
         env:
-          RUST_TEST_THREADS: "2"
+          RUST_TEST_THREADS: "1"
         run: cargo test --workspace
