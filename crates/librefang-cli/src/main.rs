@@ -174,7 +174,7 @@ enum Commands {
     },
     /// Update the CLI to the latest published release.
     #[command(
-        long_about = "Update the LibreFang CLI binary to the latest published GitHub release.\n\nBy default, downloads and installs the latest release. Use --check to see if\nan update is available without installing, or --version to pin a specific tag.\n\nExamples:\n  librefang update                   # Install latest release\n  librefang update --check           # Check for updates only\n  librefang update --version v0.4.0  # Install a specific version"
+        long_about = "Update the LibreFang CLI binary to the latest published GitHub release.\n\nBy default, downloads and installs the latest release for your configured\nupdate channel. Use --check to see if an update is available without\ninstalling, --version to pin a specific tag, or --channel to override.\n\nChannels (like Apple software updates):\n  stable  — only stable releases (default)\n  beta    — stable + beta releases\n  rc      — all releases including release candidates\n\nSet a persistent default in config.toml:\n  update_channel = \"rc\"\n\nExamples:\n  librefang update                   # Install latest for your channel\n  librefang update --check           # Check for updates only\n  librefang update --channel rc      # Use rc channel for this update\n  librefang update --version v0.4.0  # Install a specific version"
     )]
     Update {
         /// Check whether a newer release exists without installing it.
@@ -183,6 +183,10 @@ enum Commands {
         /// Install a specific GitHub release tag instead of the latest release.
         #[arg(long)]
         version: Option<String>,
+        /// Update channel: stable, beta, or rc.
+        /// Overrides the `update_channel` setting in config.toml.
+        #[arg(long)]
+        channel: Option<String>,
     },
     /// Stop the running daemon.
     #[command(
@@ -1460,6 +1464,18 @@ fn load_log_level_from_config() -> String {
     level.unwrap_or_else(|| "info".to_string())
 }
 
+/// Load just the `update_channel` field from config.toml without fully deserializing.
+fn load_update_channel_from_config() -> Option<librefang_types::config::UpdateChannel> {
+    let config_path = dirs::home_dir()?.join(".librefang").join("config.toml");
+    let content = std::fs::read_to_string(&config_path).ok()?;
+    let config: toml::Value = toml::from_str(&content).ok()?;
+    config
+        .get("update_channel")?
+        .as_str()?
+        .parse::<librefang_types::config::UpdateChannel>()
+        .ok()
+}
+
 /// Load just the `log_dir` field from config.toml without fully deserializing.
 /// Returns the configured custom log directory, or `None` to use the default.
 fn load_log_dir_from_config() -> Option<PathBuf> {
@@ -1550,7 +1566,11 @@ fn main() {
         ),
         Some(Commands::Agents { json }) => cmd_agent_list(cli.config, json),
         Some(Commands::Kill { agent_id }) => cmd_agent_kill(cli.config, &agent_id),
-        Some(Commands::Update { check, version }) => cmd_update(check, version),
+        Some(Commands::Update {
+            check,
+            version,
+            channel,
+        }) => cmd_update(check, version, channel),
         Some(Commands::Stop) => cmd_stop(cli.config),
         Some(Commands::Agent(sub)) => match sub {
             AgentCommands::New { template } => cmd_agent_new(cli.config, template),
@@ -3353,47 +3373,37 @@ fn cmd_doctor(json: bool, repair: bool) {
         // --- Check: Version update ---
         {
             let current_version = env!("CARGO_PKG_VERSION");
+            let update_channel = load_update_channel_from_config().unwrap_or_default();
             if !json {
-                ui::check_ok(&format!("CLI version: {current_version}"));
+                ui::check_ok(&format!(
+                    "CLI version: {current_version} (channel: {update_channel})"
+                ));
             }
-            checks.push(serde_json::json!({"check": "cli_version", "status": "ok", "version": current_version}));
+            checks.push(serde_json::json!({"check": "cli_version", "status": "ok", "version": current_version, "channel": update_channel.to_string()}));
 
-            // Try to fetch latest release from GitHub (best-effort, 3s timeout)
-            let version_client = crate::http_client::client_builder()
-                .timeout(std::time::Duration::from_secs(3))
-                .build();
-            if let Ok(client) = version_client {
-                match client
-                    .get("https://api.github.com/repos/librefang/librefang/releases/latest")
-                    .header("User-Agent", format!("librefang-cli/{current_version}"))
-                    .send()
-                {
-                    Ok(resp) if resp.status().is_success() => {
-                        if let Ok(body) = resp.json::<serde_json::Value>() {
-                            if let Some(tag) = body.get("tag_name").and_then(|v| v.as_str()) {
-                                let latest = tag.strip_prefix('v').unwrap_or(tag);
-                                if latest != current_version {
-                                    if !json {
-                                        ui::check_warn(&format!(
-                                            "Update available: {current_version} -> {latest} (see https://github.com/librefang/librefang/releases)"
-                                        ));
-                                    }
-                                    checks.push(serde_json::json!({"check": "version_update", "status": "warn", "current": current_version, "latest": latest}));
-                                } else {
-                                    if !json {
-                                        ui::check_ok("CLI is up to date");
-                                    }
-                                    checks.push(serde_json::json!({"check": "version_update", "status": "ok"}));
-                                }
-                            }
-                        }
-                    }
-                    _ => {
+            // Try to fetch latest release for the configured channel (best-effort)
+            match fetch_latest_release_tag(update_channel) {
+                Ok(tag) => {
+                    let latest = tag.strip_prefix('v').unwrap_or(&tag);
+                    if latest != current_version {
                         if !json {
-                            ui::check_warn("Could not check for updates (network unavailable)");
+                            ui::check_warn(&format!(
+                                "Update available: {current_version} -> {latest} (see https://github.com/librefang/librefang/releases)"
+                            ));
                         }
-                        checks.push(serde_json::json!({"check": "version_update", "status": "warn", "reason": "network_error"}));
+                        checks.push(serde_json::json!({"check": "version_update", "status": "warn", "current": current_version, "latest": latest}));
+                    } else {
+                        if !json {
+                            ui::check_ok("CLI is up to date");
+                        }
+                        checks.push(serde_json::json!({"check": "version_update", "status": "ok"}));
                     }
+                }
+                Err(_) => {
+                    if !json {
+                        ui::check_warn("Could not check for updates (network unavailable)");
+                    }
+                    checks.push(serde_json::json!({"check": "version_update", "status": "warn", "reason": "network_error"}));
                 }
             }
         }
@@ -8434,6 +8444,7 @@ fn cmd_reset(confirm: bool) {
 const RELEASE_REPO: &str = "librefang/librefang";
 const RELEASES_LATEST_API: &str =
     "https://api.github.com/repos/librefang/librefang/releases/latest";
+const RELEASES_API: &str = "https://api.github.com/repos/librefang/librefang/releases";
 const SHELL_INSTALLER_URL: &str = "https://librefang.ai/install.sh";
 const POWERSHELL_INSTALLER_URL: &str = "https://librefang.ai/install.ps1";
 
@@ -8452,7 +8463,9 @@ enum ReleaseComparison {
     Unknown,
 }
 
-fn cmd_update(check: bool, version: Option<String>) {
+fn cmd_update(check: bool, version: Option<String>, channel_override: Option<String>) {
+    use librefang_types::config::UpdateChannel;
+
     let current_exe = std::env::current_exe().unwrap_or_else(|e| {
         ui::error(&format!("Cannot determine current executable path: {e}"));
         std::process::exit(1);
@@ -8462,12 +8475,26 @@ fn cmd_update(check: bool, version: Option<String>) {
     let current_exe_display = current_exe.display().to_string();
     let requested_version = version.as_deref();
 
+    // Resolve update channel: CLI arg > config.toml > default (stable)
+    let channel = if let Some(ref ch) = channel_override {
+        match ch.parse::<UpdateChannel>() {
+            Ok(c) => c,
+            Err(e) => {
+                ui::error(&e);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        load_update_channel_from_config().unwrap_or_default()
+    };
+
     ui::section("Update");
     ui::kv("Current", current_version);
+    ui::kv("Channel", &channel.to_string());
     ui::kv("Binary", &current_exe_display);
 
     let latest_tag = if requested_version.is_none() {
-        match fetch_latest_release_tag() {
+        match fetch_latest_release_tag(channel) {
             Ok(tag) => {
                 ui::kv("Latest", &tag);
                 Some(tag)
@@ -8613,25 +8640,70 @@ fn cmd_update(check: bool, version: Option<String>) {
     ui::hint("If this binary came from another package manager, update it with that package manager instead.");
 }
 
-fn fetch_latest_release_tag() -> Result<String, String> {
-    let client = update_http_client()?;
-    let response = client
-        .get(RELEASES_LATEST_API)
-        .send()
-        .map_err(|e| format!("GitHub request failed: {e}"))?;
-    let status = response.status();
-    if !status.is_success() {
-        return Err(format!("GitHub API returned {status}"));
-    }
+fn fetch_latest_release_tag(
+    channel: librefang_types::config::UpdateChannel,
+) -> Result<String, String> {
+    use librefang_types::config::UpdateChannel;
 
-    let body = response
-        .json::<serde_json::Value>()
-        .map_err(|e| format!("Failed to decode release metadata: {e}"))?;
-    body["tag_name"]
-        .as_str()
-        .filter(|tag| !tag.is_empty())
-        .map(str::to_string)
-        .ok_or_else(|| "Release metadata is missing `tag_name`".to_string())
+    let client = update_http_client()?;
+
+    match channel {
+        UpdateChannel::Stable => {
+            // /releases/latest returns the latest non-draft, non-prerelease
+            let response = client
+                .get(RELEASES_LATEST_API)
+                .send()
+                .map_err(|e| format!("GitHub request failed: {e}"))?;
+            let status = response.status();
+            if !status.is_success() {
+                return Err(format!("GitHub API returned {status}"));
+            }
+            let body = response
+                .json::<serde_json::Value>()
+                .map_err(|e| format!("Failed to decode release metadata: {e}"))?;
+            body["tag_name"]
+                .as_str()
+                .filter(|tag| !tag.is_empty())
+                .map(str::to_string)
+                .ok_or_else(|| "Release metadata is missing `tag_name`".to_string())
+        }
+        UpdateChannel::Beta | UpdateChannel::Rc => {
+            // /releases lists all releases, newest first — filter by channel
+            let response = client
+                .get(RELEASES_API)
+                .send()
+                .map_err(|e| format!("GitHub request failed: {e}"))?;
+            let status = response.status();
+            if !status.is_success() {
+                return Err(format!("GitHub API returned {status}"));
+            }
+            let releases = response
+                .json::<Vec<serde_json::Value>>()
+                .map_err(|e| format!("Failed to decode releases list: {e}"))?;
+
+            for release in &releases {
+                let draft = release["draft"].as_bool().unwrap_or(false);
+                if draft {
+                    continue;
+                }
+                let Some(tag) = release["tag_name"].as_str().filter(|t| !t.is_empty()) else {
+                    continue;
+                };
+                match channel {
+                    UpdateChannel::Rc => return Ok(tag.to_string()),
+                    UpdateChannel::Beta => {
+                        if !tag.contains("-rc") {
+                            return Ok(tag.to_string());
+                        }
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            Err(format!(
+                "No matching release found for the '{channel}' channel"
+            ))
+        }
+    }
 }
 
 fn update_http_client() -> Result<reqwest::blocking::Client, String> {
@@ -9741,7 +9813,8 @@ input_schema = { type = "object" }
             cli.command,
             Some(Commands::Update {
                 check: false,
-                version: None
+                version: None,
+                channel: None,
             })
         ));
     }
@@ -9753,9 +9826,21 @@ input_schema = { type = "object" }
             cli.command,
             Some(Commands::Update {
                 check: true,
-                version: None
+                version: None,
+                channel: None,
             })
         ));
+    }
+
+    #[test]
+    fn test_update_channel_command_parses() {
+        let cli = Cli::parse_from(["librefang", "update", "--channel", "rc"]);
+        match cli.command {
+            Some(Commands::Update { channel, .. }) => {
+                assert_eq!(channel.as_deref(), Some("rc"));
+            }
+            _ => panic!("Expected Update command"),
+        }
     }
 
     #[test]

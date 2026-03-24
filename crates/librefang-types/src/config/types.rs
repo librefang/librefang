@@ -108,6 +108,45 @@ pub enum KernelMode {
     Dev,
 }
 
+/// CLI update channel (like Apple software update channels).
+///
+/// Controls which GitHub releases are considered for `librefang update`:
+/// - **Stable**: only non-prerelease tags (default).
+/// - **Beta**: stable + beta tags (excludes `-rc`).
+/// - **Rc**: all tags including release candidates.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UpdateChannel {
+    #[default]
+    Stable,
+    Beta,
+    Rc,
+}
+
+impl std::fmt::Display for UpdateChannel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Stable => write!(f, "stable"),
+            Self::Beta => write!(f, "beta"),
+            Self::Rc => write!(f, "rc"),
+        }
+    }
+}
+
+impl std::str::FromStr for UpdateChannel {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "stable" => Ok(Self::Stable),
+            "beta" => Ok(Self::Beta),
+            "rc" => Ok(Self::Rc),
+            _ => Err(format!(
+                "unknown update channel: {s} (expected: stable, beta, rc)"
+            )),
+        }
+    }
+}
+
 /// User configuration for RBAC multi-user support.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserConfig {
@@ -1509,6 +1548,10 @@ pub struct KernelConfig {
     /// Telemetry / observability configuration (OpenTelemetry + Prometheus).
     #[serde(default)]
     pub telemetry: TelemetryConfig,
+    /// CLI update channel (stable, beta, rc).
+    /// Controls which releases `librefang update` considers.
+    #[serde(default)]
+    pub update_channel: UpdateChannel,
 }
 
 /// Input sanitization mode for channel messages.
@@ -2330,6 +2373,7 @@ impl Default for KernelConfig {
             sanitize: SanitizeConfig::default(),
             inbox: InboxConfig::default(),
             telemetry: TelemetryConfig::default(),
+            update_channel: UpdateChannel::default(),
         }
     }
 }
