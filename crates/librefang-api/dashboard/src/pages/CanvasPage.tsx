@@ -659,7 +659,6 @@ function CanvasPageInner() {
   const [showHelp, setShowHelp] = useState(false);
   const [showTemplateBrowser, setShowTemplateBrowser] = useState(false);
   const [showScheduleModal, setShowScheduleModal] = useState(false);
-  const [scheduleCron, setScheduleCron] = useState("0 9 * * *");
 
   // Undo/redo history
   const historyRef = useRef<{ nodes: Node[]; edges: Edge[] }[]>([]);
@@ -1395,22 +1394,7 @@ function CanvasPageInner() {
     }
   }, [selectedWorkflow, t, showError, showToast]);
 
-  // Schedule workflow
-  const handleSchedule = useCallback(async () => {
-    if (!selectedWorkflow?.id || !scheduleCron.trim()) return;
-    try {
-      await createSchedule({
-        name: `${workflowName || "workflow"} schedule`,
-        cron: scheduleCron.trim(),
-        workflow_id: selectedWorkflow.id,
-        enabled: true,
-      });
-      setShowScheduleModal(false);
-      showToast(t("canvas.scheduled", { defaultValue: "Schedule created" }));
-    } catch (e: any) {
-      showError(e?.message || String(e));
-    }
-  }, [selectedWorkflow, scheduleCron, workflowName, t, showError, showToast]);
+
 
   // Click run -> show input dialog
   const handleRunClick = useCallback((id?: string) => {
@@ -1632,7 +1616,7 @@ function CanvasPageInner() {
   const [zoomLevel, setZoomLevel] = useState(100);
 
   return (
-    <div className={`flex flex-col transition-all duration-300 ${isFullscreen ? "fixed inset-0 z-[100] bg-main" : "h-[calc(100vh-140px)]"}`}>
+    <div className={`flex flex-col transition-all duration-300 ${isFullscreen ? "fixed inset-0 z-100 bg-main" : "h-[calc(100vh-140px)]"}`}>
       <header className="flex flex-wrap justify-between items-center gap-2 pb-2 sm:pb-4">
         <div className="flex items-center gap-2 sm:gap-4">
           {isFullscreen && (
@@ -1985,7 +1969,7 @@ function CanvasPageInner() {
       {/* Shortcut help panel */}
       {showHelp && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-xl backdrop-saturate-150" onClick={() => setShowHelp(false)}>
-          <div className="bg-surface rounded-2xl shadow-2xl border border-border-subtle w-[420px] max-w-[90vw] max-h-[80vh] overflow-y-auto animate-fade-in-scale" onClick={e => e.stopPropagation()}>
+          <div className="bg-surface rounded-2xl shadow-2xl border border-border-subtle w-140 max-w-[90vw] max-h-[80vh] overflow-y-auto animate-fade-in-scale" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between px-5 py-3 border-b border-border-subtle">
               <h3 className="text-sm font-bold">{t("canvas.shortcuts_title")}</h3>
               <button onClick={() => setShowHelp(false)} className="p-1 rounded hover:bg-main"><X className="w-4 h-4" /></button>

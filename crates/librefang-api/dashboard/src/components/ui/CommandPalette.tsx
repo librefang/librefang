@@ -95,7 +95,7 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
   }, {} as Record<string, CommandItem[]>);
 
   return (
-    <div className="fixed inset-0 z-[100] flex items-start justify-center pt-[15vh]">
+    <div className="fixed inset-0 z-100 flex items-start justify-center pt-[15vh]">
       <div className="fixed inset-0 bg-black/60 backdrop-blur-xl backdrop-saturate-150" onClick={onClose} />
       <div className="relative w-full max-w-xl max-w-[90vw] rounded-2xl border border-border-subtle bg-surface shadow-2xl overflow-hidden animate-fade-in-scale">
         <div className="flex items-center gap-3 border-b border-border-subtle px-4 py-4">

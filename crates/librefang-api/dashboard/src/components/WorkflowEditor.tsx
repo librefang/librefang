@@ -69,7 +69,7 @@ export function WorkflowEditor({ initialNodes = [], initialEdges = [], onSave, o
   }, [setNodes, t]);
 
   return (
-    <div className="fixed inset-0 z-[100] flex flex-col bg-main animate-in fade-in duration-300">
+    <div className="fixed inset-0 z-100 flex flex-col bg-main animate-in fade-in duration-300">
       <header className="flex items-center justify-between border-b border-border-subtle bg-surface px-6 py-4 shadow-sm">
         <div className="flex items-center gap-4">
           <button onClick={onClose} className="p-2 rounded-xl hover:bg-surface-hover text-text-dim transition-all">

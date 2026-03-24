@@ -6,7 +6,7 @@ export function ToastContainer() {
   const { toasts, removeToast } = useUIStore();
 
   return (
-    <div className="fixed bottom-6 right-6 z-[100] flex flex-col gap-2 pointer-events-none">
+    <div className="fixed bottom-6 right-6 z-100 flex flex-col gap-2 pointer-events-none">
       {toasts.map((toast) => (
         <ToastItem key={toast.id} {...toast} onDismiss={() => removeToast(toast.id)} />
       ))}

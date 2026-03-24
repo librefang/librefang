@@ -39,7 +39,6 @@ export function WorkflowsPage() {
   const [searchQuery, setSearchQuery] = useState("");
   const [activeTab, setActiveTab] = useState<"workflows" | "templates">("workflows");
   const [scheduleWorkflowId, setScheduleWorkflowId] = useState<string | null>(null);
-  const [scheduleCron, setScheduleCron] = useState("0 9 * * *");
 
   const workflowsQuery = useQuery({ queryKey: ["workflows", "list"], queryFn: listWorkflows, refetchInterval: REFRESH_MS });
   const runsQuery = useQuery({ queryKey: ["workflows", "runs", selectedWorkflowId], queryFn: () => listWorkflowRuns(selectedWorkflowId), enabled: Boolean(selectedWorkflowId) });
@@ -61,20 +60,6 @@ export function WorkflowsPage() {
     } catch { /* ignore */ }
   };
 
-  const handleCreateSchedule = async () => {
-    if (!scheduleWorkflowId || !scheduleCron.trim()) return;
-    const wf = workflows.find(w => w.id === scheduleWorkflowId);
-    try {
-      await createSchedule({
-        name: `${wf?.name || "workflow"} schedule`,
-        cron: scheduleCron.trim(),
-        workflow_id: scheduleWorkflowId,
-        enabled: true,
-      });
-      setScheduleWorkflowId(null);
-      await queryClient.invalidateQueries({ queryKey: ["workflows"] });
-    } catch { /* ignore */ }
-  };
 
   const handleDelete = async (id: string) => {
     if (confirmDeleteId !== id) { setConfirmDeleteId(id); return; }

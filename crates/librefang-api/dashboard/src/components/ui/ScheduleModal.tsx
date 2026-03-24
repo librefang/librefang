@@ -107,8 +107,8 @@ export function ScheduleModal({ title, subtitle, initialCron, onSave, onClose }:
   const wdShort = isZh ? ["一", "二", "三", "四", "五", "六", "日"] : ["M", "T", "W", "T", "F", "S", "S"];
 
   return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-sm" onClick={onClose}>
-      <div className="w-full max-w-[420px] mx-4 rounded-2xl bg-surface border border-border-subtle shadow-2xl animate-fade-in-scale" onClick={e => e.stopPropagation()}>
+    <div className="fixed inset-0 z-100 flex items-center justify-center bg-black/50 backdrop-blur-sm" onClick={onClose}>
+      <div className="w-full max-w-140 mx-4 rounded-2xl bg-surface border border-border-subtle shadow-2xl animate-fade-in-scale" onClick={e => e.stopPropagation()}>
         {/* Header */}
         <div className="p-5 pb-3">
           <h3 className="text-base font-black">{title}</h3>
