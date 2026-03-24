@@ -56,7 +56,12 @@ function OptionCard({ active, icon: Icon, label, onClick }: { active: boolean; i
 
 export function SettingsPage() {
   const { t, i18n } = useTranslation();
-  const { theme, toggleTheme, language, setLanguage, navLayout, setNavLayout } = useUIStore();
+  const theme = useUIStore((s) => s.theme);
+  const toggleTheme = useUIStore((s) => s.toggleTheme);
+  const language = useUIStore((s) => s.language);
+  const setLanguage = useUIStore((s) => s.setLanguage);
+  const navLayout = useUIStore((s) => s.navLayout);
+  const setNavLayout = useUIStore((s) => s.setNavLayout);
   const isZh = i18n.language === "zh";
   const [toolSearch, setToolSearch] = useState("");
 

@@ -60,15 +60,7 @@ if (typeof document !== "undefined" && !document.getElementById("hands-keyframes
 
 /* ── Inline metrics for active hand cards ─────────────────── */
 
-function HandMetricsInline({ instanceId }: { instanceId: string }) {
-  const statsQuery = useQuery({
-    queryKey: ["hands", "stats", instanceId],
-    queryFn: () => getHandStats(instanceId),
-    refetchInterval: REFRESH_MS,
-    enabled: !!instanceId,
-  });
-
-  const metrics = statsQuery.data?.metrics;
+function HandMetricsInline({ metrics }: { metrics?: Record<string, { value?: unknown; format?: string }> }) {
   if (!metrics || Object.keys(metrics).length === 0) return null;
 
   const entries = Object.entries(metrics).slice(0, 3);
@@ -443,6 +435,7 @@ function ActiveHandCard({
   onDeactivate,
   onDetail,
   isPending,
+  metrics,
 }: {
   hand: HandDefinitionItem;
   instance: HandInstanceItem;
@@ -450,6 +443,7 @@ function ActiveHandCard({
   onDeactivate: (id: string) => void;
   onDetail: (hand: HandDefinitionItem) => void;
   isPending: boolean;
+  metrics?: Record<string, { value?: unknown; format?: string }>;
 }) {
   const { t } = useTranslation();
   const isPaused = instance.status === "paused";
@@ -483,7 +477,7 @@ function ActiveHandCard({
           )}
         </div>
         {instance.instance_id && (
-          <HandMetricsInline instanceId={instance.instance_id} />
+          <HandMetricsInline metrics={metrics} />
         )}
       </div>
       <div
@@ -687,6 +681,23 @@ export function HandsPage() {
 
   const hands = handsQuery.data ?? [];
   const instances = activeQuery.data ?? [];
+
+  // Batch-fetch stats for all active instances (avoids N+1 queries)
+  const activeInstanceIds = useMemo(() => instances.map(i => i.instance_id).filter(Boolean), [instances]);
+  const allStatsQuery = useQuery({
+    queryKey: ["hands", "stats", "batch", activeInstanceIds],
+    queryFn: async () => {
+      const results: Record<string, HandStatsResponse> = {};
+      await Promise.all(activeInstanceIds.map(async id => {
+        try { results[id] = await getHandStats(id); } catch { /* skip */ }
+      }));
+      return results;
+    },
+    refetchInterval: REFRESH_MS,
+    enabled: activeInstanceIds.length > 0,
+  });
+  const allStats = allStatsQuery.data ?? {};
+
   const activeHandIds = useMemo(
     () => new Set(instances.map((i) => i.hand_id).filter(Boolean)),
     [instances],
@@ -849,6 +860,7 @@ export function HandsPage() {
                 onDeactivate={handleDeactivate}
                 onDetail={setDetailHand}
                 isPending={pendingId === hand.id || pendingId === instance.instance_id}
+                metrics={allStats[instance.instance_id]?.metrics}
               />
             ))}
           </div>

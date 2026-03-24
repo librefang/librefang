@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { getUsageSummary, listUsageByAgent, listUsageByModel, getUsageDaily, getBudgetStatus, updateBudget } from "../api";
 import { Card } from "../components/ui/Card";
@@ -31,9 +31,13 @@ export function AnalyticsPage() {
   const budgetMutation = useMutation({ mutationFn: updateBudget, onSuccess: () => queryClient.invalidateQueries({ queryKey: ["budget"] }) });
 
   const usage = usageQuery.data ?? null;
-  const usageByAgent = [...(usageByAgentQuery.data ?? [])].sort((a: any, b: any) => (b.total_cost_usd ?? 0) - (a.total_cost_usd ?? 0));
+  const usageByAgent = useMemo(() => [...(usageByAgentQuery.data ?? [])].sort((a: any, b: any) => (b.total_cost_usd ?? 0) - (a.total_cost_usd ?? 0)), [usageByAgentQuery.data]);
   const usageByModel = usageByModelQuery.data ?? [];
   const daily = dailyQuery.data ?? null;
+
+  const agentChartData = useMemo(() => usageByAgent.map(u => ({ name: u.name || u.agent_id?.slice(0, 8), cost: u.cost ?? 0 })), [usageByAgent]);
+  const modelChartData = useMemo(() => (usageByModel as any[]).map(m => ({ name: m.model?.slice(0, 20), cost: m.total_cost_usd ?? 0 })), [usageByModel]);
+  const dailyChartData = useMemo(() => (daily?.days || []).slice(-30).map((d: any) => ({ ...d, date: (d.date || "").slice(5), cost: d.cost_usd || 0 })), [daily]);
 
   const [budgetForm, setBudgetForm] = useState<Record<string, string>>({});
 
@@ -86,7 +90,7 @@ export function AnalyticsPage() {
                 <EmptyState icon={<Users />} title={t("common.no_data")} description={t("analytics.no_agent_data")} />
               ) : (
                 <ResponsiveContainer width="100%" height={Math.max(usageByAgent.length * 36, 100)}>
-                  <BarChart data={usageByAgent.map(u => ({ name: u.name || u.agent_id?.slice(0, 8), cost: u.cost ?? 0 }))} layout="vertical" margin={{ left: 0, right: 20 }}>
+                  <BarChart data={agentChartData} layout="vertical" margin={{ left: 0, right: 20 }}>
                     <CartesianGrid strokeDasharray="3 3" opacity={0.2} horizontal={false} />
                     <XAxis type="number" tick={{ fontSize: 10 }} tickFormatter={v => `$${v}`} axisLine={false} tickLine={false} />
                     <YAxis type="category" dataKey="name" tick={{ fontSize: 10 }} width={100} axisLine={false} tickLine={false} />
@@ -105,7 +109,7 @@ export function AnalyticsPage() {
                 <EmptyState icon={<Cpu />} title={t("common.no_data")} description={t("analytics.no_model_data")} />
               ) : (
                 <ResponsiveContainer width="100%" height={Math.max(usageByModel.length * 36, 100)}>
-                  <BarChart data={usageByModel.map(m => ({ name: m.model?.slice(0, 20), cost: m.total_cost_usd ?? 0 }))} layout="vertical" margin={{ left: 0, right: 20 }}>
+                  <BarChart data={modelChartData} layout="vertical" margin={{ left: 0, right: 20 }}>
                     <CartesianGrid strokeDasharray="3 3" opacity={0.2} horizontal={false} />
                     <XAxis type="number" tick={{ fontSize: 10 }} tickFormatter={v => `$${v}`} axisLine={false} tickLine={false} />
                     <YAxis type="category" dataKey="name" tick={{ fontSize: 10 }} width={120} axisLine={false} tickLine={false} />
@@ -126,7 +130,7 @@ export function AnalyticsPage() {
               <EmptyState icon={<TrendingUp />} title={t("common.no_data")} description={t("analytics.no_trend_data")} />
             ) : (
               <ResponsiveContainer width="100%" height={200}>
-                <AreaChart data={(daily.days || []).slice(-30).map(d => ({ ...d, date: (d.date || "").slice(5), cost: d.cost_usd || 0 }))}>
+                <AreaChart data={dailyChartData}>
                   <defs>
                     <linearGradient id="costGrad" x1="0" y1="0" x2="0" y2="1">
                       <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.3} />

@@ -634,7 +634,7 @@ function CanvasPageInner() {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const { t: routeTimestamp, wf: routeWorkflowId } = useSearch({ from: "/canvas" });
-  const { theme } = useUIStore();
+  const theme = useUIStore((s) => s.theme);
   const { fitView } = useReactFlow();
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);

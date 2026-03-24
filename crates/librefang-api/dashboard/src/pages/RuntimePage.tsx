@@ -80,19 +80,19 @@ export function RuntimePage() {
 
   // --- Queries ---
   const snapshotQuery = useQuery<DashboardSnapshot>({
-    queryKey: ["dashboard", "snapshot", "runtime"],
+    queryKey: ["dashboard", "snapshot"],
     queryFn: loadDashboardSnapshot,
     refetchInterval: REFRESH_MS,
   });
   const versionQuery = useQuery<VersionResponse>({
     queryKey: ["version"],
     queryFn: getVersionInfo,
-    refetchInterval: REFRESH_MS * 2,
+    staleTime: Infinity,
   });
   const queueQuery = useQuery<QueueStatusResponse>({
     queryKey: ["queue", "status"],
     queryFn: getQueueStatus,
-    refetchInterval: 5000,
+    refetchInterval: 15000,
   });
   const healthDetailQuery = useQuery<HealthDetailResponse>({
     queryKey: ["health", "detail"],
@@ -122,7 +122,7 @@ export function RuntimePage() {
   const taskStatusQuery = useQuery({
     queryKey: ["tasks", "status"],
     queryFn: getTaskQueueStatus,
-    refetchInterval: 5000,
+    refetchInterval: 15000,
   });
   const taskListQuery = useQuery({
     queryKey: ["tasks", "list"],
@@ -625,7 +625,7 @@ export function RuntimePage() {
               <div className="mt-5 pt-4 border-t border-border-subtle flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <span className="relative flex h-2.5 w-2.5">
-                    <span className="absolute inline-flex h-full w-full rounded-full bg-success opacity-75 animate-ping" />
+                    <span className="absolute inline-flex h-full w-full rounded-full bg-success opacity-75 animate-pulse" />
                     <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-success" />
                   </span>
                   <span className="text-xs font-bold">{t("runtime.status")}</span>

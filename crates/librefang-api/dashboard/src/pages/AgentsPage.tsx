@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
 import { listAgents, getAgentDetail, spawnAgent, suspendAgent, resumeAgent } from "../api";
@@ -47,24 +47,20 @@ export function AgentsPage() {
   });
 
   const agents = agentsQuery.data ?? [];
-  const filteredAgents = agents
+  const filteredAgents = useMemo(() => agents
     .filter(a => a.name.toLowerCase().includes(search.toLowerCase()) || a.id.toLowerCase().includes(search.toLowerCase()))
     .sort((a, b) => {
-      // 1. Suspended agents last
       const aSusp = (a.state || "").toLowerCase() === "suspended" ? 1 : 0;
       const bSusp = (b.state || "").toLowerCase() === "suspended" ? 1 : 0;
       if (aSusp !== bSusp) return aSusp - bSusp;
-      // 2. Core agents first, hands second
       const aHand = a.name.includes("-hand") ? 1 : 0;
       const bHand = b.name.includes("-hand") ? 1 : 0;
       if (aHand !== bHand) return aHand - bHand;
-      // 3. Alphabetical
       return a.name.localeCompare(b.name);
-    });
+    }), [agents, search]);
 
-  // Group: core agents and hands
-  const coreAgents = filteredAgents.filter(a => !a.name.includes("-hand"));
-  const handAgents = filteredAgents.filter(a => a.name.includes("-hand"));
+  const coreAgents = useMemo(() => filteredAgents.filter(a => !a.name.includes("-hand")), [filteredAgents]);
+  const handAgents = useMemo(() => filteredAgents.filter(a => a.name.includes("-hand")), [filteredAgents]);
 
   const renderAgentCard = (agent: any) => {
     const isSuspended = (agent.state || "").toLowerCase() === "suspended";
