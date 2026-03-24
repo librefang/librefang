@@ -24,7 +24,7 @@ function AuthDialog({ onAuthenticated }: { onAuthenticated: () => void }) {
   }
 
   return (
-    <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/70 backdrop-blur-md">
+    <div className="fixed inset-0 z-200 flex items-center justify-center bg-black/70 backdrop-blur-md">
       <div className="w-full max-w-md mx-4 animate-fade-in-scale">
         <div className="rounded-2xl border border-border-subtle bg-surface shadow-2xl p-8">
           <div className="flex flex-col items-center mb-6">
@@ -172,7 +172,7 @@ export function App() {
         fixed inset-y-0 left-0 z-50 flex w-[220px] flex-col border-r border-border-subtle bg-surface lg:static lg:translate-x-0
         transition-[width,transform] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]
         ${isMobileMenuOpen ? "translate-x-0 shadow-2xl" : "-translate-x-full"}
-        ${isSidebarCollapsed ? "lg:w-[72px]" : "lg:w-[280px]"}
+        ${isSidebarCollapsed ? "lg:w-24" : "lg:w-[280px]"}
       `}>
         {/* Sidebar Header */}
         <div className={`flex h-16 items-center border-b border-border-subtle transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] ${
@@ -217,7 +217,7 @@ export function App() {
                   <>
                     <button
                       onClick={() => toggleNavGroup(group.key)}
-                      className={`flex items-center justify-between px-3 text-[11px] font-bold uppercase tracking-[0.1em] text-text-dim/80 hover:text-brand transition-colors ${isSidebarCollapsed ? "lg:max-h-0 lg:opacity-0 lg:overflow-hidden lg:p-0! lg:m-0! lg:mb-0!" : "lg:max-h-20 lg:opacity-100"} transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] overflow-hidden`}
+                      className={`flex items-center justify-between px-3 text-[11px] font-bold uppercase tracking-widest text-text-dim/80 hover:text-brand transition-colors ${isSidebarCollapsed ? "lg:max-h-0 lg:opacity-0 lg:overflow-hidden lg:p-0! lg:m-0! lg:mb-0!" : "lg:max-h-20 lg:opacity-100"} transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] overflow-hidden`}
                     >
                       {group.label}
                       <ChevronDown className={`h-3 w-3 transition-transform ${collapsedNavGroups[group.key] ? "-rotate-90" : ""}`} />
@@ -240,7 +240,7 @@ export function App() {
                 ) : (
                   // 分组布局 - 全部显示
                   <>
-                    <h3 className={`px-3 text-[11px] font-bold uppercase tracking-[0.1em] text-text-dim/80 ${isSidebarCollapsed ? "lg:max-h-0 lg:opacity-0 lg:overflow-hidden lg:p-0! lg:m-0! lg:mb-0!" : "lg:max-h-20 lg:opacity-100"} transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] overflow-hidden`}>
+                    <h3 className={`px-3 text-[11px] font-bold uppercase tracking-widest text-text-dim/80 ${isSidebarCollapsed ? "lg:max-h-0 lg:opacity-0 lg:overflow-hidden lg:p-0! lg:m-0! lg:mb-0!" : "lg:max-h-20 lg:opacity-100"} transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] overflow-hidden`}>
                       {group.label}
                     </h3>
                     <div className="mt-1 flex flex-col gap-0.5">
@@ -266,7 +266,7 @@ export function App() {
 
         {/* Sidebar Footer */}
         <div className={`border-t border-border-subtle p-4 ${isSidebarCollapsed ? "lg:max-h-0 lg:opacity-0 lg:overflow-hidden lg:p-0! lg:m-0! lg:mb-0!" : "lg:max-h-28 lg:opacity-100"} transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] overflow-hidden`}>
-          <div className="rounded-xl bg-gradient-to-r from-success/5 to-transparent p-3 border border-success/10">
+          <div className="rounded-xl bg-linear-to-r from-success/5 to-transparent p-3 border border-success/10">
             <p className="text-[10px] font-bold text-text-dim uppercase tracking-wider">{t("common.status")}</p>
             <div className="mt-2 flex items-center gap-2">
               <span className="relative flex h-2 w-2 shrink-0">

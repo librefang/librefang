@@ -129,7 +129,7 @@ function ChannelCard({ channel: c, isSelected, viewMode, onSelect, onConfigure, 
   // Grid view
   return (
     <Card hover padding="none" className={`flex flex-col overflow-hidden group transition-all ${isSelected ? "ring-2 ring-brand" : ""}`}>
-      <div className={`h-1.5 bg-gradient-to-r ${c.configured ? "from-success via-success/60 to-success/30" : "from-brand via-brand/60 to-brand/30"}`} />
+      <div className={`h-1.5 bg-linear-to-r ${c.configured ? "from-success via-success/60 to-success/30" : "from-brand via-brand/60 to-brand/30"}`} />
       <div className="p-5 flex-1 flex flex-col">
         {/* Header */}
         <div className="flex items-start justify-between gap-3 mb-4">
@@ -140,7 +140,7 @@ function ChannelCard({ channel: c, isSelected, viewMode, onSelect, onConfigure, 
             >
               {isSelected ? <CheckSquare className="w-5 h-5 text-brand" /> : <Square className="w-5 h-5" />}
             </button>
-            <div className={`w-10 h-10 rounded-lg flex items-center justify-center text-xl shadow-sm ${c.configured ? "bg-gradient-to-br from-success/10 to-success/5 border border-success/20" : "bg-gradient-to-br from-brand/10 to-brand/5 border border-brand/20"}`}>
+            <div className={`w-10 h-10 rounded-lg flex items-center justify-center text-xl shadow-sm ${c.configured ? "bg-linear-to-br from-success/10 to-success/5 border border-success/20" : "bg-linear-to-br from-brand/10 to-brand/5 border border-brand/20"}`}>
               {getChannelIcon(c.name)}
             </div>
             <div className="min-w-0">
@@ -200,7 +200,7 @@ function DetailsModal({ channel, onClose, onConfigure, t }: {
     <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-black/50 backdrop-blur-sm" onClick={onClose}>
       <div className="bg-surface rounded-2xl border border-border-subtle w-full sm:max-w-lg shadow-2xl rounded-t-2xl sm:rounded-2xl max-h-[90vh] overflow-y-auto animate-fade-in-scale" onClick={e => e.stopPropagation()}>
         {/* Header */}
-        <div className={`h-2 bg-gradient-to-r ${channel.configured ? "from-success via-success/60 to-success/30" : "from-brand via-brand/60 to-brand/30"} rounded-t-2xl`} />
+        <div className={`h-2 bg-linear-to-r ${channel.configured ? "from-success via-success/60 to-success/30" : "from-brand via-brand/60 to-brand/30"} rounded-t-2xl`} />
         <div className="p-6 border-b border-border-subtle">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
