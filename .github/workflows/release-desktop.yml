@@ -156,7 +156,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ github.ref_name }}
-          releaseName: "LibreFang ${{ github.ref_name }}"
+          releaseName: "${{ github.ref_name }}"
           releaseDraft: false
           prerelease: ${{ contains(github.ref, '-beta') || contains(github.ref, '-rc') }}
           includeUpdaterJson: true
@@ -176,7 +176,7 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.MAC_NOTARIZE_TEAM_ID }}
         with:
           tagName: ${{ github.ref_name }}
-          releaseName: "LibreFang ${{ github.ref_name }}"
+          releaseName: "${{ github.ref_name }}"
           releaseDraft: false
           prerelease: ${{ contains(github.ref, '-beta') || contains(github.ref, '-rc') }}
           includeUpdaterJson: true
