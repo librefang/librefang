@@ -8,6 +8,7 @@ import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
 import { FileText, Search, Download } from "lucide-react";
+import { truncateId } from "../lib/string";
 
 const REFRESH_MS = 5000;
 
@@ -104,7 +105,7 @@ export function LogsPage() {
               const time = formatTime(l.timestamp);
               const detail = l.detail || l.message || "-";
               const reason = l.outcome && l.outcome !== detail ? l.outcome : "";
-              const agentId = l.agent_id ? l.agent_id.slice(0, 8) : "";
+              const agentId = l.agent_id ? truncateId(l.agent_id) : "";
               return (
                 <div key={l.seq || l.id || i} className="flex flex-col sm:flex-row gap-1 sm:gap-4 p-2 hover:bg-surface-hover rounded transition-colors items-start">
                   <div className="flex items-center gap-2 sm:contents">

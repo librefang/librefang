@@ -34,6 +34,7 @@ import {
   Copy, ClipboardPaste, LayoutGrid,
   Download, Upload, HelpCircle, Scan, Check, LayoutTemplate, Search, Tag, BookCopy
 } from "lucide-react";
+import { truncateId } from "../lib/string";
 
 // Node type configuration — n8n-style color scheme
 const NODE_TYPES = [
@@ -1907,7 +1908,7 @@ function CanvasPageInner() {
                 <div className="flex items-center gap-2">
                   <span className="text-xs font-bold text-success">{t("canvas.run_result")}</span>
                   <Badge variant="success">{runResult.status}</Badge>
-                  {runResult.run_id && <span className="text-[9px] text-text-dim font-mono">{runResult.run_id.slice(0, 8)}</span>}
+                  {runResult.run_id && <span className="text-[9px] text-text-dim font-mono">{truncateId(runResult.run_id)}</span>}
                 </div>
                 <button onClick={() => setRunResult(null)} className="p-1 rounded hover:bg-main"><X className="w-3.5 h-3.5" /></button>
               </div>

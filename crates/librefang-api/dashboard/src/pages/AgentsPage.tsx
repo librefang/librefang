@@ -13,17 +13,10 @@ import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { Avatar } from "../components/ui/Avatar";
 import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap } from "lucide-react";
+import { truncateId } from "../lib/string";
+import { getStatusVariant } from "../lib/status";
 
 const REFRESH_MS = 30000;
-
-function getStatusVariant(status?: string) {
-  const value = (status ?? "").toLowerCase();
-  if (value === "running") return "success";
-  if (value === "suspended") return "warning";
-  if (value === "idle") return "warning";
-  if (value === "error" || value === "crashed") return "error";
-  return "default";
-}
 
 export function AgentsPage() {
   const { t } = useTranslation();
@@ -83,7 +76,7 @@ export function AgentsPage() {
             </div>
             <div className="min-w-0">
               <h2 className="text-base font-black tracking-tight truncate">{agent.name}</h2>
-              <p className="text-[10px] font-mono text-text-dim/50 truncate mt-0.5">{agent.id.slice(0, 8)}</p>
+              <p className="text-[10px] font-mono text-text-dim/50 truncate mt-0.5">{truncateId(agent.id)}</p>
             </div>
           </div>
           <Badge variant={getStatusVariant(agent.state)} dot>
@@ -201,7 +194,7 @@ export function AgentsPage() {
                           </Badge>
                         </div>
                         <div className="flex items-center gap-2 sm:gap-3 mt-0.5 sm:mt-1 text-[9px] sm:text-[10px] text-text-dim/60">
-                          <span className="font-mono">{agent.id.slice(0, 8)}</span>
+                          <span className="font-mono">{truncateId(agent.id)}</span>
                           <span className="hidden sm:inline">{agent.model_name || t("common.unknown")}</span>
                           <span className="text-brand">{agent.model_provider}</span>
                         </div>
@@ -242,7 +235,7 @@ export function AgentsPage() {
                   </div>
                   <div>
                     <h3 className="text-lg font-black tracking-tight">{detailAgent.name}</h3>
-                    <p className="text-[10px] text-text-dim font-mono mt-0.5">{detailAgent.id?.slice(0, 16)}...</p>
+                    <p className="text-[10px] text-text-dim font-mono mt-0.5">{truncateId(detailAgent.id, 16)}</p>
                   </div>
                 </div>
                 <button onClick={() => setDetailAgent(null)} className="p-2 rounded-xl hover:bg-main transition-colors"><X className="w-4 h-4" /></button>

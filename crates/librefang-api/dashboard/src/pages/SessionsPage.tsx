@@ -10,6 +10,7 @@ import { PageHeader } from "../components/ui/PageHeader";
 import { ListSkeleton } from "../components/ui/Skeleton";
 import { useUIStore } from "../lib/store";
 import { Clock, Search, MessageCircle, Trash2, Play, Users } from "lucide-react";
+import { truncateId } from "../lib/string";
 
 const REFRESH_MS = 30000;
 
@@ -147,7 +148,7 @@ export function SessionsPage() {
                     </Badge>
                   </div>
                   <div className="flex items-center gap-2 sm:gap-3 mt-0.5 sm:mt-1 text-[9px] sm:text-[10px] text-text-dim/60">
-                    <span className="font-mono">{s.session_id.slice(0, 8)}</span>
+                    <span className="font-mono">{truncateId(s.session_id)}</span>
                     <span className="flex items-center gap-1"><Clock className="w-3 h-3" /> {formatTime(s.created_at || "")}</span>
                     {s.message_count !== undefined && (
                       <span className="flex items-center gap-1 hidden sm:flex"><MessageCircle className="w-3 h-3" /> {s.message_count}</span>

@@ -50,6 +50,7 @@ import {
 } from "lucide-react";
 import { PageHeader } from "../components/ui/PageHeader";
 import { ListSkeleton } from "../components/ui/Skeleton";
+import { truncateId } from "../lib/string";
 
 const REFRESH_MS = 15000;
 
@@ -234,7 +235,7 @@ function HandChatPanel({
             <div>
               <h3 className="text-sm font-bold">{handName}</h3>
               <p className="text-[9px] text-text-dim/60 font-mono">
-                {instanceId.slice(0, 12)}
+                {truncateId(instanceId, 12)}
               </p>
             </div>
           </div>
@@ -544,7 +545,7 @@ function HandDetailPanel({
             {instance && (
               <div className="p-3 rounded-xl bg-main/50 border border-border-subtle space-y-1.5">
                 <p className="text-[10px] text-text-dim/60 font-mono">
-                  {t("hands.instance")}: {instance.instance_id?.slice(0, 16)}
+                  {t("hands.instance")}: {truncateId(instance.instance_id, 16)}
                 </p>
                 {instance.agent_name && (
                   <p className="text-[10px] text-text-dim/60">

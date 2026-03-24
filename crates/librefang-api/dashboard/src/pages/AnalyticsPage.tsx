@@ -9,6 +9,7 @@ import { PageHeader } from "../components/ui/PageHeader";
 import { EmptyState } from "../components/ui/EmptyState";
 import { BarChart3, DollarSign, Shield, Save, Loader2, Cpu, Users, Zap, TrendingUp } from "lucide-react";
 import { CardSkeleton } from "../components/ui/Skeleton";
+import { truncateId } from "../lib/string";
 import { AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts";
 
 const REFRESH_MS = 30000;
@@ -79,7 +80,7 @@ export function AnalyticsPage() {
                 <EmptyState icon={<Users />} title={t("common.no_data")} description={t("analytics.no_agent_data")} />
               ) : (
                 <ResponsiveContainer width="100%" height={Math.max(usageByAgent.slice(0, 8).length * 36, 100)}>
-                  <BarChart data={usageByAgent.slice(0, 8).map(u => ({ name: u.name || u.agent_id?.slice(0, 8), cost: u.cost ?? 0 }))} layout="vertical" margin={{ left: 0, right: 20 }}>
+                  <BarChart data={usageByAgent.slice(0, 8).map(u => ({ name: u.name || truncateId(u.agent_id), cost: u.cost ?? 0 }))} layout="vertical" margin={{ left: 0, right: 20 }}>
                     <CartesianGrid strokeDasharray="3 3" opacity={0.2} horizontal={false} />
                     <XAxis type="number" tick={{ fontSize: 10 }} tickFormatter={v => `$${v}`} axisLine={false} tickLine={false} />
                     <YAxis type="category" dataKey="name" tick={{ fontSize: 10 }} width={100} axisLine={false} tickLine={false} />
