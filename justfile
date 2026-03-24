@@ -50,6 +50,8 @@ dash:
 
 # Start API daemon with dashboard dev server (hot reload)
 api:
+    launchctl remove ai.librefang.daemon 2>/dev/null; \
+    lsof -ti :4545 -sTCP:LISTEN 2>/dev/null | xargs kill -9 2>/dev/null; \
     for p in 5173 5174 5175 5176 5177 5178; do lsof -ti :$p -sTCP:LISTEN 2>/dev/null | xargs kill -9 2>/dev/null; done; sleep 1
     cd crates/librefang-api/dashboard && pnpm dev &
     (while ! curl -s http://127.0.0.1:5173/dashboard/ >/dev/null 2>&1; do sleep 2; done; \
