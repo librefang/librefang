@@ -225,7 +225,6 @@ jobs:
     name: Sync Homebrew Cask
     runs-on: ubuntu-latest
     needs: [desktop]
-    if: ${{ !contains(github.ref, '-beta') }}
     steps:
       - name: Check out tap repo
         uses: actions/checkout@v6
