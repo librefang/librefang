@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { listMemories, searchMemories, deleteMemory, getMemoryStats, addMemoryFromText, updateMemory, cleanupMemories, decayMemories, type MemoryStatsResponse, type MemoryItem } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
@@ -173,24 +173,26 @@ function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
     queryFn: () => fetch("/api/memory/config").then(r => r.json()),
   });
 
-  const [form, setForm] = useState<Record<string, any>>({});
+  const [form, setForm] = useState<Record<string, any> | null>(null);
   const [saving, setSaving] = useState(false);
 
   // Init form from API data
-  const data = configQuery.data;
-  if (data && Object.keys(form).length === 0) {
-    setForm({
-      embedding_provider: data.embedding_provider || "",
-      embedding_model: data.embedding_model || "",
-      embedding_api_key_env: data.embedding_api_key_env || "",
-      decay_rate: data.decay_rate ?? 0.05,
-      pm_enabled: data.proactive_memory?.enabled ?? true,
-      pm_auto_memorize: data.proactive_memory?.auto_memorize ?? true,
-      pm_auto_retrieve: data.proactive_memory?.auto_retrieve ?? true,
-      pm_extraction_model: data.proactive_memory?.extraction_model || "",
-      pm_max_retrieve: data.proactive_memory?.max_retrieve ?? 10,
-    });
-  }
+  useEffect(() => {
+    const data = configQuery.data;
+    if (data && !form) {
+      setForm({
+        embedding_provider: data.embedding_provider || "",
+        embedding_model: data.embedding_model || "",
+        embedding_api_key_env: data.embedding_api_key_env || "",
+        decay_rate: data.decay_rate ?? 0.05,
+        pm_enabled: data.proactive_memory?.enabled ?? true,
+        pm_auto_memorize: data.proactive_memory?.auto_memorize ?? true,
+        pm_auto_retrieve: data.proactive_memory?.auto_retrieve ?? true,
+        pm_extraction_model: data.proactive_memory?.extraction_model || "",
+        pm_max_retrieve: data.proactive_memory?.max_retrieve ?? 10,
+      });
+    }
+  }, [configQuery.data, form]);
 
   const handleSave = async () => {
     setSaving(true);
@@ -238,7 +240,7 @@ function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
           <p className="text-xs text-text-dim mt-0.5">{t("memory.config_desc", { defaultValue: "Changes are written to config.toml. Restart required for full effect." })}</p>
         </div>
 
-        {configQuery.isLoading ? (
+        {configQuery.isLoading || !form ? (
           <div className="p-6 text-center"><Loader2 className="w-5 h-5 animate-spin mx-auto" /></div>
         ) : (
           <div className="px-6 pb-4 space-y-4 max-h-[60vh] overflow-y-auto">
@@ -248,8 +250,13 @@ function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <span className={labelCls}>Provider</span>
-                  <input value={form.embedding_provider ?? ""} onChange={e => setForm({ ...form, embedding_provider: e.target.value })}
-                    placeholder="openai" className={inputCls} />
+                  <select value={form.embedding_provider ?? ""} onChange={e => setForm({ ...form, embedding_provider: e.target.value })} className={inputCls}>
+                    <option value="">Auto-detect</option>
+                    <option value="openai">OpenAI</option>
+                    <option value="ollama">Ollama</option>
+                    <option value="gemini">Gemini</option>
+                    <option value="minimax">MiniMax</option>
+                  </select>
                 </div>
                 <div>
                   <span className={labelCls}>Model</span>
@@ -518,7 +525,7 @@ export function MemoryPage() {
                   </Button>
                 </div>
               </div>
-              <MarkdownContent className="text-xs text-text-dim leading-relaxed">
+              <MarkdownContent className="text-xs text-text-dim leading-relaxed h-16 overflow-y-auto">
                 {m.content || t("common.no_data")}
               </MarkdownContent>
               {m.created_at && (
