@@ -118,7 +118,10 @@
     "total_memories": "总记忆数", "importance": "重要性",
     "cleanup": "清理", "decay": "衰减", "add": "添加",
     "filter_all": "全部", "showing": "显示 {{count}} / {{total}} 条",
-    "no_memories": "暂无记忆", "created": "创建于"
+    "no_memories": "暂无记忆", "created": "创建于",
+    "config_title": "记忆配置", "config_desc": "修改后写入 config.toml，重启后生效。",
+    "embedding_provider": "向量引擎", "extraction_model": "提取模型", "proactive": "主动记忆",
+    "proactive_enabled": "启用", "auto_memorize": "自动记忆", "auto_retrieve": "自动召回"
   },
   "comms": {
     "bus": "通信总线", "subtitle": "实时消息流量和连接性。",
@@ -223,7 +226,17 @@
     "title": "运行时", "subtitle": "引擎状态与资源管理。", "kernel": "运行时环境",
     "environment": "运行环境", "engine_version": "引擎版本", "system_uptime": "系统运行时间",
     "engine": "引擎信息", "git_hash": "Git 提交", "build_time": "构建时间",
-    "system": "系统状态", "queue": "任务队列", "pending_tasks": "待处理", "running_tasks": "运行中", "completed_today": "今日完成", "active_agents": "活跃智能体", "status": "状态"
+    "system": "系统状态", "queue": "任务队列", "pending_tasks": "待处理", "running_tasks": "运行中", "completed_today": "今日完成", "active_agents": "活跃智能体", "status": "状态",
+    "hostname": "主机名", "platform": "平台", "rust_version": "Rust 版本",
+    "config": "运行配置", "default_provider": "默认供应商", "default_model": "默认模型",
+    "api_listen": "API 监听地址", "home_dir": "主目录", "log_level": "日志级别", "network_enabled": "网络",
+    "memory_used": "内存", "sessions": "会话数",
+    "health_checks": "健康检查", "all_passed": "全部通过", "degraded": "有异常",
+    "queue_config": "队列配置", "max_depth_agent": "单 Agent 最大深度", "max_depth_global": "全局最大深度", "task_ttl": "任务 TTL",
+    "lane": "通道", "capacity": "容量", "no_lanes": "暂无队列通道",
+    "enabled": "已启用", "disabled": "已禁用",
+    "providers": "供应商", "channels": "通道", "skills": "技能", "workflows": "工作流",
+    "resources": "资源概览"
   },
   "logs": {
     "title": "日志", "subtitle": "实时系统日志。", "export_json": "导出 JSON",

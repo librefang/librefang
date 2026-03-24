@@ -117,7 +117,10 @@
     "total_memories": "Total Memories", "importance": "Importance",
     "cleanup": "Cleanup", "decay": "Decay", "add": "Add",
     "filter_all": "All", "showing": "Showing {{count}} / {{total}}",
-    "no_memories": "No memories yet", "created": "Created"
+    "no_memories": "No memories yet", "created": "Created",
+    "config_title": "Memory Configuration", "config_desc": "Changes are written to config.toml. Restart required for full effect.",
+    "embedding_provider": "Embedding", "extraction_model": "Extraction", "proactive": "Proactive",
+    "proactive_enabled": "Enabled", "auto_memorize": "Auto Memorize", "auto_retrieve": "Auto Retrieve"
   },
   "comms": {
     "bus": "Communication Bus", "subtitle": "Real-time message traffic and connectivity.",
@@ -217,7 +220,17 @@
     "title": "Runtime", "subtitle": "Engine status and resource management.", "kernel": "Kernel Execution Environment",
     "environment": "Environment", "engine_version": "Engine Version", "system_uptime": "System Uptime",
     "engine": "Engine Info", "git_hash": "Git Commit", "build_time": "Build Time",
-    "system": "System Status", "queue": "Task Queue", "pending_tasks": "Pending", "running_tasks": "Running", "completed_today": "Completed Today", "active_agents": "Active Agents", "status": "Status"
+    "system": "System Status", "queue": "Task Queue", "pending_tasks": "Pending", "running_tasks": "Running", "completed_today": "Completed Today", "active_agents": "Active Agents", "status": "Status",
+    "hostname": "Hostname", "platform": "Platform", "rust_version": "Rust Version",
+    "config": "Runtime Config", "default_provider": "Default Provider", "default_model": "Default Model",
+    "api_listen": "API Listen", "home_dir": "Home Directory", "log_level": "Log Level", "network_enabled": "Network",
+    "memory_used": "Memory", "sessions": "Sessions",
+    "health_checks": "Health Checks", "all_passed": "All Passed", "degraded": "Degraded",
+    "queue_config": "Queue Config", "max_depth_agent": "Max Depth / Agent", "max_depth_global": "Max Depth Global", "task_ttl": "Task TTL",
+    "lane": "Lane", "capacity": "Capacity", "no_lanes": "No queue lanes",
+    "enabled": "Enabled", "disabled": "Disabled",
+    "providers": "Providers", "channels": "Channels", "skills": "Skills", "workflows": "Workflows",
+    "resources": "Resource Summary"
   },
   "telemetry": {
     "badge": "Observability", "title": "Telemetry", "subtitle": "System metrics, LLM usage, and HTTP observability.",
