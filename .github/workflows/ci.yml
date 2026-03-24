@@ -158,7 +158,26 @@ jobs:
             patchelf
       - name: Build tests
         run: cargo test --workspace --no-run
-      - name: Run tests
+      - name: Run tests per crate
         env:
-          RUST_TEST_THREADS: "2"
-        run: cargo test --workspace
+          RUST_TEST_THREADS: "1"
+        run: |
+          for crate in \
+            librefang-types \
+            librefang-wire \
+            librefang-telemetry \
+            librefang-memory \
+            librefang-channels \
+            librefang-skills \
+            librefang-hands \
+            librefang-extensions \
+            librefang-kernel \
+            librefang-api \
+            librefang-runtime \
+            librefang-migrate \
+            librefang-testing \
+            xtask; do
+            echo "::group::Testing $crate"
+            cargo test -p "$crate" && echo "✓ $crate" || exit 1
+            echo "::endgroup::"
+          done
