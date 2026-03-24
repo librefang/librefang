@@ -28,6 +28,7 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DDHH).
 - Add 8GB swap to prevent Ubuntu OOM kill (exit 143) (#1573) (@houko)
 - Split runtime tests to prevent Ubuntu OOM kill (#1574) (@houko)
 - Feishu WS endpoint fails to parse negative ClientConfig values (#1578) (@houko)
+- Use PAT for tag push to trigger release workflows (#1581) (@houko)
 
 ### Performance
 
