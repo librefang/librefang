@@ -157,7 +157,7 @@ memory_write = ["self.*"]
 // ---------------------------------------------------------------------------
 
 /// Test: Concurrent agent spawns — verify kernel handles parallel agent creation.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 #[ignore] // Flaky: race condition in concurrent agent lifecycle
 async fn load_concurrent_agent_spawns() {
     let server = start_test_server().await;
@@ -213,7 +213,7 @@ async fn load_concurrent_agent_spawns() {
 }
 
 /// Test: API endpoint latency — measure p50/p95/p99 for health, status, list agents.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn load_endpoint_latency() {
     let server = start_test_server().await;
     let client = librefang_runtime::http_client::new_client();
@@ -277,7 +277,7 @@ async fn load_endpoint_latency() {
 }
 
 /// Test: Concurrent reads — many clients hitting the same endpoints simultaneously.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn load_concurrent_reads() {
     let server = start_test_server().await;
     let client = librefang_runtime::http_client::new_client();
@@ -335,7 +335,7 @@ async fn load_concurrent_reads() {
 }
 
 /// Test: Session management under load — create, list, and switch sessions.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn load_session_management() {
     let server = start_test_server().await;
     let client = librefang_runtime::http_client::new_client();
@@ -436,7 +436,7 @@ async fn load_session_management() {
 }
 
 /// Test: Workflow creation and listing under load.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn load_workflow_operations() {
     let server = start_test_server().await;
     let client = librefang_runtime::http_client::new_client();
@@ -493,7 +493,10 @@ async fn load_workflow_operations() {
         .json()
         .await
         .unwrap();
-    let wf_count = workflows.as_array().map(|a| a.len()).unwrap_or(0);
+    let wf_count = workflows["workflows"]
+        .as_array()
+        .map(|a| a.len())
+        .unwrap_or(0);
     eprintln!(
         "  [LOAD] Listed {wf_count} workflows in {:.1}ms",
         start.elapsed().as_secs_f64() * 1000.0
@@ -502,7 +505,7 @@ async fn load_workflow_operations() {
 }
 
 /// Test: Agent spawn + kill cycle — stress the registry.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 #[ignore] // Flaky: race condition in spawn/kill timing
 async fn load_spawn_kill_cycle() {
     let server = start_test_server().await;
@@ -559,7 +562,7 @@ async fn load_spawn_kill_cycle() {
 }
 
 /// Test: Prometheus metrics endpoint under sustained load.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn load_metrics_sustained() {
     let server = start_test_server().await;
     let client = librefang_runtime::http_client::new_client();
