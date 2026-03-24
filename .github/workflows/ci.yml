@@ -154,4 +154,9 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev \
             patchelf
-      - run: cargo test --workspace
+      - name: Build tests
+        run: cargo test --workspace --no-run
+      - name: Run tests
+        env:
+          RUST_TEST_THREADS: "2"
+        run: cargo test --workspace
