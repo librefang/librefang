@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { formatDateTime } from "../lib/datetime";
 import { formatCost } from "../lib/format";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -553,7 +554,7 @@ function HandDetailPanel({
                 {instance.activated_at && (
                   <p className="text-[10px] text-text-dim/60">
                     {t("hands.activated_at")}:{" "}
-                    {new Date(instance.activated_at).toLocaleString()}
+                    {formatDateTime(instance.activated_at)}
                   </p>
                 )}
               </div>

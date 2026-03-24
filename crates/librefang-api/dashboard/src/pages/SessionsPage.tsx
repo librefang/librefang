@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { formatRelativeTime } from "../lib/datetime";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { deleteSession, listAgents, listSessions, switchAgentSession } from "../api";
@@ -76,9 +77,7 @@ export function SessionsPage() {
     const now = new Date();
     const diff = now.getTime() - d.getTime();
     if (diff < 60000) return t("sessions.just_now");
-    if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`;
-    if (diff < 86400000) return `${Math.floor(diff / 3600000)}h ago`;
-    return d.toLocaleDateString();
+    return formatRelativeTime(ts);
   };
 
   return (

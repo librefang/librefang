@@ -1,4 +1,5 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
+import { formatTime, formatDateTime } from "../lib/datetime";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { listProviders, testProvider, setProviderKey, deleteProviderKey, setProviderUrl } from "../api";
@@ -124,7 +125,7 @@ function ProviderCard({ provider: p, isSelected, pendingId, viewMode, onSelect, 
           </div>
           {p.last_tested && (
             <div className="text-center w-20">
-              <p className="text-[10px] font-mono text-text-dim">{new Date(p.last_tested).toLocaleTimeString()}</p>
+              <p className="text-[10px] font-mono text-text-dim">{formatTime(p.last_tested)}</p>
               <p className="text-[8px] uppercase text-text-dim">{t("providers.last_test")}</p>
             </div>
           )}
@@ -264,7 +265,7 @@ function ProviderCard({ provider: p, isSelected, pendingId, viewMode, onSelect, 
             <div className="flex items-center gap-2 text-xs">
               <Activity className="w-3 h-3 text-text-dim/50 shrink-0" />
               <span className="text-text-dim font-mono text-[10px]">
-                {t("providers.last_test")}: {new Date(p.last_tested).toLocaleTimeString()}
+                {t("providers.last_test")}: {formatTime(p.last_tested)}
               </span>
             </div>
           )}
@@ -384,7 +385,7 @@ function DetailsModal({ provider, onClose, onTest, pendingId, t }: {
               {provider.last_tested && (
                 <div className="flex justify-between items-center p-3 rounded-lg bg-main/20">
                   <span className="text-xs font-bold text-text-dim">{t("providers.last_test")}</span>
-                  <span className="text-xs font-mono text-text-main">{new Date(provider.last_tested).toLocaleString()}</span>
+                  <span className="text-xs font-mono text-text-main">{formatDateTime(provider.last_tested)}</span>
                 </div>
               )}
             </div>

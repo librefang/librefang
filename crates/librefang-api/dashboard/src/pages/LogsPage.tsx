@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { formatTime } from "../lib/datetime";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { listAuditRecent } from "../api";
@@ -100,7 +101,7 @@ export function LogsPage() {
               const isError = outcome.startsWith("error");
               const level = isError ? "error" : (l.event_type || "info").toLowerCase();
               const levelStyle = LOG_LEVELS[level as keyof typeof LOG_LEVELS] || LOG_LEVELS.info;
-              const time = l.timestamp ? new Date(l.timestamp).toLocaleTimeString() : "-";
+              const time = formatTime(l.timestamp);
               const detail = l.detail || l.message || "-";
               const reason = l.outcome && l.outcome !== detail ? l.outcome : "";
               const agentId = l.agent_id ? l.agent_id.slice(0, 8) : "";

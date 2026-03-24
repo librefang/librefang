@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { formatTime } from "../lib/datetime";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { listChannels, loadDashboardSnapshot, getCommsTopology, listCommsEvents, type CommsEventItem } from "../api";
@@ -61,7 +62,7 @@ function EventItem({ event }: { event: CommsEventItem }) {
         <p className="text-xs text-text-dim truncate mt-0.5">{event.detail || "-"}</p>
       </div>
       <span className="text-[10px] text-text-dim shrink-0">
-        {event.timestamp ? new Date(event.timestamp).toLocaleTimeString() : "-"}
+        {formatTime(event.timestamp)}
       </span>
     </div>
   );

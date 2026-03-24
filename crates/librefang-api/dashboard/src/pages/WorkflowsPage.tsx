@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { formatDate } from "../lib/datetime";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
@@ -214,7 +215,7 @@ export function WorkflowsPage() {
                   <p className="text-[10px] text-text-dim mt-0.5 truncate">{wf.description || t("common.no_data")}</p>
                   <div className="flex items-center gap-2 mt-1.5 text-[9px] text-text-dim/50">
                     <Clock className="w-3 h-3" />
-                    <span>{new Date(wf.created_at || "").toLocaleDateString()}</span>
+                    <span>{formatDate(wf.created_at)}</span>
                   </div>
                 </div>
                 {/* Actions */}

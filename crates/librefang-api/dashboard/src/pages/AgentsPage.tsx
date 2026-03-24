@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { formatTime } from "../lib/datetime";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
@@ -103,7 +104,7 @@ export function AgentsPage() {
           <div className="flex items-center gap-3 text-xs">
             <div className="w-5 h-5 rounded bg-warning/10 flex items-center justify-center shrink-0"><Clock className="w-3 h-3 text-warning" /></div>
             <span className="text-text-dim flex-1">{t("agents.last_active")}</span>
-            <span className="font-mono text-[10px]">{agent.last_active ? new Date(agent.last_active).toLocaleTimeString() : t("common.never")}</span>
+            <span className="font-mono text-[10px]">{agent.last_active ? formatTime(agent.last_active) : t("common.never")}</span>
           </div>
         </div>
         <div className="pt-4 border-t border-border-subtle/30 flex gap-2">

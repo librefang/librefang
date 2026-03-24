@@ -1,4 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { formatDateTime } from "../lib/datetime";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { listMemories, deleteMemory, getMemoryStats, addMemoryFromText, updateMemory, cleanupMemories, decayMemories, type MemoryStatsResponse } from "../api";
@@ -321,7 +322,7 @@ export function MemoryPage() {
               <p className="text-xs text-text-dim line-clamp-3 leading-relaxed whitespace-pre-wrap">{m.content || t("common.no_data")}</p>
               {m.created_at && (
                 <div className="mt-2 text-[10px] text-text-dim/50">
-                  {t("memory.created")}: {new Date(m.created_at).toLocaleString()}
+                  {t("memory.created")}: {formatDateTime(m.created_at)}
                 </div>
               )}
             </Card>

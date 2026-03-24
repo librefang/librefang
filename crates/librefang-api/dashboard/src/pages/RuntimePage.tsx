@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { formatUptime } from "../lib/datetime";
 import { useTranslation } from "react-i18next";
 import { loadDashboardSnapshot, getVersionInfo, getQueueStatus } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
@@ -20,9 +21,7 @@ export function RuntimePage() {
   const queue = queueQuery.data ?? null;
 
   const uptimeSecs = snapshot?.status?.uptime_seconds || 0;
-  const uptimeStr = uptimeSecs
-    ? `${Math.floor(uptimeSecs / 3600)}h ${Math.floor((uptimeSecs % 3600) / 60)}m`
-    : "-";
+  const uptimeStr = uptimeSecs ? formatUptime(uptimeSecs) : "-";
 
   return (
     <div className="flex flex-col gap-6 transition-colors duration-300">
