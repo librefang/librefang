@@ -765,7 +765,7 @@ export async function testChannel(channelName: string): Promise<ApiActionRespons
 }
 
 export async function configureChannel(channelName: string, config: Record<string, unknown>): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>(`/api/channels/${encodeURIComponent(channelName)}/configure`, config);
+  return post<ApiActionResponse>(`/api/channels/${encodeURIComponent(channelName)}/configure`, { fields: config });
 }
 
 export async function reloadChannels(): Promise<ApiActionResponse> {
