@@ -2109,7 +2109,8 @@ system_prompt = "You are a helpful assistant."
         // Auto-register workflow definitions from ~/.librefang/workflows/
         {
             let workflows_dir = kernel.config.home_dir.join("workflows");
-            let loaded = kernel.workflows.load_from_dir_sync(&workflows_dir);
+            let loaded =
+                tokio::task::block_in_place(|| kernel.workflows.load_from_dir_sync(&workflows_dir));
             if loaded > 0 {
                 info!(
                     "Auto-registered {loaded} workflow(s) from {}",
