@@ -51,7 +51,7 @@ function CustomNode({ data, type }: any) {
 
 export function WorkflowEditor({ initialNodes = [], initialEdges = [], onSave, onClose, title }: WorkflowEditorProps) {
   const { t } = useTranslation();
-  const { theme } = useUIStore();
+  const theme = useUIStore((s) => s.theme);
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
