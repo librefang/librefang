@@ -145,12 +145,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: test-ubuntu-${{ hashFiles('**/Cargo.lock') }}
-      - name: Add swap space
-        run: |
-          sudo fallocate -l 8G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
       - name: Install Tauri system deps
         run: |
           sudo apt-get update
@@ -162,7 +156,26 @@ jobs:
             patchelf
       - name: Build tests
         run: cargo test --workspace --no-run
-      - name: Run tests
+      - name: Run tests per crate
         env:
           RUST_TEST_THREADS: "1"
-        run: cargo test --workspace
+        run: |
+          for crate in \
+            librefang-types \
+            librefang-wire \
+            librefang-telemetry \
+            librefang-memory \
+            librefang-channels \
+            librefang-skills \
+            librefang-hands \
+            librefang-extensions \
+            librefang-kernel \
+            librefang-api \
+            librefang-runtime \
+            librefang-migrate \
+            librefang-testing \
+            xtask; do
+            echo "::group::Testing $crate"
+            cargo test -p "$crate" && echo "✓ $crate" || exit 1
+            echo "::endgroup::"
+          done
