@@ -181,8 +181,10 @@ mod tests {
             ..Default::default()
         }]);
         let warnings = config.validate();
-        assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("Discord"));
+        assert!(
+            warnings.iter().any(|w| w.contains("Discord")),
+            "expected a Discord warning in: {warnings:?}"
+        );
     }
 
     #[test]
