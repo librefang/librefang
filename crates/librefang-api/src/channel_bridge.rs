@@ -2101,9 +2101,17 @@ pub async fn start_channel_bridge_with_config(
     }
 
     // WeChat (personal account via iLink)
+    // Only start when a bot token is available — without a token the adapter
+    // would block on QR login which stalls the entire server startup.
+    // Users obtain a token via the dashboard QR flow, which saves it to
+    // secrets.env; on next restart the adapter will start normally.
     #[cfg(feature = "channel-wechat")]
     for wx_config in config.wechat.iter() {
         let bot_token = read_token(&wx_config.bot_token_env, "WeChat");
+        if bot_token.is_none() {
+            warn!("WeChat: no bot token available — skipping adapter start (use dashboard QR login to obtain one)");
+            continue;
+        }
         let adapter = Arc::new(
             WeChatAdapter::new(bot_token, wx_config.allowed_users.clone())
                 .with_account_id(wx_config.account_id.clone()),

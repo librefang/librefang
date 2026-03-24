@@ -1884,8 +1884,11 @@ pub async fn wechat_qr_status(
         }));
     }
 
+    // iLink uses long-polling: the request hangs until the user scans or it
+    // times out server-side (~30s). Use a generous timeout so we don't mistake
+    // a normal long-poll wait for a network error.
     let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(35))
         .build()
     {
         Ok(c) => c,
@@ -1933,10 +1936,11 @@ pub async fn wechat_qr_status(
                 "message": "Failed to parse status response"
             })),
         },
+        // Timeout is normal for long-poll — treat as "still waiting"
         _ => Json(serde_json::json!({
             "connected": false,
             "expired": false,
-            "message": "Could not reach iLink API"
+            "message": "Waiting for scan..."
         })),
     }
 }

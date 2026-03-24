@@ -725,7 +725,7 @@ pub fn auto_select_template(
 }
 
 pub fn load_template_manifest(home_dir: &Path, template: &str) -> Result<AgentManifest, String> {
-    load_template_manifest_at(&home_dir.join("agents"), template)
+    load_template_manifest_at(&home_dir.join("workspaces").join("agents"), template)
 }
 
 fn auto_select_template_from_metadata(

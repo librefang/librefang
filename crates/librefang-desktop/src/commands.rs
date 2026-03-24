@@ -63,7 +63,10 @@ pub fn import_agent_toml(
         toml::from_str(&content).map_err(|e| format!("Invalid agent manifest: {e}"))?;
 
     let agent_name = manifest.name.clone();
-    let agent_dir = librefang_home().join("agents").join(&agent_name);
+    let agent_dir = librefang_home()
+        .join("workspaces")
+        .join("agents")
+        .join(&agent_name);
     std::fs::create_dir_all(&agent_dir)
         .map_err(|e| format!("Failed to create agent directory: {e}"))?;
 

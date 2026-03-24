@@ -77,6 +77,8 @@ pub enum RequirementType {
     EnvVar,
     /// An API key env var must be set.
     ApiKey,
+    /// Any one of several env vars must be set (comma-separated in check_value).
+    AnyEnvVar,
 }
 
 /// Platform-specific install commands and guides for a requirement.

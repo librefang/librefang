@@ -65,6 +65,26 @@ pub fn sync_registry(home_dir: &Path) {
         }
     }
 
+    // Pre-install agent templates from registry (e.g. hello-world)
+    let agents_src = registry_cache.join("agents");
+    if agents_src.exists() {
+        let agents_dest = home_dir.join("workspaces").join("agents");
+        if let Ok(entries) = std::fs::read_dir(&agents_src) {
+            for entry in entries.flatten() {
+                let src = entry.path();
+                if !src.is_dir() || !src.join("agent.toml").exists() {
+                    continue;
+                }
+                let name = src.file_name().unwrap_or_default();
+                let dest = agents_dest.join(name);
+                if !dest.exists() {
+                    let _ = std::fs::create_dir_all(&dest);
+                    let _ = copy_dir_recursive(&src, &dest);
+                }
+            }
+        }
+    }
+
     // Sync root-level files (aliases.toml, schema.toml)
     for name in &["aliases.toml", "schema.toml"] {
         let src = registry_cache.join(name);
@@ -411,7 +431,6 @@ fn cleanup_stale_dirs(hands_dir: &Path) {
 }
 
 /// Recursively copy a directory.
-#[cfg(test)]
 fn copy_dir_recursive(src: &Path, dest: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dest)?;
     for entry in std::fs::read_dir(src)? {

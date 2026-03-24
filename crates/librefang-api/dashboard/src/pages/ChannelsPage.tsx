@@ -470,7 +470,7 @@ function QrLoginDialog({ channel, onClose, t }: { channel: Channel; onClose: () 
             setPhase("success");
             setMessage("Login successful! Saving configuration...");
             // Save bot_token via configure endpoint
-            await configureChannel(channel.name, { bot_token: status.bot_token });
+            await configureChannel(channel.name, { bot_token_env: status.bot_token });
             queryClient.invalidateQueries({ queryKey: ["channels", "list"] });
             setTimeout(onClose, 1500);
           } else if (status.expired) {
