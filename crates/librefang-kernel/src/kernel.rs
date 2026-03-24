@@ -9691,7 +9691,7 @@ mod tests {
         kernel.shutdown();
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_send_message_ephemeral_unknown_agent_returns_not_found() {
         let dir = tempfile::tempdir().unwrap();
         let home_dir = dir.path().to_path_buf();
@@ -9716,7 +9716,7 @@ mod tests {
         kernel.shutdown();
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_send_message_ephemeral_does_not_modify_session() {
         let dir = tempfile::tempdir().unwrap();
         let home_dir = dir.path().to_path_buf();
