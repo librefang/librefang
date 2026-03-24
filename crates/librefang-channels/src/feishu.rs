@@ -605,7 +605,7 @@ impl FeishuAdapter {
                     .as_ref()
                     .map(|c| c.ping_interval)
                     .filter(|&p| p > 0)
-                    .unwrap_or(120);
+                    .unwrap_or(120) as u64;
                 let mut ping_interval = tokio::time::interval(Duration::from_secs(ping_secs));
                 ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
