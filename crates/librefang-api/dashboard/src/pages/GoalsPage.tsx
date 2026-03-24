@@ -228,7 +228,7 @@ export function GoalsPage() {
                       <div className="flex items-center justify-between gap-3">
                         <span className="text-sm text-text-dim">{t("goals.delete_confirm")}</span>
                         <div className="flex items-center gap-2">
-                          <Button variant="primary" size="sm" onClick={() => handleDelete(r.goal.id)} className="!bg-error hover:!bg-error/80">{t("common.confirm")}</Button>
+                          <Button variant="primary" size="sm" onClick={() => handleDelete(r.goal.id)} className="bg-error! hover:bg-error/80!">{t("common.confirm")}</Button>
                           <Button variant="ghost" size="sm" onClick={() => setConfirmDeleteId(null)}>{t("common.cancel")}</Button>
                         </div>
                       </div>

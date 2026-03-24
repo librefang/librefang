@@ -69,7 +69,7 @@ export function LogsPage() {
               onChange={(e) => setSearch(e.target.value)}
               placeholder={t("common.search")}
               leftIcon={<Search className="h-4 w-4" />}
-              className="!py-1.5"
+              className="py-1.5!"
             />
           </div>
           <select

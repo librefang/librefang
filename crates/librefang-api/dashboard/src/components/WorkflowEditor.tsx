@@ -133,8 +133,8 @@ export function WorkflowEditor({ initialNodes = [], initialEdges = [], onSave, o
         <main className="flex-1 relative">
           <ReactFlow nodes={nodes} edges={edges} onNodesChange={onNodesChange} onEdgesChange={onEdgesChange} onConnect={onConnect} nodeTypes={{ custom: CustomNode }} colorMode={theme}>
             <Background color={theme === "dark" ? "rgba(255,255,255,0.05)" : "rgba(0,0,0,0.05)"} />
-            <Controls className="!bg-surface !border-border-subtle !shadow-xl" />
-            <MiniMap nodeStrokeColor="var(--border-color)" maskColor={theme === "dark" ? "rgba(0,0,0,0.6)" : "rgba(255,255,255,0.6)"} className="!bg-surface !border-border-subtle !rounded-xl" />
+            <Controls className="bg-surface! border-border-subtle! shadow-xl!" />
+            <MiniMap nodeStrokeColor="var(--border-color)" maskColor={theme === "dark" ? "rgba(0,0,0,0.6)" : "rgba(255,255,255,0.6)"} className="bg-surface! border-border-subtle! rounded-xl!" />
           </ReactFlow>
         </main>
       </div>

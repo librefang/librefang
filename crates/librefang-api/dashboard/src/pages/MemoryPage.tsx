@@ -313,7 +313,7 @@ export function MemoryPage() {
                   <Button variant="ghost" size="sm" onClick={() => setEditingMemory(m)}>
                     <Edit2 className="h-3.5 w-3.5" />
                   </Button>
-                  <Button variant="ghost" size="sm" className="!text-error hover:!bg-error/10" onClick={() => deleteMutation.mutate(m.id)}>
+                  <Button variant="ghost" size="sm" className="text-error! hover:bg-error/10!" onClick={() => deleteMutation.mutate(m.id)}>
                     <Trash2 className="h-3.5 w-3.5" />
                   </Button>
                 </div>

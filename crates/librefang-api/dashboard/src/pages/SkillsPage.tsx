@@ -274,7 +274,7 @@ function UninstallDialog({ skillName, onClose, onConfirm, isPending }: {
         <p className="text-sm text-text-dim mb-6">{t("skills.uninstall_confirm", { name: skillName })}</p>
         <div className="flex gap-3">
           <Button variant="secondary" className="flex-1" onClick={onClose}>{t("common.cancel")}</Button>
-          <Button variant="primary" className="flex-1 !bg-error hover:!bg-error/90" onClick={onConfirm} disabled={isPending}>
+          <Button variant="primary" className="flex-1 bg-error! hover:bg-error/90!" onClick={onConfirm} disabled={isPending}>
             {isPending ? "..." : t("common.confirm")}
           </Button>
         </div>

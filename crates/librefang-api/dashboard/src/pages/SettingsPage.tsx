@@ -126,7 +126,7 @@ export function SettingsPage() {
             <Input value={toolSearch} onChange={(e) => setToolSearch(e.target.value)}
               placeholder={t("settings.tools_search")}
               leftIcon={<Search className="h-3.5 w-3.5" />}
-              className="!text-xs" />
+              className="text-xs!" />
           </div>
 
           <div className="space-y-1 sm:max-h-80 sm:overflow-y-auto scrollbar-thin">

@@ -129,7 +129,7 @@ function CustomNode({ data, type: nodeTypeKey, t }: { data: any; type: string; t
       {/* Source Handle */}
       {!isEnd && (
         <Handle type="source" position={Position.Bottom}
-          className="!w-3 !h-3 !rounded-full !border-2 !border-surface"
+          className="w-3! h-3! rounded-full! border-2! border-surface!"
           style={{ backgroundColor: config.color }} />
       )}
     </div>
@@ -147,7 +147,7 @@ function GroupNodeComponent({ data, id }: { data: any; id: string }) {
         ? { width: "100%", height: "100%", pointerEvents: "none" }
         : { width: 180 }}
     >
-      <Handle type="target" position={Position.Top} className="!w-3 !h-3 !rounded-full !bg-brand !border-2 !border-surface" />
+      <Handle type="target" position={Position.Top} className="w-3! h-3! rounded-full! bg-brand! border-2! border-surface!" />
       <div
         className="flex items-center gap-2 px-3 py-2 bg-brand/10 rounded-t-xl cursor-pointer relative z-10"
         style={{ pointerEvents: "auto" }}
@@ -180,7 +180,7 @@ function GroupNodeComponent({ data, id }: { data: any; id: string }) {
           <p className="text-[9px] text-text-dim">Click to expand</p>
         </div>
       )}
-      <Handle type="source" position={Position.Bottom} className="!w-3 !h-3 !rounded-full !bg-brand !border-2 !border-surface" />
+      <Handle type="source" position={Position.Bottom} className="w-3! h-3! rounded-full! bg-brand! border-2! border-surface!" />
     </div>
   );
 }
@@ -1868,17 +1868,17 @@ function CanvasPageInner() {
             selectionOnDrag={!spacePressed}
             selectionMode={SelectionMode.Partial}
             zoomOnScroll
-            className={`!bg-transparent ${spacePressed ? "!cursor-grab" : ""}`}
+            className={`bg-transparent! ${spacePressed ? "cursor-grab!" : ""}`}
             connectionLineStyle={{ stroke: edgeColorActive, strokeWidth: 2 }}
             connectionLineType={ConnectionLineType.SmoothStep}
             isValidConnection={isValidConnection}
           >
             <Background variant={BackgroundVariant.Dots} color={theme === "dark" ? "#444" : "#cbd5e1"} gap={24} size={1.5} />
-            <Controls className="!bg-surface !border-border-subtle !rounded-xl !shadow-lg" />
-            <div className="react-flow__panel !bottom-2 !left-14">
+            <Controls className="bg-surface! border-border-subtle! rounded-xl! shadow-lg!" />
+            <div className="react-flow__panel bottom-2! left-14!">
               <span className="text-[10px] font-mono text-text-dim/50 bg-surface/80 px-1.5 py-0.5 rounded">{zoomLevel}%</span>
             </div>
-            <MiniMap className="!bg-surface/80 !border-border-subtle !rounded-xl !shadow-lg"
+            <MiniMap className="bg-surface/80! border-border-subtle! rounded-xl! shadow-lg!"
               nodeColor={(n) => {
                 const cfg = NODE_TYPES.find(t => t.type === (n.data as any)?.nodeType);
                 return cfg?.color || "#3b82f6";
