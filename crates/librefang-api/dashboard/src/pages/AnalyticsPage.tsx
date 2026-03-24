@@ -10,6 +10,13 @@ import { BarChart3, DollarSign, Shield, Save, Loader2, Cpu, Users, Zap, Trending
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts";
 
+function formatTokens(n: number): string {
+  if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(1)}B`;
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+  return String(n);
+}
+
 const REFRESH_MS = 30000;
 
 export function AnalyticsPage() {
@@ -54,7 +61,7 @@ export function AnalyticsPage() {
           <div className="grid grid-cols-2 gap-2 sm:gap-4 md:grid-cols-4 stagger-children">
             {[
               { icon: Zap, label: t("analytics.total_calls"), value: usage?.call_count ?? 0, color: "text-brand", bg: "bg-brand/10" },
-              { icon: Cpu, label: t("analytics.total_tokens_label"), value: `${(((usage?.total_input_tokens ?? 0) + (usage?.total_output_tokens ?? 0)) / 1000).toFixed(0)}K`, color: "text-purple-500", bg: "bg-purple-500/10" },
+              { icon: Cpu, label: t("analytics.total_tokens_label"), value: formatTokens((usage?.total_input_tokens ?? 0) + (usage?.total_output_tokens ?? 0)), color: "text-purple-500", bg: "bg-purple-500/10" },
               { icon: DollarSign, label: t("analytics.total_cost"), value: `$${(usage?.total_cost_usd ?? 0).toFixed(4)}`, color: "text-success", bg: "bg-success/10" },
               { icon: TrendingUp, label: t("analytics.today_cost"), value: `$${(daily?.today_cost_usd ?? 0).toFixed(4)}`, color: "text-warning", bg: "bg-warning/10" },
             ].map((kpi, i) => (
