@@ -716,13 +716,13 @@ struct WsEndpointData {
 #[allow(dead_code)]
 struct WsClientConfig {
     #[serde(rename = "ReconnectCount", default)]
-    reconnect_count: u32,
+    reconnect_count: i32,
     #[serde(rename = "ReconnectInterval", default)]
-    reconnect_interval: u64,
+    reconnect_interval: i64,
     #[serde(rename = "ReconnectNonce", default)]
-    reconnect_nonce: u64,
+    reconnect_nonce: i64,
     #[serde(rename = "PingInterval", default)]
-    ping_interval: u64,
+    ping_interval: i64,
 }
 
 /// Obtain the real WebSocket URL from the Feishu/Lark endpoint discovery API.
