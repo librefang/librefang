@@ -418,7 +418,13 @@ function MessageBubble({ message }: { message: ChatMessage }) {
               <span>{message.error}</span>
             </div>
           ) : (
-            <Typewriter text={message.content} speed={10} />
+            <Markdown
+              remarkPlugins={[remarkGfm, remarkMath]}
+              rehypePlugins={[rehypeKatex]}
+              components={mdComponents}
+            >
+              {message.content}
+            </Markdown>
           )}
         </div>
 
