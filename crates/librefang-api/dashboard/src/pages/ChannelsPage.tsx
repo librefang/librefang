@@ -1,7 +1,8 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { listChannels, configureChannel } from "../api";
+import { listChannels, configureChannel, wechatQrStart, wechatQrStatus } from "../api";
+import QRCode from "qrcode";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -421,6 +422,129 @@ function ConfigDialog({ channel, onClose, t }: { channel: Channel; onClose: () =
   );
 }
 
+// QR Login Dialog for channels with setup_type === "qr" (e.g. WeChat)
+function QrLoginDialog({ channel, onClose, t }: { channel: Channel; onClose: () => void; t: (key: string) => string }) {
+  const queryClient = useQueryClient();
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [phase, setPhase] = useState<"idle" | "loading" | "scanning" | "success" | "error">("idle");
+  const [qrCode, setQrCode] = useState("");
+  const [message, setMessage] = useState("");
+
+  const cleanup = useCallback(() => {
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => () => cleanup(), [cleanup]);
+
+  const startQr = useCallback(async () => {
+    cleanup();
+    setPhase("loading");
+    setMessage("");
+    try {
+      const res = await wechatQrStart();
+      if (!res.available || !res.qr_code) {
+        setPhase("error");
+        setMessage(res.message || "Failed to get QR code");
+        return;
+      }
+      setQrCode(res.qr_code);
+      setPhase("scanning");
+      setMessage(res.message || "Scan this QR code with your WeChat app");
+
+      // Render QR code to canvas
+      if (canvasRef.current) {
+        QRCode.toCanvas(canvasRef.current, res.qr_code, { width: 256, margin: 2 });
+      }
+
+      // Poll for scan status
+      pollRef.current = setInterval(async () => {
+        try {
+          const status = await wechatQrStatus(res.qr_code!);
+          if (status.connected && status.bot_token) {
+            cleanup();
+            setPhase("success");
+            setMessage("Login successful! Saving configuration...");
+            // Save bot_token via configure endpoint
+            await configureChannel(channel.name, { bot_token: status.bot_token });
+            queryClient.invalidateQueries({ queryKey: ["channels", "list"] });
+            setTimeout(onClose, 1500);
+          } else if (status.expired) {
+            cleanup();
+            setPhase("error");
+            setMessage(status.message || "QR code expired");
+          }
+        } catch {
+          // Ignore transient poll errors
+        }
+      }, 3000);
+    } catch (e) {
+      setPhase("error");
+      setMessage(e instanceof Error ? e.message : "Failed to start QR login");
+    }
+  }, [channel.name, cleanup, onClose, queryClient]);
+
+  // Auto-start on mount
+  useEffect(() => { startQr(); }, [startQr]);
+
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-end sm:items-center justify-center z-50 backdrop-blur-xl backdrop-saturate-150" onClick={onClose}>
+      <div className="bg-surface border border-border-subtle rounded-2xl w-full sm:max-w-md shadow-2xl rounded-t-2xl sm:rounded-2xl animate-fade-in-scale" onClick={e => e.stopPropagation()}>
+        <div className="px-6 py-5 border-b border-border-subtle">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-brand/10 flex items-center justify-center text-brand text-sm font-bold">
+                {channel.icon || "QR"}
+              </div>
+              <div>
+                <h3 className="text-base font-black">{channel.display_name || channel.name}</h3>
+                <p className="text-[10px] text-text-dim mt-0.5">{t("channels.qr_login") || "QR Code Login"}</p>
+              </div>
+            </div>
+            <button onClick={onClose} className="p-2 rounded-xl hover:bg-main transition-colors"><X className="w-4 h-4" /></button>
+          </div>
+        </div>
+
+        <div className="p-6 flex flex-col items-center gap-4">
+          {phase === "loading" && (
+            <div className="w-64 h-64 flex items-center justify-center bg-main/30 rounded-xl">
+              <div className="animate-spin w-8 h-8 border-2 border-brand border-t-transparent rounded-full" />
+            </div>
+          )}
+
+          {phase === "scanning" && (
+            <div className="bg-white rounded-xl p-2">
+              <canvas ref={canvasRef} />
+            </div>
+          )}
+
+          {phase === "success" && (
+            <div className="w-64 h-64 flex items-center justify-center bg-success/10 rounded-xl">
+              <CheckCircle2 className="w-16 h-16 text-success" />
+            </div>
+          )}
+
+          {phase === "error" && (
+            <div className="w-64 h-64 flex flex-col items-center justify-center bg-error/10 rounded-xl gap-3">
+              <XCircle className="w-16 h-16 text-error" />
+              <Button variant="secondary" onClick={startQr}>{t("common.retry") || "Retry"}</Button>
+            </div>
+          )}
+
+          <p className="text-xs text-text-dim text-center max-w-xs">{message}</p>
+        </div>
+
+        <div className="p-4 border-t border-border-subtle flex justify-end">
+          <Button variant="ghost" onClick={onClose}>{t("common.close")}</Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 type TabType = "configured" | "unconfigured";
 
 export function ChannelsPage() {
@@ -434,6 +558,7 @@ export function ChannelsPage() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [detailsChannel, setDetailsChannel] = useState<Channel | null>(null);
   const [configuringChannel, setConfiguringChannel] = useState<Channel | null>(null);
+  const [qrLoginChannel, setQrLoginChannel] = useState<Channel | null>(null);
 
   const channelsQuery = useQuery({ queryKey: ["channels", "list"], queryFn: listChannels, refetchInterval: REFRESH_MS });
 
@@ -645,7 +770,15 @@ export function ChannelsPage() {
         <DetailsModal
           channel={detailsChannel}
           onClose={() => setDetailsChannel(null)}
-          onConfigure={() => { setDetailsChannel(null); setConfiguringChannel(detailsChannel); }}
+          onConfigure={() => {
+            const ch = detailsChannel;
+            setDetailsChannel(null);
+            if (ch.setup_type === "qr") {
+              setQrLoginChannel(ch);
+            } else {
+              setConfiguringChannel(ch);
+            }
+          }}
           t={t}
         />
       )}
@@ -655,6 +788,15 @@ export function ChannelsPage() {
         <ConfigDialog
           channel={configuringChannel}
           onClose={() => setConfiguringChannel(null)}
+          t={t}
+        />
+      )}
+
+      {/* QR Login Dialog */}
+      {qrLoginChannel && (
+        <QrLoginDialog
+          channel={qrLoginChannel}
+          onClose={() => setQrLoginChannel(null)}
           t={t}
         />
       )}

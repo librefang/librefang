@@ -70,7 +70,7 @@
     "configure": "配置通道", "config_key": "键", "config_value": "值",
     "configured": "已配置", "unconfigured": "未配置", "config": "配置",
     "name": "名称", "category": "类别", "difficulty": "难度", "setup_time": "设置时间",
-    "setup_type": "设置类型", "setup_steps": "设置步骤", "required_fields": "必填字段",
+    "setup_type": "设置类型", "setup_steps": "设置步骤", "required_fields": "必填字段", "qr_login": "扫码登录",
     "has_token": "已有令牌", "no_token": "无令牌", "no_fields_required": "无需字段",
     "update_config": "更新配置", "select_all": "全选", "results": "结果",
     "no_results": "没有匹配的通道", "no_configured": "暂无已配置的通道", "no_unconfigured": "暂无未配置的通道",

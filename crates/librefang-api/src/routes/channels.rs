@@ -1,4 +1,4 @@
-//! Channel configuration, status, and WhatsApp QR flow handlers.
+//! Channel configuration, status, and WhatsApp/WeChat QR flow handlers.
 
 /// Build routes for the Channel domain.
 pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
@@ -18,6 +18,14 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
         .route(
             "/channels/whatsapp/qr/status",
             axum::routing::get(whatsapp_qr_status),
+        )
+        .route(
+            "/channels/wechat/qr/start",
+            axum::routing::post(wechat_qr_start),
+        )
+        .route(
+            "/channels/wechat/qr/status",
+            axum::routing::get(wechat_qr_status),
         )
 }
 
@@ -1782,5 +1790,151 @@ async fn gateway_http_get(url_with_path: &str) -> Result<serde_json::Value, Stri
         serde_json::from_str(body_str.trim()).map_err(|e| format!("Parse failed: {e}"))
     } else {
         Err("No HTTP body in response".to_string())
+    }
+}
+
+// ── WeChat QR login endpoints ────────────────────────────────────────────────
+
+/// iLink API base URL used by the WeChat adapter.
+const WECHAT_ILINK_BASE: &str = "https://ilinkai.weixin.qq.com";
+
+#[utoipa::path(
+    post,
+    path = "/api/channels/wechat/qr/start",
+    tag = "channels",
+    responses(
+        (status = 200, description = "WeChat QR login initiated", body = serde_json::Value)
+    )
+)]
+/// POST /api/channels/wechat/qr/start — Request a QR code from iLink for WeChat login.
+pub async fn wechat_qr_start() -> impl IntoResponse {
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return Json(serde_json::json!({
+                "available": false,
+                "message": format!("HTTP client error: {e}")
+            }));
+        }
+    };
+
+    let url = format!("{WECHAT_ILINK_BASE}/ilink/bot/get_bot_qrcode?bot_type=3");
+    match client.get(&url).send().await {
+        Ok(resp) if resp.status().is_success() => match resp.json::<serde_json::Value>().await {
+            Ok(body) => {
+                let qrcode = body["qrcode"].as_str().unwrap_or("");
+                if qrcode.is_empty() {
+                    return Json(serde_json::json!({
+                        "available": false,
+                        "message": "iLink returned empty qrcode"
+                    }));
+                }
+                Json(serde_json::json!({
+                    "available": true,
+                    "qr_code": qrcode,
+                    "message": "Scan this QR code with your WeChat app to log in",
+                }))
+            }
+            Err(e) => Json(serde_json::json!({
+                "available": false,
+                "message": format!("Failed to parse iLink response: {e}")
+            })),
+        },
+        Ok(resp) => {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            Json(serde_json::json!({
+                "available": false,
+                "message": format!("iLink QR request failed ({status}): {body}")
+            }))
+        }
+        Err(e) => Json(serde_json::json!({
+            "available": false,
+            "message": format!("Could not reach iLink API: {e}")
+        })),
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/channels/wechat/qr/status",
+    tag = "channels",
+    params(
+        ("qr_code" = String, Query, description = "QR code value from /qr/start")
+    ),
+    responses(
+        (status = 200, description = "WeChat QR scan status", body = serde_json::Value)
+    )
+)]
+/// GET /api/channels/wechat/qr/status — Poll iLink for QR scan confirmation.
+pub async fn wechat_qr_status(
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let qr_code = params.get("qr_code").cloned().unwrap_or_default();
+    if qr_code.is_empty() {
+        return Json(serde_json::json!({
+            "connected": false,
+            "expired": false,
+            "message": "Missing qr_code parameter"
+        }));
+    }
+
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => {
+            return Json(serde_json::json!({
+                "connected": false,
+                "expired": false,
+                "message": "HTTP client error"
+            }));
+        }
+    };
+
+    let encoded: String = url::form_urlencoded::byte_serialize(qr_code.as_bytes()).collect();
+    let url = format!("{WECHAT_ILINK_BASE}/ilink/bot/get_qrcode_status?qrcode={encoded}");
+
+    match client.get(&url).send().await {
+        Ok(resp) if resp.status().is_success() => match resp.json::<serde_json::Value>().await {
+            Ok(body) => {
+                let status = body["status"].as_str().unwrap_or("pending");
+                match status {
+                    "confirmed" => {
+                        let bot_token = body["bot_token"].as_str().unwrap_or("");
+                        Json(serde_json::json!({
+                            "connected": true,
+                            "expired": false,
+                            "message": "WeChat login successful",
+                            "bot_token": bot_token,
+                        }))
+                    }
+                    "expired" => Json(serde_json::json!({
+                        "connected": false,
+                        "expired": true,
+                        "message": "QR code expired — click Start to get a new one"
+                    })),
+                    _ => Json(serde_json::json!({
+                        "connected": false,
+                        "expired": false,
+                        "message": "Waiting for scan..."
+                    })),
+                }
+            }
+            Err(_) => Json(serde_json::json!({
+                "connected": false,
+                "expired": false,
+                "message": "Failed to parse status response"
+            })),
+        },
+        _ => Json(serde_json::json!({
+            "connected": false,
+            "expired": false,
+            "message": "Could not reach iLink API"
+        })),
     }
 }

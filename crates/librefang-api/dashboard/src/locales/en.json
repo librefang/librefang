@@ -70,7 +70,7 @@
     "configure": "Configure Channel", "config_key": "Key", "config_value": "Value",
     "configured": "Configured", "unconfigured": "Unconfigured", "config": "Configure",
     "name": "Name", "category": "Category", "difficulty": "Difficulty", "setup_time": "Setup Time",
-    "setup_type": "Setup Type", "setup_steps": "Setup Steps", "required_fields": "Required Fields",
+    "setup_type": "Setup Type", "setup_steps": "Setup Steps", "required_fields": "Required Fields", "qr_login": "QR Code Login",
     "has_token": "Has Token", "no_token": "No Token", "no_fields_required": "No fields required",
     "update_config": "Update Config", "select_all": "Select All", "results": "results",
     "no_results": "No matching channels", "no_configured": "No configured channels", "no_unconfigured": "No unconfigured channels",
