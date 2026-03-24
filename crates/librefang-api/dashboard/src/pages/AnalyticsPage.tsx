@@ -49,6 +49,7 @@ export function AnalyticsPage() {
         subtitle={t("analytics.subtitle")}
         isFetching={usageQuery.isFetching}
         onRefresh={() => { usageQuery.refetch(); usageByAgentQuery.refetch(); usageByModelQuery.refetch(); dailyQuery.refetch(); }}
+        helpText={t("analytics.help")}
       />
 
       {isLoading ? (

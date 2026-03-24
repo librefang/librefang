@@ -33,7 +33,7 @@ function AddMemoryDialog({ onClose }: { onClose: () => void }) {
   });
 
   return (
-    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-black/50 backdrop-blur-xl backdrop-saturate-150" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-black/50 backdrop-blur-sm" onClick={onClose}>
       <div className="bg-surface rounded-2xl border border-border-subtle w-full sm:max-w-md p-4 sm:p-6 rounded-t-2xl sm:rounded-2xl shadow-2xl animate-fade-in-scale" onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-4">
           <h3 className="text-lg font-black">{t("memory.add_memory")}</h3>
@@ -107,7 +107,7 @@ function EditMemoryDialog({ memory, onClose }: { memory: { id: string; content?:
   });
 
   return (
-    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-black/50 backdrop-blur-xl backdrop-saturate-150" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-black/50 backdrop-blur-sm" onClick={onClose}>
       <div className="bg-surface rounded-2xl border border-border-subtle w-full sm:max-w-md p-4 sm:p-6 rounded-t-2xl sm:rounded-2xl shadow-2xl animate-fade-in-scale" onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-4">
           <h3 className="text-lg font-black">{t("memory.edit_memory")}</h3>
@@ -394,6 +394,7 @@ export function MemoryPage() {
         isFetching={memoryQuery.isFetching}
         onRefresh={() => void memoryQuery.refetch()}
         icon={<Database className="h-4 w-4" />}
+        helpText={t("memory.help")}
         actions={
           <div className="flex items-center gap-1 sm:gap-2 flex-wrap">
 <Button variant="secondary" size="sm" onClick={() => setShowConfigDialog(true)}>
@@ -494,12 +495,15 @@ export function MemoryPage() {
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1 sm:gap-2 mb-2">
                 <div className="flex items-center gap-2 min-w-0 flex-wrap">
                   <h2 className="text-xs sm:text-sm font-black truncate font-mono max-w-45 sm:max-w-none">{m.id}</h2>
-                  <Badge variant={m.level === "episodic" ? "success" : m.level === "semantic" ? "warning" : "info"}>
-                    {m.level || "Vector"}
+                  <Badge variant={m.level === "user" ? "success" : m.level === "agent" ? "warning" : "info"}>
+                    {m.level || "session"}
                   </Badge>
-                  {(m as any).importance !== undefined && (
-                    <Badge variant={(m as any).importance > 0.7 ? "error" : (m as any).importance > 0.3 ? "warning" : "default"}>
-                      {Math.round((m as any).importance * 100)}%
+                  {m.source && (
+                    <Badge variant="default">{m.source}</Badge>
+                  )}
+                  {m.confidence != null && (
+                    <Badge variant={m.confidence > 0.7 ? "success" : m.confidence > 0.3 ? "warning" : "default"}>
+                      {Math.round(m.confidence * 100)}%
                     </Badge>
                   )}
                 </div>
@@ -512,14 +516,26 @@ export function MemoryPage() {
                   </Button>
                 </div>
               </div>
-              <MarkdownContent className="text-xs text-text-dim leading-relaxed line-clamp-3">
+              <MarkdownContent className="text-xs text-text-dim leading-relaxed h-16 overflow-y-auto">
                 {m.content || t("common.no_data")}
               </MarkdownContent>
-              {m.created_at && (
-                <div className="mt-2 text-[10px] text-text-dim/50">
-                  {t("memory.created")}: {new Date(m.created_at).toLocaleString()}
-                </div>
-              )}
+              <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] text-text-dim/50">
+                {m.created_at && (
+                  <span>{t("memory.created")}: {new Date(m.created_at).toLocaleString()}</span>
+                )}
+                {m.accessed_at && (
+                  <span>{t("memory.last_access", { defaultValue: "Last access" })}: {new Date(m.accessed_at).toLocaleString()}</span>
+                )}
+                {m.access_count != null && m.access_count > 0 && (
+                  <span>{t("memory.access_count", { defaultValue: "Accessed" })}: {m.access_count}x</span>
+                )}
+                {m.agent_id && (
+                  <span>Agent: <span className="font-mono">{m.agent_id.slice(0, 8)}</span></span>
+                )}
+                {m.category && (
+                  <span>{t("memory.category", { defaultValue: "Category" })}: {m.category}</span>
+                )}
+              </div>
             </Card>
           ))}
         </div>

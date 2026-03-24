@@ -380,7 +380,7 @@ function MessageBubble({ message }: { message: ChatMessage }) {
   }
 
   return (
-    <div className={`flex ${isUser ? "justify-end" : "justify-start"} animate-fade-in-up`}>
+    <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
       <div className={`flex flex-col max-w-[90%] sm:max-w-[75%] ${isUser ? "items-end" : "items-start"}`}>
         {/* Avatar + name */}
         <div className={`flex items-center gap-2 mb-1.5 ${isUser ? "self-end flex-row-reverse" : "self-start"}`}>
@@ -531,11 +531,11 @@ function ChatInput({ onSend, disabled, placeholder }: { onSend: (msg: string) =>
 function ConnectionBar({ agentName, isLoading, messageCount, onClear, wsConnected }: { agentName: string; isLoading: boolean; messageCount: number; onClear: () => void; wsConnected?: boolean }) {
   const { t } = useTranslation();
   return (
-    <div className="px-2 sm:px-4 py-2 sm:py-2.5 border-b border-border-subtle/50 bg-gradient-to-r from-surface/80 to-transparent flex items-center justify-between backdrop-blur-xl backdrop-saturate-150">
+    <div className="px-2 sm:px-4 py-2 sm:py-2.5 border-b border-border-subtle/50 bg-gradient-to-r from-surface to-transparent flex items-center justify-between">
       <div className="flex items-center gap-2 sm:gap-3 min-w-0 flex-1">
         <div className="relative">
           <Wifi className="h-3.5 w-3.5 text-success" />
-          <span className="absolute inset-0 rounded-full bg-success/30 animate-ping" />
+          <span className="absolute inset-0 rounded-full bg-success/30 animate-pulse" />
         </div>
         <span className="text-xs font-semibold text-success uppercase tracking-wide hidden sm:inline">{t("chat.secure_link")}</span>
         {wsConnected && (
@@ -756,7 +756,7 @@ export function ChatPage() {
           <div className="flex items-center gap-2 sm:gap-3">
             <div className="relative hidden sm:block">
               <Sparkles className="h-5 w-5 text-brand" />
-              <span className="absolute inset-0 bg-brand/30 animate-ping" />
+              <span className="absolute inset-0 bg-brand/30 animate-pulse" />
             </div>
             <span className="text-brand font-bold uppercase tracking-widest text-[10px] hidden sm:inline">{t("chat.neural_terminal")}</span>
             <h1 className="text-xl sm:text-3xl font-extrabold tracking-tight">{t("chat.title")}</h1>
@@ -773,7 +773,7 @@ export function ChatPage() {
       {/* Main content area */}
       <div className="flex flex-1 overflow-hidden rounded-2xl border border-border-subtle bg-surface shadow-xl ring-1 ring-black/5 dark:ring-white/5">
         {/* Left sidebar - Agent list */}
-        <aside className="hidden md:flex w-64 flex-shrink-0 border-r border-border-subtle bg-main/30 backdrop-blur-md flex-col">
+        <aside className="hidden md:flex w-64 flex-shrink-0 border-r border-border-subtle bg-main flex-col">
           <div className="p-4 border-b border-border-subtle">
             <h3 className="text-[10px] font-black uppercase tracking-[0.2em] text-text-dim/60">{t("nav.agents")}</h3>
           </div>
@@ -885,7 +885,7 @@ export function ChatPage() {
           </div>
 
           {/* Input area */}
-          <div className={`p-2 sm:p-4 border-t border-border-subtle bg-surface/90 backdrop-blur-md transition-all ${!selectedAgentId ? "opacity-30 pointer-events-none" : ""}`}>
+          <div className={`p-2 sm:p-4 border-t border-border-subtle bg-surface transition-all ${!selectedAgentId ? "opacity-30 pointer-events-none" : ""}`}>
             <ChatInput
               onSend={sendMessage}
               disabled={isLoading}

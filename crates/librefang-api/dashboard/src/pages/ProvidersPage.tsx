@@ -311,7 +311,7 @@ function DetailsModal({ provider, onClose, onTest, pendingId, t }: {
   const isConfigured = provider.auth_status === "configured";
 
   return (
-    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-black/50 backdrop-blur-xl backdrop-saturate-150" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-black/50 backdrop-blur-sm" onClick={onClose}>
       <div className="bg-surface rounded-2xl border border-border-subtle w-full sm:max-w-lg shadow-2xl rounded-t-2xl sm:rounded-2xl max-h-[90vh] overflow-y-auto animate-fade-in-scale" onClick={e => e.stopPropagation()}>
         {/* Header */}
         <div className={`h-2 bg-gradient-to-r ${isConfigured ? "from-success via-success/60 to-success/30" : "from-brand via-brand/60 to-brand/30"} rounded-t-2xl`} />
@@ -640,6 +640,7 @@ export function ProvidersPage() {
         isFetching={providersQuery.isFetching}
         onRefresh={() => void providersQuery.refetch()}
         icon={<Server className="h-4 w-4" />}
+        helpText={t("providers.help")}
         actions={
           <div className="hidden rounded-full border border-border-subtle bg-surface px-3 py-1.5 text-[10px] font-bold uppercase text-text-dim sm:block">
             {t("providers.configured_count", { configured: configuredCount, total: providers.length })}
@@ -816,7 +817,7 @@ export function ProvidersPage() {
 
       {/* API Key Config Modal */}
       {configProvider && (
-        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/30 backdrop-blur-xl backdrop-saturate-150" onClick={() => setConfigProvider(null)}>
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/30 backdrop-blur-sm" onClick={() => setConfigProvider(null)}>
           <div className="bg-surface rounded-2xl shadow-2xl border border-border-subtle w-[440px] max-w-[90vw] animate-fade-in-scale" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between px-5 py-3 border-b border-border-subtle">
               <div className="flex items-center gap-2">

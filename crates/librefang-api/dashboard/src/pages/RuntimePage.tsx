@@ -97,6 +97,7 @@ export function RuntimePage() {
         isFetching={snapshotQuery.isFetching}
         onRefresh={() => { snapshotQuery.refetch(); versionQuery.refetch(); queueQuery.refetch(); }}
         icon={<Activity className="h-4 w-4" />}
+        helpText={t("runtime.help")}
       />
 
       {snapshotQuery.isLoading ? (
@@ -275,7 +276,7 @@ export function RuntimePage() {
               <div className="mt-5 pt-4 border-t border-border-subtle flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <span className="relative flex h-2.5 w-2.5">
-                    <span className="absolute inline-flex h-full w-full rounded-full bg-success opacity-75 animate-ping" />
+                    <span className="absolute inline-flex h-full w-full rounded-full bg-success opacity-75 animate-pulse" />
                     <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-success" />
                   </span>
                   <span className="text-xs font-bold">{t("runtime.status")}</span>

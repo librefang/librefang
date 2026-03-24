@@ -343,7 +343,7 @@ export function OverviewPage() {
                 {snapshot.health.checks.map((check: HealthCheck, i: number) => (
                   <div key={i} className="flex items-center gap-3 p-2 rounded-lg hover:bg-main/40 transition-colors">
                     <div className={`relative h-2.5 w-2.5 rounded-full ${check.status === "ok" ? "bg-success" : "bg-warning"}`}>
-                      {check.status === "ok" && <span className="absolute inset-0 rounded-full bg-success/40 animate-ping" />}
+                      {check.status === "ok" && <span className="absolute inset-0 rounded-full bg-success/40 animate-pulse" />}
                     </div>
                     <span className="flex-1 text-xs font-medium">{check.name}</span>
                     <Badge variant={check.status === "ok" ? "success" : "warning"}>
@@ -358,7 +358,7 @@ export function OverviewPage() {
                   <div className="w-10 h-10 rounded-full bg-success/10 flex items-center justify-center">
                     <Shield className="w-5 h-5 text-success" />
                   </div>
-                  <span className="absolute inset-0 rounded-full bg-success/10 animate-ping" />
+                  <span className="absolute inset-0 rounded-full bg-success/10 animate-pulse" />
                 </div>
                 <p className="text-xs font-bold text-success">{t("common.daemon_online")}</p>
               </div>

@@ -118,6 +118,7 @@ export function WorkflowsPage() {
         isFetching={workflowsQuery.isFetching}
         onRefresh={() => void workflowsQuery.refetch()}
         icon={<Layers className="h-4 w-4" />}
+        helpText={t("workflows.help")}
         actions={hasWorkflows ?
           <Button variant="primary" onClick={handleNewWorkflow}>
             <FilePlus className="h-4 w-4" />

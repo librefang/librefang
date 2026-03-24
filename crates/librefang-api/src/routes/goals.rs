@@ -6,6 +6,7 @@ use super::AppState;
 pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
     axum::Router::new()
         .route("/goals", axum::routing::get(list_goals).post(create_goal))
+        .route("/goals/templates", axum::routing::get(list_goal_templates))
         .route(
             "/goals/{id}",
             axum::routing::get(get_goal)
@@ -16,7 +17,6 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             "/goals/{id}/children",
             axum::routing::get(get_goal_children),
         )
-        .route("/goals/templates", axum::routing::get(list_goal_templates))
 }
 use axum::extract::{Path, State};
 use axum::http::StatusCode;

@@ -92,6 +92,7 @@ export function ModelsPage() {
         icon={<Cpu className="h-4 w-4" />}
         isFetching={modelsQuery.isFetching}
         onRefresh={() => modelsQuery.refetch()}
+        helpText={t("models.help")}
         actions={allModels.length > 0 ? <Badge variant="brand">{totalAvailable} / {allModels.length} {t("models.available")}</Badge> : undefined}
       />
       {/* Error state */}

@@ -52,6 +52,7 @@ export function LogsPage() {
         isFetching={auditQuery.isFetching}
         onRefresh={() => void auditQuery.refetch()}
         icon={<FileText className="h-4 w-4" />}
+        helpText={t("logs.help")}
         actions={
           <Button variant="secondary" size="sm" onClick={handleExport}>
             <Download className="h-3.5 w-3.5 mr-1" />

@@ -76,6 +76,7 @@ export function SettingsPage() {
         title={t("settings.title")}
         subtitle={t("settings.subtitle")}
         icon={<Settings className="h-4 w-4" />}
+        helpText={t("settings.help")}
       />
 
       <div className="grid gap-4 sm:gap-6 lg:grid-cols-2">

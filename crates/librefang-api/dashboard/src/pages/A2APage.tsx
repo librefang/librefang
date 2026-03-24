@@ -94,6 +94,7 @@ export function A2APage() {
         isFetching={agentsQuery.isFetching}
         onRefresh={() => void agentsQuery.refetch()}
         icon={<Globe className="h-4 w-4" />}
+        helpText={t("a2a.help")}
         actions={
           <button
             onClick={() => setShowDiscover((v) => !v)}

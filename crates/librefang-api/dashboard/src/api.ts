@@ -1043,6 +1043,116 @@ export async function reloadConfig(): Promise<{ status: string; restart_required
   return post<{ status: string; restart_required?: boolean; restart_reasons?: string[] }>("/api/config/reload", {});
 }
 
+export interface HealthDetailResponse {
+  status?: string;
+  version?: string;
+  uptime_seconds?: number;
+  panic_count?: number;
+  restart_count?: number;
+  agent_count?: number;
+  database?: string;
+  memory?: {
+    embedding_available?: boolean;
+    embedding_provider?: string;
+    embedding_model?: string;
+    proactive_memory_enabled?: boolean;
+    extraction_model?: string;
+  };
+  config_warnings?: string[];
+}
+
+export interface SecurityStatusResponse {
+  core_protections?: Record<string, boolean>;
+  configurable?: {
+    rate_limiter?: { enabled?: boolean; tokens_per_minute?: number; algorithm?: string };
+    websocket_limits?: { max_per_ip?: number; idle_timeout_secs?: number; max_message_size?: number; max_messages_per_minute?: number };
+    wasm_sandbox?: { fuel_metering?: boolean; epoch_interruption?: boolean; default_timeout_secs?: number; default_fuel_limit?: number };
+    auth?: { mode?: string; api_key_set?: boolean };
+  };
+  monitoring?: {
+    audit_trail?: { enabled?: boolean; algorithm?: string; entry_count?: number };
+    taint_tracking?: { enabled?: boolean; tracked_labels?: string[] };
+    manifest_signing?: { algorithm?: string; available?: boolean };
+  };
+  secret_zeroization?: boolean;
+  total_features?: number;
+}
+
+export interface BackupItem {
+  filename?: string;
+  path?: string;
+  size_bytes?: number;
+  modified_at?: string;
+  components?: string[];
+  librefang_version?: string;
+  created_at?: string;
+}
+
+export interface TaskQueueStatusResponse {
+  total?: number;
+  pending?: number;
+  in_progress?: number;
+  completed?: number;
+  failed?: number;
+}
+
+export interface TaskQueueItem {
+  id?: string;
+  status?: string;
+  created_at?: string;
+  updated_at?: string;
+  [key: string]: unknown;
+}
+
+export async function getHealthDetail(): Promise<HealthDetailResponse> {
+  return get<HealthDetailResponse>("/api/health/detail");
+}
+
+export async function getSecurityStatus(): Promise<SecurityStatusResponse> {
+  return get<SecurityStatusResponse>("/api/security");
+}
+
+export async function getFullConfig(): Promise<Record<string, unknown>> {
+  return get<Record<string, unknown>>("/api/config");
+}
+
+export async function listBackups(): Promise<{ backups?: BackupItem[]; total?: number }> {
+  return get<{ backups?: BackupItem[]; total?: number }>("/api/backups");
+}
+
+export async function createBackup(): Promise<{ filename?: string; path?: string; size_bytes?: number; components?: string[]; created_at?: string }> {
+  return post<{ filename?: string; path?: string; size_bytes?: number; components?: string[]; created_at?: string }>("/api/backup", {});
+}
+
+export async function restoreBackup(filename: string): Promise<{ restored_files?: number; errors?: string[]; message?: string }> {
+  return post<{ restored_files?: number; errors?: string[]; message?: string }>("/api/restore", { filename });
+}
+
+export async function deleteBackup(filename: string): Promise<{ deleted?: string }> {
+  return del<{ deleted?: string }>(`/api/backups/${encodeURIComponent(filename)}`);
+}
+
+export async function getTaskQueueStatus(): Promise<TaskQueueStatusResponse> {
+  return get<TaskQueueStatusResponse>("/api/tasks/status");
+}
+
+export async function listTaskQueue(status?: string): Promise<{ tasks?: TaskQueueItem[]; total?: number }> {
+  const qs = status ? `?status=${encodeURIComponent(status)}` : "";
+  return get<{ tasks?: TaskQueueItem[]; total?: number }>(`/api/tasks/list${qs}`);
+}
+
+export async function deleteTaskFromQueue(id: string): Promise<{ status?: string; id?: string }> {
+  return del<{ status?: string; id?: string }>(`/api/tasks/${encodeURIComponent(id)}`);
+}
+
+export async function retryTask(id: string): Promise<{ status?: string; id?: string }> {
+  return post<{ status?: string; id?: string }>(`/api/tasks/${encodeURIComponent(id)}/retry`, {});
+}
+
+export async function cleanupSessions(): Promise<{ sessions_deleted?: number }> {
+  return post<{ sessions_deleted?: number }>("/api/sessions/cleanup", {});
+}
+
 export async function listAuditRecent(limit = 200): Promise<AuditRecentResponse> {
   const n = Number.isFinite(limit) ? Math.max(1, Math.min(1000, Math.floor(limit))) : 200;
   return get<AuditRecentResponse>(`/api/audit/recent?n=${encodeURIComponent(String(n))}`);

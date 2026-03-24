@@ -1,4 +1,4 @@
-import { Link, Outlet, useLocation } from "@tanstack/react-router";
+import { Link, Outlet } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Globe, Sun, Moon, Search, ChevronLeft, ChevronRight, ChevronDown, Menu, Home, Layers, MessageCircle, Clock, CheckCircle, Calendar, Shield, Users, Server, Network, Bell, Hand, BarChart3, Database, Activity, FileText, Settings, Puzzle, Cpu, Lock, Share2, Gauge } from "lucide-react";
@@ -67,8 +67,6 @@ export function App() {
   const { t } = useTranslation();
   const { theme, toggleTheme, language, setLanguage, isMobileMenuOpen, setMobileMenuOpen, isSidebarCollapsed, toggleSidebar, navLayout, collapsedNavGroups, toggleNavGroup } = useUIStore();
   const { isOpen: isPaletteOpen, setIsOpen: setPaletteOpen } = useCommandPalette();
-  const location = useLocation();
-
   const [authNeeded, setAuthNeeded] = useState(false);
   const [authChecked, setAuthChecked] = useState(false);
   const [appVersion, setAppVersion] = useState("");
@@ -161,7 +159,7 @@ export function App() {
 
       {/* Sidebar */}
       <aside className={`
-        fixed inset-y-0 left-0 z-50 flex w-[220px] flex-col border-r border-border-subtle bg-surface/80 backdrop-blur-xl lg:static lg:translate-x-0
+        fixed inset-y-0 left-0 z-50 flex w-[220px] flex-col border-r border-border-subtle bg-surface lg:static lg:translate-x-0
         transition-[width,transform] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]
         ${isMobileMenuOpen ? "translate-x-0 shadow-2xl" : "-translate-x-full"}
         ${isSidebarCollapsed ? "lg:w-[72px]" : "lg:w-[280px]"}
@@ -280,7 +278,7 @@ export function App() {
       {/* Main Content Area */}
       <div className="flex flex-1 flex-col overflow-hidden">
         {/* Top Header */}
-        <header className="flex h-14 sm:h-16 shrink-0 items-center justify-between border-b border-border-subtle bg-surface/80 px-3 sm:px-6 backdrop-blur-xl">
+        <header className="flex h-14 sm:h-16 shrink-0 items-center justify-between border-b border-border-subtle bg-surface px-3 sm:px-6">
           <div className="flex items-center gap-2">
             <button
               onClick={() => setMobileMenuOpen(true)}
@@ -322,7 +320,7 @@ export function App() {
 
         {/* Main Content */}
         <main className="flex-1 overflow-y-auto overflow-x-hidden bg-main">
-          <div key={location.pathname} className="mx-auto max-w-7xl p-3 sm:p-4 lg:p-8 animate-fade-in-up">
+          <div className="mx-auto max-w-7xl p-3 sm:p-4 lg:p-8">
             <Outlet />
           </div>
         </main>

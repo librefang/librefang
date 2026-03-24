@@ -814,6 +814,7 @@ export function HandsPage() {
           activeQuery.refetch();
         }}
         icon={<Hand className="h-4 w-4" />}
+        helpText={t("hands.help")}
         actions={
           <div className="flex items-center gap-3">
             <Badge variant="success" dot>

@@ -190,6 +190,7 @@ export function TelemetryPage() {
         isFetching={metricsQuery.isFetching}
         onRefresh={() => void metricsQuery.refetch()}
         icon={<Activity className="h-4 w-4" />}
+        helpText={t("telemetry.help")}
       />
 
       {metricsQuery.isLoading ? (
@@ -268,7 +269,7 @@ export function TelemetryPage() {
               </div>
               <div className="mt-1 flex items-center gap-2">
                 <span className="relative flex h-2 w-2">
-                  <span className="absolute inline-flex h-full w-full rounded-full bg-success opacity-75 animate-ping" />
+                  <span className="absolute inline-flex h-full w-full rounded-full bg-success opacity-75 animate-pulse" />
                   <span className="relative inline-flex rounded-full h-2 w-2 bg-success" />
                 </span>
                 <Badge variant="success">{t("telemetry.collecting")}</Badge>
