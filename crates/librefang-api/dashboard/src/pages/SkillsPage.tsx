@@ -1,4 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { formatDate } from "../lib/datetime";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { listSkills, uninstallSkill, clawhubSearch, clawhubInstall, clawhubGetSkill, skillhubSearch, skillhubBrowse, skillhubInstall, skillhubGetSkill, type ClawHubBrowseItem } from "../api";
@@ -136,7 +137,7 @@ function MarketplaceSkillCard({ skill, onInstall, pendingId, onViewDetails, sour
           ) : skill.updated_at ? (
             <span className="flex items-center gap-1 text-text-dim">
               <Calendar className="w-3 h-3" />
-              {new Date(skill.updated_at).toLocaleDateString()}
+              {formatDate(skill.updated_at)}
             </span>
           ) : null}
         </div>
@@ -218,7 +219,7 @@ function DetailsModal({ skill, onClose, onInstall, pendingId, source = "clawhub"
             ) : skill.updated_at ? (
               <span className="flex items-center gap-1">
                 <Calendar className="w-4 h-4" />
-                {new Date(skill.updated_at).toLocaleDateString()}
+                {formatDate(skill.updated_at)}
               </span>
             ) : null}
           </div>

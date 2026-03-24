@@ -1,4 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { formatTime } from "../lib/datetime";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { listA2AAgents, discoverA2AAgent, sendA2ATask, getA2ATaskStatus } from "../api";
@@ -279,7 +280,7 @@ export function A2APage() {
                         {task.created_at && (
                           <span className="text-[10px] text-text-dim flex items-center gap-1">
                             <Clock className="w-3 h-3" />
-                            {new Date(task.created_at).toLocaleTimeString()}
+                            {formatTime(task.created_at)}
                           </span>
                         )}
                         <button

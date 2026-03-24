@@ -1,4 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { formatDateTime } from "../lib/datetime";
 import { useState, useEffect, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { listMemories, searchMemories, deleteMemory, getMemoryStats, addMemoryFromText, updateMemory, cleanupMemories, type MemoryStatsResponse, type MemoryItem } from "../api";
@@ -527,10 +528,10 @@ export function MemoryPage() {
               </MarkdownContent>
               <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] text-text-dim/50">
                 {m.created_at && (
-                  <span>{t("memory.created")}: {new Date(m.created_at).toLocaleString()}</span>
+                  <span>{t("memory.created")}: {formatDateTime(m.created_at)}</span>
                 )}
                 {m.accessed_at && (
-                  <span>{t("memory.last_access", { defaultValue: "Last access" })}: {new Date(m.accessed_at).toLocaleString()}</span>
+                  <span>{t("memory.last_access", { defaultValue: "Last access" })}: {formatDateTime(m.accessed_at)}</span>
                 )}
                 {m.access_count != null && m.access_count > 0 && (
                   <span>{t("memory.access_count", { defaultValue: "Accessed" })}: {m.access_count}x</span>

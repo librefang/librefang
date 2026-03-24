@@ -1,3 +1,5 @@
+import { formatCost } from "./format";
+
 export type ChatRole = "user" | "assistant" | "system";
 
 export interface ToolOutputEntry {
@@ -35,7 +37,7 @@ export function formatMeta(response: {
     parts.push(`${response.iterations} iter`);
   }
   if (typeof response.cost_usd === "number") {
-    parts.push(`$${response.cost_usd.toFixed(4)}`);
+    parts.push(formatCost(response.cost_usd));
   }
   return parts.join(" | ");
 }

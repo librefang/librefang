@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { formatTime } from "../lib/datetime";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { listAuditRecent } from "../api";
@@ -7,6 +8,7 @@ import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
 import { FileText, Search, Download } from "lucide-react";
+import { truncateId } from "../lib/string";
 
 const REFRESH_MS = 5000;
 
@@ -107,10 +109,10 @@ export function LogsPage() {
               const isError = outcome.startsWith("error");
               const level = isError ? "error" : (l.event_type || "info").toLowerCase();
               const levelStyle = LOG_LEVELS[level as keyof typeof LOG_LEVELS] || LOG_LEVELS.info;
-              const time = l.timestamp ? new Date(l.timestamp).toLocaleTimeString() : "-";
+              const time = formatTime(l.timestamp);
               const detail = l.detail || l.message || "-";
               const reason = l.outcome && l.outcome !== detail ? l.outcome : "";
-              const agentId = l.agent_id ? l.agent_id.slice(0, 8) : "";
+              const agentId = l.agent_id ? truncateId(l.agent_id) : "";
               return (
                 <div key={l.seq || l.id || i} className="flex flex-col sm:flex-row gap-1 sm:gap-4 p-2 hover:bg-surface-hover rounded transition-colors items-start">
                   <div className="flex items-center gap-2 sm:contents">

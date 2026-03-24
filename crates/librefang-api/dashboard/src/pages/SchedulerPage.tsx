@@ -8,6 +8,7 @@ import { PageHeader } from "../components/ui/PageHeader";
 import { useUIStore } from "../lib/store";
 import { Clock, Plus, Play, Trash2, Calendar, Zap, X, Loader2, AlertCircle } from "lucide-react";
 import { ListSkeleton } from "../components/ui/Skeleton";
+import { truncateId } from "../lib/string";
 
 const REFRESH_MS = 30000;
 
@@ -115,7 +116,7 @@ export function SchedulerPage() {
                     <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-lg bg-brand/10 flex items-center justify-center shrink-0">
                       <Clock className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-brand" />
                     </div>
-                    <h3 className="text-xs sm:text-sm font-bold truncate flex-1 min-w-0">{s.name || s.description || s.id.slice(0, 8)}</h3>
+                    <h3 className="text-xs sm:text-sm font-bold truncate flex-1 min-w-0">{s.name || s.description || truncateId(s.id)}</h3>
                     {s.enabled !== false && <Badge variant="success">{t("common.active")}</Badge>}
                     <div className="flex items-center gap-1 shrink-0">
                       <Button variant="secondary" size="sm" onClick={() => runMut.mutate(s.id)} disabled={runMut.isPending}>
@@ -164,7 +165,7 @@ export function SchedulerPage() {
                 <div key={tr.id} className="flex items-center gap-3 p-3 rounded-xl border border-border-subtle hover:border-brand/30 transition-colors">
                   <Zap className="w-4 h-4 text-warning shrink-0" />
                   <div className="min-w-0 flex-1">
-                    <p className="text-xs font-bold truncate">{tr.pattern || tr.name || tr.id?.slice(0, 12)}</p>
+                    <p className="text-xs font-bold truncate">{tr.pattern || tr.name || truncateId(tr.id, 12)}</p>
                     {tr.prompt_template && <p className="text-[9px] text-text-dim truncate">{tr.prompt_template}</p>}
                   </div>
                   {tr.enabled !== false && <Badge variant="success" className="shrink-0">ON</Badge>}
@@ -188,7 +189,7 @@ export function SchedulerPage() {
                 <div key={j.id || i} className="flex items-center gap-3 p-3 rounded-xl border border-border-subtle hover:border-brand/30 transition-colors">
                   <Clock className="w-4 h-4 text-brand shrink-0" />
                   <div className="min-w-0 flex-1">
-                    <p className="text-xs font-bold truncate">{j.name || j.id?.slice(0, 12)}</p>
+                    <p className="text-xs font-bold truncate">{j.name || truncateId(j.id, 12)}</p>
                     <p className="text-[9px] text-text-dim font-mono">{j.cron || j.schedule || "-"}</p>
                   </div>
                   {j.enabled !== false && <Badge variant="success" className="shrink-0">ON</Badge>}

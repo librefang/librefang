@@ -1,4 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { formatCost } from "../lib/format";
 import { memo, useEffect, useMemo, useRef, useState, useCallback } from "react";
 import rehypeKatex from "rehype-katex";
 import remarkMath from "remark-math";
@@ -424,7 +425,7 @@ const MessageBubble = memo(function MessageBubble({ message }: { message: ChatMe
           )}
           {message.cost_usd !== undefined && message.cost_usd > 0 && (
             <span className="px-1.5 py-0.5 rounded bg-success/10 text-success/70 font-mono text-[9px]">
-              ${message.cost_usd.toFixed(4)}
+              {formatCost(message.cost_usd)}
             </span>
           )}
         </div>

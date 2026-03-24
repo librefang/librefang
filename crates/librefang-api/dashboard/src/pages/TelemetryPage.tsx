@@ -1,4 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
+import { formatCompact } from "../lib/format";
+import { formatUptime } from "../lib/datetime";
 import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { PageHeader } from "../components/ui/PageHeader";
@@ -147,12 +149,7 @@ function parseMetrics(text: string): ParsedMetrics {
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
-function formatUptime(seconds: number): string {
-  if (seconds < 60) return `${seconds}s`;
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
-  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
-  return `${Math.floor(seconds / 86400)}d ${Math.floor((seconds % 86400) / 3600)}h`;
-}
+
 
 // ── Component ────────────────────────────────────────────────────────
 
@@ -262,7 +259,7 @@ export function TelemetryPage() {
                 <span className="text-[10px] font-black uppercase tracking-widest text-text-dim/60">{t("telemetry.total_requests")}</span>
                 <div className="w-7 h-7 rounded-lg bg-brand/10 flex items-center justify-center"><BarChart3 className="w-3.5 h-3.5 text-brand" /></div>
               </div>
-              <p className="text-xl font-black tracking-tight mt-1"><AnimatedNumber value={totalRequests} /></p>
+              <p className="text-xl font-black tracking-tight mt-1" title={totalRequests.toLocaleString()}>{formatCompact(totalRequests)}</p>
             </Card>
             <Card hover padding="md">
               <div className="flex items-center justify-between">
@@ -305,35 +302,35 @@ export function TelemetryPage() {
                 <span className="text-[10px] font-black uppercase tracking-widest text-text-dim/60">{t("telemetry.total_tokens")}</span>
                 <div className="w-7 h-7 rounded-lg bg-brand/10 flex items-center justify-center"><BarChart3 className="w-3.5 h-3.5 text-brand" /></div>
               </div>
-              <p className="text-2xl font-black tracking-tight mt-1 text-brand"><AnimatedNumber value={totalTokens} /></p>
+              <p className="text-2xl font-black tracking-tight mt-1 text-brand" title={totalTokens.toLocaleString()}>{formatCompact(totalTokens)}</p>
             </Card>
             <Card hover padding="md">
               <div className="flex items-center justify-between">
                 <span className="text-[10px] font-black uppercase tracking-widest text-text-dim/60">{t("telemetry.input_tokens")}</span>
                 <div className="w-7 h-7 rounded-lg bg-success/10 flex items-center justify-center"><TrendingUp className="w-3.5 h-3.5 text-success" /></div>
               </div>
-              <p className="text-2xl font-black tracking-tight mt-1 text-success"><AnimatedNumber value={totalInput} /></p>
+              <p className="text-2xl font-black tracking-tight mt-1 text-success" title={totalInput.toLocaleString()}>{formatCompact(totalInput)}</p>
             </Card>
             <Card hover padding="md">
               <div className="flex items-center justify-between">
                 <span className="text-[10px] font-black uppercase tracking-widest text-text-dim/60">{t("telemetry.output_tokens")}</span>
                 <div className="w-7 h-7 rounded-lg bg-warning/10 flex items-center justify-center"><TrendingUp className="w-3.5 h-3.5 text-warning" /></div>
               </div>
-              <p className="text-2xl font-black tracking-tight mt-1 text-warning"><AnimatedNumber value={totalOutput} /></p>
+              <p className="text-2xl font-black tracking-tight mt-1 text-warning" title={totalOutput.toLocaleString()}>{formatCompact(totalOutput)}</p>
             </Card>
             <Card hover padding="md">
               <div className="flex items-center justify-between">
                 <span className="text-[10px] font-black uppercase tracking-widest text-text-dim/60">{t("telemetry.llm_calls")}</span>
                 <div className="w-7 h-7 rounded-lg bg-accent/10 flex items-center justify-center"><MessageSquare className="w-3.5 h-3.5 text-accent" /></div>
               </div>
-              <p className="text-2xl font-black tracking-tight mt-1"><AnimatedNumber value={totalLlmCalls} /></p>
+              <p className="text-2xl font-black tracking-tight mt-1" title={totalLlmCalls.toLocaleString()}>{formatCompact(totalLlmCalls)}</p>
             </Card>
             <Card hover padding="md">
               <div className="flex items-center justify-between">
                 <span className="text-[10px] font-black uppercase tracking-widest text-text-dim/60">{t("telemetry.tool_calls")}</span>
                 <div className="w-7 h-7 rounded-lg bg-brand/10 flex items-center justify-center"><Wrench className="w-3.5 h-3.5 text-brand" /></div>
               </div>
-              <p className="text-2xl font-black tracking-tight mt-1"><AnimatedNumber value={totalToolCalls} /></p>
+              <p className="text-2xl font-black tracking-tight mt-1" title={totalToolCalls.toLocaleString()}>{formatCompact(totalToolCalls)}</p>
             </Card>
           </div>
 
@@ -353,7 +350,7 @@ export function TelemetryPage() {
                       <div key={i} className="flex items-center gap-3">
                         <span className="text-sm font-semibold flex-1 truncate">{a.agent}</span>
                         <Badge variant="default" className="font-mono text-xs">{a.provider}/{a.model}</Badge>
-                        <span className="text-sm font-black text-brand w-20 text-right">{a.tokens.toLocaleString()}<span className="text-xs font-normal text-text-dim"> tok</span></span>
+                        <span className="text-sm font-black text-brand w-20 text-right" title={a.tokens.toLocaleString()}>{formatCompact(a.tokens)}<span className="text-xs font-normal text-text-dim"> tok</span></span>
                       </div>
                     ))}
                 </div>
@@ -377,7 +374,7 @@ export function TelemetryPage() {
                         <Badge variant={r.status.startsWith("2") ? "success" : r.status.startsWith("4") ? "warning" : "error"} className="w-12 justify-center">
                           {r.status}
                         </Badge>
-                        <span className="text-sm font-black text-brand w-16 text-right">{r.count.toLocaleString()}</span>
+                        <span className="text-sm font-black text-brand w-16 text-right" title={r.count.toLocaleString()}>{formatCompact(r.count)}</span>
                       </div>
                     ))}
                 </div>

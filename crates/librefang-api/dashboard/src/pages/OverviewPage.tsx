@@ -7,6 +7,8 @@ import { Card } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { Home, RefreshCw, Users, Layers, Server, Network, Zap, MessageCircle, User, Clock, Shield, Sparkles, Calendar, HardDrive, Activity, Globe } from "lucide-react";
+import { truncateId } from "../lib/string";
+import { getStatusVariant } from "../lib/status";
 
 const REFRESH_MS = 30000;
 
@@ -53,15 +55,6 @@ export function OverviewPage() {
     if (!s) return t("status.unknown");
     const key = `status.${s.toLowerCase()}`;
     return t(key, { defaultValue: s });
-  };
-
-  const getStatusVariant = (state?: string): "success" | "warning" | "error" | "default" => {
-    switch (state) {
-      case "running": return "success";
-      case "idle": return "warning";
-      case "error": return "error";
-      default: return "default";
-    }
   };
 
   // Stats card data
@@ -249,7 +242,7 @@ export function OverviewPage() {
                     <div className="min-w-0 flex-1">
                       <p className="truncate text-sm font-bold">{agent.name}</p>
                       <p className="truncate text-[10px] text-text-dim uppercase tracking-tight font-medium">
-                        {agent.id?.slice(0, 8)} · {translateStatus(agent.state)}
+                        {truncateId(agent.id)} · {translateStatus(agent.state)}
                       </p>
                     </div>
                     <Badge variant={getStatusVariant(agent.state)}>

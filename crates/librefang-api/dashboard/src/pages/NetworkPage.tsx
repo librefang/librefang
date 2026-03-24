@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { formatDateTime } from "../lib/datetime";
 import { useTranslation } from "react-i18next";
 import { getNetworkStatus, listPeers } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
@@ -149,7 +150,7 @@ export function NetworkPage() {
                         )}
                         {peer.last_seen && (
                           <span className="flex items-center gap-1">
-                            <Clock className="w-3 h-3" /> {new Date(peer.last_seen).toLocaleString()}
+                            <Clock className="w-3 h-3" /> {formatDateTime(peer.last_seen)}
                           </span>
                         )}
                       </div>
