@@ -95,7 +95,7 @@ function CustomNode({ data, type: nodeTypeKey, t }: { data: any; type: string; t
       {/* Header: icon circle + label */}
       <div className="flex items-center gap-2.5 px-3 py-2.5" style={{ backgroundColor: `${config.color}15` }}>
         <div
-          className="w-8 h-8 rounded-xl flex items-center justify-center text-white text-sm font-bold shrink-0 transition-all"
+          className="w-8 h-8 rounded-xl flex items-center justify-center text-white text-sm font-bold shrink-0 transition-colors"
           style={{ backgroundColor: config.color }}
         >
           {runState === "running" ? <Loader2 className="w-4 h-4 animate-spin" /> :
@@ -141,7 +141,7 @@ function GroupNodeComponent({ data, id }: { data: any; id: string }) {
   const expanded = data._expanded !== false;
   return (
     <div
-      className={`rounded-2xl border-2 border-dashed transition-all ${expanded ? "border-brand/30 bg-brand/5" : "border-brand bg-surface shadow-lg"
+      className={`rounded-2xl border-2 border-dashed transition-colors ${expanded ? "border-brand/30 bg-brand/5" : "border-brand bg-surface shadow-lg"
         }`}
       style={expanded
         ? { width: "100%", height: "100%", pointerEvents: "none" }
@@ -206,7 +206,7 @@ function WorkflowList({
         ) : (
           workflows.map(w => (
             <div key={w.id} onClick={() => onSelect(w)}
-              className={`p-3 rounded-xl border cursor-pointer transition-all ${selectedId === w.id ? "border-brand bg-brand/5" : "border-border-subtle hover:border-brand/50 bg-surface"
+              className={`p-3 rounded-xl border cursor-pointer transition-colors ${selectedId === w.id ? "border-brand bg-brand/5" : "border-border-subtle hover:border-brand/50 bg-surface"
                 }`}>
               {confirmId === w.id ? (
                 <div className="flex items-center justify-between gap-2">
@@ -384,7 +384,7 @@ function TemplateBrowser({
                   <button
                     key={tmpl.id}
                     onClick={() => handleSelect(tmpl)}
-                    className="p-3 rounded-xl border border-border-subtle bg-surface hover:border-brand/50 hover:shadow-sm transition-all text-left"
+                    className="p-3 rounded-xl border border-border-subtle bg-surface hover:border-brand/50 hover:shadow-sm transition-colors text-left"
                   >
                     <div className="flex items-center justify-between">
                       <span className="text-sm font-bold truncate">{tmpl.name}</span>
@@ -1755,7 +1755,7 @@ function CanvasPageInner() {
                   <div className="grid gap-1.5">
                     {group.items.map(n => (
                       <button key={n.type} onClick={() => addNode(n.type)}
-                        className="flex items-center gap-2.5 px-2.5 py-2 rounded-xl bg-surface hover:bg-main border border-transparent hover:border-border-subtle hover:shadow-sm transition-all text-left group">
+                        className="flex items-center gap-2.5 px-2.5 py-2 rounded-xl bg-surface hover:bg-main border border-transparent hover:border-border-subtle hover:shadow-sm transition-colors text-left group">
                         <div className="w-7 h-7 rounded-lg flex items-center justify-center text-sm shrink-0 transition-transform group-hover:scale-110"
                           style={{ backgroundColor: `${n.color}15`, color: n.color }}>
                           {n.icon}
@@ -1961,7 +1961,7 @@ function CanvasPageInner() {
 
       {/* Toast */}
       {toast && (
-        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-xl bg-text text-surface text-xs font-bold shadow-lg transition-all">
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-xl bg-text text-surface text-xs font-bold shadow-lg transition-colors">
           <Check className="w-3.5 h-3.5 inline mr-1.5" />{toast}
         </div>
       )}

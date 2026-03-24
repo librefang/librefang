@@ -497,7 +497,7 @@ export function SkillsPage() {
       <div className="flex gap-1 p-1 bg-main/30 rounded-xl w-fit">
         <button
           onClick={() => { setViewMode("installed"); setPage(1); setSearch(""); setSkillhubSearch(""); setSelectedCategory(null); }}
-          className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all ${
+          className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-colors ${
             viewMode === "installed" ? "bg-surface text-success shadow-sm" : "text-text-dim hover:text-text-main"
           }`}
         >
@@ -509,7 +509,7 @@ export function SkillsPage() {
         </button>
         <button
           onClick={() => { setViewMode("marketplace"); setPage(1); setSkillhubSearch(""); setSelectedCategory(categories[0]?.id || null); }}
-          className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all ${
+          className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-colors ${
             viewMode === "marketplace" ? "bg-surface text-brand shadow-sm" : "text-text-dim hover:text-text-main"
           }`}
         >
@@ -518,7 +518,7 @@ export function SkillsPage() {
         </button>
         <button
           onClick={() => { setViewMode("skillhub"); setPage(1); setSearch(""); setSelectedCategory(null); }}
-          className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all ${
+          className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-colors ${
             viewMode === "skillhub" ? "bg-surface text-accent shadow-sm" : "text-text-dim hover:text-text-main"
           }`}
         >
@@ -534,7 +534,7 @@ export function SkillsPage() {
             <button
               key={cat.id}
               onClick={() => handleCategoryClick(cat.id)}
-              className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+              className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${
                 selectedCategory === cat.id
                   ? "bg-brand text-white shadow-md"
                   : "bg-main/50 text-text-dim hover:bg-main hover:text-text-main border border-border-subtle"

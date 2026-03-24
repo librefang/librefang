@@ -395,7 +395,7 @@ const MessageBubble = memo(function MessageBubble({ message }: { message: ChatMe
         </div>
 
         {/* Message content */}
-        <div className={`relative px-4 py-3 rounded-2xl text-sm leading-relaxed shadow-sm transition-all ${
+        <div className={`relative px-4 py-3 rounded-2xl text-sm leading-relaxed shadow-sm transition-colors ${
           isUser
             ? "bg-gradient-to-br from-brand to-brand/90 text-white rounded-tr-md"
             : message.error
@@ -743,7 +743,7 @@ export function ChatPage() {
           </div>
           <button
             onClick={() => queryClient.invalidateQueries({ queryKey: ["agents", "list"] })}
-            className="p-2 sm:p-2.5 rounded-xl hover:bg-surface-hover text-text-dim hover:text-brand transition-all"
+            className="p-2 sm:p-2.5 rounded-xl hover:bg-surface-hover text-text-dim hover:text-brand transition-colors"
           >
             <RefreshCw className={`h-4 w-4 ${agentsQuery.isFetching ? "animate-spin" : ""}`} />
           </button>
@@ -765,7 +765,7 @@ export function ChatPage() {
                 <button
                   key={agent.id}
                   onClick={() => selectAgent(agent.id)}
-                  className={`w-full flex items-center gap-3 p-3 rounded-xl transition-all text-left group ${
+                  className={`w-full flex items-center gap-3 p-3 rounded-xl transition-colors text-left group ${
                     selectedAgentId === agent.id
                       ? "bg-brand text-white shadow-lg shadow-brand/20"
                       : "hover:bg-surface-hover"
@@ -865,7 +865,7 @@ export function ChatPage() {
           </div>
 
           {/* Input area */}
-          <div className={`p-2 sm:p-4 border-t border-border-subtle bg-surface transition-all ${!selectedAgentId ? "opacity-30 pointer-events-none" : ""}`}>
+          <div className={`p-2 sm:p-4 border-t border-border-subtle bg-surface transition-opacity ${!selectedAgentId ? "opacity-30 pointer-events-none" : ""}`}>
             <ChatInput
               onSend={sendMessage}
               disabled={isLoading}

@@ -144,7 +144,7 @@ export function PluginsPage() {
           ) : (
             <div className="space-y-2 stagger-children">
               {plugins.map(p => (
-                <div key={p.name} className="flex items-center gap-3 p-3 sm:p-4 rounded-xl sm:rounded-2xl border border-border-subtle bg-surface hover:border-brand/30 transition-all">
+                <div key={p.name} className="flex items-center gap-3 p-3 sm:p-4 rounded-xl sm:rounded-2xl border border-border-subtle bg-surface hover:border-brand/30 transition-colors">
                   <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-lg sm:rounded-xl bg-brand/10 flex items-center justify-center shrink-0">
                     <Puzzle className="w-4 h-4 sm:w-5 sm:h-5 text-brand" />
                   </div>
@@ -175,7 +175,7 @@ export function PluginsPage() {
                         <button onClick={() => setConfirmDelete(null)} className="px-2 py-1 rounded-lg bg-main text-text-dim text-[10px] font-bold">{t("common.cancel")}</button>
                       </div>
                     ) : (
-                      <button onClick={() => handleDelete(p.name)} className="p-2 rounded-lg text-text-dim/30 hover:text-error hover:bg-error/10 transition-all">
+                      <button onClick={() => handleDelete(p.name)} className="p-2 rounded-lg text-text-dim/30 hover:text-error hover:bg-error/10 transition-colors">
                         <Trash2 className="w-3.5 h-3.5" />
                       </button>
                     )}

@@ -131,7 +131,7 @@ export function WorkflowsPage() {
       <div className="flex items-center gap-1 border-b border-border-subtle">
         <button
           onClick={() => setActiveTab("workflows")}
-          className={`px-4 py-2.5 text-sm font-bold transition-all border-b-2 -mb-px ${
+          className={`px-4 py-2.5 text-sm font-bold transition-colors border-b-2 -mb-px ${
             activeTab === "workflows"
               ? "border-brand text-brand"
               : "border-transparent text-text-dim hover:text-brand/70"
@@ -142,7 +142,7 @@ export function WorkflowsPage() {
         </button>
         <button
           onClick={() => setActiveTab("templates")}
-          className={`px-4 py-2.5 text-sm font-bold transition-all border-b-2 -mb-px ${
+          className={`px-4 py-2.5 text-sm font-bold transition-colors border-b-2 -mb-px ${
             activeTab === "templates"
               ? "border-brand text-brand"
               : "border-transparent text-text-dim hover:text-brand/70"
@@ -213,7 +213,7 @@ export function WorkflowsPage() {
               <div key={wf.id}
                 onClick={() => setSelectedWorkflowId(wf.id)}
                 onDoubleClick={() => openWorkflow(wf.id)}
-                className={`group flex items-center gap-4 p-4 rounded-2xl border cursor-pointer transition-all ${
+                className={`group flex items-center gap-4 p-4 rounded-2xl border cursor-pointer transition-colors ${
                   selectedWorkflowId === wf.id
                     ? "border-brand bg-brand/5 shadow-sm"
                     : "border-border-subtle bg-surface hover:border-brand/30 hover:shadow-sm"
@@ -247,12 +247,12 @@ export function WorkflowsPage() {
                 {/* Actions */}
                 <div className="flex items-center gap-1 shrink-0" onClick={e => e.stopPropagation()}>
                   <button onClick={() => { setScheduleWorkflowId(wf.id); }}
-                    className={`p-2 rounded-lg transition-all ${(wf as any).schedule ? "text-success hover:text-success hover:bg-success/10" : "text-text-dim/40 hover:text-brand hover:bg-brand/10"}`}
+                    className={`p-2 rounded-lg transition-colors ${(wf as any).schedule ? "text-success hover:text-success hover:bg-success/10" : "text-text-dim/40 hover:text-brand hover:bg-brand/10"}`}
                     title={t("nav.scheduler")}>
                     <Calendar className="w-3.5 h-3.5" />
                   </button>
                   <button onClick={() => openWorkflow(wf.id)}
-                    className="p-2 rounded-lg text-text-dim/40 hover:text-brand hover:bg-brand/10 transition-all"
+                    className="p-2 rounded-lg text-text-dim/40 hover:text-brand hover:bg-brand/10 transition-colors"
                     title={t("canvas.ctx_edit")}>
                     <ChevronRight className="w-4 h-4" />
                   </button>
@@ -263,7 +263,7 @@ export function WorkflowsPage() {
                     </div>
                   ) : (
                     <button onClick={() => handleDelete(wf.id)}
-                      className="p-2 rounded-lg text-text-dim/30 hover:text-error hover:bg-error/10 transition-all">
+                      className="p-2 rounded-lg text-text-dim/30 hover:text-error hover:bg-error/10 transition-colors">
                       <Trash2 className="w-3.5 h-3.5" />
                     </button>
                   )}

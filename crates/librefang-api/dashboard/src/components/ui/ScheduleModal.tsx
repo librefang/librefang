@@ -120,7 +120,7 @@ export function ScheduleModal({ title, subtitle, initialCron, onSave, onClose }:
           <div className="flex rounded-xl bg-main p-0.5">
             {types.map(tp => (
               <button key={tp.key} onClick={() => setScheduleType(tp.key)}
-                className={`flex-1 py-1.5 rounded-lg text-[11px] font-bold transition-all duration-200 ${
+                className={`flex-1 py-1.5 rounded-lg text-[11px] font-bold transition-colors duration-200 ${
                   scheduleType === tp.key
                     ? "bg-surface text-brand shadow-sm"
                     : "text-text-dim/60 hover:text-text-dim"
@@ -160,7 +160,7 @@ export function ScheduleModal({ title, subtitle, initialCron, onSave, onClose }:
               <div className="flex justify-between">
                 {wdShort.map((d, i) => (
                   <button key={i} onClick={() => setWeekday(i + 1)}
-                    className={`w-8 h-8 rounded-full text-[11px] font-bold transition-all ${
+                    className={`w-8 h-8 rounded-full text-[11px] font-bold transition-colors ${
                       weekday === i + 1 ? "bg-brand text-white" : "text-text-dim hover:bg-main"
                     }`}>{d}</button>
                 ))}

@@ -159,7 +159,7 @@ export function GoalsPage() {
   };
   const [showClearConfirm, setShowClearConfirm] = useState(false);
 
-  const inputClass = "rounded-xl border border-border-subtle bg-main px-4 py-2 text-sm focus:border-brand outline-none transition-all";
+  const inputClass = "rounded-xl border border-border-subtle bg-main px-4 py-2 text-sm focus:border-brand outline-none transition-colors";
 
   const statusLabel = (status: string) => {
     if (status === "in_progress") return t("goals.in_progress");
@@ -308,7 +308,7 @@ export function GoalsPage() {
                       ? <Play className="h-4 w-4 text-warning" />
                       : <Clock className="h-4 w-4 text-text-dim/40" />;
                   return (
-                    <div key={r.goal.id} className="rounded-xl bg-main/40 border border-border-subtle hover:border-brand/30 transition-all" style={{ marginLeft: `${r.depth * 16}px` }}>
+                    <div key={r.goal.id} className="rounded-xl bg-main/40 border border-border-subtle hover:border-brand/30 transition-colors" style={{ marginLeft: `${r.depth * 16}px` }}>
                       {editingId === r.goal.id ? (
                         <div className="p-3 sm:p-4 flex flex-col gap-2">
                           <input value={editDraft.title} onChange={e => setEditDraft({...editDraft, title: e.target.value})} className={inputClass} placeholder={t("goals.title_label")} />
@@ -356,10 +356,10 @@ export function GoalsPage() {
                               </Badge>
                             </div>
                             <div className="flex items-center gap-1 shrink-0">
-                              <button onClick={() => handleStartEdit(r.goal)} className="p-1.5 rounded-lg hover:bg-brand/10 text-text-dim hover:text-brand transition-all" title={t("common.edit")}>
+                              <button onClick={() => handleStartEdit(r.goal)} className="p-1.5 rounded-lg hover:bg-brand/10 text-text-dim hover:text-brand transition-colors" title={t("common.edit")}>
                                 <Edit2 className="h-3.5 w-3.5" />
                               </button>
-                              <button onClick={() => setConfirmDeleteId(r.goal.id)} className="p-1.5 rounded-lg hover:bg-error/10 text-text-dim hover:text-error transition-all" title={t("common.delete")}>
+                              <button onClick={() => setConfirmDeleteId(r.goal.id)} className="p-1.5 rounded-lg hover:bg-error/10 text-text-dim hover:text-error transition-colors" title={t("common.delete")}>
                                 <Trash2 className="h-3.5 w-3.5" />
                               </button>
                             </div>

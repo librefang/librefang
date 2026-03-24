@@ -139,7 +139,7 @@ export function OverviewPage() {
           </div>
           <button
             onClick={() => void snapshotQuery.refetch()}
-            className="flex h-9 w-9 items-center justify-center rounded-full border border-border-subtle bg-surface text-text-dim hover:text-brand transition-all shadow-sm"
+            className="flex h-9 w-9 items-center justify-center rounded-full border border-border-subtle bg-surface text-text-dim hover:text-brand transition-colors shadow-sm"
           >
             <RefreshCw className={`h-4 w-4 ${snapshotQuery.isFetching ? "animate-spin" : ""}`} />
           </button>
@@ -222,7 +222,7 @@ export function OverviewPage() {
               <h3 className="text-xs font-bold uppercase tracking-wider text-text-dim">{t("overview.recent_agents")}</h3>
               <button
                 onClick={() => navigate({ to: "/agents" })}
-                className="text-xs font-bold text-brand hover:underline transition-all"
+                className="text-xs font-bold text-brand hover:underline transition-colors"
               >
                 {t("overview.view_all")} →
               </button>
@@ -272,7 +272,7 @@ export function OverviewPage() {
               <h3 className="text-xs font-bold uppercase tracking-wider text-text-dim">{t("nav.sessions")}</h3>
               <button
                 onClick={() => navigate({ to: "/sessions" })}
-                className="text-xs font-bold text-brand hover:underline transition-all"
+                className="text-xs font-bold text-brand hover:underline transition-colors"
               >
                 {t("overview.view_all")} →
               </button>

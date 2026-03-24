@@ -181,7 +181,7 @@ export function AgentsPage() {
                   const isSuspended = (agent.state || "").toLowerCase() === "suspended";
                   return (
                     <div key={agent.id}
-                      className={`flex items-center gap-3 sm:gap-4 p-3 sm:p-4 rounded-xl sm:rounded-2xl border border-border-subtle hover:border-brand/30 transition-all cursor-pointer ${isSuspended ? "opacity-60 hover:opacity-100" : "bg-surface"}`}
+                      className={`flex items-center gap-3 sm:gap-4 p-3 sm:p-4 rounded-xl sm:rounded-2xl border border-border-subtle hover:border-brand/30 transition-[colors,opacity] cursor-pointer ${isSuspended ? "opacity-60 hover:opacity-100" : "bg-surface"}`}
                       onClick={async () => {
                         setDetailLoading(true);
                         try { const d = await getAgentDetail(agent.id); setDetailAgent(d); } catch { setDetailAgent({ name: agent.name, id: agent.id }); }

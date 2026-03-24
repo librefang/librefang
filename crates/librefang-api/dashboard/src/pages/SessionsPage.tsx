@@ -171,7 +171,7 @@ export function SessionsPage() {
                     </div>
                   ) : (
                     <button onClick={() => handleDelete(s.session_id)} disabled={pendingId === s.session_id}
-                      className="p-1.5 sm:p-2 rounded-lg text-text-dim/30 hover:text-error hover:bg-error/10 transition-all">
+                      className="p-1.5 sm:p-2 rounded-lg text-text-dim/30 hover:text-error hover:bg-error/10 transition-colors">
                       <Trash2 className="w-3.5 h-3.5" />
                     </button>
                   )}

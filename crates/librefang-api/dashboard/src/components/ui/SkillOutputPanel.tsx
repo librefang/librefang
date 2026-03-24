@@ -33,7 +33,7 @@ export function SkillOutputPanel() {
             </button>
             <button
               onClick={clearSkillOutputs}
-              className="p-1.5 rounded-lg text-text-dim/40 hover:text-error hover:bg-error/10 transition-all"
+              className="p-1.5 rounded-lg text-text-dim/40 hover:text-error hover:bg-error/10 transition-colors"
               title={t("common.clear", { defaultValue: "Clear" })}
             >
               <Trash2 className="w-3.5 h-3.5" />
@@ -68,7 +68,7 @@ export function SkillOutputPanel() {
                   </div>
                   <button
                     onClick={() => dismissSkillOutput(output.id)}
-                    className="p-1 rounded text-text-dim/20 hover:text-text-dim opacity-0 group-hover:opacity-100 transition-all shrink-0"
+                    className="p-1 rounded text-text-dim/20 hover:text-text-dim opacity-0 group-hover:opacity-100 transition-[colors,opacity] shrink-0"
                   >
                     <X className="w-3 h-3" />
                   </button>

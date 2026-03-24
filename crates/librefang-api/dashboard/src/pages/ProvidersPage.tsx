@@ -442,7 +442,7 @@ function FilterChips({ activeFilter, onChange, t }: {
         <button
           key={f.value}
           onClick={() => onChange(f.value)}
-          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-bold transition-all ${
+          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${
             activeFilter === f.value
               ? "bg-surface shadow-sm text-text-main"
               : "text-text-dim hover:text-text-main"
@@ -669,21 +669,21 @@ export function ProvidersPage() {
           <div className="flex gap-1 p-1 bg-main/30 rounded-lg">
             <button
               onClick={() => handleSort("name")}
-              className={`flex items-center gap-1 px-3 py-1.5 rounded-md text-xs font-bold transition-all ${sortField === "name" ? "bg-surface shadow-sm" : "text-text-dim hover:text-text-main"}`}
+              className={`flex items-center gap-1 px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${sortField === "name" ? "bg-surface shadow-sm" : "text-text-dim hover:text-text-main"}`}
             >
               {sortField === "name" && (sortOrder === "asc" ? <SortAsc className="w-3 h-3" /> : <SortDesc className="w-3 h-3" />)}
               {t("providers.name")}
             </button>
             <button
               onClick={() => handleSort("models")}
-              className={`flex items-center gap-1 px-3 py-1.5 rounded-md text-xs font-bold transition-all ${sortField === "models" ? "bg-surface shadow-sm" : "text-text-dim hover:text-text-main"}`}
+              className={`flex items-center gap-1 px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${sortField === "models" ? "bg-surface shadow-sm" : "text-text-dim hover:text-text-main"}`}
             >
               {sortField === "models" && (sortOrder === "asc" ? <SortAsc className="w-3 h-3" /> : <SortDesc className="w-3 h-3" />)}
               {t("providers.models")}
             </button>
             <button
               onClick={() => handleSort("latency")}
-              className={`flex items-center gap-1 px-3 py-1.5 rounded-md text-xs font-bold transition-all ${sortField === "latency" ? "bg-surface shadow-sm" : "text-text-dim hover:text-text-main"}`}
+              className={`flex items-center gap-1 px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${sortField === "latency" ? "bg-surface shadow-sm" : "text-text-dim hover:text-text-main"}`}
             >
               {sortField === "latency" && (sortOrder === "asc" ? <SortAsc className="w-3 h-3" /> : <SortDesc className="w-3 h-3" />)}
               {t("providers.latency")}
@@ -694,13 +694,13 @@ export function ProvidersPage() {
           <div className="flex gap-1 p-1 bg-main/30 rounded-lg">
             <button
               onClick={() => setViewMode("grid")}
-              className={`p-1.5 rounded-md transition-all ${viewMode === "grid" ? "bg-surface shadow-sm" : "text-text-dim hover:text-text-main"}`}
+              className={`p-1.5 rounded-md transition-colors ${viewMode === "grid" ? "bg-surface shadow-sm" : "text-text-dim hover:text-text-main"}`}
             >
               <Grid3X3 className="w-4 h-4" />
             </button>
             <button
               onClick={() => setViewMode("list")}
-              className={`p-1.5 rounded-md transition-all ${viewMode === "list" ? "bg-surface shadow-sm" : "text-text-dim hover:text-text-main"}`}
+              className={`p-1.5 rounded-md transition-colors ${viewMode === "list" ? "bg-surface shadow-sm" : "text-text-dim hover:text-text-main"}`}
             >
               <List className="w-4 h-4" />
             </button>
@@ -713,7 +713,7 @@ export function ProvidersPage() {
         <div className="flex gap-1 p-1 bg-main/30 rounded-xl w-fit">
           <button
             onClick={() => handleTabChange("configured")}
-            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all ${
+            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-colors ${
               activeTab === "configured" ? "bg-surface text-success shadow-sm" : "text-text-dim hover:text-text-main"
             }`}
           >
@@ -725,7 +725,7 @@ export function ProvidersPage() {
           </button>
           <button
             onClick={() => handleTabChange("unconfigured")}
-            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all ${
+            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-colors ${
               activeTab === "unconfigured" ? "bg-surface text-brand shadow-sm" : "text-text-dim hover:text-text-main"
             }`}
           >

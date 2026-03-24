@@ -33,7 +33,7 @@ export function PageHeader({ icon, badge, title, subtitle, actions, isFetching, 
           {helpText && (
             <button
               onClick={() => setShowHelp(!showHelp)}
-              className="flex h-8 sm:h-9 w-8 sm:w-9 items-center justify-center rounded-xl border border-border-subtle bg-surface text-text-dim hover:text-brand hover:border-brand/30 transition-all duration-200"
+              className="flex h-8 sm:h-9 w-8 sm:w-9 items-center justify-center rounded-xl border border-border-subtle bg-surface text-text-dim hover:text-brand hover:border-brand/30 transition-colors duration-200"
               title={t("common.help", { defaultValue: "Help" })}
             >
               <HelpCircle className="h-4 w-4" />
@@ -41,7 +41,7 @@ export function PageHeader({ icon, badge, title, subtitle, actions, isFetching, 
           )}
           {onRefresh && (
             <button
-              className="flex h-8 sm:h-9 items-center gap-1.5 sm:gap-2 rounded-xl border border-border-subtle bg-surface px-3 sm:px-4 text-xs sm:text-sm font-bold text-text-dim hover:text-brand hover:border-brand/30 hover:shadow-sm transition-all duration-200"
+              className="flex h-8 sm:h-9 items-center gap-1.5 sm:gap-2 rounded-xl border border-border-subtle bg-surface px-3 sm:px-4 text-xs sm:text-sm font-bold text-text-dim hover:text-brand hover:border-brand/30 hover:shadow-sm transition-colors duration-200"
               onClick={onRefresh}
             >
               <RefreshCw

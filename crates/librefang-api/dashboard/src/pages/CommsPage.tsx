@@ -79,7 +79,7 @@ function TopologyNode({ node, onClick }: { node: { id: string; name?: string; st
   return (
     <div
       onClick={onClick}
-      className="flex flex-col items-center gap-2 p-4 rounded-xl bg-surface border border-border-subtle hover:border-brand transition-all cursor-pointer"
+      className="flex flex-col items-center gap-2 p-4 rounded-xl bg-surface border border-border-subtle hover:border-brand transition-colors cursor-pointer"
     >
       <div className={`w-12 h-12 rounded-xl bg-gradient-to-br ${getNodeColor()} flex items-center justify-center shadow-lg`}>
         <Users className="w-6 h-6 text-white" />
@@ -176,7 +176,7 @@ export function CommsPage() {
       <div className="flex gap-1 p-1 bg-main/30 rounded-xl w-fit overflow-x-auto">
         <button
           onClick={() => setActiveTab("channels")}
-          className={`flex items-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-2 rounded-lg text-xs sm:text-sm font-bold transition-all whitespace-nowrap ${
+          className={`flex items-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-2 rounded-lg text-xs sm:text-sm font-bold transition-colors whitespace-nowrap ${
             activeTab === "channels" ? "bg-surface text-brand shadow-sm" : "text-text-dim hover:text-text-main"
           }`}
         >
@@ -185,7 +185,7 @@ export function CommsPage() {
         </button>
         <button
           onClick={() => setActiveTab("topology")}
-          className={`flex items-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-2 rounded-lg text-xs sm:text-sm font-bold transition-all whitespace-nowrap ${
+          className={`flex items-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-2 rounded-lg text-xs sm:text-sm font-bold transition-colors whitespace-nowrap ${
             activeTab === "topology" ? "bg-surface text-brand shadow-sm" : "text-text-dim hover:text-text-main"
           }`}
         >
@@ -194,7 +194,7 @@ export function CommsPage() {
         </button>
         <button
           onClick={() => setActiveTab("events")}
-          className={`flex items-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-2 rounded-lg text-xs sm:text-sm font-bold transition-all whitespace-nowrap ${
+          className={`flex items-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-2 rounded-lg text-xs sm:text-sm font-bold transition-colors whitespace-nowrap ${
             activeTab === "events" ? "bg-surface text-brand shadow-sm" : "text-text-dim hover:text-text-main"
           }`}
         >

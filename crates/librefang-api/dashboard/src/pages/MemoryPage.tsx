@@ -457,7 +457,7 @@ export function MemoryPage() {
         <div className="flex gap-1 p-1 bg-main/30 rounded-lg">
           <button
             onClick={() => setLevelFilter("all")}
-            className={`px-3 py-1.5 rounded-md text-xs font-bold transition-all ${levelFilter === "all" ? "bg-surface shadow-sm" : "text-text-dim hover:text-text-main"}`}
+            className={`px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${levelFilter === "all" ? "bg-surface shadow-sm" : "text-text-dim hover:text-text-main"}`}
           >
             {t("memory.filter_all")}
           </button>
@@ -465,7 +465,7 @@ export function MemoryPage() {
             <button
               key={level}
               onClick={() => setLevelFilter(level || "all")}
-              className={`px-3 py-1.5 rounded-md text-xs font-bold transition-all ${levelFilter === level ? "bg-surface shadow-sm" : "text-text-dim hover:text-text-main"}`}
+              className={`px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${levelFilter === level ? "bg-surface shadow-sm" : "text-text-dim hover:text-text-main"}`}
             >
               {level}
             </button>

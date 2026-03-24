@@ -42,7 +42,7 @@ function OptionCard({ active, icon: Icon, label, onClick }: { active: boolean; i
   return (
     <button
       onClick={onClick}
-      className={`flex flex-1 items-center justify-center gap-2 rounded-xl border py-2.5 text-sm font-bold transition-all duration-300 ${
+      className={`flex flex-1 items-center justify-center gap-2 rounded-xl border py-2.5 text-sm font-bold transition-colors duration-300 ${
         active
           ? "border-brand/30 bg-brand/10 text-brand shadow-sm shadow-brand/10"
           : "border-border-subtle bg-surface text-text-dim hover:border-brand/20 hover:text-brand"
@@ -142,8 +142,8 @@ export function SettingsPage() {
               <p className="text-xs text-text-dim italic text-center py-4">{t("common.no_data")}</p>
             ) : (
               filteredTools.map((tool: any, i: number) => (
-                <div key={tool.name || i} className="flex items-start gap-3 px-3 py-2.5 rounded-xl border border-transparent hover:border-brand/15 hover:bg-gradient-to-r hover:from-brand/5 hover:to-transparent transition-all duration-300 group cursor-default">
-                  <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-brand/15 to-brand/5 flex items-center justify-center shrink-0 ring-1 ring-brand/10 group-hover:ring-brand/25 group-hover:shadow-sm group-hover:shadow-brand/10 transition-all duration-300">
+                <div key={tool.name || i} className="flex items-start gap-3 px-3 py-2.5 rounded-xl border border-transparent hover:border-brand/15 hover:bg-gradient-to-r hover:from-brand/5 hover:to-transparent transition-colors duration-300 group cursor-default">
+                  <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-brand/15 to-brand/5 flex items-center justify-center shrink-0 ring-1 ring-brand/10 group-hover:ring-brand/25 group-hover:shadow-sm group-hover:shadow-brand/10 transition-shadow duration-300">
                     <Wrench className="w-3.5 h-3.5 text-brand/70 group-hover:text-brand transition-colors duration-300" />
                   </div>
                   <div className="min-w-0 flex-1 pt-0.5">

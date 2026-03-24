@@ -41,7 +41,7 @@ function AuthDialog({ onAuthenticated }: { onAuthenticated: () => void }) {
               onChange={(e) => { setKey(e.target.value); setError(false); }}
               placeholder={t("auth.placeholder")}
               autoFocus
-              className={`w-full rounded-xl border px-4 py-3 text-sm focus:ring-2 outline-none transition-all ${
+              className={`w-full rounded-xl border px-4 py-3 text-sm focus:ring-2 outline-none transition-colors ${
                 error
                   ? "border-error focus:border-error focus:ring-error/10"
                   : "border-border-subtle bg-main focus:border-brand focus:ring-brand/10"
@@ -52,7 +52,7 @@ function AuthDialog({ onAuthenticated }: { onAuthenticated: () => void }) {
             )}
             <button
               type="submit"
-              className="w-full rounded-xl bg-brand py-3 text-sm font-bold text-white hover:bg-brand/90 transition-all shadow-lg shadow-brand/20"
+              className="w-full rounded-xl bg-brand py-3 text-sm font-bold text-white hover:bg-brand/90 transition-colors shadow-lg shadow-brand/20"
             >
               {t("auth.submit")}
             </button>
@@ -189,7 +189,7 @@ export function App() {
           </div>
           <button
             onClick={toggleSidebar}
-            className="hidden lg:flex h-9 w-9 items-center justify-center rounded-xl text-text-dim hover:text-brand hover:bg-surface-hover transition-all"
+            className="hidden lg:flex h-9 w-9 items-center justify-center rounded-xl text-text-dim hover:text-brand hover:bg-surface-hover transition-colors"
             title={isSidebarCollapsed ? "Expand" : "Collapse"}
           >
             {isSidebarCollapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronLeft className="h-4 w-4" />}
@@ -201,7 +201,7 @@ export function App() {
           {/* Search Button */}
           <button
             onClick={() => setPaletteOpen(true)}
-            className={`mb-4 flex w-full items-center gap-2 rounded-xl border border-border-subtle bg-surface-hover px-3 py-2.5 text-text-dim hover:border-brand/30 hover:text-brand transition-all ${isSidebarCollapsed ? "lg:max-h-0 lg:opacity-0 lg:overflow-hidden lg:p-0! lg:m-0! lg:mb-0!" : "lg:max-h-20 lg:opacity-100"} transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] overflow-hidden`}
+            className={`mb-4 flex w-full items-center gap-2 rounded-xl border border-border-subtle bg-surface-hover px-3 py-2.5 text-text-dim hover:border-brand/30 hover:text-brand ${isSidebarCollapsed ? "lg:max-h-0 lg:opacity-0 lg:overflow-hidden lg:p-0! lg:m-0! lg:mb-0!" : "lg:max-h-20 lg:opacity-100"} transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] overflow-hidden`}
             title="Search (Cmd+K)"
           >
             <Search className="h-4 w-4" />
@@ -292,7 +292,7 @@ export function App() {
           <div className="flex items-center gap-2">
             <button
               onClick={() => setMobileMenuOpen(true)}
-              className="flex h-9 w-9 items-center justify-center rounded-xl text-text-dim hover:text-brand hover:bg-surface-hover transition-all duration-200 lg:hidden"
+              className="flex h-9 w-9 items-center justify-center rounded-xl text-text-dim hover:text-brand hover:bg-surface-hover transition-colors duration-200 lg:hidden"
             >
               <Menu className="h-5 w-5" />
             </button>
@@ -306,21 +306,21 @@ export function App() {
           <div className="flex items-center gap-1">
             <Link
               to="/settings"
-              className="flex h-9 w-9 items-center justify-center rounded-xl text-text-dim hover:text-brand hover:bg-surface-hover transition-all duration-200"
+              className="flex h-9 w-9 items-center justify-center rounded-xl text-text-dim hover:text-brand hover:bg-surface-hover transition-colors duration-200"
               title={t("nav.settings")}
             >
               <Settings className="h-4 w-4" />
             </Link>
             <button
               onClick={() => setLanguage(language === "en" ? "zh" : "en")}
-              className="flex h-9 w-9 items-center justify-center rounded-xl text-text-dim hover:text-brand hover:bg-surface-hover transition-all duration-200"
+              className="flex h-9 w-9 items-center justify-center rounded-xl text-text-dim hover:text-brand hover:bg-surface-hover transition-colors duration-200"
               title={t("common.change_language")}
             >
               <Globe className="h-4 w-4" />
             </button>
             <button
               onClick={toggleTheme}
-              className="flex h-9 w-9 items-center justify-center rounded-xl text-text-dim hover:text-brand hover:bg-surface-hover transition-all duration-200"
+              className="flex h-9 w-9 items-center justify-center rounded-xl text-text-dim hover:text-brand hover:bg-surface-hover transition-colors duration-200"
               title={t("common.toggle_theme")}
             >
               {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}

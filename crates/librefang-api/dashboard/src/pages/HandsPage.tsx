@@ -450,7 +450,7 @@ function ActiveHandCard({
 
   return (
     <div
-      className={`group relative flex items-center gap-3 px-4 py-3 rounded-2xl border cursor-pointer transition-all shrink-0 min-w-[240px] max-w-[320px] ${
+      className={`group relative flex items-center gap-3 px-4 py-3 rounded-2xl border cursor-pointer transition-colors shrink-0 min-w-[240px] max-w-[320px] ${
         isPaused
           ? "border-warning/30 bg-warning/5 hover:border-warning/50"
           : "border-success/30 bg-success/5 hover:border-success/50"
@@ -532,7 +532,7 @@ function HandCard({
 
   return (
     <div
-      className="group p-4 rounded-2xl border border-border-subtle hover:border-brand/30 bg-surface hover:bg-surface/80 transition-all cursor-pointer"
+      className="group p-4 rounded-2xl border border-border-subtle hover:border-brand/30 bg-surface hover:bg-surface/80 transition-colors cursor-pointer"
       onClick={() => onDetail(hand)}
       role="button"
       tabIndex={0}
@@ -563,7 +563,7 @@ function HandCard({
           {isActive && instance && !isPaused && (
             <button
               onClick={() => onChat(instance.instance_id, hand.name || hand.id)}
-              className="p-1.5 rounded-lg text-brand/60 hover:text-brand hover:bg-brand/10 opacity-0 group-hover:opacity-100 transition-all"
+              className="p-1.5 rounded-lg text-brand/60 hover:text-brand hover:bg-brand/10 opacity-0 group-hover:opacity-100 transition-[colors,opacity]"
               title={t("chat.title")}
             >
               <MessageCircle className="w-4 h-4" />
@@ -573,7 +573,7 @@ function HandCard({
             <button
               onClick={() => onDeactivate(instance.instance_id)}
               disabled={isPending}
-              className="p-1.5 rounded-lg text-text-dim/40 hover:text-error hover:bg-error/10 opacity-0 group-hover:opacity-100 transition-all disabled:opacity-40"
+              className="p-1.5 rounded-lg text-text-dim/40 hover:text-error hover:bg-error/10 opacity-0 group-hover:opacity-100 transition-[colors,opacity] disabled:opacity-40"
               title={t("hands.deactivate")}
             >
               {isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <PowerOff className="w-4 h-4" />}
@@ -582,7 +582,7 @@ function HandCard({
             <button
               onClick={() => onActivate(hand.id)}
               disabled={isPending || !hand.requirements_met}
-              className="p-1.5 rounded-lg text-text-dim/40 hover:text-brand hover:bg-brand/10 opacity-0 group-hover:opacity-100 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+              className="p-1.5 rounded-lg text-text-dim/40 hover:text-brand hover:bg-brand/10 opacity-0 group-hover:opacity-100 transition-[colors,opacity] disabled:opacity-40 disabled:cursor-not-allowed"
               title={t("hands.activate")}
             >
               {isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Power className="w-4 h-4" />}
@@ -874,7 +874,7 @@ export function HandsPage() {
           <div className="flex items-center gap-1.5 overflow-x-auto scrollbar-thin pb-1 shrink-0">
             <button
               onClick={() => setSelectedCategory("all")}
-              className={`px-3 py-1.5 rounded-xl text-[11px] font-bold whitespace-nowrap transition-all ${
+              className={`px-3 py-1.5 rounded-xl text-[11px] font-bold whitespace-nowrap transition-colors ${
                 selectedCategory === "all"
                   ? "bg-brand text-white shadow-sm shadow-brand/20"
                   : "bg-main text-text-dim hover:text-text hover:bg-main/80 border border-border-subtle"
@@ -888,7 +888,7 @@ export function HandsPage() {
                 onClick={() =>
                   setSelectedCategory(selectedCategory === cat ? "all" : cat)
                 }
-                className={`px-3 py-1.5 rounded-xl text-[11px] font-bold whitespace-nowrap transition-all ${
+                className={`px-3 py-1.5 rounded-xl text-[11px] font-bold whitespace-nowrap transition-colors ${
                   selectedCategory === cat
                     ? "bg-brand text-white shadow-sm shadow-brand/20"
                     : "bg-main text-text-dim hover:text-text hover:bg-main/80 border border-border-subtle"
