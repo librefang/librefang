@@ -4,8 +4,7 @@
 
 use chrono::{DateTime, Utc};
 use librefang_types::agent::{
-    AgentId, ExperimentStatus, ExperimentVariant, ExperimentVariantMetrics, PromptExperiment,
-    PromptVersion,
+    AgentId, ExperimentStatus, ExperimentVariantMetrics, PromptExperiment, PromptVersion,
 };
 use librefang_types::error::{LibreFangError, LibreFangResult};
 use rusqlite::{Connection, OptionalExtension, Row};
@@ -308,36 +307,6 @@ impl PromptStore {
             experiments.push(row);
         }
         Ok(experiments)
-    }
-
-    fn get_experiment_variants_internal(
-        &self,
-        conn: &Connection,
-        experiment_id: Uuid,
-    ) -> LibreFangResult<Vec<ExperimentVariant>> {
-        let mut stmt = conn
-            .prepare("SELECT id, experiment_id, name, prompt_version_id, description FROM experiment_variants WHERE experiment_id = ?1")
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
-
-        let rows = stmt
-            .query_map([experiment_id.to_string()], |row| {
-                let id: String = row.get(0)?;
-                let prompt_version_id: String = row.get(3)?;
-
-                Ok(ExperimentVariant {
-                    id: Uuid::parse_str(&id).unwrap_or_default(),
-                    name: row.get(2)?,
-                    prompt_version_id: Uuid::parse_str(&prompt_version_id).unwrap_or_default(),
-                    description: row.get(4)?,
-                })
-            })
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
-
-        let mut variants = Vec::new();
-        for row in rows.flatten() {
-            variants.push(row);
-        }
-        Ok(variants)
     }
 
     pub fn get_experiment(&self, id: Uuid) -> LibreFangResult<Option<PromptExperiment>> {
