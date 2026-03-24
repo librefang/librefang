@@ -7465,10 +7465,10 @@ system_prompt = "You are a helpful assistant."
         let transport_entry = match &server_config.transport {
             Some(t) => t,
             None => {
-                return Err(LibreFangError::Config(format!(
+                return Err(format!(
                     "MCP server '{}' has no transport configured",
                     server_config.name
-                )));
+                ));
             }
         };
         let transport = match transport_entry {
