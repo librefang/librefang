@@ -110,6 +110,30 @@ impl StructuredStore {
         Ok(pairs)
     }
 
+    /// List only keys for an agent (without values).
+    pub fn list_keys(&self, agent_id: AgentId) -> LibreFangResult<Vec<String>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let mut stmt = conn
+            .prepare("SELECT key FROM kv_store WHERE agent_id = ?1 ORDER BY key")
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        let rows = stmt
+            .query_map(rusqlite::params![agent_id.0.to_string()], |row| {
+                let key: String = row.get(0)?;
+                Ok(key)
+            })
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+
+        let mut keys = Vec::new();
+        for row in rows {
+            let key = row.map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            keys.push(key);
+        }
+        Ok(keys)
+    }
+
     /// Save an agent entry to the database.
     pub fn save_agent(&self, entry: &AgentEntry) -> LibreFangResult<()> {
         let conn = self

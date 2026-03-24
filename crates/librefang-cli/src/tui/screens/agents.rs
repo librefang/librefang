@@ -17,6 +17,7 @@ const TOOL_OPTIONS: &[(&str, &str)] = &[
     ("file_list", "List directory contents"),
     ("memory_store", "Store data in agent memory"),
     ("memory_recall", "Recall data from memory"),
+    ("memory_list", "List all stored memory keys"),
     ("web_fetch", "Fetch web pages"),
     ("shell_exec", "Execute shell commands"),
     ("agent_send", "Send messages to other agents"),
