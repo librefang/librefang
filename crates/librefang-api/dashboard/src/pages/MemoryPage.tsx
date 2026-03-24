@@ -1,7 +1,7 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { listMemories, deleteMemory, getMemoryStats, addMemoryFromText, updateMemory, cleanupMemories, decayMemories, type MemoryStatsResponse } from "../api";
+import { listMemories, searchMemories, deleteMemory, getMemoryStats, addMemoryFromText, updateMemory, cleanupMemories, decayMemories, type MemoryStatsResponse } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -174,7 +174,13 @@ export function MemoryPage() {
   const [page, setPage] = useState(0);
   const pageSize = 20;
 
-  const memoryQuery = useQuery({ queryKey: ["memory", "list", page], queryFn: () => listMemories({ offset: page * pageSize, limit: pageSize }), refetchInterval: REFRESH_MS });
+  const memoryQuery = useQuery({
+    queryKey: ["memory", "list", page, search],
+    queryFn: () => search.trim()
+      ? searchMemories({ query: search.trim(), limit: 50 }).then(items => ({ memories: items, total: items.length }))
+      : listMemories({ offset: page * pageSize, limit: pageSize }),
+    refetchInterval: REFRESH_MS,
+  });
   const statsQuery = useQuery({ queryKey: ["memory", "stats"], queryFn: () => getMemoryStats(), refetchInterval: REFRESH_MS * 2 });
 
   const deleteMutation = useMutation({
@@ -205,11 +211,8 @@ export function MemoryPage() {
   const totalCount = memoryQuery.data?.total ?? 0;
 
   const filteredMemories = memories.filter(m => {
-    const matchesSearch = !search ||
-      m.id.toLowerCase().includes(search.toLowerCase()) ||
-      (m.content || "").toLowerCase().includes(search.toLowerCase());
     const matchesLevel = levelFilter === "all" || m.level === levelFilter;
-    return matchesSearch && matchesLevel;
+    return matchesLevel;
   });
 
   const levels = Array.from(new Set(memories.map(m => m.level).filter(Boolean)));
@@ -252,7 +255,7 @@ export function MemoryPage() {
         <div className="flex-1">
           <Input
             value={search}
-            onChange={(e) => setSearch(e.target.value)}
+            onChange={(e) => { setSearch(e.target.value); setPage(0); }}
             placeholder={t("common.search")}
             leftIcon={<Search className="w-4 h-4" />}
             rightIcon={search && (
@@ -333,7 +336,7 @@ export function MemoryPage() {
       )}
 
       {/* Pagination */}
-      {totalCount > pageSize && (
+      {!search.trim() && totalCount > pageSize && (
         <Pagination
           currentPage={page + 1}
           totalPages={Math.ceil(totalCount / pageSize)}
