@@ -1801,6 +1801,7 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
+if (require.main === module) {
 server.listen(PORT, '127.0.0.1', async () => {
   console.log(`[gateway] WhatsApp Web gateway listening on http://127.0.0.1:${PORT}`);
   console.log(`[gateway] LibreFang URL: ${LIBREFANG_URL}`);
@@ -1842,6 +1843,7 @@ process.on('SIGTERM', () => {
   if (sock) sock.end();
   server.close(() => process.exit(0));
 });
+} // end if (require.main === module)
 
 // Export for testing
 module.exports = {
