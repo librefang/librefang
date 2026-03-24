@@ -41,6 +41,8 @@ jobs:
             patchelf
       - name: Check formatting
         run: cargo xtask fmt
+      - name: Ensure dashboard build dir exists
+        run: mkdir -p crates/librefang-api/static/react
       - name: Run clippy
         run: cargo xtask ci --no-test --no-web
 
