@@ -16,8 +16,9 @@ pip install librefang
 
 # Homebrew (macOS)
 brew tap librefang/tap
-brew install librefang        # CLI
-brew install --cask librefang  # Desktop App
+brew install librefang              # CLI (stable)
+brew install --cask librefang       # Desktop (stable)
+# Beta/RC channels: brew install librefang-beta / librefang-rc
 
 # Cargo
 cargo install librefang
