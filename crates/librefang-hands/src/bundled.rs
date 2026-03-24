@@ -109,7 +109,7 @@ pub fn parse_bundled(
     // then try the documented [hand] wrapper format.
     let mut def: HandDefinition = toml::from_str::<HandDefinition>(toml_content)
         .or_else(|flat_err| {
-            tracing::debug!("Flat parse failed for hand: {flat_err}");
+            tracing::warn!("Flat parse failed for hand: {flat_err}");
             toml::from_str::<HandTomlWrapper>(toml_content).map(|w| w.hand)
         })
         .map_err(|e| HandError::TomlParse(e.to_string()))?;
