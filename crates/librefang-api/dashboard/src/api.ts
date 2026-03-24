@@ -781,6 +781,7 @@ export async function reloadChannels(): Promise<ApiActionResponse> {
 export interface QrStartResponse {
   available: boolean;
   qr_code?: string;
+  qr_url?: string;
   message?: string;
 }
 

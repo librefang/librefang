@@ -455,9 +455,10 @@ function QrLoginDialog({ channel, onClose, t }: { channel: Channel; onClose: () 
       setPhase("scanning");
       setMessage(res.message || "Scan this QR code with your WeChat app");
 
-      // Render QR code to canvas
-      if (canvasRef.current) {
-        QRCode.toCanvas(canvasRef.current, res.qr_code, { width: 256, margin: 2 });
+      // Render QR code to canvas — use the full URL so WeChat recognises the scan
+      const qrContent = res.qr_url || res.qr_code;
+      if (canvasRef.current && qrContent) {
+        QRCode.toCanvas(canvasRef.current, qrContent, { width: 256, margin: 2 });
       }
 
       // Poll for scan status

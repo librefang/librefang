@@ -1826,6 +1826,7 @@ pub async fn wechat_qr_start() -> impl IntoResponse {
         Ok(resp) if resp.status().is_success() => match resp.json::<serde_json::Value>().await {
             Ok(body) => {
                 let qrcode = body["qrcode"].as_str().unwrap_or("");
+                let qrcode_url = body["qrcode_img_content"].as_str().unwrap_or("");
                 if qrcode.is_empty() {
                     return Json(serde_json::json!({
                         "available": false,
@@ -1835,6 +1836,7 @@ pub async fn wechat_qr_start() -> impl IntoResponse {
                 Json(serde_json::json!({
                     "available": true,
                     "qr_code": qrcode,
+                    "qr_url": qrcode_url,
                     "message": "Scan this QR code with your WeChat app to log in",
                 }))
             }
