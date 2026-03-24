@@ -20,9 +20,11 @@ export default defineConfig({
         target: "http://127.0.0.1:4545",
         changeOrigin: true,
         configure: (proxy) => {
-          proxy.on("error", () => {});
-          proxy.on("proxyReq", (proxyReq) => { proxyReq.on("error", () => {}); });
-          proxy.on("proxyRes", (proxyRes) => { proxyRes.on("error", () => {}); });
+          type Emitter = { on(event: string, fn: (...args: never[]) => void): void };
+          const p = proxy as unknown as Emitter;
+          p.on("error", () => {});
+          p.on("proxyReq", (proxyReq: Emitter) => { proxyReq.on("error", () => {}); });
+          p.on("proxyRes", (proxyRes: Emitter) => { proxyRes.on("error", () => {}); });
         }
       }
     }
