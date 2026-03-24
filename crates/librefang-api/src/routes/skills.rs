@@ -2442,7 +2442,7 @@ pub async fn list_mcp_servers(State(state): State<Arc<AppState>>) -> impl IntoRe
         .mcp_servers
         .iter()
         .map(|s| {
-            let transport = s.transport.as_ref().map(|t| serialize_mcp_transport(t));
+            let transport = s.transport.as_ref().map(serialize_mcp_transport);
             serde_json::json!({
                 "name": s.name,
                 "transport": transport,
@@ -2522,7 +2522,7 @@ pub async fn get_mcp_server(
         }
     };
 
-    let transport = entry.transport.as_ref().map(|t| serialize_mcp_transport(t));
+    let transport = entry.transport.as_ref().map(serialize_mcp_transport);
 
     let mut result = serde_json::json!({
         "name": entry.name,
