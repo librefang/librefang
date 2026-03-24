@@ -128,16 +128,18 @@ fn update_tauri_conf(path: &Path, version: &str) -> Result<(), Box<dyn std::erro
 
     // Determine pre-release suffix
     let prerelease_re = Regex::new(r"-(beta|rc)([0-9]+)")?;
+    // Offset 32000 ensures all new YYYY.M.DD versions sort higher than
+    // legacy YYYY.M.DDHH versions (max old patch was 31239).
     let tauri_patch = if let Some(caps) = prerelease_re.captures(version) {
         let kind = caps.get(1).unwrap().as_str();
         let n: u32 = caps.get(2).unwrap().as_str().parse()?;
         match kind {
-            "beta" => dd * 10 + n,
-            "rc" => dd * 10 + 4 + n,
-            _ => dd * 10 + 9,
+            "beta" => 32000 + dd * 10 + n,
+            "rc" => 32000 + dd * 10 + 4 + n,
+            _ => 32000 + dd * 10 + 9,
         }
     } else {
-        dd * 10 + 9
+        32000 + dd * 10 + 9
     };
 
     let tauri_version = format!("{}.{}.{}", yy, month, tauri_patch);
