@@ -106,7 +106,8 @@
     "token_limit": "Token/小时", "alert_threshold": "告警阈值", "budget_saved": "预算限额已更新。",
     "usage_summary": "使用概览", "usage_summary_desc": "API 调用消耗统计。",
     "total_requests": "总请求数", "total_tokens": "总 Token", "total_cost": "总消耗", "avg_latency": "平均延迟",
-    "usage_by_agent": "智能体消耗", "usage_by_agent_desc": "按智能体分组的消耗排名。"
+    "usage_by_agent": "智能体消耗", "usage_by_agent_desc": "按智能体分组的消耗排名。",
+    "no_agent_data": "暂无智能体消耗数据", "no_model_data": "暂无模型消耗数据"
   },
   "memory": {
     "title": "记忆", "subtitle": "智能体的持久化记忆存储。",
