@@ -411,6 +411,7 @@ fn cleanup_stale_dirs(hands_dir: &Path) {
 }
 
 /// Recursively copy a directory.
+#[cfg(test)]
 fn copy_dir_recursive(src: &Path, dest: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dest)?;
     for entry in std::fs::read_dir(src)? {
