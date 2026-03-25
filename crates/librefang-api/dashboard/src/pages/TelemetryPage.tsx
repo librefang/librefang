@@ -154,7 +154,12 @@ function parseMetrics(text: string): ParsedMetrics {
 // ── Component ────────────────────────────────────────────────────────
 
 async function fetchMetrics(): Promise<string> {
-  const res = await fetch("/api/metrics");
+  const token = localStorage.getItem("librefang-api-key") || "";
+  const headers: Record<string, string> = {};
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`;
+  }
+  const res = await fetch("/api/metrics", { headers });
   if (!res.ok) throw new Error("Failed to fetch metrics");
   return res.text();
 }

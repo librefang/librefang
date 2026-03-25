@@ -11,7 +11,12 @@ import { useUIStore } from "../lib/store";
 
 // Tools API (inline since it's small)
 async function listTools(): Promise<any[]> {
-  const resp = await fetch("/api/tools", { headers: { "Content-Type": "application/json" } });
+  const token = localStorage.getItem("librefang-api-key") || "";
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`;
+  }
+  const resp = await fetch("/api/tools", { headers });
   if (!resp.ok) return [];
   const data = await resp.json();
   return data.tools ?? data ?? [];
