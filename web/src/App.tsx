@@ -863,11 +863,10 @@ function Downloads(_props: SectionProps) {
                 </div>
                 <div className="space-y-1.5">
                   {[
-                    { name: 'pip install librefang', label: 'Python' },
-                    { name: 'npm install librefang', label: 'Node.js' },
-                    { name: 'cargo install librefang', label: 'Rust' },
-                    { name: 'brew install librefang', label: 'Homebrew' },
-                    { name: 'docker pull librefang/librefang', label: 'Docker' },
+                    { name: 'pip install librefang', label: 'Python SDK' },
+                    { name: 'npm i @librefang/sdk', label: 'Node.js SDK' },
+                    { name: 'cargo install librefang', label: 'Rust CLI' },
+                    { name: 'curl -fsSL librefang.sh/install | sh', label: 'Shell' },
                   ].map((pkg) => (
                     <div key={pkg.label} className="flex items-center justify-between px-3 py-2 hover:bg-surface-200 transition-colors group">
                       <code className="text-xs text-gray-700 dark:text-gray-300 font-mono">{pkg.name}</code>
