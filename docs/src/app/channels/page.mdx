@@ -69,6 +69,15 @@ All adapters share a common foundation: graceful shutdown via `watch::channel`, 
 
 ## Channel Configuration
 
+<Note>
+All channel credentials can be stored using any of the three methods:
+- **Environment variable**: `export TELEGRAM_BOT_TOKEN=...`
+- **Encrypted vault** (recommended): `librefang vault set TELEGRAM_BOT_TOKEN`
+- **.env file**: `librefang config set-key` or edit `~/.librefang/.env` directly
+
+The examples below use `export` for brevity. In production, use the vault.
+</Note>
+
 All channel configurations live in `~/.librefang/config.toml` under the `[channels]` section. Each channel is a subsection:
 
 ```toml
@@ -221,7 +230,9 @@ Policy enforcement happens in `dispatch_message()` before the message reaches th
 4. Set the environment variable:
 
 ```bash
-export TELEGRAM_BOT_TOKEN=123456789:ABCdefGHIjklMNOpqrsTUVwxyz
+# Choose one method:
+export TELEGRAM_BOT_TOKEN=your-token          # Environment variable
+librefang vault set TELEGRAM_BOT_TOKEN        # Encrypted vault (recommended)
 ```
 
 5. Add to config:
@@ -282,7 +293,9 @@ This walks you through the setup interactively.
 7. Set the environment variable:
 
 ```bash
-export DISCORD_BOT_TOKEN=MTIzNDU2Nzg5.ABCDEF.ghijklmnop
+# Choose one method:
+export DISCORD_BOT_TOKEN=your-token           # Environment variable
+librefang vault set DISCORD_BOT_TOKEN         # Encrypted vault (recommended)
 ```
 
 8. Add to config:
@@ -326,8 +339,12 @@ The adapter handles Gateway reconnection, heartbeating, and session resumption a
 6. Set the environment variables:
 
 ```bash
-export SLACK_APP_TOKEN=xapp-1-...
+# Choose one method for each:
+export SLACK_APP_TOKEN=xapp-...               # Environment variable
 export SLACK_BOT_TOKEN=xoxb-...
+# Or use vault:
+librefang vault set SLACK_APP_TOKEN           # Encrypted vault (recommended)
+librefang vault set SLACK_BOT_TOKEN
 ```
 
 7. Add to config:
@@ -371,9 +388,14 @@ The Slack adapter uses Socket Mode, which establishes a WebSocket connection to 
 6. Set environment variables:
 
 ```bash
-export WA_PHONE_ID=123456789012345
-export WA_ACCESS_TOKEN=EAABs...
-export WA_VERIFY_TOKEN=my-secret-verify-token
+# Choose one method for each:
+export WA_PHONE_ID=your-phone-id              # Environment variable
+export WA_ACCESS_TOKEN=your-access-token
+export WA_VERIFY_TOKEN=your-verify-token
+# Or use vault:
+librefang vault set WA_PHONE_ID               # Encrypted vault (recommended)
+librefang vault set WA_ACCESS_TOKEN
+librefang vault set WA_VERIFY_TOKEN
 ```
 
 7. Add to config:
@@ -490,7 +512,9 @@ The Signal adapter spawns `signal-cli` as a subprocess in daemon mode and commun
 3. Set the environment variable:
 
 ```bash
-export MATRIX_TOKEN=syt_...
+# Choose one method:
+export MATRIX_TOKEN=your-token                # Environment variable
+librefang vault set MATRIX_TOKEN              # Encrypted vault (recommended)
 ```
 
 4. Add to config:
@@ -524,7 +548,9 @@ The Matrix adapter uses the Matrix Client-Server API. It syncs with the homeserv
 2. Set the environment variable:
 
 ```bash
-export EMAIL_PASSWORD=abcd-efgh-ijkl-mnop
+# Choose one method:
+export EMAIL_PASSWORD=your-password           # Environment variable
+librefang vault set EMAIL_PASSWORD            # Encrypted vault (recommended)
 ```
 
 3. Add to config:
@@ -582,8 +608,12 @@ Features:
 5. Set environment variables:
 
 ```bash
-export TEAMS_APP_ID=your-azure-app-id
+# Choose one method for each:
+export TEAMS_APP_ID=your-azure-app-id         # Environment variable
 export TEAMS_APP_SECRET=your-azure-client-secret
+# Or use vault:
+librefang vault set TEAMS_APP_ID              # Encrypted vault (recommended)
+librefang vault set TEAMS_APP_SECRET
 ```
 
 6. Add to config:
@@ -618,8 +648,12 @@ The Teams adapter uses the Microsoft Bot Framework v3 webhook protocol with OAut
 3. Set environment variables:
 
 ```bash
-export MATTERMOST_TOKEN=your-bot-token
+# Choose one method for each:
+export MATTERMOST_TOKEN=your-bot-token        # Environment variable
 export MATTERMOST_URL=https://mattermost.example.com
+# Or use vault:
+librefang vault set MATTERMOST_TOKEN          # Encrypted vault (recommended)
+librefang vault set MATTERMOST_URL
 ```
 
 4. Add to config:
@@ -654,8 +688,12 @@ The Mattermost adapter connects to the Mattermost server via WebSocket for real-
 4. Set environment variables:
 
 ```bash
-export GOOGLE_CHAT_SA_KEY=/path/to/service-account-key.json
+# Choose one method for each:
+export GOOGLE_CHAT_SA_KEY=/path/to/sa-key.json  # Environment variable
 export GOOGLE_CHAT_SPACE=spaces/AAAA_BBBBBB
+# Or use vault:
+librefang vault set GOOGLE_CHAT_SA_KEY        # Encrypted vault (recommended)
+librefang vault set GOOGLE_CHAT_SPACE
 ```
 
 5. Add to config:
@@ -689,7 +727,9 @@ The Google Chat adapter authenticates using a service account and receives messa
 4. Set the environment variable:
 
 ```bash
-export WEBEX_BOT_TOKEN=your-webex-bot-token
+# Choose one method:
+export WEBEX_BOT_TOKEN=your-webex-bot-token   # Environment variable
+librefang vault set WEBEX_BOT_TOKEN           # Encrypted vault (recommended)
 ```
 
 5. Add to config:
@@ -723,8 +763,12 @@ The Webex adapter registers a webhook with the Webex API to receive message even
 5. Set environment variables:
 
 ```bash
-export FEISHU_APP_ID=cli_abcdef123456
+# Choose one method for each:
+export FEISHU_APP_ID=your-app-id              # Environment variable
 export FEISHU_APP_SECRET=your-app-secret
+# Or use vault:
+librefang vault set FEISHU_APP_ID             # Encrypted vault (recommended)
+librefang vault set FEISHU_APP_SECRET
 ```
 
 6. Add to config:
@@ -758,8 +802,12 @@ The Feishu adapter uses the Open Platform webhook protocol to receive message ev
 3. Set environment variables:
 
 ```bash
-export ROCKETCHAT_TOKEN=your-personal-access-token
+# Choose one method for each:
+export ROCKETCHAT_TOKEN=your-access-token     # Environment variable
 export ROCKETCHAT_URL=https://chat.example.com
+# Or use vault:
+librefang vault set ROCKETCHAT_TOKEN          # Encrypted vault (recommended)
+librefang vault set ROCKETCHAT_URL
 ```
 
 4. Add to config:
@@ -794,9 +842,14 @@ The Rocket.Chat adapter polls the Rocket.Chat REST API for new messages at a reg
 4. Set environment variables:
 
 ```bash
-export ZULIP_EMAIL=my-bot@example.zulipchat.com
+# Choose one method for each:
+export ZULIP_EMAIL=bot@example.zulipchat.com  # Environment variable
 export ZULIP_API_KEY=your-api-key
 export ZULIP_URL=https://example.zulipchat.com
+# Or use vault:
+librefang vault set ZULIP_EMAIL               # Encrypted vault (recommended)
+librefang vault set ZULIP_API_KEY
+librefang vault set ZULIP_URL
 ```
 
 5. Add to config:
@@ -830,7 +883,9 @@ The Zulip adapter uses Zulip's event queue API for long-polling. It registers an
 3. Set the environment variable:
 
 ```bash
-export FLOCK_BOT_TOKEN=your-flock-bot-token
+# Choose one method:
+export FLOCK_BOT_TOKEN=your-flock-bot-token   # Environment variable
+librefang vault set FLOCK_BOT_TOKEN           # Encrypted vault (recommended)
 ```
 
 4. Add to config:
@@ -862,7 +917,9 @@ The Flock adapter receives messages via webhook callbacks from the Flock platfor
 3. Set the environment variable:
 
 ```bash
-export TWIST_TOKEN=your-twist-token
+# Choose one method:
+export TWIST_TOKEN=your-twist-token           # Environment variable
+librefang vault set TWIST_TOKEN               # Encrypted vault (recommended)
 ```
 
 4. Add to config:
@@ -894,7 +951,9 @@ The Twist adapter polls the Twist REST API v3 for new messages in configured cha
 3. Set the environment variable:
 
 ```bash
-export PUMBLE_BOT_TOKEN=your-pumble-bot-token
+# Choose one method:
+export PUMBLE_BOT_TOKEN=your-pumble-bot-token # Environment variable
+librefang vault set PUMBLE_BOT_TOKEN          # Encrypted vault (recommended)
 ```
 
 4. Add to config:
@@ -926,7 +985,9 @@ The Pumble adapter receives messages via webhook callbacks from the Pumble platf
 3. Set the environment variable:
 
 ```bash
-export GUILDED_BOT_TOKEN=your-guilded-bot-token
+# Choose one method:
+export GUILDED_BOT_TOKEN=your-guilded-token   # Environment variable
+librefang vault set GUILDED_BOT_TOKEN         # Encrypted vault (recommended)
 ```
 
 4. Add to config:
@@ -959,8 +1020,12 @@ The Guilded adapter connects to the Guilded API via WebSocket for real-time mess
 3. Set environment variables:
 
 ```bash
-export LINE_CHANNEL_SECRET=your-channel-secret
-export LINE_ACCESS_TOKEN=your-channel-access-token
+# Choose one method for each:
+export LINE_CHANNEL_SECRET=your-secret        # Environment variable
+export LINE_ACCESS_TOKEN=your-access-token
+# Or use vault:
+librefang vault set LINE_CHANNEL_SECRET       # Encrypted vault (recommended)
+librefang vault set LINE_ACCESS_TOKEN
 ```
 
 4. Add to config:
@@ -996,7 +1061,9 @@ The LINE adapter runs an HTTP server on the configured `webhook_port` to receive
 3. Set environment variables:
 
 ```bash
-export VIBER_AUTH_TOKEN=your-viber-auth-token
+# Choose one method:
+export VIBER_AUTH_TOKEN=your-viber-auth-token  # Environment variable
+librefang vault set VIBER_AUTH_TOKEN           # Encrypted vault (recommended)
 ```
 
 4. Add to config:
@@ -1033,8 +1100,12 @@ The Viber adapter registers a webhook with the Viber API on startup and receives
 5. Set environment variables:
 
 ```bash
-export MESSENGER_PAGE_TOKEN=your-page-access-token
-export MESSENGER_VERIFY_TOKEN=my-verify-token
+# Choose one method for each:
+export MESSENGER_PAGE_TOKEN=your-page-token   # Environment variable
+export MESSENGER_VERIFY_TOKEN=your-verify-token
+# Or use vault:
+librefang vault set MESSENGER_PAGE_TOKEN      # Encrypted vault (recommended)
+librefang vault set MESSENGER_VERIFY_TOKEN
 ```
 
 6. Add to config:
@@ -1069,10 +1140,16 @@ The Messenger adapter runs an HTTP server on the configured `webhook_port` that 
 3. Set environment variables:
 
 ```bash
-export REDDIT_CLIENT_ID=your-client-id
+# Choose one method for each:
+export REDDIT_CLIENT_ID=your-client-id        # Environment variable
 export REDDIT_CLIENT_SECRET=your-client-secret
 export REDDIT_USERNAME=your-reddit-username
 export REDDIT_PASSWORD=your-reddit-password
+# Or use vault:
+librefang vault set REDDIT_CLIENT_ID          # Encrypted vault (recommended)
+librefang vault set REDDIT_CLIENT_SECRET
+librefang vault set REDDIT_USERNAME
+librefang vault set REDDIT_PASSWORD
 ```
 
 4. Add to config:
@@ -1111,8 +1188,12 @@ The Reddit adapter authenticates via OAuth2 using script-type credentials and po
 4. Set environment variables:
 
 ```bash
-export MASTODON_INSTANCE_URL=https://mastodon.social
+# Choose one method for each:
+export MASTODON_INSTANCE_URL=https://mastodon.social  # Environment variable
 export MASTODON_ACCESS_TOKEN=your-access-token
+# Or use vault:
+librefang vault set MASTODON_INSTANCE_URL     # Encrypted vault (recommended)
+librefang vault set MASTODON_ACCESS_TOKEN
 ```
 
 5. Add to config:
@@ -1145,8 +1226,12 @@ The Mastodon adapter connects to the instance's streaming API via Server-Sent Ev
 2. Set environment variables:
 
 ```bash
-export BLUESKY_IDENTIFIER=your-handle.bsky.social
+# Choose one method for each:
+export BLUESKY_IDENTIFIER=your-handle.bsky.social  # Environment variable
 export BLUESKY_APP_PASSWORD=your-app-password
+# Or use vault:
+librefang vault set BLUESKY_IDENTIFIER        # Encrypted vault (recommended)
+librefang vault set BLUESKY_APP_PASSWORD
 ```
 
 3. Add to config:
@@ -1180,7 +1265,9 @@ The Bluesky adapter authenticates using the AT Protocol and monitors notificatio
 3. Set the environment variable:
 
 ```bash
-export LINKEDIN_ACCESS_TOKEN=your-linkedin-access-token
+# Choose one method:
+export LINKEDIN_ACCESS_TOKEN=your-token       # Environment variable
+librefang vault set LINKEDIN_ACCESS_TOKEN     # Encrypted vault (recommended)
 ```
 
 4. Add to config:
@@ -1212,9 +1299,14 @@ The LinkedIn adapter polls the LinkedIn Messaging API for new messages at a regu
 3. Set environment variables:
 
 ```bash
-export TWITCH_OAUTH_TOKEN=oauth:your-token-here
+# Choose one method for each:
+export TWITCH_OAUTH_TOKEN=oauth:your-token    # Environment variable
 export TWITCH_NICK=your-bot-username
 export TWITCH_CHANNELS=channel1,channel2
+# Or use vault:
+librefang vault set TWITCH_OAUTH_TOKEN        # Encrypted vault (recommended)
+librefang vault set TWITCH_NICK
+librefang vault set TWITCH_CHANNELS
 ```
 
 4. Add to config:
@@ -1247,11 +1339,16 @@ The Twitch adapter connects to Twitch's IRC gateway (`irc.chat.twitch.tv:6697` o
 2. Set environment variables:
 
 ```bash
-export IRC_SERVER=irc.libera.chat:6697
+# Choose one method for each:
+export IRC_SERVER=irc.libera.chat:6697        # Environment variable
 export IRC_NICK=librefang-bot
 export IRC_CHANNELS=#channel1,#channel2
-# Optional: set a server password
-# export IRC_PASSWORD=your-password
+# export IRC_PASSWORD=your-password           # Optional
+# Or use vault:
+librefang vault set IRC_SERVER                # Encrypted vault (recommended)
+librefang vault set IRC_NICK
+librefang vault set IRC_CHANNELS
+# librefang vault set IRC_PASSWORD            # Optional
 ```
 
 3. Add to config:
@@ -1285,9 +1382,14 @@ The IRC adapter connects to the IRC server over TCP (with optional TLS), authent
 2. Set environment variables:
 
 ```bash
-export XMPP_JID=bot@example.com
+# Choose one method for each:
+export XMPP_JID=bot@example.com               # Environment variable
 export XMPP_PASSWORD=your-password
 export XMPP_SERVER=example.com
+# Or use vault:
+librefang vault set XMPP_JID                  # Encrypted vault (recommended)
+librefang vault set XMPP_PASSWORD
+librefang vault set XMPP_SERVER
 ```
 
 3. Add to config:
@@ -1322,9 +1424,14 @@ The XMPP adapter connects to the XMPP server using the specified JID and passwor
 3. Set environment variables:
 
 ```bash
-export DISCOURSE_URL=https://forum.example.com
+# Choose one method for each:
+export DISCOURSE_URL=https://forum.example.com  # Environment variable
 export DISCOURSE_API_KEY=your-api-key
 export DISCOURSE_USERNAME=bot-user
+# Or use vault:
+librefang vault set DISCOURSE_URL             # Encrypted vault (recommended)
+librefang vault set DISCOURSE_API_KEY
+librefang vault set DISCOURSE_USERNAME
 ```
 
 4. Add to config:
@@ -1358,7 +1465,9 @@ The Discourse adapter polls the Discourse REST API for new posts and notificatio
 2. Set the environment variable:
 
 ```bash
-export GITTER_TOKEN=your-gitter-token
+# Choose one method:
+export GITTER_TOKEN=your-gitter-token         # Environment variable
+librefang vault set GITTER_TOKEN              # Encrypted vault (recommended)
 ```
 
 3. Add to config:
@@ -1390,7 +1499,9 @@ The Gitter adapter connects to the Gitter Streaming API to receive messages in r
 3. Set the environment variable:
 
 ```bash
-export REVOLT_TOKEN=your-revolt-bot-token
+# Choose one method:
+export REVOLT_TOKEN=your-revolt-bot-token     # Environment variable
+librefang vault set REVOLT_TOKEN              # Encrypted vault (recommended)
 ```
 
 4. Add to config:
@@ -1422,8 +1533,12 @@ The Revolt adapter connects to the Revolt API via WebSocket for real-time messag
 3. Set environment variables:
 
 ```bash
-export KEYBASE_USERNAME=your-keybase-username
+# Choose one method for each:
+export KEYBASE_USERNAME=your-username         # Environment variable
 export KEYBASE_PAPERKEY="your paper key words here"
+# Or use vault:
+librefang vault set KEYBASE_USERNAME          # Encrypted vault (recommended)
+librefang vault set KEYBASE_PAPERKEY
 ```
 
 4. Add to config:
@@ -1456,8 +1571,12 @@ The Keybase adapter uses the Keybase Bot API to poll for new messages. It authen
 3. Set environment variables:
 
 ```bash
-export THREEMA_ID=*YOUR_ID
+# Choose one method for each:
+export THREEMA_ID=*YOUR_ID                    # Environment variable
 export THREEMA_SECRET=your-api-secret
+# Or use vault:
+librefang vault set THREEMA_ID                # Encrypted vault (recommended)
+librefang vault set THREEMA_SECRET
 ```
 
 4. Add to config:
@@ -1490,8 +1609,12 @@ The Threema adapter uses the Threema Gateway REST API to send and receive end-to
 3. Set environment variables:
 
 ```bash
-export NOSTR_PRIVATE_KEY=nsec1your-private-key-here
+# Choose one method for each:
+export NOSTR_PRIVATE_KEY=nsec1your-key        # Environment variable
 export NOSTR_RELAYS=wss://relay.damus.io,wss://nos.lol
+# Or use vault:
+librefang vault set NOSTR_PRIVATE_KEY         # Encrypted vault (recommended)
+librefang vault set NOSTR_RELAYS
 ```
 
 4. Add to config:
@@ -1525,8 +1648,12 @@ The Nostr adapter connects to the configured relays via WebSocket using the NIP-
 4. Set environment variables:
 
 ```bash
-export DINGTALK_ACCESS_TOKEN=your-access-token
+# Choose one method for each:
+export DINGTALK_ACCESS_TOKEN=your-token       # Environment variable
 export DINGTALK_SECRET=your-signing-secret
+# Or use vault:
+librefang vault set DINGTALK_ACCESS_TOKEN     # Encrypted vault (recommended)
+librefang vault set DINGTALK_SECRET
 ```
 
 5. Add to config:
@@ -1560,8 +1687,12 @@ The DingTalk adapter receives messages via webhook callbacks from the DingTalk R
 3. Set environment variables:
 
 ```bash
-export QQ_APP_ID=your-app-id
+# Choose one method for each:
+export QQ_APP_ID=your-app-id                 # Environment variable
 export QQ_TOKEN=your-bot-token
+# Or use vault:
+librefang vault set QQ_APP_ID                # Encrypted vault (recommended)
+librefang vault set QQ_TOKEN
 ```
 
 4. Add to config:
@@ -1595,9 +1726,14 @@ The QQ adapter connects to the QQ Bot API via WebSocket for real-time message de
 4. Set environment variables:
 
 ```bash
-export WECOM_CORP_ID=your-corp-id
+# Choose one method for each:
+export WECOM_CORP_ID=your-corp-id             # Environment variable
 export WECOM_AGENT_ID=your-agent-id
 export WECOM_SECRET=your-app-secret
+# Or use vault:
+librefang vault set WECOM_CORP_ID             # Encrypted vault (recommended)
+librefang vault set WECOM_AGENT_ID
+librefang vault set WECOM_SECRET
 ```
 
 5. Add to config:
@@ -1631,11 +1767,16 @@ The WeCom adapter uses the WeCom Enterprise API webhook protocol to receive mess
 2. Set environment variables (optional, for authenticated brokers):
 
 ```bash
-export MQTT_BROKER_URL=mqtt://broker.example.com:1883
+# Choose one method for each:
+export MQTT_BROKER_URL=mqtt://broker:1883     # Environment variable
 export MQTT_TOPIC=home/agents/input
-# Optional auth:
-# export MQTT_USERNAME=your-username
-# export MQTT_PASSWORD=your-password
+# export MQTT_USERNAME=your-username          # Optional
+# export MQTT_PASSWORD=your-password          # Optional
+# Or use vault:
+librefang vault set MQTT_BROKER_URL           # Encrypted vault (recommended)
+librefang vault set MQTT_TOPIC
+# librefang vault set MQTT_USERNAME           # Optional
+# librefang vault set MQTT_PASSWORD           # Optional
 ```
 
 3. Add to config:
@@ -1674,10 +1815,14 @@ The MQTT adapter uses the `rumqttc` crate to connect to the broker using MQTT v3
 2. Set environment variables:
 
 ```bash
-export NTFY_URL=https://ntfy.sh
+# Choose one method for each:
+export NTFY_URL=https://ntfy.sh               # Environment variable
 export NTFY_TOPIC=my-librefang-topic
-# Optional: if the topic requires authentication
-# export NTFY_TOKEN=your-access-token
+# export NTFY_TOKEN=your-access-token         # Optional
+# Or use vault:
+librefang vault set NTFY_URL                  # Encrypted vault (recommended)
+librefang vault set NTFY_TOPIC
+# librefang vault set NTFY_TOKEN              # Optional
 ```
 
 3. Add to config:
@@ -1710,8 +1855,12 @@ The ntfy adapter subscribes to a topic on the ntfy server using Server-Sent Even
 2. Set environment variables:
 
 ```bash
-export GOTIFY_URL=https://gotify.example.com
+# Choose one method for each:
+export GOTIFY_URL=https://gotify.example.com  # Environment variable
 export GOTIFY_TOKEN=your-application-token
+# Or use vault:
+librefang vault set GOTIFY_URL                # Encrypted vault (recommended)
+librefang vault set GOTIFY_TOKEN
 ```
 
 3. Add to config:
@@ -1744,8 +1893,12 @@ The Gotify adapter connects to the Gotify server via WebSocket to receive messag
 2. Set environment variables:
 
 ```bash
-export NEXTCLOUD_URL=https://nextcloud.example.com
-export NEXTCLOUD_TOKEN=your-app-password-or-token
+# Choose one method for each:
+export NEXTCLOUD_URL=https://nextcloud.example.com  # Environment variable
+export NEXTCLOUD_TOKEN=your-app-password
+# Or use vault:
+librefang vault set NEXTCLOUD_URL             # Encrypted vault (recommended)
+librefang vault set NEXTCLOUD_TOKEN
 ```
 
 3. Add to config:
@@ -1777,10 +1930,14 @@ The Nextcloud Talk adapter polls the Nextcloud Talk REST API for new messages in
 2. Set environment variables:
 
 ```bash
-export MUMBLE_SERVER=mumble.example.com:64738
+# Choose one method for each:
+export MUMBLE_SERVER=mumble.example.com:64738 # Environment variable
 export MUMBLE_USERNAME=librefang-bot
-# Optional: server password
-# export MUMBLE_PASSWORD=your-password
+# export MUMBLE_PASSWORD=your-password        # Optional
+# Or use vault:
+librefang vault set MUMBLE_SERVER             # Encrypted vault (recommended)
+librefang vault set MUMBLE_USERNAME
+# librefang vault set MUMBLE_PASSWORD         # Optional
 ```
 
 3. Add to config:
@@ -1814,8 +1971,12 @@ The Mumble adapter connects to the Mumble server using the Mumble TCP protocol a
 3. Set environment variables:
 
 ```bash
-export WEBHOOK_URL=https://your-service.example.com/hook
+# Choose one method for each:
+export WEBHOOK_URL=https://your-service.example.com/hook  # Environment variable
 export WEBHOOK_SECRET=your-shared-secret
+# Or use vault:
+librefang vault set WEBHOOK_URL               # Encrypted vault (recommended)
+librefang vault set WEBHOOK_SECRET
 ```
 
 4. Add to config:
