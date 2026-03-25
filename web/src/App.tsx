@@ -829,7 +829,7 @@ function Downloads(_props: SectionProps) {
           <div className="grid md:grid-cols-2 gap-6 mb-8">
             {categories.map((cat) => (
               <FadeIn key={cat.label}>
-                <div className="bg-surface-100 border border-black/10 dark:border-white/5 p-6 hover:-translate-y-0.5 transition-transform">
+                <div className="bg-surface-100 border border-black/10 dark:border-white/5 p-6 hover:-translate-y-0.5 transition-transform h-full">
                   <div className="flex items-center gap-3 mb-4">
                     <cat.icon className="w-5 h-5 text-cyan-600 dark:text-cyan-500" />
                     <div>
