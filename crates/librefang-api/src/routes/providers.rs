@@ -57,6 +57,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 
+use crate::types::ApiErrorResponse;
 #[utoipa::path(
     get,
     path = "/api/models",
@@ -189,16 +190,10 @@ pub async fn create_alias(
         .to_string();
 
     if alias.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Missing required field: alias"})),
-        );
+        return ApiErrorResponse::bad_request("Missing required field: alias").into_json_tuple();
     }
     if model_id.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Missing required field: model_id"})),
-        );
+        return ApiErrorResponse::bad_request("Missing required field: model_id").into_json_tuple();
     }
 
     let mut catalog = state
@@ -208,10 +203,7 @@ pub async fn create_alias(
         .unwrap_or_else(|e| e.into_inner());
 
     if !catalog.add_alias(&alias, &model_id) {
-        return (
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({"error": format!("Alias '{}' already exists", alias)})),
-        );
+        return ApiErrorResponse::conflict(format!("Alias '{}' already exists", alias)).into_json_tuple();
     }
 
     (
@@ -237,10 +229,7 @@ pub async fn delete_alias(
         .unwrap_or_else(|e| e.into_inner());
 
     if !catalog.remove_alias(&alias) {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": format!("Alias '{}' not found", alias)})),
-        );
+        return ApiErrorResponse::not_found(format!("Alias '{}' not found", alias)).into_json_tuple();
     }
 
     (
@@ -284,10 +273,7 @@ pub async fn get_model(
                 })),
             )
         }
-        None => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": format!("Model '{}' not found", id)})),
-        ),
+        None => ApiErrorResponse::not_found(format!("Model '{}' not found", id)).into_json_tuple(),
     }
 }
 
@@ -471,10 +457,7 @@ pub async fn get_provider(
                 (p.clone(), models)
             }
             None => {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(serde_json::json!({"error": format!("Provider '{}' not found", name)})),
-                );
+                return ApiErrorResponse::not_found(format!("Provider '{}' not found", name)).into_json_tuple();
             }
         }
     };
@@ -544,10 +527,7 @@ pub async fn add_custom_model(
         .unwrap_or(8_192);
 
     if id.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Missing required field: id"})),
-        );
+        return ApiErrorResponse::bad_request("Missing required field: id").into_json_tuple();
     }
 
     let display = body
@@ -593,12 +573,7 @@ pub async fn add_custom_model(
         .unwrap_or_else(|e| e.into_inner());
 
     if !catalog.add_custom_model(entry) {
-        return (
-            StatusCode::CONFLICT,
-            Json(
-                serde_json::json!({"error": format!("Model '{}' already exists for provider '{}'", id, provider)}),
-            ),
-        );
+        return ApiErrorResponse::conflict(format!("Model '{}' already exists for provider '{}'", id, provider)).into_json_tuple();
     }
 
     // Persist to disk
@@ -630,10 +605,7 @@ pub async fn remove_custom_model(
         .unwrap_or_else(|e| e.into_inner());
 
     if !catalog.remove_custom_model(&model_id) {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": format!("Custom model '{}' not found", model_id)})),
-        );
+        return ApiErrorResponse::not_found(format!("Custom model '{}' not found", model_id)).into_json_tuple();
     }
 
     let custom_path = state.kernel.home_dir().join("custom_models.json");
@@ -658,10 +630,7 @@ pub async fn set_provider_key(
     let key = match body["key"].as_str() {
         Some(k) if !k.trim().is_empty() => k.trim().to_string(),
         _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Missing or empty 'key' field"})),
-            );
+            return ApiErrorResponse::bad_request("Missing or empty 'key' field").into_json_tuple();
         }
     };
 
@@ -685,10 +654,7 @@ pub async fn set_provider_key(
     // Write to secrets.env file
     let secrets_path = state.kernel.home_dir().join("secrets.env");
     if let Err(e) = write_secret_env(&secrets_path, &env_var, &key) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("Failed to write secrets.env: {e}")})),
-        );
+        return ApiErrorResponse::internal(format!("Failed to write secrets.env: {e}")).into_json_tuple();
     }
 
     // Set env var in current process so detect_auth picks it up
@@ -858,19 +824,13 @@ pub async fn delete_provider_key(
     };
 
     if env_var.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Provider does not require an API key"})),
-        );
+        return ApiErrorResponse::bad_request("Provider does not require an API key").into_json_tuple();
     }
 
     // Remove from secrets.env
     let secrets_path = state.kernel.home_dir().join("secrets.env");
     if let Err(e) = remove_secret_env(&secrets_path, &env_var) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("Failed to update secrets.env: {e}")})),
-        );
+        return ApiErrorResponse::internal(format!("Failed to update secrets.env: {e}")).into_json_tuple();
     }
 
     // Remove from process environment
@@ -905,10 +865,7 @@ pub async fn test_provider(
         match catalog.get_provider(&name) {
             Some(p) => (p.api_key_env.clone(), p.base_url.clone(), p.key_required),
             None => {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(serde_json::json!({"error": format!("Unknown provider '{}'", name)})),
-                );
+                return ApiErrorResponse::not_found(format!("Unknown provider '{}'", name)).into_json_tuple();
             }
         }
     };
@@ -916,10 +873,7 @@ pub async fn test_provider(
     let api_key = std::env::var(&env_var).ok();
     // Only require API key for providers that need one (skip local providers like ollama/vllm/lmstudio)
     if key_required && api_key.is_none() && !env_var.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Provider API key not configured"})),
-        );
+        return ApiErrorResponse::bad_request("Provider API key not configured").into_json_tuple();
     }
 
     // ── CLI-based providers (no HTTP base URL) ──
@@ -1083,19 +1037,13 @@ pub async fn set_provider_url(
     let base_url = match body["base_url"].as_str() {
         Some(u) if !u.trim().is_empty() => u.trim().to_string(),
         _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Missing or empty 'base_url' field"})),
-            );
+            return ApiErrorResponse::bad_request("Missing or empty 'base_url' field").into_json_tuple();
         }
     };
 
     // Validate URL scheme
     if !base_url.starts_with("http://") && !base_url.starts_with("https://") {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "base_url must start with http:// or https://"})),
-        );
+        return ApiErrorResponse::bad_request("base_url must start with http:// or https://").into_json_tuple();
     }
 
     // Update catalog in memory
@@ -1111,10 +1059,7 @@ pub async fn set_provider_url(
     // Persist to config.toml [provider_urls] section
     let config_path = state.kernel.home_dir().join("config.toml");
     if let Err(e) = upsert_provider_url(&config_path, &name, &base_url) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("Failed to save config: {e}")})),
-        );
+        return ApiErrorResponse::internal(format!("Failed to save config: {e}")).into_json_tuple();
     }
 
     // Probe reachability at the new URL

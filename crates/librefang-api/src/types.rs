@@ -101,6 +101,19 @@ impl ApiErrorResponse {
         self.status = status;
         self
     }
+
+    /// Convert into a `(StatusCode, Json<Value>)` tuple that is type-compatible
+    /// with the success paths of existing handler functions.
+    ///
+    /// Prefer `into_response()` in new code; this helper exists for incremental
+    /// migration of handlers whose success path still returns a `(StatusCode, Json<Value>)`.
+    pub fn into_json_tuple(self) -> (StatusCode, Json<serde_json::Value>) {
+        // `StatusCode` is Copy so no move issue.
+        let status = self.status;
+        // `status` field is `#[serde(skip)]` so `to_value` won't include it.
+        let body = serde_json::to_value(&self).unwrap_or_default();
+        (status, Json(body))
+    }
 }
 
 /// Request to spawn an agent from a TOML manifest string or a template name.

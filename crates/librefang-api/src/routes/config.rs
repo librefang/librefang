@@ -1173,10 +1173,7 @@ pub async fn migrate_detect() -> impl IntoResponse {
 pub async fn migrate_scan(Json(req): Json<MigrateScanRequest>) -> impl IntoResponse {
     let path = std::path::PathBuf::from(&req.path);
     if !path.exists() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Directory not found"})),
-        );
+        return ApiErrorResponse::bad_request("Directory not found").into_json_tuple();
     }
     let scan = librefang_migrate::openclaw::scan_openclaw_workspace(&path);
     (StatusCode::OK, Json(serde_json::json!(scan)))
@@ -1201,12 +1198,7 @@ pub async fn run_migrate(
         "autogpt" => librefang_migrate::MigrateSource::AutoGpt,
         "openfang" => librefang_migrate::MigrateSource::OpenFang,
         other => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(
-                    serde_json::json!({"error": format!("Unknown source: {other}. Use 'openclaw', 'openfang', 'langchain', or 'autogpt'")}),
-                ),
-            );
+            return ApiErrorResponse::bad_request(format!("Unknown source: {other}. Use 'openclaw', 'openfang', 'langchain', or 'autogpt'")).into_json_tuple();
         }
     };
 
@@ -1263,10 +1255,7 @@ pub async fn run_migrate(
                 })),
             )
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("Migration failed: {e}")})),
-        ),
+        Err(e) => ApiErrorResponse::internal(format!("Migration failed: {e}")).into_json_tuple(),
     }
 }
 
