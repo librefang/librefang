@@ -4175,14 +4175,12 @@ pub async fn inject_message(
             Json(serde_json::json!({"injected": injected})),
         )
             .into_response(),
-        Err(e) => {
-            if e.to_string().contains("not found") {
-                ApiErrorResponse::not_found(e.to_string())
-            } else {
-                ApiErrorResponse::internal(e.to_string())
-            }
-            .into_response()
+        Err(e) => if e.to_string().contains("not found") {
+            ApiErrorResponse::not_found(e.to_string())
+        } else {
+            ApiErrorResponse::internal(e.to_string())
         }
+        .into_response(),
     }
 }
 

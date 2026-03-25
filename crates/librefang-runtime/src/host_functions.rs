@@ -154,16 +154,28 @@ fn is_ssrf_target(url: &str) -> Result<SsrfResolved, serde_json::Value> {
     let port = if url.starts_with("https") { 443 } else { 80 };
     let socket_addr = format!("{hostname}:{port}");
     let mut resolved = Vec::new();
-    if let Ok(addrs) = socket_addr.to_socket_addrs() {
-        for addr in addrs {
-            let ip = addr.ip();
-            if ip.is_loopback() || ip.is_unspecified() || is_private_ip(&ip) {
-                return Err(json!({"error": format!(
-                    "SSRF blocked: {hostname} resolves to private IP {ip}"
-                )}));
+    match socket_addr.to_socket_addrs() {
+        Ok(addrs) => {
+            for addr in addrs {
+                let ip = addr.ip();
+                if ip.is_loopback() || ip.is_unspecified() || is_private_ip(&ip) {
+                    return Err(json!({"error": format!(
+                        "SSRF blocked: {hostname} resolves to private IP {ip}"
+                    )}));
+                }
+                resolved.push(addr);
             }
-            resolved.push(addr);
         }
+        Err(e) => {
+            return Err(json!({"error": format!(
+                "SSRF blocked: DNS resolution failed for {hostname}: {e}"
+            )}));
+        }
+    }
+    if resolved.is_empty() {
+        return Err(json!({"error": format!(
+            "SSRF blocked: DNS resolution returned no addresses for {hostname}"
+        )}));
     }
     Ok(SsrfResolved {
         hostname: hostname.to_string(),
