@@ -6,6 +6,7 @@ import { ChevronRight } from "lucide-react";
 import { AnimatePresence, motion, useIsPresent } from "motion/react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useRouter } from "next/navigation";
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 import { useIsInsideMobileNavigation } from "@/components/MobileNavigation";
 import { type Section, useSectionStore } from "@/components/SectionProvider";
@@ -177,7 +178,7 @@ function NavigationGroup({
 	className?: string;
 	allSections?: Record<string, Array<Section>>;
 	isOpen: boolean;
-	onToggle: () => void;
+	onToggle: (navigateToFirst?: boolean) => void;
 }) {
 	// If this is the mobile navigation then we always render the initial
 	// state, so that the state does not change during the close animation.
@@ -212,7 +213,7 @@ function NavigationGroup({
 			<motion.h2
 				layout="position"
 				className="flex cursor-pointer select-none items-center gap-1.5 text-sm font-semibold text-zinc-900 dark:text-white"
-				onClick={onToggle}
+				onClick={() => onToggle(true)}
 			>
 				<ChevronRight
 					className={clsx(
@@ -482,11 +483,15 @@ export function Navigation({
 		}
 	}, [pathname, navigation]);
 
+	const router = useRouter();
 	const handleToggle = useCallback(
-		(index: number) => {
+		(index: number, navigateToFirst?: boolean) => {
 			setOpenGroupIndex((prev) => (prev === index ? -1 : index));
+			if (navigateToFirst && navigation[index]?.links[0]) {
+				router.push(navigation[index].links[0].href);
+			}
 		},
-		[],
+		[navigation, router],
 	);
 
 	return (
@@ -505,7 +510,7 @@ export function Navigation({
 						className={groupIndex === 0 ? "md:mt-0" : ""}
 						allSections={allSections}
 						isOpen={openGroupIndex === groupIndex}
-						onToggle={() => handleToggle(groupIndex)}
+						onToggle={(navigateToFirst) => handleToggle(groupIndex, navigateToFirst)}
 					/>
 				))}
 			</ul>
