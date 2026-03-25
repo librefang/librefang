@@ -51,15 +51,15 @@ flyctl volumes create librefang_data \
 # --- 6. Set secrets (optional) ---
 echo ""
 info "Optional: Set your LLM API key (press Enter to skip)"
-read -rp "  GROQ_API_KEY: " GROQ_KEY
+read -rp "  GROQ_API_KEY: " GROQ_KEY < /dev/tty
 if [ -n "$GROQ_KEY" ]; then
   flyctl secrets set GROQ_API_KEY="$GROQ_KEY" --app "$APP_NAME"
 fi
-read -rp "  OPENAI_API_KEY: " OPENAI_KEY
+read -rp "  OPENAI_API_KEY: " OPENAI_KEY < /dev/tty
 if [ -n "$OPENAI_KEY" ]; then
   flyctl secrets set OPENAI_API_KEY="$OPENAI_KEY" --app "$APP_NAME"
 fi
-read -rp "  ANTHROPIC_API_KEY: " ANTHROPIC_KEY
+read -rp "  ANTHROPIC_API_KEY: " ANTHROPIC_KEY < /dev/tty
 if [ -n "$ANTHROPIC_KEY" ]; then
   flyctl secrets set ANTHROPIC_API_KEY="$ANTHROPIC_KEY" --app "$APP_NAME"
 fi
