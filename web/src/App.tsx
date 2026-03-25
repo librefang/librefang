@@ -826,7 +826,7 @@ function Downloads(_props: SectionProps) {
         {isLoading ? (
           <div className="text-gray-400 dark:text-gray-600 text-center py-12">Loading releases...</div>
         ) : (
-          <div className="grid md:grid-cols-2 gap-6 mb-8">
+          <div className="grid md:grid-cols-3 gap-6 mb-8">
             {categories.map((cat) => (
               <FadeIn key={cat.label}>
                 <div className="bg-surface-100 border border-black/10 dark:border-white/5 p-6 hover:-translate-y-0.5 transition-transform h-full">
@@ -852,12 +852,37 @@ function Downloads(_props: SectionProps) {
                 </div>
               </FadeIn>
             ))}
+            <FadeIn>
+              <div className="bg-surface-100 border border-black/10 dark:border-white/5 p-6 hover:-translate-y-0.5 transition-transform h-full">
+                <div className="flex items-center gap-3 mb-4">
+                  <Box className="w-5 h-5 text-cyan-600 dark:text-cyan-500" />
+                  <div>
+                    <h3 className="text-base font-bold text-slate-900 dark:text-white">{l('sdk')}</h3>
+                    <span className="text-xs text-gray-500">Python / Node.js / Rust</span>
+                  </div>
+                </div>
+                <div className="space-y-1.5">
+                  {[
+                    { name: 'pip install librefang', label: 'Python' },
+                    { name: 'npm install librefang', label: 'Node.js' },
+                    { name: 'cargo install librefang', label: 'Rust' },
+                    { name: 'brew install librefang', label: 'Homebrew' },
+                    { name: 'docker pull librefang/librefang', label: 'Docker' },
+                  ].map((pkg) => (
+                    <div key={pkg.label} className="flex items-center justify-between px-3 py-2 hover:bg-surface-200 transition-colors group">
+                      <code className="text-xs text-gray-700 dark:text-gray-300 font-mono">{pkg.name}</code>
+                      <span className="text-xs text-gray-400 dark:text-gray-600">{pkg.label}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </FadeIn>
           </div>
         )}
 
         {/* SDK, Deploy, All Releases */}
         <FadeIn delay={200}>
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <a href="https://deploy.librefang.ai/" target="_blank" rel="noopener noreferrer" className="flex items-center gap-3 bg-surface-100 border border-black/10 dark:border-white/5 hover:border-cyan-500/20 px-5 py-4 transition-all group">
               <Globe className="w-5 h-5 text-cyan-500/60 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 shrink-0" />
               <div>
@@ -870,13 +895,6 @@ function Downloads(_props: SectionProps) {
               <div>
                 <div className="text-sm font-bold text-slate-900 dark:text-white">{l('allReleases')}</div>
                 <div className="text-xs text-gray-500">GitHub Releases</div>
-              </div>
-            </a>
-            <a href="https://docs.librefang.ai/sdk" target="_blank" rel="noopener noreferrer" className="flex items-center gap-3 bg-surface-100 border border-black/10 dark:border-white/5 hover:border-cyan-500/20 px-5 py-4 transition-all group">
-              <Box className="w-5 h-5 text-cyan-500/60 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 shrink-0" />
-              <div>
-                <div className="text-sm font-bold text-slate-900 dark:text-white">{l('sdk')}</div>
-                <div className="text-xs text-gray-500">Python / Node.js / Rust</div>
               </div>
             </a>
           </div>
