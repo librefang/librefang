@@ -1201,7 +1201,10 @@ pub async fn run_migrate(
         "autogpt" => librefang_migrate::MigrateSource::AutoGpt,
         "openfang" => librefang_migrate::MigrateSource::OpenFang,
         other => {
-            return ApiErrorResponse::bad_request(format!("Unknown source: {other}. Use 'openclaw', 'openfang', 'langchain', or 'autogpt'")).into_json_tuple();
+            return ApiErrorResponse::bad_request(format!(
+                "Unknown source: {other}. Use 'openclaw', 'openfang', 'langchain', or 'autogpt'"
+            ))
+            .into_json_tuple();
         }
     };
 

@@ -316,55 +316,6 @@ struct TokenResponse {
     refresh_token: Option<String>,
 }
 
-// ── Token Store ─────────────────────────────────────────────────────────
-
-/// Stored token entry for a user session, keyed by user subject (`sub`).
-#[derive(Debug, Clone)]
-struct StoredTokens {
-    /// The OAuth2 access token.
-    #[allow(dead_code)]
-    access_token: String,
-    /// Optional refresh token for obtaining new access tokens.
-    refresh_token: Option<String>,
-    /// When the access token expires (absolute time).
-    #[allow(dead_code)]
-    expires_at: Option<std::time::Instant>,
-    /// Provider ID that issued these tokens.
-    #[allow(dead_code)]
-    provider_id: String,
-}
-
-/// In-memory token store. Maps user `sub` to their stored tokens.
-#[derive(Default)]
-pub struct TokenStore {
-    inner: RwLock<HashMap<String, StoredTokens>>,
-}
-
-/// Global token store instance.
-static TOKEN_STORE: std::sync::LazyLock<TokenStore> = std::sync::LazyLock::new(TokenStore::default);
-
-impl TokenStore {
-    /// Store tokens for a user.
-    async fn store(&self, sub: &str, tokens: StoredTokens) {
-        let mut write = self.inner.write().await;
-        write.insert(sub.to_string(), tokens);
-    }
-
-    /// Retrieve stored tokens for a user.
-    #[allow(dead_code)]
-    async fn get(&self, sub: &str) -> Option<StoredTokens> {
-        let read = self.inner.read().await;
-        read.get(sub).cloned()
-    }
-
-    /// Remove stored tokens for a user (e.g., on logout).
-    #[allow(dead_code)]
-    async fn remove(&self, sub: &str) {
-        let mut write = self.inner.write().await;
-        write.remove(sub);
-    }
-}
-
 // ── Route: GET /api/auth/providers ──────────────────────────────────────
 
 /// GET /api/auth/providers — List available authentication providers.
@@ -536,6 +487,11 @@ struct CallbackResponse {
     user: CallbackUser,
     /// Refresh token (if the provider issued one). Clients should store this
     /// and use `POST /api/auth/refresh` when the access token expires.
+    ///
+    /// SECURITY: Returning the refresh token to the client is acceptable here because
+    /// LibreFang is a local agent system — the "client" is always the local dashboard
+    /// or CLI running on the same machine, not a remote browser. The API is bound to
+    /// 127.0.0.1 by default and protected by the existing API key middleware.
     #[serde(skip_serializing_if = "Option::is_none")]
     refresh_token: Option<String>,
 }
@@ -820,20 +776,6 @@ async fn handle_code_exchange(
 
     let expires_in = token_resp.expires_in.unwrap_or(ext_auth.session_ttl_secs);
 
-    // Store tokens so we can refresh later when the access token expires.
-    let expires_at = Some(std::time::Instant::now() + std::time::Duration::from_secs(expires_in));
-    TOKEN_STORE
-        .store(
-            &claims.sub,
-            StoredTokens {
-                access_token: token_resp.access_token.clone(),
-                refresh_token: token_resp.refresh_token.clone(),
-                expires_at,
-                provider_id: provider.id.clone(),
-            },
-        )
-        .await;
-
     (
         StatusCode::OK,
         Json(CallbackResponse {
@@ -1033,6 +975,12 @@ struct RefreshResponse {
 ///
 /// When the access token expires, clients can call this endpoint with the
 /// refresh token received during login instead of forcing a full re-authorization.
+///
+/// SECURITY: In the local agent model, this endpoint is only accessible from the
+/// loopback interface (127.0.0.1) and protected by API key middleware. The client
+/// (local dashboard or CLI) holds the refresh token and submits it directly — there
+/// is no server-side token store. This is the appropriate design for a single-user
+/// local agent that doesn't need cross-session token persistence.
 #[utoipa::path(post, path = "/api/auth/refresh", tag = "auth", request_body = RefreshRequest, responses((status = 200, description = "New access token", body = serde_json::Value), (status = 400, description = "Missing or invalid refresh token"), (status = 502, description = "Token refresh failed")))]
 pub async fn auth_refresh(
     State(state): State<Arc<AppState>>,
@@ -1055,7 +1003,7 @@ pub async fn auth_refresh(
     } else if providers.len() == 1 {
         providers.first()
     } else {
-        // Try to find the provider from the token store by scanning for a matching refresh token.
+        // Multiple providers and no hint — we cannot determine which provider issued the token.
         None
     };
 

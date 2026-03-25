@@ -1140,7 +1140,8 @@ pub async fn get_channel(
     let meta = match find_channel_meta(&name) {
         Some(m) => m,
         None => {
-            return ApiErrorResponse::not_found(format!("Unknown channel: {name}")).into_json_tuple()
+            return ApiErrorResponse::not_found(format!("Unknown channel: {name}"))
+                .into_json_tuple()
         }
     };
 
@@ -1207,16 +1208,12 @@ pub async fn configure_channel(
 ) -> impl IntoResponse {
     let meta = match find_channel_meta(&name) {
         Some(m) => m,
-        None => {
-            return ApiErrorResponse::not_found("Unknown channel").into_json_tuple()
-        }
+        None => return ApiErrorResponse::not_found("Unknown channel").into_json_tuple(),
     };
 
     let fields = match body.get("fields").and_then(|v| v.as_object()) {
         Some(f) => f,
-        None => {
-            return ApiErrorResponse::bad_request("Missing 'fields' object").into_json_tuple()
-        }
+        None => return ApiErrorResponse::bad_request("Missing 'fields' object").into_json_tuple(),
     };
 
     let home = librefang_kernel::config::librefang_home();
@@ -1240,7 +1237,8 @@ pub async fn configure_channel(
             }
             // Secret field — write to secrets.env and set in process
             if let Err(e) = write_secret_env(&secrets_path, env_var, value) {
-                return ApiErrorResponse::internal(format!("Failed to write secret: {e}")).into_json_tuple();
+                return ApiErrorResponse::internal(format!("Failed to write secret: {e}"))
+                    .into_json_tuple();
             }
             // SAFETY: We are the only writer; this is a single-threaded config operation
             unsafe {
@@ -1263,7 +1261,8 @@ pub async fn configure_channel(
 
     // Write config.toml section
     if let Err(e) = upsert_channel_config(&config_path, &name, &config_fields) {
-        return ApiErrorResponse::internal(format!("Failed to write config: {e}")).into_json_tuple();
+        return ApiErrorResponse::internal(format!("Failed to write config: {e}"))
+            .into_json_tuple();
     }
 
     // Hot-reload: activate the channel immediately
@@ -1319,9 +1318,7 @@ pub async fn remove_channel(
 ) -> impl IntoResponse {
     let meta = match find_channel_meta(&name) {
         Some(m) => m,
-        None => {
-            return ApiErrorResponse::not_found("Unknown channel").into_json_tuple()
-        }
+        None => return ApiErrorResponse::not_found("Unknown channel").into_json_tuple(),
     };
 
     let home = librefang_kernel::config::librefang_home();
@@ -1343,7 +1340,8 @@ pub async fn remove_channel(
 
     // Remove config section
     if let Err(e) = remove_channel_config(&config_path, &name) {
-        return ApiErrorResponse::internal(format!("Failed to remove config: {e}")).into_json_tuple();
+        return ApiErrorResponse::internal(format!("Failed to remove config: {e}"))
+            .into_json_tuple();
     }
 
     // Hot-reload: deactivate the channel immediately

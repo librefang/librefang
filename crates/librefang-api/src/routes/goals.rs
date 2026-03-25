@@ -123,7 +123,8 @@ pub async fn create_goal(
     let title = match req["title"].as_str() {
         Some(t) if !t.is_empty() => t.to_string(),
         _ => {
-            return ApiErrorResponse::bad_request("Missing or empty 'title' field").into_json_tuple();
+            return ApiErrorResponse::bad_request("Missing or empty 'title' field")
+                .into_json_tuple();
         }
     };
 
@@ -133,14 +134,18 @@ pub async fn create_goal(
 
     let description = req["description"].as_str().unwrap_or("").to_string();
     if description.chars().count() > 4096 {
-        return ApiErrorResponse::bad_request("Description too long (max 4096 chars)").into_json_tuple();
+        return ApiErrorResponse::bad_request("Description too long (max 4096 chars)")
+            .into_json_tuple();
     }
 
     let parent_id = req["parent_id"].as_str().map(|s| s.to_string());
 
     let status = req["status"].as_str().unwrap_or("pending").to_string();
     if !["pending", "in_progress", "completed", "cancelled"].contains(&status.as_str()) {
-        return ApiErrorResponse::bad_request("Invalid status. Must be: pending, in_progress, completed, or cancelled").into_json_tuple();
+        return ApiErrorResponse::bad_request(
+            "Invalid status. Must be: pending, in_progress, completed, or cancelled",
+        )
+        .into_json_tuple();
     }
 
     let progress = req["progress"].as_u64().unwrap_or(0);
@@ -184,7 +189,8 @@ pub async fn create_goal(
     if let Some(ref pid) = parent_id {
         let parent_exists = goals.iter().any(|g| g["id"].as_str() == Some(pid.as_str()));
         if !parent_exists {
-            return ApiErrorResponse::not_found(format!("Parent goal '{}' not found", pid)).into_json_tuple();
+            return ApiErrorResponse::not_found(format!("Parent goal '{}' not found", pid))
+                .into_json_tuple();
         }
     }
 
@@ -224,13 +230,15 @@ pub async fn update_goal_by_id(
             return ApiErrorResponse::bad_request("Title must not be empty").into_json_tuple();
         }
         if title.chars().count() > 256 {
-            return ApiErrorResponse::bad_request("Title too long (max 256 chars)").into_json_tuple();
+            return ApiErrorResponse::bad_request("Title too long (max 256 chars)")
+                .into_json_tuple();
         }
     }
 
     if let Some(description) = req.get("description").and_then(|v| v.as_str()) {
         if description.chars().count() > 4096 {
-            return ApiErrorResponse::bad_request("Description too long (max 4096 chars)").into_json_tuple();
+            return ApiErrorResponse::bad_request("Description too long (max 4096 chars)")
+                .into_json_tuple();
         }
     }
 
@@ -251,11 +259,13 @@ pub async fn update_goal_by_id(
         if !parent_id.is_null() {
             if let Some(pid) = parent_id.as_str() {
                 if pid == id {
-                    return ApiErrorResponse::bad_request("A goal cannot be its own parent").into_json_tuple();
+                    return ApiErrorResponse::bad_request("A goal cannot be its own parent")
+                        .into_json_tuple();
                 }
                 // Verify the target parent exists
                 if !goals.iter().any(|g| g["id"].as_str() == Some(pid)) {
-                    return ApiErrorResponse::not_found(format!("Parent goal '{}' not found", pid)).into_json_tuple();
+                    return ApiErrorResponse::not_found(format!("Parent goal '{}' not found", pid))
+                        .into_json_tuple();
                 }
                 // Detect indirect cycles: walk ancestor chain from `pid` upward.
                 // Use a seen set to guard against infinite loops on corrupted data.
@@ -275,7 +285,10 @@ pub async fn update_goal_by_id(
                     });
                     match anc_parent {
                         Some(ref ap) if ap == &id => {
-                            return ApiErrorResponse::bad_request("Circular parent reference detected").into_json_tuple();
+                            return ApiErrorResponse::bad_request(
+                                "Circular parent reference detected",
+                            )
+                            .into_json_tuple();
                         }
                         Some(ap) => ancestor = Some(ap),
                         None => break,
