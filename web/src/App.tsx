@@ -861,10 +861,10 @@ function Downloads(_props: SectionProps) {
                 <div className="space-y-1.5">
                   {[
                     { name: 'Fly.io', url: 'https://deploy.librefang.ai/?platform=flyio', icon: Zap },
-                    { name: 'Railway', url: 'https://deploy.librefang.ai/?platform=railway', icon: ArrowRight },
-                    { name: 'Render', url: 'https://deploy.librefang.ai/?platform=render', icon: Layers },
-                    { name: 'GCP', url: 'https://deploy.librefang.ai/?platform=gcp', icon: Network },
-                    { name: 'Docker', url: 'https://deploy.librefang.ai/?platform=docker', icon: Box },
+                    { name: 'Railway', url: 'https://railway.com/deploy/Bb7HnN', icon: ArrowRight },
+                    { name: 'Render', url: 'https://dashboard.render.com/blueprint/new?repo=https://github.com/librefang/librefang', icon: Layers },
+                    { name: 'GCP', url: 'https://github.com/librefang/librefang/tree/main/deploy/gcp', icon: Network },
+                    { name: 'Docker', url: 'https://github.com/librefang/librefang/blob/main/deploy/docker-compose.yml', icon: Box },
                   ].map((p) => (
                     <a key={p.name} href={p.url} target="_blank" rel="noopener noreferrer" className="flex items-center gap-3 px-3 py-2 hover:bg-surface-200 transition-colors group">
                       <p.icon className="w-4 h-4 text-gray-400 dark:text-gray-600 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors shrink-0" />
