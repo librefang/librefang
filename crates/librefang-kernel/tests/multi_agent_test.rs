@@ -137,12 +137,14 @@ fn test_deterministic_agent_id() {
     install_hand(&kernel, HAND_A);
 
     let instance = kernel.activate_hand("test-clip", HashMap::new()).unwrap();
-    let expected = AgentId::from_hand_agent("test-clip", "main");
+    // activate_hand passes instance_id=None (new single-instance activation),
+    // so from_hand_agent uses the legacy hash format "{hand_id}:{role}".
+    let expected = AgentId::from_hand_agent("test-clip", "main", None);
 
     assert_eq!(
         instance.agent_id().unwrap(),
         expected,
-        "Agent ID should be deterministic from hand_id + role"
+        "Agent ID should be deterministic from hand_id + role (legacy format when no explicit instance_id)"
     );
 
     kernel.shutdown();

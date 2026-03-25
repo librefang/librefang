@@ -740,10 +740,18 @@ pub struct HandInstance {
 
 impl HandInstance {
     /// Create a new pending instance.
-    pub fn new(hand_id: &str, config: HashMap<String, serde_json::Value>) -> Self {
+    ///
+    /// If `instance_id` is `Some`, that UUID is reused (e.g. when restoring
+    /// a persisted instance across daemon restarts).  Otherwise a fresh
+    /// random UUID is generated.
+    pub fn new(
+        hand_id: &str,
+        config: HashMap<String, serde_json::Value>,
+        instance_id: Option<Uuid>,
+    ) -> Self {
         let now = Utc::now();
         Self {
-            instance_id: Uuid::new_v4(),
+            instance_id: instance_id.unwrap_or_else(Uuid::new_v4),
             hand_id: hand_id.to_string(),
             status: HandStatus::Active,
             agent_ids: BTreeMap::new(),
