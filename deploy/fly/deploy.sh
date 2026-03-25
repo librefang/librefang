@@ -149,7 +149,7 @@ done
 # --- 7. Deploy ---
 echo ""
 info "Deploying LibreFang (this may take a few minutes on first build)..."
-flyctl deploy --app "$APP_NAME" --remote-only
+flyctl deploy --app "$APP_NAME" --config deploy/fly/fly.toml --remote-only
 
 # --- 8. Done ---
 echo ""
