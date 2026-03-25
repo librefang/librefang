@@ -18,43 +18,62 @@ Project website: [https://librefang.ai/](https://librefang.ai/)
 
 ## Installation
 
-### Option 1: Cargo Install (Any Platform)
+### CLI
 
-LibreFang does not publish GitHub Releases yet. The current recommended install path is:
+The CLI is the core command-line tool for managing agents, hands, workflows, and more.
+
+**Quick Install Script (Recommended)**
+
+Linux / macOS / WSL:
+```bash
+curl -fsSL https://librefang.ai/install.sh | sh
+```
+
+Windows (PowerShell):
+```powershell
+irm https://librefang.ai/install.ps1 | iex
+```
+
+The script auto-detects platform and architecture, downloads the binary, verifies SHA256 checksums, configures PATH, and starts the daemon.
+
+Environment variables:
+- `LIBREFANG_INSTALL_DIR` — install directory (default: `~/.librefang/bin`)
+- `LIBREFANG_VERSION` — specific version (default: latest)
+- `LIBREFANG_AUTO_START` — auto-start daemon (default: 1)
+
+**Homebrew**
+
+```bash
+brew tap librefang/tap
+brew install librefang              # Stable
+brew install librefang-beta         # Beta
+brew install librefang-rc           # RC
+```
+
+**npm**
+
+```bash
+npm install -g @librefang/cli                  # Stable
+npm install -g @librefang/cli@next             # Latest pre-release (Beta or RC)
+npm install -g @librefang/cli@2026.3.25-rc1    # Specific version
+```
+
+**Cargo**
 
 ```bash
 cargo install --git https://github.com/librefang/librefang librefang-cli
 ```
 
 Or build from source:
-
 ```bash
 git clone https://github.com/librefang/librefang.git
 cd librefang
 cargo install --path crates/librefang-cli
 ```
 
-### Option 2: Shell Installer (Linux / macOS, for future releases)
+**Docker**
 
 ```bash
-curl -fsSL https://librefang.ai/install.sh | sh
-```
-
-Use this once LibreFang starts publishing GitHub Releases. The script installs the CLI binary to `~/.librefang/bin/`.
-
-### Option 3: PowerShell Installer (Windows, for future releases)
-
-```powershell
-irm https://librefang.ai/install.ps1 | iex
-```
-
-Use this once LibreFang starts publishing GitHub Releases. The script verifies SHA256 checksums and adds the CLI to your user PATH.
-
-### Option 4: Docker
-
-```bash
-docker pull ghcr.io/librefang/librefang:latest
-
 docker run -d \
   --name librefang \
   -p 4545:4545 \
@@ -63,19 +82,111 @@ docker run -d \
   ghcr.io/librefang/librefang:latest
 ```
 
-Or use Docker Compose:
-
+Docker Compose:
 ```bash
 git clone https://github.com/librefang/librefang.git
-cd librefang
-# Set your API keys in environment or .env file
+cd librefang/deploy
 docker compose up -d
 ```
 
-### Verify Installation
+**Verify Installation**
 
 ```bash
 librefang --version
+```
+
+---
+
+### SDK
+
+SDKs for integrating LibreFang API into your applications.
+
+**JavaScript / TypeScript**
+
+```bash
+npm install @librefang/sdk                     # Stable
+npm install @librefang/sdk@next                # Latest pre-release (Beta or RC)
+npm install @librefang/sdk@2026.3.25-rc1       # Specific version
+```
+
+**Python**
+
+```bash
+pip install librefang-sdk                      # Stable
+pip install librefang-sdk --pre                # Latest pre-release (Beta or RC)
+pip install librefang-sdk==2026.3.25rc1        # Specific version (PEP 440)
+```
+
+**Rust**
+
+```bash
+cargo add librefang
+```
+
+**Go**
+
+```bash
+go get github.com/librefang/librefang/sdk/go
+```
+
+---
+
+### Desktop App
+
+Native Tauri 2.0 desktop application. See [Desktop](/desktop) for details.
+
+**Homebrew Cask**
+
+```bash
+brew tap librefang/tap
+brew install --cask librefang       # Stable
+brew install --cask librefang-beta  # Beta
+brew install --cask librefang-rc    # RC
+```
+
+**Direct Download**
+
+Download from [GitHub Releases](https://github.com/librefang/librefang/releases):
+- **macOS**: `.dmg` (Universal)
+- **Windows**: `.msi`
+- **Linux**: `.appimage` / `.deb`
+
+---
+
+## One-Click Cloud Deployment
+
+Visit [deploy.librefang.ai](https://deploy.librefang.ai/) for all cloud deployment options.
+
+### Fly.io
+
+```bash
+curl -sL https://raw.githubusercontent.com/librefang/librefang/main/deploy/fly/deploy.sh | bash
+```
+
+### Railway
+
+[![Railway](https://img.shields.io/badge/Railway-Deploy-0B0D0E?logo=railway)](https://railway.com/deploy/Bb7HnN)
+
+### Render
+
+[![Render](https://img.shields.io/badge/Render-Deploy-46E3B7?logo=render)](https://render.com/deploy?repo=https://github.com/librefang/librefang)
+
+### GCP (Terraform)
+
+Deploy on GCP always-free tier (e2-micro). See [deploy/gcp/README.md](https://github.com/librefang/librefang/tree/main/deploy/gcp) for details:
+
+```bash
+cd deploy/gcp
+cp terraform.tfvars.example terraform.tfvars
+# Edit terraform.tfvars with your project_id and API keys
+terraform init && terraform apply
+```
+
+### Linux systemd
+
+```bash
+sudo cp deploy/librefang.service /etc/systemd/system/
+sudo systemctl enable --now librefang
 ```
 
 ---
@@ -90,14 +201,34 @@ Initialization runs automatically on first `librefang start` (or via the install
 librefang init
 ```
 
-This creates:
+This creates the `~/.librefang/` directory (customizable via `LIBREFANG_HOME`):
 
 ```
 ~/.librefang/
-  config.toml    # Main configuration
-  data/          # Database and runtime data
-  agents/        # Agent manifests (optional)
+├── config.toml                # Main configuration file
+├── aliases.toml               # Model and command aliases
+├── data/
+│   ├── librefang.db           #   SQLite database (memory, sessions, knowledge graph)
+│   └── state.db               #   Daemon state persistence
+├── registry/                  # Synced from librefang-registry
+│   ├── agents/                #   32 agent templates
+│   ├── hands/                 #   15 hand definitions
+│   ├── providers/             #   49 provider configs
+│   ├── skills/                #   Skill definitions
+│   ├── workflows/             #   Workflow templates
+│   └── plugins/               #   Plugin definitions
+├── workspaces/                # Runtime working directories
+│   ├── agents/                #   Active agent working directories
+│   └── hands/                 #   Active hand working directories
+├── skills/                    # User-installed skills
+├── plugins/                   # User-installed plugins
+├── vault.enc                  # Encrypted credential vault
+├── logs/                      # Application logs
+├── cache/                     # Temporary cache
+└── bin/                       # CLI binary (if installed via script)
 ```
+
+See [Architecture - User Data Directory](/architecture#user-data-directory) for the full reference.
 
 ### Set Up an API Key
 
@@ -115,6 +246,15 @@ export GROQ_API_KEY=gsk_...
 ```
 
 Add the export to your shell profile (`~/.bashrc`, `~/.zshrc`, etc.) to persist it.
+
+LibreFang supports three layers of key storage (highest priority first):
+
+| Layer | File | How to set | Notes |
+|-------|------|-----------|-------|
+| System env vars | — | `export GROQ_API_KEY=...` | Highest priority, never overridden |
+| Encrypted vault | `vault.enc` | `librefang vault set GROQ_API_KEY` | AES encrypted, recommended |
+| .env file | `.env` | `librefang config set-key groq` | Plaintext, written by CLI |
+| secrets.env | `secrets.env` | Dashboard "Set API Key" button | Plaintext, written by dashboard |
 
 ### Edit the Config
 
@@ -147,7 +287,7 @@ This checks that your config exists, API keys are set, and the toolchain is avai
 
 ### Using a Built-in Template
 
-LibreFang provides 30 agent templates (assistant pre-installed, others available from dashboard). Spawn the assistant agent:
+LibreFang provides 32 agent templates from the [registry](https://github.com/librefang/librefang-registry/tree/main/agents) (assistant pre-installed, others available from dashboard). Spawn the assistant agent:
 
 ```bash
 librefang agent spawn agents/hello-world/agent.toml
@@ -315,13 +455,13 @@ The embedded WebChat UI allows you to:
 
 Now that you have LibreFang running:
 
-- **Explore agent templates**: Browse the `agents/` directory for 30 pre-built agents (coder, researcher, writer, ops, analyst, security-auditor, and more).
+- **Explore agent templates**: Browse the `agents/` directory for pre-built agents (coder, researcher, writer, ops, analyst, security-auditor, and more).
 - **Create custom agents**: Write your own `agent.toml` manifests. See the [Architecture guide](architecture.md) for details on capabilities and scheduling.
 - **Set up channels**: Connect any of 44 messaging platforms (Telegram, Discord, Slack, WhatsApp, LINE, Mastodon, and 38 more). See [Channel Adapters](channel-adapters.md).
 - **Install skills**: 60 expert knowledge skills available from the dashboard (GitHub, Docker, Kubernetes, security audit, prompt engineering, etc.). See [Skill Development](skill-development.md).
 - **Build custom skills**: Extend agents with Python, WASM, or prompt-only skills. See [Skill Development](skill-development.md).
 - **Use the API**: 230+ REST/WS/SSE endpoints, including an OpenAI-compatible `/v1/chat/completions`. See [API Reference](api-reference.md).
-- **Switch LLM providers**: 28 providers supported (Anthropic, OpenAI, Gemini, Groq, DeepSeek, xAI, Ollama, and more). Per-agent model overrides.
+- **Switch LLM providers**: 49 drivers supported (Anthropic, OpenAI, Gemini, Groq, DeepSeek, xAI, Ollama, and more). Per-agent model overrides.
 - **Set up workflows**: Chain multiple agents together. Use `librefang workflow create` with a TOML workflow definition.
 - **Use MCP**: Connect to external tools via Model Context Protocol. Configure in `config.toml` under `[[mcp_servers]]`.
 - **Migrate from OpenFang**: Run `librefang migrate --from openfang`. Copies `~/.openfang` → `~/.librefang` with automatic content rewriting.

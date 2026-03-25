@@ -6,10 +6,17 @@ export const metadata = {
 
 # LibreFang
 
-LibreFang 是一个用 Rust 编写的开源 Agent 操作系统。
+LibreFang 是一个用 Rust 编写的开源 Agent 操作系统。它提供从 Agent 创建、调度、通信到部署的完整生命周期管理——接入 49 个 LLM 驱动，通过 44 个通道适配器连接 Telegram、Discord、Slack、微信等平台，支持 MCP 与 A2A 协议实现 Agent 间协作。
 
-**官网**: [https://librefang.ai/](https://librefang.ai/)
-**GitHub**: [https://github.com/librefang/librefang](https://github.com/librefang/librefang)
+你可以用 CLI 或 Web 仪表板管理 Agent，配置工作流和定时任务，通过 Hands 让 Agent 自主浏览网页、调用 API、执行系统命令。所有操作经过 16 层安全防护，支持 RBAC 权限控制和审计日志。
+
+**官网**: [https://librefang.ai/](https://librefang.ai/) <br/>
+**部署**: [https://deploy.librefang.ai/](https://deploy.librefang.ai/) <br/>
+**GitHub**: [https://github.com/librefang/librefang](https://github.com/librefang/librefang) <br/>
+**Issues**: [https://github.com/librefang/librefang/issues](https://github.com/librefang/librefang/issues) <br/>
+**Pull Requests**: [https://github.com/librefang/librefang/pulls](https://github.com/librefang/librefang/pulls) <br/>
+**Discord**: [https://discord.gg/DzTYqAZZmc](https://discord.gg/DzTYqAZZmc) <br/>
+**Discussions**: [https://github.com/librefang/librefang/discussions](https://github.com/librefang/librefang/discussions)
 
 ## 快速链接
 
@@ -25,8 +32,8 @@ LibreFang 是一个用 Rust 编写的开源 Agent 操作系统。
     <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">
       <Bot className="h-5 w-5" />
     </div>
-    <h3 className="mt-4 text-sm font-semibold text-zinc-900 dark:text-white">7 个内置 Hands</h3>
-    <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">Clip、Lead、Collector、Predictor、Researcher、Twitter、Browser</p>
+    <h3 className="mt-4 text-sm font-semibold text-zinc-900 dark:text-white">15 个 Hands</h3>
+    <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">Browser、Researcher、Clip、Lead、Collector、Predictor、Creator、DevOps、Trader 等</p>
   </div>
   <div className="rounded-2xl border border-zinc-200 p-6 transition-all hover:border-zinc-300 hover:shadow-md dark:border-zinc-800 dark:hover:border-zinc-700">
     <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-sky-500/10 text-sky-600 dark:text-sky-400">
@@ -39,28 +46,28 @@ LibreFang 是一个用 Rust 编写的开源 Agent 操作系统。
     <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-violet-500/10 text-violet-600 dark:text-violet-400">
       <Bot className="h-5 w-5" />
     </div>
-    <h3 className="mt-4 text-sm font-semibold text-zinc-900 dark:text-white">40 个通道适配器</h3>
+    <h3 className="mt-4 text-sm font-semibold text-zinc-900 dark:text-white">44 个通道适配器</h3>
     <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">Telegram、Discord、Slack、WhatsApp、Matrix、Email 等</p>
   </div>
   <div className="rounded-2xl border border-zinc-200 p-6 transition-all hover:border-zinc-300 hover:shadow-md dark:border-zinc-800 dark:hover:border-zinc-700">
     <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-amber-500/10 text-amber-600 dark:text-amber-400">
       <Bot className="h-5 w-5" />
     </div>
-    <h3 className="mt-4 text-sm font-semibold text-zinc-900 dark:text-white">27 个 LLM 提供商</h3>
+    <h3 className="mt-4 text-sm font-semibold text-zinc-900 dark:text-white">49 个 LLM 驱动</h3>
     <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">Anthropic、OpenAI、Gemini、Groq、DeepSeek、Ollama 等</p>
   </div>
   <div className="rounded-2xl border border-zinc-200 p-6 transition-all hover:border-zinc-300 hover:shadow-md dark:border-zinc-800 dark:hover:border-zinc-700">
     <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-rose-500/10 text-rose-600 dark:text-rose-400">
       <Bot className="h-5 w-5" />
     </div>
-    <h3 className="mt-4 text-sm font-semibold text-zinc-900 dark:text-white">30 个 Agent 模板</h3>
-    <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">Coder、Researcher、Writer、Analyst、Architect 等</p>
+    <h3 className="mt-4 text-sm font-semibold text-zinc-900 dark:text-white">MCP & A2A 协议</h3>
+    <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">Model Context Protocol 与 Agent-to-Agent 通信</p>
   </div>
   <div className="rounded-2xl border border-zinc-200 p-6 transition-all hover:border-zinc-300 hover:shadow-md dark:border-zinc-800 dark:hover:border-zinc-700">
     <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-teal-500/10 text-teal-600 dark:text-teal-400">
       <Bot className="h-5 w-5" />
     </div>
     <h3 className="mt-4 text-sm font-semibold text-zinc-900 dark:text-white">Rust + WASM</h3>
-    <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">14 个 crates，137K+ 代码行，冷启动 {'<'}200ms</p>
+    <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">15 个 crates，241K+ 代码行，冷启动 {'<'}200ms</p>
   </div>
 </div>

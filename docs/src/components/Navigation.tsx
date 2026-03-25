@@ -6,7 +6,8 @@ import { ChevronRight } from "lucide-react";
 import { AnimatePresence, motion, useIsPresent } from "motion/react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { createContext, useContext, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
+import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 import { useIsInsideMobileNavigation } from "@/components/MobileNavigation";
 import { type Section, useSectionStore } from "@/components/SectionProvider";
 import { Tag } from "@/components/Tag";
@@ -170,10 +171,14 @@ function NavigationGroup({
 	group,
 	className,
 	allSections,
+	isOpen,
+	onToggle,
 }: {
 	group: NavGroup;
 	className?: string;
 	allSections?: Record<string, Array<Section>>;
+	isOpen: boolean;
+	onToggle: (navigateToFirst?: boolean) => void;
 }) {
 	// If this is the mobile navigation then we always render the initial
 	// state, so that the state does not change during the close animation.
@@ -207,93 +212,109 @@ function NavigationGroup({
 		<li className={clsx("relative mt-6", className)}>
 			<motion.h2
 				layout="position"
-				className="text-xs font-semibold text-zinc-900 dark:text-white"
+				className="flex cursor-pointer select-none items-center gap-1.5 text-sm font-semibold text-zinc-900 dark:text-white"
+				onClick={() => onToggle(true)}
 			>
+				<ChevronRight
+					className={clsx(
+						"h-3.5 w-3.5 shrink-0 text-zinc-500 transition-transform duration-200 dark:text-zinc-400",
+						isOpen && "rotate-90",
+					)}
+				/>
 				{group.title}
 			</motion.h2>
-			<div className="relative mt-3 pl-2">
-				<AnimatePresence initial={!isInsideMobileNavigation}>
-					{isActiveGroup && (
-						<VisibleSectionHighlight group={group} pathname={pathname} />
-					)}
-				</AnimatePresence>
-				<motion.div
-					layout
-					className="absolute inset-y-0 left-2 w-px bg-zinc-900/10 dark:bg-white/5"
-				/>
-				<AnimatePresence initial={false}>
-					{isActiveGroup && (
-						<ActivePageMarker group={group} pathname={pathname} />
-					)}
-				</AnimatePresence>
-				<ul className="border-l border-transparent">
-					{group.links.map((link) => {
-						const isActive = link.href === pathname;
-						const hasSections = isActive && sections.length > 0;
-						const isExpanded = hasSections && !collapsedSections.has(link.href);
+			<AnimatePresence initial={false}>
+				{isOpen && (
+					<motion.div
+						className="relative mt-3 pl-2 overflow-hidden"
+						initial={{ height: 0, opacity: 0 }}
+						animate={{ height: "auto", opacity: 1, transition: { duration: 0.2 } }}
+						exit={{ height: 0, opacity: 0, transition: { duration: 0.15 } }}
+					>
+						<AnimatePresence initial={!isInsideMobileNavigation}>
+							{isActiveGroup && (
+								<VisibleSectionHighlight group={group} pathname={pathname} />
+							)}
+						</AnimatePresence>
+						<motion.div
+							layout
+							className="absolute inset-y-0 left-2 w-px bg-zinc-900/10 dark:bg-white/5"
+						/>
+						<AnimatePresence initial={false}>
+							{isActiveGroup && (
+								<ActivePageMarker group={group} pathname={pathname} />
+							)}
+						</AnimatePresence>
+						<ul className="border-l border-transparent">
+							{group.links.map((link) => {
+								const isActive = link.href === pathname;
+								const hasSections = isActive && sections.length > 0;
+								const isExpanded = hasSections && !collapsedSections.has(link.href);
 
-						return (
-							<motion.li key={link.href} layout="position" className="relative">
-								<NavLink
-									href={link.href}
-									active={isActive}
-									indicator={
-										lookupSections(allSections, link.href)?.length ? (
-											<button
-												type="button"
-												className="flex items-center justify-center p-0.5 -m-0.5"
-												onClick={(e) => {
-													if (isActive && hasSections) {
-														e.preventDefault();
-														e.stopPropagation();
-														toggleSections(link.href);
-													}
-												}}
-											>
-												<ChevronRight
-													className={clsx(
-														"h-3.5 w-3.5 shrink-0 text-zinc-400 transition-transform duration-200 dark:text-zinc-500",
-														isExpanded && "rotate-90",
-													)}
-												/>
-											</button>
-										) : null
-									}
-								>
-									{link.title}
-								</NavLink>
-								<AnimatePresence mode="popLayout" initial={false}>
-									{isExpanded && (
-										<motion.ul
-											initial={{ opacity: 0 }}
-											animate={{
-												opacity: 1,
-												transition: { delay: 0.1 },
-											}}
-											exit={{
-												opacity: 0,
-												transition: { duration: 0.15 },
-											}}
-										>
-											{sections.map((section, sectionIndex) => (
-												<li key={section.id || `section-${sectionIndex}`}>
-													<NavLink
-														href={`${link.href}#${section.id}`}
-														tag={section.tag}
-														isAnchorLink
+								return (
+									<motion.li key={link.href} layout="position" className="relative">
+										<NavLink
+											href={link.href}
+											active={isActive}
+											indicator={
+												lookupSections(allSections, link.href)?.length ? (
+													<button
+														type="button"
+														className="flex items-center justify-center p-0.5 -m-0.5"
+														onClick={(e) => {
+															if (isActive && hasSections) {
+																e.preventDefault();
+																e.stopPropagation();
+																toggleSections(link.href);
+															}
+														}}
 													>
-														{section.title}
-													</NavLink>
-												</li>
-											))}
-										</motion.ul>
-									)}
-								</AnimatePresence>
-							</motion.li>
-						);
-					})}
-				</ul>
-			</div>
+														<ChevronRight
+															className={clsx(
+																"h-3.5 w-3.5 shrink-0 text-zinc-400 transition-transform duration-200 dark:text-zinc-500",
+																isExpanded && "rotate-90",
+															)}
+														/>
+													</button>
+												) : null
+											}
+										>
+											{link.title}
+										</NavLink>
+										<AnimatePresence mode="popLayout" initial={false}>
+											{isExpanded && (
+												<motion.ul
+													initial={{ opacity: 0 }}
+													animate={{
+														opacity: 1,
+														transition: { delay: 0.1 },
+													}}
+													exit={{
+														opacity: 0,
+														transition: { duration: 0.15 },
+													}}
+												>
+													{sections.map((section, sectionIndex) => (
+														<li key={section.id || `section-${sectionIndex}`}>
+															<NavLink
+																href={`${link.href}#${section.id}`}
+																tag={section.tag}
+																isAnchorLink
+															>
+																{section.title}
+															</NavLink>
+														</li>
+													))}
+												</motion.ul>
+											)}
+										</AnimatePresence>
+									</motion.li>
+								);
+							})}
+						</ul>
+					</motion.div>
+				)}
+			</AnimatePresence>
 		</li>
 	);
 }
@@ -444,6 +465,35 @@ export function Navigation({
 	const isZh = pathname?.startsWith("/zh");
 	const navigation = isZh ? zhNavigation : enNavigation;
 
+	// Accordion: find group containing the active page
+	const activeGroupIndex = navigation.findIndex((group) =>
+		group.links.some((link) => link.href === pathname),
+	);
+	const [openGroupIndex, setOpenGroupIndex] = useState(
+		activeGroupIndex !== -1 ? activeGroupIndex : 0,
+	);
+
+	// Sync when pathname changes
+	useEffect(() => {
+		const idx = navigation.findIndex((group) =>
+			group.links.some((link) => link.href === pathname),
+		);
+		if (idx !== -1) {
+			setOpenGroupIndex(idx);
+		}
+	}, [pathname, navigation]);
+
+	const router = useRouter();
+	const handleToggle = useCallback(
+		(index: number, navigateToFirst?: boolean) => {
+			setOpenGroupIndex((prev) => (prev === index ? -1 : index));
+			if (navigateToFirst && navigation[index]?.links[0]) {
+				router.push(navigation[index].links[0].href);
+			}
+		},
+		[navigation, router],
+	);
+
 	return (
 		<nav {...props}>
 			<ul>
@@ -459,6 +509,8 @@ export function Navigation({
 						group={group}
 						className={groupIndex === 0 ? "md:mt-0" : ""}
 						allSections={allSections}
+						isOpen={openGroupIndex === groupIndex}
+						onToggle={(navigateToFirst) => handleToggle(groupIndex, navigateToFirst)}
 					/>
 				))}
 			</ul>
