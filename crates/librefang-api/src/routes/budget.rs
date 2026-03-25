@@ -1,6 +1,7 @@
 //! Budget and usage tracking handlers.
 
 use super::AppState;
+use crate::types::ApiErrorResponse;
 
 /// Build routes for the budget and usage domain.
 pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
@@ -294,20 +295,14 @@ pub async fn agent_budget_status(
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid agent ID"})),
-            )
+            return ApiErrorResponse::bad_request("Invalid agent ID").into_response();
         }
     };
 
     let entry = match state.kernel.agent_registry().get(agent_id) {
         Some(e) => e,
         None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "Agent not found"})),
-            )
+            return ApiErrorResponse::not_found("Agent not found").into_response();
         }
     };
 
@@ -349,6 +344,7 @@ pub async fn agent_budget_status(
             },
         })),
     )
+        .into_response()
 }
 
 /// GET /api/budget/agents — Per-agent cost ranking (top spenders).
@@ -405,10 +401,7 @@ pub async fn update_agent_budget(
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid agent ID"})),
-            )
+            return ApiErrorResponse::bad_request("Invalid agent ID").into_response();
         }
     };
 
@@ -418,12 +411,10 @@ pub async fn update_agent_budget(
     let tokens = body["max_llm_tokens_per_hour"].as_u64();
 
     if hourly.is_none() && daily.is_none() && monthly.is_none() && tokens.is_none() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(
-                serde_json::json!({"error": "Provide at least one of: max_cost_per_hour_usd, max_cost_per_day_usd, max_cost_per_month_usd, max_llm_tokens_per_hour"}),
-            ),
-        );
+        return ApiErrorResponse::bad_request(
+            "Provide at least one of: max_cost_per_hour_usd, max_cost_per_day_usd, max_cost_per_month_usd, max_llm_tokens_per_hour",
+        )
+        .into_response();
     }
 
     match state
@@ -442,10 +433,8 @@ pub async fn update_agent_budget(
                 StatusCode::OK,
                 Json(serde_json::json!({"status": "ok", "message": "Agent budget updated"})),
             )
+                .into_response()
         }
-        Err(e) => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": format!("{e}")})),
-        ),
+        Err(e) => ApiErrorResponse::not_found(format!("{e}")).into_response(),
     }
 }
