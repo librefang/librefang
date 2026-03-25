@@ -499,16 +499,18 @@ function RequirementsForm({ handId, requirements }: { handId: string; requiremen
           {!r.satisfied && r.key && (
             <div className="flex gap-1.5 ml-5">
               <input
-                type="password"
+                type="text"
+                autoComplete="off"
                 placeholder={r.key}
-                value={values[r.key ?? ""] ?? ""}
-                onChange={(e) => setValues(prev => ({ ...prev, [r.key!]: e.target.value }))}
-                onKeyDown={(e) => { if (e.key === "Enter") handleSave(r.key!); }}
+                value={values[r.key!] ?? ""}
+                onChange={(e) => { setValues(prev => ({ ...prev, [r.key!]: e.target.value })); }}
+                onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); handleSave(r.key!); } }}
                 className="flex-1 px-2.5 py-1.5 rounded-lg border border-border-subtle bg-main text-[11px] font-mono outline-none focus:border-brand placeholder:text-text-dim/30"
               />
               <button
-                onClick={() => handleSave(r.key!)}
-                disabled={!values[r.key ?? ""]?.trim() || saving === r.key}
+                type="button"
+                onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleSave(r.key!); }}
+                disabled={!values[r.key!]?.trim() || saving === r.key}
                 className="px-2.5 py-1.5 rounded-lg text-[11px] font-medium text-white bg-brand hover:bg-brand/90 transition-colors disabled:opacity-40"
               >
                 {saving === r.key ? <Loader2 className="w-3 h-3 animate-spin" /> : t("common.save")}
@@ -953,10 +955,15 @@ export function HandsPage() {
 
   const activeCount = activeHandIds.size;
 
-  const detailInstance = detailHand
-    ? instances.find((i) => i.hand_id === detailHand.id)
+  // Always read the latest hand data from the query cache so the modal
+  // reflects changes (e.g. requirement satisfaction) after saving secrets.
+  const detailHandLatest = detailHand
+    ? hands.find((h) => h.id === detailHand.id) ?? detailHand
+    : null;
+  const detailInstance = detailHandLatest
+    ? instances.find((i) => i.hand_id === detailHandLatest.id)
     : undefined;
-  const detailIsActive = detailHand ? activeHandIds.has(detailHand.id) : false;
+  const detailIsActive = detailHandLatest ? activeHandIds.has(detailHandLatest.id) : false;
 
   return (
     <div className="flex flex-col gap-5 transition-colors duration-300">
@@ -1086,10 +1093,10 @@ export function HandsPage() {
       )}
 
       {/* Detail side panel */}
-      {detailHand && (
+      {detailHandLatest && (
         <HandDetailPanel
-          key={detailHand.id}
-          hand={detailHand}
+          key={detailHandLatest.id}
+          hand={detailHandLatest}
           instance={detailInstance}
           isActive={detailIsActive}
           onClose={() => setDetailHand(null)}
@@ -1101,7 +1108,7 @@ export function HandsPage() {
             const inst = instances.find(i => i.instance_id === instanceId);
             navigate({ to: "/chat", search: { agentId: inst?.agent_id || instanceId } });
           }}
-          isPending={pendingId === detailHand.id}
+          isPending={pendingId === detailHandLatest.id}
         />
       )}
 
