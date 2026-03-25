@@ -51,5 +51,5 @@ jobs:
       - name: Auto-merge PR
         if: steps.diff.outputs.changed == 'true' && steps.cpr.outputs.pull-request-number
         env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh pr merge ${{ steps.cpr.outputs.pull-request-number }} --squash --delete-branch
+          GH_TOKEN: ${{ secrets.WEBSITE_REPO_TOKEN }}
+        run: gh pr merge ${{ steps.cpr.outputs.pull-request-number }} --squash --delete-branch --admin

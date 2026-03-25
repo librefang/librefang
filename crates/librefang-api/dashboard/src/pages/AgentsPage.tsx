@@ -5,7 +5,7 @@ import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
 import { listAgents, getAgentDetail, spawnAgent, suspendAgent, resumeAgent, 
   listPromptVersions, listExperiments, activatePromptVersion, startExperiment, pauseExperiment, completeExperiment,
-  createPromptVersion, createExperiment, PromptVersion, PromptExperiment, ExperimentVariantMetrics, getExperimentMetrics } from "../api";
+  createPromptVersion, createExperiment, deletePromptVersion, PromptVersion, PromptExperiment, ExperimentVariantMetrics, getExperimentMetrics } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -442,11 +442,11 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
   const [newPromptDescription, setNewPromptDescription] = useState("");
   const [newExperimentName, setNewExperimentName] = useState("");
   const [selectedMetrics, setSelectedMetrics] = useState<string | null>(null);
+  const [selectedVariantIds, setSelectedVariantIds] = useState<string[]>([]);
 
   const versionsQuery = useQuery({
     queryKey: ["prompt-versions", agentId],
     queryFn: () => listPromptVersions(agentId),
-    enabled: activeTab === "versions"
   });
 
   const experimentsQuery = useQuery({
@@ -468,9 +468,25 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
   });
 
   const createExperimentMutation = useMutation({
-    mutationFn: (data: { name: string }) => 
-      createExperiment(agentId, { ...data, status: "draft" as const, traffic_split: [50], success_criteria: { require_user_helpful: true, require_no_tool_errors: true, require_non_empty: true }, variants: [] }),
-    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["experiments", agentId] }); setShowCreateExperiment(false); setNewExperimentName(""); }
+    mutationFn: (data: { name: string }) => {
+      const variants = selectedVariantIds.map((vId, i) => {
+        const ver = versions.find(v => v.id === vId);
+        return {
+          name: i === 0 ? "Control" : `Variant ${String.fromCharCode(65 + i)}`,
+          prompt_version_id: vId,
+          description: ver ? `v${ver.version}` : undefined,
+        };
+      });
+      const split = Math.floor(100 / selectedVariantIds.length);
+      return createExperiment(agentId, {
+        ...data,
+        status: "draft" as const,
+        traffic_split: selectedVariantIds.map(() => split),
+        success_criteria: { require_user_helpful: true, require_no_tool_errors: true, require_non_empty: true },
+        variants,
+      });
+    },
+    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["experiments", agentId] }); setShowCreateExperiment(false); setNewExperimentName(""); setSelectedVariantIds([]); }
   });
 
   const activateMutation = useMutation({
@@ -486,6 +502,16 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
   const pauseExpMutation = useMutation({
     mutationFn: (expId: string) => pauseExperiment(expId),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["experiments", agentId] })
+  });
+
+  const completeExpMutation = useMutation({
+    mutationFn: (expId: string) => completeExperiment(expId),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["experiments", agentId] })
+  });
+
+  const deleteVersionMutation = useMutation({
+    mutationFn: (versionId: string) => deletePromptVersion(versionId),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["prompt-versions", agentId] })
   });
 
   const versions = versionsQuery.data ?? [];
@@ -537,6 +563,11 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
                           {!v.is_active && (
                             <Button variant="secondary" size="sm" onClick={() => activateMutation.mutate(v.id)}>
                               <Check className="w-3 h-3 mr-1" /> Activate
+                            </Button>
+                          )}
+                          {!v.is_active && (
+                            <Button variant="secondary" size="sm" onClick={() => deleteVersionMutation.mutate(v.id)}>
+                              <Trash2 className="w-3 h-3" />
                             </Button>
                           )}
                         </div>
@@ -596,11 +627,16 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
                           <Badge variant={exp.status === "running" ? "success" : exp.status === "completed" ? "default" : "warning"}>{exp.status}</Badge>
                         </div>
                         <div className="flex gap-2">
-                          {exp.status === "draft" && <Button variant="secondary" size="sm" onClick={() => startExpMutation.mutate(exp.id)}><Play className="w-3 h-3" /></Button>}
-                          {exp.status === "running" && <Button variant="secondary" size="sm" onClick={() => pauseExpMutation.mutate(exp.id)}><Pause className="w-3 h-3" /></Button>}
+                          {exp.status === "draft" && <Button variant="secondary" size="sm" onClick={() => startExpMutation.mutate(exp.id)}><Play className="w-3 h-3 mr-1" />Start</Button>}
+                          {exp.status === "running" && <Button variant="secondary" size="sm" onClick={() => pauseExpMutation.mutate(exp.id)}><Pause className="w-3 h-3 mr-1" />Pause</Button>}
+                          {(exp.status === "running" || exp.status === "paused") && (
+                            <Button variant="secondary" size="sm" onClick={() => completeExpMutation.mutate(exp.id)}>
+                              <Check className="w-3 h-3 mr-1" />Complete
+                            </Button>
+                          )}
                           {(exp.status === "running" || exp.status === "paused") && (
                             <Button variant="secondary" size="sm" onClick={() => setSelectedMetrics(exp.id)}>
-                              <BarChart3 className="w-3 h-3" /> Metrics
+                              <BarChart3 className="w-3 h-3 mr-1" />Metrics
                             </Button>
                           )}
                         </div>
@@ -616,9 +652,27 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
                   <h5 className="text-xs font-bold mb-3">Experiment Metrics</h5>
                   <div className="space-y-2">
                     {metrics.map((m: ExperimentVariantMetrics) => (
-                      <div key={m.variant_id} className="flex justify-between text-xs">
-                        <span>{m.variant_name}</span>
-                        <span>{m.success_rate?.toFixed(1)}% success ({m.total_requests} reqs)</span>
+                      <div key={m.variant_id} className="p-3 rounded-lg bg-surface border border-border-subtle">
+                        <div className="flex items-center justify-between mb-2">
+                          <span className="font-bold text-xs">{m.variant_name}</span>
+                          <Badge variant={m.success_rate >= 80 ? "success" : m.success_rate >= 50 ? "warning" : "default"}>
+                            {m.success_rate?.toFixed(1)}%
+                          </Badge>
+                        </div>
+                        <div className="grid grid-cols-3 gap-2 text-[10px] text-text-dim">
+                          <div>
+                            <span className="block text-text-dim/60">Requests</span>
+                            <span className="font-mono">{m.total_requests} ({m.successful_requests} ok / {m.failed_requests} err)</span>
+                          </div>
+                          <div>
+                            <span className="block text-text-dim/60">Avg Latency</span>
+                            <span className="font-mono">{m.avg_latency_ms?.toFixed(0)}ms</span>
+                          </div>
+                          <div>
+                            <span className="block text-text-dim/60">Avg Cost</span>
+                            <span className="font-mono">${m.avg_cost_usd?.toFixed(4)}</span>
+                          </div>
+                        </div>
                       </div>
                     ))}
                   </div>
@@ -636,12 +690,33 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
                         <input value={newExperimentName} onChange={e => setNewExperimentName(e.target.value)}
                           className="w-full mt-1 rounded-xl border border-border-subtle bg-main px-3 py-2 text-xs" placeholder="My A/B Test" />
                       </div>
+                      <div>
+                        <label className="text-xs text-text-dim mb-2 block">Select Prompt Versions (min 2)</label>
+                        {versions.length < 2 ? (
+                          <p className="text-xs text-warning">Create at least 2 prompt versions first.</p>
+                        ) : (
+                          <div className="space-y-1 max-h-40 overflow-y-auto">
+                            {versions.map((v: PromptVersion) => (
+                              <label key={v.id} className={`flex items-center gap-2 p-2 rounded-lg cursor-pointer text-xs ${selectedVariantIds.includes(v.id) ? "bg-brand/10 border border-brand" : "bg-main/30 border border-border-subtle"}`}>
+                                <input type="checkbox" checked={selectedVariantIds.includes(v.id)}
+                                  onChange={e => {
+                                    if (e.target.checked) setSelectedVariantIds([...selectedVariantIds, v.id]);
+                                    else setSelectedVariantIds(selectedVariantIds.filter(id => id !== v.id));
+                                  }} className="rounded" />
+                                <span className="font-bold">v{v.version}</span>
+                                {v.is_active && <Badge variant="success">Active</Badge>}
+                                <span className="text-text-dim truncate">{v.description || v.system_prompt.slice(0, 40) + "..."}</span>
+                              </label>
+                            ))}
+                          </div>
+                        )}
+                      </div>
                     </div>
                     <div className="flex gap-2 mt-4">
-                      <Button variant="primary" className="flex-1" onClick={() => createExperimentMutation.mutate({ name: newExperimentName })} disabled={!newExperimentName.trim()}>
-                        Create
+                      <Button variant="primary" className="flex-1" onClick={() => createExperimentMutation.mutate({ name: newExperimentName })} disabled={!newExperimentName.trim() || selectedVariantIds.length < 2}>
+                        Create ({selectedVariantIds.length} variants)
                       </Button>
-                      <Button variant="secondary" onClick={() => setShowCreateExperiment(false)}>Cancel</Button>
+                      <Button variant="secondary" onClick={() => { setShowCreateExperiment(false); setSelectedVariantIds([]); }}>Cancel</Button>
                     </div>
                   </div>
                 </div>

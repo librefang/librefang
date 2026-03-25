@@ -4,7 +4,8 @@
 
 use chrono::{DateTime, Utc};
 use librefang_types::agent::{
-    AgentId, ExperimentStatus, ExperimentVariantMetrics, PromptExperiment, PromptVersion,
+    AgentId, ExperimentStatus, ExperimentVariant, ExperimentVariantMetrics, PromptExperiment,
+    PromptVersion,
 };
 use librefang_types::error::{LibreFangError, LibreFangResult};
 use rusqlite::{Connection, OptionalExtension, Row};
@@ -69,6 +70,27 @@ fn row_to_prompt_experiment(row: &Row) -> rusqlite::Result<PromptExperiment> {
             .unwrap_or_else(|_| Utc::now()),
         variants: vec![],
     })
+}
+
+/// Load variants from DB for a given experiment. Must be called while holding the conn lock.
+fn load_variants_for_experiment(
+    conn: &Connection,
+    experiment_id: &str,
+) -> rusqlite::Result<Vec<ExperimentVariant>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, name, prompt_version_id, description FROM experiment_variants WHERE experiment_id = ?1",
+    )?;
+    let rows = stmt.query_map([experiment_id], |row| {
+        let id: String = row.get(0)?;
+        let prompt_version_id: String = row.get(2)?;
+        Ok(ExperimentVariant {
+            id: Uuid::parse_str(&id).unwrap_or_default(),
+            name: row.get(1)?,
+            prompt_version_id: Uuid::parse_str(&prompt_version_id).unwrap_or_default(),
+            description: row.get(3)?,
+        })
+    })?;
+    rows.collect()
 }
 
 #[derive(Clone)]
@@ -218,6 +240,81 @@ impl PromptStore {
         Ok(())
     }
 
+    /// Delete oldest inactive versions if the agent exceeds the max count.
+    pub fn prune_old_versions(&self, agent_id: AgentId, max_versions: u32) -> LibreFangResult<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        // Get total count for this agent
+        let count: u32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM prompt_versions WHERE agent_id = ?1",
+                [agent_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+
+        if count > max_versions {
+            let to_delete = count - max_versions;
+            conn.execute(
+                "DELETE FROM prompt_versions WHERE id IN (
+                    SELECT id FROM prompt_versions
+                    WHERE agent_id = ?1 AND is_active = 0
+                    ORDER BY version ASC
+                    LIMIT ?2
+                )",
+                rusqlite::params![agent_id.to_string(), to_delete],
+            )
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    /// Create a new version only if the system prompt hash differs from the current active version.
+    /// Returns true if a new version was created.
+    pub fn create_version_if_changed(
+        &self,
+        agent_id: AgentId,
+        system_prompt: &str,
+        created_by: &str,
+    ) -> LibreFangResult<bool> {
+        let content_hash = {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(system_prompt.as_bytes());
+            format!("{:x}", hasher.finalize())
+        };
+
+        // Check if active version has the same hash
+        if let Some(active) = self.get_active_version(agent_id)? {
+            if active.content_hash == content_hash {
+                return Ok(false);
+            }
+        }
+
+        let next_version = self.get_latest_version_number(agent_id)? + 1;
+        let version = PromptVersion {
+            id: uuid::Uuid::new_v4(),
+            agent_id,
+            version: next_version,
+            content_hash,
+            system_prompt: system_prompt.to_string(),
+            tools: vec![],
+            variables: vec![],
+            created_at: chrono::Utc::now(),
+            created_by: created_by.to_string(),
+            is_active: true,
+            description: Some(format!("Auto-tracked v{next_version}")),
+        };
+
+        // Create first, then activate (set_active deactivates all others then activates this one)
+        self.create_version(version.clone())?;
+        self.set_active_version(version.id, agent_id)?;
+
+        Ok(true)
+    }
+
     pub fn get_latest_version_number(&self, agent_id: AgentId) -> LibreFangResult<u32> {
         let conn = self
             .conn
@@ -303,8 +400,10 @@ impl PromptStore {
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
         let mut experiments = Vec::new();
-        for row in rows.flatten() {
-            experiments.push(row);
+        for mut exp in rows.flatten() {
+            exp.variants =
+                load_variants_for_experiment(&conn, &exp.id.to_string()).unwrap_or_default();
+            experiments.push(exp);
         }
         Ok(experiments)
     }
@@ -324,7 +423,11 @@ impl PromptStore {
             .optional()
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
-        Ok(result)
+        Ok(result.map(|mut exp| {
+            exp.variants =
+                load_variants_for_experiment(&conn, &exp.id.to_string()).unwrap_or_default();
+            exp
+        }))
     }
 
     pub fn update_experiment_status(
@@ -386,7 +489,11 @@ impl PromptStore {
             .optional()
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
-        Ok(result)
+        Ok(result.map(|mut exp| {
+            exp.variants =
+                load_variants_for_experiment(&conn, &exp.id.to_string()).unwrap_or_default();
+            exp
+        }))
     }
 
     pub fn record_request(
@@ -490,17 +597,62 @@ impl PromptStore {
         &self,
         experiment_id: Uuid,
     ) -> LibreFangResult<Vec<ExperimentVariantMetrics>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT em.variant_id, ev.name, em.total_requests, em.successful_requests, em.failed_requests, em.total_latency_ms, em.total_cost_usd
+                 FROM experiment_metrics em
+                 JOIN experiment_variants ev ON ev.id = em.variant_id
+                 WHERE em.experiment_id = ?1",
+            )
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+
+        let rows = stmt
+            .query_map([experiment_id.to_string()], |row| {
+                let total_requests: i64 = row.get(2)?;
+                let successful_requests: i64 = row.get(3)?;
+                let failed_requests: i64 = row.get(4)?;
+                let total_latency_ms: i64 = row.get(5)?;
+                let total_cost_usd: f64 = row.get(6)?;
+
+                let success_rate = if total_requests > 0 {
+                    (successful_requests as f64 / total_requests as f64) * 100.0
+                } else {
+                    0.0
+                };
+                let avg_latency_ms = if total_requests > 0 {
+                    total_latency_ms as f64 / total_requests as f64
+                } else {
+                    0.0
+                };
+                let avg_cost_usd = if total_requests > 0 {
+                    total_cost_usd / total_requests as f64
+                } else {
+                    0.0
+                };
+
+                Ok(ExperimentVariantMetrics {
+                    variant_id: Uuid::parse_str(&row.get::<_, String>(0)?).unwrap_or_default(),
+                    variant_name: row.get(1)?,
+                    total_requests: total_requests as u64,
+                    successful_requests: successful_requests as u64,
+                    failed_requests: failed_requests as u64,
+                    success_rate,
+                    avg_latency_ms,
+                    avg_cost_usd,
+                    total_cost_usd,
+                })
+            })
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+
         let mut metrics = Vec::new();
-        let experiment = self.get_experiment(experiment_id)?;
-
-        if let Some(exp) = experiment {
-            for variant in exp.variants {
-                if let Some(m) = self.get_variant_metrics(variant.id)? {
-                    metrics.push(m);
-                }
-            }
+        for row in rows {
+            metrics.push(row.map_err(|e| LibreFangError::Internal(e.to_string()))?);
         }
-
         Ok(metrics)
     }
 }
@@ -528,8 +680,8 @@ mod tests {
             );
             CREATE TABLE IF NOT EXISTS prompt_experiments (
                 id TEXT PRIMARY KEY,
-                agent_id TEXT NOT NULL,
                 name TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT '\"draft\"',
                 traffic_split TEXT NOT NULL DEFAULT '[]',
                 success_criteria TEXT NOT NULL DEFAULT '{}',
