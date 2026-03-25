@@ -87,6 +87,27 @@ impl CachedSkillMetadata {
     }
 }
 
+/// Cached tool list for an agent, keyed by agent ID.
+/// Stores the computed tool definitions along with generation counters that were
+/// current at the time the cache was populated, enabling staleness detection.
+#[derive(Clone, Debug)]
+struct CachedToolList {
+    tools: Arc<Vec<ToolDefinition>>,
+    skill_generation: u64,
+    mcp_generation: u64,
+    created_at: std::time::Instant,
+}
+
+impl CachedToolList {
+    fn is_expired(&self) -> bool {
+        self.created_at.elapsed() > PROMPT_CACHE_TTL
+    }
+
+    fn is_stale(&self, skill_gen: u64, mcp_gen: u64) -> bool {
+        self.skill_generation != skill_gen || self.mcp_generation != mcp_gen
+    }
+}
+
 /// Thread-safe cache for prompt-building metadata. Avoids redundant filesystem
 /// scans and skill registry iteration on every incoming message.
 ///
@@ -97,6 +118,9 @@ impl CachedSkillMetadata {
 struct PromptMetadataCache {
     workspace: dashmap::DashMap<PathBuf, CachedWorkspaceMetadata>,
     skills: dashmap::DashMap<String, CachedSkillMetadata>,
+    /// Per-agent cached tool list. Invalidated by TTL, generation counters
+    /// (skill reload / MCP tool changes), or explicit removal.
+    tools: dashmap::DashMap<AgentId, CachedToolList>,
 }
 
 impl PromptMetadataCache {
@@ -104,6 +128,7 @@ impl PromptMetadataCache {
         Self {
             workspace: dashmap::DashMap::new(),
             skills: dashmap::DashMap::new(),
+            tools: dashmap::DashMap::new(),
         }
     }
 
@@ -111,6 +136,7 @@ impl PromptMetadataCache {
     fn invalidate_all(&self) {
         self.workspace.clear();
         self.skills.clear();
+        self.tools.clear();
     }
 
     /// Build a cache key for the skill allowlist.
@@ -370,6 +396,12 @@ pub struct LibreFangKernel {
     /// Cache for workspace context, identity files, and skill metadata to avoid
     /// redundant filesystem I/O and registry scans on every message.
     prompt_metadata_cache: PromptMetadataCache,
+    /// Generation counter for skill registry — bumped on every hot-reload.
+    /// Used by the tool list cache to detect staleness.
+    skill_generation: std::sync::atomic::AtomicU64,
+    /// Generation counter for MCP tool definitions — bumped whenever mcp_tools
+    /// are modified (connect, disconnect, rebuild). Used by the tool list cache.
+    mcp_generation: std::sync::atomic::AtomicU64,
     /// Lazy-loading driver cache — avoids recreating HTTP clients for the same
     /// provider/key/url combination on every agent message.
     driver_cache: librefang_runtime::drivers::DriverCache,
@@ -1867,6 +1899,8 @@ impl LibreFangKernel {
             self_handle: OnceLock::new(),
             provider_unconfigured_logged: std::sync::atomic::AtomicBool::new(false),
             prompt_metadata_cache: PromptMetadataCache::new(),
+            skill_generation: std::sync::atomic::AtomicU64::new(0),
+            mcp_generation: std::sync::atomic::AtomicU64::new(0),
             driver_cache: librefang_runtime::drivers::DriverCache::new(),
         };
 
@@ -3010,7 +3044,7 @@ system_prompt = "You are a helpful assistant."
         };
 
         let tools = self.available_tools(agent_id);
-        let tools = entry.mode.filter_tools(tools);
+        let tools = entry.mode.filter_tools((*tools).clone());
         let driver = self.resolve_driver(&entry.manifest)?;
 
         // Look up model's actual context window from the catalog
@@ -3921,7 +3955,7 @@ system_prompt = "You are a helpful assistant."
         let messages_before = session.messages.len();
 
         let tools = self.available_tools(agent_id);
-        let tools = entry.mode.filter_tools(tools);
+        let tools = entry.mode.filter_tools((*tools).clone());
 
         info!(
             agent = %entry.name,
@@ -4986,6 +5020,9 @@ system_prompt = "You are a helpful assistant."
             let _ = self.memory.save_agent(&entry);
         }
 
+        // Invalidate cached tool list — skill allowlist change affects available tools
+        self.prompt_metadata_cache.tools.remove(&agent_id);
+
         info!(agent_id = %agent_id, skills = ?skills, "Agent skills updated");
         Ok(())
     }
@@ -5033,6 +5070,9 @@ system_prompt = "You are a helpful assistant."
             let _ = self.memory.save_agent(&entry);
         }
 
+        // Invalidate cached tool list — MCP server allowlist change affects available tools
+        self.prompt_metadata_cache.tools.remove(&agent_id);
+
         info!(agent_id = %agent_id, servers = ?servers, "Agent MCP servers updated");
         Ok(())
     }
@@ -5051,6 +5091,9 @@ system_prompt = "You are a helpful assistant."
         if let Some(entry) = self.registry.get(agent_id) {
             let _ = self.memory.save_agent(&entry);
         }
+
+        // Invalidate cached tool list — tool filter change affects available tools
+        self.prompt_metadata_cache.tools.remove(&agent_id);
 
         info!(
             agent_id = %agent_id,
@@ -7312,6 +7355,8 @@ system_prompt = "You are a helpful assistant."
                     // Cache tool definitions
                     if let Ok(mut tools) = self.mcp_tools.lock() {
                         tools.extend(conn.tools().iter().cloned());
+                        self.mcp_generation
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
                     info!(
                         server = %server_config.name,
@@ -7436,6 +7481,8 @@ system_prompt = "You are a helpful assistant."
                     let tool_count = conn.tools().len();
                     if let Ok(mut tools) = self.mcp_tools.lock() {
                         tools.extend(conn.tools().iter().cloned());
+                        self.mcp_generation
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
                     self.extension_health
                         .report_ok(&server_config.name, tool_count);
@@ -7481,6 +7528,8 @@ system_prompt = "You are a helpful assistant."
                 for conn in conns.iter() {
                     tools.extend(conn.tools().iter().cloned());
                 }
+                self.mcp_generation
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
             for name in &removed {
                 self.extension_health.unregister(name);
@@ -7526,6 +7575,8 @@ system_prompt = "You are a helpful assistant."
                     for conn in conns.iter() {
                         tools.extend(conn.tools().iter().cloned());
                     }
+                    self.mcp_generation
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
             }
         }
@@ -7570,6 +7621,8 @@ system_prompt = "You are a helpful assistant."
                 let tool_count = conn.tools().len();
                 if let Ok(mut tools) = self.mcp_tools.lock() {
                     tools.extend(conn.tools().iter().cloned());
+                    self.mcp_generation
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
                 self.extension_health.report_ok(id, tool_count);
                 info!(
@@ -7632,13 +7685,27 @@ system_prompt = "You are a helpful assistant."
     ///
     /// If `capabilities.tools` is empty (or contains `"*"`), all tools are
     /// available (backwards compatible).
-    fn available_tools(&self, agent_id: AgentId) -> Vec<ToolDefinition> {
+    fn available_tools(&self, agent_id: AgentId) -> Arc<Vec<ToolDefinition>> {
+        // Check the tool list cache first — avoids recomputing builtins, skill tools,
+        // and MCP tools on every message for the same agent.
+        let skill_gen = self
+            .skill_generation
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let mcp_gen = self
+            .mcp_generation
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if let Some(cached) = self.prompt_metadata_cache.tools.get(&agent_id) {
+            if !cached.is_expired() && !cached.is_stale(skill_gen, mcp_gen) {
+                return Arc::clone(&cached.tools);
+            }
+        }
+
         let all_builtins = builtin_tool_definitions();
 
         // Look up agent entry for profile, skill/MCP allowlists, and declared tools
         let entry = self.registry.get(agent_id);
         if entry.as_ref().is_some_and(|e| e.manifest.tools_disabled) {
-            return Vec::new();
+            return Arc::new(Vec::new());
         }
         let (skill_allowlist, mcp_allowlist, tool_profile, skills_disabled) = entry
             .as_ref()
@@ -7817,7 +7884,19 @@ system_prompt = "You are a helpful assistant."
             all_tools.retain(|t| t.name != "shell_exec");
         }
 
-        all_tools
+        // Store in cache for subsequent calls with the same agent
+        let tools = Arc::new(all_tools);
+        self.prompt_metadata_cache.tools.insert(
+            agent_id,
+            CachedToolList {
+                tools: Arc::clone(&tools),
+                skill_generation: skill_gen,
+                mcp_generation: mcp_gen,
+                created_at: std::time::Instant::now(),
+            },
+        );
+
+        tools
     }
 
     /// Collect prompt context from prompt-only skills for system prompt injection.
@@ -7846,6 +7925,10 @@ system_prompt = "You are a helpful assistant."
 
         // Invalidate cached skill metadata so next message picks up changes
         self.prompt_metadata_cache.skills.clear();
+
+        // Bump skill generation so the tool list cache detects staleness
+        self.skill_generation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Check whether the context engine plugin (if any) is allowed for an agent.
