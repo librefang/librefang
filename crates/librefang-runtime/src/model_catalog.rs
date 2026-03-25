@@ -797,7 +797,7 @@ mod tests {
     /// 1. `~/.librefang/providers/` (after registry sync)
     /// 2. Auto-sync from GitHub registry if empty
     fn test_catalog() -> ModelCatalog {
-        let home = resolve_home_dir();
+        let home = crate::registry_sync::resolve_home_dir_for_tests();
         let catalog = ModelCatalog::new(&home);
         if !catalog.list_models().is_empty() {
             return catalog;
