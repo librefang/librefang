@@ -8,6 +8,10 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
         .route("/usage", axum::routing::get(usage_stats))
         .route("/usage/summary", axum::routing::get(usage_summary))
         .route("/usage/by-model", axum::routing::get(usage_by_model))
+        .route(
+            "/usage/by-model/performance",
+            axum::routing::get(usage_by_model_performance),
+        )
         .route("/usage/daily", axum::routing::get(usage_daily))
         .route(
             "/budget",
@@ -113,6 +117,44 @@ pub async fn usage_by_model(State(state): State<Arc<AppState>>) -> impl IntoResp
                         "total_input_tokens": m.total_input_tokens,
                         "total_output_tokens": m.total_output_tokens,
                         "call_count": m.call_count,
+                    })
+                })
+                .collect();
+            Json(serde_json::json!({"models": list}))
+        }
+        Err(_) => Json(serde_json::json!({"models": []})),
+    }
+}
+
+/// GET /api/usage/by-model/performance — Get model performance metrics including latency statistics.
+#[utoipa::path(
+    get,
+    path = "/api/usage/by-model/performance",
+    tag = "budget",
+    responses((status = 200, description = "Model performance metrics", body = serde_json::Value))
+)]
+pub async fn usage_by_model_performance(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match state
+        .kernel
+        .memory_substrate()
+        .usage()
+        .query_model_performance()
+    {
+        Ok(models) => {
+            let list: Vec<serde_json::Value> = models
+                .iter()
+                .map(|m| {
+                    serde_json::json!({
+                        "model": m.model,
+                        "total_cost_usd": m.total_cost_usd,
+                        "total_input_tokens": m.total_input_tokens,
+                        "total_output_tokens": m.total_output_tokens,
+                        "call_count": m.call_count,
+                        "avg_latency_ms": m.avg_latency_ms,
+                        "min_latency_ms": m.min_latency_ms,
+                        "max_latency_ms": m.max_latency_ms,
+                        "cost_per_call": m.cost_per_call,
+                        "avg_latency_per_call": m.avg_latency_per_call,
                     })
                 })
                 .collect();

@@ -20,44 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-
-      - name: Wait for release or create fallback
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TAG="${GITHUB_REF#refs/tags/}"
-          for i in $(seq 1 12); do
-            if gh release view "$TAG" --repo "${{ github.repository }}" &>/dev/null; then
-              echo "✓ Release $TAG found"
-              exit 0
-            fi
-            echo "Waiting for release $TAG to be created... ($i/12)"
-            sleep 5
-          done
-
-          # Fallback: create a minimal release so builds can proceed
-          echo "::warning::Release not found after 60s, creating fallback release"
-          VERSION="${TAG#v}"
-          # Strip pre-release suffix then strip hour for CHANGELOG
-          VERSION=$(echo "$VERSION" | sed 's/-.*//')
-          PATCH=$(echo "$VERSION" | cut -d. -f3)
-          if [ ${#PATCH} -eq 4 ]; then
-            VERSION="$(echo "$VERSION" | cut -d. -f1,2).${PATCH:0:2}"
-          fi
-          CHANGES=$(awk '/^## \['"$VERSION"'\]/{found=1; next} found && /^## \[/{exit} found{print}' CHANGELOG.md)
-          if [ -z "$CHANGES" ]; then
-            CHANGES="See [CHANGELOG](https://github.com/librefang/librefang/blob/main/CHANGELOG.md) for details."
-          fi
-          # Detect pre-release tags (-betaN, -rcN)
-          PRERELEASE_FLAG=""
-          if echo "$TAG" | grep -qE '-(beta|rc)[0-9]'; then
-            PRERELEASE_FLAG="--prerelease"
-          fi
-          gh release create "$TAG" \
-            --title "LibreFang $TAG" \
-            --notes "$CHANGES" \
-            $PRERELEASE_FLAG \
-            --repo "${{ github.repository }}" || true
+      - uses: ./.github/actions/wait-for-release
 
   # ── JavaScript SDK → npm ─────────────────────────────────────────────────
   sdk_javascript:
@@ -107,7 +70,14 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           npm config set registry https://npm.pkg.github.com
-          npm publish --access public 2>/dev/null || echo "✓ Already published to GitHub Packages, skipping"
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          GPR_TAG=""
+          if echo "$PKG_VERSION" | grep -qE -- '-(beta|rc)[0-9]'; then
+            GPR_TAG="--tag next"
+          elif echo "$PKG_VERSION" | grep -qE -- '-lts'; then
+            GPR_TAG="--tag lts"
+          fi
+          npm publish --access public $GPR_TAG 2>/dev/null || echo "✓ Already published to GitHub Packages, skipping"
 
   # ── CLI npm wrapper → npm ─────────────────────────────────────────────────
   sdk_cli_npm:
@@ -235,15 +205,13 @@ jobs:
           VERSION="${GITHUB_REF#refs/tags/v}"
           REPO="${{ github.repository }}"
 
-          # Map CalVer to Go-compatible v0.YYYYMMDD.HH (keeps major=0, no /v2026 import path)
-          # e.g. 2026.3.2114 → v0.20260321.14, 2026.3.2114-rc1 → v0.20260321.14-rc1
+          # Map CalVer to Go-compatible v0.YYYYMMDD.0 (keeps major=0, no /v2026 import path)
+          # e.g. 2026.3.21 → v0.20260321.0, 2026.3.21-rc1 → v0.20260321.0-rc1
           YEAR=$(echo "$VERSION" | cut -d. -f1)
           MONTH=$(printf '%02d' "$(echo "$VERSION" | cut -d. -f2)")
-          DDHH=$(echo "$VERSION" | cut -d. -f3 | sed 's/-.*//')
+          DD=$(echo "$VERSION" | cut -d. -f3 | sed 's/-.*//')
           PRERELEASE=$(echo "$VERSION" | grep -oE '\-.*' || true)
-          DD=${DDHH:0:2}
-          HH=$((10#${DDHH:2:2}))  # strip leading zero (SemVer forbids 01, 02, etc.)
-          GO_VERSION="0.${YEAR}${MONTH}${DD}.${HH}${PRERELEASE}"
+          GO_VERSION="0.${YEAR}${MONTH}${DD}.0${PRERELEASE}"
           GO_TAG="sdk/go/v${GO_VERSION}"
 
           # Check if tag already exists

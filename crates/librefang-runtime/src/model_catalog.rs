@@ -110,7 +110,7 @@ impl ModelCatalog {
                 provider.auth_status = if crate::drivers::cli_provider_available(&provider.id) {
                     AuthStatus::Configured
                 } else {
-                    AuthStatus::Missing
+                    AuthStatus::CliNotInstalled
                 };
                 continue;
             }
@@ -123,21 +123,42 @@ impl ModelCatalog {
             // Primary: check the provider's declared env var
             let has_key = std::env::var(&provider.api_key_env).is_ok();
 
-            // Secondary: provider-specific fallback auth
-            let has_fallback = match provider.id.as_str() {
+            // Secondary: provider-specific fallback keys (still API-key-based auth)
+            let has_key_fallback = match provider.id.as_str() {
                 "gemini" => std::env::var("GOOGLE_API_KEY").is_ok(),
-                "codex" => {
+                "openai" | "codex" => {
                     std::env::var("OPENAI_API_KEY").is_ok() || read_codex_credential().is_some()
                 }
-                // claude-code is handled above (before key_required check)
                 _ => false,
             };
 
-            provider.auth_status = if has_key || has_fallback {
+            // Tertiary: CLI tools that can serve as fallback for API providers
+            let aider_ok = || crate::drivers::cli_provider_available("aider");
+            let has_cli_fallback = match provider.id.as_str() {
+                "anthropic" => crate::drivers::cli_provider_available("claude-code") || aider_ok(),
+                "gemini" => crate::drivers::cli_provider_available("gemini-cli") || aider_ok(),
+                "openai" | "codex" => {
+                    crate::drivers::cli_provider_available("codex-cli") || aider_ok()
+                }
+                "qwen" => crate::drivers::cli_provider_available("qwen-code") || aider_ok(),
+                _ => false,
+            };
+
+            provider.auth_status = if has_key || has_key_fallback {
                 AuthStatus::Configured
+            } else if has_cli_fallback {
+                AuthStatus::ConfiguredCli
             } else {
                 AuthStatus::Missing
             };
+            tracing::debug!(
+                provider = %provider.id,
+                has_key,
+                has_key_fallback,
+                has_cli_fallback,
+                auth_status = %provider.auth_status,
+                "detect_auth result"
+            );
         }
     }
 
@@ -225,7 +246,7 @@ impl ModelCatalog {
         let configured: Vec<&str> = self
             .providers
             .iter()
-            .filter(|p| p.auth_status != AuthStatus::Missing)
+            .filter(|p| p.auth_status.is_available())
             .map(|p| p.id.as_str())
             .collect();
         self.models
@@ -547,7 +568,10 @@ impl ModelCatalog {
                 if let Some(existing) = self.providers.iter_mut().find(|p| p.id == provider_id) {
                     existing.base_url = prov_toml.base_url;
                     existing.display_name = prov_toml.display_name;
-                    existing.api_key_env = prov_toml.api_key_env;
+                    // Keep the previous env var when catalog payload omits/empties it.
+                    if !prov_toml.api_key_env.trim().is_empty() {
+                        existing.api_key_env = prov_toml.api_key_env;
+                    }
                     existing.key_required = prov_toml.key_required;
                 }
             } else {
@@ -1503,6 +1527,34 @@ aliases = ["tm1"]
         // Verify alias was registered
         let aliased = catalog.find_model("tm1").unwrap();
         assert_eq!(aliased.id, "test-model-1");
+    }
+
+    #[test]
+    fn test_merge_catalog_keeps_existing_api_key_env_when_incoming_empty() {
+        let mut catalog = test_catalog();
+        let original_env = catalog
+            .get_provider("deepseek")
+            .expect("deepseek provider should exist in test catalog")
+            .api_key_env
+            .clone();
+        assert!(!original_env.is_empty());
+
+        let toml_content = r#"
+[provider]
+id = "deepseek"
+display_name = "DeepSeek"
+api_key_env = ""
+base_url = "https://api.deepseek.com/v1"
+key_required = true
+"#;
+        let file: ModelCatalogFile = toml::from_str(toml_content).unwrap();
+        let added = catalog.merge_catalog_file(file);
+        assert_eq!(added, 0);
+
+        let merged = catalog
+            .get_provider("deepseek")
+            .expect("deepseek provider should still exist");
+        assert_eq!(merged.api_key_env, original_env);
     }
 
     #[test]

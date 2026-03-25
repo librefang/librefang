@@ -235,7 +235,9 @@ pub async fn get_profile(
 /// GET /api/templates — List available agent templates.
 #[utoipa::path(get, path = "/api/templates", tag = "system", operation_id = "list_agent_templates", responses((status = 200, description = "List templates", body = Vec<serde_json::Value>)))]
 pub async fn list_agent_templates() -> impl IntoResponse {
-    let agents_dir = librefang_kernel::config::librefang_home().join("agents");
+    let agents_dir = librefang_kernel::config::librefang_home()
+        .join("workspaces")
+        .join("agents");
     let mut templates = Vec::new();
 
     if let Ok(entries) = std::fs::read_dir(&agents_dir) {
@@ -278,7 +280,9 @@ pub async fn get_agent_template(
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-    let agents_dir = librefang_kernel::config::librefang_home().join("agents");
+    let agents_dir = librefang_kernel::config::librefang_home()
+        .join("workspaces")
+        .join("agents");
     let manifest_path = agents_dir.join(&name).join("agent.toml");
 
     if !manifest_path.exists() {
@@ -2153,7 +2157,7 @@ pub async fn create_backup(
     }
 
     // 5. agents/ directory (user templates)
-    let agents_dir = home_dir.join("agents");
+    let agents_dir = home_dir.join("workspaces").join("agents");
     if agents_dir.exists() {
         match add_dir(&mut zip, &agents_dir, "agents") {
             Ok(n) if n > 0 => components.push("agents".to_string()),
@@ -2617,9 +2621,15 @@ pub async fn queue_status(State(state): State<Arc<AppState>>) -> impl IntoRespon
 }
 
 /// Get the machine hostname (best-effort).
-fn hostname_string() -> String {
+pub(crate) fn hostname_string() -> String {
     std::env::var("HOSTNAME")
         .or_else(|_| std::env::var("COMPUTERNAME"))
+        .or_else(|_| {
+            std::process::Command::new("hostname")
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .map_err(|_| std::env::VarError::NotPresent)
+        })
         .unwrap_or_else(|_| "unknown".to_string())
 }
 

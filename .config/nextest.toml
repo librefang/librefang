@@ -1,0 +1,3 @@
+[profile.default]
+# Show immediately which tests fail
+failure-output = "immediate"

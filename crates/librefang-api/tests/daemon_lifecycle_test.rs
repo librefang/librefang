@@ -85,7 +85,7 @@ fn test_read_daemon_info_corrupt_json() {
 ///   3. Verify health endpoint
 ///   4. Verify daemon info file contents match
 ///   5. Shut down and verify cleanup
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_full_daemon_lifecycle() {
     let tmp = tempfile::tempdir().unwrap();
     let daemon_info_path = tmp.path().join("daemon.json");
@@ -222,7 +222,7 @@ fn test_stale_daemon_info_detection() {
 }
 
 /// Test that the server starts and immediately responds to requests.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_server_immediate_responsiveness() {
     let tmp = tempfile::tempdir().unwrap();
     let config = KernelConfig {

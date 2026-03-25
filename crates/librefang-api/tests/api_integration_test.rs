@@ -266,7 +266,7 @@ memory_write = ["self.*"]
 // Tests
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_health_endpoint() {
     let server = start_test_server().await;
     let client = librefang_runtime::http_client::new_client();
@@ -291,7 +291,7 @@ async fn test_health_endpoint() {
     assert!(body["agent_count"].is_null());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_status_endpoint() {
     let server = start_test_server().await;
     let client = librefang_runtime::http_client::new_client();
@@ -311,7 +311,7 @@ async fn test_status_endpoint() {
     assert_eq!(body["agents"].as_array().unwrap().len(), 1);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_build_router_exposes_versioned_api_aliases() {
     let harness = start_full_router("").await;
 
@@ -367,7 +367,7 @@ async fn test_build_router_exposes_versioned_api_aliases() {
         .contains(&serde_json::json!("v1")));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_build_router_path_version_beats_unknown_accept_header() {
     let harness = start_full_router("").await;
 
@@ -388,7 +388,7 @@ async fn test_build_router_path_version_beats_unknown_accept_header() {
     assert_eq!(response.headers()["x-api-version"], "v1");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_build_router_serves_dashboard_locales() {
     let harness = start_full_router("").await;
 
@@ -418,7 +418,7 @@ async fn test_build_router_serves_dashboard_locales() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_build_router_providers_marks_lemonade_as_local() {
     let harness = start_full_router("").await;
 
@@ -449,7 +449,7 @@ async fn test_build_router_providers_marks_lemonade_as_local() {
     assert_eq!(lemonade["is_local"], serde_json::json!(true));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_build_router_unauthorized_responses_include_api_version_header() {
     let harness = start_full_router("secret").await;
 
@@ -470,7 +470,7 @@ async fn test_build_router_unauthorized_responses_include_api_version_header() {
     assert_eq!(response.headers()["x-api-version"], "v1");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_run_migrate_uses_daemon_home_when_target_dir_is_empty() {
     let harness = start_full_router("").await;
 
@@ -557,7 +557,7 @@ async fn test_run_migrate_uses_daemon_home_when_target_dir_is_empty() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_config_reload_reports_proxy_changes_require_restart() {
     let server = start_test_server().await;
     let client = reqwest::Client::new();
@@ -624,7 +624,7 @@ async fn test_config_reload_reports_proxy_changes_require_restart() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_spawn_list_kill_agent() {
     let server = start_test_server().await;
     let client = librefang_runtime::http_client::new_client();
@@ -680,7 +680,7 @@ async fn test_spawn_list_kill_agent() {
     assert_eq!(agents[0]["name"], "assistant");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_agent_session_empty() {
     let server = start_test_server().await;
     let client = librefang_runtime::http_client::new_client();
@@ -710,7 +710,7 @@ async fn test_agent_session_empty() {
     assert_eq!(body["messages"].as_array().unwrap().len(), 0);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_agent_monitoring_endpoints() {
     let server = start_test_server().await;
     let client = librefang_runtime::http_client::new_client();
@@ -768,7 +768,7 @@ async fn test_agent_monitoring_endpoints() {
     assert_eq!(logs["logs"][0]["outcome"], "custom_error");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_send_message_with_llm() {
     if std::env::var("GROQ_API_KEY").is_err() {
         eprintln!("GROQ_API_KEY not set, skipping LLM integration test");
@@ -821,7 +821,7 @@ async fn test_send_message_with_llm() {
     assert!(session["message_count"].as_u64().unwrap() > 0);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_workflow_crud() {
     let server = start_test_server().await;
     let client = librefang_runtime::http_client::new_client();
@@ -867,13 +867,14 @@ async fn test_workflow_crud() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    let workflows: Vec<serde_json::Value> = resp.json().await.unwrap();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let workflows = body["workflows"].as_array().unwrap();
     assert_eq!(workflows.len(), 1);
     assert_eq!(workflows[0]["name"], "test-workflow");
     assert_eq!(workflows[0]["steps"], 1);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_trigger_crud() {
     let server = start_test_server().await;
     let client = librefang_runtime::http_client::new_client();
@@ -953,7 +954,7 @@ async fn test_trigger_crud() {
     assert_eq!(triggers.len(), 0);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_invalid_agent_id_returns_400() {
     let server = start_test_server().await;
     let client = librefang_runtime::http_client::new_client();
@@ -986,7 +987,7 @@ async fn test_invalid_agent_id_returns_400() {
     assert_eq!(resp.status(), 400);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_kill_nonexistent_agent_returns_404() {
     let server = start_test_server().await;
     let client = librefang_runtime::http_client::new_client();
@@ -1000,7 +1001,7 @@ async fn test_kill_nonexistent_agent_returns_404() {
     assert_eq!(resp.status(), 404);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_spawn_invalid_manifest_returns_400() {
     let server = start_test_server().await;
     let client = librefang_runtime::http_client::new_client();
@@ -1016,7 +1017,7 @@ async fn test_spawn_invalid_manifest_returns_400() {
     assert!(body["error"].as_str().unwrap().contains("Invalid manifest"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_request_id_header_is_uuid() {
     let server = start_test_server().await;
     let client = librefang_runtime::http_client::new_client();
@@ -1039,7 +1040,7 @@ async fn test_request_id_header_is_uuid() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_multiple_agents_lifecycle() {
     let server = start_test_server().await;
     let client = librefang_runtime::http_client::new_client();
@@ -1138,7 +1139,7 @@ memory_write = ["self.*"]
 // Agent list filtering, pagination, and sorting tests
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_agent_list_paginated_response_format() {
     let server = start_test_server().await;
     let client = reqwest::Client::new();
@@ -1170,7 +1171,7 @@ async fn test_agent_list_paginated_response_format() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_agent_list_invalid_sort_returns_400() {
     let server = start_test_server().await;
     let client = reqwest::Client::new();
@@ -1191,7 +1192,7 @@ async fn test_agent_list_invalid_sort_returns_400() {
     assert!(error.contains("invalid_field"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_agent_list_valid_sort_fields() {
     let server = start_test_server().await;
     let client = reqwest::Client::new();
@@ -1207,7 +1208,7 @@ async fn test_agent_list_valid_sort_fields() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_agent_list_limit_clamped_to_max() {
     let server = start_test_server().await;
     let client = reqwest::Client::new();
@@ -1224,7 +1225,7 @@ async fn test_agent_list_limit_clamped_to_max() {
     assert_eq!(body["limit"].as_u64().unwrap(), 100);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_agent_list_pagination() {
     let server = start_test_server().await;
     let client = reqwest::Client::new();
@@ -1275,7 +1276,7 @@ system_prompt = "Agent {i}."
     assert_eq!(items2.len(), 1, "Second page should return 1 item");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_agent_list_text_search() {
     let server = start_test_server().await;
     let client = reqwest::Client::new();
@@ -1457,7 +1458,7 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_auth_health_is_public() {
     let server = start_test_server_with_auth("secret-key-123").await;
     let client = librefang_runtime::http_client::new_client();
@@ -1471,7 +1472,7 @@ async fn test_auth_health_is_public() {
     assert_eq!(resp.status(), 200);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_auth_rejects_no_token() {
     let server = start_test_server_with_auth("secret-key-123").await;
     let client = librefang_runtime::http_client::new_client();
@@ -1488,7 +1489,7 @@ async fn test_auth_rejects_no_token() {
     assert!(body["error"].as_str().unwrap().contains("Missing"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_auth_rejects_wrong_token() {
     let server = start_test_server_with_auth("secret-key-123").await;
     let client = librefang_runtime::http_client::new_client();
@@ -1506,7 +1507,7 @@ async fn test_auth_rejects_wrong_token() {
     assert!(body["error"].as_str().unwrap().contains("Invalid"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_auth_accepts_correct_token() {
     let server = start_test_server_with_auth("secret-key-123").await;
     let client = librefang_runtime::http_client::new_client();
@@ -1523,7 +1524,7 @@ async fn test_auth_accepts_correct_token() {
     assert_eq!(body["status"], "running");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_auth_disabled_when_no_key() {
     // Empty API key = auth disabled
     let server = start_test_server().await;
@@ -1542,7 +1543,7 @@ async fn test_auth_disabled_when_no_key() {
 // Tool endpoints
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_list_tools() {
     let server = start_test_server().await;
     let client = librefang_runtime::http_client::new_client();
@@ -1559,7 +1560,7 @@ async fn test_list_tools() {
     assert!(body["total"].as_u64().unwrap() > 0);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_get_tool_found() {
     let server = start_test_server().await;
     let client = librefang_runtime::http_client::new_client();
@@ -1587,7 +1588,7 @@ async fn test_get_tool_found() {
     assert!(tool["input_schema"].is_object());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_get_tool_not_found() {
     let server = start_test_server().await;
     let client = librefang_runtime::http_client::new_client();

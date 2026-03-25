@@ -1,0 +1,307 @@
+# Prompt 智能
+
+Prompt 智能提供 **Prompt 版本管理** 和 **A/B 实验** 功能。追踪 prompt 变更历史，对比不同版本的效果，自动激活表现最好的 prompt。
+
+---
+
+## 快速开始
+
+### 1. 启用功能
+
+在 `~/.librefang/config.toml` 中添加：
+
+```toml
+[prompt_intelligence]
+enabled = true
+```
+
+### 2. 创建 Prompt 版本
+
+打开 Dashboard → Agents → 选择 agent → **Prompts** 按钮 → **Versions** 标签 → **New Version**。
+
+输入 system prompt 和可选的描述。服务端自动生成 ID 和内容哈希。
+
+### 3. 运行 A/B 实验
+
+切换到 **Experiments** 标签 → **New Experiment** → 选择 2 个或更多 prompt 版本 → **Create**。
+
+点击 **Start** 开始将流量路由到不同的变体。
+
+### 4. 查看结果
+
+点击运行中实验的 **Metrics** 按钮，查看各变体的成功率、延迟和成本。满意后点 **Complete** — 获胜变体的 prompt 会自动激活。
+
+---
+
+## Prompt 版本管理
+
+### 自动追踪
+
+启用后，LibreFang 在每次请求开始时计算 agent system prompt 的哈希值。如果 prompt 内容与上次记录的版本不同，自动创建新版本并标记为 active。
+
+这意味着任何对 agent `system_prompt` 的修改（无论是通过 manifest 还是 API）都会被自动捕获。
+
+### 手动创建版本
+
+通过 Dashboard 或 API 手动创建版本，用于准备 A/B 实验的变体。每个版本包含：
+
+- **System prompt** — 完整的 prompt 文本
+- **Content hash** — 服务端计算，用于去重
+- **Version number** — 每个 agent 自动递增
+- **Description** — 可选的描述
+- **Active flag** — 每个 agent 同时只有一个活跃版本
+
+### 版本清理
+
+当新版本创建后，如果总数超过 `max_versions_per_agent`（默认 50），最旧的非活跃版本会被自动删除。活跃版本永远不会被清理。
+
+### 激活版本
+
+在 Dashboard 中点击任意版本的 **Activate** 按钮，或调用 API：
+
+```bash
+curl -X POST http://localhost:4545/api/prompts/versions/{version_id}/activate \
+  -H "Content-Type: application/json" \
+  -d '{"agent_id": "your-agent-id"}'
+```
+
+Agent 会在下一次请求时使用该版本的 system prompt。
+
+---
+
+## A/B 实验
+
+### 核心概念
+
+一个 **实验** 在单个 agent 上对比两个或多个 prompt **变体**。每个变体关联一个 prompt 版本。实验运行期间，请求会根据配置的流量比例路由到不同变体。
+
+| 术语 | 说明 |
+|------|------|
+| **变体 (Variant)** | 实验中的一个条目，关联到特定的 prompt 版本 |
+| **流量分配 (Traffic split)** | 每个变体接收的流量百分比（如 `[70, 30]` 表示 70/30） |
+| **成功标准 (Success criteria)** | 判断请求是否成功的规则 |
+
+### 实验生命周期
+
+```
+Draft → Running → Paused → Running → Completed
+              ↘                    ↗
+               →→→ Completed →→→→→→
+```
+
+| 状态 | 行为 |
+|------|------|
+| **Draft** | 实验已配置但未激活，不路由流量 |
+| **Running** | 请求在变体间分配，记录指标 |
+| **Paused** | 暂停流量路由，保留指标数据 |
+| **Completed** | 实验结束，成功率最高的变体自动激活 |
+
+### 流量分配
+
+流量通过加权选择分配。`traffic_split` 数组定义每个变体的百分比。例如两个变体配置 `[70, 30]`：
+
+- 70% 的 session 路由到变体 A（对照组）
+- 30% 的 session 路由到变体 B
+
+路由是 **session 一致**的 — 同一个 session 始终命中同一个变体，通过 session ID 哈希保证。
+
+### 成功判定
+
+一个请求被判定为成功需要满足：
+
+1. Agent 产生了非空响应
+2. Agent 至少完成了一次迭代（执行了循环）
+
+### 指标采集
+
+Streaming 和非 streaming 请求路径都会记录每个变体的指标：
+
+| 指标 | 说明 |
+|------|------|
+| **总请求数** | 路由到该变体的请求数量 |
+| **成功 / 失败** | 按成功标准分类 |
+| **成功率** | 成功请求的百分比 |
+| **平均延迟** | 平均响应时间（毫秒） |
+| **平均成本** | 每次请求的平均成本（USD） |
+| **总成本** | 所有请求的累计成本 |
+
+### 自动激活获胜者
+
+实验标记为 **Completed** 时，系统自动：
+
+1. 对比所有变体的成功率
+2. 选择成功率最高的变体
+3. 激活其关联的 prompt 版本
+
+无需手动操作。
+
+---
+
+## Dashboard
+
+### Prompts 按钮
+
+Agents 页面的每个 agent 卡片都有 **Prompts** 按钮，打开 Prompt 智能弹窗，包含两个标签：
+
+**Versions 标签：**
+- 列出所有 prompt 版本，显示版本号、活跃标识、描述和创建日期
+- 创建新版本（输入 system prompt 和描述）
+- 一键激活任意版本
+- 删除非活跃版本
+
+**Experiments 标签：**
+- 列出所有实验，显示状态标识和变体数量
+- 创建实验（选择 2+ 个 prompt 版本作为变体）
+- 启动 / 暂停 / 完成实验
+- 查看详细指标（成功率标识、延迟、成本）
+
+### Analytics 页面
+
+Analytics 页面包含 **模型性能** 区域：
+- KPI 卡片：平均延迟、最快模型、最低单次成本、总调用次数
+- 延迟对比图表（按模型展示 avg/min/max）
+- 单次成本对比图表
+- 性能详情表格
+
+---
+
+## API 参考
+
+### Prompt 版本
+
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/api/agents/{agent_id}/prompts/versions` | GET | 列出 agent 的所有 prompt 版本 |
+| `/api/agents/{agent_id}/prompts/versions` | POST | 创建新 prompt 版本 |
+| `/api/prompts/versions/{id}` | GET | 获取指定版本 |
+| `/api/prompts/versions/{id}` | DELETE | 删除版本 |
+| `/api/prompts/versions/{id}/activate` | POST | 激活版本（body: `{"agent_id": "..."}`) |
+
+#### 创建版本
+
+```bash
+curl -X POST http://localhost:4545/api/agents/{agent_id}/prompts/versions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "system_prompt": "你是一个高质量的编程助手。",
+    "description": "注重代码质量",
+    "version": 1,
+    "tools": [],
+    "variables": [],
+    "created_by": "dashboard"
+  }'
+```
+
+服务端自动生成 `id`、`created_at` 和 `content_hash`。
+
+### 实验
+
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/api/agents/{agent_id}/prompts/experiments` | GET | 列出 agent 的实验 |
+| `/api/agents/{agent_id}/prompts/experiments` | POST | 创建实验 |
+| `/api/prompts/experiments/{id}` | GET | 获取实验详情 |
+| `/api/prompts/experiments/{id}/start` | POST | 启动实验 |
+| `/api/prompts/experiments/{id}/pause` | POST | 暂停实验 |
+| `/api/prompts/experiments/{id}/complete` | POST | 完成实验（自动激活获胜者） |
+| `/api/prompts/experiments/{id}/metrics` | GET | 获取各变体指标 |
+
+#### 创建实验
+
+```bash
+curl -X POST http://localhost:4545/api/agents/{agent_id}/prompts/experiments \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "语气对比",
+    "status": "draft",
+    "traffic_split": [50, 50],
+    "success_criteria": {
+      "require_user_helpful": true,
+      "require_no_tool_errors": true,
+      "require_non_empty": true
+    },
+    "variants": [
+      {
+        "name": "Control",
+        "prompt_version_id": "version-uuid-1",
+        "description": "当前 prompt"
+      },
+      {
+        "name": "Variant B",
+        "prompt_version_id": "version-uuid-2",
+        "description": "更简洁"
+      }
+    ]
+  }'
+```
+
+#### 获取指标
+
+```bash
+curl http://localhost:4545/api/prompts/experiments/{id}/metrics
+```
+
+响应示例：
+
+```json
+[
+  {
+    "variant_id": "...",
+    "variant_name": "Control",
+    "total_requests": 142,
+    "successful_requests": 128,
+    "failed_requests": 14,
+    "success_rate": 90.1,
+    "avg_latency_ms": 1250.5,
+    "avg_cost_usd": 0.0023,
+    "total_cost_usd": 0.3266
+  },
+  {
+    "variant_id": "...",
+    "variant_name": "Variant B",
+    "total_requests": 58,
+    "successful_requests": 55,
+    "failed_requests": 3,
+    "success_rate": 94.8,
+    "avg_latency_ms": 980.2,
+    "avg_cost_usd": 0.0019,
+    "total_cost_usd": 0.1102
+  }
+]
+```
+
+### 模型性能
+
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/api/usage/by-model/performance` | GET | 模型性能指标（含延迟统计） |
+
+---
+
+## 配置参考
+
+```toml
+[prompt_intelligence]
+enabled = false              # 总开关（默认关闭）
+hash_prompts = true          # 计算内容哈希用于去重（默认开启）
+max_versions_per_agent = 50  # 超出后自动清理旧版本（默认 50）
+```
+
+完整配置参考见 [配置文档](/zh/configuration#prompt_intelligence)。
+
+---
+
+## 数据库
+
+Prompt 智能使用 SQLite（与 LibreFang 其他功能共用）。Migration v13 创建四张表：
+
+| 表名 | 用途 |
+|------|------|
+| `prompt_versions` | 存储每个 agent 的 prompt 版本历史 |
+| `prompt_experiments` | 实验定义和状态 |
+| `experiment_variants` | 实验中的变体，关联到 prompt 版本 |
+| `experiment_metrics` | 每个变体的聚合指标（请求数、延迟、成本） |
+
+Migration v14 在 `usage_events` 表中添加 `latency_ms` 列，用于模型性能追踪。
+
+迁移在启动时自动执行，无需手动操作。

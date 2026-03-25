@@ -96,6 +96,11 @@ jobs:
           echo "report_path=/tmp/report.md" >> "$GITHUB_OUTPUT"
           echo "week=$WEEK" >> "$GITHUB_OUTPUT"
           echo "today=$TODAY" >> "$GITHUB_OUTPUT"
+          echo "merged_count=$MERGED_COUNT" >> "$GITHUB_OUTPUT"
+          echo "opened_count=$OPENED_COUNT" >> "$GITHUB_OUTPUT"
+          echo "closed_count=$CLOSED_COUNT" >> "$GITHUB_OUTPUT"
+          echo "stars=$STARS" >> "$GITHUB_OUTPUT"
+          echo "gfi_count=$GFI_COUNT" >> "$GITHUB_OUTPUT"
 
           cat /tmp/report.md
 
@@ -133,19 +138,11 @@ jobs:
             exit 0
           fi
 
-          # Discord has 2000 char limit, send condensed version
-          REPO="librefang/librefang"
-          SINCE=$(date -u -d '7 days ago' +%Y-%m-%dT00:00:00Z 2>/dev/null || date -u -v-7d +%Y-%m-%dT00:00:00Z)
-          MERGED_COUNT=$(gh pr list --repo $REPO --state merged --search "merged:>=$SINCE" --json number --jq 'length')
-          OPENED_COUNT=$(gh issue list --repo $REPO --state all --search "created:>=$SINCE" --json number --jq 'length')
-          CLOSED_COUNT=$(gh issue list --repo $REPO --state closed --search "closed:>=$SINCE" --json number --jq 'length')
-          STARS=$(gh api repos/$REPO --jq '.stargazers_count')
-          GFI_COUNT=$(gh issue list --repo $REPO --label "good first issue" --state open --json number --jq 'length')
-
+          # Discord has 2000 char limit, send condensed version (reuse stats from report step)
           CONTENT="📊 **LibreFang Weekly Report — ${{ steps.report.outputs.week }} ~ ${{ steps.report.outputs.today }}**
 
-          📌 PRs merged: **$MERGED_COUNT** | Issues opened: **$OPENED_COUNT** | Issues closed: **$CLOSED_COUNT**
-          ⭐ Stars: **$STARS** | Good first issues: **$GFI_COUNT**
+          📌 PRs merged: **${{ steps.report.outputs.merged_count }}** | Issues opened: **${{ steps.report.outputs.opened_count }}** | Issues closed: **${{ steps.report.outputs.closed_count }}**
+          ⭐ Stars: **${{ steps.report.outputs.stars }}** | Good first issues: **${{ steps.report.outputs.gfi_count }}**
 
           👉 [Full report](https://github.com/librefang/librefang/discussions) | [Contribute](https://github.com/librefang/librefang/blob/main/docs/CONTRIBUTING.md)"
 

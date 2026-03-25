@@ -187,14 +187,11 @@ async fn execute_python(
         .spawn()
         .map_err(|e| SkillError::ExecutionFailed(format!("Failed to spawn Python: {e}")))?;
 
-    // Write input to stdin
+    // Write input to stdin (ignore broken pipe — process may not need stdin)
     if let Some(mut stdin) = child.stdin.take() {
         let payload_bytes = serde_json::to_vec(&payload)
             .map_err(|e| SkillError::ExecutionFailed(format!("JSON serialize: {e}")))?;
-        stdin
-            .write_all(&payload_bytes)
-            .await
-            .map_err(|e| SkillError::ExecutionFailed(format!("Write stdin: {e}")))?;
+        let _ = stdin.write_all(&payload_bytes).await;
         drop(stdin);
     }
 
@@ -300,13 +297,11 @@ async fn execute_node(
         .spawn()
         .map_err(|e| SkillError::ExecutionFailed(format!("Failed to spawn Node.js: {e}")))?;
 
+    // Write input to stdin (ignore broken pipe — process may not need stdin)
     if let Some(mut stdin) = child.stdin.take() {
         let payload_bytes = serde_json::to_vec(&payload)
             .map_err(|e| SkillError::ExecutionFailed(format!("JSON serialize: {e}")))?;
-        stdin
-            .write_all(&payload_bytes)
-            .await
-            .map_err(|e| SkillError::ExecutionFailed(format!("Write stdin: {e}")))?;
+        let _ = stdin.write_all(&payload_bytes).await;
         drop(stdin);
     }
 
@@ -413,10 +408,8 @@ async fn execute_shell(
     if let Some(mut stdin) = child.stdin.take() {
         let payload_bytes = serde_json::to_vec(&payload)
             .map_err(|e| SkillError::ExecutionFailed(format!("JSON serialize: {e}")))?;
-        stdin
-            .write_all(&payload_bytes)
-            .await
-            .map_err(|e| SkillError::ExecutionFailed(format!("Write stdin: {e}")))?;
+        // Ignore broken pipe — the script may exit before reading stdin
+        let _ = stdin.write_all(&payload_bytes).await;
         drop(stdin);
     }
 

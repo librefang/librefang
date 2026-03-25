@@ -55,7 +55,8 @@ const canvasRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/canvas",
   validateSearch: (search: Record<string, unknown>) => ({
-    t: search.t as number | undefined
+    t: search.t as number | undefined,
+    wf: search.wf as string | undefined,
   }),
   component: () => <L><CanvasPage /></L>
 });
@@ -233,6 +234,7 @@ const routeTree = rootRoute.addChildren([
 export const router = createRouter({
   routeTree,
   history: createHashHistory(),
+  defaultPreload: "intent",
 });
 
 declare module "@tanstack/react-router" {

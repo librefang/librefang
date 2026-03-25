@@ -44,12 +44,8 @@ jobs:
           fi
 
           FULL_VERSION="${TAG#v}"
-          # Strip pre-release suffix then strip hour for CHANGELOG lookup
+          # Strip pre-release suffix for CHANGELOG lookup
           CHANGELOG_VERSION=$(echo "$FULL_VERSION" | sed 's/-.*//')
-          PATCH=$(echo "$CHANGELOG_VERSION" | cut -d. -f3)
-          if [ ${#PATCH} -eq 4 ]; then
-            CHANGELOG_VERSION="$(echo "$CHANGELOG_VERSION" | cut -d. -f1,2).${PATCH:0:2}"
-          fi
 
           echo "Checking release workflows for tag $TAG..."
 

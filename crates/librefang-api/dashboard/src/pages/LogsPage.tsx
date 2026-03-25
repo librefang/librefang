@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
-import { useState } from "react";
+import { formatTime } from "../lib/datetime";
+import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { listAuditRecent } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
@@ -7,6 +8,7 @@ import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
 import { FileText, Search, Download } from "lucide-react";
+import { truncateId } from "../lib/string";
 
 const REFRESH_MS = 5000;
 
@@ -23,15 +25,21 @@ export function LogsPage() {
   const auditQuery = useQuery({ queryKey: ["audit", "recent", limit], queryFn: () => listAuditRecent(limit), refetchInterval: REFRESH_MS });
 
   const logs = auditQuery.data?.entries ?? [];
-  const modules = Array.from(new Set(logs.map((l: any) => l.action || l.source).filter(Boolean))) as string[];
+  const modules = useMemo(
+    () => Array.from(new Set(logs.map((l: any) => l.action || l.source).filter(Boolean))) as string[],
+    [logs],
+  );
   const [search, setSearch] = useState("");
   const [moduleFilter, setModuleFilter] = useState<string | null>(null);
 
-  const filteredLogs = logs.filter((l: any) => {
-    const matchesSearch = !search || (l.detail || l.outcome || l.message || "").toLowerCase().includes(search.toLowerCase());
-    const matchesModule = !moduleFilter || (l.action || l.source) === moduleFilter;
-    return matchesSearch && matchesModule;
-  });
+  const filteredLogs = useMemo(
+    () => logs.filter((l: any) => {
+      const matchesSearch = !search || (l.detail || l.outcome || l.message || "").toLowerCase().includes(search.toLowerCase());
+      const matchesModule = !moduleFilter || (l.action || l.source) === moduleFilter;
+      return matchesSearch && matchesModule;
+    }),
+    [logs, search, moduleFilter],
+  );
 
   const handleExport = () => {
     const blob = new Blob([JSON.stringify(logs, null, 2)], { type: "application/json" });
@@ -52,6 +60,7 @@ export function LogsPage() {
         isFetching={auditQuery.isFetching}
         onRefresh={() => void auditQuery.refetch()}
         icon={<FileText className="h-4 w-4" />}
+        helpText={t("logs.help")}
         actions={
           <Button variant="secondary" size="sm" onClick={handleExport}>
             <Download className="h-3.5 w-3.5 mr-1" />
@@ -69,7 +78,7 @@ export function LogsPage() {
               onChange={(e) => setSearch(e.target.value)}
               placeholder={t("common.search")}
               leftIcon={<Search className="h-4 w-4" />}
-              className="!py-1.5"
+              className="py-1.5!"
             />
           </div>
           <select
@@ -100,10 +109,10 @@ export function LogsPage() {
               const isError = outcome.startsWith("error");
               const level = isError ? "error" : (l.event_type || "info").toLowerCase();
               const levelStyle = LOG_LEVELS[level as keyof typeof LOG_LEVELS] || LOG_LEVELS.info;
-              const time = l.timestamp ? new Date(l.timestamp).toLocaleTimeString() : "-";
+              const time = formatTime(l.timestamp);
               const detail = l.detail || l.message || "-";
               const reason = l.outcome && l.outcome !== detail ? l.outcome : "";
-              const agentId = l.agent_id ? l.agent_id.slice(0, 8) : "";
+              const agentId = l.agent_id ? truncateId(l.agent_id) : "";
               return (
                 <div key={l.seq || l.id || i} className="flex flex-col sm:flex-row gap-1 sm:gap-4 p-2 hover:bg-surface-hover rounded transition-colors items-start">
                   <div className="flex items-center gap-2 sm:contents">

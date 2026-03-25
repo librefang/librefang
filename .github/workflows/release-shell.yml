@@ -22,44 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-
-      - name: Wait for release or create fallback
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TAG="${GITHUB_REF#refs/tags/}"
-          for i in $(seq 1 12); do
-            if gh release view "$TAG" --repo "${{ github.repository }}" &>/dev/null; then
-              echo "✓ Release $TAG found"
-              exit 0
-            fi
-            echo "Waiting for release $TAG to be created... ($i/12)"
-            sleep 5
-          done
-
-          # Fallback: create a minimal release so builds can proceed
-          echo "::warning::Release not found after 60s, creating fallback release"
-          VERSION="${TAG#v}"
-          # Strip pre-release suffix then strip hour for CHANGELOG
-          VERSION=$(echo "$VERSION" | sed 's/-.*//')
-          PATCH=$(echo "$VERSION" | cut -d. -f3)
-          if [ ${#PATCH} -eq 4 ]; then
-            VERSION="$(echo "$VERSION" | cut -d. -f1,2).${PATCH:0:2}"
-          fi
-          CHANGES=$(awk '/^## \['"$VERSION"'\]/{found=1; next} found && /^## \[/{exit} found{print}' CHANGELOG.md)
-          if [ -z "$CHANGES" ]; then
-            CHANGES="See [CHANGELOG](https://github.com/librefang/librefang/blob/main/CHANGELOG.md) for details."
-          fi
-          # Detect pre-release tags (-betaN, -rcN)
-          PRERELEASE_FLAG=""
-          if echo "$TAG" | grep -qE '-(beta|rc)[0-9]'; then
-            PRERELEASE_FLAG="--prerelease"
-          fi
-          gh release create "$TAG" \
-            --title "LibreFang $TAG" \
-            --notes "$CHANGES" \
-            $PRERELEASE_FLAG \
-            --repo "${{ github.repository }}" || true
+      - uses: ./.github/actions/wait-for-release
 
   # ── CLI Binary (macOS) ────────────────────────────────────────────────────
   cli_mac:
@@ -400,7 +363,7 @@ jobs:
   sync_homebrew:
     name: Sync to Homebrew Tap
     runs-on: ubuntu-latest
-    needs: [cli_mac]
+    needs: [cli_mac, cli_linux]
     steps:
       - name: Check out tap repo
         uses: actions/checkout@v6
@@ -450,19 +413,13 @@ jobs:
             sleep 10
           done
 
-      - name: Generate formula
+      - name: Generate formulas (channel-based)
         run: |
           set -euo pipefail
 
           TAG="${{ github.ref_name }}"
           VERSION="${TAG#v}"
           SEMVER="${VERSION}"
-
-          # Skip Homebrew tap update for pre-release versions
-          if echo "$VERSION" | grep -qE '-(beta|rc)[0-9]'; then
-            echo "Pre-release version ($VERSION), skipping Homebrew formula update"
-            exit 0
-          fi
 
           asset_url() {
             jq -r --arg name "$1" '.assets[] | select(.name == $name) | .browser_download_url' release.json
@@ -472,7 +429,6 @@ jobs:
             local sha_url
             sha_url="$(jq -r --arg name "${1}.sha256" '.assets[] | select(.name == $name) | .browser_download_url' release.json)"
             if [ -z "$sha_url" ] || [ "$sha_url" = "null" ]; then
-              # Download asset and compute SHA256 locally
               local asset_url
               asset_url="$(jq -r --arg name "$1" '.assets[] | select(.name == $name) | .browser_download_url' release.json)"
               curl -fsSL "$asset_url" | sha256sum | awk '{print $1}'
@@ -526,18 +482,66 @@ jobs:
             fi
           done
 
-          # --- Main formula (latest) ---
-          cat > tap/Formula/librefang.rb <<FORMULA
-          class Librefang < Formula
-            desc "Community-Maintained Agent Operating System written in Rust"
-            homepage "https://librefang.ai"
-            license "MIT"
-            version "$SEMVER"
+          # Channel strategy (like Apple software updates):
+          #   -rc tag    → update rc channel only
+          #   -beta tag  → update beta + rc channels
+          #   stable tag → update stable + beta + rc channels
+          if echo "$VERSION" | grep -qE '\-rc'; then
+            CHANNELS=(rc)
+          elif echo "$VERSION" | grep -qE '\-beta'; then
+            CHANNELS=(beta rc)
+          else
+            CHANNELS=(stable beta rc)
+          fi
+
+          echo "Release $VERSION → updating formula channels: ${CHANNELS[*]}"
+
+          ALL_CHANNELS=(stable beta rc)
+
+          generate_formula() {
+            local channel="$1"
+            local formula_name="librefang"
+            local class_name="Librefang"
+            local desc_suffix=""
+
+            if [ "$channel" != "stable" ]; then
+              formula_name="librefang-${channel}"
+              # librefang-beta → LibrefangBeta, librefang-rc → LibrefangRc
+              local suffix
+              suffix="$(echo "${channel}" | sed 's/.*/\u&/')"
+              class_name="Librefang${suffix}"
+              desc_suffix=" (${channel} channel)"
+            fi
+
+            # Build conflicts_with lines
+            local conflicts=""
+            for other in "${ALL_CHANNELS[@]}"; do
+              [ "$other" = "$channel" ] && continue
+              local other_name="librefang"
+              [ "$other" != "stable" ] && other_name="librefang-${other}"
+              conflicts="${conflicts}
+            conflicts_with \"${other_name}\", because: \"both install a \\\`librefang\\\` binary\""
+            done
+
+            # Livecheck only for stable channel
+            local livecheck=""
+            if [ "$channel" = "stable" ]; then
+              livecheck='
 
             livecheck do
               url "https://github.com/librefang/librefang/releases/latest"
               strategy :header_match
-            end
+            end'
+            fi
+
+            mkdir -p tap/Formula
+            cat > "tap/Formula/${formula_name}.rb" <<FORMULA
+          class ${class_name} < Formula
+            desc "Community-Maintained Agent Operating System written in Rust${desc_suffix}"
+            homepage "https://librefang.ai"
+            license "MIT"
+            version "$SEMVER"
+          ${conflicts}${livecheck}
 
             on_macos do
               if Hardware::CPU.arm?
@@ -569,8 +573,16 @@ jobs:
           end
           FORMULA
 
+            echo "=== Formula: ${formula_name} ==="
+            cat "tap/Formula/${formula_name}.rb"
+          }
+
+          for channel in "${CHANNELS[@]}"; do
+            generate_formula "$channel"
+          done
+
           # --- Versioned formula (e.g. librefang@2026.3.2114) ---
-          # Class name: LibrefangAT202632114 (@ → AT, dots removed)
+          # Always generated for every release, regardless of channel
           CLASS_SUFFIX=$(echo "$SEMVER" | tr -d '.')
           CLASS_NAME="LibrefangAT${CLASS_SUFFIX}"
 
@@ -580,11 +592,6 @@ jobs:
             homepage "https://librefang.ai"
             license "MIT"
             version "$SEMVER"
-
-            livecheck do
-              url "https://github.com/librefang/librefang/releases/latest"
-              strategy :header_match
-            end
 
             on_macos do
               if Hardware::CPU.arm?
@@ -618,8 +625,6 @@ jobs:
           end
           FORMULA
 
-          echo "=== Main formula ==="
-          cat tap/Formula/librefang.rb
           echo ""
           echo "=== Versioned formula: librefang@${SEMVER}.rb ==="
           cat "tap/Formula/librefang@${SEMVER}.rb"
@@ -630,6 +635,6 @@ jobs:
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
           git add .
-          git commit -m "chore: update formula to ${{ github.ref_name }}" || echo "No changes"
+          git commit -m "chore: update formula channels to ${{ github.ref_name }}" || echo "No changes"
           git push
 

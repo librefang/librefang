@@ -76,10 +76,6 @@ fn read_workspace_version(root: &Path) -> Result<String, Box<dyn std::error::Err
     Ok(version)
 }
 
-fn find_latest_stable_tag(root: &Path) -> Option<String> {
-    find_latest_tag(root, false)
-}
-
 /// Find the latest tag, optionally including pre-releases (rc, beta).
 fn find_latest_tag(root: &Path, include_prerelease: bool) -> Option<String> {
     let output = Command::new("git")
@@ -115,11 +111,10 @@ fn prompt(message: &str) -> String {
 fn compute_calver() -> String {
     let now = chrono::Local::now();
     format!(
-        "{}.{}.{}{}",
+        "{}.{}.{}",
         now.format("%Y"),
         now.format("%-m"),
         now.format("%d"),
-        now.format("%H"),
     )
 }
 
@@ -222,7 +217,7 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
             // Default to stable
             base_version
         } else {
-            // Count existing tags to auto-increment
+            // Count existing tags for this day to auto-increment rc/beta numbers
             let beta_count = Command::new("git")
                 .args(["tag", "-l", &format!("v{}-beta*", base_version)])
                 .current_dir(&root)
@@ -297,7 +292,7 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
             .unwrap();
     if !calver_re.is_match(&version) {
         return Err(format!(
-            "'{}' is not a valid CalVer (expected: YYYY.M.DDHH, YYYY.M-lts, etc.)",
+            "'{}' is not a valid CalVer (expected: YYYY.M.DD, YYYY.M-lts, etc.)",
             version
         )
         .into());
@@ -397,22 +392,13 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
             .status();
 
         // Re-compute prev_tag since we deleted the old one
-        prev_tag = find_latest_stable_tag(&root);
+        prev_tag = find_latest_tag(&root, true);
     }
 
     // --- Generate changelog ---
     println!();
     println!("Generating changelog...");
-    let changelog_version = {
-        let base = version.split('-').next().unwrap_or(&version);
-        let parts: Vec<&str> = base.split('.').collect();
-        if parts.len() == 3 && parts[2].len() == 4 {
-            // Strip hour from DDHH -> DD
-            format!("{}.{}.{}", parts[0], parts[1], &parts[2][..2])
-        } else {
-            base.to_string()
-        }
-    };
+    let changelog_version = version.split('-').next().unwrap_or(&version).to_string();
     changelog::run(changelog::ChangelogArgs {
         version: changelog_version.clone(),
         base_tag: prev_tag.clone(),
@@ -583,7 +569,7 @@ pip install librefang-sdk
         let path = root.join(file);
         if path.exists() {
             let _ = Command::new("git")
-                .args(["add", file])
+                .args(["add", "-f", file])
                 .current_dir(&root)
                 .status();
         }
@@ -628,13 +614,12 @@ pip install librefang-sdk
         println!("  No file changes. Tagging current HEAD.");
     }
 
-    git(&root, &["tag", &tag])?;
-    println!("Created tag {}", tag);
+    // Tag is created by GitHub Action after PR merges (not here).
+    println!("Tag {} will be created when PR merges.", tag);
 
     // --- Push ---
     if !args.no_push {
         git(&root, &["push", "-u", "origin", &release_branch])?;
-        git(&root, &["push", "origin", &tag, "--force"])?;
 
         // Create PR via gh
         if Command::new("gh").arg("--version").output().is_ok() {
@@ -642,7 +627,8 @@ pip install librefang-sdk
             println!("Creating Pull Request...");
 
             // Build PR body with changelog content
-            let mut pr_body = format!("## Release {}", tag);
+            // <!-- release-tag:vX.Y.Z --> marker is used by the auto-tag workflow
+            let mut pr_body = format!("<!-- release-tag:{} -->\n## Release {}", tag, tag);
             let changelog_path = root.join("CHANGELOG.md");
             if changelog_path.exists() {
                 let cl_content = fs::read_to_string(&changelog_path).unwrap_or_default();

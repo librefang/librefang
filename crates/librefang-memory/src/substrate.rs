@@ -165,6 +165,11 @@ impl MemorySubstrate {
         self.structured.list_kv(agent_id)
     }
 
+    /// List only keys for an agent (without values).
+    pub fn list_keys(&self, agent_id: AgentId) -> LibreFangResult<Vec<String>> {
+        self.structured.list_keys(agent_id)
+    }
+
     /// Delete a KV entry for an agent.
     pub fn structured_delete(&self, agent_id: AgentId, key: &str) -> LibreFangResult<()> {
         self.structured.delete(agent_id, key)

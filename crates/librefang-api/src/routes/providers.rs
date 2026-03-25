@@ -98,7 +98,7 @@ pub async fn list_models(
             if available_only {
                 let provider = catalog.get_provider(&m.provider);
                 if let Some(p) = provider {
-                    if p.auth_status == librefang_types::model_catalog::AuthStatus::Missing {
+                    if !p.auth_status.is_available() {
                         return false;
                     }
                 }
@@ -109,7 +109,7 @@ pub async fn list_models(
             // Custom models from unknown providers are assumed available
             let available = catalog
                 .get_provider(&m.provider)
-                .map(|p| p.auth_status != librefang_types::model_catalog::AuthStatus::Missing)
+                .map(|p| p.auth_status.is_available())
                 .unwrap_or(m.tier == librefang_types::model_catalog::ModelTier::Custom);
             serde_json::json!({
                 "id": m.id,
@@ -263,7 +263,7 @@ pub async fn get_model(
         Some(m) => {
             let available = catalog
                 .get_provider(&m.provider)
-                .map(|p| p.auth_status != librefang_types::model_catalog::AuthStatus::Missing)
+                .map(|p| p.auth_status.is_available())
                 .unwrap_or(m.tier == librefang_types::model_catalog::ModelTier::Custom);
             (
                 StatusCode::OK,
@@ -675,6 +675,7 @@ pub async fn set_provider_key(
         catalog
             .get_provider(&name)
             .map(|p| p.api_key_env.clone())
+            .filter(|env| !env.trim().is_empty())
             .unwrap_or_else(|| {
                 // Custom provider — derive env var: MY_PROVIDER → MY_PROVIDER_API_KEY
                 format!("{}_API_KEY", name.to_uppercase().replace('-', "_"))
@@ -849,6 +850,7 @@ pub async fn delete_provider_key(
         catalog
             .get_provider(&name)
             .map(|p| p.api_key_env.clone())
+            .filter(|env| !env.trim().is_empty())
             .unwrap_or_else(|| {
                 // Custom/unknown provider — derive env var from convention
                 format!("{}_API_KEY", name.to_uppercase().replace('-', "_"))

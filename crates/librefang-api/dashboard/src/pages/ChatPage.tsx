@@ -1,18 +1,22 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useRef, useState, useCallback } from "react";
-import Markdown from "react-markdown";
+import { formatCost } from "../lib/format";
+import { memo, useEffect, useMemo, useRef, useState, useCallback } from "react";
 import rehypeKatex from "rehype-katex";
-import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import { useTranslation } from "react-i18next";
-import { useSearch } from "@tanstack/react-router";
+import { useNavigate, useSearch } from "@tanstack/react-router";
 import { listAgents, sendAgentMessage, loadAgentSession, listPendingApprovals, resolveApproval } from "../api";
 import type { ApprovalItem } from "../api";
 import { normalizeToolOutput } from "../lib/chat";
 import { MessageCircle, Send, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, Zap, ShieldAlert, CheckCircle, XCircle } from "lucide-react";
 import { Badge } from "../components/ui/Badge";
+import { MarkdownContent } from "../components/ui/MarkdownContent";
 import { useUIStore } from "../lib/store";
+import { Typewriter_v2 } from "../components/Typewriter_v2";
 import "katex/dist/katex.min.css";
+
+const isAuthUnavailable = (status?: string) =>
+  !!status && status !== "configured" && status !== "configured_cli" && status !== "not_required";
 
 interface ChatMessage {
   id: string;
@@ -35,70 +39,15 @@ const SLASH_COMMANDS = [
   { cmd: "/info", desc: "Show current agent info" },
 ];
 
-// Markdown styles
-const mdComponents = {
-  p: ({ children }: any) => <p className="mb-2 last:mb-0">{children}</p>,
-  h1: ({ children }: any) => <h1 className="text-lg font-bold mb-2">{children}</h1>,
-  h2: ({ children }: any) => <h2 className="text-base font-bold mb-1.5">{children}</h2>,
-  h3: ({ children }: any) => <h3 className="text-sm font-bold mb-1">{children}</h3>,
-  ul: ({ children }: any) => <ul className="list-disc pl-4 mb-2 space-y-0.5">{children}</ul>,
-  ol: ({ children }: any) => <ol className="list-decimal pl-4 mb-2 space-y-0.5">{children}</ol>,
-  li: ({ children }: any) => <li className="text-sm">{children}</li>,
-  code: ({ node, children, ...props }: any) => {
-    const isBlock = node?.position?.start?.line !== node?.position?.end?.line || String(children).includes("\n");
-    return isBlock
-      ? <pre className="p-2 rounded-lg bg-main font-mono text-[11px] overflow-x-auto mb-2"><code>{children}</code></pre>
-      : <code className="px-1 py-0.5 rounded bg-main font-mono text-[11px]" {...props}>{children}</code>;
-  },
-  pre: ({ children }: any) => <>{children}</>,
-  table: ({ children }: any) => <table className="w-full text-xs border-collapse mb-2">{children}</table>,
-  th: ({ children }: any) => <th className="border border-border-subtle px-2 py-1 bg-main font-bold text-left">{children}</th>,
-  td: ({ children }: any) => <td className="border border-border-subtle px-2 py-1">{children}</td>,
-  blockquote: ({ children }: any) => <blockquote className="border-l-2 border-brand pl-3 italic text-text-dim mb-2">{children}</blockquote>,
-  strong: ({ children }: any) => <strong className="font-bold">{children}</strong>,
-  a: ({ href, children }: any) => <a href={href} className="text-brand underline" target="_blank" rel="noopener noreferrer">{children}</a>,
-};
 
-// Streaming typewriter effect + Markdown
-function Typewriter({ text, speed = 15 }: { text: string; speed?: number }) {
-  const [displayed, setDisplayed] = useState("");
-  const done = displayed.length >= text.length;
-
-  useEffect(() => {
-    if (!text) { setDisplayed(""); return; }
-    if (text.length <= displayed.length) { setDisplayed(text); return; }
-
-    const interval = setInterval(() => {
-      setDisplayed(prev => {
-        if (prev.length >= text.length) {
-          clearInterval(interval);
-          return text;
-        }
-        return text.slice(0, prev.length + 2);
-      });
-    }, speed);
-
-    return () => clearInterval(interval);
-  }, [text, speed]);
-
-  if (done) {
-    return (
-      <Markdown
-        remarkPlugins={[remarkGfm, remarkMath]}
-        rehypePlugins={[rehypeKatex]}
-        components={mdComponents}
-      >
-        {text}
-      </Markdown>
-    );
-  }
-  return <span>{displayed}</span>;
-}
-
-// WebSocket hook for real-time streaming
+// WebSocket hook with auto-reconnect
 function useWebSocket(agentId: string | null) {
   const wsRef = useRef<WebSocket | null>(null);
   const [wsConnected, setWsConnected] = useState(false);
+  const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const retriesRef = useRef(0);
+  // Callback fired when WS closes while a response is pending
+  const onDropRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     if (!agentId) {
@@ -106,52 +55,92 @@ function useWebSocket(agentId: string | null) {
       return;
     }
 
-    // Determine WS URL from current location
     const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
     const host = window.location.host;
     const url = `${proto}//${host}/api/agents/${encodeURIComponent(agentId)}/ws`;
 
-    try {
-      const ws = new WebSocket(url);
+    function connect() {
+      try {
+        const ws = new WebSocket(url);
 
-      ws.onopen = () => {
-        setWsConnected(true);
-      };
+        ws.onopen = () => {
+          setWsConnected(true);
+          retriesRef.current = 0;
+        };
 
-      ws.onclose = () => {
+        ws.onclose = () => {
+          setWsConnected(false);
+          // Notify pending response handler
+          if (onDropRef.current) {
+            onDropRef.current();
+            onDropRef.current = null;
+          }
+          // Auto-reconnect with exponential backoff (max 15s)
+          const delay = Math.min(1000 * 2 ** retriesRef.current, 15000);
+          retriesRef.current++;
+          reconnectTimer.current = setTimeout(connect, delay);
+        };
+
+        ws.onerror = () => {
+          // onclose will fire after onerror, reconnect handled there
+        };
+
+        wsRef.current = ws;
+      } catch {
         setWsConnected(false);
-      };
-
-      ws.onerror = () => {
-        setWsConnected(false);
-      };
-
-      wsRef.current = ws;
-    } catch {
-      setWsConnected(false);
+      }
     }
 
+    connect();
+
     return () => {
+      if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
+      retriesRef.current = 0;
+      onDropRef.current = null;
       if (wsRef.current) {
+        wsRef.current.onclose = null; // prevent reconnect on intentional close
         wsRef.current.close();
         wsRef.current = null;
       }
     };
   }, [agentId]);
 
-  return { ws: wsRef, wsConnected };
+  return { ws: wsRef, wsConnected, onDropRef };
 }
+
+// Per-agent session cache — survives agent switches within the same page lifecycle
+const sessionCache = new Map<string, ChatMessage[]>();
 
 // Chat message management - includes history loading and sending (with WS streaming)
 function useChatMessages(agentId: string | null, agents: any[] = []) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isLoading, setIsLoading] = useState(false);
-  const { ws, wsConnected } = useWebSocket(agentId);
+  const { ws, wsConnected, onDropRef } = useWebSocket(agentId);
   const addSkillOutput = useUIStore((s) => s.addSkillOutput);
 
-  // Load history
+  // Save current messages to cache when switching away
+  const prevAgentRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!agentId) return;
+    return () => {
+      if (prevAgentRef.current) {
+        sessionCache.set(prevAgentRef.current, messages);
+      }
+    };
+  });
+  useEffect(() => { prevAgentRef.current = agentId; }, [agentId]);
+
+  // Load history — use cache if available, otherwise fetch
+  useEffect(() => {
+    if (!agentId) { setMessages([]); return; }
+
+    const cached = sessionCache.get(agentId);
+    if (cached) {
+      setMessages(cached);
+      return;
+    }
+
+    setMessages([]);
+    setIsLoading(true);
     loadAgentSession(agentId)
       .then(session => {
         if (session.messages?.length) {
@@ -176,9 +165,11 @@ function useChatMessages(agentId: string | null, agents: any[] = []) {
             }];
           });
           setMessages(historical);
+          sessionCache.set(agentId, historical);
         }
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => setIsLoading(false));
   }, [agentId]);
 
   // Send message - WS first, HTTP fallback
@@ -231,9 +222,49 @@ function useChatMessages(agentId: string | null, agents: any[] = []) {
     setMessages(prev => [...prev, userMsg, botMsg]);
     setIsLoading(true);
 
+    // Helper: send via HTTP (used as primary fallback and WS drop recovery)
+    const sendViaHttp = async () => {
+      try {
+        const response = await sendAgentMessage(agentId, trimmed);
+        const fullContent = response.response || "";
+        setMessages(prev => prev.map(m =>
+          m.id === botMsg.id
+            ? {
+                ...m, content: fullContent, isStreaming: false,
+                tokens: { output: response.output_tokens, input: response.input_tokens },
+                cost_usd: response.cost_usd,
+                memories_saved: response.memories_saved,
+                memories_used: response.memories_used,
+              }
+            : m
+        ));
+        if (response.memories_saved?.length) {
+          const agentName = agents.find(a => a.id === agentId)?.name;
+          response.memories_saved.forEach((mem: string) => {
+            addSkillOutput({ skillName: "memory", agentId: agentId || undefined, agentName, content: mem });
+          });
+        }
+      } catch (err) {
+        const errorMsg = err instanceof Error ? err.message : "Unknown error";
+        setMessages(prev => prev.map(m =>
+          m.id === botMsg.id ? { ...m, isStreaming: false, error: errorMsg } : m
+        ));
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
     // Try WebSocket streaming first
     if (wsConnected && ws.current && ws.current.readyState === WebSocket.OPEN) {
       try {
+        let responded = false;
+
+        const cleanup = () => {
+          responded = true;
+          onDropRef.current = null;
+          ws.current?.removeEventListener("message", handleMessage);
+        };
+
         // Set up message handler for this response
         const handleMessage = (event: MessageEvent) => {
           try {
@@ -250,7 +281,6 @@ function useChatMessages(agentId: string | null, agents: any[] = []) {
                 ));
               }
             } else if (data.type === "tool_result") {
-              // Persist tool output for display
               const entry = normalizeToolOutput(data);
               if (entry) {
                 addSkillOutput({ skillName: entry.tool, agentId: agentId || undefined, content: entry.content });
@@ -258,14 +288,14 @@ function useChatMessages(agentId: string | null, agents: any[] = []) {
             } else if (data.type === "silent_complete") {
               setMessages(prev => prev.filter(m => m.id !== botMsg.id));
               setIsLoading(false);
-              ws.current?.removeEventListener("message", handleMessage);
+              cleanup();
             } else if (data.type === "error") {
               const error = data.content || "WebSocket error";
               setMessages(prev => prev.map(m =>
                 m.id === botMsg.id ? { ...m, isStreaming: false, error } : m
               ));
               setIsLoading(false);
-              ws.current?.removeEventListener("message", handleMessage);
+              cleanup();
             } else if (data.type === "response") {
               setMessages(prev => prev.map(m =>
                 m.id === botMsg.id
@@ -279,7 +309,7 @@ function useChatMessages(agentId: string | null, agents: any[] = []) {
                   : m
               ));
               setIsLoading(false);
-              ws.current?.removeEventListener("message", handleMessage);
+              cleanup();
             }
           } catch {
             // Non-JSON text chunk
@@ -289,22 +319,23 @@ function useChatMessages(agentId: string | null, agents: any[] = []) {
           }
         };
 
+        // Register fallback: if WS drops mid-stream, retry via HTTP
+        onDropRef.current = () => {
+          if (!responded) {
+            ws.current?.removeEventListener("message", handleMessage);
+            sendViaHttp();
+          }
+        };
+
         ws.current.addEventListener("message", handleMessage);
         ws.current.send(JSON.stringify({ type: "message", content: trimmed }));
 
-        // Timeout fallback - if no response in 60s, clean up
+        // Timeout: if no response in 60s, fall back to HTTP
         setTimeout(() => {
-          ws.current?.removeEventListener("message", handleMessage);
-          setMessages(prev => {
-            const msg = prev.find(m => m.id === botMsg.id);
-            if (msg?.isStreaming) {
-              setIsLoading(false);
-              return prev.map(m =>
-                m.id === botMsg.id ? { ...m, isStreaming: false } : m
-              );
-            }
-            return prev;
-          });
+          if (!responded) {
+            cleanup();
+            sendViaHttp();
+          }
         }, 60000);
 
         return;
@@ -313,48 +344,8 @@ function useChatMessages(agentId: string | null, agents: any[] = []) {
       }
     }
 
-    // HTTP fallback
-    try {
-      const response = await sendAgentMessage(agentId, trimmed);
-      const fullContent = response.response || "";
-      let currentLength = 0;
-
-      const streamInterval = setInterval(() => {
-        if (currentLength < fullContent.length) {
-          currentLength += Math.min(3, fullContent.length - currentLength);
-          setMessages(prev => prev.map(m =>
-            m.id === botMsg.id ? { ...m, content: fullContent.slice(0, currentLength) } : m
-          ));
-        } else {
-          clearInterval(streamInterval);
-          setMessages(prev => prev.map(m =>
-            m.id === botMsg.id
-              ? {
-                  ...m, isStreaming: false,
-                  tokens: { output: response.output_tokens, input: response.input_tokens },
-                  cost_usd: response.cost_usd,
-                  memories_saved: response.memories_saved,
-                  memories_used: response.memories_used,
-                }
-              : m
-          ));
-          // Persist skill outputs
-          if (response.memories_saved?.length) {
-            const agentName = agents.find(a => a.id === agentId)?.name;
-            response.memories_saved.forEach((mem: string) => {
-              addSkillOutput({ skillName: "memory", agentId: agentId || undefined, agentName, content: mem });
-            });
-          }
-          setIsLoading(false);
-        }
-      }, 20);
-    } catch (err) {
-      const errorMsg = err instanceof Error ? err.message : "Unknown error";
-      setMessages(prev => prev.map(m =>
-        m.id === botMsg.id ? { ...m, isStreaming: false, error: errorMsg } : m
-      ));
-      setIsLoading(false);
-    }
+    // HTTP fallback — direct, no fake streaming
+    await sendViaHttp();
   }, [agentId, agents, wsConnected, ws]);
 
   const clearHistory = useCallback(() => setMessages([]), []);
@@ -362,8 +353,8 @@ function useChatMessages(agentId: string | null, agents: any[] = []) {
   return { messages, isLoading, sendMessage, clearHistory, wsConnected };
 }
 
-// Message bubble component
-function MessageBubble({ message }: { message: ChatMessage }) {
+// Message bubble component — memoized to skip re-render during streaming of other messages
+const MessageBubble = memo(function MessageBubble({ message }: { message: ChatMessage }) {
   const { t } = useTranslation();
   const isUser = message.role === "user";
 
@@ -380,7 +371,7 @@ function MessageBubble({ message }: { message: ChatMessage }) {
   }
 
   return (
-    <div className={`flex ${isUser ? "justify-end" : "justify-start"} animate-fade-in-up`}>
+    <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
       <div className={`flex flex-col max-w-[90%] sm:max-w-[75%] ${isUser ? "items-end" : "items-start"}`}>
         {/* Avatar + name */}
         <div className={`flex items-center gap-2 mb-1.5 ${isUser ? "self-end flex-row-reverse" : "self-start"}`}>
@@ -395,7 +386,7 @@ function MessageBubble({ message }: { message: ChatMessage }) {
         </div>
 
         {/* Message content */}
-        <div className={`relative px-4 py-3 rounded-2xl text-sm leading-relaxed shadow-sm transition-all ${
+        <div className={`relative px-4 py-3 rounded-2xl text-sm leading-relaxed shadow-sm transition-colors ${
           isUser
             ? "bg-gradient-to-br from-brand to-brand/90 text-white rounded-tr-md"
             : message.error
@@ -404,7 +395,7 @@ function MessageBubble({ message }: { message: ChatMessage }) {
         }`}>
           {message.isStreaming ? (
             message.content ? (
-              <Typewriter text={message.content} speed={10} />
+              <Typewriter_v2 text={message.content} speed={10} />
             ) : (
               <div className="flex items-center gap-1">
                 <span className="w-1.5 h-1.5 bg-brand/60 rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
@@ -418,7 +409,12 @@ function MessageBubble({ message }: { message: ChatMessage }) {
               <span>{message.error}</span>
             </div>
           ) : (
-            <Typewriter text={message.content} speed={10} />
+            <MarkdownContent
+              remarkPlugins={[remarkMath]}
+              rehypePlugins={[rehypeKatex]}
+            >
+              {message.content}
+            </MarkdownContent>
           )}
         </div>
 
@@ -432,7 +428,7 @@ function MessageBubble({ message }: { message: ChatMessage }) {
           )}
           {message.cost_usd !== undefined && message.cost_usd > 0 && (
             <span className="px-1.5 py-0.5 rounded bg-success/10 text-success/70 font-mono text-[9px]">
-              ${message.cost_usd.toFixed(4)}
+              {formatCost(message.cost_usd)}
             </span>
           )}
         </div>
@@ -448,17 +444,17 @@ function MessageBubble({ message }: { message: ChatMessage }) {
       </div>
     </div>
   );
-}
+});
 
 // Input box - with shortcut hints
-function ChatInput({ onSend, disabled, placeholder }: { onSend: (msg: string) => void; disabled: boolean; placeholder: string }) {
+function ChatInput({ onSend, disabled, placeholder, authMissing, providerName }: { onSend: (msg: string) => void; disabled: boolean; placeholder: string; authMissing?: boolean; providerName?: string }) {
   const { t } = useTranslation();
   const [message, setMessage] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (message.trim() && !disabled) {
+    if (message.trim() && !effectiveDisabled) {
       onSend(message);
       setMessage("");
     }
@@ -474,8 +470,17 @@ function ChatInput({ onSend, disabled, placeholder }: { onSend: (msg: string) =>
   const showingSlash = message.startsWith("/") && !message.includes(" ");
   const filteredCmds = showingSlash ? SLASH_COMMANDS.filter(c => c.cmd.startsWith(message)) : [];
 
+  const effectiveDisabled = disabled || !!authMissing;
+
   return (
     <form onSubmit={handleSubmit} className="space-y-2">
+      {/* Auth missing warning */}
+      {authMissing && (
+        <div className="flex items-center gap-2 rounded-xl border border-warning/30 bg-warning/5 px-4 py-2.5 text-sm text-warning">
+          <AlertCircle className="h-4 w-4 flex-shrink-0" />
+          <span>{t("chat.auth_missing", { provider: providerName || "unknown" })}</span>
+        </div>
+      )}
       {/* Slash command autocomplete */}
       {showingSlash && filteredCmds.length > 0 && (
         <div className="rounded-xl border border-border-subtle bg-surface shadow-lg p-1 mb-1">
@@ -502,14 +507,14 @@ function ChatInput({ onSend, disabled, placeholder }: { onSend: (msg: string) =>
               }
             }}
             placeholder={placeholder}
-            disabled={disabled}
+            disabled={effectiveDisabled}
             rows={1}
             className="w-full min-h-[44px] sm:min-h-[52px] max-h-[150px] rounded-2xl border border-border-subtle bg-surface px-3 sm:px-5 py-2.5 sm:py-3.5 text-sm focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none resize-none placeholder:text-text-dim/40 shadow-sm"
           />
         </div>
         <button
           type="submit"
-          disabled={!message.trim() || disabled}
+          disabled={!message.trim() || effectiveDisabled}
           className="group relative px-3.5 sm:px-5 py-2.5 sm:py-3.5 rounded-2xl bg-gradient-to-r from-brand to-brand/90 text-white font-bold text-sm shadow-lg shadow-brand/20 hover:shadow-brand/40 hover:-translate-y-0.5 transition-all duration-300 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:translate-y-0"
         >
           <Send className="h-4 w-4" />
@@ -523,14 +528,14 @@ function ChatInput({ onSend, disabled, placeholder }: { onSend: (msg: string) =>
 }
 
 // Connection status bar
-function ConnectionBar({ agentName, isLoading, messageCount, onClear, wsConnected }: { agentName: string; isLoading: boolean; messageCount: number; onClear: () => void; wsConnected?: boolean }) {
+function ConnectionBar({ agentName, isLoading, messageCount, onClear, wsConnected, modelName }: { agentName: string; isLoading: boolean; messageCount: number; onClear: () => void; wsConnected?: boolean; modelName?: string }) {
   const { t } = useTranslation();
   return (
-    <div className="px-2 sm:px-4 py-2 sm:py-2.5 border-b border-border-subtle/50 bg-gradient-to-r from-surface/80 to-transparent flex items-center justify-between backdrop-blur-xl backdrop-saturate-150">
+    <div className="px-2 sm:px-4 py-2 sm:py-2.5 border-b border-border-subtle/50 bg-gradient-to-r from-surface to-transparent flex items-center justify-between">
       <div className="flex items-center gap-2 sm:gap-3 min-w-0 flex-1">
         <div className="relative">
           <Wifi className="h-3.5 w-3.5 text-success" />
-          <span className="absolute inset-0 rounded-full bg-success/30 animate-ping" />
+          <span className="absolute inset-0 rounded-full bg-success/30 animate-pulse" />
         </div>
         <span className="text-xs font-semibold text-success uppercase tracking-wide hidden sm:inline">{t("chat.secure_link")}</span>
         {wsConnected && (
@@ -547,54 +552,41 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, wsConnecte
           </span>
         )}
       </div>
-      {messageCount > 0 && (
-        <button onClick={onClear} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-text-dim/60 hover:text-error hover:bg-error/5 transition-colors">
-          <X className="h-3 w-3" />
-          {t("chat.clear_chat")}
-        </button>
-      )}
+      <div className="flex items-center gap-2">
+        {modelName && (
+          <span className="hidden sm:inline text-[10px] text-text-dim/50 font-mono truncate max-w-[200px]">{modelName}</span>
+        )}
+        {messageCount > 0 && (
+          <button onClick={onClear} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-text-dim/60 hover:text-error hover:bg-error/5 transition-colors">
+            <X className="h-3 w-3" />
+            {t("chat.clear_chat")}
+          </button>
+        )}
+      </div>
     </div>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Approval polling — polls pending approvals for the current agent
+// Approval polling — uses React Query for caching, background pause, dedup
 // ---------------------------------------------------------------------------
-const APPROVAL_POLL_MS = 2000;
-
 function useApprovalPoller(agentId: string | null) {
-  const [pendingApprovals, setPendingApprovals] = useState<ApprovalItem[]>([]);
-
-  useEffect(() => {
-    if (!agentId) {
-      setPendingApprovals([]);
-      return;
-    }
-
-    let cancelled = false;
-
-    const poll = async () => {
-      try {
-        const items = await listPendingApprovals(agentId);
-        if (!cancelled) setPendingApprovals(items);
-      } catch {
-        // Silently ignore — API may be temporarily unavailable
-      }
-    };
-
-    poll();
-    const timer = setInterval(poll, APPROVAL_POLL_MS);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-  }, [agentId]);
+  const queryClient = useQueryClient();
+  const approvalsQuery = useQuery({
+    queryKey: ["approvals", "pending", agentId],
+    queryFn: () => listPendingApprovals(agentId!),
+    enabled: !!agentId,
+    refetchInterval: 5000,
+  });
 
   const remove = useCallback((id: string) => {
-    setPendingApprovals((prev) => prev.filter((a) => a.id !== id));
-  }, []);
+    queryClient.setQueryData<ApprovalItem[]>(
+      ["approvals", "pending", agentId],
+      (prev) => prev?.filter((a) => a.id !== id) ?? [],
+    );
+  }, [agentId, queryClient]);
 
-  return { pendingApprovals, removeApproval: remove };
+  return { pendingApprovals: approvalsQuery.data ?? [], removeApproval: remove };
 }
 
 // ---------------------------------------------------------------------------
@@ -695,23 +687,29 @@ function ApprovalCard({ approval, onResolved }: { approval: ApprovalItem; onReso
 export function ChatPage() {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
   const search = useSearch({ from: "/chat" });
   const initialAgentId = search?.agentId || "";
   const [selectedAgentId, setSelectedAgentId] = useState(initialAgentId);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
+  // Sync agent selection to URL search params
+  const selectAgent = useCallback((id: string) => {
+    setSelectedAgentId(id);
+    navigate({ to: "/chat", search: { agentId: id }, replace: true });
+  }, [navigate]);
+
   const agentsQuery = useQuery({ queryKey: ["agents", "list", "chat"], queryFn: listAgents, staleTime: 30000 });
-  const agents = (agentsQuery.data ?? []).sort((a, b) => {
-    // Suspended last
+  const agents = useMemo(() => [...(agentsQuery.data ?? [])].filter(a => !a.name.includes("-hand") && !a.name.includes(":")).sort((a, b) => {
+    // Auth missing → sort to bottom
+    const aNoAuth = isAuthUnavailable(a.auth_status) ? 1 : 0;
+    const bNoAuth = isAuthUnavailable(b.auth_status) ? 1 : 0;
+    if (aNoAuth !== bNoAuth) return aNoAuth - bNoAuth;
     const aSusp = (a.state || "").toLowerCase() === "suspended" ? 1 : 0;
     const bSusp = (b.state || "").toLowerCase() === "suspended" ? 1 : 0;
     if (aSusp !== bSusp) return aSusp - bSusp;
-    // Core agents first, hands second
-    const aHand = a.name.includes("-hand") ? 1 : 0;
-    const bHand = b.name.includes("-hand") ? 1 : 0;
-    if (aHand !== bHand) return aHand - bHand;
     return a.name.localeCompare(b.name);
-  });
+  }), [agentsQuery.data]);
   const { messages, isLoading, sendMessage, clearHistory, wsConnected } = useChatMessages(selectedAgentId || null, agents);
   const { pendingApprovals, removeApproval } = useApprovalPoller(selectedAgentId || null);
   const selectedAgent = agents.find(a => a.id === selectedAgentId);
@@ -720,17 +718,20 @@ export function ChatPage() {
     // Auto-select first running agent
     if (!selectedAgentId && agents.length > 0) {
       const firstRunning = agents.find(a => (a.state || "").toLowerCase() === "running");
-      setSelectedAgentId((firstRunning || agents[0]).id);
+      selectAgent((firstRunning || agents[0]).id);
     }
-  }, [agents, selectedAgentId]);
+  }, [agents, selectedAgentId, selectAgent]);
 
-  // Scroll to latest message
+  // Scroll to latest message — instant on agent switch, smooth on new messages
+  const prevMsgCountRef = useRef(0);
   useEffect(() => {
     if (messages.length > 0) {
+      const behavior = prevMsgCountRef.current === 0 ? "instant" as const : "smooth" as const;
       setTimeout(() => {
-        messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-      }, 100);
+        messagesEndRef.current?.scrollIntoView({ behavior, block: "end" });
+      }, 30);
     }
+    prevMsgCountRef.current = messages.length;
   }, [messages]);
 
   return (
@@ -741,14 +742,14 @@ export function ChatPage() {
           <div className="flex items-center gap-2 sm:gap-3">
             <div className="relative hidden sm:block">
               <Sparkles className="h-5 w-5 text-brand" />
-              <span className="absolute inset-0 bg-brand/30 animate-ping" />
+              <span className="absolute inset-0 bg-brand/30 animate-pulse" />
             </div>
             <span className="text-brand font-bold uppercase tracking-widest text-[10px] hidden sm:inline">{t("chat.neural_terminal")}</span>
             <h1 className="text-xl sm:text-3xl font-extrabold tracking-tight">{t("chat.title")}</h1>
           </div>
           <button
             onClick={() => queryClient.invalidateQueries({ queryKey: ["agents", "list"] })}
-            className="p-2 sm:p-2.5 rounded-xl hover:bg-surface-hover text-text-dim hover:text-brand transition-all"
+            className="p-2 sm:p-2.5 rounded-xl hover:bg-surface-hover text-text-dim hover:text-brand transition-colors"
           >
             <RefreshCw className={`h-4 w-4 ${agentsQuery.isFetching ? "animate-spin" : ""}`} />
           </button>
@@ -758,7 +759,7 @@ export function ChatPage() {
       {/* Main content area */}
       <div className="flex flex-1 overflow-hidden rounded-2xl border border-border-subtle bg-surface shadow-xl ring-1 ring-black/5 dark:ring-white/5">
         {/* Left sidebar - Agent list */}
-        <aside className="hidden md:flex w-64 flex-shrink-0 border-r border-border-subtle bg-main/30 backdrop-blur-md flex-col">
+        <aside className="hidden md:flex w-64 flex-shrink-0 border-r border-border-subtle bg-main flex-col">
           <div className="p-4 border-b border-border-subtle">
             <h3 className="text-[10px] font-black uppercase tracking-[0.2em] text-text-dim/60">{t("nav.agents")}</h3>
           </div>
@@ -769,8 +770,8 @@ export function ChatPage() {
               agents.map(agent => (
                 <button
                   key={agent.id}
-                  onClick={() => setSelectedAgentId(agent.id)}
-                  className={`w-full flex items-center gap-3 p-3 rounded-xl transition-all text-left group ${
+                  onClick={() => selectAgent(agent.id)}
+                  className={`w-full flex items-center gap-3 p-3 rounded-xl transition-colors text-left group ${
                     selectedAgentId === agent.id
                       ? "bg-brand text-white shadow-lg shadow-brand/20"
                       : "hover:bg-surface-hover"
@@ -789,12 +790,17 @@ export function ChatPage() {
                     )}
                   </div>
                   <div className="min-w-0 flex-1">
-                    <p className={`text-sm font-bold truncate ${(agent.state || "").toLowerCase() !== "running" ? "opacity-50" : ""}`}>{agent.name}</p>
+                    <div className="flex items-center gap-1.5">
+                      <p className={`text-sm font-bold truncate ${(agent.state || "").toLowerCase() !== "running" ? "opacity-50" : ""}`}>{agent.name}</p>
+                      {agent.auth_status === "configured" && <span className={`flex-shrink-0 px-1 py-0.5 rounded text-[8px] font-bold uppercase leading-none ${selectedAgentId === agent.id ? "bg-white/20" : "bg-brand/10 text-brand"}`}>KEY</span>}
+                      {agent.auth_status === "configured_cli" && <span className={`flex-shrink-0 px-1 py-0.5 rounded text-[8px] font-bold uppercase leading-none ${selectedAgentId === agent.id ? "bg-white/20" : "bg-accent/10 text-accent"}`}>CLI</span>}
+                      {isAuthUnavailable(agent.auth_status) && <AlertCircle className="h-3 w-3 text-warning flex-shrink-0" />}
+                    </div>
                     <p className={`text-[10px] truncate ${selectedAgentId === agent.id ? "text-white/70" : "text-text-dim"}`}>
-                      {agent.model_name || t("common.unknown")}
+                      {agent.model_provider || t("common.unknown")}
                     </p>
                   </div>
-                  <ArrowRight className={`h-4 w-4 transition-transform ${selectedAgentId === agent.id ? "rotate-90" : "opacity-0 group-hover:opacity-100"}`} />
+                  <ArrowRight className={`h-4 w-4 flex-shrink-0 transition-transform ${selectedAgentId === agent.id ? "rotate-90" : "opacity-0 group-hover:opacity-100"}`} />
                 </button>
               ))
             )}
@@ -813,7 +819,7 @@ export function ChatPage() {
           <div className="md:hidden px-3 py-2 border-b border-border-subtle bg-surface/80">
             <select
               value={selectedAgentId}
-              onChange={(e) => setSelectedAgentId(e.target.value)}
+              onChange={(e) => selectAgent(e.target.value)}
               className="w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-sm font-bold outline-none focus:border-brand"
             >
               <option value="">{t("chat.select_agent")}</option>
@@ -832,6 +838,7 @@ export function ChatPage() {
               messageCount={messages.length}
               onClear={clearHistory}
               wsConnected={wsConnected}
+              modelName={selectedAgent?.model_name}
             />
           )}
 
@@ -870,11 +877,13 @@ export function ChatPage() {
           </div>
 
           {/* Input area */}
-          <div className={`p-2 sm:p-4 border-t border-border-subtle bg-surface/90 backdrop-blur-md transition-all ${!selectedAgentId ? "opacity-30 pointer-events-none" : ""}`}>
+          <div className={`p-2 sm:p-4 border-t border-border-subtle bg-surface transition-opacity ${!selectedAgentId ? "opacity-30 pointer-events-none" : ""}`}>
             <ChatInput
               onSend={sendMessage}
               disabled={isLoading}
               placeholder={selectedAgentId ? t("chat.input_placeholder_with_agent", { name: selectedAgent?.name }) : t("chat.transmit_command")}
+              authMissing={isAuthUnavailable(selectedAgent?.auth_status)}
+              providerName={selectedAgent?.model_provider}
             />
           </div>
         </main>

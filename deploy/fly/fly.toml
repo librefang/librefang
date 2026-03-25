@@ -6,6 +6,7 @@ image = "ghcr.io/librefang/librefang:latest"
 
 [env]
   LIBREFANG_HOME = "/data"
+  LIBREFANG_LISTEN = "0.0.0.0:4545"
 
 [http_service]
   internal_port = 4545

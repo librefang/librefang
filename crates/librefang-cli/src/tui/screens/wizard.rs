@@ -386,7 +386,7 @@ impl WizardState {
                 }
             }
         };
-        let _ = std::fs::create_dir_all(librefang_dir.join("agents"));
+        let _ = std::fs::create_dir_all(librefang_dir.join("workspaces").join("agents"));
         let _ = std::fs::create_dir_all(librefang_dir.join("data"));
         crate::restrict_dir_permissions(&librefang_dir);
 

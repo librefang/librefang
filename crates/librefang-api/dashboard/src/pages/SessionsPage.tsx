@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { formatRelativeTime } from "../lib/datetime";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { deleteSession, listAgents, listSessions, switchAgentSession } from "../api";
@@ -9,6 +10,7 @@ import { PageHeader } from "../components/ui/PageHeader";
 import { ListSkeleton } from "../components/ui/Skeleton";
 import { useUIStore } from "../lib/store";
 import { Clock, Search, MessageCircle, Trash2, Play, Users } from "lucide-react";
+import { truncateId } from "../lib/string";
 
 const REFRESH_MS = 30000;
 
@@ -76,9 +78,7 @@ export function SessionsPage() {
     const now = new Date();
     const diff = now.getTime() - d.getTime();
     if (diff < 60000) return t("sessions.just_now");
-    if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`;
-    if (diff < 86400000) return `${Math.floor(diff / 3600000)}h ago`;
-    return d.toLocaleDateString();
+    return formatRelativeTime(ts);
   };
 
   return (
@@ -90,6 +90,7 @@ export function SessionsPage() {
         isFetching={sessionsQuery.isFetching}
         onRefresh={() => void sessionsQuery.refetch()}
         icon={<Clock className="h-4 w-4" />}
+        helpText={t("sessions.help")}
         actions={
           <div className="flex items-center gap-3">
             <Badge variant="brand">{activeCount} {t("sessions.active_count")}</Badge>
@@ -117,7 +118,7 @@ export function SessionsPage() {
             <div className="w-20 h-20 rounded-3xl bg-brand/10 flex items-center justify-center">
               <MessageCircle className="w-10 h-10 text-brand" />
             </div>
-            <span className="absolute inset-0 rounded-3xl bg-brand/5 animate-ping" style={{ animationDuration: "3s" }} />
+            <span className="absolute inset-0 rounded-3xl bg-brand/5 animate-pulse" style={{ animationDuration: "3s" }} />
           </div>
           <h3 className="text-xl font-black tracking-tight">{t("sessions.empty_title")}</h3>
           <p className="text-sm text-text-dim mt-2 max-w-xs text-center">{t("sessions.empty_desc")}</p>
@@ -148,7 +149,7 @@ export function SessionsPage() {
                     </Badge>
                   </div>
                   <div className="flex items-center gap-2 sm:gap-3 mt-0.5 sm:mt-1 text-[9px] sm:text-[10px] text-text-dim/60">
-                    <span className="font-mono">{s.session_id.slice(0, 8)}</span>
+                    <span className="font-mono">{truncateId(s.session_id)}</span>
                     <span className="flex items-center gap-1"><Clock className="w-3 h-3" /> {formatTime(s.created_at || "")}</span>
                     {s.message_count !== undefined && (
                       <span className="flex items-center gap-1 hidden sm:flex"><MessageCircle className="w-3 h-3" /> {s.message_count}</span>
@@ -170,7 +171,7 @@ export function SessionsPage() {
                     </div>
                   ) : (
                     <button onClick={() => handleDelete(s.session_id)} disabled={pendingId === s.session_id}
-                      className="p-1.5 sm:p-2 rounded-lg text-text-dim/30 hover:text-error hover:bg-error/10 transition-all">
+                      className="p-1.5 sm:p-2 rounded-lg text-text-dim/30 hover:text-error hover:bg-error/10 transition-colors">
                       <Trash2 className="w-3.5 h-3.5" />
                     </button>
                   )}

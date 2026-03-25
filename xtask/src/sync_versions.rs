@@ -24,7 +24,7 @@ fn validate_calver(version: &str) -> Result<(), Box<dyn std::error::Error>> {
     let re = Regex::new(r"^[0-9]{4}\.[0-9]{1,2}\.[0-9]{2,4}(-(beta|rc)[0-9]+)?$")?;
     if !re.is_match(version) {
         return Err(format!(
-            "'{}' is not a valid CalVer (expected: YYYY.M.DDHH e.g. 2026.3.2114)",
+            "'{}' is not a valid CalVer (expected: YYYY.M.DD e.g. 2026.3.21)",
             version
         )
         .into());
@@ -124,20 +124,22 @@ fn update_tauri_conf(path: &Path, version: &str) -> Result<(), Box<dyn std::erro
     let yyyy: u32 = parts[0].parse()?;
     let yy = yyyy % 100;
     let month: u32 = parts[1].parse()?;
-    let ddhh: u32 = parts[2].parse()?;
+    let dd: u32 = parts[2].parse()?;
 
     // Determine pre-release suffix
     let prerelease_re = Regex::new(r"-(beta|rc)([0-9]+)")?;
+    // Offset 32000 ensures all new YYYY.M.DD versions sort higher than
+    // legacy YYYY.M.DDHH versions (max old patch was 31239).
     let tauri_patch = if let Some(caps) = prerelease_re.captures(version) {
         let kind = caps.get(1).unwrap().as_str();
         let n: u32 = caps.get(2).unwrap().as_str().parse()?;
         match kind {
-            "beta" => ddhh * 10 + n,
-            "rc" => ddhh * 10 + 4 + n,
-            _ => ddhh * 10 + 9,
+            "beta" => 32000 + dd * 10 + n,
+            "rc" => 32000 + dd * 10 + 4 + n,
+            _ => 32000 + dd * 10 + 9,
         }
     } else {
-        ddhh * 10 + 9
+        32000 + dd * 10 + 9
     };
 
     let tauri_version = format!("{}.{}.{}", yy, month, tauri_patch);

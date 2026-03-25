@@ -55,6 +55,7 @@ Complete reference for `config.toml`, covering every configurable field in the L
   - [\[audit\]](#audit)
   - [\[health\_check\]](#health_check)
   - [\[plugins\]](#plugins)
+  - [\[prompt\_intelligence\]](#prompt_intelligence)
 - [Environment Variables](#environment-variables)
 - [Validation](#validation)
 
@@ -145,6 +146,7 @@ api_key = ""                          # API Bearer token (empty = unauthenticate
 dashboard_user = ""                   # Dashboard login username (empty = no login required)
 dashboard_pass = ""                   # Dashboard login password (supports vault:KEY syntax)
 mode = "default"                      # stable | default | dev
+update_channel = "stable"             # stable | beta | rc — CLI update channel
 language = "en"                       # Locale for CLI/messages
 usage_footer = "full"                 # off | tokens | cost | full
 prompt_caching = true                 # Enable LLM prompt caching
@@ -2593,6 +2595,25 @@ plugin_registries = ["acme-corp/librefang-plugins"]
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `plugin_registries` | list of strings | `[]` | Additional GitHub `owner/repo` plugin registries. Merged with `context_engine.plugin_registries`. |
+
+---
+
+### `[prompt_intelligence]`
+
+Configures prompt versioning and A/B experiment support. When enabled, LibreFang automatically tracks prompt version history and supports running A/B experiments to compare prompt variants. See the [Prompt Intelligence guide](/prompt-intelligence) for full documentation.
+
+```toml
+[prompt_intelligence]
+enabled = false
+hash_prompts = true
+max_versions_per_agent = 50
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `false` | Master toggle. When `false`, no prompt versions are tracked and experiments are skipped. |
+| `hash_prompts` | bool | `true` | Compute content hashes for prompt versions. |
+| `max_versions_per_agent` | u32 | `50` | Maximum prompt versions per agent. Oldest inactive versions are pruned when exceeded. |
 
 ---
 

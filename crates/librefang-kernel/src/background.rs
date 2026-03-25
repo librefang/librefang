@@ -290,20 +290,23 @@ pub fn parse_condition(condition: &str) -> Option<TriggerPattern> {
     None
 }
 
-/// Parse a simplified cron expression into seconds.
+/// Parse a cron or interval expression into a polling interval in seconds.
 ///
 /// Supported formats:
 /// - `"every 30s"` → 30
 /// - `"every 5m"` → 300
 /// - `"every 1h"` → 3600
 /// - `"every 2d"` → 172800
+/// - Standard 5-field cron (e.g. `"*/15 * * * *"`) → interval derived from
+///   the minute field: `*/N` → N*60, otherwise 60s for per-minute schedules.
+///   Hour/day constraints are handled by the cron scheduler, not this function.
 ///
 /// Falls back to 300 seconds (5 minutes) for unparseable expressions.
 pub fn parse_cron_to_secs(cron: &str) -> u64 {
-    let cron = cron.trim().to_lowercase();
+    let cron_lower = cron.trim().to_lowercase();
 
     // Try "every <N><unit>" format
-    if let Some(rest) = cron.strip_prefix("every ") {
+    if let Some(rest) = cron_lower.strip_prefix("every ") {
         let rest = rest.trim();
         if let Some(num_str) = rest.strip_suffix('s') {
             if let Ok(n) = num_str.trim().parse::<u64>() {
@@ -325,6 +328,30 @@ pub fn parse_cron_to_secs(cron: &str) -> u64 {
                 return n * 86400;
             }
         }
+    }
+
+    // Try standard 5-field cron: min hour dom month dow
+    let parts: Vec<&str> = cron.split_whitespace().collect();
+    if parts.len() == 5 {
+        let min_field = parts[0];
+        let hour_field = parts[1];
+
+        // */N minute interval (e.g. */15 → 900s)
+        if let Some(n_str) = min_field.strip_prefix("*/") {
+            if let Ok(n) = n_str.parse::<u64>() {
+                return n * 60;
+            }
+        }
+        // Specific minute(s) with hour constraint → run once per hour window
+        if min_field != "*" && hour_field != "*" {
+            return 3600;
+        }
+        // Every minute
+        if min_field == "*" {
+            return 60;
+        }
+        // Specific minute, every hour
+        return 3600;
     }
 
     warn!(cron = %cron, "Unparseable cron expression, defaulting to 300s");
@@ -359,9 +386,17 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_cron_fallback() {
-        // Unparseable → 300
+    fn test_parse_standard_cron() {
         assert_eq!(parse_cron_to_secs("*/5 * * * *"), 300);
+        assert_eq!(parse_cron_to_secs("*/15 * * * *"), 900);
+        assert_eq!(parse_cron_to_secs("*/15 21-23,0-5 * * 1-5"), 900);
+        assert_eq!(parse_cron_to_secs("0 9 * * *"), 3600);
+        assert_eq!(parse_cron_to_secs("* * * * *"), 60);
+        assert_eq!(parse_cron_to_secs("30 * * * *"), 3600);
+    }
+
+    #[test]
+    fn test_parse_cron_fallback() {
         assert_eq!(parse_cron_to_secs("gibberish"), 300);
     }
 

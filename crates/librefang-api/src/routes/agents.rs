@@ -708,7 +708,7 @@ fn enrich_agent_json(
                 .unwrap_or_else(|| "unknown".to_string());
             let auth = cat
                 .get_provider(provider)
-                .map(|p| format!("{:?}", p.auth_status).to_lowercase())
+                .map(|p| p.auth_status.to_string())
                 .unwrap_or_else(|| "unknown".to_string());
             (tier, auth)
         })
@@ -1038,12 +1038,13 @@ pub async fn send_message(
     // `ErrorTranslator` wraps a `FluentBundle` which is `!Send`, so it must
     // not be held across an await boundary (axum requires `Send` futures).
     let l = super::resolve_lang(lang.as_ref());
-    let (err_invalid_id, err_too_large, err_not_found) = {
+    let (err_invalid_id, err_too_large, err_not_found, err_auth_missing) = {
         let t = ErrorTranslator::new(l);
         (
             t.t("api-error-agent-invalid-id"),
             t.t("api-error-message-too-large"),
             t.t("api-error-agent-not-found"),
+            t.t("api-error-auth-missing"),
         )
     };
 
@@ -1072,6 +1073,33 @@ pub async fn send_message(
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": err_not_found})),
         );
+    }
+
+    // Reject messages when the agent's provider has no API key configured
+    {
+        let registry = state.kernel.agent_registry();
+        if let Some(entry) = registry.get(agent_id) {
+            let dm = &state.kernel.config_ref().default_model;
+            let provider = if entry.manifest.model.provider.is_empty()
+                || entry.manifest.model.provider == "default"
+            {
+                &dm.provider
+            } else {
+                &entry.manifest.model.provider
+            };
+            if let Some(catalog) = state.kernel.model_catalog_ref().read().ok().as_ref() {
+                if let Some(p) = catalog.get_provider(provider) {
+                    if !p.auth_status.is_available() {
+                        return (
+                            StatusCode::PRECONDITION_FAILED,
+                            Json(
+                                serde_json::json!({"error": format!("{} (provider: {})", err_auth_missing, provider)}),
+                            ),
+                        );
+                    }
+                }
+            }
+        }
     }
 
     // Resolve file attachments into image content blocks
@@ -4644,7 +4672,7 @@ mod monitoring_tests {
         (status, json)
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_agent_metrics_returns_json_shape_for_existing_agent() {
         let (state, _tmp) = monitoring_test_app_state();
         let agent_id = spawn_monitoring_test_agent(&state, "metrics-shape");
@@ -4660,7 +4688,7 @@ mod monitoring_tests {
         assert!(body.get("avg_response_time_ms").is_some());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_agent_metrics_returns_not_found_for_unknown_agent() {
         let (state, _tmp) = monitoring_test_app_state();
 
@@ -4673,7 +4701,7 @@ mod monitoring_tests {
         assert_eq!(body["error"], "Agent not found");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_agent_logs_filters_level_by_exact_match() {
         let (state, _tmp) = monitoring_test_app_state();
         let agent_id = spawn_monitoring_test_agent(&state, "logs-filter");

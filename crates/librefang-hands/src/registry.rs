@@ -632,6 +632,13 @@ fn check_requirement(req: &HandRequirement) -> bool {
                 .map(|v| !v.is_empty())
                 .unwrap_or(false)
         }
+        RequirementType::AnyEnvVar => {
+            // check_value is comma-separated list of env var names; any one being set is enough
+            req.check_value
+                .split(',')
+                .map(str::trim)
+                .any(|var| std::env::var(var).map(|v| !v.is_empty()).unwrap_or(false))
+        }
     }
 }
 
@@ -757,7 +764,7 @@ mod tests {
         let reg = HandRegistry::new();
         let home = ensure_test_home();
         let count = reg.load_bundled(&home);
-        assert_eq!(count, 14);
+        assert_eq!(count, 15);
         assert!(!reg.list_definitions().is_empty());
 
         // Clip hand should be loaded

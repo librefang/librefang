@@ -77,6 +77,8 @@ pub enum RequirementType {
     EnvVar,
     /// An API key env var must be set.
     ApiKey,
+    /// Any one of several env vars must be set (comma-separated in check_value).
+    AnyEnvVar,
 }
 
 /// Platform-specific install commands and guides for a requirement.
@@ -429,6 +431,17 @@ pub struct HandSettingI18n {
     pub description: Option<String>,
 }
 
+/// Localized strings for a single agent within a Hand.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HandAgentI18n {
+    /// Localized agent display name.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Localized agent description.
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
 /// Localized strings for a Hand definition.
 ///
 /// All fields are optional — HAND.toml files work without any `[i18n.*]` section.
@@ -440,6 +453,11 @@ pub struct HandSettingI18n {
 /// [i18n.zh]
 /// name = "线索生成 Hand"
 /// description = "自主线索生成"
+///
+/// # Optional: translate individual agent names/descriptions.
+/// [i18n.zh.agents.main]
+/// name = "主协调器"
+/// description = "协调各个子智能体完成任务"
 ///
 /// # Optional: translate individual settings. Omit to keep English labels.
 /// [i18n.zh.settings.target_industry]
@@ -457,6 +475,10 @@ pub struct HandI18n {
     /// Localized category display name.
     #[serde(default)]
     pub category: Option<String>,
+    /// Localized agent names/descriptions, keyed by role name.
+    /// Optional — agents without translations fall back to English.
+    #[serde(default)]
+    pub agents: HashMap<String, HandAgentI18n>,
     /// Localized setting labels/descriptions, keyed by setting key.
     /// Optional — settings without translations fall back to English.
     #[serde(default)]

@@ -1,19 +1,20 @@
 {
   "name": "@librefang/whatsapp-gateway",
-  "version": "2026.3.2201",
+  "version": "2026.3.25-rc2",
   "description": "WhatsApp Web gateway for LibreFang — QR code login, bidirectional messaging via Baileys",
   "bin": {
     "librefang-whatsapp-gateway": "./index.js"
   },
-  "type": "commonjs",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^6",
+    "better-sqlite3": "^12.8.0",
+    "pino": "^9",
     "qrcode": "^1.5",
-    "pino": "^9"
+    "toml": "^3.0.0"
   },
   "engines": {
     "node": ">=18"

@@ -245,6 +245,8 @@ pub struct LibreFangKernel {
     pub(crate) memory: Arc<MemorySubstrate>,
     /// Proactive memory store (mem0-style auto_retrieve/auto_memorize).
     pub(crate) proactive_memory: OnceLock<Arc<librefang_memory::ProactiveMemoryStore>>,
+    /// Prompt versioning and A/B experiment store.
+    pub(crate) prompt_store: OnceLock<librefang_memory::PromptStore>,
     /// Process supervisor.
     pub(crate) supervisor: Supervisor,
     /// Workflow engine.
@@ -520,7 +522,16 @@ fn init_git_if_missing(home_dir: &Path) {
         .current_dir(home_dir)
         .status();
     let _ = std::process::Command::new("git")
-        .args(["commit", "-q", "-m", "chore: initial librefang config"])
+        .args([
+            "-c",
+            "user.name=LibreFang",
+            "-c",
+            "user.email=noreply@librefang.ai",
+            "commit",
+            "-q",
+            "-m",
+            "chore: initial librefang config",
+        ])
         .current_dir(home_dir)
         .status();
     info!("Initialized git repo in {}", home_dir.display());
@@ -1408,6 +1419,11 @@ impl LibreFangKernel {
             librefang_memory::usage::UsageStore::new(memory.usage_conn()),
         )));
 
+        // Initialize prompt versioning and A/B experiment store with its own connection
+        // to avoid conflicts with UsageStore concurrent writes
+        let prompt_store = librefang_memory::PromptStore::new_with_path(&db_path)
+            .map_err(|e| KernelError::BootFailed(format!("Prompt store init failed: {e}")))?;
+
         let supervisor = Supervisor::new();
         let background = BackgroundExecutor::new(supervisor.subscribe());
 
@@ -1592,7 +1608,9 @@ impl LibreFangKernel {
                 // If the user left embedding_model at the default ("all-MiniLM-L6-v2"),
                 // pick a sensible default for the chosen provider so we don't send a
                 // local model name to a cloud API.
-                let model = if configured_model == "all-MiniLM-L6-v2" {
+                let model = if configured_model == "all-MiniLM-L6-v2"
+                    || configured_model == "text-embedding-3-small"
+                {
                     default_embedding_model_for_provider(provider)
                 } else {
                     configured_model.as_str()
@@ -1619,7 +1637,9 @@ impl LibreFangKernel {
                     }
                 }
             } else if std::env::var("OPENAI_API_KEY").is_ok() {
-                let model = if configured_model == "all-MiniLM-L6-v2" {
+                let model = if configured_model == "all-MiniLM-L6-v2"
+                    || configured_model == "text-embedding-3-small"
+                {
                     default_embedding_model_for_provider("openai")
                 } else {
                     configured_model.as_str()
@@ -1643,7 +1663,9 @@ impl LibreFangKernel {
                 }
             } else {
                 // Try Ollama (local, no key needed)
-                let model = if configured_model == "all-MiniLM-L6-v2" {
+                let model = if configured_model == "all-MiniLM-L6-v2"
+                    || configured_model == "text-embedding-3-small"
+                {
                     default_embedding_model_for_provider("ollama")
                 } else {
                     configured_model.as_str()
@@ -1790,6 +1812,7 @@ impl LibreFangKernel {
             scheduler: AgentScheduler::new(),
             memory: memory.clone(),
             proactive_memory: OnceLock::new(),
+            prompt_store: OnceLock::new(),
             supervisor,
             workflows: WorkflowEngine::new(),
             template_registry: WorkflowTemplateRegistry::new(),
@@ -1884,6 +1907,9 @@ impl LibreFangKernel {
                 let _ = kernel.proactive_memory.set(s);
             }
         }
+
+        // Initialize prompt store
+        let _ = kernel.prompt_store.set(prompt_store);
 
         // Restore persisted agents from SQLite
         match kernel.memory.load_all_agents() {
@@ -2109,7 +2135,8 @@ system_prompt = "You are a helpful assistant."
         // Auto-register workflow definitions from ~/.librefang/workflows/
         {
             let workflows_dir = kernel.config.home_dir.join("workflows");
-            let loaded = kernel.workflows.load_from_dir_sync(&workflows_dir);
+            let loaded =
+                tokio::task::block_in_place(|| kernel.workflows.load_from_dir_sync(&workflows_dir));
             if loaded > 0 {
                 info!(
                     "Auto-registered {loaded} workflow(s) from {}",
@@ -2118,16 +2145,37 @@ system_prompt = "You are a helpful assistant."
             }
         }
 
-        // Load workflow templates from ~/.librefang/workflows/templates/
+        // Pre-install built-in workflow templates, then load
         {
+            let registry_dir = kernel.config.home_dir.join("registry").join("workflows");
             let user_dir = kernel.config.home_dir.join("workflows").join("templates");
-            let loaded = kernel.template_registry.load_templates_from_dir(&user_dir);
-            if loaded > 0 {
-                info!(
-                    "Loaded {loaded} workflow template(s) from {}",
-                    user_dir.display()
-                );
-            }
+
+            tokio::task::block_in_place(|| {
+                // Sync built-in templates to user directory (always overwrite)
+                let mut installed = 0usize;
+                if registry_dir.is_dir() {
+                    let _ = std::fs::create_dir_all(&user_dir);
+                    if let Ok(entries) = std::fs::read_dir(&registry_dir) {
+                        for entry in entries.flatten() {
+                            let path = entry.path();
+                            if path.extension().and_then(|e| e.to_str()) == Some("toml") {
+                                let dest = user_dir.join(path.file_name().unwrap());
+                                if std::fs::copy(&path, &dest).is_ok() {
+                                    installed += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+                if installed > 0 {
+                    info!("Pre-installed {installed} workflow template(s) from registry");
+                }
+
+                let loaded = kernel.template_registry.load_templates_from_dir(&user_dir);
+                if loaded > 0 {
+                    info!("Loaded {loaded} workflow template(s)");
+                }
+            });
         }
 
         // Validate routing configs against model catalog
@@ -2597,6 +2645,7 @@ system_prompt = "You are a helpful assistant."
             "Ephemeral /btw message — using temporary session (no history, no persistence)"
         );
 
+        let start_time = std::time::Instant::now();
         let result = run_agent_loop(
             &manifest,
             message,
@@ -2627,6 +2676,8 @@ system_prompt = "You are a helpful assistant."
         .await
         .map_err(KernelError::LibreFang)?;
 
+        let latency_ms = start_time.elapsed().as_millis() as u64;
+
         // NOTE: We intentionally do NOT save the ephemeral session, do NOT
         // update canonical memory, do NOT write JSONL mirror, and do NOT
         // append to the daily memory log. The side question is truly ephemeral.
@@ -2646,10 +2697,26 @@ system_prompt = "You are a helpful assistant."
             output_tokens: result.total_usage.output_tokens,
             cost_usd: cost,
             tool_calls: result.iterations.saturating_sub(1),
+            latency_ms,
         });
+
+        // Record experiment metrics if running an experiment (kernel has cost info)
+        if let Some(ref ctx) = result.experiment_context {
+            let has_content = !result.response.trim().is_empty();
+            let no_tool_errors = result.iterations > 0;
+            let success = has_content && no_tool_errors;
+            let _ = self.record_experiment_request(
+                &ctx.experiment_id.to_string(),
+                &ctx.variant_id.to_string(),
+                latency_ms,
+                cost,
+                success,
+            );
+        }
 
         let mut result = result;
         result.cost_usd = if cost > 0.0 { Some(cost) } else { None };
+        result.latency_ms = latency_ms;
 
         Ok(result)
     }
@@ -3190,6 +3257,7 @@ system_prompt = "You are a helpful assistant."
             // Set up mid-turn injection channel (#956)
             let injection_rx = kernel_clone.setup_injection_channel(agent_id);
 
+            let start_time = std::time::Instant::now();
             let result = run_agent_loop_streaming(
                 &manifest,
                 &message_owned,
@@ -3230,6 +3298,8 @@ system_prompt = "You are a helpful assistant."
 
             // Tear down injection channel after loop finishes
             kernel_clone.teardown_injection_channel(agent_id);
+
+            let latency_ms = start_time.elapsed().as_millis() as u64;
 
             match result {
                 Ok(result) => {
@@ -3276,7 +3346,22 @@ system_prompt = "You are a helpful assistant."
                             output_tokens: result.total_usage.output_tokens,
                             cost_usd: cost,
                             tool_calls: result.iterations.saturating_sub(1),
+                            latency_ms,
                         });
+
+                    // Record experiment metrics if running an experiment (kernel has cost info)
+                    if let Some(ref ctx) = result.experiment_context {
+                        let has_content = !result.response.trim().is_empty();
+                        let no_tool_errors = result.iterations > 0;
+                        let success = has_content && no_tool_errors;
+                        let _ = kernel_clone.record_experiment_request(
+                            &ctx.experiment_id.to_string(),
+                            &ctx.variant_id.to_string(),
+                            latency_ms,
+                            cost,
+                            success,
+                        );
+                    }
 
                     let _ = kernel_clone
                         .registry
@@ -3406,6 +3491,8 @@ system_prompt = "You are a helpful assistant."
             memories_used: Vec::new(),
             memory_conflicts: Vec::new(),
             provider_not_configured: false,
+            experiment_context: None,
+            latency_ms: 0,
         })
     }
 
@@ -3472,6 +3559,8 @@ system_prompt = "You are a helpful assistant."
             memories_used: Vec::new(),
             memory_conflicts: Vec::new(),
             provider_not_configured: false,
+            experiment_context: None,
+            latency_ms: 0,
         })
     }
 
@@ -3517,8 +3606,9 @@ system_prompt = "You are a helpful assistant."
             return None;
         }
 
-        let dynamic_choices =
-            router::all_template_descriptions(&self.config.home_dir.join("agents"));
+        let dynamic_choices = router::all_template_descriptions(
+            &self.config.home_dir.join("workspaces").join("agents"),
+        );
         let routable_names: HashSet<String> = dynamic_choices
             .iter()
             .map(|(name, _)| name.clone())
@@ -3681,8 +3771,11 @@ system_prompt = "You are a helpful assistant."
 
     fn route_assistant_by_metadata(&self, message: &str) -> Option<AssistantRouteTarget> {
         let hand_selection = router::auto_select_hand(message, None);
-        let template_selection =
-            router::auto_select_template(message, &self.config.home_dir.join("agents"), None);
+        let template_selection = router::auto_select_template(
+            message,
+            &self.config.home_dir.join("workspaces").join("agents"),
+            None,
+        );
 
         let hand_candidate = hand_selection
             .hand_id
@@ -4113,6 +4206,7 @@ system_prompt = "You are a helpful assistant."
         // Set up mid-turn injection channel (#956)
         let injection_rx = self.setup_injection_channel(agent_id);
 
+        let start_time = std::time::Instant::now();
         let result = run_agent_loop(
             &manifest,
             &message_with_links,
@@ -4155,6 +4249,8 @@ system_prompt = "You are a helpful assistant."
 
         let result = result.map_err(KernelError::LibreFang)?;
 
+        let latency_ms = start_time.elapsed().as_millis() as u64;
+
         // Append new messages to canonical session for cross-channel memory
         if session.messages.len() > messages_before {
             let new_messages = session.messages[messages_before..].to_vec();
@@ -4190,10 +4286,12 @@ system_prompt = "You are a helpful assistant."
             output_tokens: result.total_usage.output_tokens,
             cost_usd: cost,
             tool_calls: result.iterations.saturating_sub(1),
+            latency_ms,
         });
 
         // Populate cost on the result based on usage_footer mode
         let mut result = result;
+        result.latency_ms = latency_ms;
         match self.config.usage_footer {
             librefang_types::config::UsageFooterMode::Off => {
                 result.cost_usd = None;
@@ -7177,7 +7275,14 @@ system_prompt = "You are a helpful assistant."
             .unwrap_or_default();
 
         for server_config in &servers {
-            let transport = match &server_config.transport {
+            let transport_entry = match &server_config.transport {
+                Some(t) => t,
+                None => {
+                    tracing::warn!(name = %server_config.name, "MCP server has no transport configured, skipping");
+                    continue;
+                }
+            };
+            let transport = match transport_entry {
                 McpTransportEntry::Stdio { command, args } => McpTransport::Stdio {
                     command: command.clone(),
                     args: args.clone(),
@@ -7294,7 +7399,13 @@ system_prompt = "You are a helpful assistant."
         // 5. Connect new servers
         let mut connected_count = 0;
         for server_config in &new_servers {
-            let transport = match &server_config.transport {
+            let transport_entry = match &server_config.transport {
+                Some(t) => t,
+                None => {
+                    continue;
+                }
+            };
+            let transport = match transport_entry {
                 McpTransportEntry::Stdio { command, args } => McpTransport::Stdio {
                     command: command.clone(),
                     args: args.clone(),
@@ -7421,7 +7532,16 @@ system_prompt = "You are a helpful assistant."
 
         self.extension_health.mark_reconnecting(id);
 
-        let transport = match &server_config.transport {
+        let transport_entry = match &server_config.transport {
+            Some(t) => t,
+            None => {
+                return Err(format!(
+                    "MCP server '{}' has no transport configured",
+                    server_config.name
+                ));
+            }
+        };
+        let transport = match transport_entry {
             McpTransportEntry::Stdio { command, args } => McpTransport::Stdio {
                 command: command.clone(),
                 args: args.clone(),
@@ -8395,6 +8515,13 @@ impl KernelHandle for LibreFangKernel {
             .map_err(|e| format!("Memory recall failed: {e}"))
     }
 
+    fn memory_list(&self) -> Result<Vec<String>, String> {
+        let agent_id = shared_memory_agent_id();
+        self.memory
+            .list_keys(agent_id)
+            .map_err(|e| format!("Memory list failed: {e}"))
+    }
+
     fn find_agents(&self, query: &str) -> Vec<kernel_handle::AgentInfo> {
         let q = query.to_lowercase();
         self.registry
@@ -9025,6 +9152,253 @@ impl KernelHandle for LibreFangKernel {
         // Delegate to the normal spawn path (use trait method via KernelHandle::)
         KernelHandle::spawn_agent(self, manifest_toml, parent_id).await
     }
+
+    fn get_running_experiment(
+        &self,
+        agent_id: &str,
+    ) -> Result<Option<librefang_types::agent::PromptExperiment>, String> {
+        if !self.config.prompt_intelligence.enabled {
+            return Ok(None);
+        }
+        let id: AgentId = agent_id
+            .parse()
+            .map_err(|e| format!("Invalid agent ID: {e}"))?;
+        let store = self
+            .prompt_store
+            .get()
+            .ok_or("Prompt store not initialized")?;
+        store
+            .get_running_experiment(id)
+            .map_err(|e| format!("Failed to get experiment: {e}"))
+    }
+
+    fn record_experiment_request(
+        &self,
+        experiment_id: &str,
+        variant_id: &str,
+        latency_ms: u64,
+        cost_usd: f64,
+        success: bool,
+    ) -> Result<(), String> {
+        let exp_id: uuid::Uuid = experiment_id
+            .parse()
+            .map_err(|e| format!("Invalid experiment ID: {e}"))?;
+        let var_id: uuid::Uuid = variant_id
+            .parse()
+            .map_err(|e| format!("Invalid variant ID: {e}"))?;
+        let store = self
+            .prompt_store
+            .get()
+            .ok_or("Prompt store not initialized")?;
+        store
+            .record_request(exp_id, var_id, latency_ms, cost_usd, success)
+            .map_err(|e| format!("Failed to record request: {e}"))
+    }
+
+    fn get_prompt_version(
+        &self,
+        version_id: &str,
+    ) -> Result<Option<librefang_types::agent::PromptVersion>, String> {
+        let id: uuid::Uuid = version_id
+            .parse()
+            .map_err(|e| format!("Invalid version ID: {e}"))?;
+        let store = self
+            .prompt_store
+            .get()
+            .ok_or("Prompt store not initialized")?;
+        store
+            .get_version(id)
+            .map_err(|e| format!("Failed to get version: {e}"))
+    }
+
+    fn list_prompt_versions(
+        &self,
+        agent_id: librefang_types::agent::AgentId,
+    ) -> Result<Vec<librefang_types::agent::PromptVersion>, String> {
+        let store = self
+            .prompt_store
+            .get()
+            .ok_or("Prompt store not initialized")?;
+        store
+            .list_versions(agent_id)
+            .map_err(|e| format!("Failed to list versions: {e}"))
+    }
+
+    fn create_prompt_version(
+        &self,
+        version: librefang_types::agent::PromptVersion,
+    ) -> Result<(), String> {
+        let store = self
+            .prompt_store
+            .get()
+            .ok_or("Prompt store not initialized")?;
+        let agent_id = version.agent_id;
+        store
+            .create_version(version)
+            .map_err(|e| format!("Failed to create version: {e}"))?;
+        // Prune old versions if over the configured limit
+        let max = self.config.prompt_intelligence.max_versions_per_agent;
+        let _ = store.prune_old_versions(agent_id, max);
+        Ok(())
+    }
+
+    fn delete_prompt_version(&self, version_id: &str) -> Result<(), String> {
+        let id: uuid::Uuid = version_id
+            .parse()
+            .map_err(|e| format!("Invalid version ID: {e}"))?;
+        let store = self
+            .prompt_store
+            .get()
+            .ok_or("Prompt store not initialized")?;
+        store
+            .delete_version(id)
+            .map_err(|e| format!("Failed to delete version: {e}"))
+    }
+
+    fn set_active_prompt_version(&self, version_id: &str, agent_id: &str) -> Result<(), String> {
+        let id: uuid::Uuid = version_id
+            .parse()
+            .map_err(|e| format!("Invalid version ID: {e}"))?;
+        let agent: librefang_types::agent::AgentId = agent_id
+            .parse()
+            .map_err(|e| format!("Invalid agent ID: {e}"))?;
+        let store = self
+            .prompt_store
+            .get()
+            .ok_or("Prompt store not initialized")?;
+        store
+            .set_active_version(id, agent)
+            .map_err(|e| format!("Failed to set active version: {e}"))
+    }
+
+    fn list_experiments(
+        &self,
+        agent_id: librefang_types::agent::AgentId,
+    ) -> Result<Vec<librefang_types::agent::PromptExperiment>, String> {
+        let store = self
+            .prompt_store
+            .get()
+            .ok_or("Prompt store not initialized")?;
+        store
+            .list_experiments(agent_id)
+            .map_err(|e| format!("Failed to list experiments: {e}"))
+    }
+
+    fn create_experiment(
+        &self,
+        experiment: librefang_types::agent::PromptExperiment,
+    ) -> Result<(), String> {
+        let store = self
+            .prompt_store
+            .get()
+            .ok_or("Prompt store not initialized")?;
+        store
+            .create_experiment(experiment)
+            .map_err(|e| format!("Failed to create experiment: {e}"))
+    }
+
+    fn get_experiment(
+        &self,
+        experiment_id: &str,
+    ) -> Result<Option<librefang_types::agent::PromptExperiment>, String> {
+        let id: uuid::Uuid = experiment_id
+            .parse()
+            .map_err(|e| format!("Invalid experiment ID: {e}"))?;
+        let store = self
+            .prompt_store
+            .get()
+            .ok_or("Prompt store not initialized")?;
+        store
+            .get_experiment(id)
+            .map_err(|e| format!("Failed to get experiment: {e}"))
+    }
+
+    fn update_experiment_status(
+        &self,
+        experiment_id: &str,
+        status: librefang_types::agent::ExperimentStatus,
+    ) -> Result<(), String> {
+        let id: uuid::Uuid = experiment_id
+            .parse()
+            .map_err(|e| format!("Invalid experiment ID: {e}"))?;
+        let store = self
+            .prompt_store
+            .get()
+            .ok_or("Prompt store not initialized")?;
+        store
+            .update_experiment_status(id, status)
+            .map_err(|e| format!("Failed to update experiment status: {e}"))?;
+
+        // When completing an experiment, auto-activate the winning variant's prompt version
+        if status == librefang_types::agent::ExperimentStatus::Completed {
+            let metrics = store
+                .get_experiment_metrics(id)
+                .map_err(|e| format!("Failed to get experiment metrics: {e}"))?;
+            if let Some(winner) = metrics.iter().max_by(|a, b| {
+                a.success_rate
+                    .partial_cmp(&b.success_rate)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            }) {
+                if let Some(exp) = store
+                    .get_experiment(id)
+                    .map_err(|e| format!("Failed to get experiment: {e}"))?
+                {
+                    if let Some(variant) = exp.variants.iter().find(|v| v.id == winner.variant_id) {
+                        let _ = store.set_active_version(variant.prompt_version_id, exp.agent_id);
+                        tracing::info!(
+                            experiment_id = %id,
+                            winner_variant = %winner.variant_name,
+                            success_rate = winner.success_rate,
+                            "Auto-activated winning variant's prompt version"
+                        );
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn get_experiment_metrics(
+        &self,
+        experiment_id: &str,
+    ) -> Result<Vec<librefang_types::agent::ExperimentVariantMetrics>, String> {
+        let id: uuid::Uuid = experiment_id
+            .parse()
+            .map_err(|e| format!("Invalid experiment ID: {e}"))?;
+        let store = self
+            .prompt_store
+            .get()
+            .ok_or("Prompt store not initialized")?;
+        store
+            .get_experiment_metrics(id)
+            .map_err(|e| format!("Failed to get experiment metrics: {e}"))
+    }
+
+    fn auto_track_prompt_version(
+        &self,
+        agent_id: librefang_types::agent::AgentId,
+        system_prompt: &str,
+    ) -> Result<(), String> {
+        if !self.config.prompt_intelligence.enabled {
+            return Ok(());
+        }
+        let store = self
+            .prompt_store
+            .get()
+            .ok_or("Prompt store not initialized")?;
+        match store.create_version_if_changed(agent_id, system_prompt, "auto") {
+            Ok(true) => {
+                tracing::debug!(agent_id = %agent_id, "Auto-tracked new prompt version");
+                // Prune old versions
+                let max = self.config.prompt_intelligence.max_versions_per_agent;
+                let _ = store.prune_old_versions(agent_id, max);
+                Ok(())
+            }
+            Ok(false) => Ok(()),
+            Err(e) => Err(format!("Failed to auto-track prompt version: {e}")),
+        }
+    }
 }
 
 // --- OFP Wire Protocol integration ---
@@ -9634,7 +10008,7 @@ mod tests {
         kernel.shutdown();
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_send_message_ephemeral_unknown_agent_returns_not_found() {
         let dir = tempfile::tempdir().unwrap();
         let home_dir = dir.path().to_path_buf();
@@ -9659,7 +10033,7 @@ mod tests {
         kernel.shutdown();
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_send_message_ephemeral_does_not_modify_session() {
         let dir = tempfile::tempdir().unwrap();
         let home_dir = dir.path().to_path_buf();

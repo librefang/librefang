@@ -1253,6 +1253,12 @@ async fn send_response(
     thread_id: Option<&str>,
     output_format: OutputFormat,
 ) {
+    tracing::debug!(
+        adapter = adapter.name(),
+        user = %user.platform_id,
+        text_len = text.len(),
+        "Sending response to channel"
+    );
     let formatted = if adapter.name() == "wecom" {
         formatter::format_for_wecom(&text, output_format)
     } else {

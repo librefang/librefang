@@ -65,10 +65,10 @@ pub fn sync_registry(home_dir: &Path) {
         }
     }
 
-    // Pre-install all agent templates from registry
+    // Pre-install agent templates from registry (e.g. hello-world)
     let agents_src = registry_cache.join("agents");
     if agents_src.exists() {
-        let agents_dest = home_dir.join("agents");
+        let agents_dest = home_dir.join("workspaces").join("agents");
         if let Ok(entries) = std::fs::read_dir(&agents_src) {
             for entry in entries.flatten() {
                 let src = entry.path();
@@ -241,9 +241,9 @@ pub fn resolve_home_dir_for_tests() -> std::path::PathBuf {
     std::env::var("LIBREFANG_HOME")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| {
-            dirs::home_dir()
-                .unwrap_or_else(std::env::temp_dir)
-                .join(".librefang")
+            // Use process-unique dir to avoid git lock conflicts
+            // when nextest runs tests in parallel processes.
+            std::env::temp_dir().join(format!("librefang-test-{}", std::process::id()))
         })
 }
 

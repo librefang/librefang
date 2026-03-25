@@ -64,8 +64,11 @@ librefang start
 
 ```bash
 brew tap librefang/tap
-brew install librefang        # CLI
-brew install --cask librefang  # Desktop App
+brew install librefang              # CLI (stable)
+brew install --cask librefang       # Desktop (stable)
+# Beta/RC channels also available:
+# brew install librefang-beta       # or librefang-rc
+# brew install --cask librefang-rc  # or librefang-beta
 ```
 
 </details>

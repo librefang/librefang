@@ -61,7 +61,7 @@ memory_write = ["self.*"]
 // ---------------------------------------------------------------------------
 
 /// Test that workflow registration and agent resolution work at the kernel level.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_workflow_register_and_resolve() {
     let config = test_config("ollama", "test-model", "OLLAMA_API_KEY");
     let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
@@ -181,7 +181,7 @@ memory_write = ["self.*"]
 }
 
 /// Test workflow with agent referenced by ID.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_workflow_agent_by_id() {
     let config = test_config("ollama", "test-model", "OLLAMA_API_KEY");
     let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
@@ -241,7 +241,7 @@ memory_write = ["self.*"]
 }
 
 /// Test trigger registration and listing at kernel level.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_trigger_registration_with_kernel() {
     use librefang_kernel::triggers::TriggerPattern;
 
@@ -313,7 +313,7 @@ memory_write = ["self.*"]
 
 /// End-to-end: boot kernel → spawn 2 agents → create 2-step workflow →
 /// run it through the real Groq LLM → verify output flows from step 1 to step 2.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_workflow_e2e_with_groq() {
     if std::env::var("GROQ_API_KEY").is_err() {
         eprintln!("GROQ_API_KEY not set, skipping E2E workflow test");

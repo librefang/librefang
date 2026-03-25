@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 12;
+const SCHEMA_VERSION: u32 = 14;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -57,6 +57,14 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
 
     if current_version < 12 {
         migrate_v12(conn)?;
+    }
+
+    if current_version < 13 {
+        migrate_v13(conn)?;
+    }
+
+    if current_version < 14 {
+        migrate_v14(conn)?;
     }
 
     set_schema_version(conn, SCHEMA_VERSION)?;
@@ -413,7 +421,94 @@ fn migrate_v12(conn: &Connection) -> Result<(), rusqlite::Error> {
     Ok(())
 }
 
+/// Version 13: Add prompt versioning and A/B testing tables.
+fn migrate_v13(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "
+        -- Prompt versions: stores version history for agent prompts
+        CREATE TABLE IF NOT EXISTS prompt_versions (
+            id TEXT PRIMARY KEY,
+            agent_id TEXT NOT NULL,
+            version INTEGER NOT NULL,
+            content_hash TEXT NOT NULL,
+            system_prompt TEXT NOT NULL,
+            tools TEXT NOT NULL,
+            variables TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            created_by TEXT NOT NULL,
+            is_active INTEGER NOT NULL DEFAULT 0,
+            description TEXT,
+            UNIQUE(agent_id, version)
+        );
+
+        -- Prompt experiments: A/B experiment definitions
+        CREATE TABLE IF NOT EXISTS prompt_experiments (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            agent_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            traffic_split TEXT NOT NULL,
+            success_criteria TEXT NOT NULL,
+            started_at TEXT,
+            ended_at TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(agent_id) REFERENCES agents(id)
+        );
+
+        -- Experiment variants: variants within experiments
+        CREATE TABLE IF NOT EXISTS experiment_variants (
+            id TEXT PRIMARY KEY,
+            experiment_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            prompt_version_id TEXT NOT NULL,
+            description TEXT,
+            FOREIGN KEY(experiment_id) REFERENCES prompt_experiments(id),
+            FOREIGN KEY(prompt_version_id) REFERENCES prompt_versions(id)
+        );
+
+        -- Experiment metrics: aggregated metrics per variant
+        CREATE TABLE IF NOT EXISTS experiment_metrics (
+            id TEXT PRIMARY KEY,
+            experiment_id TEXT NOT NULL,
+            variant_id TEXT NOT NULL,
+            total_requests INTEGER NOT NULL DEFAULT 0,
+            successful_requests INTEGER NOT NULL DEFAULT 0,
+            failed_requests INTEGER NOT NULL DEFAULT 0,
+            total_latency_ms INTEGER NOT NULL DEFAULT 0,
+            total_cost_usd REAL NOT NULL DEFAULT 0,
+            last_updated TEXT NOT NULL,
+            FOREIGN KEY(experiment_id) REFERENCES prompt_experiments(id),
+            FOREIGN KEY(variant_id) REFERENCES experiment_variants(id)
+        );
+
+        -- Indexes for prompt versioning tables
+        CREATE INDEX IF NOT EXISTS idx_prompt_versions_agent ON prompt_versions(agent_id);
+        CREATE INDEX IF NOT EXISTS idx_prompt_versions_active ON prompt_versions(agent_id, is_active);
+        CREATE INDEX IF NOT EXISTS idx_experiments_agent ON prompt_experiments(agent_id);
+        CREATE INDEX IF NOT EXISTS idx_experiments_status ON prompt_experiments(status);
+        CREATE INDEX IF NOT EXISTS idx_experiment_variants_experiment ON experiment_variants(experiment_id);
+        CREATE INDEX IF NOT EXISTS idx_experiment_metrics_variant ON experiment_metrics(variant_id);
+        ",
+    )
+}
+
+/// Version 14: Add latency_ms column to usage_events for model performance tracking.
+fn migrate_v14(conn: &Connection) -> Result<(), rusqlite::Error> {
+    if !column_exists(conn, "usage_events", "latency_ms") {
+        conn.execute(
+            "ALTER TABLE usage_events ADD COLUMN latency_ms INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) VALUES (14, datetime('now'), 'Add latency_ms column to usage_events')",
+        [],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
 
@@ -444,5 +539,24 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         run_migrations(&conn).unwrap();
         run_migrations(&conn).unwrap(); // Should not error
+    }
+
+    #[test]
+    fn test_migration_creates_tables_v13() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        let tables: Vec<String> = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+
+        assert!(tables.contains(&"prompt_versions".to_string()));
+        assert!(tables.contains(&"prompt_experiments".to_string()));
+        assert!(tables.contains(&"experiment_variants".to_string()));
+        assert!(tables.contains(&"experiment_metrics".to_string()));
     }
 }

@@ -29,7 +29,17 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: cargo xtask contributors --repo librefang/librefang
 
+      - name: Check for changes
+        id: diff
+        run: |
+          if git diff --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Create PR with updated SVGs
+        if: steps.diff.outputs.changed == 'true'
         id: cpr
         uses: peter-evans/create-pull-request@v8
         with:
@@ -39,7 +49,7 @@ jobs:
           delete-branch: true
 
       - name: Auto-merge PR
-        if: steps.cpr.outputs.pull-request-number
+        if: steps.diff.outputs.changed == 'true' && steps.cpr.outputs.pull-request-number
         env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh pr merge ${{ steps.cpr.outputs.pull-request-number }} --squash --delete-branch
+          GH_TOKEN: ${{ secrets.WEBSITE_REPO_TOKEN }}
+        run: gh pr merge ${{ steps.cpr.outputs.pull-request-number }} --squash --delete-branch --admin

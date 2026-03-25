@@ -24,7 +24,7 @@ export function WizardPage() {
         <div className="flex justify-between items-center mb-8">
           {[1, 2, 3].map((s) => (
             <div key={s} className="flex items-center gap-2">
-              <div className={`h-8 w-8 rounded-full flex items-center justify-center text-xs font-black transition-all ${step >= s ? 'bg-brand text-white' : 'bg-main text-text-dim border border-border-subtle'}`}>{s}</div>
+              <div className={`h-8 w-8 rounded-full flex items-center justify-center text-xs font-black transition-colors ${step >= s ? 'bg-brand text-white' : 'bg-main text-text-dim border border-border-subtle'}`}>{s}</div>
               {s < 3 && <div className={`h-1 w-12 rounded-full ${step > s ? 'bg-brand' : 'bg-border-subtle'}`} />}
             </div>
           ))}

@@ -151,6 +151,45 @@ pub enum KernelMode {
     Dev,
 }
 
+/// CLI update channel (like Apple software update channels).
+///
+/// Controls which GitHub releases are considered for `librefang update`:
+/// - **Stable**: only non-prerelease tags (default).
+/// - **Beta**: stable + beta tags (excludes `-rc`).
+/// - **Rc**: all tags including release candidates.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UpdateChannel {
+    #[default]
+    Stable,
+    Beta,
+    Rc,
+}
+
+impl std::fmt::Display for UpdateChannel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Stable => write!(f, "stable"),
+            Self::Beta => write!(f, "beta"),
+            Self::Rc => write!(f, "rc"),
+        }
+    }
+}
+
+impl std::str::FromStr for UpdateChannel {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "stable" => Ok(Self::Stable),
+            "beta" => Ok(Self::Beta),
+            "rc" => Ok(Self::Rc),
+            _ => Err(format!(
+                "unknown update channel: {s} (expected: stable, beta, rc)"
+            )),
+        }
+    }
+}
+
 /// User configuration for RBAC multi-user support.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserConfig {
@@ -832,6 +871,28 @@ impl Default for TelemetryConfig {
             service_name: "librefang".to_string(),
             sample_rate: 1.0,
             prometheus_enabled: true,
+        }
+    }
+}
+
+/// Configuration for prompt versioning and A/B testing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PromptIntelligenceConfig {
+    /// Enable prompt versioning and A/B testing. Default: false.
+    pub enabled: bool,
+    /// Hash prompts using SHA-256 for version identification. Default: true.
+    pub hash_prompts: bool,
+    /// Maximum number of versions to keep per agent. Default: 50.
+    pub max_versions_per_agent: u32,
+}
+
+impl Default for PromptIntelligenceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            hash_prompts: true,
+            max_versions_per_agent: 50,
         }
     }
 }
@@ -1552,6 +1613,13 @@ pub struct KernelConfig {
     /// Telemetry / observability configuration (OpenTelemetry + Prometheus).
     #[serde(default)]
     pub telemetry: TelemetryConfig,
+    /// Prompt intelligence configuration (versioning + A/B testing).
+    #[serde(default)]
+    pub prompt_intelligence: PromptIntelligenceConfig,
+    /// CLI update channel (stable, beta, rc).
+    /// Controls which releases `librefang update` considers.
+    #[serde(default)]
+    pub update_channel: UpdateChannel,
 }
 
 /// Input sanitization mode for channel messages.
@@ -2155,8 +2223,8 @@ fn default_prompt_caching() -> bool {
 pub struct McpServerConfigEntry {
     /// Display name for this server.
     pub name: String,
-    /// Transport configuration.
-    pub transport: McpTransportEntry,
+    /// Transport configuration. Optional — entries without transport are skipped at boot.
+    pub transport: Option<McpTransportEntry>,
     /// Request timeout in seconds.
     #[serde(default = "default_mcp_timeout")]
     pub timeout_secs: u64,
@@ -2373,6 +2441,8 @@ impl Default for KernelConfig {
             sanitize: SanitizeConfig::default(),
             inbox: InboxConfig::default(),
             telemetry: TelemetryConfig::default(),
+            prompt_intelligence: PromptIntelligenceConfig::default(),
+            update_channel: UpdateChannel::default(),
         }
     }
 }
@@ -2536,6 +2606,8 @@ pub struct DefaultModelConfig {
     /// Model identifier.
     pub model: String,
     /// Environment variable name for the API key.
+    /// Defaults to `"{PROVIDER}_API_KEY"` pattern when omitted.
+    #[serde(default)]
     pub api_key_env: String,
     /// Optional base URL override.
     pub base_url: Option<String>,
@@ -2618,7 +2690,7 @@ impl Default for MemoryConfig {
     fn default() -> Self {
         Self {
             sqlite_path: None,
-            embedding_model: "all-MiniLM-L6-v2".to_string(),
+            embedding_model: "text-embedding-3-small".to_string(),
             consolidation_threshold: 10_000,
             decay_rate: 0.1,
             embedding_provider: None,
@@ -2983,9 +3055,17 @@ pub struct WhatsAppConfig {
     /// owner number with sender context, and the sender receives an auto-ack.
     #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
     pub owner_numbers: Vec<String>,
+    /// Conversation tracker TTL in hours (Web gateway mode).
+    /// Active stranger conversations expire after this period of inactivity.
+    #[serde(default = "default_conversation_ttl_hours")]
+    pub conversation_ttl_hours: u32,
     /// Per-channel behavior overrides.
     #[serde(default)]
     pub overrides: ChannelOverrides,
+}
+
+fn default_conversation_ttl_hours() -> u32 {
+    24
 }
 
 impl Default for WhatsAppConfig {
@@ -3000,6 +3080,7 @@ impl Default for WhatsAppConfig {
             account_id: None,
             default_agent: None,
             owner_numbers: vec![],
+            conversation_ttl_hours: default_conversation_ttl_hours(),
             overrides: ChannelOverrides::default(),
         }
     }
