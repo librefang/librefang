@@ -266,6 +266,9 @@ pub async fn health_detail(State(state): State<Arc<AppState>>) -> impl IntoRespo
             "extraction_model": &state.kernel.config_ref().proactive_memory.extraction_model,
         },
         "config_warnings": config_warnings,
+        "event_bus": {
+            "dropped_events": state.kernel.event_bus_ref().dropped_count(),
+        },
     }))
 }
 
