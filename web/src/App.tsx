@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { motion } from 'framer-motion'
+import { motion, AnimatePresence } from 'framer-motion'
 import {
   Terminal, Cpu, Shield, Zap, Network, ChevronRight, ChevronDown, ExternalLink,
   Copy, Check, Menu, X, Box, Layers, Radio, Eye,
@@ -1059,18 +1059,22 @@ function FAQ({ t }: SectionProps) {
                   <span className="font-semibold text-slate-900 dark:text-white text-sm pr-4">{item.q}</span>
                   <ChevronRight className={cn('w-4 h-4 text-gray-300 dark:text-gray-600 transition-transform shrink-0', openIndex === i && 'rotate-90 text-cyan-600 dark:text-cyan-500')} />
                 </button>
-                {openIndex === i && (
-                  <motion.div
-                    initial={{ height: 0, opacity: 0 }}
-                    animate={{ height: 'auto', opacity: 1 }}
-                    transition={{ duration: 0.3, ease: 'easeOut' }}
-                    className="overflow-hidden"
-                  >
-                    <div className="px-6 pb-5 text-sm text-gray-500 dark:text-gray-400 leading-relaxed border-t border-black/10 dark:border-white/5 pt-4">
-                      {item.a}
-                    </div>
-                  </motion.div>
-                )}
+                <AnimatePresence>
+                  {openIndex === i && (
+                    <motion.div
+                      key={`faq-${i}`}
+                      initial={{ height: 0, opacity: 0 }}
+                      animate={{ height: 'auto', opacity: 1 }}
+                      exit={{ height: 0, opacity: 0 }}
+                      transition={{ duration: 0.25, ease: 'easeInOut' }}
+                      className="overflow-hidden"
+                    >
+                      <div className="px-6 pb-5 text-sm text-gray-500 dark:text-gray-400 leading-relaxed border-t border-black/10 dark:border-white/5 pt-4">
+                        {item.a}
+                      </div>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
               </div>
             </FadeIn>
           ))}
