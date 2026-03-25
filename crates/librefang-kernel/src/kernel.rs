@@ -2891,7 +2891,7 @@ system_prompt = "You are a helpful assistant."
                 // Record token usage for quota tracking
                 self.scheduler.record_usage(agent_id, &result.total_usage);
                 // Record tool calls for rate limiting
-                let tool_count = result.iterations.saturating_sub(1) as u32;
+                let tool_count = result.iterations.saturating_sub(1);
                 self.scheduler.record_tool_calls(agent_id, tool_count);
 
                 // Update last active time
@@ -3438,7 +3438,7 @@ system_prompt = "You are a helpful assistant."
                         .scheduler
                         .record_usage(agent_id, &result.total_usage);
                     // Record tool calls for rate limiting
-                    let tool_count = result.iterations.saturating_sub(1) as u32;
+                    let tool_count = result.iterations.saturating_sub(1);
                     kernel_clone
                         .scheduler
                         .record_tool_calls(agent_id, tool_count);
