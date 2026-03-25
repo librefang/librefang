@@ -136,12 +136,6 @@ jobs:
             fi
           } > /tmp/release-body.md
 
-          # Detect pre-release tags (-betaN, -rcN)
-          PRERELEASE_FLAG=""
-          if echo "$TAG" | grep -qE -- '-(beta|rc)[0-9]'; then
-            PRERELEASE_FLAG="--prerelease"
-          fi
-
           # LTS releases get a special label
           if echo "$TAG" | grep -qE -- '\-lts$'; then
             # v2026.3.0-lts -> release/2026.3
@@ -156,11 +150,9 @@ jobs:
             echo "Release $TAG already exists, updating..."
             gh release edit "$TAG" \
               --title "$TAG" \
-              --notes-file /tmp/release-body.md \
-              $PRERELEASE_FLAG
+              --notes-file /tmp/release-body.md
           else
             gh release create "$TAG" \
               --title "$TAG" \
-              --notes-file /tmp/release-body.md \
-              $PRERELEASE_FLAG
+              --notes-file /tmp/release-body.md
           fi
