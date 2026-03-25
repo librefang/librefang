@@ -337,7 +337,8 @@ pub async fn a2a_send_task(
                     StatusCode::OK,
                     Json(serde_json::to_value(&completed_task).unwrap_or_default()),
                 ),
-                None => ApiErrorResponse::internal("Task disappeared after completion").into_json_tuple(),
+                None => ApiErrorResponse::internal("Task disappeared after completion")
+                    .into_json_tuple(),
             }
         }
         Err(e) => {
@@ -380,7 +381,9 @@ pub async fn a2a_get_task(
             StatusCode::OK,
             Json(serde_json::to_value(&task).unwrap_or_default()),
         ),
-        None => ApiErrorResponse::not_found(format!("Task '{}' not found", task_id)).into_json_tuple(),
+        None => {
+            ApiErrorResponse::not_found(format!("Task '{}' not found", task_id)).into_json_tuple()
+        }
     }
 }
 
@@ -406,7 +409,9 @@ pub async fn a2a_cancel_task(
                 StatusCode::OK,
                 Json(serde_json::to_value(&task).unwrap_or_default()),
             ),
-            None => ApiErrorResponse::internal("Task disappeared after cancellation").into_json_tuple(),
+            None => {
+                ApiErrorResponse::internal("Task disappeared after cancellation").into_json_tuple()
+            }
         }
     } else {
         ApiErrorResponse::not_found(format!("Task '{}' not found", task_id)).into_json_tuple()
@@ -580,9 +585,7 @@ pub async fn a2a_discover_external(
 ) -> impl IntoResponse {
     let url = match body["url"].as_str() {
         Some(u) => u.to_string(),
-        None => {
-            return ApiErrorResponse::bad_request("Missing 'url' field").into_json_tuple()
-        }
+        None => return ApiErrorResponse::bad_request("Missing 'url' field").into_json_tuple(),
     };
 
     // SSRF protection: validate URL before making any outbound request
@@ -639,15 +642,11 @@ pub async fn a2a_send_external(
 ) -> impl IntoResponse {
     let url = match body["url"].as_str() {
         Some(u) => u.to_string(),
-        None => {
-            return ApiErrorResponse::bad_request("Missing 'url' field").into_json_tuple()
-        }
+        None => return ApiErrorResponse::bad_request("Missing 'url' field").into_json_tuple(),
     };
     let message = match body["message"].as_str() {
         Some(m) => m.to_string(),
-        None => {
-            return ApiErrorResponse::bad_request("Missing 'message' field").into_json_tuple()
-        }
+        None => return ApiErrorResponse::bad_request("Missing 'message' field").into_json_tuple(),
     };
     let session_id = body["session_id"].as_str();
 
@@ -1174,9 +1173,7 @@ pub async fn comms_send(
     // Validate from agent exists
     let from_id: librefang_types::agent::AgentId = match req.from_agent_id.parse() {
         Ok(id) => id,
-        Err(_) => {
-            return ApiErrorResponse::bad_request("Invalid from_agent_id").into_json_tuple()
-        }
+        Err(_) => return ApiErrorResponse::bad_request("Invalid from_agent_id").into_json_tuple(),
     };
     if state.kernel.agent_registry().get(from_id).is_none() {
         return ApiErrorResponse::not_found("Source agent not found").into_json_tuple();
@@ -1185,9 +1182,7 @@ pub async fn comms_send(
     // Validate to agent exists
     let to_id: librefang_types::agent::AgentId = match req.to_agent_id.parse() {
         Ok(id) => id,
-        Err(_) => {
-            return ApiErrorResponse::bad_request("Invalid to_agent_id").into_json_tuple()
-        }
+        Err(_) => return ApiErrorResponse::bad_request("Invalid to_agent_id").into_json_tuple(),
     };
     if state.kernel.agent_registry().get(to_id).is_none() {
         return ApiErrorResponse::not_found("Target agent not found").into_json_tuple();
@@ -1236,7 +1231,9 @@ pub async fn comms_send(
             }
             (StatusCode::OK, Json(resp))
         }
-        Err(e) => ApiErrorResponse::internal(format!("Message delivery failed: {e}")).into_json_tuple(),
+        Err(e) => {
+            ApiErrorResponse::internal(format!("Message delivery failed: {e}")).into_json_tuple()
+        }
     }
 }
 

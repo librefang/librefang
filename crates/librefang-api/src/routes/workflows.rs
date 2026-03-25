@@ -299,7 +299,11 @@ pub async fn create_workflow(
                 name: name.to_string(),
             }
         } else {
-            return ApiErrorResponse::bad_request(format!("Step '{}' needs 'agent_id' or 'agent_name'", step_name)).into_json_tuple();
+            return ApiErrorResponse::bad_request(format!(
+                "Step '{}' needs 'agent_id' or 'agent_name'",
+                step_name
+            ))
+            .into_json_tuple();
         };
 
         let mode = parse_step_mode(&s["mode"], s);
@@ -454,7 +458,9 @@ pub async fn get_workflow(
                 "layout": w.layout,
             })),
         ),
-        None => ApiErrorResponse::not_found(format!("Workflow '{}' not found", id)).into_json_tuple(),
+        None => {
+            ApiErrorResponse::not_found(format!("Workflow '{}' not found", id)).into_json_tuple()
+        }
     }
 }
 
@@ -519,7 +525,11 @@ pub async fn update_workflow(
                     name: aname.to_string(),
                 }
             } else {
-                return ApiErrorResponse::bad_request(format!("Step '{}' needs 'agent_id' or 'agent_name'", step_name)).into_json_tuple();
+                return ApiErrorResponse::bad_request(format!(
+                    "Step '{}' needs 'agent_id' or 'agent_name'",
+                    step_name
+                ))
+                .into_json_tuple();
             };
 
             let mode = parse_step_mode(&s["mode"], s);
@@ -712,7 +722,8 @@ pub async fn save_workflow_as_template(
     {
         Some(w) => w,
         None => {
-            return ApiErrorResponse::not_found(format!("Workflow '{}' not found", id)).into_json_tuple();
+            return ApiErrorResponse::not_found(format!("Workflow '{}' not found", id))
+                .into_json_tuple();
         }
     };
 
@@ -828,7 +839,8 @@ pub async fn create_trigger(
         }
         Err(e) => {
             tracing::warn!("Trigger registration failed: {e}");
-            ApiErrorResponse::not_found("Trigger registration failed (agent not found?)").into_json_tuple()
+            ApiErrorResponse::not_found("Trigger registration failed (agent not found?)")
+                .into_json_tuple()
         }
     }
 }
@@ -990,10 +1002,13 @@ pub async fn get_schedule(
             if let Some(schedule) = arr.iter().find(|s| s["id"].as_str() == Some(&id)) {
                 (StatusCode::OK, Json(schedule.clone()))
             } else {
-                ApiErrorResponse::not_found(format!("Schedule '{}' not found", id)).into_json_tuple()
+                ApiErrorResponse::not_found(format!("Schedule '{}' not found", id))
+                    .into_json_tuple()
             }
         }
-        Ok(_) => ApiErrorResponse::not_found(format!("Schedule '{}' not found", id)).into_json_tuple(),
+        Ok(_) => {
+            ApiErrorResponse::not_found(format!("Schedule '{}' not found", id)).into_json_tuple()
+        }
         Err(e) => {
             tracing::warn!("Failed to load schedules: {e}");
             ApiErrorResponse::internal(format!("Failed to load schedules: {e}")).into_json_tuple()
@@ -1033,7 +1048,10 @@ pub async fn create_schedule(
     // Validate cron expression: must be 5 space-separated fields
     let cron_parts: Vec<&str> = cron.split_whitespace().collect();
     if cron_parts.len() != 5 {
-        return ApiErrorResponse::bad_request("Invalid cron expression: must have 5 fields (min hour dom mon dow)").into_json_tuple();
+        return ApiErrorResponse::bad_request(
+            "Invalid cron expression: must have 5 fields (min hour dom mon dow)",
+        )
+        .into_json_tuple();
     }
 
     let agent_id_str = req["agent_id"].as_str().unwrap_or("").to_string();
@@ -1041,7 +1059,8 @@ pub async fn create_schedule(
 
     // Must have either agent_id or workflow_id
     if agent_id_str.is_empty() && workflow_id_str.is_empty() {
-        return ApiErrorResponse::bad_request("Must provide either agent_id or workflow_id").into_json_tuple();
+        return ApiErrorResponse::bad_request("Must provide either agent_id or workflow_id")
+            .into_json_tuple();
     }
 
     // Validate agent exists if provided
@@ -1057,7 +1076,8 @@ pub async fn create_schedule(
                 .any(|a| a.name == agent_id_str)
         };
         if !agent_exists {
-            return ApiErrorResponse::not_found(format!("Agent not found: {agent_id_str}")).into_json_tuple();
+            return ApiErrorResponse::not_found(format!("Agent not found: {agent_id_str}"))
+                .into_json_tuple();
         }
     }
 
@@ -1071,7 +1091,10 @@ pub async fn create_schedule(
                 .await
                 .is_none()
             {
-                return ApiErrorResponse::not_found(format!("Workflow not found: {workflow_id_str}")).into_json_tuple();
+                return ApiErrorResponse::not_found(format!(
+                    "Workflow not found: {workflow_id_str}"
+                ))
+                .into_json_tuple();
             }
         } else {
             return ApiErrorResponse::bad_request("Invalid workflow_id format").into_json_tuple();
@@ -1112,7 +1135,8 @@ pub async fn create_schedule(
         serde_json::Value::Array(schedules),
     ) {
         tracing::warn!("Failed to save schedule: {e}");
-        return ApiErrorResponse::internal(format!("Failed to save schedule: {e}")).into_json_tuple();
+        return ApiErrorResponse::internal(format!("Failed to save schedule: {e}"))
+            .into_json_tuple();
     }
 
     (StatusCode::CREATED, Json(entry))
@@ -1148,7 +1172,8 @@ pub async fn update_schedule(
             if let Some(cron) = req.get("cron").and_then(|v| v.as_str()) {
                 let cron_parts: Vec<&str> = cron.split_whitespace().collect();
                 if cron_parts.len() != 5 {
-                    return ApiErrorResponse::bad_request("Invalid cron expression").into_json_tuple();
+                    return ApiErrorResponse::bad_request("Invalid cron expression")
+                        .into_json_tuple();
                 }
                 s["cron"] = serde_json::Value::String(cron.to_string());
             }
@@ -1171,7 +1196,8 @@ pub async fn update_schedule(
         SCHEDULES_KEY,
         serde_json::Value::Array(schedules),
     ) {
-        return ApiErrorResponse::internal(format!("Failed to update schedule: {e}")).into_json_tuple();
+        return ApiErrorResponse::internal(format!("Failed to update schedule: {e}"))
+            .into_json_tuple();
     }
 
     (
@@ -1208,7 +1234,8 @@ pub async fn delete_schedule(
         SCHEDULES_KEY,
         serde_json::Value::Array(schedules),
     ) {
-        return ApiErrorResponse::internal(format!("Failed to delete schedule: {e}")).into_json_tuple();
+        return ApiErrorResponse::internal(format!("Failed to delete schedule: {e}"))
+            .into_json_tuple();
     }
 
     (
@@ -1331,7 +1358,10 @@ pub async fn run_schedule(
         let target_agent = match target_agent {
             Some(a) => a,
             None => {
-                return ApiErrorResponse::not_found("No target agent found. Specify an agent_id or start an agent first.").into_json_tuple();
+                return ApiErrorResponse::not_found(
+                    "No target agent found. Specify an agent_id or start an agent first.",
+                )
+                .into_json_tuple();
             }
         };
 
@@ -1629,7 +1659,9 @@ pub async fn get_workflow_template(
             StatusCode::OK,
             Json(serde_json::to_value(&t).unwrap_or_default()),
         ),
-        None => ApiErrorResponse::not_found(format!("Template '{}' not found", id)).into_json_tuple(),
+        None => {
+            ApiErrorResponse::not_found(format!("Template '{}' not found", id)).into_json_tuple()
+        }
     }
 }
 
@@ -1654,7 +1686,8 @@ pub async fn instantiate_template(
     let template = match state.kernel.templates().get(&id).await {
         Some(t) => t,
         None => {
-            return ApiErrorResponse::not_found(format!("Template '{}' not found", id)).into_json_tuple();
+            return ApiErrorResponse::not_found(format!("Template '{}' not found", id))
+                .into_json_tuple();
         }
     };
 

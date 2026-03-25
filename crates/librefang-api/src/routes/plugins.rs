@@ -123,7 +123,8 @@ pub async fn install_plugin(Json(body): Json<serde_json::Value>) -> impl IntoRes
             let name = match body.get("name").and_then(|n| n.as_str()) {
                 Some(n) => n.to_string(),
                 None => {
-                    return ApiErrorResponse::bad_request("Missing 'name' for registry install").into_json_tuple()
+                    return ApiErrorResponse::bad_request("Missing 'name' for registry install")
+                        .into_json_tuple()
                 }
             };
             let github_repo = body
@@ -136,7 +137,8 @@ pub async fn install_plugin(Json(body): Json<serde_json::Value>) -> impl IntoRes
             let path = match body.get("path").and_then(|p| p.as_str()) {
                 Some(p) => std::path::PathBuf::from(p),
                 None => {
-                    return ApiErrorResponse::bad_request("Missing 'path' for local install").into_json_tuple()
+                    return ApiErrorResponse::bad_request("Missing 'path' for local install")
+                        .into_json_tuple()
                 }
             };
             librefang_runtime::plugin_manager::PluginSource::Local { path }
@@ -145,7 +147,8 @@ pub async fn install_plugin(Json(body): Json<serde_json::Value>) -> impl IntoRes
             let url = match body.get("url").and_then(|u| u.as_str()) {
                 Some(u) => u.to_string(),
                 None => {
-                    return ApiErrorResponse::bad_request("Missing 'url' for git install").into_json_tuple()
+                    return ApiErrorResponse::bad_request("Missing 'url' for git install")
+                        .into_json_tuple()
                 }
             };
             let branch = body
@@ -155,7 +158,10 @@ pub async fn install_plugin(Json(body): Json<serde_json::Value>) -> impl IntoRes
             librefang_runtime::plugin_manager::PluginSource::Git { url, branch }
         }
         _ => {
-            return ApiErrorResponse::bad_request("Invalid source. Use 'registry', 'local', or 'git'").into_json_tuple()
+            return ApiErrorResponse::bad_request(
+                "Invalid source. Use 'registry', 'local', or 'git'",
+            )
+            .into_json_tuple()
         }
     };
 
@@ -197,9 +203,7 @@ pub async fn install_plugin(Json(body): Json<serde_json::Value>) -> impl IntoRes
 pub async fn uninstall_plugin(Json(body): Json<serde_json::Value>) -> impl IntoResponse {
     let name = match body.get("name").and_then(|n| n.as_str()) {
         Some(n) => n,
-        None => {
-            return ApiErrorResponse::bad_request("Missing 'name'").into_json_tuple()
-        }
+        None => return ApiErrorResponse::bad_request("Missing 'name'").into_json_tuple(),
     };
 
     match librefang_runtime::plugin_manager::remove_plugin(name) {
@@ -234,9 +238,7 @@ pub async fn uninstall_plugin(Json(body): Json<serde_json::Value>) -> impl IntoR
 pub async fn scaffold_plugin(Json(body): Json<serde_json::Value>) -> impl IntoResponse {
     let name = match body.get("name").and_then(|n| n.as_str()) {
         Some(n) => n,
-        None => {
-            return ApiErrorResponse::bad_request("Missing 'name'").into_json_tuple()
-        }
+        None => return ApiErrorResponse::bad_request("Missing 'name'").into_json_tuple(),
     };
     let description = body
         .get("description")

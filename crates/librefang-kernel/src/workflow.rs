@@ -1080,6 +1080,8 @@ impl WorkflowEngine {
 
                 StepMode::Collect => {
                     // Build structured JSON from step results accumulated so far.
+                    // NOTE: This intentionally outputs JSON (not plain text with `---` separators)
+                    // so downstream steps can parse individual fan-out results programmatically.
                     let step_results: Vec<StepResult> = self
                         .runs
                         .read()
@@ -3552,5 +3554,87 @@ id = "{id}"
         let engine = WorkflowEngine::new();
         let count = engine.load_runs().unwrap();
         assert_eq!(count, 0);
+    }
+
+    // --- evaluate_condition tests ----------------------------------------
+
+    #[test]
+    fn test_evaluate_condition_simple_contains() {
+        assert!(evaluate_condition("hello world", "hello"));
+        assert!(!evaluate_condition("hello world", "goodbye"));
+    }
+
+    #[test]
+    fn test_evaluate_condition_negation() {
+        assert!(evaluate_condition("hello world", "!goodbye"));
+        assert!(!evaluate_condition("hello world", "!hello"));
+    }
+
+    #[test]
+    fn test_evaluate_condition_and() {
+        assert!(evaluate_condition("hello world", "hello && world"));
+        assert!(!evaluate_condition("hello world", "hello && goodbye"));
+    }
+
+    #[test]
+    fn test_evaluate_condition_or() {
+        assert!(evaluate_condition("hello world", "hello || goodbye"));
+        assert!(evaluate_condition("hello world", "goodbye || hello"));
+        assert!(!evaluate_condition("hello world", "goodbye || missing"));
+    }
+
+    #[test]
+    fn test_evaluate_condition_combined_and_or() {
+        // OR has lower precedence: parsed as (a && b) || c
+        assert!(evaluate_condition(
+            "hello world",
+            "hello && world || goodbye"
+        ));
+        // First AND branch fails, but OR branch succeeds
+        assert!(evaluate_condition(
+            "hello world",
+            "hello && goodbye || world"
+        ));
+        // Both branches fail
+        assert!(!evaluate_condition(
+            "hello world",
+            "missing && goodbye || absent"
+        ));
+    }
+
+    #[test]
+    fn test_evaluate_condition_negation_and() {
+        // !missing is true, hello is true => true
+        assert!(evaluate_condition("hello world", "!missing && hello"));
+        // !hello is false, world is true => false (AND requires both)
+        assert!(!evaluate_condition("hello world", "!hello && world"));
+    }
+
+    #[test]
+    fn test_evaluate_condition_negation_or() {
+        // !hello is false, world is true => true
+        assert!(evaluate_condition("hello world", "!hello || world"));
+        // !hello is false, missing is false => false
+        assert!(!evaluate_condition("hello world", "!hello || !world"));
+    }
+
+    #[test]
+    fn test_evaluate_condition_case_insensitivity() {
+        // The condition is lowercased internally, so uppercase conditions
+        // should still match lowercase input.
+        assert!(evaluate_condition("hello world", "HELLO"));
+        assert!(evaluate_condition("hello world", "Hello && World"));
+        assert!(evaluate_condition("hello world", "!GOODBYE"));
+    }
+
+    #[test]
+    fn test_evaluate_condition_empty_and_whitespace() {
+        // Empty condition => empty string is always contained in any string
+        assert!(evaluate_condition("hello world", ""));
+        assert!(evaluate_condition("hello world", "  "));
+        // Empty input with non-empty condition
+        assert!(!evaluate_condition("", "hello"));
+        // Both empty
+        assert!(evaluate_condition("", ""));
     }
 }
