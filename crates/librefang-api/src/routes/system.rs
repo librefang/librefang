@@ -142,7 +142,6 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
         )
 }
 use crate::middleware::RequestLanguage;
-use crate::types::ApiErrorResponse;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;

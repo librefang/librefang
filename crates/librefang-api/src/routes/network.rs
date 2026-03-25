@@ -1313,7 +1313,7 @@ pub async fn comms_send(
         return (
             StatusCode::PAYLOAD_TOO_LARGE,
             Json(
-                serde_json::to_value(&ApiErrorResponse::bad_request(
+                serde_json::to_value(&ApiErrorResponse::payload_too_large(
                     "Message too large (max 64KB)",
                 ))
                 .unwrap_or_default(),

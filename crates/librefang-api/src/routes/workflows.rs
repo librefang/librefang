@@ -85,7 +85,6 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             axum::routing::get(cron_job_status),
         )
 }
-use crate::types::ApiErrorResponse;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;

@@ -123,6 +123,11 @@ impl ApiErrorResponse {
         )
     }
 
+    /// 413 Payload Too Large.
+    pub fn payload_too_large(error: impl Into<String>) -> Self {
+        Self::with_code(StatusCode::PAYLOAD_TOO_LARGE, error, "payload_too_large")
+    }
+
     /// 429 Too Many Requests.
     pub fn too_many_requests(error: impl Into<String>) -> Self {
         Self::with_code(StatusCode::TOO_MANY_REQUESTS, error, "rate_limited")
@@ -704,6 +709,10 @@ mod tests {
         assert_eq!(
             ApiErrorResponse::unprocessable("x").status,
             StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(
+            ApiErrorResponse::payload_too_large("x").status,
+            StatusCode::PAYLOAD_TOO_LARGE
         );
         assert_eq!(
             ApiErrorResponse::too_many_requests("x").status,
