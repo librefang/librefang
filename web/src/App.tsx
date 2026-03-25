@@ -171,6 +171,13 @@ function Nav({ t, lang, onSwitchLang }: NavProps) {
               target={link.external ? '_blank' : undefined}
               rel={link.external ? 'noopener noreferrer' : undefined}
               aria-current={activeSection === link.href.replace('#', '') ? 'page' : undefined}
+              onClick={(e) => {
+                if (link.href.startsWith('#')) {
+                  e.preventDefault()
+                  const el = document.querySelector(link.href)
+                  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+                }
+              }}
               className={cn(
                 'px-3 py-1.5 text-sm transition-colors font-medium flex items-center gap-1',
                 activeSection === link.href.replace('#', '') ? 'text-cyan-600 dark:text-cyan-400' : 'text-gray-600 dark:text-gray-400 hover:text-cyan-600 dark:hover:text-cyan-400'
@@ -254,7 +261,14 @@ function Nav({ t, lang, onSwitchLang }: NavProps) {
             <a
               key={link.label}
               href={link.href}
-              onClick={() => setOpen(false)}
+              onClick={(e) => {
+                if (link.href.startsWith('#')) {
+                  e.preventDefault()
+                  const el = document.querySelector(link.href)
+                  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+                }
+                setOpen(false)
+              }}
               aria-current={activeSection === link.href.replace('#', '') ? 'page' : undefined}
               className="block py-2.5 text-sm text-gray-600 dark:text-gray-400 hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors font-medium"
             >
@@ -1018,7 +1032,7 @@ function Community({ t }: SectionProps) {
                   href={communityHrefs[i]}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="group block bg-surface-100 border border-black/10 dark:border-white/5 hover:border-cyan-500/20 p-6 transition-all"
+                  className="group block bg-surface-100 border border-black/10 dark:border-white/5 hover:border-cyan-500/20 p-6 transition-all hover:-translate-y-1"
                 >
                   <Icon className="w-5 h-5 text-cyan-500/60 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors mb-4" />
                   <h3 className="font-bold text-slate-900 dark:text-white mb-1">{item.label}</h3>
