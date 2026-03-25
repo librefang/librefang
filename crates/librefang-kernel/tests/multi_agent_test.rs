@@ -180,8 +180,7 @@ fn test_deterministic_id_stable_across_reactivation() {
     // Agent ID is deterministic within the same activation instance.
     let expected1 = AgentId::from_hand_agent("test-clip", "main", Some(inst1.instance_id));
     assert_eq!(
-        id1,
-        expected1,
+        id1, expected1,
         "Agent ID should be deterministic from hand_id + role + instance_id"
     );
 
@@ -198,15 +197,13 @@ fn test_deterministic_id_stable_across_reactivation() {
 
     let expected2 = AgentId::from_hand_agent("test-clip", "main", Some(inst2.instance_id));
     assert_eq!(
-        id2,
-        expected2,
+        id2, expected2,
         "Agent ID should be deterministic from hand_id + role + instance_id"
     );
 
     // Each activation is a new instance — different instance_id produces a different agent ID.
     assert_ne!(
-        id1,
-        id2,
+        id1, id2,
         "Each reactivation produces a unique agent ID (instance-scoped IDs)"
     );
 
@@ -591,13 +588,11 @@ fn test_reactivation_restores_triggers_to_original_roles() {
     // Each reactivation creates a new instance with a distinct instance_id, so the
     // reactivated agent IDs differ from the original ones (instance-scoped IDs).
     assert_ne!(
-        reactivated_analyst_id,
-        analyst_id,
+        reactivated_analyst_id, analyst_id,
         "Reactivated analyst gets a new instance-scoped agent ID"
     );
     assert_ne!(
-        reactivated_planner_id,
-        planner_id,
+        reactivated_planner_id, planner_id,
         "Reactivated planner gets a new instance-scoped agent ID"
     );
     assert_eq!(
