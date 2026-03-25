@@ -3,34 +3,41 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <link rel="icon" type="image/png" href="/fox-mascot.png" />
-    <link rel="apple-touch-icon" href="/fox-mascot.png" />
+    <link rel="icon" type="image/png" href="/logo.png" />
+    <link rel="apple-touch-icon" href="/logo.png" />
     <link rel="manifest" href="/manifest.webmanifest" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="description" content="LibreFang is the production-grade Agent Operating System built in Rust. 180ms cold start, 40MB memory, 16 security layers, 40 channel adapters. Run autonomous AI agents 24/7 — not a chatbot framework, a complete OS for AI." />
-    <meta name="theme-color" content="#080c10" />
-
-    <!-- Open Graph -->
+    <meta name="description" content="LibreFang - The Agent Operating System. Run autonomous AI agents 24/7. Built in Rust for production workloads." />
+    <meta name="theme-color" content="#070b14" />
     <meta property="og:type" content="website" />
     <meta property="og:url" content="https://librefang.ai/" />
-    <meta property="og:title" content="LibreFang - Production-Grade Agent Operating System" />
-    <meta property="og:description" content="Run autonomous AI agents 24/7. Built in Rust: 180ms cold start, 40MB memory, 16 security layers, 40 channel adapters." />
-    <meta property="og:image" content="https://librefang.ai/fox-mascot.png" />
-
-    <!-- Twitter Card -->
+    <meta property="og:title" content="LibreFang - The Agent Operating System" />
+    <meta property="og:description" content="Run autonomous AI agents 24/7. Built in Rust for production workloads." />
+    <meta property="og:image" content="https://librefang.ai/logo.png" />
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:url" content="https://librefang.ai/" />
-    <meta name="twitter:title" content="LibreFang - Production-Grade Agent Operating System" />
-    <meta name="twitter:description" content="Run autonomous AI agents 24/7. Built in Rust: 180ms cold start, 40MB memory, 16 security layers, 40 channel adapters." />
-    <meta name="twitter:image" content="https://librefang.ai/fox-mascot.png" />
-
-    <!-- Canonical -->
+    <meta name="twitter:title" content="LibreFang - The Agent Operating System" />
+    <meta name="twitter:description" content="Run autonomous AI agents 24/7. Built in Rust for production workloads." />
+    <meta name="twitter:image" content="https://librefang.ai/logo.png" />
     <link rel="canonical" href="https://librefang.ai/" />
+    <link rel="dns-prefetch" href="https://api.github.com" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link rel="dns-prefetch" href="https://api.github.com" />
-    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
-    <title>LibreFang - Production-Grade Agent Operating System | Rust-Powered, 24/7 Autonomous AI</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+    <script>
+      // Load CJK font based on detected language
+      (function() {
+        var fontMap = { 'zh': 'Noto+Sans+SC', 'zh-TW': 'Noto+Sans+TC', 'ja': 'Noto+Sans+JP', 'ko': 'Noto+Sans+KR' };
+        var lang = window.__INITIAL_LANG__ || 'en';
+        var font = fontMap[lang];
+        if (font) {
+          var link = document.createElement('link');
+          link.rel = 'stylesheet';
+          link.href = 'https://fonts.googleapis.com/css2?family=' + font + ':wght@400;500;700;900&display=swap';
+          document.head.appendChild(link);
+        }
+      })();
+    </script>
+    <title>LibreFang - The Agent Operating System</title>
     <script>
       (function() {
         var lang = 'en';
@@ -48,7 +55,7 @@
   </head>
   <body>
     <div id="root"></div>
-    <script type="module" src="./src/main.jsx"></script>
+    <script type="module" src="./src/main.tsx"></script>
 
     <!-- Google Analytics -->
     <script async src="https://www.googletagmanager.com/gtag/js?id=G-9Q0WS7SHZ6"></script>

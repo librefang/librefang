@@ -1,0 +1,1158 @@
+export interface Language {
+  code: string
+  name: string
+  url: string
+}
+
+export interface PerformanceRow {
+  metric: string
+  others: string
+  librefang: string
+}
+
+export interface Translation {
+  nav: { architecture: string; hands: string; performance: string; install: string; docs: string }
+  hero: {
+    badge: string
+    title1: string
+    title2: string
+    typing: string[]
+    desc: string
+    getStarted: string
+    viewGithub: string
+  }
+  stats: { coldStart: string; memory: string; security?: string; channels?: string; hands?: string; providers?: string }
+  architecture: {
+    label: string
+    title: string
+    desc: string
+    layers: { label: string; desc: string }[]
+    kernelDescs?: string[]
+    runtimeDescs?: string[]
+    hardwareDescs?: string[]
+  }
+  hands: {
+    label: string
+    title: string
+    desc: string
+    items: { name: string; desc: string }[]
+    more: string
+  }
+  performance: {
+    label: string
+    title: string
+    desc: string
+    metric: string
+    others: string
+    rows: PerformanceRow[]
+  }
+  install: {
+    label: string
+    title: string
+    desc: string
+    terminal: string
+    comment: string
+    requires: string
+    includes: string
+    reqItems: string[]
+    incItems: string[]
+  }
+  faq: {
+    label: string
+    title: string
+    items: { q: string; a: string }[]
+  }
+  community: {
+    label: string
+    title: string
+    desc: string
+    items: { label: string; desc: string }[]
+    open: string
+  }
+  meta?: {
+    title: string
+    description: string
+  }
+  workflows?: {
+    label: string
+    title: string
+    desc: string
+    items: { title: string; desc: string }[]
+  }
+  docs?: {
+    label: string
+    title: string
+    desc: string
+    categories: { title: string; desc: string }[]
+    viewAll: string
+  }
+  githubStats?: {
+    label: string
+    title: string
+    desc: string
+    stars: string
+    forks: string
+    issues: string
+    prs: string
+    downloads: string
+    docsVisits: string
+    lastUpdate: string
+    starHistory: string
+    starUs: string
+    discuss: string
+  }
+  contributing?: {
+    label: string
+    title: string
+    desc: string
+    steps: { title: string; desc: string }[]
+    cta: string
+  }
+  footer: { docs: string; license: string; privacy: string }
+}
+
+export const languages: Language[] = [
+  { code: 'en', name: 'English', url: '/' },
+  { code: 'zh', name: '简体中文', url: '/zh' },
+  { code: 'zh-TW', name: '繁體中文', url: '/zh-TW' },
+  { code: 'ja', name: '日本語', url: '/ja' },
+  { code: 'ko', name: '한국어', url: '/ko' },
+  { code: 'de', name: 'Deutsch', url: '/de' },
+  { code: 'es', name: 'Español', url: '/es' },
+]
+
+export const translations: Record<string, Translation> = {
+  en: {
+    nav: { architecture: 'Architecture', hands: 'Hands', performance: 'Performance', install: 'Install', docs: 'Docs' },
+    hero: {
+      badge: 'Open Source',
+      title1: 'The Agent',
+      title2: 'Operating System',
+      typing: [
+        'run autonomous agents 24/7',
+        'replace entire workflows',
+        'deploy on any hardware',
+        'monitor with 16 security layers',
+      ],
+      desc: 'LibreFang is a production-grade runtime for autonomous AI agents. Single binary, 15 built-in capability units, 44 channel adapters. Built in Rust for the workloads that can\'t afford to go down.',
+      getStarted: 'Get Started',
+      viewGithub: 'View on GitHub',
+    },
+    stats: { coldStart: 'Cold Start', memory: 'Memory', security: 'Security Layers', channels: 'Channels', hands: 'Hands', providers: 'Providers' },
+    architecture: {
+      label: 'System Design',
+      title: 'Five-layer architecture',
+      desc: 'From hardware to user-facing channels. Each layer is isolated, testable, and replaceable.',
+      layers: [
+        { label: 'Channels', desc: '44 adapters: Telegram, Slack, Discord, Feishu, DingTalk, WhatsApp...' },
+        { label: 'Hands', desc: '15 autonomous capability units with dedicated models and tools' },
+        { label: 'Kernel', desc: 'Agent lifecycle, workflow orchestration, budget control, scheduling' },
+        { label: 'Runtime', desc: 'Tokio async, WASM sandbox, Merkle audit chain, SSRF protection' },
+        { label: 'Hardware', desc: 'Single binary: laptop, VPS, Raspberry Pi, bare metal, cloud' },
+      ],
+      kernelDescs: [
+        'Create, start, pause, resume, stop, destroy',
+        '9 built-in templates, DAG orchestration',
+        'Per-agent spend limits, global caps, alerts',
+        'Cron-based triggers, interval tasks, event hooks',
+        'Short-term, long-term, episodic, semantic',
+        'Python & prompt skills, hot-reload',
+        'Model Context Protocol, Agent-to-Agent',
+        'Open Fang Protocol for mesh networking',
+      ],
+      runtimeDescs: [
+        'Multi-threaded async runtime',
+        'Isolated execution for untrusted code',
+        'Hash-chain integrity verification',
+        'Block internal network access',
+        'Data flow analysis for secrets',
+        'Token bucket per agent/channel',
+        'Multi-layer input sanitization',
+        'Role-based access control + audit log',
+      ],
+      hardwareDescs: [
+        '32MB, zero dependencies, just copy and run',
+        'x86_64 and ARM64 native builds',
+        'ARM64 — runs on Pi 4 with 64MB RAM',
+        'Termux environment, ARM64 native',
+        'Any $5/mo VPS, Docker optional',
+        'Direct deployment, no orchestrator needed',
+        'Native desktop app with system tray',
+      ],
+    },
+    hands: {
+      label: 'Capability Units',
+      title: '15 built-in Hands',
+      desc: 'Each Hand ships with its own model, tools, and workflow. Activate, don\'t assemble.',
+      items: [
+        { name: 'Clip', desc: 'YouTube to vertical shorts with AI captions. Auto-publish to Telegram.' },
+        { name: 'Lead', desc: 'Daily prospect discovery with ICP scoring, dedup, and CSV export.' },
+        { name: 'Collector', desc: 'OSINT-grade intelligence monitoring with change detection.' },
+        { name: 'Predictor', desc: 'Calibrated probabilistic forecasting for markets and outcomes.' },
+        { name: 'Researcher', desc: 'Deep research with source credibility scoring.' },
+        { name: 'Trader', desc: 'Autonomous market intelligence and trading engine — multi-signal analysis, adversarial reasoning, risk management.' },
+      ],
+      more: '+ 9 more: Twitter, Browser, Analytics, DevOps, Creator, LinkedIn, Reddit, Strategist, API Tester',
+    },
+    performance: {
+      label: 'Benchmarks',
+      title: 'Built different',
+      desc: 'Rust, not TypeScript. Production, not prototype.',
+      metric: 'Metric',
+      others: 'Others',
+      rows: [
+        { metric: 'Cold Start', others: '2.5 ~ 4s', librefang: '180ms' },
+        { metric: 'Idle Memory', others: '180 ~ 250MB', librefang: '40MB' },
+        { metric: 'Binary Size', others: '100 ~ 200MB', librefang: '32MB' },
+        { metric: 'Security Layers', others: '2 ~ 3', librefang: '16' },
+        { metric: 'Channel Adapters', others: '8 ~ 15', librefang: '44' },
+        { metric: 'Built-in Hands', others: '0', librefang: '15' },
+      ],
+    },
+    install: {
+      label: 'Get Started',
+      title: 'One command',
+      desc: 'Single binary. No Docker. 60 seconds to autonomous agents.',
+      terminal: 'terminal',
+      comment: '# agents are now running autonomously',
+      requires: 'Requires',
+      includes: 'Includes',
+      reqItems: ['Linux / macOS / Windows', '64MB RAM minimum', 'x86_64 or ARM64', 'LLM API Key'],
+      incItems: ['15 built-in Hands', '44 channel adapters', '50 LLM providers', 'Desktop app (Tauri 2.0)'],
+    },
+    faq: {
+      label: 'FAQ',
+      title: 'Common questions',
+      items: [
+        { q: 'What is LibreFang?', a: 'A production-grade Agent Operating System built in Rust. It runs autonomous AI agents on schedules 24/7 — without requiring user prompts. Runtime, security, and channel infrastructure in a single binary.' },
+        { q: 'What are Hands?', a: 'Self-contained autonomous capability units. Each Hand has a dedicated model, tools, and workflow. 15 built-in: Clip (video), Lead (prospecting), Collector (OSINT), Predictor (forecasting), Researcher, Trader, and more.' },
+        { q: 'Which LLM providers are supported?', a: '50 providers: Anthropic, OpenAI, Gemini, Groq, DeepSeek, Mistral, Together, Ollama, vLLM, and more. 200+ models total. Each Hand can use a different provider.' },
+        { q: 'Which channels are supported?', a: '44 channel adapters: Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Teams, Google Chat, Feishu, DingTalk, Mastodon, Bluesky, LinkedIn, Reddit, IRC, and more.' },
+        { q: 'Is it production-ready?', a: '2100+ tests, zero Clippy warnings. 16 security layers including WASM sandbox, Merkle audit chain, SSRF protection. Pin your version until v1.0 for stability.' },
+      ],
+    },
+    community: {
+      label: 'Open Source',
+      title: 'Join the community',
+      desc: 'LibreFang is built in the open. Contribute code, report issues, or join the discussion.',
+      items: [
+        { label: 'Contribute', desc: 'Submit PRs, fix bugs, improve docs' },
+        { label: 'Report', desc: 'Found a bug? Open an issue' },
+        { label: 'Discuss', desc: 'Ask questions, share ideas' },
+      ],
+      open: 'Open',
+    },
+    meta: {
+      title: 'LibreFang - The Agent Operating System',
+      description: 'LibreFang is a production-grade Agent Operating System built in Rust. 180ms cold start, 40MB memory, 16 security layers, 44 channel adapters. Run autonomous AI agents 24/7.',
+    },
+    workflows: {
+      label: 'Workflows',
+      title: 'Replace entire workflows',
+      desc: 'LibreFang doesn\'t just assist — it takes over. These are the operations you\'d otherwise hire people for.',
+      items: [
+        { title: 'Content Pipeline', desc: 'Clip + Twitter: monitor trending videos, cut shorts, add captions, publish to social — all while you\'re offline.' },
+        { title: 'Sales Prospecting', desc: 'Lead runs nightly: discovers prospects, scores by ICP fit, removes duplicates, exports clean CSV.' },
+        { title: 'Competitive Intelligence', desc: 'Collector watches competitor sites, pricing, job boards, and news. Alerts the moment something changes.' },
+        { title: 'Multi-Agent Orchestration', desc: 'Chain Hands with workflow orchestration: Researcher → Predictor → Clip → broadcast to 44 channels.' },
+        { title: 'Migration', desc: 'One command: librefang migrate --from openclaw. Agents, memory, and skills transfer automatically.' },
+        { title: 'Production Security', desc: 'WASM sandbox, Merkle audit chain, SSRF protection, prompt injection scanning, GCRA rate limiting — 16 layers.' },
+      ],
+    },
+    docs: {
+      label: 'Documentation',
+      title: 'Documentation',
+      desc: 'Comprehensive guides for LibreFang',
+      categories: [
+        { title: 'Overview', desc: 'Introduction, quick start, architecture' },
+        { title: 'Automation', desc: 'Cron tasks, webhooks, integrations' },
+        { title: 'Infrastructure', desc: 'Deployment, monitoring, scaling' },
+      ],
+      viewAll: 'View All Docs',
+    },
+    githubStats: {
+      label: 'Community',
+      title: 'Join the community',
+      desc: 'Help us build the future of autonomous AI agents',
+      stars: 'Stars', forks: 'Forks', issues: 'Issues', prs: 'PRs',
+      downloads: 'Downloads', docsVisits: 'Docs Visits', lastUpdate: 'Last Update',
+      starHistory: 'Star History', starUs: 'Star Us', discuss: 'Discuss',
+    },
+    contributing: {
+      label: 'Contributing',
+      title: 'How to contribute',
+      desc: 'LibreFang is open source and welcomes contributions of all kinds.',
+      steps: [
+        { title: 'Fork & Clone', desc: 'Fork the repository and clone it locally to get started.' },
+        { title: 'Pick an Issue', desc: 'Browse open issues labeled "good first issue" or "help wanted".' },
+        { title: 'Submit a PR', desc: 'Make your changes, write tests, and submit a pull request for review.' },
+      ],
+      cta: 'Read Contributing Guide',
+    },
+    footer: { docs: 'Docs', license: 'License', privacy: 'Privacy' },
+  },
+
+  zh: {
+    nav: { architecture: '架构', hands: '能力单元', performance: '性能', install: '安装', docs: '文档' },
+    hero: {
+      badge: '开源',
+      title1: 'Agent',
+      title2: '操作系统',
+      typing: [
+        '7x24 运行自主 Agent',
+        '替代整条工作流',
+        '部署到任意硬件',
+        '16 层安全防护',
+      ],
+      desc: 'LibreFang 是面向自主 AI Agent 的生产级运行时。单一二进制文件，15 个内置能力单元，44 个渠道适配器。Rust 构建，为不能停机的负载而生。',
+      getStarted: '开始使用',
+      viewGithub: '查看 GitHub',
+    },
+    stats: { coldStart: '冷启动', memory: '内存', security: '安全层', channels: '渠道', hands: '能力单元', providers: '模型提供商' },
+    architecture: {
+      label: '系统设计',
+      title: '五层架构',
+      desc: '从硬件到用户渠道，每一层都隔离、可测试、可替换。',
+      layers: [
+        { label: '渠道层', desc: '44 个渠道适配器：Telegram、Slack、Discord、飞书、钉钉、WhatsApp...' },
+        { label: '能力层', desc: '15 个自主能力单元，各配专属模型和工具' },
+        { label: '内核层', desc: 'Agent 生命周期、工作流编排、预算控制、调度' },
+        { label: '运行时层', desc: 'Tokio 异步、WASM 沙箱、Merkle 审计链、SSRF 防护' },
+        { label: '硬件层', desc: '单一二进制：笔记本、VPS、树莓派、裸金属、云' },
+      ],
+      kernelDescs: ['创建、启动、暂停、恢复、停止、销毁', '9 个内置模板，DAG 编排', '单 Agent 限额、全局上限、告警', '基于 Cron 的触发器、定时任务、事件钩子', '短期、长期、情景、语义', 'Python 和 Prompt 技能，热重载', 'Model Context Protocol，Agent 间通信', 'Open Fang Protocol，网状网络'],
+      runtimeDescs: ['多线程异步运行时', '不可信代码隔离执行', '哈希链完整性验证', '阻止内部网络访问', '敏感数据流分析', '每 Agent/渠道令牌桶', '多层输入清洗', '基于角色的访问控制 + 审计日志'],
+      hardwareDescs: ['32MB，零依赖，复制即运行', 'x86_64 和 ARM64 原生构建', 'ARM64 — Pi 4 上 64MB 内存可运行', 'Termux 环境，ARM64 原生', '任意 $5/月 VPS，Docker 可选', '直接部署，无需编排器', '原生桌面应用，系统托盘'],
+    },
+    hands: {
+      label: '能力单元',
+      title: '15 个内置 Hand',
+      desc: '每个 Hand 自带模型、工具和工作流。激活即用，无需组装。',
+      items: [
+        { name: 'Clip', desc: 'YouTube 视频自动转竖版短视频，AI 字幕，自动发布到 Telegram。' },
+        { name: 'Lead', desc: '每日自主发现潜在客户，ICP 评分、去重、CSV 导出。' },
+        { name: 'Collector', desc: 'OSINT 级情报监控，变化检测。' },
+        { name: 'Predictor', desc: '校准概率预测引擎，预判市场和业务走向。' },
+        { name: 'Researcher', desc: '深度自主研究，来源可信度评分。' },
+        { name: 'Trader', desc: '自主市场情报与交易引擎——多信号分析、对抗推理、风险管理。' },
+      ],
+      more: '+ 另有 9 个 Hand：Twitter、Browser、Analytics、DevOps、Creator、LinkedIn、Reddit、Strategist、API Tester',
+    },
+    performance: {
+      label: '基准测试',
+      title: '生而不同',
+      desc: 'Rust 而非 TypeScript。生产级，非原型。',
+      metric: '指标',
+      others: '其他框架',
+      rows: [
+        { metric: '冷启动', others: '2.5 ~ 4s', librefang: '180ms' },
+        { metric: '空闲内存', others: '180 ~ 250MB', librefang: '40MB' },
+        { metric: '二进制体积', others: '100 ~ 200MB', librefang: '32MB' },
+        { metric: '安全层', others: '2 ~ 3', librefang: '16' },
+        { metric: '渠道适配器', others: '8 ~ 15', librefang: '44' },
+        { metric: '内置 Hands', others: '0', librefang: '15' },
+      ],
+    },
+    install: {
+      label: '开始使用',
+      title: '一条命令',
+      desc: '单一二进制文件，无需 Docker，60 秒启动自主 Agent。',
+      terminal: '终端',
+      comment: '# Agent 已在自主运行',
+      requires: '系统要求',
+      includes: '包含内容',
+      reqItems: ['Linux / macOS / Windows', '最低 64MB 内存', 'x86_64 或 ARM64', 'LLM API 密钥'],
+      incItems: ['15 个内置 Hands', '44 个渠道适配器', '50 个 LLM 提供商', '桌面应用 (Tauri 2.0)'],
+    },
+    faq: {
+      label: '常见问题',
+      title: '常见问题',
+      items: [
+        { q: '什么是 LibreFang？', a: '用 Rust 构建的生产级 Agent 操作系统。按计划 7x24 运行自主 AI Agent，无需用户提示。运行时、安全和渠道基础设施集于一个二进制文件。' },
+        { q: '什么是 Hands？', a: '独立的自主能力单元。每个 Hand 配有专属模型、工具和工作流。15 个内置：Clip（视频）、Lead（获客）、Collector（情报）、Predictor（预测）、Researcher、Trader 等。' },
+        { q: '支持哪些 LLM 提供商？', a: '50 个提供商：Anthropic、OpenAI、Gemini、Groq、DeepSeek、Mistral、Together、Ollama、vLLM 等，共 200+ 模型。每个 Hand 可配置不同提供商。' },
+        { q: '支持哪些渠道？', a: '44 个渠道适配器：Telegram、Discord、Slack、WhatsApp、Signal、Matrix、Teams、Google Chat、飞书、钉钉、Mastodon、Bluesky、LinkedIn、Reddit、IRC 等。' },
+        { q: '可以用于生产环境了吗？', a: '2100+ 测试，零 Clippy 警告。16 层安全包括 WASM 沙箱、Merkle 审计链、SSRF 防护。v1.0 之前建议锁定版本。' },
+      ],
+    },
+    community: {
+      label: '开源',
+      title: '加入社区',
+      desc: 'LibreFang 开放构建。贡献代码、报告问题或参与讨论。',
+      items: [
+        { label: '贡献代码', desc: '提交 PR、修 Bug、完善文档' },
+        { label: '报告问题', desc: '发现 Bug？提一个 Issue' },
+        { label: '参与讨论', desc: '提问、分享想法' },
+      ],
+      open: '前往',
+    },
+    meta: {
+      title: 'LibreFang - Agent 操作系统',
+      description: 'LibreFang 是用 Rust 构建的生产级 Agent 操作系统。180ms 冷启动，40MB 内存，16 层安全，44 个渠道适配器。7x24 运行自主 AI Agent。',
+    },
+    workflows: {
+      label: '工作流',
+      title: '替代整条工作流',
+      desc: 'LibreFang 不只是辅助——它会接管。这些是你原本需要雇人来做的工作。',
+      items: [
+        { title: '内容管道', desc: 'Clip + Twitter 协同：监控趋势视频、剪辑短片、添加字幕、发布社交媒体——全在你离线时完成。' },
+        { title: '销售获客', desc: 'Lead 每晚运行：发现潜客、按 ICP 评分、去重、导出干净 CSV。' },
+        { title: '竞争情报', desc: 'Collector 监控竞品网站、价格、招聘和新闻，一有变化立即提醒。' },
+        { title: '多 Agent 编排', desc: '用工作流链接 Hands：Researcher → Predictor → Clip → 广播到 44 个渠道。' },
+        { title: '迁移', desc: '一条命令：librefang migrate --from openclaw。Agent、记忆、技能自动转移。' },
+        { title: '生产级安全', desc: 'WASM 沙箱、Merkle 审计链、SSRF 防护、提示注入扫描、GCRA 限流——16 层。' },
+      ],
+    },
+    docs: {
+      label: '文档',
+      title: '文档',
+      desc: 'LibreFang 完整指南',
+      categories: [
+        { title: '概览', desc: '简介、快速开始、架构' },
+        { title: '自动化', desc: '定时任务、Webhooks、集成' },
+        { title: '基础设施', desc: '部署、监控、扩容' },
+      ],
+      viewAll: '查看全部文档',
+    },
+    githubStats: {
+      label: '社区',
+      title: '加入社区',
+      desc: '帮助我们构建自主 AI 的未来',
+      stars: '星标', forks: '分支', issues: '问题', prs: 'PR',
+      downloads: '下载量', docsVisits: '文档访问', lastUpdate: '最后更新',
+      starHistory: 'Star 趋势', starUs: '给我们星标', discuss: '讨论',
+    },
+    contributing: {
+      label: '贡献',
+      title: '如何贡献',
+      desc: 'LibreFang 是开源项目，欢迎各种形式的贡献。',
+      steps: [
+        { title: 'Fork & Clone', desc: 'Fork 仓库并克隆到本地，开始开发。' },
+        { title: '选择 Issue', desc: '浏览标记为 "good first issue" 或 "help wanted" 的开放 Issue。' },
+        { title: '提交 PR', desc: '完成修改、编写测试，提交 Pull Request 等待审核。' },
+      ],
+      cta: '阅读贡献指南',
+    },
+    footer: { docs: '文档', license: '许可证', privacy: '隐私' },
+  },
+
+  'zh-TW': {
+    nav: { architecture: '架構', hands: '能力單元', performance: '效能', install: '安裝', docs: '文件' },
+    hero: {
+      badge: '開源',
+      title1: 'Agent',
+      title2: '作業系統',
+      typing: [
+        '7x24 運行自主 Agent',
+        '取代整條工作流',
+        '部署到任意硬體',
+        '16 層安全防護',
+      ],
+      desc: 'LibreFang 是面向自主 AI Agent 的生產級執行環境。單一二進位檔案，15 個內建能力單元，44 個頻道適配器。Rust 打造，為不能停機的負載而生。',
+      getStarted: '開始使用',
+      viewGithub: '查看 GitHub',
+    },
+    stats: { coldStart: '冷啟動', memory: '記憶體', security: '安全層', channels: '頻道', hands: '能力單元', providers: '模型供應商' },
+    architecture: {
+      label: '系統設計',
+      title: '五層架構',
+      desc: '從硬體到使用者頻道，每一層都隔離、可測試、可替換。',
+      layers: [
+        { label: '頻道層', desc: '44 個頻道適配器：Telegram、Slack、Discord、飛書、釘釘、WhatsApp...' },
+        { label: '能力層', desc: '15 個自主能力單元，各配專屬模型和工具' },
+        { label: '核心層', desc: 'Agent 生命週期、工作流編排、預算控制、排程' },
+        { label: '執行環境層', desc: 'Tokio 非同步、WASM 沙箱、Merkle 稽核鏈、SSRF 防護' },
+        { label: '硬體層', desc: '單一二進位：筆電、VPS、樹莓派、裸機、雲端' },
+      ],
+      kernelDescs: ['建立、啟動、暫停、恢復、停止、銷毀', '9 個內建模板，DAG 編排', '單 Agent 限額、全域上限、告警', '基於 Cron 的觸發器、定時任務、事件鉤子', '短期、長期、情景、語意', 'Python 和 Prompt 技能，熱重載', 'Model Context Protocol，Agent 間通訊', 'Open Fang Protocol，網狀網路'],
+      runtimeDescs: ['多執行緒非同步執行環境', '不可信程式碼隔離執行', '雜湊鏈完整性驗證', '阻止內部網路存取', '敏感資料流分析', '每 Agent/頻道令牌桶', '多層輸入清洗', '基於角色的存取控制 + 稽核日誌'],
+      hardwareDescs: ['32MB，零依賴，複製即執行', 'x86_64 和 ARM64 原生建置', 'ARM64 — Pi 4 上 64MB 記憶體可執行', 'Termux 環境，ARM64 原生', '任意 $5/月 VPS，Docker 可選', '直接部署，無需編排器', '原生桌面應用，系統匣'],
+    },
+    hands: {
+      label: '能力單元',
+      title: '15 個內建 Hand',
+      desc: '每個 Hand 自帶模型、工具和工作流。啟用即用，無需組裝。',
+      items: [
+        { name: 'Clip', desc: 'YouTube 影片自動轉直式短影音，AI 字幕，自動發佈到 Telegram。' },
+        { name: 'Lead', desc: '每日自主發現潛在客戶，ICP 評分、去重、CSV 匯出。' },
+        { name: 'Collector', desc: 'OSINT 級情報監控，變化偵測。' },
+        { name: 'Predictor', desc: '校準機率預測引擎，預判市場和業務走向。' },
+        { name: 'Researcher', desc: '深度自主研究，來源可信度評分。' },
+        { name: 'Trader', desc: '自主市場情報與交易引擎——多訊號分析、對抗推理、風險管理。' },
+      ],
+      more: '+ 另有 9 個 Hand：Twitter、Browser、Analytics、DevOps、Creator、LinkedIn、Reddit、Strategist、API Tester',
+    },
+    performance: {
+      label: '基準測試',
+      title: '生而不同',
+      desc: 'Rust 而非 TypeScript。生產級，非原型。',
+      metric: '指標',
+      others: '其他框架',
+      rows: [
+        { metric: '冷啟動', others: '2.5 ~ 4s', librefang: '180ms' },
+        { metric: '閒置記憶體', others: '180 ~ 250MB', librefang: '40MB' },
+        { metric: '二進位大小', others: '100 ~ 200MB', librefang: '32MB' },
+        { metric: '安全層', others: '2 ~ 3', librefang: '16' },
+        { metric: '頻道適配器', others: '8 ~ 15', librefang: '44' },
+        { metric: '內建 Hands', others: '0', librefang: '15' },
+      ],
+    },
+    install: {
+      label: '開始使用',
+      title: '一條指令',
+      desc: '單一二進位檔案，無需 Docker，60 秒啟動自主 Agent。',
+      terminal: '終端',
+      comment: '# Agent 已在自主運行',
+      requires: '系統需求',
+      includes: '包含內容',
+      reqItems: ['Linux / macOS / Windows', '最低 64MB 記憶體', 'x86_64 或 ARM64', 'LLM API 金鑰'],
+      incItems: ['15 個內建 Hands', '44 個頻道適配器', '50 個 LLM 供應商', '桌面應用 (Tauri 2.0)'],
+    },
+    faq: {
+      label: '常見問題',
+      title: '常見問題',
+      items: [
+        { q: '什麼是 LibreFang？', a: '用 Rust 打造的生產級 Agent 作業系統。按排程 7x24 運行自主 AI Agent，無需使用者提示。執行環境、安全和頻道基礎設施集於一個二進位檔案。' },
+        { q: '什麼是 Hands？', a: '獨立的自主能力單元。每個 Hand 配有專屬模型、工具和工作流。15 個內建：Clip（影片）、Lead（獲客）、Collector（情報）、Predictor（預測）、Researcher、Trader 等。' },
+        { q: '支援哪些 LLM 供應商？', a: '50 個供應商：Anthropic、OpenAI、Gemini、Groq、DeepSeek、Mistral、Together、Ollama、vLLM 等，共 200+ 模型。每個 Hand 可設定不同供應商。' },
+        { q: '支援哪些頻道？', a: '44 個頻道適配器：Telegram、Discord、Slack、WhatsApp、Signal、Matrix、Teams、Google Chat、飛書、釘釘、Mastodon、Bluesky、LinkedIn、Reddit、IRC 等。' },
+        { q: '可以用於生產環境了嗎？', a: '2100+ 測試，零 Clippy 警告。16 層安全包括 WASM 沙箱、Merkle 稽核鏈、SSRF 防護。v1.0 之前建議鎖定版本。' },
+      ],
+    },
+    community: {
+      label: '開源',
+      title: '加入社群',
+      desc: 'LibreFang 開放打造。貢獻程式碼、回報問題或參與討論。',
+      items: [
+        { label: '貢獻程式碼', desc: '提交 PR、修 Bug、完善文件' },
+        { label: '回報問題', desc: '發現 Bug？提一個 Issue' },
+        { label: '參與討論', desc: '提問、分享想法' },
+      ],
+      open: '前往',
+    },
+    meta: {
+      title: 'LibreFang - Agent 作業系統',
+      description: 'LibreFang 是用 Rust 打造的生產級 Agent 作業系統。180ms 冷啟動，40MB 記憶體，16 層安全，44 個頻道適配器。7x24 運行自主 AI Agent。',
+    },
+    workflows: {
+      label: '工作流',
+      title: '取代整條工作流',
+      desc: 'LibreFang 不只是輔助——它會接管。這些是你原本需要雇人來做的工作。',
+      items: [
+        { title: '內容管道', desc: 'Clip + Twitter 協同：監控趨勢影片、剪輯短片、添加字幕、發佈社群媒體——全在你離線時完成。' },
+        { title: '銷售獲客', desc: 'Lead 每晚運行：發現潛客、按 ICP 評分、去重、匯出乾淨 CSV。' },
+        { title: '競爭情報', desc: 'Collector 監控競品網站、價格、招聘和新聞，一有變化立即提醒。' },
+        { title: '多 Agent 編排', desc: '用工作流鏈結 Hands：Researcher → Predictor → Clip → 廣播到 44 個頻道。' },
+        { title: '遷移', desc: '一條指令：librefang migrate --from openclaw。Agent、記憶、技能自動轉移。' },
+        { title: '生產級安全', desc: 'WASM 沙箱、Merkle 稽核鏈、SSRF 防護、提示注入掃描、GCRA 限流——16 層。' },
+      ],
+    },
+    docs: {
+      label: '文件',
+      title: '文件',
+      desc: 'LibreFang 完整指南',
+      categories: [
+        { title: '概覽', desc: '簡介、快速開始、架構' },
+        { title: '自動化', desc: '排程任務、Webhooks、整合' },
+        { title: '基礎設施', desc: '部署、監控、擴容' },
+      ],
+      viewAll: '查看全部文件',
+    },
+    githubStats: {
+      label: '社群',
+      title: '加入社群',
+      desc: '幫助我們打造自主 AI 的未來',
+      stars: '星標', forks: '分支', issues: '問題', prs: 'PR',
+      downloads: '下載量', docsVisits: '文件瀏覽', lastUpdate: '最後更新',
+      starHistory: 'Star 趨勢', starUs: '給我們星標', discuss: '討論',
+    },
+    contributing: {
+      label: '貢獻',
+      title: '如何貢獻',
+      desc: 'LibreFang 是開源專案，歡迎各種形式的貢獻。',
+      steps: [
+        { title: 'Fork & Clone', desc: 'Fork 儲存庫並複製到本機，開始開發。' },
+        { title: '選擇 Issue', desc: '瀏覽標記為 "good first issue" 或 "help wanted" 的開放 Issue。' },
+        { title: '提交 PR', desc: '完成修改、撰寫測試，提交 Pull Request 等待審核。' },
+      ],
+      cta: '閱讀貢獻指南',
+    },
+    footer: { docs: '文件', license: '授權', privacy: '隱私' },
+  },
+
+  ja: {
+    nav: { architecture: 'アーキテクチャ', hands: 'Hands', performance: 'パフォーマンス', install: 'インストール', docs: 'ドキュメント' },
+    hero: {
+      badge: 'オープンソース',
+      title1: 'Agent',
+      title2: 'オペレーティングシステム',
+      typing: [
+        '自律エージェントを24時間365日稼働',
+        'ワークフロー全体を置き換え',
+        'あらゆるハードウェアにデプロイ',
+        '16層のセキュリティで保護',
+      ],
+      desc: 'LibreFang は自律型 AI エージェントのための本番グレードランタイムです。シングルバイナリ、15 の内蔵ケイパビリティユニット、44 チャネルアダプタ。ダウンタイムが許されないワークロードのために Rust で構築。',
+      getStarted: '始める',
+      viewGithub: 'GitHub で見る',
+    },
+    stats: { coldStart: 'コールドスタート', memory: 'メモリ', security: 'セキュリティ層', channels: 'チャネル', hands: 'Hands', providers: 'プロバイダ' },
+    architecture: {
+      label: 'システム設計',
+      title: '5層アーキテクチャ',
+      desc: 'ハードウェアからユーザー向けチャネルまで。各層は分離・テスト・交換可能。',
+      layers: [
+        { label: 'チャネル層', desc: '44チャネルアダプタ：Telegram、Slack、Discord、Feishu、DingTalk、WhatsApp...' },
+        { label: 'Hands層', desc: '15の自律ケイパビリティユニット、専用モデルとツール付き' },
+        { label: 'カーネル層', desc: 'エージェントライフサイクル、ワークフロー編成、予算管理、スケジューリング' },
+        { label: 'ランタイム層', desc: 'Tokio非同期、WASMサンドボックス、Merkle監査チェーン、SSRF保護' },
+        { label: 'ハードウェア層', desc: 'シングルバイナリ：ノートPC、VPS、Raspberry Pi、ベアメタル、クラウド' },
+      ],
+      kernelDescs: ['作成、開始、一時停止、再開、停止、破棄', '9つの組み込みテンプレート、DAGオーケストレーション', 'エージェント別支出制限、グローバル上限、アラート', 'Cronベースのトリガー、定期タスク、イベントフック', '短期、長期、エピソード、セマンティック', 'Python & Promptスキル、ホットリロード', 'Model Context Protocol、エージェント間通信', 'Open Fang Protocol、メッシュネットワーク'],
+      runtimeDescs: ['マルチスレッド非同期ランタイム', '信頼できないコードの隔離実行', 'ハッシュチェーン整合性検証', '内部ネットワークアクセスのブロック', 'シークレットのデータフロー分析', 'エージェント/チャネル毎のトークンバケット', '多層入力サニタイズ', 'ロールベースアクセス制御 + 監査ログ'],
+      hardwareDescs: ['32MB、依存関係ゼロ、コピーして実行', 'x86_64 & ARM64ネイティブビルド', 'ARM64 — Pi 4で64MB RAMで動作', 'Termux環境、ARM64ネイティブ', '$5/月のVPS、Docker任意', '直接デプロイ、オーケストレーター不要', 'ネイティブデスクトップアプリ、システムトレイ'],
+    },
+    hands: {
+      label: 'ケイパビリティユニット',
+      title: '15の内蔵Hand',
+      desc: '各Handは専用のモデル、ツール、ワークフローを搭載。有効化するだけ、組み立て不要。',
+      items: [
+        { name: 'Clip', desc: 'YouTube動画を縦型ショートに自動変換、AIキャプション付き。Telegramに自動公開。' },
+        { name: 'Lead', desc: '毎日の見込み客発見、ICPスコアリング、重複排除、CSV出力。' },
+        { name: 'Collector', desc: 'OSINTレベルのインテリジェンス監視、変更検出。' },
+        { name: 'Predictor', desc: '校正済み確率予測エンジン、市場と成果を予測。' },
+        { name: 'Researcher', desc: 'ソース信頼性スコアリング付きの深層リサーチ。' },
+        { name: 'Trader', desc: '自律型マーケットインテリジェンス＆トレーディングエンジン——マルチシグナル分析、敵対的推論、リスク管理。' },
+      ],
+      more: '+ 他9つのHand：Twitter、Browser、Analytics、DevOps、Creator、LinkedIn、Reddit、Strategist、API Tester',
+    },
+    performance: {
+      label: 'ベンチマーク',
+      title: '根本から違う',
+      desc: 'TypeScriptではなくRust。プロトタイプではなくプロダクション。',
+      metric: '指標',
+      others: '他のフレームワーク',
+      rows: [
+        { metric: 'コールドスタート', others: '2.5 ~ 4s', librefang: '180ms' },
+        { metric: 'アイドルメモリ', others: '180 ~ 250MB', librefang: '40MB' },
+        { metric: 'バイナリサイズ', others: '100 ~ 200MB', librefang: '32MB' },
+        { metric: 'セキュリティ層', others: '2 ~ 3', librefang: '16' },
+        { metric: 'チャネルアダプタ', others: '8 ~ 15', librefang: '44' },
+        { metric: '内蔵Hands', others: '0', librefang: '15' },
+      ],
+    },
+    install: {
+      label: '始める',
+      title: 'コマンド1つ',
+      desc: 'シングルバイナリ。Docker不要。60秒で自律エージェント。',
+      terminal: 'ターミナル',
+      comment: '# エージェントが自律稼働中',
+      requires: '要件',
+      includes: '含まれるもの',
+      reqItems: ['Linux / macOS / Windows', '最低64MB RAM', 'x86_64 または ARM64', 'LLM API キー'],
+      incItems: ['15の内蔵Hands', '44チャネルアダプタ', '50のLLMプロバイダ', 'デスクトップアプリ (Tauri 2.0)'],
+    },
+    faq: {
+      label: 'FAQ',
+      title: 'よくある質問',
+      items: [
+        { q: 'LibreFangとは？', a: 'Rustで構築された本番グレードのAgent OS。スケジュールに従い24/7自律AIエージェントを実行。ユーザープロンプト不要。ランタイム、セキュリティ、チャネルインフラをシングルバイナリで。' },
+        { q: 'Handsとは？', a: '自己完結型の自律ケイパビリティユニット。各Handは専用モデル、ツール、ワークフローを持つ。15内蔵：Clip（動画）、Lead（見込み客）、Collector（OSINT）、Predictor（予測）、Researcher、Trader等。' },
+        { q: '対応LLMプロバイダは？', a: '50プロバイダ：Anthropic、OpenAI、Gemini、Groq、DeepSeek、Mistral、Together、Ollama、vLLM等。計200+モデル。各Handで異なるプロバイダを設定可能。' },
+        { q: '対応チャネルは？', a: '44チャネルアダプタ：Telegram、Discord、Slack、WhatsApp、Signal、Matrix、Teams、Google Chat、Feishu、DingTalk、Mastodon、Bluesky、LinkedIn、Reddit、IRC等。' },
+        { q: '本番利用可能？', a: '2100+テスト、Clippy警告ゼロ。WASMサンドボックス、Merkle監査チェーン、SSRF保護含む16セキュリティ層。v1.0までバージョン固定推奨。' },
+      ],
+    },
+    community: {
+      label: 'オープンソース',
+      title: 'コミュニティに参加',
+      desc: 'LibreFangはオープンに開発。コード貢献、バグ報告、ディスカッションに参加。',
+      items: [
+        { label: 'コード貢献', desc: 'PR提出、バグ修正、ドキュメント改善' },
+        { label: 'バグ報告', desc: 'バグ発見？Issueを開く' },
+        { label: 'ディスカッション', desc: '質問やアイデアを共有' },
+      ],
+      open: '開く',
+    },
+    meta: {
+      title: 'LibreFang - Agent オペレーティングシステム',
+      description: 'LibreFang は Rust で構築された本番グレードの Agent オペレーティングシステムです。180ms コールドスタート、40MB メモリ、16 セキュリティ層、44 チャネルアダプタ。自律 AI エージェントを 24 時間 365 日稼働。',
+    },
+    workflows: {
+      label: 'ワークフロー',
+      title: 'ワークフロー全体を置き換え',
+      desc: 'LibreFang は単なるアシストではなく、業務を引き継ぎます。これらは本来人を雇って行う作業です。',
+      items: [
+        { title: 'コンテンツパイプライン', desc: 'Clip + Twitter：トレンド動画を監視、ショート動画をカット、字幕を追加、SNSに公開——すべてオフライン中に完了。' },
+        { title: '営業プロスペクティング', desc: 'Lead が毎晩実行：見込み客を発見、ICP適合度でスコアリング、重複排除、クリーンなCSVをエクスポート。' },
+        { title: '競合インテリジェンス', desc: 'Collector が競合サイト、価格、求人、ニュースを監視。変化があった瞬間にアラート。' },
+        { title: 'マルチエージェントオーケストレーション', desc: 'ワークフローでHandsを連鎖：Researcher → Predictor → Clip → 44チャネルにブロードキャスト。' },
+        { title: 'マイグレーション', desc: 'コマンド1つ：librefang migrate --from openclaw。エージェント、メモリ、スキルが自動転送。' },
+        { title: '本番セキュリティ', desc: 'WASMサンドボックス、Merkle監査チェーン、SSRF保護、プロンプトインジェクションスキャン、GCRAレート制限——16層。' },
+      ],
+    },
+    docs: {
+      label: 'ドキュメント',
+      title: 'ドキュメント',
+      desc: 'LibreFang の包括的なガイド',
+      categories: [
+        { title: '概要', desc: '紹介、クイックスタート、アーキテクチャ' },
+        { title: '自動化', desc: 'Cronタスク、Webhooks、インテグレーション' },
+        { title: 'インフラストラクチャ', desc: 'デプロイ、モニタリング、スケーリング' },
+      ],
+      viewAll: '全ドキュメントを見る',
+    },
+    githubStats: {
+      label: 'コミュニティ',
+      title: 'コミュニティに参加',
+      desc: '自律AIエージェントの未来を一緒に築きましょう',
+      stars: 'スター', forks: 'フォーク', issues: 'Issue', prs: 'PR',
+      downloads: 'ダウンロード', docsVisits: 'ドキュメント閲覧', lastUpdate: '最終更新',
+      starHistory: 'スター推移', starUs: 'スターする', discuss: 'ディスカッション',
+    },
+    contributing: {
+      label: 'コントリビュート',
+      title: '貢献する方法',
+      desc: 'LibreFang はオープンソースであり、あらゆる形の貢献を歓迎します。',
+      steps: [
+        { title: 'Fork & Clone', desc: 'リポジトリをフォークしてローカルにクローンし、開発を始めましょう。' },
+        { title: 'Issueを選ぶ', desc: '"good first issue" や "help wanted" ラベルの付いたオープンIssueを探しましょう。' },
+        { title: 'PRを提出', desc: '変更を行い、テストを書き、Pull Requestを提出してレビューを依頼しましょう。' },
+      ],
+      cta: 'コントリビュートガイドを読む',
+    },
+    footer: { docs: 'ドキュメント', license: 'ライセンス', privacy: 'プライバシー' },
+  },
+
+  ko: {
+    nav: { architecture: '아키텍처', hands: 'Hands', performance: '성능', install: '설치', docs: '문서' },
+    hero: {
+      badge: '오픈소스',
+      title1: 'Agent',
+      title2: '운영 체제',
+      typing: [
+        '자율 에이전트를 24/7 가동',
+        '전체 워크플로우를 대체',
+        '모든 하드웨어에 배포',
+        '16개 보안 레이어로 보호',
+      ],
+      desc: 'LibreFang은 자율 AI 에이전트를 위한 프로덕션급 런타임입니다. 단일 바이너리, 15개 내장 기능 유닛, 44개 채널 어댑터. 다운타임이 허용되지 않는 워크로드를 위해 Rust로 구축.',
+      getStarted: '시작하기',
+      viewGithub: 'GitHub 보기',
+    },
+    stats: { coldStart: '콜드 스타트', memory: '메모리', security: '보안 레이어', channels: '채널', hands: 'Hands', providers: '제공자' },
+    architecture: {
+      label: '시스템 설계',
+      title: '5계층 아키텍처',
+      desc: '하드웨어에서 사용자 채널까지. 각 계층은 격리, 테스트, 교체 가능.',
+      layers: [
+        { label: '채널 계층', desc: '44개 채널 어댑터: Telegram, Slack, Discord, Feishu, DingTalk, WhatsApp...' },
+        { label: 'Hands 계층', desc: '전용 모델과 도구를 갖춘 15개 자율 기능 유닛' },
+        { label: '커널 계층', desc: '에이전트 라이프사이클, 워크플로우 오케스트레이션, 예산 제어, 스케줄링' },
+        { label: '런타임 계층', desc: 'Tokio 비동기, WASM 샌드박스, Merkle 감사 체인, SSRF 보호' },
+        { label: '하드웨어 계층', desc: '단일 바이너리: 노트북, VPS, Raspberry Pi, 베어메탈, 클라우드' },
+      ],
+      kernelDescs: ['생성, 시작, 일시정지, 재개, 중지, 삭제', '9개 내장 템플릿, DAG 오케스트레이션', '에이전트별 지출 한도, 전역 상한, 알림', 'Cron 기반 트리거, 주기 작업, 이벤트 훅', '단기, 장기, 에피소드, 시맨틱', 'Python & Prompt 스킬, 핫 리로드', 'Model Context Protocol, 에이전트 간 통신', 'Open Fang Protocol, 메시 네트워킹'],
+      runtimeDescs: ['멀티스레드 비동기 런타임', '신뢰할 수 없는 코드 격리 실행', '해시 체인 무결성 검증', '내부 네트워크 접근 차단', '시크릿 데이터 흐름 분석', '에이전트/채널별 토큰 버킷', '다중 레이어 입력 새니타이징', '역할 기반 접근 제어 + 감사 로그'],
+      hardwareDescs: ['32MB, 제로 의존성, 복사 후 실행', 'x86_64 및 ARM64 네이티브 빌드', 'ARM64 — Pi 4에서 64MB RAM으로 실행', 'Termux 환경, ARM64 네이티브', '$5/월 VPS, Docker 선택', '직접 배포, 오케스트레이터 불필요', '네이티브 데스크톱 앱, 시스템 트레이'],
+    },
+    hands: {
+      label: '기능 유닛',
+      title: '15개 내장 Hand',
+      desc: '각 Hand는 전용 모델, 도구, 워크플로우를 탑재. 활성화만 하면 됩니다.',
+      items: [
+        { name: 'Clip', desc: 'YouTube 동영상을 세로형 쇼츠로 자동 변환, AI 자막. Telegram 자동 게시.' },
+        { name: 'Lead', desc: '매일 잠재 고객 발견, ICP 점수, 중복 제거, CSV 내보내기.' },
+        { name: 'Collector', desc: 'OSINT급 인텔리전스 모니터링, 변경 감지.' },
+        { name: 'Predictor', desc: '보정된 확률적 예측 엔진, 시장과 결과 예측.' },
+        { name: 'Researcher', desc: '출처 신뢰도 점수가 포함된 심층 리서치.' },
+        { name: 'Trader', desc: '자율 시장 인텔리전스 및 거래 엔진 — 다중 신호 분석, 적대적 추론, 리스크 관리.' },
+      ],
+      more: '+ 9개 추가 Hand: Twitter, Browser, Analytics, DevOps, Creator, LinkedIn, Reddit, Strategist, API Tester',
+    },
+    performance: {
+      label: '벤치마크',
+      title: '근본부터 다르다',
+      desc: 'TypeScript가 아닌 Rust. 프로토타입이 아닌 프로덕션.',
+      metric: '지표',
+      others: '다른 프레임워크',
+      rows: [
+        { metric: '콜드 스타트', others: '2.5 ~ 4s', librefang: '180ms' },
+        { metric: '유휴 메모리', others: '180 ~ 250MB', librefang: '40MB' },
+        { metric: '바이너리 크기', others: '100 ~ 200MB', librefang: '32MB' },
+        { metric: '보안 레이어', others: '2 ~ 3', librefang: '16' },
+        { metric: '채널 어댑터', others: '8 ~ 15', librefang: '44' },
+        { metric: '내장 Hands', others: '0', librefang: '15' },
+      ],
+    },
+    install: {
+      label: '시작하기',
+      title: '명령어 하나',
+      desc: '단일 바이너리. Docker 불필요. 60초면 자율 에이전트 가동.',
+      terminal: '터미널',
+      comment: '# 에이전트가 자율적으로 실행 중',
+      requires: '요구 사항',
+      includes: '포함 내용',
+      reqItems: ['Linux / macOS / Windows', '최소 64MB RAM', 'x86_64 또는 ARM64', 'LLM API 키'],
+      incItems: ['15개 내장 Hands', '44개 채널 어댑터', '50개 LLM 제공자', '데스크톱 앱 (Tauri 2.0)'],
+    },
+    faq: {
+      label: 'FAQ',
+      title: '자주 묻는 질문',
+      items: [
+        { q: 'LibreFang이란?', a: 'Rust로 구축된 프로덕션급 Agent OS. 스케줄에 따라 24/7 자율 AI 에이전트를 실행. 사용자 프롬프트 불필요. 런타임, 보안, 채널 인프라를 단일 바이너리로.' },
+        { q: 'Hands란?', a: '자체 완결형 자율 기능 유닛. 각 Hand는 전용 모델, 도구, 워크플로우를 보유. 15개 내장: Clip(동영상), Lead(영업), Collector(OSINT), Predictor(예측), Researcher, Trader 등.' },
+        { q: '지원 LLM 제공자는?', a: '50개 제공자: Anthropic, OpenAI, Gemini, Groq, DeepSeek, Mistral, Together, Ollama, vLLM 등. 총 200+ 모델. 각 Hand마다 다른 제공자 설정 가능.' },
+        { q: '지원 채널은?', a: '44개 채널 어댑터: Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Teams, Google Chat, Feishu, DingTalk, Mastodon, Bluesky, LinkedIn, Reddit, IRC 등.' },
+        { q: '프로덕션 사용 가능?', a: '2100+ 테스트, Clippy 경고 제로. WASM 샌드박스, Merkle 감사 체인, SSRF 보호 포함 16개 보안 레이어. v1.0까지 버전 고정 권장.' },
+      ],
+    },
+    community: {
+      label: '오픈소스',
+      title: '커뮤니티 참여',
+      desc: 'LibreFang은 오픈으로 개발됩니다. 코드 기여, 버그 보고, 토론 참여.',
+      items: [
+        { label: '코드 기여', desc: 'PR 제출, 버그 수정, 문서 개선' },
+        { label: '버그 보고', desc: '버그 발견? Issue 열기' },
+        { label: '토론', desc: '질문과 아이디어 공유' },
+      ],
+      open: '열기',
+    },
+    meta: {
+      title: 'LibreFang - Agent 운영 체제',
+      description: 'LibreFang은 Rust로 구축된 프로덕션급 Agent 운영 체제입니다. 180ms 콜드 스타트, 40MB 메모리, 16개 보안 레이어, 44개 채널 어댑터. 자율 AI 에이전트를 24/7 가동.',
+    },
+    workflows: {
+      label: '워크플로우',
+      title: '전체 워크플로우를 대체',
+      desc: 'LibreFang은 단순 보조가 아닌 업무를 인수합니다. 원래 사람을 고용해야 할 작업들입니다.',
+      items: [
+        { title: '콘텐츠 파이프라인', desc: 'Clip + Twitter: 트렌드 동영상 모니터링, 쇼츠 편집, 자막 추가, SNS 게시 -- 오프라인 중에도 자동 완료.' },
+        { title: '영업 프로스펙팅', desc: 'Lead가 매일 밤 실행: 잠재 고객 발견, ICP 적합도 점수, 중복 제거, 깨끗한 CSV 내보내기.' },
+        { title: '경쟁 인텔리전스', desc: 'Collector가 경쟁사 사이트, 가격, 채용, 뉴스를 감시. 변화가 생기는 순간 알림.' },
+        { title: '멀티 에이전트 오케스트레이션', desc: '워크플로우로 Hands를 체인: Researcher → Predictor → Clip → 44개 채널로 브로드캐스트.' },
+        { title: '마이그레이션', desc: '명령어 하나: librefang migrate --from openclaw. 에이전트, 메모리, 스킬이 자동 이전.' },
+        { title: '프로덕션 보안', desc: 'WASM 샌드박스, Merkle 감사 체인, SSRF 보호, 프롬프트 인젝션 스캔, GCRA 속도 제한 -- 16개 레이어.' },
+      ],
+    },
+    docs: {
+      label: '문서',
+      title: '문서',
+      desc: 'LibreFang 종합 가이드',
+      categories: [
+        { title: '개요', desc: '소개, 빠른 시작, 아키텍처' },
+        { title: '자동화', desc: 'Cron 작업, Webhooks, 통합' },
+        { title: '인프라', desc: '배포, 모니터링, 스케일링' },
+      ],
+      viewAll: '전체 문서 보기',
+    },
+    githubStats: {
+      label: '커뮤니티',
+      title: '커뮤니티 참여',
+      desc: '자율 AI 에이전트의 미래를 함께 만들어 가세요',
+      stars: '스타', forks: '포크', issues: '이슈', prs: 'PR',
+      downloads: '다운로드', docsVisits: '문서 방문', lastUpdate: '마지막 업데이트',
+      starHistory: '스타 추이', starUs: '스타 하기', discuss: '토론',
+    },
+    contributing: {
+      label: '기여',
+      title: '기여하는 방법',
+      desc: 'LibreFang은 오픈소스이며 모든 형태의 기여를 환영합니다.',
+      steps: [
+        { title: 'Fork & Clone', desc: '저장소를 포크하고 로컬에 클론하여 개발을 시작하세요.' },
+        { title: 'Issue 선택', desc: '"good first issue" 또는 "help wanted" 라벨이 붙은 오픈 Issue를 찾아보세요.' },
+        { title: 'PR 제출', desc: '변경을 완료하고 테스트를 작성한 후 Pull Request를 제출하여 리뷰를 요청하세요.' },
+      ],
+      cta: '기여 가이드 읽기',
+    },
+    footer: { docs: '문서', license: '라이선스', privacy: '개인정보' },
+  },
+
+  de: {
+    nav: { architecture: 'Architektur', hands: 'Hands', performance: 'Leistung', install: 'Installation', docs: 'Dokumentation' },
+    hero: {
+      badge: 'Open Source',
+      title1: 'Das Agent',
+      title2: 'Betriebssystem',
+      typing: [
+        'autonome Agenten 24/7 betreiben',
+        'ganze Workflows ersetzen',
+        'auf jeder Hardware deployen',
+        '16 Sicherheitsschichten nutzen',
+      ],
+      desc: 'LibreFang ist eine produktionsreife Laufzeitumgebung für autonome KI-Agenten. Einzelne Binärdatei, 15 eingebaute Fähigkeitseinheiten, 44 Kanaladapter. In Rust gebaut für Workloads, die nicht ausfallen dürfen.',
+      getStarted: 'Loslegen',
+      viewGithub: 'Auf GitHub ansehen',
+    },
+    stats: { coldStart: 'Kaltstart', memory: 'Speicher', security: 'Sicherheitsschichten', channels: 'Kanäle', hands: 'Hands', providers: 'Anbieter' },
+    architecture: {
+      label: 'Systemdesign',
+      title: 'Fünf-Schichten-Architektur',
+      desc: 'Von Hardware bis Benutzerkanäle. Jede Schicht ist isoliert, testbar und austauschbar.',
+      layers: [
+        { label: 'Kanäle', desc: '44 Kanaladapter: Telegram, Slack, Discord, Feishu, DingTalk, WhatsApp...' },
+        { label: 'Hands', desc: '15 autonome Fähigkeitseinheiten mit dedizierten Modellen und Tools' },
+        { label: 'Kernel', desc: 'Agent-Lebenszyklus, Workflow-Orchestrierung, Budgetkontrolle, Planung' },
+        { label: 'Laufzeit', desc: 'Tokio-Async, WASM-Sandbox, Merkle-Audit-Kette, SSRF-Schutz' },
+        { label: 'Hardware', desc: 'Einzelne Binärdatei: Laptop, VPS, Raspberry Pi, Bare Metal, Cloud' },
+      ],
+      kernelDescs: ['Erstellen, starten, pausieren, fortsetzen, stoppen, zerstören', '9 eingebaute Vorlagen, DAG-Orchestrierung', 'Ausgabelimits pro Agent, globale Obergrenzen, Warnungen', 'Cron-basierte Trigger, Intervall-Tasks, Event-Hooks', 'Kurzzeit, Langzeit, episodisch, semantisch', 'Python & Prompt Skills, Hot-Reload', 'Model Context Protocol, Agent-to-Agent', 'Open Fang Protocol für Mesh-Netzwerk'],
+      runtimeDescs: ['Multithreaded asynchrone Laufzeit', 'Isolierte Ausführung für nicht vertrauenswürdigen Code', 'Hash-Chain-Integritätsprüfung', 'Internes Netzwerk blockieren', 'Datenflussanalyse für Geheimnisse', 'Token-Bucket pro Agent/Kanal', 'Mehrstufige Eingabe-Sanitisierung', 'Rollenbasierte Zugriffskontrolle + Audit-Log'],
+      hardwareDescs: ['32MB, keine Abhängigkeiten, einfach kopieren und starten', 'x86_64 und ARM64 native Builds', 'ARM64 — läuft auf Pi 4 mit 64MB RAM', 'Termux-Umgebung, ARM64 nativ', 'Jeder $5/Monat VPS, Docker optional', 'Direktes Deployment, kein Orchestrator nötig', 'Native Desktop-App mit System-Tray'],
+    },
+    hands: {
+      label: 'Fähigkeitseinheiten',
+      title: '15 eingebaute Hands',
+      desc: 'Jede Hand bringt eigenes Modell, Tools und Workflow mit. Aktivieren, nicht zusammenbauen.',
+      items: [
+        { name: 'Clip', desc: 'YouTube-Videos automatisch in vertikale Shorts umwandeln, mit KI-Untertiteln. Auto-Veröffentlichung auf Telegram.' },
+        { name: 'Lead', desc: 'Tägliche Interessenten-Entdeckung mit ICP-Bewertung, Deduplizierung, CSV-Export.' },
+        { name: 'Collector', desc: 'OSINT-grade Intelligenz-Überwachung mit Änderungserkennung.' },
+        { name: 'Predictor', desc: 'Kalibrierte probabilistische Prognose-Engine für Märkte und Ergebnisse.' },
+        { name: 'Researcher', desc: 'Tiefenforschung mit Quellenglaubwürdigkeitsbewertung.' },
+        { name: 'Trader', desc: 'Autonome Marktintelligenz und Trading-Engine — Multi-Signal-Analyse, adversariales Reasoning, Risikomanagement.' },
+      ],
+      more: '+ 9 weitere Hands: Twitter, Browser, Analytics, DevOps, Creator, LinkedIn, Reddit, Strategist, API Tester',
+    },
+    performance: {
+      label: 'Benchmarks',
+      title: 'Grundlegend anders',
+      desc: 'Rust, nicht TypeScript. Produktion, nicht Prototyp.',
+      metric: 'Metrik',
+      others: 'Andere',
+      rows: [
+        { metric: 'Kaltstart', others: '2,5 ~ 4s', librefang: '180ms' },
+        { metric: 'Leerlaufspeicher', others: '180 ~ 250MB', librefang: '40MB' },
+        { metric: 'Binärgröße', others: '100 ~ 200MB', librefang: '32MB' },
+        { metric: 'Sicherheitsschichten', others: '2 ~ 3', librefang: '16' },
+        { metric: 'Kanaladapter', others: '8 ~ 15', librefang: '44' },
+        { metric: 'Eingebaute Hands', others: '0', librefang: '15' },
+      ],
+    },
+    install: {
+      label: 'Loslegen',
+      title: 'Ein Befehl',
+      desc: 'Einzelne Binärdatei. Kein Docker. 60 Sekunden bis zu autonomen Agenten.',
+      terminal: 'Terminal',
+      comment: '# Agenten laufen jetzt autonom',
+      requires: 'Voraussetzungen',
+      includes: 'Enthalten',
+      reqItems: ['Linux / macOS / Windows', 'Mindestens 64MB RAM', 'x86_64 oder ARM64', 'LLM API-Schlüssel'],
+      incItems: ['15 eingebaute Hands', '44 Kanaladapter', '50 LLM-Anbieter', 'Desktop-App (Tauri 2.0)'],
+    },
+    faq: {
+      label: 'FAQ',
+      title: 'Häufige Fragen',
+      items: [
+        { q: 'Was ist LibreFang?', a: 'Ein produktionsreifes Agent-Betriebssystem in Rust. Führt autonome KI-Agenten 24/7 nach Zeitplan aus — ohne Benutzer-Prompts. Laufzeit, Sicherheit und Kanal-Infrastruktur in einer Binärdatei.' },
+        { q: 'Was sind Hands?', a: 'Eigenständige autonome Fähigkeitseinheiten. Jede Hand hat dediziertes Modell, Tools und Workflow. 15 eingebaut: Clip (Video), Lead (Akquise), Collector (OSINT), Predictor (Prognose), Researcher, Trader und mehr.' },
+        { q: 'Welche LLM-Anbieter werden unterstützt?', a: '50 Anbieter: Anthropic, OpenAI, Gemini, Groq, DeepSeek, Mistral, Together, Ollama, vLLM und mehr. 200+ Modelle insgesamt. Jede Hand kann einen anderen Anbieter nutzen.' },
+        { q: 'Welche Kanäle werden unterstützt?', a: '44 Kanaladapter: Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Teams, Google Chat, Feishu, DingTalk, Mastodon, Bluesky, LinkedIn, Reddit, IRC und mehr.' },
+        { q: 'Ist es produktionsreif?', a: '2100+ Tests, null Clippy-Warnungen. 16 Sicherheitsschichten inkl. WASM-Sandbox, Merkle-Audit-Kette, SSRF-Schutz. Version bis v1.0 fixieren empfohlen.' },
+      ],
+    },
+    community: {
+      label: 'Open Source',
+      title: 'Community beitreten',
+      desc: 'LibreFang wird offen entwickelt. Code beitragen, Bugs melden oder an Diskussionen teilnehmen.',
+      items: [
+        { label: 'Beitragen', desc: 'PRs einreichen, Bugs fixen, Docs verbessern' },
+        { label: 'Melden', desc: 'Bug gefunden? Issue öffnen' },
+        { label: 'Diskutieren', desc: 'Fragen stellen, Ideen teilen' },
+      ],
+      open: 'Öffnen',
+    },
+    meta: {
+      title: 'LibreFang - Das Agent-Betriebssystem',
+      description: 'LibreFang ist ein produktionsreifes Agent-Betriebssystem, gebaut in Rust. 180ms Kaltstart, 40MB Speicher, 16 Sicherheitsschichten, 44 Kanaladapter. Autonome KI-Agenten rund um die Uhr betreiben.',
+    },
+    workflows: {
+      label: 'Workflows',
+      title: 'Ganze Workflows ersetzen',
+      desc: 'LibreFang assistiert nicht nur — es übernimmt. Das sind Aufgaben, für die Sie sonst Mitarbeiter einstellen würden.',
+      items: [
+        { title: 'Content-Pipeline', desc: 'Clip + Twitter: Trend-Videos überwachen, Shorts schneiden, Untertitel hinzufügen, auf Social Media veröffentlichen — alles während Sie offline sind.' },
+        { title: 'Vertriebsakquise', desc: 'Lead läuft jede Nacht: Interessenten entdecken, nach ICP bewerten, Duplikate entfernen, saubere CSV exportieren.' },
+        { title: 'Wettbewerbsanalyse', desc: 'Collector überwacht Konkurrenz-Websites, Preise, Stellenbörsen und Nachrichten. Alarm bei jeder Änderung.' },
+        { title: 'Multi-Agent-Orchestrierung', desc: 'Hands mit Workflow-Orchestrierung verketten: Researcher → Predictor → Clip → Broadcast an 44 Kanäle.' },
+        { title: 'Migration', desc: 'Ein Befehl: librefang migrate --from openclaw. Agenten, Speicher und Skills werden automatisch übertragen.' },
+        { title: 'Produktionssicherheit', desc: 'WASM-Sandbox, Merkle-Audit-Kette, SSRF-Schutz, Prompt-Injection-Scanning, GCRA-Ratenlimitierung — 16 Schichten.' },
+      ],
+    },
+    docs: {
+      label: 'Dokumentation',
+      title: 'Dokumentation',
+      desc: 'Umfassende Anleitungen für LibreFang',
+      categories: [
+        { title: 'Überblick', desc: 'Einführung, Schnellstart, Architektur' },
+        { title: 'Automatisierung', desc: 'Cron-Aufgaben, Webhooks, Integrationen' },
+        { title: 'Infrastruktur', desc: 'Deployment, Monitoring, Skalierung' },
+      ],
+      viewAll: 'Alle Docs ansehen',
+    },
+    githubStats: {
+      label: 'Community',
+      title: 'Community beitreten',
+      desc: 'Helfen Sie uns, die Zukunft autonomer KI-Agenten zu gestalten',
+      stars: 'Sterne', forks: 'Forks', issues: 'Issues', prs: 'PRs',
+      downloads: 'Downloads', docsVisits: 'Docs-Besuche', lastUpdate: 'Letztes Update',
+      starHistory: 'Star-Verlauf', starUs: 'Star geben', discuss: 'Diskutieren',
+    },
+    contributing: {
+      label: 'Mitwirken',
+      title: 'Wie Sie beitragen können',
+      desc: 'LibreFang ist Open Source und begrüßt Beiträge jeder Art.',
+      steps: [
+        { title: 'Fork & Clone', desc: 'Forken Sie das Repository und klonen Sie es lokal, um loszulegen.' },
+        { title: 'Issue auswählen', desc: 'Durchsuchen Sie offene Issues mit den Labels "good first issue" oder "help wanted".' },
+        { title: 'PR einreichen', desc: 'Nehmen Sie Änderungen vor, schreiben Sie Tests und reichen Sie einen Pull Request zur Überprüfung ein.' },
+      ],
+      cta: 'Beitragsrichtlinien lesen',
+    },
+    footer: { docs: 'Dokumentation', license: 'Lizenz', privacy: 'Datenschutz' },
+  },
+
+  es: {
+    nav: { architecture: 'Arquitectura', hands: 'Hands', performance: 'Rendimiento', install: 'Instalar', docs: 'Documentación' },
+    hero: {
+      badge: 'Código Abierto',
+      title1: 'El Sistema Operativo',
+      title2: 'para Agentes',
+      typing: [
+        'ejecutar agentes autónomos 24/7',
+        'reemplazar flujos de trabajo completos',
+        'desplegar en cualquier hardware',
+        'monitorizar con 16 capas de seguridad',
+      ],
+      desc: 'LibreFang es un runtime de grado de producción para agentes de IA autónomos. Un solo binario, 15 unidades de capacidad integradas, 44 adaptadores de canal. Construido en Rust para cargas de trabajo que no pueden caer.',
+      getStarted: 'Comenzar',
+      viewGithub: 'Ver en GitHub',
+    },
+    stats: { coldStart: 'Arranque en Frío', memory: 'Memoria', security: 'Capas de Seguridad', channels: 'Canales', hands: 'Hands', providers: 'Proveedores' },
+    architecture: {
+      label: 'Diseño del Sistema',
+      title: 'Arquitectura de cinco capas',
+      desc: 'Desde el hardware hasta los canales de usuario. Cada capa está aislada, es testeable y reemplazable.',
+      layers: [
+        { label: 'Canales', desc: '44 adaptadores de canal: Telegram, Slack, Discord, Feishu, DingTalk, WhatsApp...' },
+        { label: 'Hands', desc: '15 unidades de capacidad autónomas con modelos y herramientas dedicados' },
+        { label: 'Kernel', desc: 'Ciclo de vida de agentes, orquestación de workflows, control de presupuesto, programación' },
+        { label: 'Runtime', desc: 'Tokio async, sandbox WASM, cadena de auditoría Merkle, protección SSRF' },
+        { label: 'Hardware', desc: 'Un solo binario: portátil, VPS, Raspberry Pi, bare metal, nube' },
+      ],
+      kernelDescs: ['Crear, iniciar, pausar, reanudar, detener, destruir', '9 plantillas integradas, orquestación DAG', 'Límites de gasto por agente, topes globales, alertas', 'Triggers basados en Cron, tareas de intervalo, hooks de eventos', 'Corto plazo, largo plazo, episódica, semántica', 'Skills Python y Prompt, recarga en caliente', 'Model Context Protocol, Agent-to-Agent', 'Open Fang Protocol para redes mesh'],
+      runtimeDescs: ['Runtime asíncrono multihilo', 'Ejecución aislada para código no confiable', 'Verificación de integridad por cadena de hash', 'Bloqueo de acceso a red interna', 'Análisis de flujo de datos para secretos', 'Token bucket por agente/canal', 'Sanitización de entrada multicapa', 'Control de acceso basado en roles + log de auditoría'],
+      hardwareDescs: ['32MB, cero dependencias, solo copiar y ejecutar', 'Builds nativos x86_64 y ARM64', 'ARM64 — funciona en Pi 4 con 64MB RAM', 'Entorno Termux, ARM64 nativo', 'Cualquier VPS de $5/mes, Docker opcional', 'Despliegue directo, sin orquestador', 'App de escritorio nativa con bandeja del sistema'],
+    },
+    hands: {
+      label: 'Unidades de Capacidad',
+      title: '15 Hands integradas',
+      desc: 'Cada Hand incluye su propio modelo, herramientas y workflow. Activar, no ensamblar.',
+      items: [
+        { name: 'Clip', desc: 'Videos de YouTube a shorts verticales con subtítulos IA. Publicación automática en Telegram.' },
+        { name: 'Lead', desc: 'Descubrimiento diario de prospectos con puntuación ICP, dedup y exportación CSV.' },
+        { name: 'Collector', desc: 'Monitorización de inteligencia nivel OSINT con detección de cambios.' },
+        { name: 'Predictor', desc: 'Motor de pronóstico probabilístico calibrado para mercados y resultados.' },
+        { name: 'Researcher', desc: 'Investigación profunda con puntuación de credibilidad de fuentes.' },
+        { name: 'Trader', desc: 'Motor autónomo de inteligencia de mercado y trading — análisis multi-señal, razonamiento adversarial, gestión de riesgos.' },
+      ],
+      more: '+ 9 Hands más: Twitter, Browser, Analytics, DevOps, Creator, LinkedIn, Reddit, Strategist, API Tester',
+    },
+    performance: {
+      label: 'Benchmarks',
+      title: 'Fundamentalmente diferente',
+      desc: 'Rust, no TypeScript. Producción, no prototipo.',
+      metric: 'Métrica',
+      others: 'Otros',
+      rows: [
+        { metric: 'Arranque en Frío', others: '2.5 ~ 4s', librefang: '180ms' },
+        { metric: 'Memoria en Reposo', others: '180 ~ 250MB', librefang: '40MB' },
+        { metric: 'Tamaño del Binario', others: '100 ~ 200MB', librefang: '32MB' },
+        { metric: 'Capas de Seguridad', others: '2 ~ 3', librefang: '16' },
+        { metric: 'Adaptadores de Canal', others: '8 ~ 15', librefang: '44' },
+        { metric: 'Hands Integradas', others: '0', librefang: '15' },
+      ],
+    },
+    install: {
+      label: 'Comenzar',
+      title: 'Un solo comando',
+      desc: 'Un solo binario. Sin Docker. 60 segundos para agentes autónomos.',
+      terminal: 'terminal',
+      comment: '# los agentes están ejecutándose autónomamente',
+      requires: 'Requisitos',
+      includes: 'Incluye',
+      reqItems: ['Linux / macOS / Windows', 'Mínimo 64MB RAM', 'x86_64 o ARM64', 'Clave API LLM'],
+      incItems: ['15 Hands integradas', '44 adaptadores de canal', '50 proveedores LLM', 'App de escritorio (Tauri 2.0)'],
+    },
+    faq: {
+      label: 'FAQ',
+      title: 'Preguntas frecuentes',
+      items: [
+        { q: '¿Qué es LibreFang?', a: 'Un sistema operativo de agentes de grado de producción construido en Rust. Ejecuta agentes de IA autónomos 24/7 por horario — sin prompts de usuario. Runtime, seguridad e infraestructura de canales en un solo binario.' },
+        { q: '¿Qué son los Hands?', a: 'Unidades de capacidad autónomas autocontenidas. Cada Hand tiene modelo, herramientas y workflow dedicados. 15 integradas: Clip (video), Lead (prospección), Collector (OSINT), Predictor (pronóstico), Researcher, Trader y más.' },
+        { q: '¿Qué proveedores LLM son compatibles?', a: '50 proveedores: Anthropic, OpenAI, Gemini, Groq, DeepSeek, Mistral, Together, Ollama, vLLM y más. 200+ modelos en total. Cada Hand puede usar un proveedor diferente.' },
+        { q: '¿Qué canales son compatibles?', a: '44 adaptadores de canal: Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Teams, Google Chat, Feishu, DingTalk, Mastodon, Bluesky, LinkedIn, Reddit, IRC y más.' },
+        { q: '¿Está listo para producción?', a: '2100+ tests, cero advertencias Clippy. 16 capas de seguridad incluyendo sandbox WASM, cadena de auditoría Merkle, protección SSRF. Fijar versión hasta v1.0 recomendado.' },
+      ],
+    },
+    community: {
+      label: 'Código Abierto',
+      title: 'Únete a la comunidad',
+      desc: 'LibreFang se desarrolla abiertamente. Contribuye código, reporta bugs o únete a la discusión.',
+      items: [
+        { label: 'Contribuir', desc: 'Enviar PRs, corregir bugs, mejorar docs' },
+        { label: 'Reportar', desc: '¿Encontraste un bug? Abre un issue' },
+        { label: 'Discutir', desc: 'Haz preguntas, comparte ideas' },
+      ],
+      open: 'Abrir',
+    },
+    meta: {
+      title: 'LibreFang - El Sistema Operativo para Agentes',
+      description: 'LibreFang es un sistema operativo de agentes de grado de producción construido en Rust. 180ms de arranque en frío, 40MB de memoria, 16 capas de seguridad, 44 adaptadores de canal. Ejecuta agentes de IA autónomos 24/7.',
+    },
+    workflows: {
+      label: 'Flujos de Trabajo',
+      title: 'Reemplaza flujos de trabajo completos',
+      desc: 'LibreFang no solo asiste — toma el control. Estas son las operaciones para las que de otro modo contratarías personas.',
+      items: [
+        { title: 'Pipeline de Contenido', desc: 'Clip + Twitter: monitoriza videos en tendencia, corta shorts, agrega subtítulos, publica en redes — todo mientras estás desconectado.' },
+        { title: 'Prospección de Ventas', desc: 'Lead se ejecuta cada noche: descubre prospectos, puntúa por ajuste ICP, elimina duplicados, exporta CSV limpio.' },
+        { title: 'Inteligencia Competitiva', desc: 'Collector vigila sitios de la competencia, precios, bolsas de empleo y noticias. Alerta en el momento que algo cambia.' },
+        { title: 'Orquestación Multi-Agente', desc: 'Encadena Hands con orquestación de workflows: Researcher → Predictor → Clip → broadcast a 44 canales.' },
+        { title: 'Migración', desc: 'Un solo comando: librefang migrate --from openclaw. Agentes, memoria y habilidades se transfieren automáticamente.' },
+        { title: 'Seguridad en Producción', desc: 'Sandbox WASM, cadena de auditoría Merkle, protección SSRF, escaneo de inyección de prompts, limitación de tasa GCRA — 16 capas.' },
+      ],
+    },
+    docs: {
+      label: 'Documentación',
+      title: 'Documentación',
+      desc: 'Guías completas para LibreFang',
+      categories: [
+        { title: 'Descripción General', desc: 'Introducción, inicio rápido, arquitectura' },
+        { title: 'Automatización', desc: 'Tareas cron, webhooks, integraciones' },
+        { title: 'Infraestructura', desc: 'Despliegue, monitorización, escalado' },
+      ],
+      viewAll: 'Ver Toda la Documentación',
+    },
+    githubStats: {
+      label: 'Comunidad',
+      title: 'Únete a la comunidad',
+      desc: 'Ayúdanos a construir el futuro de los agentes de IA autónomos',
+      stars: 'Estrellas', forks: 'Forks', issues: 'Issues', prs: 'PRs',
+      downloads: 'Descargas', docsVisits: 'Visitas a Docs', lastUpdate: 'Última Actualización',
+      starHistory: 'Historial de Estrellas', starUs: 'Danos una Estrella', discuss: 'Discutir',
+    },
+    contributing: {
+      label: 'Contribuir',
+      title: 'Cómo contribuir',
+      desc: 'LibreFang es código abierto y da la bienvenida a contribuciones de todo tipo.',
+      steps: [
+        { title: 'Fork & Clone', desc: 'Haz fork del repositorio y clónalo localmente para empezar.' },
+        { title: 'Elige un Issue', desc: 'Explora issues abiertos etiquetados como "good first issue" o "help wanted".' },
+        { title: 'Envía un PR', desc: 'Realiza tus cambios, escribe tests y envía un pull request para revisión.' },
+      ],
+      cta: 'Leer Guía de Contribución',
+    },
+    footer: { docs: 'Documentación', license: 'Licencia', privacy: 'Privacidad' },
+  },
+}

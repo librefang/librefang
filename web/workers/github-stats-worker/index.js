@@ -9,6 +9,7 @@ export default {
 
   async scheduled(event, env, ctx) {
     ctx.waitUntil(recordDailyStats(env))
+    ctx.waitUntil(refreshRegistryCache(env))
   },
 }
 
@@ -152,6 +153,11 @@ function handleFetch(request, env) {
     return handleGitHubStats(env, cors, forceRefresh)
   }
 
+  if (path === '/api/registry' && request.method === 'GET') {
+    const forceRefresh = url.searchParams.has('refresh')
+    return handleRegistry(env, cors, forceRefresh)
+  }
+
   return new Response('Not Found', { status: 404 })
 }
 
@@ -271,5 +277,220 @@ async function handleGitHubStats(env, cors, forceRefresh = false) {
       status: 500,
       headers: { 'Content-Type': 'application/json', ...cors }
     })
+  }
+}
+
+// ─── Registry proxy with KV cache (1 hour) ───
+const REGISTRY_API = 'https://api.github.com/repos/librefang/librefang-registry/contents'
+
+async function handleRegistry(env, cors, forceRefresh = false) {
+  const cacheKey = 'registry_data'
+  const cacheTimeKey = 'registry_data_time'
+  const cacheDuration = 1000 * 60 * 60 // 1 hour
+
+  try {
+    if (!forceRefresh) {
+      const [cached, cacheTime] = await Promise.all([
+        env.KV.get(cacheKey),
+        env.KV.get(cacheTimeKey),
+      ])
+      if (cached && cacheTime && (Date.now() - parseInt(cacheTime, 10) < cacheDuration)) {
+        return new Response(cached, {
+          headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=600', ...cors }
+        })
+      }
+    }
+
+    const ghHeaders = {
+      'Accept': 'application/vnd.github.v3+json',
+      'User-Agent': 'LibrefangStats/1.0',
+    }
+    if (env.GITHUB_TOKEN) {
+      ghHeaders['Authorization'] = `token ${env.GITHUB_TOKEN}`
+    }
+
+    async function fetchDir(path) {
+      const res = await fetch(`${REGISTRY_API}/${path}`, { headers: ghHeaders })
+      if (!res.ok) return []
+      const items = await res.json()
+      return items.filter(f => (f.type === 'dir' || f.name.endsWith('.toml')) && f.name !== 'README.md')
+    }
+
+    const [handDirs, channelFiles, providerFiles, integrationFiles, workflowFiles, agentDirs, pluginFiles] = await Promise.all([
+      fetchDir('hands'),
+      fetchDir('channels'),
+      fetchDir('providers'),
+      fetchDir('integrations'),
+      fetchDir('workflows'),
+      fetchDir('agents'),
+      fetchDir('plugins'),
+    ])
+
+    const filter = (items) => items.filter(f => f.name !== 'README.md')
+    const hands = filter(handDirs)
+    const channels = filter(channelFiles)
+
+    // Only fetch names from directory listings (avoid subrequest limit)
+    // TOML details are served from build-time registry.json fallback
+    const handNames = hands.map(h => ({ id: h.name, name: h.name, description: '', category: '', icon: '' }))
+    const channelNames = channels.map(c => {
+      const id = c.name.replace('.toml', '')
+      const name = id.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())
+      return { id, name, description: '', category: '', icon: '' }
+    })
+
+    const result = {
+      hands: handNames,
+      channels: channelNames,
+      handsCount: hands.length,
+      channelsCount: channels.length,
+      providersCount: filter(providerFiles).length,
+      integrationsCount: filter(integrationFiles).length,
+      workflowsCount: filter(workflowFiles).length,
+      agentsCount: filter(agentDirs).length,
+      pluginsCount: filter(pluginFiles).length,
+      fetchedAt: new Date().toISOString(),
+    }
+
+    const json = JSON.stringify(result)
+
+    await Promise.all([
+      env.KV.put(cacheKey, json),
+      env.KV.put(cacheTimeKey, String(Date.now())),
+    ])
+
+    return new Response(json, {
+      headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=600', ...cors }
+    })
+  } catch (e) {
+    // Fallback: try returning stale cache
+    const stale = await env.KV.get(cacheKey)
+    if (stale) {
+      return new Response(stale, {
+        headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=60', ...cors }
+      })
+    }
+    return new Response(JSON.stringify({ error: e.message }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json', ...cors }
+    })
+  }
+}
+
+// ─── Scheduled: full registry refresh with TOML details ───
+const REGISTRY_RAW = 'https://raw.githubusercontent.com/librefang/librefang-registry/main'
+
+async function refreshRegistryCache(env) {
+  const ghHeaders = {
+    'Accept': 'application/vnd.github.v3+json',
+    'User-Agent': 'LibrefangStats/1.0',
+  }
+  if (env.GITHUB_TOKEN) {
+    ghHeaders['Authorization'] = `token ${env.GITHUB_TOKEN}`
+  }
+
+  async function fetchDir(path) {
+    const res = await fetch(`${REGISTRY_API}/${path}`, { headers: ghHeaders })
+    if (!res.ok) return []
+    const items = await res.json()
+    return items.filter(f => (f.type === 'dir' || f.name.endsWith('.toml')) && f.name !== 'README.md')
+  }
+
+  async function fetchToml(path) {
+    const res = await fetch(`${REGISTRY_RAW}/${path}`)
+    if (!res.ok) return null
+    const text = await res.text()
+    const get = (key) => {
+      const m = text.match(new RegExp(`^${key}\\s*=\\s*"([^"]*)"`, 'm'))
+      return m ? m[1] : ''
+    }
+    // Parse i18n sections: [i18n.zh], [i18n.ja], etc.
+    const i18n = {}
+    const i18nRegex = /\[i18n\.([a-zA-Z-]+)\]\s*\n(?:([^[]*?)(?=\n\[|\n*$))/g
+    let match
+    while ((match = i18nRegex.exec(text)) !== null) {
+      const lang = match[1]
+      const block = match[2] || ''
+      const descMatch = block.match(/description\s*=\s*"([^"]*)"/)
+      if (descMatch) {
+        i18n[lang] = { description: descMatch[1] }
+      }
+    }
+    const result = { id: get('id'), name: get('name'), description: get('description'), category: get('category'), icon: get('icon') }
+    if (Object.keys(i18n).length > 0) result.i18n = i18n
+    return result
+  }
+
+  try {
+    const [handDirs, channelFiles, providerFiles, integrationFiles, workflowFiles, agentDirs, pluginFiles] = await Promise.all([
+      fetchDir('hands'),
+      fetchDir('channels'),
+      fetchDir('providers'),
+      fetchDir('integrations'),
+      fetchDir('workflows'),
+      fetchDir('agents'),
+      fetchDir('plugins'),
+    ])
+
+    const filter = (items) => items.filter(f => f.name !== 'README.md')
+    const hands = filter(handDirs)
+    const channels = filter(channelFiles)
+
+    // Compare counts with cached data — skip full TOML fetch if unchanged
+    const cached = await env.KV.get('registry_data')
+    if (cached) {
+      try {
+        const old = JSON.parse(cached)
+        if (old.handsCount === hands.length &&
+            old.channelsCount === channels.length &&
+            old.providersCount === filter(providerFiles).length &&
+            old.integrationsCount === filter(integrationFiles).length &&
+            old.workflowsCount === filter(workflowFiles).length &&
+            old.agentsCount === filter(agentDirs).length &&
+            old.pluginsCount === filter(pluginFiles).length) {
+          console.log('Registry unchanged, skipping TOML fetch')
+          await env.KV.put('registry_data_time', String(Date.now()))
+          return
+        }
+      } catch (_) { /* parse error, refetch */ }
+    }
+
+    // Counts changed — fetch full TOML details in batches of 10
+    async function fetchBatch(items, tomlPath) {
+      const results = []
+      for (let i = 0; i < items.length; i += 10) {
+        const batch = items.slice(i, i + 10)
+        const batchResults = await Promise.all(batch.map(item => fetchToml(tomlPath(item))))
+        results.push(...batchResults)
+      }
+      return results.filter(Boolean)
+    }
+
+    const [handDetails, channelDetails] = await Promise.all([
+      fetchBatch(hands, h => `hands/${h.name}/HAND.toml`),
+      fetchBatch(channels, c => `channels/${c.name}`),
+    ])
+
+    const result = {
+      hands: handDetails,
+      channels: channelDetails,
+      handsCount: hands.length,
+      channelsCount: channels.length,
+      providersCount: filter(providerFiles).length,
+      integrationsCount: filter(integrationFiles).length,
+      workflowsCount: filter(workflowFiles).length,
+      agentsCount: filter(agentDirs).length,
+      pluginsCount: filter(pluginFiles).length,
+      fetchedAt: new Date().toISOString(),
+    }
+
+    const json = JSON.stringify(result)
+    await Promise.all([
+      env.KV.put('registry_data', json),
+      env.KV.put('registry_data_time', String(Date.now())),
+    ])
+    console.log('Registry refreshed:', hands.length, 'hands,', channels.length, 'channels')
+  } catch (e) {
+    console.error('Registry refresh failed:', e.message)
   }
 }
