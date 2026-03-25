@@ -3347,6 +3347,18 @@ system_prompt = "You are a helpful assistant."
                             latency_ms,
                         });
 
+                    // Record experiment metrics if running an experiment (kernel has cost info)
+                    if let Some(ref ctx) = result.experiment_context {
+                        let success = !result.response.trim().is_empty();
+                        let _ = kernel_clone.record_experiment_request(
+                            &ctx.experiment_id.to_string(),
+                            &ctx.variant_id.to_string(),
+                            latency_ms,
+                            cost,
+                            success,
+                        );
+                    }
+
                     let _ = kernel_clone
                         .registry
                         .set_state(agent_id, AgentState::Running);
@@ -9141,6 +9153,9 @@ impl KernelHandle for LibreFangKernel {
         &self,
         agent_id: &str,
     ) -> Result<Option<librefang_types::agent::PromptExperiment>, String> {
+        if !self.config.prompt_intelligence.enabled {
+            return Ok(None);
+        }
         let id: AgentId = agent_id
             .parse()
             .map_err(|e| format!("Invalid agent ID: {e}"))?;
@@ -9213,9 +9228,14 @@ impl KernelHandle for LibreFangKernel {
             .prompt_store
             .get()
             .ok_or("Prompt store not initialized")?;
+        let agent_id = version.agent_id;
         store
             .create_version(version)
-            .map_err(|e| format!("Failed to create version: {e}"))
+            .map_err(|e| format!("Failed to create version: {e}"))?;
+        // Prune old versions if over the configured limit
+        let max = self.config.prompt_intelligence.max_versions_per_agent;
+        let _ = store.prune_old_versions(agent_id, max);
+        Ok(())
     }
 
     fn delete_prompt_version(&self, version_id: &str) -> Result<(), String> {
@@ -9303,7 +9323,36 @@ impl KernelHandle for LibreFangKernel {
             .ok_or("Prompt store not initialized")?;
         store
             .update_experiment_status(id, status)
-            .map_err(|e| format!("Failed to update experiment status: {e}"))
+            .map_err(|e| format!("Failed to update experiment status: {e}"))?;
+
+        // When completing an experiment, auto-activate the winning variant's prompt version
+        if status == librefang_types::agent::ExperimentStatus::Completed {
+            let metrics = store
+                .get_experiment_metrics(id)
+                .map_err(|e| format!("Failed to get experiment metrics: {e}"))?;
+            if let Some(winner) = metrics.iter().max_by(|a, b| {
+                a.success_rate
+                    .partial_cmp(&b.success_rate)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            }) {
+                if let Some(exp) = store
+                    .get_experiment(id)
+                    .map_err(|e| format!("Failed to get experiment: {e}"))?
+                {
+                    if let Some(variant) = exp.variants.iter().find(|v| v.id == winner.variant_id) {
+                        let _ = store.set_active_version(variant.prompt_version_id, exp.agent_id);
+                        tracing::info!(
+                            experiment_id = %id,
+                            winner_variant = %winner.variant_name,
+                            success_rate = winner.success_rate,
+                            "Auto-activated winning variant's prompt version"
+                        );
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 
     fn get_experiment_metrics(
@@ -9320,6 +9369,31 @@ impl KernelHandle for LibreFangKernel {
         store
             .get_experiment_metrics(id)
             .map_err(|e| format!("Failed to get experiment metrics: {e}"))
+    }
+
+    fn auto_track_prompt_version(
+        &self,
+        agent_id: librefang_types::agent::AgentId,
+        system_prompt: &str,
+    ) -> Result<(), String> {
+        if !self.config.prompt_intelligence.enabled {
+            return Ok(());
+        }
+        let store = self
+            .prompt_store
+            .get()
+            .ok_or("Prompt store not initialized")?;
+        match store.create_version_if_changed(agent_id, system_prompt, "auto") {
+            Ok(true) => {
+                tracing::debug!(agent_id = %agent_id, "Auto-tracked new prompt version");
+                // Prune old versions
+                let max = self.config.prompt_intelligence.max_versions_per_agent;
+                let _ = store.prune_old_versions(agent_id, max);
+                Ok(())
+            }
+            Ok(false) => Ok(()),
+            Err(e) => Err(format!("Failed to auto-track prompt version: {e}")),
+        }
     }
 }
 

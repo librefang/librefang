@@ -442,11 +442,11 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
   const [newPromptDescription, setNewPromptDescription] = useState("");
   const [newExperimentName, setNewExperimentName] = useState("");
   const [selectedMetrics, setSelectedMetrics] = useState<string | null>(null);
+  const [selectedVariantIds, setSelectedVariantIds] = useState<string[]>([]);
 
   const versionsQuery = useQuery({
     queryKey: ["prompt-versions", agentId],
     queryFn: () => listPromptVersions(agentId),
-    enabled: activeTab === "versions"
   });
 
   const experimentsQuery = useQuery({
@@ -468,9 +468,26 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
   });
 
   const createExperimentMutation = useMutation({
-    mutationFn: (data: { name: string }) => 
-      createExperiment(agentId, { ...data, status: "draft" as const, traffic_split: [50], success_criteria: { require_user_helpful: true, require_no_tool_errors: true, require_non_empty: true }, variants: [] }),
-    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["experiments", agentId] }); setShowCreateExperiment(false); setNewExperimentName(""); }
+    mutationFn: (data: { name: string }) => {
+      const variants = selectedVariantIds.map((vId, i) => {
+        const ver = versions.find(v => v.id === vId);
+        return {
+          id: "",
+          name: i === 0 ? "Control" : `Variant ${String.fromCharCode(65 + i)}`,
+          prompt_version_id: vId,
+          description: ver ? `v${ver.version}` : undefined,
+        };
+      });
+      const split = Math.floor(100 / selectedVariantIds.length);
+      return createExperiment(agentId, {
+        ...data,
+        status: "draft" as const,
+        traffic_split: selectedVariantIds.map(() => split),
+        success_criteria: { require_user_helpful: true, require_no_tool_errors: true, require_non_empty: true },
+        variants,
+      });
+    },
+    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["experiments", agentId] }); setShowCreateExperiment(false); setNewExperimentName(""); setSelectedVariantIds([]); }
   });
 
   const activateMutation = useMutation({
@@ -636,12 +653,33 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
                         <input value={newExperimentName} onChange={e => setNewExperimentName(e.target.value)}
                           className="w-full mt-1 rounded-xl border border-border-subtle bg-main px-3 py-2 text-xs" placeholder="My A/B Test" />
                       </div>
+                      <div>
+                        <label className="text-xs text-text-dim mb-2 block">Select Prompt Versions (min 2)</label>
+                        {versions.length < 2 ? (
+                          <p className="text-xs text-warning">Create at least 2 prompt versions first.</p>
+                        ) : (
+                          <div className="space-y-1 max-h-40 overflow-y-auto">
+                            {versions.map((v: PromptVersion) => (
+                              <label key={v.id} className={`flex items-center gap-2 p-2 rounded-lg cursor-pointer text-xs ${selectedVariantIds.includes(v.id) ? "bg-brand/10 border border-brand" : "bg-main/30 border border-border-subtle"}`}>
+                                <input type="checkbox" checked={selectedVariantIds.includes(v.id)}
+                                  onChange={e => {
+                                    if (e.target.checked) setSelectedVariantIds([...selectedVariantIds, v.id]);
+                                    else setSelectedVariantIds(selectedVariantIds.filter(id => id !== v.id));
+                                  }} className="rounded" />
+                                <span className="font-bold">v{v.version}</span>
+                                {v.is_active && <Badge variant="success">Active</Badge>}
+                                <span className="text-text-dim truncate">{v.description || v.system_prompt.slice(0, 40) + "..."}</span>
+                              </label>
+                            ))}
+                          </div>
+                        )}
+                      </div>
                     </div>
                     <div className="flex gap-2 mt-4">
-                      <Button variant="primary" className="flex-1" onClick={() => createExperimentMutation.mutate({ name: newExperimentName })} disabled={!newExperimentName.trim()}>
-                        Create
+                      <Button variant="primary" className="flex-1" onClick={() => createExperimentMutation.mutate({ name: newExperimentName })} disabled={!newExperimentName.trim() || selectedVariantIds.length < 2}>
+                        Create ({selectedVariantIds.length} variants)
                       </Button>
-                      <Button variant="secondary" onClick={() => setShowCreateExperiment(false)}>Cancel</Button>
+                      <Button variant="secondary" onClick={() => { setShowCreateExperiment(false); setSelectedVariantIds([]); }}>Cancel</Button>
                     </div>
                   </div>
                 </div>

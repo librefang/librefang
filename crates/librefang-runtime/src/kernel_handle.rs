@@ -379,4 +379,13 @@ pub trait KernelHandle: Send + Sync {
     ) -> Result<Vec<librefang_types::agent::ExperimentVariantMetrics>, String> {
         Ok(Vec::new())
     }
+
+    /// Auto-track prompt version if the system prompt changed. Default: no-op.
+    fn auto_track_prompt_version(
+        &self,
+        _agent_id: librefang_types::agent::AgentId,
+        _system_prompt: &str,
+    ) -> Result<(), String> {
+        Ok(())
+    }
 }
