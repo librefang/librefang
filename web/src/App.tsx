@@ -1055,11 +1055,11 @@ function Community({ t }: SectionProps) {
                   href={communityHrefs[i]}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="group block bg-surface-100 border border-black/10 dark:border-white/5 hover:border-cyan-500/20 p-6 transition-all hover:-translate-y-1"
+                  className="group flex flex-col bg-surface-100 border border-black/10 dark:border-white/5 hover:border-cyan-500/20 p-6 transition-all hover:-translate-y-1 h-full"
                 >
                   <Icon className="w-5 h-5 text-cyan-500/60 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors mb-4" />
                   <h3 className="font-bold text-slate-900 dark:text-white mb-1">{item.label}</h3>
-                  <p className="text-sm text-gray-500">{item.desc}</p>
+                  <p className="text-sm text-gray-500 line-clamp-1">{item.desc}</p>
                   <div className="mt-4 text-cyan-600 dark:text-cyan-500 text-sm font-semibold flex items-center gap-1 group-hover:gap-2 transition-all">
                     {t.community.open} <ArrowRight className="w-3.5 h-3.5" />
                   </div>
