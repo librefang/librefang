@@ -12,6 +12,8 @@ use tracing::{info, warn};
 /// Gateway source files embedded at compile time.
 const GATEWAY_INDEX_JS: &str = include_str!("../../../packages/whatsapp-gateway/index.js");
 const GATEWAY_PACKAGE_JSON: &str = include_str!("../../../packages/whatsapp-gateway/package.json");
+const GATEWAY_POSTINSTALL_JS: &str =
+    include_str!("../../../packages/whatsapp-gateway/scripts/postinstall.js");
 
 /// Default port for the WhatsApp Web gateway.
 const DEFAULT_GATEWAY_PORT: u16 = 3009;
@@ -65,12 +67,18 @@ async fn ensure_gateway_installed() -> Result<PathBuf, String> {
 
     let index_path = dir.join("index.js");
     let package_path = dir.join("package.json");
+    let scripts_dir = dir.join("scripts");
+    std::fs::create_dir_all(&scripts_dir)
+        .map_err(|e| format!("Failed to create scripts dir: {e}"))?;
+    let postinstall_path = scripts_dir.join("postinstall.js");
 
     // Write files only if content changed (avoids unnecessary npm install)
     let index_changed = write_if_changed(&index_path, GATEWAY_INDEX_JS)
         .map_err(|e| format!("Write index.js: {e}"))?;
     let package_changed = write_if_changed(&package_path, GATEWAY_PACKAGE_JSON)
         .map_err(|e| format!("Write package.json: {e}"))?;
+    write_if_changed(&postinstall_path, GATEWAY_POSTINSTALL_JS)
+        .map_err(|e| format!("Write scripts/postinstall.js: {e}"))?;
 
     let node_modules = dir.join("node_modules");
     let needs_install = !node_modules.exists() || package_changed;
@@ -288,8 +296,10 @@ mod tests {
     fn test_embedded_files_not_empty() {
         assert!(!GATEWAY_INDEX_JS.is_empty());
         assert!(!GATEWAY_PACKAGE_JSON.is_empty());
+        assert!(!GATEWAY_POSTINSTALL_JS.is_empty());
         assert!(GATEWAY_INDEX_JS.contains("WhatsApp"));
         assert!(GATEWAY_PACKAGE_JSON.contains("@librefang/whatsapp-gateway"));
+        assert!(GATEWAY_POSTINSTALL_JS.contains("android_ndk_path"));
     }
 
     #[test]
