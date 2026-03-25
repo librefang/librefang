@@ -845,10 +845,7 @@ impl LibreFangKernel {
     /// The caller supplies a closure that receives `&mut BudgetConfig`.
     /// All writes are serialised through an `RwLock` write-guard, which
     /// eliminates the data-race hazard of the old raw-pointer approach.
-    pub fn update_budget_config(
-        &self,
-        f: impl FnOnce(&mut librefang_types::config::BudgetConfig),
-    ) {
+    pub fn update_budget_config(&self, f: impl FnOnce(&mut librefang_types::config::BudgetConfig)) {
         let mut guard = self.budget_config.write().unwrap();
         f(&mut guard);
     }
@@ -1803,6 +1800,7 @@ impl LibreFangKernel {
         let initial_bindings = config.bindings.clone();
         let initial_broadcast = config.broadcast.clone();
         let auto_reply_engine = crate::auto_reply::AutoReplyEngine::new(config.auto_reply.clone());
+        let initial_budget = config.budget.clone();
 
         // Initialize command queue with configured concurrency limits
         let command_queue = librefang_runtime::command_lane::CommandQueue::with_capacities(
@@ -1894,7 +1892,7 @@ impl LibreFangKernel {
             provider_unconfigured_logged: std::sync::atomic::AtomicBool::new(false),
             prompt_metadata_cache: PromptMetadataCache::new(),
             driver_cache: librefang_runtime::drivers::DriverCache::new(),
-            budget_config: std::sync::RwLock::new(config.budget.clone()),
+            budget_config: std::sync::RwLock::new(initial_budget),
         };
 
         // Initialize proactive memory system (mem0-style) from config.
