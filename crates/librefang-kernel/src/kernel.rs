@@ -1804,6 +1804,7 @@ impl LibreFangKernel {
             Some(engine)
         };
 
+        let workflow_home_dir = config.home_dir.clone();
         let kernel = Self {
             config,
             registry: AgentRegistry::new(),
@@ -1814,7 +1815,7 @@ impl LibreFangKernel {
             proactive_memory: OnceLock::new(),
             prompt_store: OnceLock::new(),
             supervisor,
-            workflows: WorkflowEngine::new(),
+            workflows: WorkflowEngine::new_with_persistence(&workflow_home_dir),
             template_registry: WorkflowTemplateRegistry::new(),
             triggers: TriggerEngine::new(),
             background,
@@ -2142,6 +2143,19 @@ system_prompt = "You are a helpful assistant."
                     "Auto-registered {loaded} workflow(s) from {}",
                     workflows_dir.display()
                 );
+            }
+        }
+
+        // Load persisted workflow runs (completed/failed) from disk.
+        {
+            match tokio::task::block_in_place(|| kernel.workflows.load_runs()) {
+                Ok(count) if count > 0 => {
+                    info!("Loaded {count} persisted workflow run(s) from disk");
+                }
+                Err(e) => {
+                    warn!("Failed to load persisted workflow runs: {e}");
+                }
+                _ => {}
             }
         }
 
