@@ -144,10 +144,18 @@ impl AgentId {
         Self(Uuid::new_v5(&Self::HAND_NAMESPACE, hand_id.as_bytes()))
     }
 
-    /// Generate a deterministic agent ID for a specific role within a multi-agent hand.
-    /// Uses UUID v5 with "{hand_id}:{role}" as input.
-    pub fn from_hand_agent(hand_id: &str, role: &str) -> Self {
-        let input = format!("{hand_id}:{role}");
+    /// Generate a deterministic agent ID for a specific role within a multi-agent hand instance.
+    ///
+    /// **Backward compatibility**: when `instance_id` is `None`, uses the legacy
+    /// hash format `"{hand_id}:{role}"` so that existing single-instance hands
+    /// keep their original agent IDs (no orphaned cron jobs, memory keys, etc.).
+    /// When `instance_id` is `Some`, uses `"{hand_id}:{role}:{instance_id}"` so
+    /// that multiple instances of the same hand each get unique, deterministic IDs.
+    pub fn from_hand_agent(hand_id: &str, role: &str, instance_id: Option<Uuid>) -> Self {
+        let input = match instance_id {
+            Some(id) => format!("{hand_id}:{role}:{id}"),
+            None => format!("{hand_id}:{role}"),
+        };
         Self(Uuid::new_v5(&Self::HAND_NAMESPACE, input.as_bytes()))
     }
 }

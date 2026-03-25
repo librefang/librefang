@@ -954,8 +954,8 @@ async fn handle_command(
             serde_json::json!({"type": "command_result", "command": cmd, "message": msg})
         }
         "budget" => {
-            let budget = &state.kernel.config_ref().budget;
-            let status = state.kernel.metering_ref().budget_status(budget);
+            let budget = state.kernel.budget_config();
+            let status = state.kernel.metering_ref().budget_status(&budget);
             let fmt = |v: f64| -> String {
                 if v > 0.0 {
                     format!("${v:.2}")

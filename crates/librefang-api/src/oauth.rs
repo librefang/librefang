@@ -1176,7 +1176,9 @@ async fn discover_oidc(issuer_url: &str) -> Result<OidcDiscovery, String> {
         "{}/.well-known/openid-configuration",
         issuer_url.trim_end_matches('/')
     );
-    let resp = reqwest::get(&url)
+    let resp = librefang_runtime::http_client::new_client()
+        .get(&url)
+        .send()
         .await
         .map_err(|e| format!("Failed to fetch OIDC discovery: {e}"))?;
     if !resp.status().is_success() {
@@ -1240,7 +1242,9 @@ async fn fetch_jwks_cached(jwks_uri: &str) -> Result<Vec<JwksKey>, String> {
 
     // Fetch fresh keys.
     debug!(jwks_uri, "Fetching JWKS keys");
-    let resp = reqwest::get(jwks_uri)
+    let resp = librefang_runtime::http_client::new_client()
+        .get(jwks_uri)
+        .send()
         .await
         .map_err(|e| format!("Failed to fetch JWKS: {e}"))?;
     if !resp.status().is_success() {
