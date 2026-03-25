@@ -2,7 +2,8 @@
 
 > **安全联系方式：** 请通过 GitHub 私密漏洞报告功能提交：`https://github.com/librefang/librefang/security/advisories/new`。
 
-本文档为 LibreFang Agent 操作系统中的每个安全子系统提供完整的技术参考。所有结构体名称、函数签名、常量值和算法描述均直接来源于源代码。
+本文档为 LibreFang Agent 操作系统中的每个安全子系统提供完整的技术参考。
+所有结构体名称、函数签名、常量值和算法描述均直接来源于源代码。
 
 ---
 
@@ -33,7 +34,9 @@
 
 ## 1. 安全概述
 
-LibreFang 采用**纵深防御**安全策略。系统不依赖任何单一机制作为唯一保护手段，而是由 16 个独立的安全子系统形成相互重叠的防护层，确保任何单层失效都能被其他层捕获。
+LibreFang 采用**纵深防御**安全策略。系统不依赖任何单一机制作为唯一
+保护手段，而是由 16 个独立的安全子系统形成相互重叠的防护层，确保任何
+单层失效都能被其他层捕获。
 
 | # | 系统 | 所属 Crate | 防护目标 |
 |---|------|-----------|---------|
@@ -60,7 +63,8 @@ LibreFang 采用**纵深防御**安全策略。系统不依赖任何单一机制
 
 **源码：** `librefang-types/src/capability.rs`
 
-LibreFang 采用基于能力的安全模型。Agent 只能执行被明确授权的操作。能力在 Agent 创建后不可变，并在内核层面强制执行。
+LibreFang 采用基于能力的安全模型。Agent 只能执行被明确授权的操作。
+能力在 Agent 创建后不可变，并在内核层面强制执行。
 
 ### 2.1 能力变体
 
@@ -123,7 +127,8 @@ pub enum Capability {
 
 ### 2.3 执行检查点
 
-在 WASM 沙箱中，每个宿主调用在执行**之前**都会通过 `host_functions.rs` 中的 `check_capability()` 进行检查：
+在 WASM 沙箱中，每个宿主调用在执行**之前**都会通过 `host_functions.rs`
+中的 `check_capability()` 进行检查：
 
 ```rust
 fn check_capability(
@@ -139,11 +144,13 @@ fn check_capability(
 }
 ```
 
-如果没有任何已授予的能力与所需能力匹配，操作会立即返回 JSON 错误——工具永远不会被调用。
+如果没有任何已授予的能力与所需能力匹配，操作会立即返回 JSON
+错误——工具永远不会被调用。
 
 ### 2.4 能力继承
 
-当 Agent 生成子 Agent 时，`validate_capability_inheritance()` 会确保子 Agent 的能力是父 Agent 能力的**子集**。这可以防止权限提升：
+当 Agent 生成子 Agent 时，`validate_capability_inheritance()` 会确保
+子 Agent 的能力是父 Agent 能力的**子集**。这可以防止权限提升：
 
 ```rust
 pub fn validate_capability_inheritance(
@@ -166,7 +173,9 @@ pub fn validate_capability_inheritance(
 }
 ```
 
-`host_functions.rs` 中的 `host_agent_spawn()` 函数调用 `kernel.spawn_agent_checked(manifest_toml, Some(&state.agent_id), &state.capabilities)`，在子 Agent 创建之前执行此验证。
+`host_functions.rs` 中的 `host_agent_spawn()` 函数调用
+`kernel.spawn_agent_checked(manifest_toml, Some(&state.agent_id), &state.capabilities)`，
+在子 Agent 创建之前执行此验证。
 
 ---
 
@@ -174,11 +183,13 @@ pub fn validate_capability_inheritance(
 
 **源码：** `librefang-runtime/src/sandbox.rs`
 
-不受信任的 WASM 模块在 Wasmtime 沙箱中运行，同时启用**两个独立的**计量机制。
+不受信任的 WASM 模块在 Wasmtime 沙箱中运行，同时启用**两个独立的**
+计量机制。
 
 ### 3.1 燃料计量（确定性）
 
-燃料计量统计 WASM 指令数。引擎为每条执行的指令扣除燃料。当预算耗尽时，执行会以 `Trap::OutOfFuel` 中断。
+燃料计量统计 WASM 指令数。引擎为每条执行的指令扣除燃料。当预算耗尽时，
+执行会以 `Trap::OutOfFuel` 中断。
 
 ```rust
 // SandboxConfig defaults
@@ -199,7 +210,8 @@ let fuel_consumed = config.fuel_limit.saturating_sub(fuel_remaining);
 
 ### 3.2 纪元中断（墙钟时间）
 
-看门狗线程休眠指定的超时时长，然后递增引擎纪元。当纪元超过 store 的截止期限时，执行会以 `Trap::Interrupt` 中断。
+看门狗线程休眠指定的超时时长，然后递增引擎纪元。当纪元超过 store 的
+截止期限时，执行会以 `Trap::Interrupt` 中断。
 
 ```rust
 store.set_epoch_deadline(1);
@@ -220,7 +232,8 @@ let _watchdog = std::thread::spawn(move || {
 | **可捕获** | CPU 密集型循环 | 宿主调用阻塞、I/O 等待 |
 | **可规避** | 可在宿主调用中浪费时间 | 可廉价地忙等循环 |
 
-两者组合形成完整防御：燃料捕获计算密集型循环，纪元捕获宿主调用滥用或环境延迟。
+两者组合形成完整防御：燃料捕获计算密集型循环，纪元捕获宿主调用滥用或
+环境延迟。
 
 ### 3.4 SandboxConfig
 
@@ -251,7 +264,8 @@ pub enum SandboxError {
 
 **源码：** `librefang-runtime/src/audit.rs`
 
-每个安全关键操作都会追加到一条防篡改的 Merkle 哈希链中，类似于区块链。每个条目包含其自身内容与前一个条目哈希值拼接后的 SHA-256 哈希。
+每个安全关键操作都会追加到一条防篡改的 Merkle 哈希链中，类似于区块链。
+每个条目包含其自身内容与前一个条目哈希值拼接后的 SHA-256 哈希。
 
 ### 4.1 可审计的操作
 
@@ -311,7 +325,9 @@ fn compute_entry_hash(
 
 ### 4.4 链完整性验证
 
-`AuditLog::verify_integrity()` 遍历整条链并重新计算每个哈希值。如果任何条目被篡改，重新计算的哈希值将与存储的哈希值不匹配，或者 `prev_hash` 链接将断裂：
+`AuditLog::verify_integrity()` 遍历整条链并重新计算每个哈希值。如果
+任何条目被篡改，重新计算的哈希值将与存储的哈希值不匹配，或者
+`prev_hash` 链接将断裂：
 
 ```rust
 pub fn verify_integrity(&self) -> Result<(), String> {
@@ -340,7 +356,9 @@ pub fn verify_integrity(&self) -> Result<(), String> {
 
 ### 4.5 线程安全
 
-`AuditLog` 使用 `Mutex<Vec<AuditEntry>>` 和 `Mutex<String>` 来保护链尾哈希。两个锁都使用 `unwrap_or_else(|e| e.into_inner())` 从中毒的互斥锁中恢复，确保审计日志在 panic 之后仍然可用。
+`AuditLog` 使用 `Mutex<Vec<AuditEntry>>` 和 `Mutex<String>` 来保护
+链尾哈希。两个锁都使用 `unwrap_or_else(|e| e.into_inner())` 从中毒的
+互斥锁中恢复，确保审计日志在 panic 之后仍然可用。
 
 ### 4.6 API
 
@@ -359,7 +377,8 @@ pub fn verify_integrity(&self) -> Result<(), String> {
 
 **源码：** `librefang-types/src/taint.rs`
 
-LibreFang 实现了基于格的污点传播模型，防止被污染的值在未经显式解密的情况下流入敏感汇聚点。此机制可防范提示注入、数据外泄和混淆代理攻击。
+LibreFang 实现了基于格的污点传播模型，防止被污染的值在未经显式解密的
+情况下流入敏感汇聚点。此机制可防范提示注入、数据外泄和混淆代理攻击。
 
 ### 5.1 污点标签
 
@@ -445,7 +464,8 @@ combined.merge_taint(&other_value);
 
 **源码：** `librefang-types/src/manifest_signing.rs`
 
-Agent 清单定义了 Agent 的能力、工具和配置。被篡改的清单可以授予提升的权限。本模块提供基于 Ed25519 的加密签名。
+Agent 清单定义了 Agent 的能力、工具和配置。被篡改的清单可以授予
+提升的权限。本模块提供基于 Ed25519 的加密签名。
 
 ### 6.1 签名方案
 
@@ -522,11 +542,13 @@ pub fn verify(&self) -> Result<(), String> {
 
 **源码：** `librefang-runtime/src/host_functions.rs`
 
-`host_net_fetch` 函数（用于网络请求的 WASM 宿主调用）包含全面的服务端请求伪造防护。
+`host_net_fetch` 函数（用于网络请求的 WASM 宿主调用）包含全面的
+服务端请求伪造防护。
 
 ### 7.1 协议验证
 
-仅允许 `http://` 和 `https://` 协议。所有其他协议（`file://`、`gopher://`、`ftp://`）会被立即阻止：
+仅允许 `http://` 和 `https://` 协议。所有其他协议（`file://`、
+`gopher://`、`ftp://`）会被立即阻止：
 
 ```rust
 if !url.starts_with("http://") && !url.starts_with("https://") {
@@ -546,7 +568,8 @@ if !url.starts_with("http://") && !url.starts_with("https://") {
 
 ### 7.3 DNS 解析检查
 
-在主机名黑名单检查之后，函数会将主机名解析为 IP 地址，并检查**每个解析出的 IP** 是否属于私有地址范围。这可以防御 DNS 重绑定攻击：
+在主机名黑名单检查之后，函数会将主机名解析为 IP 地址，并检查**每个
+解析出的 IP** 是否属于私有地址范围。这可以防御 DNS 重绑定攻击：
 
 ```rust
 let socket_addr = format!("{hostname}:{port}");
@@ -596,7 +619,8 @@ fn is_private_ip(ip: &std::net::IpAddr) -> bool {
 
 ### 7.5 主机提取
 
-`extract_host_from_url()` 解析 URL 以提取 `host:port`，同时用于 SSRF 检查和能力匹配：
+`extract_host_from_url()` 解析 URL 以提取 `host:port`，同时用于 SSRF
+检查和能力匹配：
 
 ```
 https://api.openai.com/v1/chat  ->  api.openai.com:443
@@ -610,11 +634,14 @@ http://example.com              ->  example.com:80
 
 **源码：** 所有 LLM 驱动模块、通道适配器和网络搜索模块。
 
-LibreFang 在所有持有密钥材料的字段上使用 `zeroize` crate 提供的 `Zeroizing<String>`。当值被销毁时，其内存会被零覆盖，防止密钥在内存中残留。
+LibreFang 在所有持有密钥材料的字段上使用 `zeroize` crate 提供的
+`Zeroizing<String>`。当值被销毁时，其内存会被零覆盖，防止密钥在
+内存中残留。
 
 ### 8.1 工作原理
 
-`Zeroizing<T>` 是 `zeroize` crate 提供的智能指针包装器。它实现了 `Deref<Target=T>` 以实现透明使用，以及 `Drop` 以实现自动零化：
+`Zeroizing<T>` 是 `zeroize` crate 提供的智能指针包装器。它实现了
+`Deref<Target=T>` 以实现透明使用，以及 `Drop` 以实现自动零化：
 
 ```rust
 // On Drop, the inner String's buffer is overwritten with zeros
@@ -663,7 +690,9 @@ fn resolve_api_key(env_var: &str) -> Option<Zeroizing<String>> {
 
 ### 8.3 为什么重要
 
-如果不进行零化，密钥在使用后会一直留在内存中，直到操作系统回收该页面。具有核心转储、交换文件或内存取证工具访问权限的攻击者可以恢复 API 密钥。`Zeroizing<String>` 确保密钥在不再需要时立即被覆盖。
+如果不进行零化，密钥在使用后会一直留在内存中，直到操作系统回收该页面。
+具有核心转储、交换文件或内存取证工具访问权限的攻击者可以恢复 API 密钥。
+`Zeroizing<String>` 确保密钥在不再需要时立即被覆盖。
 
 ---
 
@@ -671,7 +700,8 @@ fn resolve_api_key(env_var: &str) -> Option<Zeroizing<String>> {
 
 **源码：** `librefang-wire/src/peer.rs`
 
-LibreFang 线路协议（OFP）在 TCP 连接上使用基于 HMAC-SHA256 的 nonce 双向认证。
+LibreFang 线路协议（OFP）在 TCP 连接上使用基于 HMAC-SHA256 的 nonce
+双向认证。
 
 ### 9.1 预共享密钥要求
 
@@ -792,11 +822,14 @@ pub async fn security_headers(request: Request<Body>, next: Next) -> Response<Bo
 
 **源码：** `librefang-api/src/rate_limiter.rs`
 
-LibreFang 通过 `governor` crate 使用通用信元速率算法（GCRA）实现成本感知的 API 速率限制。
+LibreFang 通过 `governor` crate 使用通用信元速率算法（GCRA）实现
+成本感知的 API 速率限制。
 
 ### 11.1 算法
 
-GCRA 是漏桶算法的一种变体，为每个键追踪一个"虚拟调度时间"（TAT -- Theoretical Arrival Time）。每个请求消耗的令牌数与其成本成正比。桶以恒定速率补充。
+GCRA 是漏桶算法的一种变体，为每个键追踪一个"虚拟调度时间"
+（TAT -- Theoretical Arrival Time）。每个请求消耗的令牌数与其成本
+成正比。桶以恒定速率补充。
 
 **预算：** 每个 IP 地址每分钟 500 个令牌。
 
@@ -836,7 +869,9 @@ pub fn operation_cost(method: &str, path: &str) -> NonZeroU32 {
 }
 ```
 
-成本分层是有意设计的：只读的健康检查消耗 1 个令牌，而昂贵的工作流运行消耗 100 个令牌，这意味着客户端每分钟可以执行 500 次健康检查，但只能执行 5 次工作流运行。
+成本分层是有意设计的：只读的健康检查消耗 1 个令牌，而昂贵的工作流运行
+消耗 100 个令牌，这意味着客户端每分钟可以执行 500 次健康检查，但只能
+执行 5 次工作流运行。
 
 ### 11.3 中间件
 
@@ -935,7 +970,8 @@ fn safe_resolve_parent(path: &str) -> Result<std::path::PathBuf, serde_json::Val
 2. **路径遍历检查**其次执行。
 3. **操作**仅在两者都通过后才执行。
 
-这种顺序确保即使能力被错误配置为宽泛的模式（如 `"*"`），路径遍历仍然会被阻止。
+这种顺序确保即使能力被错误配置为宽泛的模式（如 `"*"`），路径遍历仍然
+会被阻止。
 
 ---
 
@@ -943,7 +979,8 @@ fn safe_resolve_parent(path: &str) -> Result<std::path::PathBuf, serde_json::Val
 
 **源码：** `librefang-runtime/src/subprocess_sandbox.rs`
 
-当运行时生成子进程（例如用于 shell 工具或技能执行）时，必须清除继承的环境变量以防止意外的密钥泄露。
+当运行时生成子进程（例如用于 shell 工具或技能执行）时，必须清除继承的
+环境变量以防止意外的密钥泄露。
 
 ### 13.1 环境清除
 
@@ -986,7 +1023,9 @@ pub const SAFE_ENV_VARS_WINDOWS: &[&str] = &[
 ];
 ```
 
-不在这些列表中且不在 `allowed_env_vars` 中的变量**永远不会**传递给子进程。这意味着 `OPENAI_API_KEY`、`GEMINI_API_KEY`、数据库凭据以及所有其他密钥都会被清除。
+不在这些列表中且不在 `allowed_env_vars` 中的变量**永远不会**传递给
+子进程。这意味着 `OPENAI_API_KEY`、`GEMINI_API_KEY`、数据库凭据以及
+所有其他密钥都会被清除。
 
 ### 13.3 可执行文件路径验证
 
@@ -1005,11 +1044,14 @@ pub fn validate_executable_path(path: &str) -> Result<(), String> {
 }
 ```
 
-这可以防止 Agent 通过构造的路径（如 `../../bin/dangerous`）逃离其工作目录。
+这可以防止 Agent 通过构造的路径（如 `../../bin/dangerous`）逃离其
+工作目录。
 
 ### 13.4 Shell 注入防护
 
-`host_shell_exec` 函数使用 `Command::new(command).args(&args)`，这**不会**调用 shell。每个参数直接传递给进程，防止通过 `;`、`|`、`&&` 等元字符进行 shell 注入。
+`host_shell_exec` 函数使用 `Command::new(command).args(&args)`，
+这**不会**调用 shell。每个参数直接传递给进程，防止通过 `;`、`|`、
+`&&` 等元字符进行 shell 注入。
 
 ---
 
@@ -1017,7 +1059,8 @@ pub fn validate_executable_path(path: &str) -> Result<(), String> {
 
 **源码：** `librefang-skills/src/verify.rs`
 
-`SkillVerifier` 提供两个扫描函数：`security_scan()` 用于技能清单，`scan_prompt_content()` 用于技能提示文本（SKILL.md 正文）。
+`SkillVerifier` 提供两个扫描函数：`security_scan()` 用于技能清单，
+`scan_prompt_content()` 用于技能提示文本（SKILL.md 正文）。
 
 ### 14.1 清单安全扫描
 
@@ -1034,7 +1077,8 @@ pub fn validate_executable_path(path: &str) -> Result<(), String> {
 
 ### 14.2 提示注入扫描
 
-`SkillVerifier::scan_prompt_content(content)` 检测技能提示文本中的常见攻击模式：
+`SkillVerifier::scan_prompt_content(content)` 检测技能提示文本中的
+常见攻击模式：
 
 **Critical -- 提示覆盖尝试：**
 
@@ -1072,7 +1116,8 @@ pub fn verify_checksum(data: &[u8], expected_sha256: &str) -> bool {
 }
 ```
 
-从 ClawHub 安装的技能会根据已知的 SHA256 哈希验证其内容，以检测下载过程中的篡改。
+从 ClawHub 安装的技能会根据已知的 SHA256 哈希验证其内容，以检测
+下载过程中的篡改。
 
 ### 14.4 警告结构
 
@@ -1089,7 +1134,8 @@ pub struct SkillWarning {
 
 **源码：** `librefang-runtime/src/loop_guard.rs`
 
-`LoopGuard` 追踪单次 Agent 循环执行中的工具调用，以检测 Agent 是否陷入重复调用同一工具的状态。
+`LoopGuard` 追踪单次 Agent 循环执行中的工具调用，以检测 Agent 是否
+陷入重复调用同一工具的状态。
 
 ### 15.1 配置
 
@@ -1153,11 +1199,14 @@ fn compute_hash(tool_name: &str, params: &serde_json::Value) -> String {
 }
 ```
 
-注意：`serde_json::to_string` 生成确定性输出（对象键已排序），确保语义相同的参数产生相同的哈希值。
+注意：`serde_json::to_string` 生成确定性输出（对象键已排序），确保
+语义相同的参数产生相同的哈希值。
 
 ### 15.5 关键特性
 
-使用**不同参数**的调用会被分别追踪。一个 Agent 使用 10 个不同查询调用 `web_search` 不会触发守卫，但使用 `web_search({"query": "test"})` 调用 5 次将被阻止。
+使用**不同参数**的调用会被分别追踪。一个 Agent 使用 10 个不同查询调用
+`web_search` 不会触发守卫，但使用 `web_search({"query": "test"})` 调用
+5 次将被阻止。
 
 ---
 
@@ -1165,7 +1214,8 @@ fn compute_hash(tool_name: &str, params: &serde_json::Value) -> String {
 
 **源码：** `librefang-runtime/src/session_repair.rs`
 
-在将消息历史发送给 LLM 之前，本模块会验证并修复常见的结构性问题，避免 API 错误。
+在将消息历史发送给 LLM 之前，本模块会验证并修复常见的结构性问题，
+避免 API 错误。
 
 ### 16.1 三阶段修复
 
@@ -1175,16 +1225,20 @@ pub fn validate_and_repair(messages: &[Message]) -> Vec<Message>
 
 **阶段 1 -- 收集 ToolUse ID：**
 
-扫描所有消息中的 `ContentBlock::ToolUse { id, .. }` 块，将其 ID 收集到 `HashSet<String>` 中。
+扫描所有消息中的 `ContentBlock::ToolUse { id, .. }` 块，将其 ID 收集
+到 `HashSet<String>` 中。
 
 **阶段 2 -- 过滤孤立条目和空消息：**
 
-- **孤立的 ToolResult：** `ContentBlock::ToolResult { tool_use_id, .. }` 块中 `tool_use_id` 不在 ToolUse ID 集合中的会被丢弃。
+- **孤立的 ToolResult：** `ContentBlock::ToolResult { tool_use_id, .. }`
+  块中 `tool_use_id` 不在 ToolUse ID 集合中的会被丢弃。
 - **空消息：** 文本为空或没有内容块的消息会被丢弃。
 
 **阶段 3 -- 合并连续的同角色消息：**
 
-Anthropic API 要求严格的角色交替（user、assistant、user、assistant...）。如果两条连续消息具有相同的角色，它们会被合并为一条包含组合内容块的消息。
+Anthropic API 要求严格的角色交替（user、assistant、user、
+assistant...）。如果两条连续消息具有相同的角色，它们会被合并为一条
+包含组合内容块的消息。
 
 ### 16.2 每种修复的必要性
 
@@ -1227,7 +1281,8 @@ LibreFang 提供两个信息级别不同的健康端点。
 }
 ```
 
-该端点不会暴露 Agent 数量、数据库详情、配置警告、运行时间或任何内部系统信息。适用于负载均衡器健康检查。
+该端点不会暴露 Agent 数量、数据库详情、配置警告、运行时间或任何内部
+系统信息。适用于负载均衡器健康检查。
 
 ### 17.2 详细端点：`GET /api/health/detail`
 
@@ -1248,7 +1303,8 @@ LibreFang 提供两个信息级别不同的健康端点。
 
 ### 17.3 本地回环回退
 
-当未配置 API 密钥时，`auth` 中间件将所有非健康端点限制为仅允许回环地址访问：
+当未配置 API 密钥时，`auth` 中间件将所有非健康端点限制为仅允许回环
+地址访问：
 
 ```rust
 if api_key.is_empty() {
@@ -1279,7 +1335,8 @@ dashboard_user = "admin"
 dashboard_pass = "vault:dashboard_password"
 ```
 
-当两个字段都设置后，Dashboard 会显示登录页面。如果未配置凭据，Dashboard 无需登录即可访问（或者在设置了 `api_key` 的情况下受其保护）。
+当两个字段都设置后，Dashboard 会显示登录页面。如果未配置凭据，
+Dashboard 无需登录即可访问（或者在设置了 `api_key` 的情况下受其保护）。
 
 ### 18.2 凭据来源（优先级顺序）
 
@@ -1299,7 +1356,9 @@ librefang vault set dashboard_password
 dashboard_pass = "vault:dashboard_password"
 ```
 
-Vault 使用 AES-256-GCM 加密，主密钥存储在操作系统密钥链中（macOS Keychain / Windows Credential Manager / Linux Secret Service），或通过 `LIBREFANG_VAULT_KEY` 环境变量指定。
+Vault 使用 AES-256-GCM 加密，主密钥存储在操作系统密钥链中（macOS
+Keychain / Windows Credential Manager / Linux Secret Service），或
+通过 `LIBREFANG_VAULT_KEY` 环境变量指定。
 
 ### 18.4 安全属性
 
@@ -1312,7 +1371,7 @@ Vault 使用 AES-256-GCM 加密，主密钥存储在操作系统密钥链中（m
 
 ## 19. 安全配置
 
-### 19.1 config.toml 参考
+### 18.1 config.toml 参考
 
 ```toml
 # API Authentication
@@ -1336,7 +1395,7 @@ max_memory_bytes = 16777216 # 16 MB max WASM memory
 # SSRF protection is always on and cannot be disabled
 ```
 
-### 19.2 密钥相关环境变量
+### 18.2 密钥相关环境变量
 
 | 变量 | 用途 |
 |------|------|
@@ -1349,9 +1408,10 @@ max_memory_bytes = 16777216 # 16 MB max WASM memory
 | `TAVILY_API_KEY` | Tavily 网络搜索 |
 | `PERPLEXITY_API_KEY` | Perplexity 网络搜索 |
 
-所有环境变量中的 API 密钥在加载到驱动结构体时都会被包装为 `Zeroizing<String>`。
+所有环境变量中的 API 密钥在加载到驱动结构体时都会被包装为
+`Zeroizing<String>`。
 
-### 19.3 能力声明（Agent 清单）
+### 18.3 能力声明（Agent 清单）
 
 能力在 Agent 的 TOML 清单中声明：
 
@@ -1376,7 +1436,7 @@ type = "LlmMaxTokens"
 value = 4096
 ```
 
-### 19.4 循环守卫调优
+### 18.4 循环守卫调优
 
 `LoopGuardConfig` 的默认值：
 
@@ -1386,7 +1446,7 @@ value = 4096
 | `block_threshold` | 5 | 相同调用多少次后阻止 |
 | `global_circuit_breaker` | 30 | 总调用多少次后熔断 |
 
-### 19.5 子进程沙箱白名单
+### 18.5 子进程沙箱白名单
 
 要将特定环境变量传递给子进程：
 
@@ -1394,7 +1454,8 @@ value = 4096
 sandbox_command(&mut cmd, &["MY_CUSTOM_VAR".to_string()]);
 ```
 
-只有明确列在 `allowed_env_vars` 中的变量（加上安全默认值）才会被子进程继承。
+只有明确列在 `allowed_env_vars` 中的变量（加上安全默认值）才会被
+子进程继承。
 
 ---
 
@@ -1415,7 +1476,7 @@ sandbox_command(&mut cmd, &["MY_CUSTOM_VAR".to_string()]);
 | `chrono` | 审计条目的 ISO-8601 时间戳 |
 | `reqwest` | HTTP 客户端（在受 SSRF 保护的 `host_net_fetch` 中使用） |
 
-### 20.1 为什么选择这些 Crate
+### 19.1 为什么选择这些 Crate
 
 - **sha2/hmac：** 属于 RustCrypto 项目，经过审计，在生产环境的 Rust 项目中广泛使用。
 - **ed25519-dalek：** Rust 生态中事实上的 Ed25519 标准库，经过广泛审计。
@@ -1450,3 +1511,7 @@ sandbox_command(&mut cmd, &["MY_CUSTOM_VAR".to_string()]);
 | 针对 HMAC 验证的时序攻击 | subtle::ConstantTimeEq（第 9.2 节） |
 | 通过元字符进行 Shell 注入 | Command::new（无 shell）+ env_clear（第 13.4 节） |
 | DNS 重绑定绕过 SSRF | 检查解析后的 IP，而非主机名（第 7.3 节） |
+
+
+
+

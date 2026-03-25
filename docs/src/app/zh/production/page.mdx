@@ -1,261 +1,298 @@
-# 生产部署检查清单
+# 生产发布检查清单
 
-LibreFang 生产环境部署检查清单。
-
----
-
-## 部署前检查
-
-### 1. 安全配置
-
-- [ ] API 认证已启用
-- [ ] 强密码/密钥已设置
-- [ ] 网络访问已限制
-- [ ] 防火墙规则已配置
-
-### 2. 资源配置
-
-- [ ] 内存充足 (推荐 4GB+)
-- [ ] CPU 核心数足够 (推荐 2+)
-- [ ] 磁盘空间足够 (推荐 20GB+)
-
-### 3. 依赖检查
-
-- [ ] Rust 工具链已安装
-- [ ] 所有依赖已解析
-- [ ] 构建成功
+在打标签 `v0.7.0` 并交付给用户之前，必须完成以下所有事项。各步骤按依赖关系排列，请从上至下依次完成。
 
 ---
 
-## 配置检查
+## 1. 生成 Tauri 签名密钥对
 
-### 必需配置
+**状态：** 阻塞项 -- 没有密钥对，自动更新功能将完全失效，用户永远无法收到更新。
 
-```toml
-# API 认证
-api_key = "your-secure-random-key"
+Tauri 更新器需要一个 Ed25519 密钥对。私钥用于对每个发布包进行签名，公钥嵌入到应用二进制文件中以验证更新。
 
-# 默认模型
-[default_model]
-provider = "groq"
-model = "llama-3.3-70b-versatile"
-api_key_env = "GROQ_API_KEY"
+```bash
+# 安装 Tauri CLI（如果尚未安装）
+cargo install tauri-cli --locked
 
-# 网络
-[network]
-listen_addr = "127.0.0.1:4545"
+# 生成密钥对
+cargo tauri signer generate -w ~/.tauri/librefang.key
 ```
 
-### 推荐配置
+命令将输出：
 
-```toml
-# 内存
-[memory]
-decay_rate = 0.05
+```
+Your public key was generated successfully:
+dW50cnVzdGVkIGNvb...  <-- COPY THIS
 
-# 使用统计
-[usage_footer]
-display = "Full"
+Your private key was saved to: ~/.tauri/librefang.key
 ```
 
-> **注意**：会话压缩（compaction）参数由 runtime 内部管理，不在 `config.toml` 中配置。自动压缩默认启用。
+妥善保存这两个值，后续步骤 2 和步骤 3 会用到。
 
 ---
 
-## 部署步骤
+## 2. 在 `tauri.conf.json` 中设置公钥
 
-### 1. 构建发布版本
+**状态：** 阻塞项 -- 必须在构建之前替换占位符。
 
-```bash
-cargo build --release
+打开 `crates/librefang-desktop/tauri.conf.json`，将：
+
+```json
+"pubkey": "PLACEHOLDER_REPLACE_WITH_GENERATED_PUBKEY"
 ```
 
-### 2. 配置环境变量
+替换为步骤 1 中生成的实际公钥字符串：
 
-```bash
-export ANTHROPIC_API_KEY="sk-..."
-export RUST_LOG=info
-```
-
-### 3. 启动守护进程
-
-```bash
-# 前台运行测试
-./target/release/librefang start
-
-# 或后台运行
-nohup ./target/release/librefang start &
-
-# 或使用 systemd
-sudo cp librefang.service /etc/systemd/system/
-sudo systemctl enable librefang
-sudo systemctl start librefang
-```
-
-### 4. 验证运行
-
-```bash
-# 健康检查
-curl http://127.0.0.1:4545/api/health
-
-# 列出 agent
-curl http://127.0.0.1:4545/api/agents
+```json
+"pubkey": "dW50cnVzdGVkIGNvb..."
 ```
 
 ---
 
-## 监控
+## 3. 添加 GitHub 仓库密钥
 
-### 日志
+**状态：** 阻塞项 -- 没有这些密钥，CI/CD 发布工作流将会失败。
 
+前往 **GitHub 仓库 -> Settings -> Secrets and variables -> Actions -> New repository secret**，添加以下密钥：
+
+| 密钥名称 | 值 | 是否必需 |
+|---|---|---|
+| `TAURI_SIGNING_PRIVATE_KEY` | `~/.tauri/librefang.key` 的文件内容 | 是 |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | 生成密钥时设置的密码（如果没有设置则为空字符串） | 是 |
+
+### 可选 -- macOS 代码签名
+
+如果不配置这些密钥，macOS 用户将看到"来自身份不明的开发者"的警告。需要一个 Apple 开发者账户（$99/年）。
+
+| 密钥名称 | 值 |
+|---|---|
+| `APPLE_CERTIFICATE` | Base64 编码的 `.p12` 证书文件 |
+| `APPLE_CERTIFICATE_PASSWORD` | .p12 文件的密码 |
+| `APPLE_SIGNING_IDENTITY` | 例如 `Developer ID Application: Your Name (TEAMID)` |
+| `APPLE_ID` | 你的 Apple ID 邮箱 |
+| `APPLE_PASSWORD` | 从 appleid.apple.com 生成的应用专用密码 |
+| `APPLE_TEAM_ID` | 你的 10 位 Team ID |
+
+生成 Base64 编码证书的方法：
 ```bash
-# 实时日志
-tail -f ~/.librefang/logs/librefang.log
-
-# 错误日志
-grep ERROR ~/.librefang/logs/librefang.log
+base64 -i Certificates.p12 | pbcopy
 ```
 
-### 指标
+### 可选 -- Windows 代码签名
+
+如果不配置，Windows SmartScreen 可能会向用户发出警告。需要一个 EV 代码签名证书。
+
+在 `tauri.conf.json` 的 `bundle.windows` 下设置 `certificateThumbprint`，并将证书添加到 CI 中的 Windows 运行器。
+
+---
+
+## 4. 创建图标资源
+
+**状态：** 需验证 -- 图标可能是占位符。
+
+以下图标文件必须存在于 `crates/librefang-desktop/icons/` 目录中：
+
+| 文件 | 尺寸 | 用途 |
+|---|---|---|
+| `icon.png` | 1024x1024 | 源图标，macOS .icns 生成 |
+| `icon.ico` | 多尺寸 | Windows 任务栏、安装程序 |
+| `32x32.png` | 32x32 | 系统托盘、小尺寸场景 |
+| `128x128.png` | 128x128 | 应用列表 |
+| `128x128@2x.png` | 256x256 | HiDPI/Retina 显示屏 |
+
+确认这些是正式的品牌图标（而非 Tauri 默认图标）。可以从单个源 SVG 文件生成所有尺寸：
 
 ```bash
-# 预算使用
-curl http://127.0.0.1:4545/api/budget
-
-# 通道状态
-curl http://127.0.0.1:4545/api/channels
+# 使用 ImageMagick
+convert icon.svg -resize 1024x1024 icon.png
+convert icon.svg -resize 32x32 32x32.png
+convert icon.svg -resize 128x128 128x128.png
+convert icon.svg -resize 256x256 128x128@2x.png
+convert icon.svg -resize 256x256 -define icon:auto-resize=256,128,64,48,32,16 icon.ico
 ```
 
 ---
 
-## 备份
+## 5. 设置 `librefang.ai` 安装域名
 
-### 数据目录
+**状态：** 需验证 -- 用户应能通过 `curl -fsSL https://librefang.ai/install.sh | sh` 进行安装。
 
+可选方案：
+- **GitHub Pages**：将 `librefang.ai` 指向 GitHub Pages 站点，将 `/install.sh` 重定向到仓库最新发布版本的 `scripts/install.sh`，将 `/install.ps1` 重定向到 `scripts/install.ps1`。
+- **Cloudflare Workers / Vercel**：以正确的 `Content-Type: text/plain` 头部提供安装脚本。
+- **原始 GitHub 重定向**：如有需要，使用 `librefang.ai` 路由到仓库托管的安装器产物（可靠性较低）。
+
+安装脚本的引用路径：
+- `https://librefang.ai/install.sh` -> 提供 `scripts/install.sh`
+- `https://librefang.ai/install.ps1` -> 提供 `scripts/install.ps1`
+
+域名配置完成后，用户即可通过以下方式安装：
+```bash
+curl -fsSL https://librefang.ai/install.sh | sh
 ```
-~/.librefang/
-├── config.toml       # 配置文件
-├── data/
-│   └── librefang.db  # SQLite 数据库
-└── agents/          # Agent 清单
-```
 
-### 备份脚本
+---
+
+## 6. 验证 Dockerfile 构建
+
+**状态：** 需验证 -- Dockerfile 必须能生成可用的镜像。
 
 ```bash
-#!/bin/bash
-BACKUP_DIR="/backup/librefang"
-DATE=$(date +%Y%m%d)
+docker build -t librefang:local .
+docker run --rm librefang:local --version
+docker run --rm -p 4545:4545 -v librefang-data:/data librefang:local start
+```
 
-mkdir -p $BACKUP_DIR
+确认以下事项：
+- 二进制文件能正常运行并打印版本号
+- `start` 命令能启动内核和 API 服务器
+- 端口 4545 可访问
+- `/data` 卷在容器重启之间保持数据持久化
 
-# 备份配置
-cp ~/.librefang/config.toml $BACKUP_DIR/config-$DATE.toml
+---
 
-# 备份数据库
-cp ~/.librefang/data/librefang.db $BACKUP_DIR/librefang-$DATE.db
+## 7. 本地验证安装脚本
 
-# 压缩
-tar -czf librefang-backup-$DATE.tar.gz $BACKUP_DIR
+**状态：** 发布前需验证。
+
+### Linux/macOS
+```bash
+# 针对真实的 GitHub 发布进行测试（首次打标签之后）
+bash scripts/install.sh
+
+# 或仅进行语法检查
+bash -n scripts/install.sh
+shellcheck scripts/install.sh
+```
+
+### Windows (PowerShell)
+```powershell
+# 针对真实的 GitHub 发布进行测试（首次打标签之后）
+powershell -ExecutionPolicy Bypass -File scripts/install.ps1
+
+# 或仅进行语法检查
+pwsh -NoProfile -Command "Get-Content scripts/install.ps1 | Out-Null"
+```
+
+### Docker 冒烟测试
+```bash
+docker build -f scripts/docker/install-smoke.Dockerfile .
 ```
 
 ---
 
-## 故障恢复
+## 8. 编写 v0.7.0 的 CHANGELOG.md
 
-### 从备份恢复
+**状态：** 需验证 -- 确认变更日志涵盖所有已交付的功能。
+
+发布工作流会在每个 GitHub Release 正文中包含指向 `CHANGELOG.md` 的链接。确保该文件存在于仓库根目录，并涵盖以下内容：
+
+- 全部 15 个 crate 及其功能说明
+- 核心功能：44 个通道、60 个工具、49 个驱动、130+ 个模型
+- 安全系统（9 个 SOTA 方案 + 7 个关键修复）
+- 带自动更新功能的桌面应用
+- 从 OpenClaw 的迁移路径
+- Docker 和 CLI 安装选项
+
+---
+
+## 9. 首次发布 -- 打标签并推送
+
+当步骤 1-8 全部完成后：
 
 ```bash
-# 停止服务
-systemctl stop librefang
+# 确保所有地方的版本号一致
+grep '"version"' crates/librefang-desktop/tauri.conf.json
+grep '^version' Cargo.toml
 
-# 恢复配置
-cp backup/config.toml ~/.librefang/config.toml
+# 提交最终变更
+git add -A
+git commit -m "chore: prepare v0.7.0 release"
 
-# 恢复数据库
-cp backup/librefang.db ~/.librefang/data/librefang.db
-
-# 重启服务
-systemctl start librefang
+# 打标签并推送
+git tag v0.7.0
+git push origin main --tags
 ```
+
+此操作将触发发布工作流，该工作流会：
+1. 为 4 个目标平台构建桌面安装包（Linux、macOS x86、macOS ARM、Windows）
+2. 生成已签名的 `latest.json` 供自动更新器使用
+3. 为 5 个目标平台构建 CLI 二进制文件
+4. 构建并推送多架构 Docker 镜像
+5. 创建包含所有产物的 GitHub Release
 
 ---
 
-## 性能优化
+## 10. 发布后验证
 
-### 资源限制
+发布工作流完成后（约 15-30 分钟）：
 
-```toml
-# Agent 资源限制
-[resources]
-max_llm_tokens_per_hour = 100000
-max_concurrent_agents = 10
-```
+### GitHub Release 页面
+- [ ] `.msi` 和 `.exe` 存在（Windows 桌面版）
+- [ ] `.dmg` 存在（macOS 桌面版）
+- [ ] `.AppImage` 和 `.deb` 存在（Linux 桌面版）
+- [ ] `latest.json` 存在（自动更新清单）
+- [ ] CLI `.tar.gz` 归档存在（5 个目标平台）
+- [ ] CLI `.zip` 存在（Windows）
+- [ ] 每个 CLI 归档对应的 SHA256 校验文件存在
 
-### 缓存
+### 自动更新清单
+访问：`https://github.com/librefang/librefang/releases/latest/download/latest.json`
 
-```toml
-# 模型缓存
-[cache]
-enabled = true
-ttl = 3600
-```
+- [ ] JSON 格式有效
+- [ ] 包含 `signature` 字段（非空字符串）
+- [ ] 包含所有平台的下载 URL
+- [ ] 版本号与标签匹配
 
----
-
-## 安全加固
-
-### 生产环境建议
-
-1. **使用反向代理** (Nginx/Caddy)
-2. **启用 HTTPS**
-3. **配置防火墙**
-4. **定期更新**
-5. **监控异常**
-
-### Nginx 配置示例
-
-```nginx
-server {
-    listen 443 ssl;
-    server_name librefang.example.com;
-
-    ssl_certificate /etc/letsencrypt/live/example.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/example.com/privkey.pem;
-
-    location / {
-        proxy_pass http://127.0.0.1:4545;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection 'upgrade';
-        proxy_set_header Host $host;
-        proxy_cache_bypass $http_upgrade;
-    }
-}
-```
-
----
-
-## 维护
-
-### 定期任务
-
-| 任务 | 频率 |
-|------|------|
-| 日志轮转 | 每天 |
-| 备份 | 每天 |
-| 安全更新 | 每周 |
-| 系统更新 | 每月 |
-
-### 更新 LibreFang
-
+### Docker 镜像
 ```bash
-# 拉取最新
-git pull
+docker pull ghcr.io/librefang/librefang:latest
+docker pull ghcr.io/librefang/librefang:0.7.0
 
-# 重新构建
-cargo build --release
-
-# 重启服务
-systemctl restart librefang
+# 验证两种架构
+docker run --rm ghcr.io/librefang/librefang:latest --version
 ```
+
+### 桌面应用自动更新（使用 v0.7.1 进行测试）
+1. 从发布页面安装 v0.7.0
+2. 打标签 v0.7.1 并推送
+3. 等待发布工作流完成
+4. 打开 v0.7.0 应用 -- 10 秒后应当：
+   - 显示 "LibreFang Updating..." 通知
+   - 下载并安装 v0.7.1
+   - 自动重启到 v0.7.1
+5. 右键点击托盘 -> "Check for Updates" -> 应显示 "Up to Date"
+
+### 安装脚本
+```bash
+# Linux/macOS
+curl -fsSL https://librefang.ai/install.sh | sh
+librefang --version  # 应输出 v0.7.0
+
+# Windows PowerShell
+irm https://librefang.ai/install.ps1 | iex
+librefang --version
+```
+
+---
+
+## 速查 -- 依赖关系图
+
+```
+Step 1 (密钥生成) ──┬──> Step 2 (公钥写入配置)
+                    └──> Step 3 (密钥存入 GitHub)
+                           │
+Step 4 (图标) ─────────────┤
+Step 5 (域名) ─────────────┤
+Step 6 (Dockerfile) ───────┤
+Step 7 (安装脚本) ─────────┤
+Step 8 (CHANGELOG) ────────┘
+                           │
+                           v
+                    Step 9 (打标签 + 推送)
+                           │
+                           v
+                    Step 10 (验证)
+```
+
+步骤 4-8 可以并行执行。步骤 1-3 是顺序依赖的，必须首先完成。
