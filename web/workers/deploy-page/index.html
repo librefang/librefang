@@ -266,11 +266,19 @@
     @keyframes spin { to { transform: rotate(360deg); } }
     .footer { text-align: center; padding: 24px; color: var(--dim); font-size: 0.8rem; }
     .footer a { color: var(--accent); text-decoration: none; }
+    #platform-selection, #fly-deploy {
+      animation: fadeIn 0.3s ease;
+    }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(8px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
     @media (max-width: 600px) {
       body { padding: 24px 12px; }
       h1 { font-size: 1.4rem; }
       .card { padding: 20px; }
-      .platform-grid { grid-template-columns: 1fr; }
+      .platform-grid { grid-template-columns: 1fr; gap: 10px; }
+      .platform-card { padding: 16px; }
     }
   </style>
 </head>
@@ -459,7 +467,7 @@
       <a href="https://github.com/librefang/librefang">GitHub</a> &bull;
       <a href="https://librefang.ai">Website</a> &bull;
       <a href="https://discord.gg/DzTYqAZZmc">Discord</a>
-      <p style="margin-top:8px;">LibreFang &mdash; Libre Agent Operating System</p>
+      <p style="margin-top:8px;">&copy; 2026 LibreFang &mdash; Agent Operating System</p>
     </div>
   </div>
 
@@ -474,6 +482,7 @@
       setPlatformParam('flyio');
       document.getElementById('platform-selection').style.display = 'none';
       document.getElementById('fly-deploy').style.display = 'block';
+      window.scrollTo({ top: 0, behavior: 'smooth' });
     }
 
     function showPlatforms() {
