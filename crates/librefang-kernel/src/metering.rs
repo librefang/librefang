@@ -885,13 +885,36 @@ mod tests {
 
     #[test]
     fn test_estimate_cost_with_catalog_chatgpt_zero_price_uses_legacy_budget_rate() {
-        let catalog = test_catalog();
+        // Build a synthetic catalog with a zero-priced chatgpt model so the test
+        // is independent of registry state (the live registry may carry real prices).
+        use librefang_types::model_catalog::{ModelCatalogEntry, ModelCatalogFile, ModelTier};
+        let mut catalog = librefang_runtime::model_catalog::ModelCatalog::new_from_dir(
+            &std::path::PathBuf::from("/nonexistent"),
+        );
+        catalog.merge_catalog_file(ModelCatalogFile {
+            provider: None,
+            models: vec![ModelCatalogEntry {
+                id: "gpt-5.1-codex-mini".to_string(),
+                display_name: "GPT-5.1 Codex Mini".to_string(),
+                provider: "chatgpt".to_string(),
+                tier: ModelTier::Balanced,
+                context_window: 32_000,
+                max_output_tokens: 4_096,
+                input_cost_per_m: 0.0,
+                output_cost_per_m: 0.0,
+                supports_tools: true,
+                supports_vision: false,
+                supports_streaming: true,
+                aliases: vec![],
+            }],
+        });
         let cost = MeteringEngine::estimate_cost_with_catalog(
             &catalog,
             "gpt-5.1-codex-mini",
             1_000_000,
             1_000_000,
         );
+        // Zero-priced chatgpt model falls back to legacy rates ($1/$3 per million).
         assert!((cost - 4.0).abs() < 0.01);
     }
 

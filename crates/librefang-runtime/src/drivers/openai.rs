@@ -279,9 +279,12 @@ struct OaiPromptTokensDetails {
     cached_tokens: u64,
 }
 
-#[async_trait]
-impl LlmDriver for OpenAIDriver {
-    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+impl OpenAIDriver {
+    /// Build the `OaiRequest` from a `CompletionRequest`.
+    ///
+    /// Shared between `complete()` and `stream()`.  The caller sets
+    /// `stream` / `stream_options` on the returned struct before sending.
+    fn build_request(&self, request: &CompletionRequest) -> Result<OaiRequest, LlmError> {
         let mut oai_messages: Vec<OaiMessage> = Vec::new();
 
         // Add system message if present
@@ -465,7 +468,7 @@ impl LlmDriver for OpenAIDriver {
         if oai_messages.is_empty() {
             return Err(LlmError::Api {
                 status: 0,
-                message: "Cannot send completion request with no messages — \
+                message: "Cannot send request with no messages — \
                           this usually means aggressive history trimming emptied \
                           the conversation"
                     .to_string(),
@@ -483,7 +486,8 @@ impl LlmDriver for OpenAIDriver {
         } else {
             (Some(request.max_tokens), None)
         };
-        let mut oai_request = OaiRequest {
+
+        Ok(OaiRequest {
             model: request.model.clone(),
             messages: oai_messages,
             max_tokens: mt,
@@ -511,7 +515,14 @@ impl LlmDriver for OpenAIDriver {
                 .response_format
                 .as_ref()
                 .and_then(oai_response_format),
-        };
+        })
+    }
+}
+
+#[async_trait]
+impl LlmDriver for OpenAIDriver {
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        let mut oai_request = self.build_request(&request)?;
 
         let max_retries = 3;
         for attempt in 0..=max_retries {
@@ -837,198 +848,9 @@ impl LlmDriver for OpenAIDriver {
         request: CompletionRequest,
         tx: tokio::sync::mpsc::Sender<StreamEvent>,
     ) -> Result<CompletionResponse, LlmError> {
-        // Build request (same as complete but with stream: true)
-        let mut oai_messages: Vec<OaiMessage> = Vec::new();
-
-        if let Some(ref system) = request.system {
-            oai_messages.push(OaiMessage {
-                role: "system".to_string(),
-                content: Some(OaiMessageContent::Text(system.clone())),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            });
-        }
-
-        for msg in &request.messages {
-            match (&msg.role, &msg.content) {
-                (Role::System, MessageContent::Text(text)) => {
-                    if request.system.is_none() {
-                        oai_messages.push(OaiMessage {
-                            role: "system".to_string(),
-                            content: Some(OaiMessageContent::Text(text.clone())),
-                            tool_calls: None,
-                            tool_call_id: None,
-                            reasoning_content: None,
-                        });
-                    }
-                }
-                (Role::User, MessageContent::Text(text)) => {
-                    oai_messages.push(OaiMessage {
-                        role: "user".to_string(),
-                        content: Some(OaiMessageContent::Text(text.clone())),
-                        tool_calls: None,
-                        tool_call_id: None,
-                        reasoning_content: None,
-                    });
-                }
-                (Role::Assistant, MessageContent::Text(text)) => {
-                    oai_messages.push(OaiMessage {
-                        role: "assistant".to_string(),
-                        content: Some(OaiMessageContent::Text(text.clone())),
-                        tool_calls: None,
-                        tool_call_id: None,
-                        reasoning_content: None,
-                    });
-                }
-                (Role::User, MessageContent::Blocks(blocks)) => {
-                    for block in blocks {
-                        if let ContentBlock::ToolResult {
-                            tool_use_id,
-                            content,
-                            ..
-                        } = block
-                        {
-                            oai_messages.push(OaiMessage {
-                                role: "tool".to_string(),
-                                content: Some(OaiMessageContent::Text(if content.is_empty() {
-                                    "(empty)".to_string()
-                                } else {
-                                    content.clone()
-                                })),
-                                tool_calls: None,
-                                tool_call_id: Some(tool_use_id.clone()),
-                                reasoning_content: None,
-                            });
-                        }
-                    }
-                }
-                (Role::Assistant, MessageContent::Blocks(blocks)) => {
-                    let mut text_parts = Vec::new();
-                    let mut tool_calls_out = Vec::new();
-                    for block in blocks {
-                        match block {
-                            ContentBlock::Text { text, .. } => text_parts.push(text.clone()),
-                            ContentBlock::ToolUse {
-                                id, name, input, ..
-                            } => {
-                                tool_calls_out.push(OaiToolCall {
-                                    id: id.clone(),
-                                    call_type: "function".to_string(),
-                                    function: OaiFunction {
-                                        name: name.clone(),
-                                        arguments: serde_json::to_string(input).unwrap_or_default(),
-                                    },
-                                });
-                            }
-                            ContentBlock::Thinking { .. } => {}
-                            _ => {}
-                        }
-                    }
-                    let has_tool_calls = !tool_calls_out.is_empty();
-                    let is_deepseek_r = self.is_deepseek_reasoner(&request.model);
-                    oai_messages.push(OaiMessage {
-                        role: "assistant".to_string(),
-                        content: if text_parts.is_empty() {
-                            if has_tool_calls || is_deepseek_r {
-                                Some(OaiMessageContent::Text(String::new()))
-                            } else {
-                                None
-                            }
-                        } else {
-                            Some(OaiMessageContent::Text(text_parts.join("")))
-                        },
-                        tool_calls: if tool_calls_out.is_empty() {
-                            None
-                        } else {
-                            Some(tool_calls_out)
-                        },
-                        tool_call_id: None,
-                        // DeepSeek-reasoner: MUST omit reasoning_content on
-                        // all previous assistant messages — the API rejects it.
-                        // Kimi: requires an empty-string reasoning_content when
-                        // tool_calls are present.
-                        reasoning_content: if is_deepseek_r {
-                            None
-                        } else if has_tool_calls
-                            && self.kimi_needs_reasoning_content(&request.model)
-                        {
-                            Some(String::new())
-                        } else {
-                            None
-                        },
-                    });
-                }
-                _ => {}
-            }
-        }
-
-        let oai_tools: Vec<OaiTool> = request
-            .tools
-            .iter()
-            .map(|t| OaiTool {
-                tool_type: "function".to_string(),
-                function: OaiToolDef {
-                    name: t.name.clone(),
-                    description: t.description.clone(),
-                    parameters: librefang_types::tool::normalize_schema_for_provider(
-                        &t.input_schema,
-                        "openai",
-                    ),
-                },
-            })
-            .collect();
-
-        // Guard: an empty message list would produce an unparseable API response.
-        if oai_messages.is_empty() {
-            return Err(LlmError::Api {
-                status: 0,
-                message: "Cannot send streaming request with no messages — \
-                          this usually means aggressive history trimming emptied \
-                          the conversation"
-                    .to_string(),
-            });
-        }
-
-        let tool_choice = if oai_tools.is_empty() {
-            None
-        } else {
-            Some(serde_json::json!("auto"))
-        };
-
-        let (mt, mct) = if uses_completion_tokens(&request.model) {
-            (None, Some(request.max_tokens))
-        } else {
-            (Some(request.max_tokens), None)
-        };
-        let mut oai_request = OaiRequest {
-            model: request.model.clone(),
-            messages: oai_messages,
-            max_tokens: mt,
-            max_completion_tokens: mct,
-            temperature: if self.kimi_needs_reasoning_content(&request.model) {
-                Some(0.6)
-            } else if temperature_must_be_one(&request.model) {
-                Some(1.0)
-            } else if rejects_temperature(&request.model) {
-                None
-            } else {
-                Some(request.temperature)
-            },
-            tools: oai_tools,
-            tool_choice,
-            stream: true,
-            stream_options: Some(serde_json::json!({"include_usage": true})),
-            thinking: if self.kimi_needs_reasoning_content(&request.model) {
-                Some(serde_json::json!({"type": "disabled"}))
-            } else {
-                None
-            },
-            response_format: request
-                .response_format
-                .as_ref()
-                .and_then(oai_response_format),
-        };
+        let mut oai_request = self.build_request(&request)?;
+        oai_request.stream = true;
+        oai_request.stream_options = Some(serde_json::json!({"include_usage": true}));
 
         // Retry loop for the initial HTTP request
         let max_retries = 3;
