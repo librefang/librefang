@@ -466,7 +466,13 @@ function RequirementsForm({ handId, requirements }: { handId: string; requiremen
   const { t } = useTranslation();
   const queryClient = useQueryClient();
   const addToast = useUIStore((s) => s.addToast);
-  const [values, setValues] = useState<Record<string, string>>({});
+  const [values, setValues] = useState<Record<string, string>>(() => {
+    const init: Record<string, string> = {};
+    for (const r of requirements ?? []) {
+      if (r.key && r.current_value) init[r.key] = r.current_value;
+    }
+    return init;
+  });
   const [saving, setSaving] = useState<string | null>(null);
 
   if (!requirements || requirements.length === 0) return null;
@@ -477,7 +483,6 @@ function RequirementsForm({ handId, requirements }: { handId: string; requiremen
     setSaving(key);
     try {
       await setHandSecret(handId, key, val);
-      setValues(prev => ({ ...prev, [key]: "" }));
       addToast(t("common.success"), "success");
       queryClient.invalidateQueries({ queryKey: ["hands"] });
     } catch (e: unknown) {
@@ -496,16 +501,18 @@ function RequirementsForm({ handId, requirements }: { handId: string; requiremen
             <span className={`text-[11px] font-medium ${r.satisfied ? "text-text-dim" : "text-text"}`}>{r.label || r.key}</span>
             {r.optional && <span className="text-[9px] text-text-dim/40">(optional)</span>}
           </div>
-          {!r.satisfied && r.key && (
+          {r.key && (
             <div className="flex gap-1.5 ml-5">
               <input
                 type="text"
                 autoComplete="off"
-                placeholder={r.key}
+                placeholder={r.satisfied ? "••••••••" : r.key}
                 value={values[r.key!] ?? ""}
                 onChange={(e) => { setValues(prev => ({ ...prev, [r.key!]: e.target.value })); }}
                 onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); handleSave(r.key!); } }}
-                className="flex-1 px-2.5 py-1.5 rounded-lg border border-border-subtle bg-main text-[11px] font-mono outline-none focus:border-brand placeholder:text-text-dim/30"
+                className={`flex-1 px-2.5 py-1.5 rounded-lg border text-[11px] font-mono outline-none focus:border-brand placeholder:text-text-dim/30 ${
+                  r.satisfied ? "border-success/20 bg-success/5" : "border-border-subtle bg-main"
+                }`}
               />
               <button
                 type="button"

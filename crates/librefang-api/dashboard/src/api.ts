@@ -472,6 +472,7 @@ export interface HandRequirementItem {
   optional?: boolean;
   type?: string;
   description?: string;
+  current_value?: string;
 }
 
 export interface HandDefinitionItem {
