@@ -826,7 +826,7 @@ function Downloads(_props: SectionProps) {
         {isLoading ? (
           <div className="text-gray-400 dark:text-gray-600 text-center py-12">Loading releases...</div>
         ) : (
-          <div className="grid md:grid-cols-2 gap-6 mb-6">
+          <div className="grid md:grid-cols-3 gap-6 mb-6">
             {categories.map((cat) => (
               <FadeIn key={cat.label}>
                 <div className="bg-surface-100 border border-black/10 dark:border-white/5 p-6 hover:-translate-y-0.5 transition-transform h-full">
@@ -839,11 +839,7 @@ function Downloads(_props: SectionProps) {
                   </div>
                   <div className="space-y-1.5">
                     {cat.assets.map((a) => (
-                      <a
-                        key={a.name}
-                        href={a.url}
-                        className="flex items-center justify-between px-3 py-2 hover:bg-surface-200 transition-colors group"
-                      >
+                      <a key={a.name} href={a.url} className="flex items-center justify-between px-3 py-2 hover:bg-surface-200 transition-colors group">
                         <span className="text-sm text-gray-700 dark:text-gray-300 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors">{a.name}</span>
                         <span className="text-xs text-gray-400 dark:text-gray-600 font-mono">{a.size}</span>
                       </a>
@@ -852,68 +848,69 @@ function Downloads(_props: SectionProps) {
                 </div>
               </FadeIn>
             ))}
+            {/* Deploy - 3rd column */}
+            <FadeIn>
+              <div className="bg-surface-100 border border-black/10 dark:border-white/5 p-6 hover:-translate-y-0.5 transition-transform h-full">
+                <div className="flex items-center gap-3 mb-4">
+                  <Globe className="w-5 h-5 text-cyan-600 dark:text-cyan-500" />
+                  <div>
+                    <h3 className="text-base font-bold text-slate-900 dark:text-white">{l('onlineDeply')}</h3>
+                    <span className="text-xs text-gray-500">deploy.librefang.ai</span>
+                  </div>
+                </div>
+                <div className="space-y-1.5">
+                  {[
+                    { name: 'Fly.io', url: 'https://fly.io/docs/hands-on/install-flyctl/', icon: Zap },
+                    { name: 'Railway', url: 'https://railway.app/new', icon: ArrowRight },
+                    { name: 'Render', url: 'https://render.com/deploy', icon: Layers },
+                    { name: 'GCP Cloud Run', url: 'https://cloud.google.com/run', icon: Network },
+                  ].map((p) => (
+                    <a key={p.name} href={p.url} target="_blank" rel="noopener noreferrer" className="flex items-center gap-3 px-3 py-2 hover:bg-surface-200 transition-colors group">
+                      <p.icon className="w-4 h-4 text-gray-400 dark:text-gray-600 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors shrink-0" />
+                      <span className="text-sm text-gray-700 dark:text-gray-300 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors">{p.name}</span>
+                    </a>
+                  ))}
+                </div>
+              </div>
+            </FadeIn>
           </div>
 
         )}
 
-        {/* SDK */}
+        {/* SDK + All Releases */}
         <FadeIn>
-          <div className="bg-surface-100 border border-black/10 dark:border-white/5 p-5 mb-6">
-            <div className="flex items-center gap-3 mb-4">
-              <Box className="w-5 h-5 text-cyan-600 dark:text-cyan-500" />
-              <h3 className="text-base font-bold text-slate-900 dark:text-white">{l('sdk')}</h3>
+          <div className="grid md:grid-cols-2 gap-6 mb-6">
+            <div className="bg-surface-100 border border-black/10 dark:border-white/5 p-5">
+              <div className="flex items-center gap-3 mb-4">
+                <Box className="w-5 h-5 text-cyan-600 dark:text-cyan-500" />
+                <h3 className="text-base font-bold text-slate-900 dark:text-white">{l('sdk')}</h3>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                {[
+                  { cmd: 'pip install librefang', copy: 'pip install librefang', label: 'Python' },
+                  { cmd: 'npm i @librefang/sdk', copy: 'npm i @librefang/sdk', label: 'Node.js' },
+                  { cmd: 'cargo add librefang', copy: 'cargo add librefang', label: 'Rust' },
+                  { cmd: 'go get librefang/sdk', copy: 'go get github.com/librefang/librefang/sdk/go', label: 'Go' },
+                ].map((pkg) => (
+                  <button key={pkg.label} className="bg-surface-200 px-3 py-2.5 text-left hover:bg-surface-300 transition-colors relative group" onClick={(e) => {
+                    navigator.clipboard.writeText(pkg.copy)
+                    const el = e.currentTarget.querySelector('.copy-tip') as HTMLElement
+                    if (el) { el.classList.remove('opacity-0'); setTimeout(() => el.classList.add('opacity-0'), 1500) }
+                  }}>
+                    <div className="text-xs text-gray-500 mb-1">{pkg.label}</div>
+                    <code className="text-[11px] text-gray-700 dark:text-gray-300 font-mono">{pkg.cmd}</code>
+                    <Copy className="absolute top-2 right-2 w-3 h-3 text-gray-400 dark:text-gray-600 opacity-0 group-hover:opacity-100 transition-opacity" />
+                    <span className="copy-tip absolute top-1 right-1 text-[9px] text-cyan-600 dark:text-cyan-400 opacity-0 transition-opacity">Copied!</span>
+                  </button>
+                ))}
+              </div>
             </div>
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-              {[
-                { cmd: 'pip install librefang', copy: 'pip install librefang', label: 'Python' },
-                { cmd: 'npm i @librefang/sdk', copy: 'npm i @librefang/sdk', label: 'Node.js' },
-                { cmd: 'cargo add librefang', copy: 'cargo add librefang', label: 'Rust' },
-                { cmd: 'go get librefang/sdk', copy: 'go get github.com/librefang/librefang/sdk/go', label: 'Go' },
-              ].map((pkg) => (
-                <button key={pkg.label} className="bg-surface-200 px-3 py-2.5 text-left hover:bg-surface-300 transition-colors relative group" onClick={(e) => {
-                  navigator.clipboard.writeText(pkg.copy)
-                  const el = e.currentTarget.querySelector('.copy-tip') as HTMLElement
-                  if (el) { el.classList.remove('opacity-0'); setTimeout(() => el.classList.add('opacity-0'), 1500) }
-                }}>
-                  <div className="text-xs text-gray-500 mb-1">{pkg.label}</div>
-                  <code className="text-[11px] text-gray-700 dark:text-gray-300 font-mono">{pkg.cmd}</code>
-                  <Copy className="absolute top-2 right-2 w-3 h-3 text-gray-400 dark:text-gray-600 opacity-0 group-hover:opacity-100 transition-opacity" />
-                  <span className="copy-tip absolute top-1 right-1 text-[9px] text-cyan-600 dark:text-cyan-400 opacity-0 transition-opacity">Copied!</span>
-                </button>
-              ))}
-            </div>
+            <a href="https://github.com/librefang/librefang/releases" target="_blank" rel="noopener noreferrer" className="flex flex-col items-center justify-center bg-surface-100 border border-black/10 dark:border-white/5 hover:border-cyan-500/20 p-6 transition-all group">
+              <Github className="w-8 h-8 text-gray-400 dark:text-gray-600 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors mb-3" />
+              <span className="text-sm font-semibold text-gray-700 dark:text-gray-300 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors">{l('allReleases')}</span>
+              <span className="text-xs text-gray-500 mt-1">{version}</span>
+            </a>
           </div>
-        </FadeIn>
-
-        {/* One-Click Deploy */}
-        <FadeIn delay={200}>
-          <div className="bg-surface-100 border border-black/10 dark:border-white/5 p-5 mb-6">
-            <div className="flex items-center gap-3 mb-4">
-              <Globe className="w-5 h-5 text-cyan-600 dark:text-cyan-500" />
-              <h3 className="text-base font-bold text-slate-900 dark:text-white">{l('onlineDeply')}</h3>
-            </div>
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-              {[
-                { name: 'Fly.io', url: 'https://fly.io/docs/hands-on/install-flyctl/', icon: '🚀' },
-                { name: 'Railway', url: 'https://railway.app/new', icon: '🚂' },
-                { name: 'Render', url: 'https://render.com/deploy', icon: '⚡' },
-                { name: 'GCP', url: 'https://cloud.google.com/run', icon: '☁️' },
-              ].map((p) => (
-                <a key={p.name} href={p.url} target="_blank" rel="noopener noreferrer" className="bg-surface-200 px-3 py-3 text-center hover:bg-surface-300 transition-colors group">
-                  <div className="text-lg mb-1">{p.icon}</div>
-                  <div className="text-xs font-semibold text-gray-700 dark:text-gray-300 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors">{p.name}</div>
-                </a>
-              ))}
-            </div>
-          </div>
-        </FadeIn>
-
-        {/* All Releases */}
-        <FadeIn delay={300}>
-          <a href="https://github.com/librefang/librefang/releases" target="_blank" rel="noopener noreferrer" className="flex items-center justify-center gap-2 bg-surface-100 border border-black/10 dark:border-white/5 hover:border-cyan-500/20 px-5 py-3 transition-all group">
-            <Github className="w-4 h-4 text-cyan-500/60 group-hover:text-cyan-600 dark:group-hover:text-cyan-400" />
-            <span className="text-sm font-semibold text-gray-700 dark:text-gray-300 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors">{l('allReleases')}</span>
-          </a>
         </FadeIn>
       </div>
     </section>
