@@ -13,6 +13,7 @@ use librefang_types::agent::AgentManifest;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
 // ---------------------------------------------------------------------------
@@ -208,15 +209,34 @@ pub struct A2aArtifact {
 // A2A Task Store — tracks task lifecycle
 // ---------------------------------------------------------------------------
 
+/// Entry in the task store that pairs a task with its last-updated timestamp.
+#[derive(Debug, Clone)]
+struct TrackedTask {
+    task: A2aTask,
+    updated_at: Instant,
+}
+
+/// Default TTL for tasks: 24 hours.
+const DEFAULT_TASK_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+
 /// In-memory store for tracking A2A task lifecycle.
 ///
 /// Tasks are created by `tasks/send`, polled by `tasks/get`, and cancelled
 /// by `tasks/cancel`. The store is bounded to prevent memory exhaustion.
+///
+/// Eviction policy (applied lazily on insert):
+/// 1. **TTL**: any task whose `updated_at` exceeds `task_ttl` is removed,
+///    regardless of state. This prevents Working/InputRequired tasks from
+///    accumulating indefinitely.
+/// 2. **Capacity**: if still at capacity after TTL sweep, evict the oldest
+///    terminal-state task first, then fall back to the oldest task overall.
 #[derive(Debug)]
 pub struct A2aTaskStore {
-    tasks: Mutex<HashMap<String, A2aTask>>,
-    /// Maximum number of tasks to retain (FIFO eviction).
+    tasks: Mutex<HashMap<String, TrackedTask>>,
+    /// Maximum number of tasks to retain.
     max_tasks: usize,
+    /// Time-to-live for any task regardless of state.
+    task_ttl: Duration,
 }
 
 impl A2aTaskStore {
@@ -225,29 +245,69 @@ impl A2aTaskStore {
         Self {
             tasks: Mutex::new(HashMap::new()),
             max_tasks,
+            task_ttl: DEFAULT_TASK_TTL,
         }
     }
 
-    /// Insert a task. If the store is at capacity, the oldest task is evicted.
+    /// Create a new task store with a custom TTL.
+    pub fn with_ttl(max_tasks: usize, task_ttl: Duration) -> Self {
+        Self {
+            tasks: Mutex::new(HashMap::new()),
+            max_tasks,
+            task_ttl,
+        }
+    }
+
+    /// Remove all tasks whose `updated_at` is older than the TTL.
+    fn evict_expired(tasks: &mut HashMap<String, TrackedTask>, ttl: Duration) {
+        let now = Instant::now();
+        tasks.retain(|_, tracked| now.duration_since(tracked.updated_at) < ttl);
+    }
+
+    /// Insert a task. Expired tasks are swept first, then capacity eviction
+    /// is applied if needed.
     pub fn insert(&self, task: A2aTask) {
         let mut tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
-        // Evict oldest completed/failed/cancelled tasks if at capacity
+
+        // Lazy TTL sweep — remove all expired tasks regardless of state.
+        Self::evict_expired(&mut tasks, self.task_ttl);
+
+        // Capacity eviction: prefer terminal-state tasks, fall back to oldest.
         if tasks.len() >= self.max_tasks {
+            let is_terminal = |t: &TrackedTask| {
+                matches!(
+                    t.task.status.state(),
+                    A2aTaskStatus::Completed | A2aTaskStatus::Failed | A2aTaskStatus::Cancelled
+                )
+            };
+
+            // Try to evict the oldest terminal task first.
             let evict_key = tasks
                 .iter()
-                .filter(|(_, t)| {
-                    matches!(
-                        t.status.state(),
-                        A2aTaskStatus::Completed | A2aTaskStatus::Failed | A2aTaskStatus::Cancelled
-                    )
-                })
+                .filter(|(_, t)| is_terminal(t))
+                .min_by_key(|(_, t)| t.updated_at)
                 .map(|(k, _)| k.clone())
-                .next();
+                .or_else(|| {
+                    // No terminal tasks — evict the oldest task overall.
+                    tasks
+                        .iter()
+                        .min_by_key(|(_, t)| t.updated_at)
+                        .map(|(k, _)| k.clone())
+                });
+
             if let Some(key) = evict_key {
                 tasks.remove(&key);
             }
         }
-        tasks.insert(task.id.clone(), task);
+
+        let now = Instant::now();
+        tasks.insert(
+            task.id.clone(),
+            TrackedTask {
+                task,
+                updated_at: now,
+            },
+        );
     }
 
     /// Get a task by ID.
@@ -256,14 +316,15 @@ impl A2aTaskStore {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(task_id)
-            .cloned()
+            .map(|tracked| tracked.task.clone())
     }
 
     /// Update a task's status and optionally add messages/artifacts.
     pub fn update_status(&self, task_id: &str, status: A2aTaskStatus) -> bool {
         let mut tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(task) = tasks.get_mut(task_id) {
-            task.status = status.into();
+        if let Some(tracked) = tasks.get_mut(task_id) {
+            tracked.task.status = status.into();
+            tracked.updated_at = Instant::now();
             true
         } else {
             false
@@ -273,19 +334,21 @@ impl A2aTaskStore {
     /// Complete a task with a response message and optional artifacts.
     pub fn complete(&self, task_id: &str, response: A2aMessage, artifacts: Vec<A2aArtifact>) {
         let mut tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(task) = tasks.get_mut(task_id) {
-            task.messages.push(response);
-            task.artifacts.extend(artifacts);
-            task.status = A2aTaskStatus::Completed.into();
+        if let Some(tracked) = tasks.get_mut(task_id) {
+            tracked.task.messages.push(response);
+            tracked.task.artifacts.extend(artifacts);
+            tracked.task.status = A2aTaskStatus::Completed.into();
+            tracked.updated_at = Instant::now();
         }
     }
 
     /// Fail a task with an error message.
     pub fn fail(&self, task_id: &str, error_message: A2aMessage) {
         let mut tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(task) = tasks.get_mut(task_id) {
-            task.messages.push(error_message);
-            task.status = A2aTaskStatus::Failed.into();
+        if let Some(tracked) = tasks.get_mut(task_id) {
+            tracked.task.messages.push(error_message);
+            tracked.task.status = A2aTaskStatus::Failed.into();
+            tracked.updated_at = Instant::now();
         }
     }
 
@@ -523,6 +586,7 @@ impl Default for A2aClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn test_agent_card_from_manifest() {
@@ -732,6 +796,71 @@ mod tests {
         store.insert(task);
         // One was evicted, plus the new one
         assert!(store.len() <= 2);
+    }
+
+    #[test]
+    fn test_task_store_ttl_eviction() {
+        // Use a very short TTL so we can test expiration without sleeping.
+        let store = A2aTaskStore::with_ttl(100, Duration::from_secs(0));
+
+        // Insert a Working task (previously un-evictable).
+        let task = A2aTask {
+            id: "stuck-working".to_string(),
+            session_id: None,
+            status: A2aTaskStatus::Working.into(),
+            messages: vec![],
+            artifacts: vec![],
+        };
+        store.insert(task);
+        assert_eq!(store.len(), 1);
+
+        // Insert another task — the TTL sweep on insert should evict the
+        // expired Working task.
+        let task2 = A2aTask {
+            id: "new-task".to_string(),
+            session_id: None,
+            status: A2aTaskStatus::Submitted.into(),
+            messages: vec![],
+            artifacts: vec![],
+        };
+        store.insert(task2);
+
+        // The stuck Working task should have been evicted by TTL.
+        assert!(store.get("stuck-working").is_none());
+        // Only the newly inserted task should remain (it was inserted after
+        // the sweep, so its updated_at is fresh).
+        assert!(store.get("new-task").is_some());
+    }
+
+    #[test]
+    fn test_task_store_capacity_evicts_oldest_when_no_terminal() {
+        // All tasks are Working — capacity eviction should still work by
+        // evicting the oldest task.
+        let store = A2aTaskStore::new(2);
+        for i in 0..2 {
+            let task = A2aTask {
+                id: format!("w-{i}"),
+                session_id: None,
+                status: A2aTaskStatus::Working.into(),
+                messages: vec![],
+                artifacts: vec![],
+            };
+            store.insert(task);
+        }
+        assert_eq!(store.len(), 2);
+
+        // Insert a 3rd Working task — should evict the oldest Working task.
+        let task = A2aTask {
+            id: "w-2".to_string(),
+            session_id: None,
+            status: A2aTaskStatus::Working.into(),
+            messages: vec![],
+            artifacts: vec![],
+        };
+        store.insert(task);
+        assert!(store.len() <= 2);
+        // The newest task should always be present.
+        assert!(store.get("w-2").is_some());
     }
 
     #[test]
