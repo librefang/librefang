@@ -40,6 +40,7 @@ rustls-native-certs = { workspace = true }
 ureq = { workspace = true }
 flate2 = { workspace = true }
 tar = { workspace = true }
+rmcp = { workspace = true }
 shlex = "1"
 toml = { workspace = true }
 url = { workspace = true }
