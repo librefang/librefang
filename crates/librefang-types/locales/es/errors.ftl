@@ -25,6 +25,7 @@ api-error-manifest-signature-failed = Verificacion de firma del manifiesto falli
 # Auth errors
 api-error-auth-invalid-key = Clave API no valida
 api-error-auth-missing-header = Falta el encabezado Authorization: Bearer <api_key>
+api-error-auth-missing = La clave API de este proveedor no esta configurada
 
 # Session errors
 api-error-session-load-failed = Error al cargar la sesion

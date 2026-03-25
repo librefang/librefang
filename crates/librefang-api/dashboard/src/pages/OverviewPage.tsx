@@ -228,7 +228,7 @@ export function OverviewPage() {
               </div>
             ) : snapshot?.agents && snapshot.agents.length > 0 ? (
               <div className="grid gap-3 sm:grid-cols-2">
-                {snapshot.agents.slice(0, 4).map(agent => (
+                {snapshot.agents.filter(a => !a.name.includes("-hand") && !a.name.includes(":")).slice(0, 4).map(agent => (
                   <div
                     key={agent.id}
                     className="flex items-center gap-3 rounded-xl border border-border-subtle bg-surface p-3 shadow-sm hover:border-brand/30 transition-colors cursor-pointer"
