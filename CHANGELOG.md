@@ -9,57 +9,13 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
 ### Added
 
-- Bidirectional intelligent routing with SQLite persistence (#1538) (@f-liva)
-- Add prompt versioning and model performance dashboard (#1552) (@Chukwuebuka-2003)
-- Version display, mobile optimization, workflow scheduling, and config resilience (#1557) (@houko)
-- Add-memory-tool-memory_list (#1565) (@aimlyo)
-- Webui-chat-output-by-line (#1569) (@aimlyo)
-- Homebrew channels, CLI update_channel, dashboard utility extraction (#1576) (@houko)
-- Block chat when provider API key is not configured (#1592) (@houko)
-- Redesign official website (#1599) (@houko)
-- Deploy & changelog React pages, SDK downloads, OS-switch install (#1603) (@houko)
+- TUI multi-select provider menu in deploy script (#1618) (@houko)
+- Add publish links to SDK release job summary (#1623) (@houko)
 
 ### Fixed
 
-- Ignore broken pipe on skill stdin write (#1554) (@houko)
-- Create release tag after PR merge, not before (#1555) (@houko)
-- Agent-list-presentation-of-tui (#1561) (@aimlyo)
-- Make provider key save resilient to empty api_key_env (#1563) (@TechWizard9999)
-- Wrap channel config payload in fields object (#1564) (@TechWizard9999)
-- Webui-chat-history-to-using-md (#1568) (@aimlyo)
-- Webui-chat-change-agent-show-history (#1570) (@aimlyo)
-- Reduce Ubuntu test memory pressure to prevent OOM kill (#1571) (@houko)
-- Display WeChat QR code for iLink login (#1572) (@houko)
-- Add 8GB swap to prevent Ubuntu OOM kill (exit 143) (#1573) (@houko)
-- Split runtime tests to prevent Ubuntu OOM kill (#1574) (@houko)
-- Feishu WS endpoint fails to parse negative ClientConfig values (#1578) (@houko)
-- Use PAT for tag push to trigger release workflows (#1581) (@houko)
-- Tauri MSI version monotonic increment after CalVer DD change (#1583) (@houko)
-- Remove LibreFang prefix from release title (#1585) (@houko)
-- Restore full changelog for 2026.3.25 (#1586) (@houko)
-- Use multi_thread runtime and fallback git identity (#1588) (@houko)
-- Deploy on RC/beta tags and bind 0.0.0.0 in fly.toml (#1590) (@houko)
-- Complete prompt versioning and A/B experiment feature (#1595) (@houko)
-- Avoid premature dashboard timeout for long-running ops (#1596) (@TechWizard9999)
-- Include bearer auth on direct dashboard fetch calls (#1597) (@TechWizard9999)
-- Init-agent-use-config-default-model (#1598) (@aimlyo)
-- Update install commands domain from librefang.sh to librefang.ai (#1604) (@houko)
-- Replace Pages git integration with GitHub Actions deploy (#1605) (@houko)
-- Correct German and Spanish translation grammar (#1606) (@houko)
-- Use releases proxy to avoid GitHub API 403 (#1609) (@houko)
-- Correct xtask release RC/beta auto-numbering and tag cleanup (#1612) (@houko)
-- Dev.to publish fails due to shell expansion in payload (#1613) (@houko)
-- Use workspace version as floor for RC/beta numbering (#1614) (@houko)
-
-### Performance
-
-- Run test jobs in parallel with quality checks (#1579) (@houko)
-
-### Documentation
-
-- Fix homepage line break and update feature counts (#1593) (@houko)
-- Add new website launch article (#1610) (@houko)
-- Add new website launch article (#1611) (@houko)
+- Read from /dev/tty in deploy script for curl-pipe compatibility (#1616) (@houko)
+- Add -- to grep patterns in release workflows (#1622) (@houko)
 
 
 ## [2026.3.24] - 2026-03-24
