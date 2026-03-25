@@ -141,8 +141,8 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             axum::routing::post(test_webhook),
         )
 }
-use crate::types::ApiErrorResponse;
 use crate::middleware::RequestLanguage;
+use crate::types::ApiErrorResponse;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -220,7 +220,10 @@ pub async fn get_profile(
                 "tools": profile.tools(),
             })),
         ),
-        None => ApiErrorResponse::not_found(t.t_args("api-error-profile-not-found", &[("name", &name)])).into_json_tuple(),
+        None => {
+            ApiErrorResponse::not_found(t.t_args("api-error-profile-not-found", &[("name", &name)]))
+                .into_json_tuple()
+        }
     }
 }
 
@@ -310,7 +313,8 @@ pub async fn get_agent_template(
             ),
             Err(e) => {
                 tracing::warn!("Invalid template manifest for '{name}': {e}");
-                ApiErrorResponse::internal(t.t("api-error-template-invalid-manifest")).into_json_tuple()
+                ApiErrorResponse::internal(t.t("api-error-template-invalid-manifest"))
+                    .into_json_tuple()
             }
         },
         Err(e) => {
@@ -335,7 +339,8 @@ pub async fn get_agent_kv(
     let agent_id: AgentId = match id.parse() {
         Ok(aid) => aid,
         Err(_) => {
-            return ApiErrorResponse::bad_request(t.t("api-error-agent-invalid-id")).into_json_tuple();
+            return ApiErrorResponse::bad_request(t.t("api-error-agent-invalid-id"))
+                .into_json_tuple();
         }
     };
     match state.kernel.memory_substrate().list_kv(agent_id) {
@@ -364,7 +369,8 @@ pub async fn get_agent_kv_key(
     let agent_id: AgentId = match id.parse() {
         Ok(aid) => aid,
         Err(_) => {
-            return ApiErrorResponse::bad_request(t.t("api-error-agent-invalid-id")).into_json_tuple();
+            return ApiErrorResponse::bad_request(t.t("api-error-agent-invalid-id"))
+                .into_json_tuple();
         }
     };
     match state
@@ -376,7 +382,9 @@ pub async fn get_agent_kv_key(
             StatusCode::OK,
             Json(serde_json::json!({"key": key, "value": val})),
         ),
-        Ok(None) => ApiErrorResponse::not_found(t.t("api-error-kv-key-not-found")).into_json_tuple(),
+        Ok(None) => {
+            ApiErrorResponse::not_found(t.t("api-error-kv-key-not-found")).into_json_tuple()
+        }
         Err(e) => {
             tracing::warn!("Memory get failed for key '{key}': {e}");
             ApiErrorResponse::internal(t.t("api-error-memory-operation-failed")).into_json_tuple()
@@ -396,7 +404,8 @@ pub async fn set_agent_kv_key(
     let agent_id: AgentId = match id.parse() {
         Ok(aid) => aid,
         Err(_) => {
-            return ApiErrorResponse::bad_request(t.t("api-error-agent-invalid-id")).into_json_tuple();
+            return ApiErrorResponse::bad_request(t.t("api-error-agent-invalid-id"))
+                .into_json_tuple();
         }
     };
     let value = body.get("value").cloned().unwrap_or(body);
@@ -428,7 +437,8 @@ pub async fn delete_agent_kv_key(
     let agent_id: AgentId = match id.parse() {
         Ok(aid) => aid,
         Err(_) => {
-            return ApiErrorResponse::bad_request(t.t("api-error-agent-invalid-id")).into_json_tuple();
+            return ApiErrorResponse::bad_request(t.t("api-error-agent-invalid-id"))
+                .into_json_tuple();
         }
     };
     match state
@@ -458,7 +468,8 @@ pub async fn export_agent_memory(
     let agent_id: AgentId = match id.parse() {
         Ok(aid) => aid,
         Err(_) => {
-            return ApiErrorResponse::bad_request(t.t("api-error-agent-invalid-id")).into_json_tuple();
+            return ApiErrorResponse::bad_request(t.t("api-error-agent-invalid-id"))
+                .into_json_tuple();
         }
     };
 
@@ -501,7 +512,8 @@ pub async fn import_agent_memory(
     let agent_id: AgentId = match id.parse() {
         Ok(aid) => aid,
         Err(_) => {
-            return ApiErrorResponse::bad_request(t.t("api-error-agent-invalid-id")).into_json_tuple();
+            return ApiErrorResponse::bad_request(t.t("api-error-agent-invalid-id"))
+                .into_json_tuple();
         }
     };
 
@@ -513,7 +525,8 @@ pub async fn import_agent_memory(
     let kv = match body.get("kv").and_then(|v| v.as_object()) {
         Some(obj) => obj.clone(),
         None => {
-            return ApiErrorResponse::bad_request(t.t("api-error-kv-missing-kv-object")).into_json_tuple();
+            return ApiErrorResponse::bad_request(t.t("api-error-kv-missing-kv-object"))
+                .into_json_tuple();
         }
     };
 
@@ -538,7 +551,8 @@ pub async fn import_agent_memory(
             }
             Err(e) => {
                 tracing::warn!("Failed to list existing KV during import clear: {e}");
-                return ApiErrorResponse::internal(t.t("api-error-kv-import-clear-failed")).into_json_tuple();
+                return ApiErrorResponse::internal(t.t("api-error-kv-import-clear-failed"))
+                    .into_json_tuple();
             }
         }
     }
@@ -840,7 +854,8 @@ pub async fn get_tool(
         }
     }
 
-    ApiErrorResponse::not_found(tr.t_args("api-error-tool-not-found", &[("name", &name)])).into_json_tuple()
+    ApiErrorResponse::not_found(tr.t_args("api-error-tool-not-found", &[("name", &name)]))
+        .into_json_tuple()
 }
 
 // ---------------------------------------------------------------------------
@@ -874,7 +889,8 @@ pub async fn get_session(
     let session_id = match id.parse::<uuid::Uuid>() {
         Ok(u) => librefang_types::agent::SessionId(u),
         Err(_) => {
-            return ApiErrorResponse::bad_request(t.t("api-error-session-invalid-id")).into_json_tuple();
+            return ApiErrorResponse::bad_request(t.t("api-error-session-invalid-id"))
+                .into_json_tuple();
         }
     };
 
@@ -895,8 +911,13 @@ pub async fn get_session(
                 "created_at": created_at,
             })),
         ),
-        Ok(None) => ApiErrorResponse::not_found(t.t("api-error-session-not-found")).into_json_tuple(),
-        Err(e) => ApiErrorResponse::internal(t.t_args("api-error-generic", &[("error", &e.to_string())])).into_json_tuple(),
+        Ok(None) => {
+            ApiErrorResponse::not_found(t.t("api-error-session-not-found")).into_json_tuple()
+        }
+        Err(e) => {
+            ApiErrorResponse::internal(t.t_args("api-error-generic", &[("error", &e.to_string())]))
+                .into_json_tuple()
+        }
     }
 }
 
@@ -911,7 +932,8 @@ pub async fn delete_session(
     let session_id = match id.parse::<uuid::Uuid>() {
         Ok(u) => librefang_types::agent::SessionId(u),
         Err(_) => {
-            return ApiErrorResponse::bad_request(t.t("api-error-session-invalid-id")).into_json_tuple();
+            return ApiErrorResponse::bad_request(t.t("api-error-session-invalid-id"))
+                .into_json_tuple();
         }
     };
 
@@ -920,7 +942,10 @@ pub async fn delete_session(
             StatusCode::OK,
             Json(serde_json::json!({"status": "deleted", "session_id": id})),
         ),
-        Err(e) => ApiErrorResponse::internal(t.t_args("api-error-generic", &[("error", &e.to_string())])).into_json_tuple(),
+        Err(e) => {
+            ApiErrorResponse::internal(t.t_args("api-error-generic", &[("error", &e.to_string())]))
+                .into_json_tuple()
+        }
     }
 }
 
@@ -936,7 +961,8 @@ pub async fn set_session_label(
     let session_id = match id.parse::<uuid::Uuid>() {
         Ok(u) => librefang_types::agent::SessionId(u),
         Err(_) => {
-            return ApiErrorResponse::bad_request(t.t("api-error-session-invalid-id")).into_json_tuple();
+            return ApiErrorResponse::bad_request(t.t("api-error-session-invalid-id"))
+                .into_json_tuple();
         }
     };
 
@@ -945,7 +971,10 @@ pub async fn set_session_label(
     // Validate label if present
     if let Some(lbl) = label {
         if let Err(e) = librefang_types::agent::SessionLabel::new(lbl) {
-            return ApiErrorResponse::bad_request(t.t_args("api-error-generic", &[("error", &e.to_string())])).into_json_tuple();
+            return ApiErrorResponse::bad_request(
+                t.t_args("api-error-generic", &[("error", &e.to_string())]),
+            )
+            .into_json_tuple();
         }
     }
 
@@ -962,7 +991,10 @@ pub async fn set_session_label(
                 "label": label,
             })),
         ),
-        Err(e) => ApiErrorResponse::internal(t.t_args("api-error-generic", &[("error", &e.to_string())])).into_json_tuple(),
+        Err(e) => {
+            ApiErrorResponse::internal(t.t_args("api-error-generic", &[("error", &e.to_string())]))
+                .into_json_tuple()
+        }
     }
 }
 
@@ -981,7 +1013,8 @@ pub async fn find_session_by_label(
             match state.kernel.agent_registry().find_by_name(&agent_id_str) {
                 Some(entry) => entry.id,
                 None => {
-                    return ApiErrorResponse::not_found(t.t("api-error-agent-not-found")).into_json_tuple();
+                    return ApiErrorResponse::not_found(t.t("api-error-agent-not-found"))
+                        .into_json_tuple();
                 }
             }
         }
@@ -1001,8 +1034,13 @@ pub async fn find_session_by_label(
                 "message_count": session.messages.len(),
             })),
         ),
-        Ok(None) => ApiErrorResponse::not_found(t.t("api-error-session-no-label")).into_json_tuple(),
-        Err(e) => ApiErrorResponse::internal(t.t_args("api-error-generic", &[("error", &e.to_string())])).into_json_tuple(),
+        Ok(None) => {
+            ApiErrorResponse::not_found(t.t("api-error-session-no-label")).into_json_tuple()
+        }
+        Err(e) => {
+            ApiErrorResponse::internal(t.t_args("api-error-generic", &[("error", &e.to_string())]))
+                .into_json_tuple()
+        }
     }
 }
 
@@ -1031,7 +1069,11 @@ pub async fn session_cleanup(
         {
             Ok(n) => total += n,
             Err(e) => {
-                return ApiErrorResponse::internal(t.t_args("api-error-session-cleanup-expired-failed", &[("error", &e.to_string())])).into_json_tuple();
+                return ApiErrorResponse::internal(t.t_args(
+                    "api-error-session-cleanup-expired-failed",
+                    &[("error", &e.to_string())],
+                ))
+                .into_json_tuple();
             }
         }
     }
@@ -1044,7 +1086,11 @@ pub async fn session_cleanup(
         {
             Ok(n) => total += n,
             Err(e) => {
-                return ApiErrorResponse::internal(t.t_args("api-error-session-cleanup-excess-failed", &[("error", &e.to_string())])).into_json_tuple();
+                return ApiErrorResponse::internal(t.t_args(
+                    "api-error-session-cleanup-excess-failed",
+                    &[("error", &e.to_string())],
+                ))
+                .into_json_tuple();
             }
         }
     }
@@ -1076,7 +1122,8 @@ pub async fn search_sessions(
     let query = match params.get("q") {
         Some(q) if !q.is_empty() => q.clone(),
         _ => {
-            return ApiErrorResponse::bad_request("missing or empty 'q' parameter").into_json_tuple();
+            return ApiErrorResponse::bad_request("missing or empty 'q' parameter")
+                .into_json_tuple();
         }
     };
 
@@ -1204,7 +1251,8 @@ pub async fn get_approval(
     let uuid = match uuid::Uuid::parse_str(&id) {
         Ok(u) => u,
         Err(_) => {
-            return ApiErrorResponse::bad_request(t.t("api-error-approval-invalid-id")).into_json_tuple();
+            return ApiErrorResponse::bad_request(t.t("api-error-approval-invalid-id"))
+                .into_json_tuple();
         }
     };
 
@@ -1213,7 +1261,10 @@ pub async fn get_approval(
             let registry_agents = state.kernel.agent_registry().list();
             (StatusCode::OK, Json(approval_to_json(&a, &registry_agents)))
         }
-        None => ApiErrorResponse::not_found(t.t_args("api-error-approval-not-found", &[("id", &id)])).into_json_tuple(),
+        None => {
+            ApiErrorResponse::not_found(t.t_args("api-error-approval-not-found", &[("id", &id)]))
+                .into_json_tuple()
+        }
     }
 }
 
@@ -1285,7 +1336,8 @@ pub async fn approve_request(
     let uuid = match uuid::Uuid::parse_str(&id) {
         Ok(u) => u,
         Err(_) => {
-            return ApiErrorResponse::bad_request(t.t("api-error-approval-invalid-id")).into_json_tuple();
+            return ApiErrorResponse::bad_request(t.t("api-error-approval-invalid-id"))
+                .into_json_tuple();
         }
     };
 
@@ -1315,7 +1367,8 @@ pub async fn reject_request(
     let uuid = match uuid::Uuid::parse_str(&id) {
         Ok(u) => u,
         Err(_) => {
-            return ApiErrorResponse::bad_request(t.t("api-error-approval-invalid-id")).into_json_tuple();
+            return ApiErrorResponse::bad_request(t.t("api-error-approval-invalid-id"))
+                .into_json_tuple();
         }
     };
 
@@ -1555,7 +1608,8 @@ pub async fn pairing_request(
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     if !state.kernel.config_ref().pairing.enabled {
-        return ApiErrorResponse::not_found(t.t("api-error-pairing-not-enabled")).into_json_tuple()
+        return ApiErrorResponse::not_found(t.t("api-error-pairing-not-enabled"))
+            .into_json_tuple()
             .into_response();
     }
     match state.kernel.pairing_ref().create_pairing_request() {
@@ -1568,7 +1622,8 @@ pub async fn pairing_request(
             }))
             .into_response()
         }
-        Err(e) => ApiErrorResponse::bad_request(e).into_json_tuple()
+        Err(e) => ApiErrorResponse::bad_request(e)
+            .into_json_tuple()
             .into_response(),
     }
 }
@@ -1582,7 +1637,8 @@ pub async fn pairing_complete(
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     if !state.kernel.config_ref().pairing.enabled {
-        return ApiErrorResponse::not_found(t.t("api-error-pairing-not-enabled")).into_json_tuple()
+        return ApiErrorResponse::not_found(t.t("api-error-pairing-not-enabled"))
+            .into_json_tuple()
             .into_response();
     }
     let token = body.get("token").and_then(|v| v.as_str()).unwrap_or("");
@@ -1618,7 +1674,8 @@ pub async fn pairing_complete(
             "paired_at": device.paired_at.to_rfc3339(),
         }))
         .into_response(),
-        Err(e) => ApiErrorResponse::bad_request(e).into_json_tuple()
+        Err(e) => ApiErrorResponse::bad_request(e)
+            .into_json_tuple()
             .into_response(),
     }
 }
@@ -1631,7 +1688,8 @@ pub async fn pairing_devices(
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     if !state.kernel.config_ref().pairing.enabled {
-        return ApiErrorResponse::not_found(t.t("api-error-pairing-not-enabled")).into_json_tuple()
+        return ApiErrorResponse::not_found(t.t("api-error-pairing-not-enabled"))
+            .into_json_tuple()
             .into_response();
     }
     let devices: Vec<_> = state
@@ -1661,12 +1719,15 @@ pub async fn pairing_remove_device(
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     if !state.kernel.config_ref().pairing.enabled {
-        return ApiErrorResponse::not_found(t.t("api-error-pairing-not-enabled")).into_json_tuple()
+        return ApiErrorResponse::not_found(t.t("api-error-pairing-not-enabled"))
+            .into_json_tuple()
             .into_response();
     }
     match state.kernel.pairing_ref().remove_device(&device_id) {
         Ok(()) => Json(serde_json::json!({"ok": true})).into_response(),
-        Err(e) => ApiErrorResponse::not_found(e).into_json_tuple().into_response(),
+        Err(e) => ApiErrorResponse::not_found(e)
+            .into_json_tuple()
+            .into_response(),
     }
 }
 
@@ -1685,7 +1746,8 @@ pub async fn pairing_notify(
         )
     };
     if !state.kernel.config_ref().pairing.enabled {
-        return ApiErrorResponse::not_found(err_pairing_not_enabled).into_json_tuple()
+        return ApiErrorResponse::not_found(err_pairing_not_enabled)
+            .into_json_tuple()
             .into_response();
     }
     let title = body
@@ -1694,7 +1756,8 @@ pub async fn pairing_notify(
         .unwrap_or("LibreFang");
     let message = body.get("message").and_then(|v| v.as_str()).unwrap_or("");
     if message.is_empty() {
-        return ApiErrorResponse::bad_request(err_message_required).into_json_tuple()
+        return ApiErrorResponse::bad_request(err_message_required)
+            .into_json_tuple()
             .into_response();
     }
     state
@@ -1810,7 +1873,8 @@ pub async fn get_command(
         }
     }
 
-    ApiErrorResponse::not_found(t.t_args("api-error-command-not-found", &[("name", &lookup)])).into_json_tuple()
+    ApiErrorResponse::not_found(t.t_args("api-error-command-not-found", &[("name", &lookup)]))
+        .into_json_tuple()
 }
 
 // ---------------------------------------------------------------------------
@@ -1840,7 +1904,11 @@ pub async fn create_backup(
     let home_dir = &state.kernel.home_dir();
     let backups_dir = home_dir.join("backups");
     if let Err(e) = std::fs::create_dir_all(&backups_dir) {
-        return ApiErrorResponse::internal(t.t_args("api-error-backup-create-dir-failed", &[("error", &e.to_string())])).into_json_tuple();
+        return ApiErrorResponse::internal(t.t_args(
+            "api-error-backup-create-dir-failed",
+            &[("error", &e.to_string())],
+        ))
+        .into_json_tuple();
     }
 
     let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
@@ -1853,7 +1921,11 @@ pub async fn create_backup(
     let file = match std::fs::File::create(&backup_path) {
         Ok(f) => f,
         Err(e) => {
-            return ApiErrorResponse::internal(t.t_args("api-error-backup-create-file-failed", &[("error", &e.to_string())])).into_json_tuple();
+            return ApiErrorResponse::internal(t.t_args(
+                "api-error-backup-create-file-failed",
+                &[("error", &e.to_string())],
+            ))
+            .into_json_tuple();
         }
     };
     let mut zip = zip::ZipWriter::new(file);
@@ -2004,7 +2076,11 @@ pub async fn create_backup(
     }
 
     if let Err(e) = zip.finish() {
-        return ApiErrorResponse::internal(t.t_args("api-error-backup-finalize-failed", &[("error", &e.to_string())])).into_json_tuple();
+        return ApiErrorResponse::internal(t.t_args(
+            "api-error-backup-finalize-failed",
+            &[("error", &e.to_string())],
+        ))
+        .into_json_tuple();
     }
 
     let size = std::fs::metadata(&backup_path)
@@ -2131,28 +2207,40 @@ pub async fn delete_backup(
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     // Sanitize filename to prevent path traversal
     if is_invalid_backup_filename(&filename) {
-        return ApiErrorResponse::bad_request(t.t("api-error-backup-invalid-filename")).into_json_tuple();
+        return ApiErrorResponse::bad_request(t.t("api-error-backup-invalid-filename"))
+            .into_json_tuple();
     }
     if !filename.ends_with(".zip") {
-        return ApiErrorResponse::bad_request(t.t("api-error-backup-must-be-zip")).into_json_tuple();
+        return ApiErrorResponse::bad_request(t.t("api-error-backup-must-be-zip"))
+            .into_json_tuple();
     }
 
     let backups_dir = state.kernel.home_dir().join("backups");
     let backup_path = match find_backup_path(&backups_dir, &filename) {
         Ok(Some(path)) => path,
         Ok(None) => {
-            return ApiErrorResponse::not_found(t.t("api-error-backup-not-found")).into_json_tuple();
+            return ApiErrorResponse::not_found(t.t("api-error-backup-not-found"))
+                .into_json_tuple();
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return ApiErrorResponse::not_found(t.t("api-error-backup-not-found")).into_json_tuple();
+            return ApiErrorResponse::not_found(t.t("api-error-backup-not-found"))
+                .into_json_tuple();
         }
         Err(e) => {
-            return ApiErrorResponse::internal(t.t_args("api-error-backup-delete-failed", &[("error", &e.to_string())])).into_json_tuple();
+            return ApiErrorResponse::internal(t.t_args(
+                "api-error-backup-delete-failed",
+                &[("error", &e.to_string())],
+            ))
+            .into_json_tuple();
         }
     };
 
     if let Err(e) = std::fs::remove_file(&backup_path) {
-        return ApiErrorResponse::internal(t.t_args("api-error-backup-delete-failed", &[("error", &e.to_string())])).into_json_tuple();
+        return ApiErrorResponse::internal(t.t_args(
+            "api-error-backup-delete-failed",
+            &[("error", &e.to_string())],
+        ))
+        .into_json_tuple();
     }
 
     tracing::info!("Backup deleted: {filename}");
@@ -2179,16 +2267,19 @@ pub async fn restore_backup(
     let filename = match req.get("filename").and_then(|v| v.as_str()) {
         Some(f) => f.to_string(),
         None => {
-            return ApiErrorResponse::bad_request(t.t("api-error-backup-missing-filename")).into_json_tuple();
+            return ApiErrorResponse::bad_request(t.t("api-error-backup-missing-filename"))
+                .into_json_tuple();
         }
     };
 
     // Sanitize
     if is_invalid_backup_filename(&filename) {
-        return ApiErrorResponse::bad_request(t.t("api-error-backup-invalid-filename")).into_json_tuple();
+        return ApiErrorResponse::bad_request(t.t("api-error-backup-invalid-filename"))
+            .into_json_tuple();
     }
     if !filename.ends_with(".zip") {
-        return ApiErrorResponse::bad_request(t.t("api-error-backup-must-be-zip")).into_json_tuple();
+        return ApiErrorResponse::bad_request(t.t("api-error-backup-must-be-zip"))
+            .into_json_tuple();
     }
 
     let home_dir = &state.kernel.home_dir();
@@ -2196,13 +2287,18 @@ pub async fn restore_backup(
     let backup_path = match find_backup_path(&backups_dir, &filename) {
         Ok(Some(path)) => path,
         Ok(None) => {
-            return ApiErrorResponse::not_found(t.t("api-error-backup-not-found")).into_json_tuple();
+            return ApiErrorResponse::not_found(t.t("api-error-backup-not-found"))
+                .into_json_tuple();
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return ApiErrorResponse::not_found(t.t("api-error-backup-not-found")).into_json_tuple();
+            return ApiErrorResponse::not_found(t.t("api-error-backup-not-found"))
+                .into_json_tuple();
         }
         Err(e) => {
-            return ApiErrorResponse::internal(t.t_args("api-error-backup-open-failed", &[("error", &e.to_string())])).into_json_tuple();
+            return ApiErrorResponse::internal(
+                t.t_args("api-error-backup-open-failed", &[("error", &e.to_string())]),
+            )
+            .into_json_tuple();
         }
     };
 
@@ -2210,13 +2306,20 @@ pub async fn restore_backup(
     let file = match std::fs::File::open(&backup_path) {
         Ok(f) => f,
         Err(e) => {
-            return ApiErrorResponse::internal(t.t_args("api-error-backup-open-failed", &[("error", &e.to_string())])).into_json_tuple();
+            return ApiErrorResponse::internal(
+                t.t_args("api-error-backup-open-failed", &[("error", &e.to_string())]),
+            )
+            .into_json_tuple();
         }
     };
     let mut archive = match zip::ZipArchive::new(file) {
         Ok(a) => a,
         Err(e) => {
-            return ApiErrorResponse::bad_request(t.t_args("api-error-backup-invalid-archive", &[("error", &e.to_string())])).into_json_tuple();
+            return ApiErrorResponse::bad_request(t.t_args(
+                "api-error-backup-invalid-archive",
+                &[("error", &e.to_string())],
+            ))
+            .into_json_tuple();
         }
     };
 
@@ -2236,7 +2339,8 @@ pub async fn restore_backup(
     };
 
     if manifest.is_none() {
-        return ApiErrorResponse::bad_request(t.t("api-error-backup-missing-manifest")).into_json_tuple();
+        return ApiErrorResponse::bad_request(t.t("api-error-backup-missing-manifest"))
+            .into_json_tuple();
     }
 
     let mut restored: Vec<String> = Vec::new();
@@ -2472,12 +2576,17 @@ fn validate_event_types(
                 ));
             }
             None => {
-                return Err(ApiErrorResponse::bad_request(t.t("api-error-webhook-event-not-string")).into_json_tuple());
+                return Err(ApiErrorResponse::bad_request(
+                    t.t("api-error-webhook-event-not-string"),
+                )
+                .into_json_tuple());
             }
         }
     }
     if event_list.is_empty() {
-        return Err(ApiErrorResponse::bad_request(t.t("api-error-webhook-events-empty")).into_json_tuple());
+        return Err(
+            ApiErrorResponse::bad_request(t.t("api-error-webhook-events-empty")).into_json_tuple(),
+        );
     }
     Ok(event_list)
 }
@@ -2656,7 +2765,8 @@ pub async fn get_webhook(
     let wh_id = match uuid::Uuid::parse_str(&id) {
         Ok(uuid) => crate::webhook_store::WebhookId(uuid),
         Err(_) => {
-            return ApiErrorResponse::bad_request(t.t("api-error-webhook-invalid-id")).into_json_tuple();
+            return ApiErrorResponse::bad_request(t.t("api-error-webhook-invalid-id"))
+                .into_json_tuple();
         }
     };
     match state.webhook_store.get(wh_id) {
@@ -2664,7 +2774,8 @@ pub async fn get_webhook(
             let redacted = crate::webhook_store::redact_webhook_secret(&wh);
             match serde_json::to_value(&redacted) {
                 Ok(v) => (StatusCode::OK, Json(v)),
-                Err(_) => ApiErrorResponse::internal(t.t("api-error-webhook-serialize-error")).into_json_tuple(),
+                Err(_) => ApiErrorResponse::internal(t.t("api-error-webhook-serialize-error"))
+                    .into_json_tuple(),
             }
         }
         None => ApiErrorResponse::not_found(t.t("api-error-webhook-not-found")).into_json_tuple(),
@@ -2683,7 +2794,8 @@ pub async fn create_webhook(
             let redacted = crate::webhook_store::redact_webhook_secret(&webhook);
             match serde_json::to_value(&redacted) {
                 Ok(v) => (StatusCode::CREATED, Json(v)),
-                Err(_) => ApiErrorResponse::internal(t.t("api-error-webhook-serialize-error")).into_json_tuple(),
+                Err(_) => ApiErrorResponse::internal(t.t("api-error-webhook-serialize-error"))
+                    .into_json_tuple(),
             }
         }
         Err(e) => ApiErrorResponse::bad_request(e).into_json_tuple(),
@@ -2706,13 +2818,18 @@ pub async fn update_webhook(
                     let redacted = crate::webhook_store::redact_webhook_secret(&webhook);
                     match serde_json::to_value(&redacted) {
                         Ok(v) => (StatusCode::OK, Json(v)),
-                        Err(_) => ApiErrorResponse::internal(t.t("api-error-webhook-serialize-error")).into_json_tuple(),
+                        Err(_) => {
+                            ApiErrorResponse::internal(t.t("api-error-webhook-serialize-error"))
+                                .into_json_tuple()
+                        }
                     }
                 }
                 Err(e) => ApiErrorResponse::not_found(e).into_json_tuple(),
             }
         }
-        Err(_) => ApiErrorResponse::bad_request(t.t("api-error-webhook-invalid-id")).into_json_tuple(),
+        Err(_) => {
+            ApiErrorResponse::bad_request(t.t("api-error-webhook-invalid-id")).into_json_tuple()
+        }
     }
 }
 
@@ -2735,7 +2852,9 @@ pub async fn delete_webhook(
                 ApiErrorResponse::not_found(t.t("api-error-webhook-not-found")).into_json_tuple()
             }
         }
-        Err(_) => ApiErrorResponse::bad_request(t.t("api-error-webhook-invalid-id")).into_json_tuple(),
+        Err(_) => {
+            ApiErrorResponse::bad_request(t.t("api-error-webhook-invalid-id")).into_json_tuple()
+        }
     }
 }
 

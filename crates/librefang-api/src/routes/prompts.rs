@@ -1,6 +1,5 @@
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
     response::IntoResponse,
     routing::{delete, get, post},
     Json, Router,
@@ -57,13 +56,15 @@ async fn list_prompt_versions(
     let agent_id: librefang_types::agent::AgentId = match agent_id.parse() {
         Ok(id) => id,
         Err(e) => {
-            return ApiErrorResponse::bad_request(e.to_string()).into_json_tuple()
+            return ApiErrorResponse::bad_request(e.to_string())
+                .into_json_tuple()
                 .into_response()
         }
     };
     match state.kernel.list_prompt_versions(agent_id) {
         Ok(versions) => Json(versions).into_response(),
-        Err(e) => ApiErrorResponse::internal(e).into_json_tuple()
+        Err(e) => ApiErrorResponse::internal(e)
+            .into_json_tuple()
             .into_response(),
     }
 }
@@ -76,7 +77,8 @@ async fn create_prompt_version(
     let agent_id: librefang_types::agent::AgentId = match agent_id.parse() {
         Ok(id) => id,
         Err(e) => {
-            return ApiErrorResponse::bad_request(e.to_string()).into_json_tuple()
+            return ApiErrorResponse::bad_request(e.to_string())
+                .into_json_tuple()
                 .into_response()
         }
     };
@@ -89,7 +91,8 @@ async fn create_prompt_version(
     version.content_hash = format!("{:x}", hasher.finalize());
     match state.kernel.create_prompt_version(version.clone()) {
         Ok(_) => Json(version).into_response(),
-        Err(e) => ApiErrorResponse::internal(e).into_json_tuple()
+        Err(e) => ApiErrorResponse::internal(e)
+            .into_json_tuple()
             .into_response(),
     }
 }
@@ -100,7 +103,8 @@ async fn get_prompt_version(
 ) -> impl IntoResponse {
     match state.kernel.get_prompt_version(&id) {
         Ok(version) => Json(version).into_response(),
-        Err(e) => ApiErrorResponse::internal(e).into_json_tuple()
+        Err(e) => ApiErrorResponse::internal(e)
+            .into_json_tuple()
             .into_response(),
     }
 }
@@ -111,7 +115,8 @@ async fn delete_prompt_version(
 ) -> impl IntoResponse {
     match state.kernel.delete_prompt_version(&id) {
         Ok(_) => Json(serde_json::json!({"success": true})).into_response(),
-        Err(e) => ApiErrorResponse::internal(e).into_json_tuple()
+        Err(e) => ApiErrorResponse::internal(e)
+            .into_json_tuple()
             .into_response(),
     }
 }
@@ -124,13 +129,15 @@ async fn activate_prompt_version(
     let agent_id = match body.get("agent_id").and_then(|v| v.as_str()) {
         Some(id) => id,
         None => {
-            return ApiErrorResponse::bad_request("agent_id required in body").into_json_tuple()
+            return ApiErrorResponse::bad_request("agent_id required in body")
+                .into_json_tuple()
                 .into_response()
         }
     };
     match state.kernel.set_active_prompt_version(&id, agent_id) {
         Ok(_) => Json(serde_json::json!({"success": true})).into_response(),
-        Err(e) => ApiErrorResponse::internal(e).into_json_tuple()
+        Err(e) => ApiErrorResponse::internal(e)
+            .into_json_tuple()
             .into_response(),
     }
 }
@@ -142,13 +149,15 @@ async fn list_experiments(
     let agent_id: librefang_types::agent::AgentId = match agent_id.parse() {
         Ok(id) => id,
         Err(e) => {
-            return ApiErrorResponse::bad_request(e.to_string()).into_json_tuple()
+            return ApiErrorResponse::bad_request(e.to_string())
+                .into_json_tuple()
                 .into_response()
         }
     };
     match state.kernel.list_experiments(agent_id) {
         Ok(experiments) => Json(experiments).into_response(),
-        Err(e) => ApiErrorResponse::internal(e).into_json_tuple()
+        Err(e) => ApiErrorResponse::internal(e)
+            .into_json_tuple()
             .into_response(),
     }
 }
@@ -161,7 +170,8 @@ async fn create_experiment(
     let agent_id: librefang_types::agent::AgentId = match agent_id.parse() {
         Ok(id) => id,
         Err(e) => {
-            return ApiErrorResponse::bad_request(e.to_string()).into_json_tuple()
+            return ApiErrorResponse::bad_request(e.to_string())
+                .into_json_tuple()
                 .into_response()
         }
     };
@@ -174,7 +184,8 @@ async fn create_experiment(
     }
     match state.kernel.create_experiment(experiment.clone()) {
         Ok(_) => Json(experiment).into_response(),
-        Err(e) => ApiErrorResponse::internal(e).into_json_tuple()
+        Err(e) => ApiErrorResponse::internal(e)
+            .into_json_tuple()
             .into_response(),
     }
 }
@@ -185,7 +196,8 @@ async fn get_experiment(
 ) -> impl IntoResponse {
     match state.kernel.get_experiment(&id) {
         Ok(experiment) => Json(experiment).into_response(),
-        Err(e) => ApiErrorResponse::internal(e).into_json_tuple()
+        Err(e) => ApiErrorResponse::internal(e)
+            .into_json_tuple()
             .into_response(),
     }
 }
@@ -199,7 +211,8 @@ async fn start_experiment(
         .update_experiment_status(&id, librefang_types::agent::ExperimentStatus::Running)
     {
         Ok(_) => Json(serde_json::json!({"success": true})).into_response(),
-        Err(e) => ApiErrorResponse::internal(e).into_json_tuple()
+        Err(e) => ApiErrorResponse::internal(e)
+            .into_json_tuple()
             .into_response(),
     }
 }
@@ -213,7 +226,8 @@ async fn pause_experiment(
         .update_experiment_status(&id, librefang_types::agent::ExperimentStatus::Paused)
     {
         Ok(_) => Json(serde_json::json!({"success": true})).into_response(),
-        Err(e) => ApiErrorResponse::internal(e).into_json_tuple()
+        Err(e) => ApiErrorResponse::internal(e)
+            .into_json_tuple()
             .into_response(),
     }
 }
@@ -227,7 +241,8 @@ async fn complete_experiment(
         .update_experiment_status(&id, librefang_types::agent::ExperimentStatus::Completed)
     {
         Ok(_) => Json(serde_json::json!({"success": true})).into_response(),
-        Err(e) => ApiErrorResponse::internal(e).into_json_tuple()
+        Err(e) => ApiErrorResponse::internal(e)
+            .into_json_tuple()
             .into_response(),
     }
 }
@@ -238,7 +253,8 @@ async fn get_experiment_metrics(
 ) -> impl IntoResponse {
     match state.kernel.get_experiment_metrics(&id) {
         Ok(metrics) => Json(metrics).into_response(),
-        Err(e) => ApiErrorResponse::internal(e).into_json_tuple()
+        Err(e) => ApiErrorResponse::internal(e)
+            .into_json_tuple()
             .into_response(),
     }
 }
