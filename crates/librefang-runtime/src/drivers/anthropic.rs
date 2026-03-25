@@ -162,87 +162,95 @@ enum ContentBlockAccum {
     },
 }
 
-#[async_trait]
-impl LlmDriver for AnthropicDriver {
-    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
-        // Extract system prompt from messages or use the provided one
-        let mut system_text = request.system.clone().or_else(|| {
-            request.messages.iter().find_map(|m| {
-                if m.role == Role::System {
-                    match &m.content {
-                        MessageContent::Text(t) => Some(t.clone()),
-                        _ => None,
-                    }
-                } else {
-                    None
+/// Build an `ApiRequest` from a `CompletionRequest`.
+///
+/// Shared between `complete()` and `stream()`.  The caller sets
+/// the `stream` field on the returned struct before sending.
+fn build_anthropic_request(request: &CompletionRequest) -> ApiRequest {
+    // Extract system prompt from messages or use the provided one
+    let mut system_text = request.system.clone().or_else(|| {
+        request.messages.iter().find_map(|m| {
+            if m.role == Role::System {
+                match &m.content {
+                    MessageContent::Text(t) => Some(t.clone()),
+                    _ => None,
                 }
+            } else {
+                None
+            }
+        })
+    });
+
+    // Anthropic has no native response_format field — inject instructions
+    // into the system prompt when structured output is requested.
+    if let Some(rf) = &request.response_format {
+        append_response_format_instructions(&mut system_text, rf);
+    }
+
+    // Build the system field: structured blocks with cache_control when
+    // prompt caching is enabled, plain string otherwise.
+    let system = system_text.map(|text| build_system_value(&text, request.prompt_caching));
+
+    // Build API messages, filtering out system messages
+    let api_messages: Vec<ApiMessage> = request
+        .messages
+        .iter()
+        .filter(|m| m.role != Role::System)
+        .map(convert_message)
+        .collect();
+
+    // Build tools
+    let api_tools: Vec<ApiTool> = request
+        .tools
+        .iter()
+        .map(|t| ApiTool {
+            name: t.name.clone(),
+            description: t.description.clone(),
+            input_schema: t.input_schema.clone(),
+        })
+        .collect();
+
+    // Anthropic requires budget_tokens >= 1024 for extended thinking.
+    // Skip thinking if budget is too low.
+    let thinking_value = request
+        .thinking
+        .as_ref()
+        .filter(|tc| tc.budget_tokens >= 1024)
+        .map(|tc| {
+            serde_json::json!({
+                "type": "enabled",
+                "budget_tokens": tc.budget_tokens
             })
         });
 
-        // Anthropic has no native response_format field — inject instructions
-        // into the system prompt when structured output is requested.
-        if let Some(rf) = &request.response_format {
-            append_response_format_instructions(&mut system_text, rf);
-        }
+    // When thinking is enabled, max_tokens must be > budget_tokens.
+    let effective_max_tokens = if let Some(ref tv) = thinking_value {
+        let budget = tv["budget_tokens"].as_u64().unwrap_or(0) as u32;
+        request.max_tokens.max(budget + 1024)
+    } else {
+        request.max_tokens
+    };
 
-        // Build the system field: structured blocks with cache_control when
-        // prompt caching is enabled, plain string otherwise.
-        let system = system_text.map(|text| build_system_value(&text, request.prompt_caching));
-
-        // Build API messages, filtering out system messages
-        let api_messages: Vec<ApiMessage> = request
-            .messages
-            .iter()
-            .filter(|m| m.role != Role::System)
-            .map(convert_message)
-            .collect();
-
-        // Build tools
-        let api_tools: Vec<ApiTool> = request
-            .tools
-            .iter()
-            .map(|t| ApiTool {
-                name: t.name.clone(),
-                description: t.description.clone(),
-                input_schema: t.input_schema.clone(),
-            })
-            .collect();
-
-        // Anthropic requires budget_tokens >= 1024 for extended thinking.
-        // Skip thinking if budget is too low.
-        let thinking_value = request
-            .thinking
-            .as_ref()
-            .filter(|tc| tc.budget_tokens >= 1024)
-            .map(|tc| {
-                serde_json::json!({
-                    "type": "enabled",
-                    "budget_tokens": tc.budget_tokens
-                })
-            });
-
-        // When thinking is enabled, max_tokens must be > budget_tokens.
-        let effective_max_tokens = if let Some(ref tv) = thinking_value {
-            let budget = tv["budget_tokens"].as_u64().unwrap_or(0) as u32;
-            request.max_tokens.max(budget + 1024)
+    ApiRequest {
+        model: request.model.clone(),
+        max_tokens: effective_max_tokens,
+        system,
+        messages: api_messages,
+        tools: api_tools,
+        temperature: if thinking_value.is_some() {
+            None
         } else {
-            request.max_tokens
-        };
+            Some(request.temperature)
+        },
+        stream: false,
+        thinking: thinking_value,
+    }
+}
 
-        let api_request = ApiRequest {
-            model: request.model.clone(),
-            max_tokens: effective_max_tokens,
-            system,
-            messages: api_messages,
-            tools: api_tools,
-            temperature: if thinking_value.is_some() {
-                None
-            } else {
-                Some(request.temperature)
-            },
-            stream: false,
-            thinking: thinking_value,
-        };
+#[async_trait]
+impl LlmDriver for AnthropicDriver {
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        let api_request = build_anthropic_request(&request);
 
         // Retry loop for rate limits and overloads
         let max_retries = 3;
@@ -310,79 +318,8 @@ impl LlmDriver for AnthropicDriver {
         request: CompletionRequest,
         tx: tokio::sync::mpsc::Sender<StreamEvent>,
     ) -> Result<CompletionResponse, LlmError> {
-        // Build request (same as complete but with stream: true)
-        let mut system_text = request.system.clone().or_else(|| {
-            request.messages.iter().find_map(|m| {
-                if m.role == Role::System {
-                    match &m.content {
-                        MessageContent::Text(t) => Some(t.clone()),
-                        _ => None,
-                    }
-                } else {
-                    None
-                }
-            })
-        });
-
-        // Inject structured-output instructions into system prompt.
-        if let Some(rf) = &request.response_format {
-            append_response_format_instructions(&mut system_text, rf);
-        }
-
-        let system = system_text.map(|text| build_system_value(&text, request.prompt_caching));
-
-        let api_messages: Vec<ApiMessage> = request
-            .messages
-            .iter()
-            .filter(|m| m.role != Role::System)
-            .map(convert_message)
-            .collect();
-
-        let api_tools: Vec<ApiTool> = request
-            .tools
-            .iter()
-            .map(|t| ApiTool {
-                name: t.name.clone(),
-                description: t.description.clone(),
-                input_schema: t.input_schema.clone(),
-            })
-            .collect();
-
-        // Anthropic requires budget_tokens >= 1024 for extended thinking.
-        // Skip thinking if budget is too low.
-        let thinking_value = request
-            .thinking
-            .as_ref()
-            .filter(|tc| tc.budget_tokens >= 1024)
-            .map(|tc| {
-                serde_json::json!({
-                    "type": "enabled",
-                    "budget_tokens": tc.budget_tokens
-                })
-            });
-
-        // When thinking is enabled, max_tokens must be > budget_tokens.
-        let effective_max_tokens = if let Some(ref tv) = thinking_value {
-            let budget = tv["budget_tokens"].as_u64().unwrap_or(0) as u32;
-            request.max_tokens.max(budget + 1024)
-        } else {
-            request.max_tokens
-        };
-
-        let api_request = ApiRequest {
-            model: request.model.clone(),
-            max_tokens: effective_max_tokens,
-            system,
-            messages: api_messages,
-            tools: api_tools,
-            temperature: if thinking_value.is_some() {
-                None
-            } else {
-                Some(request.temperature)
-            },
-            stream: true,
-            thinking: thinking_value,
-        };
+        let mut api_request = build_anthropic_request(&request);
+        api_request.stream = true;
 
         // Retry loop for the initial HTTP request
         let max_retries = 3;
@@ -544,6 +481,11 @@ impl LlmDriver for AnthropicDriver {
                                         {
                                             t.push_str(thinking);
                                         }
+                                        let _ = tx
+                                            .send(StreamEvent::ThinkingDelta {
+                                                text: thinking.to_string(),
+                                            })
+                                            .await;
                                     }
                                 }
                                 _ => {}
