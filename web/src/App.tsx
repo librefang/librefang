@@ -861,7 +861,7 @@ function Downloads(_props: SectionProps) {
                 <div className="space-y-1.5">
                   {[
                     { name: 'Fly.io', url: 'https://flyio.librefang.ai', icon: Zap },
-                    { name: 'Railway', url: 'https://railway.com/template/d7ebcd2f-8107-4b3f-8860-4693bc72d018', icon: ArrowRight },
+                    { name: 'Railway', url: 'https://railway.com/deploy/Bb7HnN', icon: ArrowRight },
                     { name: 'Render', url: 'https://render.librefang.ai', icon: Layers },
                     { name: 'GCP', url: 'https://github.com/librefang/librefang/tree/main/deploy/gcp', icon: Network },
                     { name: 'Docker', url: 'https://github.com/librefang/librefang/blob/main/deploy/docker-compose.yml', icon: Box },
