@@ -15,25 +15,13 @@ use tracing::debug;
 /// Enhanced web fetch engine with SSRF protection and readability extraction.
 pub struct WebFetchEngine {
     config: WebFetchConfig,
-    client: reqwest::Client,
     cache: Arc<WebCache>,
 }
 
 impl WebFetchEngine {
     /// Create a new fetch engine from config with a shared cache.
     pub fn new(config: WebFetchConfig, cache: Arc<WebCache>) -> Self {
-        let client = crate::http_client::proxied_client_builder()
-            .timeout(std::time::Duration::from_secs(config.timeout_secs))
-            .gzip(true)
-            .deflate(true)
-            .brotli(true)
-            .build()
-            .expect("HTTP client build");
-        Self {
-            config,
-            client,
-            cache,
-        }
+        Self { config, cache }
     }
 
     /// Build a per-request client with DNS pinned to the SSRF-validated IPs.
