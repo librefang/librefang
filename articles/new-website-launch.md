@@ -1,5 +1,5 @@
 ---
-title: "We just launched the new LibreFang website — here's what's inside"
+title: "We just launched the new LibreFang website"
 published: true
 description: "LibreFang is an open-source Agent OS built in Rust. We redesigned our website from scratch with 7 languages, real-time GitHub stats, and one-command install."
 tags: opensource, rust, ai, webdev
@@ -27,7 +27,7 @@ The homepage walks through LibreFang's five-layer architecture:
 - **Hands** — 15 autonomous units, each with its own model, tools, and workflow
 - **Kernel** — agent lifecycle, workflow orchestration, budget control, scheduling
 - **Runtime** — Tokio async, WASM sandbox, Merkle audit chain, SSRF protection
-- **Hardware** — runs everywhere: laptop, $5 VPS, Raspberry Pi, bare metal
+- **Hardware** — runs everywhere: laptop, VPS, Raspberry Pi, bare metal
 
 Each layer is interactive — click to explore the components inside.
 
