@@ -393,6 +393,12 @@ pub struct LibreFangKernel {
     self_handle: OnceLock<Weak<LibreFangKernel>>,
     /// Whether we've already logged the "no provider" audit entry (prevents spam).
     pub(crate) provider_unconfigured_logged: std::sync::atomic::AtomicBool,
+    /// Config reload barrier — write-locked during `apply_hot_actions` to prevent
+    /// concurrent readers from seeing a half-updated configuration (e.g. new provider
+    /// URLs but old default model). Read-locked in message hot paths so multiple
+    /// requests proceed in parallel but block briefly during a reload.
+    /// Uses `tokio::sync::RwLock` so guards are `Send` and can be held across `.await`.
+    config_reload_lock: tokio::sync::RwLock<()>,
     /// Cache for workspace context, identity files, and skill metadata to avoid
     /// redundant filesystem I/O and registry scans on every message.
     prompt_metadata_cache: PromptMetadataCache,
@@ -1923,6 +1929,7 @@ impl LibreFangKernel {
             context_engine_config,
             self_handle: OnceLock::new(),
             provider_unconfigured_logged: std::sync::atomic::AtomicBool::new(false),
+            config_reload_lock: tokio::sync::RwLock::new(()),
             prompt_metadata_cache: PromptMetadataCache::new(),
             skill_generation: std::sync::atomic::AtomicU64::new(0),
             mcp_generation: std::sync::atomic::AtomicU64::new(0),
@@ -2776,7 +2783,7 @@ system_prompt = "You are a helpful assistant."
         if let Err(e) = self.metering.check_all_and_record(
             &usage_record,
             &manifest.resources,
-            &self.config.budget,
+            &self.budget_config(),
         ) {
             tracing::warn!(
                 agent_id = %agent_id,
@@ -2820,6 +2827,12 @@ system_prompt = "You are a helpful assistant."
         content_blocks: Option<Vec<librefang_types::message::ContentBlock>>,
         sender_context: Option<&SenderContext>,
     ) -> KernelResult<AgentLoopResult> {
+        // Acquire a shared read lock on the config reload barrier.
+        // This is non-blocking under normal operation (many readers proceed in
+        // parallel) but will briefly wait if a config hot-reload is in progress,
+        // ensuring this request sees a fully-consistent configuration snapshot.
+        let _config_guard = self.config_reload_lock.read().await;
+
         let agent_id = self
             .resolve_assistant_target(agent_id, message, sender_context)
             .await?;
@@ -2994,6 +3007,11 @@ system_prompt = "You are a helpful assistant."
         tokio::sync::mpsc::Receiver<StreamEvent>,
         tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
     )> {
+        // Acquire a shared read lock on the config reload barrier so we
+        // snapshot a fully-consistent configuration before spawning the
+        // streaming task. The guard is dropped before `tokio::spawn`.
+        let _config_guard = self.config_reload_lock.blocking_read();
+
         // Enforce quota before spawning the streaming task
         self.scheduler
             .check_quota(agent_id)
@@ -3284,6 +3302,10 @@ system_prompt = "You are a helpful assistant."
         };
         let kernel_clone = Arc::clone(self);
 
+        // All config-derived values have been snapshotted above; release the
+        // reload barrier before spawning the async task.
+        drop(_config_guard);
+
         let handle = tokio::spawn(async move {
             // Auto-compact if the session is large before running the loop
             if needs_compact {
@@ -3436,7 +3458,7 @@ system_prompt = "You are a helpful assistant."
                     if let Err(e) = kernel_clone.metering.check_all_and_record(
                         &usage_record,
                         &manifest.resources,
-                        &kernel_clone.config.budget,
+                        &kernel_clone.budget_config(),
                     ) {
                         tracing::warn!(
                             agent_id = %agent_id,
@@ -4390,7 +4412,7 @@ system_prompt = "You are a helpful assistant."
         if let Err(e) = self.metering.check_all_and_record(
             &usage_record,
             &manifest.resources,
-            &self.config.budget,
+            &self.budget_config(),
         ) {
             // Quota exceeded after the LLM call — log but still return the
             // result (the tokens were already consumed by the provider).
@@ -5993,12 +6015,20 @@ system_prompt = "You are a helpful assistant."
     }
 
     /// Apply hot-reload actions to the running kernel.
+    ///
+    /// Holds a write lock on `config_reload_lock` for the entire duration so
+    /// that concurrent message handlers (which hold a read lock) cannot observe
+    /// a half-updated configuration.
     fn apply_hot_actions(
         &self,
         plan: &crate::config_reload::ReloadPlan,
         new_config: &librefang_types::config::KernelConfig,
     ) {
         use crate::config_reload::HotAction;
+
+        // Acquire exclusive lock — blocks new message handlers from reading
+        // config-derived state until all actions are applied atomically.
+        let _write_guard = self.config_reload_lock.blocking_write();
 
         for action in &plan.hot_actions {
             match action {

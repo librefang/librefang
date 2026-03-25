@@ -258,10 +258,7 @@ pub async fn install_skill(
         }
         Err(e) => {
             tracing::warn!("Skill install failed: {e}");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": format!("Install failed: {e}")})),
-            )
+            ApiErrorResponse::internal(format!("Install failed: {e}")).into_json_tuple()
         }
     }
 }
@@ -295,10 +292,7 @@ pub async fn uninstall_skill(
                 Json(serde_json::json!({"status": "uninstalled", "name": req.name})),
             )
         }
-        Err(e) => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": format!("{e}")})),
-        ),
+        Err(e) => ApiErrorResponse::not_found(format!("{e}")).into_json_tuple(),
     }
 }
 
@@ -626,10 +620,7 @@ pub async fn clawhub_skill_code(
     }
 
     if code.is_empty() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "No source code found for this skill"})),
-        );
+        return ApiErrorResponse::not_found("No source code found for this skill").into_json_tuple();
     }
 
     (
@@ -939,12 +930,7 @@ pub async fn skillhub_skill_detail(
 
 /// GET /api/skillhub/skill/{slug}/code — Source code viewing is not available for Skillhub skills.
 pub async fn skillhub_skill_code(Path(_slug): Path<String>) -> impl IntoResponse {
-    (
-        StatusCode::NOT_FOUND,
-        Json(
-            serde_json::json!({"error": "Source code viewing is not available for Skillhub skills"}),
-        ),
-    )
+    ApiErrorResponse::not_found("Source code viewing is not available for Skillhub skills").into_json_tuple()
 }
 
 /// POST /api/skillhub/install — Install a skill from Skillhub.
@@ -1302,10 +1288,7 @@ pub async fn get_hand(
                 })),
             )
         }
-        None => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": format!("Hand not found: {hand_id}")})),
-        ),
+        None => ApiErrorResponse::not_found(format!("Hand not found: {hand_id}")).into_json_tuple(),
     }
 }
 
@@ -1367,10 +1350,7 @@ pub async fn check_hand_deps(
                 })),
             )
         }
-        None => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": format!("Hand not found: {hand_id}")})),
-        ),
+        None => ApiErrorResponse::not_found(format!("Hand not found: {hand_id}")).into_json_tuple(),
     }
 }
 
@@ -1393,10 +1373,7 @@ pub async fn install_hand_deps(
     let def = match state.kernel.hands().get_definition(&hand_id) {
         Some(d) => d.clone(),
         None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": format!("Hand not found: {hand_id}")})),
-            );
+            return ApiErrorResponse::not_found(format!("Hand not found: {hand_id}")).into_json_tuple();
         }
     };
 
@@ -1639,10 +1616,7 @@ pub async fn install_hand(
     let skill_content = body["skill_content"].as_str().unwrap_or("");
 
     if toml_content.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Missing toml_content field"})),
-        );
+        return ApiErrorResponse::bad_request("Missing toml_content field").into_json_tuple();
     }
 
     match state.kernel.hands().install_from_content_persisted(
@@ -1662,10 +1636,7 @@ pub async fn install_hand(
                 })),
             )
         }
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": format!("{e}")})),
-        ),
+        Err(e) => ApiErrorResponse::bad_request(format!("{e}")).into_json_tuple(),
     }
 }
 
@@ -1725,10 +1696,7 @@ pub async fn activate_hand(
                 })),
             )
         }
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": format!("{e}")})),
-        ),
+        Err(e) => ApiErrorResponse::bad_request(format!("{e}")).into_json_tuple(),
     }
 }
 
@@ -1753,10 +1721,7 @@ pub async fn pause_hand(
             StatusCode::OK,
             Json(serde_json::json!({"status": "paused", "instance_id": id})),
         ),
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": format!("{e}")})),
-        ),
+        Err(e) => ApiErrorResponse::bad_request(format!("{e}")).into_json_tuple(),
     }
 }
 
@@ -1781,10 +1746,7 @@ pub async fn resume_hand(
             StatusCode::OK,
             Json(serde_json::json!({"status": "resumed", "instance_id": id})),
         ),
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": format!("{e}")})),
-        ),
+        Err(e) => ApiErrorResponse::bad_request(format!("{e}")).into_json_tuple(),
     }
 }
 
@@ -1809,10 +1771,7 @@ pub async fn deactivate_hand(
             StatusCode::OK,
             Json(serde_json::json!({"status": "deactivated", "instance_id": id})),
         ),
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": format!("{e}")})),
-        ),
+        Err(e) => ApiErrorResponse::bad_request(format!("{e}")).into_json_tuple(),
     }
 }
 
@@ -1833,19 +1792,13 @@ pub async fn set_hand_secret(
     let env_key = match body["key"].as_str() {
         Some(k) if !k.trim().is_empty() => k.trim().to_string(),
         _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Missing 'key' field (env var name)"})),
-            );
+            return ApiErrorResponse::bad_request("Missing 'key' field (env var name)").into_json_tuple();
         }
     };
     let value = match body["value"].as_str() {
         Some(v) if !v.trim().is_empty() => v.trim().to_string(),
         _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Missing or empty 'value' field"})),
-            );
+            return ApiErrorResponse::bad_request("Missing or empty 'value' field").into_json_tuple();
         }
     };
 
@@ -1863,21 +1816,13 @@ pub async fn set_hand_secret(
     };
 
     if !valid {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(
-                serde_json::json!({"error": format!("'{}' is not a requirement of hand '{}'", env_key, hand_id)}),
-            ),
-        );
+        return ApiErrorResponse::bad_request(format!("'{}' is not a requirement of hand '{}'", env_key, hand_id)).into_json_tuple();
     }
 
     // Write to secrets.env
     let secrets_path = state.kernel.home_dir().join("secrets.env");
     if let Err(e) = write_secret_env(&secrets_path, &env_key, &value) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("Failed to write secret: {e}")})),
-        );
+        return ApiErrorResponse::internal(format!("Failed to write secret: {e}")).into_json_tuple();
     }
 
     // Set in current process
@@ -1921,10 +1866,7 @@ pub async fn get_hand_settings(
     {
         Ok(s) => s,
         Err(_) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": format!("Hand not found: {hand_id}")})),
-            );
+            return ApiErrorResponse::not_found(format!("Hand not found: {hand_id}")).into_json_tuple();
         }
     };
 
@@ -1989,17 +1931,9 @@ pub async fn update_hand_settings(
                     })),
                 )
             }
-            Err(e) => (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": format!("{e}")})),
-            ),
+            Err(e) => ApiErrorResponse::bad_request(format!("{e}")).into_json_tuple(),
         },
-        None => (
-            StatusCode::NOT_FOUND,
-            Json(
-                serde_json::json!({"error": format!("No active instance for hand: {hand_id}. Activate the hand first.")}),
-            ),
-        ),
+        None => ApiErrorResponse::not_found(format!("No active instance for hand: {hand_id}. Activate the hand first.")).into_json_tuple(),
     }
 }
 
@@ -2045,20 +1979,14 @@ pub async fn hand_stats(
     let instance = match state.kernel.hands().get_instance(id) {
         Some(i) => i,
         None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "Instance not found"})),
-            );
+            return ApiErrorResponse::not_found("Instance not found").into_json_tuple();
         }
     };
 
     let def = match state.kernel.hands().get_definition(&instance.hand_id) {
         Some(d) => d,
         None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "Hand definition not found"})),
-            );
+            return ApiErrorResponse::not_found("Hand definition not found").into_json_tuple();
         }
     };
 
@@ -2127,10 +2055,7 @@ pub async fn hand_instance_browser(
     let instance = match state.kernel.hands().get_instance(id) {
         Some(i) => i,
         None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "Instance not found"})),
-            );
+            return ApiErrorResponse::not_found("Instance not found").into_json_tuple();
         }
     };
 
@@ -2236,10 +2161,7 @@ fn resolve_hand_agent(
         .hands()
         .get_instance(instance_id)
         .ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "Hand instance not found"})),
-            )
+            ApiErrorResponse::not_found("Hand instance not found").into_json_tuple()
         })?;
     let agent_id = instance.agent_id().ok_or_else(|| {
         (
@@ -2334,10 +2256,7 @@ pub async fn hand_send_message(
         }
         Err(e) => {
             tracing::warn!("hand_send_message failed for instance {id}: {e}");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": format!("Message delivery failed: {e}")})),
-            )
+            ApiErrorResponse::internal(format!("Message delivery failed: {e}")).into_json_tuple()
         }
     }
 }
@@ -2356,10 +2275,7 @@ pub async fn hand_get_session(
     let entry = match state.kernel.agent_registry().get(agent_id) {
         Some(e) => e,
         None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "Linked agent not found"})),
-            );
+            return ApiErrorResponse::not_found("Linked agent not found").into_json_tuple();
         }
     };
 
@@ -2398,10 +2314,7 @@ pub async fn hand_get_session(
             )
         }
         Ok(None) => (StatusCode::OK, Json(serde_json::json!({ "messages": [] }))),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("Failed to load session: {e}")})),
-        ),
+        Err(e) => ApiErrorResponse::internal(format!("Failed to load session: {e}")).into_json_tuple(),
     }
 }
 
@@ -2423,10 +2336,7 @@ pub async fn hand_instance_status(
     let instance = match state.kernel.hands().get_instance(id) {
         Some(i) => i,
         None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "Hand instance not found"})),
-            );
+            return ApiErrorResponse::not_found("Hand instance not found").into_json_tuple();
         }
     };
 
@@ -2638,10 +2548,7 @@ pub async fn get_mcp_server(
     let entry = match entry {
         Some(e) => e,
         None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": format!("MCP server '{}' not found", name)})),
-            );
+            return ApiErrorResponse::not_found(format!("MCP server '{}' not found", name)).into_json_tuple();
         }
     };
 
@@ -2699,28 +2606,19 @@ pub async fn add_mcp_server(
     let name = match body.get("name").and_then(|v| v.as_str()) {
         Some(n) if !n.trim().is_empty() => n.trim().to_string(),
         _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Missing or empty 'name' field"})),
-            );
+            return ApiErrorResponse::bad_request("Missing or empty 'name' field").into_json_tuple();
         }
     };
 
     if body.get("transport").is_none() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Missing 'transport' field"})),
-        );
+        return ApiErrorResponse::bad_request("Missing 'transport' field").into_json_tuple();
     }
 
     // Validate by deserializing the body into McpServerConfigEntry
     let entry: librefang_types::config::McpServerConfigEntry = match serde_json::from_value(body) {
         Ok(e) => e,
         Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": format!("Invalid MCP server config: {e}")})),
-            );
+            return ApiErrorResponse::bad_request(format!("Invalid MCP server config: {e}")).into_json_tuple();
         }
     };
 
@@ -2732,19 +2630,13 @@ pub async fn add_mcp_server(
         .iter()
         .any(|s| s.name == name)
     {
-        return (
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({"error": format!("MCP server '{}' already exists", name)})),
-        );
+        return ApiErrorResponse::conflict(format!("MCP server '{}' already exists", name)).into_json_tuple();
     }
 
     // Persist to config.toml
     let config_path = state.kernel.home_dir().join("config.toml");
     if let Err(e) = upsert_mcp_server_config(&config_path, &entry) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("Failed to write config: {e}")})),
-        );
+        return ApiErrorResponse::internal(format!("Failed to write config: {e}")).into_json_tuple();
     }
 
     // Trigger config reload
@@ -2808,12 +2700,7 @@ pub async fn update_mcp_server(
         .iter()
         .any(|s| s.name == name)
     {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-mcp-not-found", &[("name", &name)])}),
-            ),
-        );
+        return ApiErrorResponse::not_found(t.t_args("api-error-mcp-not-found", &[("name", &name)])).into_json_tuple();
     }
 
     // Force the name in body to match the path parameter
@@ -2822,34 +2709,21 @@ pub async fn update_mcp_server(
     }
 
     if body.get("transport").is_none() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": t.t("api-error-mcp-missing-transport")})),
-        );
+        return ApiErrorResponse::bad_request(t.t("api-error-mcp-missing-transport")).into_json_tuple();
     }
 
     // Validate by deserializing
     let entry: librefang_types::config::McpServerConfigEntry = match serde_json::from_value(body) {
         Ok(e) => e,
         Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(
-                    serde_json::json!({"error": t.t_args("api-error-mcp-invalid-config", &[("error", &e.to_string())])}),
-                ),
-            );
+            return ApiErrorResponse::bad_request(t.t_args("api-error-mcp-invalid-config", &[("error", &e.to_string())])).into_json_tuple();
         }
     };
 
     // Persist — upsert replaces an existing entry with the same name
     let config_path = state.kernel.home_dir().join("config.toml");
     if let Err(e) = upsert_mcp_server_config(&config_path, &entry) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-config-write-failed", &[("error", &e.to_string())])}),
-            ),
-        );
+        return ApiErrorResponse::internal(t.t_args("api-error-config-write-failed", &[("error", &e.to_string())])).into_json_tuple();
     }
 
     let reload_status = match state.kernel.reload_config() {
@@ -2906,22 +2780,12 @@ pub async fn delete_mcp_server(
         .iter()
         .any(|s| s.name == name)
     {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-mcp-not-found", &[("name", &name)])}),
-            ),
-        );
+        return ApiErrorResponse::not_found(t.t_args("api-error-mcp-not-found", &[("name", &name)])).into_json_tuple();
     }
 
     let config_path = state.kernel.home_dir().join("config.toml");
     if let Err(e) = remove_mcp_server_config(&config_path, &name) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-config-write-failed", &[("error", &e.to_string())])}),
-            ),
-        );
+        return ApiErrorResponse::internal(t.t_args("api-error-config-write-failed", &[("error", &e.to_string())])).into_json_tuple();
     }
 
     let reload_status = match state.kernel.reload_config() {
@@ -3072,21 +2936,13 @@ pub async fn create_skill(
     let name = match body["name"].as_str() {
         Some(n) if !n.trim().is_empty() => n.trim().to_string(),
         _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Missing or empty 'name' field"})),
-            );
+            return ApiErrorResponse::bad_request("Missing or empty 'name' field").into_json_tuple();
         }
     };
 
     // Validate name (alphanumeric + hyphens only)
     if !is_safe_component_name(&name) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(
-                serde_json::json!({"error": "Skill name must contain only letters, numbers, hyphens, and underscores"}),
-            ),
-        );
+        return ApiErrorResponse::bad_request("Skill name must contain only letters, numbers, hyphens, and underscores").into_json_tuple();
     }
 
     let description = body["description"].as_str().unwrap_or("").to_string();
@@ -3095,28 +2951,17 @@ pub async fn create_skill(
 
     // Only allow prompt_only skills from the web UI for safety
     if runtime != "prompt_only" {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(
-                serde_json::json!({"error": "Only prompt_only skills can be created from the web UI"}),
-            ),
-        );
+        return ApiErrorResponse::bad_request("Only prompt_only skills can be created from the web UI").into_json_tuple();
     }
 
     // Write skill.toml to ~/.librefang/skills/{name}/
     let skill_dir = state.kernel.home_dir().join("skills").join(&name);
     if skill_dir.exists() {
-        return (
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({"error": format!("Skill '{}' already exists", name)})),
-        );
+        return ApiErrorResponse::conflict(format!("Skill '{}' already exists", name)).into_json_tuple();
     }
 
     if let Err(e) = std::fs::create_dir_all(&skill_dir) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("Failed to create skill directory: {e}")})),
-        );
+        return ApiErrorResponse::internal(format!("Failed to create skill directory: {e}")).into_json_tuple();
     }
 
     let toml_content = format!(
@@ -3128,10 +2973,7 @@ pub async fn create_skill(
 
     let toml_path = skill_dir.join("skill.toml");
     if let Err(e) = std::fs::write(&toml_path, &toml_content) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("Failed to write skill.toml: {e}")})),
-        );
+        return ApiErrorResponse::internal(format!("Failed to write skill.toml: {e}")).into_json_tuple();
     }
 
     (
@@ -3464,10 +3306,7 @@ pub async fn get_integration(
     let template = match registry.get_template(&id) {
         Some(t) => t,
         None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": format!("Integration '{}' not found", id)})),
-            )
+            return ApiErrorResponse::not_found(format!("Integration '{}' not found", id)).into_json_tuple()
                 .into_response();
         }
     };
@@ -3575,10 +3414,7 @@ pub async fn add_integration(
     let id = match req.get("id").and_then(|v| v.as_str()) {
         Some(id) => id.to_string(),
         None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Missing 'id' field"})),
-            );
+            return ApiErrorResponse::bad_request("Missing 'id' field").into_json_tuple();
         }
     };
 
@@ -3662,10 +3498,7 @@ pub async fn remove_integration(
     };
 
     if let Some(e) = uninstall_err {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": e.to_string()})),
-        );
+        return ApiErrorResponse::not_found(e.to_string()).into_json_tuple();
     }
 
     state.kernel.extension_monitor().unregister(&id);
@@ -3710,10 +3543,7 @@ pub async fn reconnect_integration(
     };
 
     if !is_installed {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": format!("Integration '{}' not installed", id)})),
-        );
+        return ApiErrorResponse::not_found(format!("Integration '{}' not installed", id)).into_json_tuple();
     }
 
     match state.kernel.reconnect_extension_mcp(&id).await {
@@ -3788,10 +3618,7 @@ pub async fn reload_integrations(State(state): State<Arc<AppState>>) -> impl Int
                 "new_connections": connected,
             })),
         ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e})),
-        ),
+        Err(e) => ApiErrorResponse::internal(e).into_json_tuple(),
     }
 }
 
@@ -3873,10 +3700,7 @@ pub async fn get_extension(
     let template = match registry.get_template(&name) {
         Some(t) => t.clone(),
         None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": format!("Extension '{}' not found", name)})),
-            );
+            return ApiErrorResponse::not_found(format!("Extension '{}' not found", name)).into_json_tuple();
         }
     };
 
@@ -3941,10 +3765,7 @@ pub async fn install_extension(
 ) -> impl IntoResponse {
     let name = req.name.trim().to_string();
     if name.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Missing or empty 'name' field"})),
-        );
+        return ApiErrorResponse::bad_request("Missing or empty 'name' field").into_json_tuple();
     }
 
     // Scope the write lock so it's dropped before any .await
@@ -4015,10 +3836,7 @@ pub async fn uninstall_extension(
 ) -> impl IntoResponse {
     let name = req.name.trim().to_string();
     if name.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Missing or empty 'name' field"})),
-        );
+        return ApiErrorResponse::bad_request("Missing or empty 'name' field").into_json_tuple();
     }
 
     // Scope the write lock
@@ -4032,10 +3850,7 @@ pub async fn uninstall_extension(
     };
 
     if let Some(e) = uninstall_err {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": e.to_string()})),
-        );
+        return ApiErrorResponse::not_found(e.to_string()).into_json_tuple();
     }
 
     state.kernel.extension_monitor().unregister(&name);
