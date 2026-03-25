@@ -137,12 +137,12 @@ fn test_deterministic_agent_id() {
     install_hand(&kernel, HAND_A);
 
     let instance = kernel.activate_hand("test-clip", HashMap::new()).unwrap();
-    let expected = AgentId::from_hand_agent("test-clip", "main");
+    let expected = AgentId::from_hand_agent("test-clip", "main", Some(instance.instance_id));
 
     assert_eq!(
         instance.agent_id().unwrap(),
         expected,
-        "Agent ID should be deterministic from hand_id + role"
+        "Agent ID should be deterministic from hand_id + role + instance_id"
     );
 
     kernel.shutdown();

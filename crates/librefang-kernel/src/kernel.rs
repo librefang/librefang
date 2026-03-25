@@ -5500,10 +5500,24 @@ system_prompt = "You are a helpful assistant."
     // ─── Hand lifecycle ─────────────────────────────────────────────────────
 
     /// Activate a hand: check requirements, create instance, spawn agent.
+    ///
+    /// When `instance_id` is `Some`, the instance is created with that UUID
+    /// so that deterministic agent IDs remain stable across daemon restarts.
     pub fn activate_hand(
         &self,
         hand_id: &str,
         config: std::collections::HashMap<String, serde_json::Value>,
+    ) -> KernelResult<librefang_hands::HandInstance> {
+        self.activate_hand_with_id(hand_id, config, None)
+    }
+
+    /// Like [`activate_hand`](Self::activate_hand) but allows specifying an
+    /// existing instance UUID (used during daemon restart recovery).
+    pub fn activate_hand_with_id(
+        &self,
+        hand_id: &str,
+        config: std::collections::HashMap<String, serde_json::Value>,
+        instance_id: Option<uuid::Uuid>,
     ) -> KernelResult<librefang_hands::HandInstance> {
         use librefang_hands::HandError;
 
@@ -5538,7 +5552,7 @@ system_prompt = "You are a helpful assistant."
         // Create the instance in the registry
         let instance = self
             .hand_registry
-            .activate(hand_id, config)
+            .activate_with_id(hand_id, config, instance_id)
             .map_err(|e| match e {
                 HandError::AlreadyActive(id) => KernelError::LibreFang(LibreFangError::Internal(
                     format!("Hand already active: {id}"),
@@ -5589,7 +5603,8 @@ system_prompt = "You are a helpful assistant."
                     warn!(agent = %old_id, error = %e, "Failed to kill old hand agent");
                 }
                 // Migrate cron jobs to the same role in the new hand
-                let new_id = AgentId::from_hand_agent(hand_id, &old_role);
+                let new_id =
+                    AgentId::from_hand_agent(hand_id, &old_role, Some(instance.instance_id));
                 let migrated = self.cron_scheduler.reassign_agent_jobs(old_id, new_id);
                 if migrated > 0 {
                     let _ = self.cron_scheduler.persist();
@@ -5743,8 +5758,11 @@ system_prompt = "You are a helpful assistant."
                 "hands/{safe_hand}/{safe_role}"
             )));
 
-            // Deterministic agent ID: hand_id + role
-            let deterministic_id = AgentId::from_hand_agent(hand_id, role);
+            // Deterministic agent ID: hand_id + role + instance_id
+            // Each instance gets unique agent IDs while remaining deterministic
+            // per-instance (survives daemon restarts when instance_id is persisted).
+            let deterministic_id =
+                AgentId::from_hand_agent(hand_id, role, Some(instance.instance_id));
             let agent_id = self.spawn_agent_inner(
                 manifest,
                 None,
@@ -6273,8 +6291,9 @@ system_prompt = "You are a helpful assistant."
                 let config = saved_hand.config;
                 let old_agent_id = saved_hand.old_agent_ids;
                 let status = saved_hand.status;
+                let persisted_instance_id = saved_hand.instance_id;
                 // The persisted coordinator role is informational here.
-                // `activate_hand` always re-derives the coordinator from the
+                // `activate_hand_with_id` always re-derives the coordinator from the
                 // latest hand definition before spawning agents.
                 // Check if hand's agent.toml has enabled=false — skip reactivation
                 let hand_agent_name = format!("{}-hand", hand_id);
@@ -6292,7 +6311,7 @@ system_prompt = "You are a helpful assistant."
                         }
                     }
                 }
-                match self.activate_hand(&hand_id, config) {
+                match self.activate_hand_with_id(&hand_id, config, persisted_instance_id) {
                     Ok(inst) => {
                         if matches!(status, librefang_hands::HandStatus::Paused) {
                             if let Err(e) = self.pause_hand(inst.instance_id) {
