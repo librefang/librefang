@@ -15,6 +15,7 @@ import { useRegistry, getLocalizedDesc } from './useRegistry'
 import { useAppStore } from './store'
 import { cn } from './lib/utils'
 import DeployPage from './pages/DeployPage'
+import ChangelogPage from './pages/ChangelogPage'
 
 
 // ─── Language detection ───
@@ -1323,6 +1324,7 @@ export default function App() {
   const lang = useAppStore((s) => s.lang)
   const switchLang = useAppStore((s) => s.switchLang)
   const [isDeployPage] = useState(() => window.location.pathname.startsWith('/deploy'))
+  const [isChangelogPage] = useState(() => window.location.pathname.startsWith('/changelog'))
 
   useEffect(() => {
     document.documentElement.lang = lang
@@ -1343,6 +1345,10 @@ export default function App() {
       document.title = 'Deploy LibreFang'
       return
     }
+    if (isChangelogPage) {
+      document.title = 'Changelog | LibreFang'
+      return
+    }
     if (t.meta) {
       document.title = t.meta.title
       const descMeta = document.querySelector('meta[name="description"]')
@@ -1352,10 +1358,14 @@ export default function App() {
       const ogDesc = document.querySelector('meta[property="og:description"]')
       if (ogDesc) ogDesc.setAttribute('content', t.meta.description)
     }
-  }, [lang, t, isDeployPage])
+  }, [lang, t, isDeployPage, isChangelogPage])
 
   if (isDeployPage) {
     return <DeployPage />
+  }
+
+  if (isChangelogPage) {
+    return <ChangelogPage />
   }
 
   return (
