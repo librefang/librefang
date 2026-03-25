@@ -434,6 +434,42 @@ async fn handle_text_message(
                 return;
             }
 
+            // Reject messages when provider API key is missing
+            {
+                let registry = state.kernel.agent_registry();
+                if let Some(entry) = registry.get(agent_id) {
+                    let dm = &state.kernel.config_ref().default_model;
+                    let provider = if entry.manifest.model.provider.is_empty()
+                        || entry.manifest.model.provider == "default"
+                    {
+                        &dm.provider
+                    } else {
+                        &entry.manifest.model.provider
+                    };
+                    let is_missing = state
+                        .kernel
+                        .model_catalog_ref()
+                        .read()
+                        .ok()
+                        .and_then(|cat| {
+                            cat.get_provider(provider)
+                                .map(|p| !p.auth_status.is_available())
+                        })
+                        .unwrap_or(false);
+                    if is_missing {
+                        let _ = send_json(
+                            sender,
+                            &serde_json::json!({
+                                "type": "error",
+                                "content": format!("API key not configured for provider '{}'. Set it in Settings > Providers.", provider),
+                            }),
+                        )
+                        .await;
+                        return;
+                    }
+                }
+            }
+
             // Resolve file attachments into image content blocks
             let mut has_images = false;
             if let Some(attachments) = parsed["attachments"].as_array() {

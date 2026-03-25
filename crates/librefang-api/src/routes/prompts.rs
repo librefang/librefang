@@ -6,6 +6,7 @@ use axum::{
     Json, Router,
 };
 use librefang_types::agent::{PromptExperiment, PromptVersion};
+use sha2::{Digest, Sha256};
 
 use super::AppState;
 use librefang_runtime::kernel_handle::KernelHandle;
@@ -88,6 +89,12 @@ async fn create_prompt_version(
         }
     };
     version.agent_id = agent_id;
+    version.id = uuid::Uuid::new_v4();
+    version.created_at = chrono::Utc::now();
+    // Compute content hash from system_prompt
+    let mut hasher = Sha256::new();
+    hasher.update(version.system_prompt.as_bytes());
+    version.content_hash = format!("{:x}", hasher.finalize());
     match state.kernel.create_prompt_version(version.clone()) {
         Ok(_) => Json(version).into_response(),
         Err(e) => (
@@ -191,6 +198,12 @@ async fn create_experiment(
         }
     };
     experiment.agent_id = agent_id;
+    experiment.id = uuid::Uuid::new_v4();
+    experiment.created_at = chrono::Utc::now();
+    // Assign IDs to variants
+    for variant in &mut experiment.variants {
+        variant.id = uuid::Uuid::new_v4();
+    }
     match state.kernel.create_experiment(experiment.clone()) {
         Ok(_) => Json(experiment).into_response(),
         Err(e) => (

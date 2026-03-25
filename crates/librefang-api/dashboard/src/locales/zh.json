@@ -93,7 +93,11 @@
     "available": "可用能力", "instances": "活跃实例", "activate": "激活", "deactivate": "停用",
     "orchestration": "能力管理", "active_label": "活跃", "total_label": "总计",
     "search_placeholder": "搜索 Hands...", "ready": "就绪", "missing_req": "缺少依赖",
-    "instance": "实例",
+    "instance": "实例", "agent": "智能体", "activated_at": "激活时间",
+    "paused": "已暂停", "pause": "暂停", "resume": "恢复", "inactive_label": "未激活",
+    "metrics": "指标", "metrics_no_data": "暂无指标数据。",
+    "settings": "设置", "settings_empty": "暂无可用设置。",
+    "requirements": "依赖项", "tools": "工具",
     "cat_communication": "通信", "cat_content": "内容", "cat_data": "数据", "cat_development": "开发", "cat_productivity": "效率",
     "help": "管理可组合的功能扩展包。激活、停用、暂停和恢复 Hands 以扩展智能体功能。"
   },
@@ -289,7 +293,8 @@
     "end_history": "历史记录末尾", "welcome_system": "连接已建立。", "input_placeholder_with_agent": "向 {{name}} 发送消息...",
     "generating": "生成中...", "clear_chat": "清空对话", "send_hint": "Enter 发送 · ⌘+↵ 换行",
     "you": "你", "bot": "Bot",
-    "ws_connected": "WS", "ws_streaming": "流式"
+    "ws_connected": "WS", "ws_streaming": "流式",
+    "auth_missing": "供应商 \"{{provider}}\" 的 API Key 未配置，请在 设置 > 供应商 中设置后再对话。"
   },
   "goals": {
     "title": "目标", "subtitle": "战略规划和任务跟踪。", "total": "总目标", "pending": "待处理", "in_progress": "进行中", "completed": "已完成",

@@ -25,6 +25,7 @@ api-error-manifest-signature-failed = Manifest-Signaturpruefung fehlgeschlagen
 # Auth errors
 api-error-auth-invalid-key = Ungueltiger API-Schluessel
 api-error-auth-missing-header = Fehlender Authorization: Bearer <api_key> Header
+api-error-auth-missing = API-Schluessel fuer diesen Anbieter nicht konfiguriert
 
 # Session errors
 api-error-session-load-failed = Sitzung konnte nicht geladen werden

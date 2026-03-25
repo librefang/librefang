@@ -15,6 +15,9 @@ import { useUIStore } from "../lib/store";
 import { Typewriter_v2 } from "../components/Typewriter_v2";
 import "katex/dist/katex.min.css";
 
+const isAuthUnavailable = (status?: string) =>
+  !!status && status !== "configured" && status !== "configured_cli" && status !== "not_required";
+
 interface ChatMessage {
   id: string;
   role: "user" | "assistant" | "system";
@@ -444,14 +447,14 @@ const MessageBubble = memo(function MessageBubble({ message }: { message: ChatMe
 });
 
 // Input box - with shortcut hints
-function ChatInput({ onSend, disabled, placeholder }: { onSend: (msg: string) => void; disabled: boolean; placeholder: string }) {
+function ChatInput({ onSend, disabled, placeholder, authMissing, providerName }: { onSend: (msg: string) => void; disabled: boolean; placeholder: string; authMissing?: boolean; providerName?: string }) {
   const { t } = useTranslation();
   const [message, setMessage] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (message.trim() && !disabled) {
+    if (message.trim() && !effectiveDisabled) {
       onSend(message);
       setMessage("");
     }
@@ -467,8 +470,17 @@ function ChatInput({ onSend, disabled, placeholder }: { onSend: (msg: string) =>
   const showingSlash = message.startsWith("/") && !message.includes(" ");
   const filteredCmds = showingSlash ? SLASH_COMMANDS.filter(c => c.cmd.startsWith(message)) : [];
 
+  const effectiveDisabled = disabled || !!authMissing;
+
   return (
     <form onSubmit={handleSubmit} className="space-y-2">
+      {/* Auth missing warning */}
+      {authMissing && (
+        <div className="flex items-center gap-2 rounded-xl border border-warning/30 bg-warning/5 px-4 py-2.5 text-sm text-warning">
+          <AlertCircle className="h-4 w-4 flex-shrink-0" />
+          <span>{t("chat.auth_missing", { provider: providerName || "unknown" })}</span>
+        </div>
+      )}
       {/* Slash command autocomplete */}
       {showingSlash && filteredCmds.length > 0 && (
         <div className="rounded-xl border border-border-subtle bg-surface shadow-lg p-1 mb-1">
@@ -495,14 +507,14 @@ function ChatInput({ onSend, disabled, placeholder }: { onSend: (msg: string) =>
               }
             }}
             placeholder={placeholder}
-            disabled={disabled}
+            disabled={effectiveDisabled}
             rows={1}
             className="w-full min-h-[44px] sm:min-h-[52px] max-h-[150px] rounded-2xl border border-border-subtle bg-surface px-3 sm:px-5 py-2.5 sm:py-3.5 text-sm focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none resize-none placeholder:text-text-dim/40 shadow-sm"
           />
         </div>
         <button
           type="submit"
-          disabled={!message.trim() || disabled}
+          disabled={!message.trim() || effectiveDisabled}
           className="group relative px-3.5 sm:px-5 py-2.5 sm:py-3.5 rounded-2xl bg-gradient-to-r from-brand to-brand/90 text-white font-bold text-sm shadow-lg shadow-brand/20 hover:shadow-brand/40 hover:-translate-y-0.5 transition-all duration-300 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:translate-y-0"
         >
           <Send className="h-4 w-4" />
@@ -516,7 +528,7 @@ function ChatInput({ onSend, disabled, placeholder }: { onSend: (msg: string) =>
 }
 
 // Connection status bar
-function ConnectionBar({ agentName, isLoading, messageCount, onClear, wsConnected }: { agentName: string; isLoading: boolean; messageCount: number; onClear: () => void; wsConnected?: boolean }) {
+function ConnectionBar({ agentName, isLoading, messageCount, onClear, wsConnected, modelName }: { agentName: string; isLoading: boolean; messageCount: number; onClear: () => void; wsConnected?: boolean; modelName?: string }) {
   const { t } = useTranslation();
   return (
     <div className="px-2 sm:px-4 py-2 sm:py-2.5 border-b border-border-subtle/50 bg-gradient-to-r from-surface to-transparent flex items-center justify-between">
@@ -540,12 +552,17 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, wsConnecte
           </span>
         )}
       </div>
-      {messageCount > 0 && (
-        <button onClick={onClear} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-text-dim/60 hover:text-error hover:bg-error/5 transition-colors">
-          <X className="h-3 w-3" />
-          {t("chat.clear_chat")}
-        </button>
-      )}
+      <div className="flex items-center gap-2">
+        {modelName && (
+          <span className="hidden sm:inline text-[10px] text-text-dim/50 font-mono truncate max-w-[200px]">{modelName}</span>
+        )}
+        {messageCount > 0 && (
+          <button onClick={onClear} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-text-dim/60 hover:text-error hover:bg-error/5 transition-colors">
+            <X className="h-3 w-3" />
+            {t("chat.clear_chat")}
+          </button>
+        )}
+      </div>
     </div>
   );
 }
@@ -683,13 +700,14 @@ export function ChatPage() {
   }, [navigate]);
 
   const agentsQuery = useQuery({ queryKey: ["agents", "list", "chat"], queryFn: listAgents, staleTime: 30000 });
-  const agents = useMemo(() => [...(agentsQuery.data ?? [])].sort((a, b) => {
+  const agents = useMemo(() => [...(agentsQuery.data ?? [])].filter(a => !a.name.includes("-hand") && !a.name.includes(":")).sort((a, b) => {
+    // Auth missing → sort to bottom
+    const aNoAuth = isAuthUnavailable(a.auth_status) ? 1 : 0;
+    const bNoAuth = isAuthUnavailable(b.auth_status) ? 1 : 0;
+    if (aNoAuth !== bNoAuth) return aNoAuth - bNoAuth;
     const aSusp = (a.state || "").toLowerCase() === "suspended" ? 1 : 0;
     const bSusp = (b.state || "").toLowerCase() === "suspended" ? 1 : 0;
     if (aSusp !== bSusp) return aSusp - bSusp;
-    const aHand = a.name.includes("-hand") ? 1 : 0;
-    const bHand = b.name.includes("-hand") ? 1 : 0;
-    if (aHand !== bHand) return aHand - bHand;
     return a.name.localeCompare(b.name);
   }), [agentsQuery.data]);
   const { messages, isLoading, sendMessage, clearHistory, wsConnected } = useChatMessages(selectedAgentId || null, agents);
@@ -772,12 +790,17 @@ export function ChatPage() {
                     )}
                   </div>
                   <div className="min-w-0 flex-1">
-                    <p className={`text-sm font-bold truncate ${(agent.state || "").toLowerCase() !== "running" ? "opacity-50" : ""}`}>{agent.name}</p>
+                    <div className="flex items-center gap-1.5">
+                      <p className={`text-sm font-bold truncate ${(agent.state || "").toLowerCase() !== "running" ? "opacity-50" : ""}`}>{agent.name}</p>
+                      {agent.auth_status === "configured" && <span className={`flex-shrink-0 px-1 py-0.5 rounded text-[8px] font-bold uppercase leading-none ${selectedAgentId === agent.id ? "bg-white/20" : "bg-brand/10 text-brand"}`}>KEY</span>}
+                      {agent.auth_status === "configured_cli" && <span className={`flex-shrink-0 px-1 py-0.5 rounded text-[8px] font-bold uppercase leading-none ${selectedAgentId === agent.id ? "bg-white/20" : "bg-accent/10 text-accent"}`}>CLI</span>}
+                      {isAuthUnavailable(agent.auth_status) && <AlertCircle className="h-3 w-3 text-warning flex-shrink-0" />}
+                    </div>
                     <p className={`text-[10px] truncate ${selectedAgentId === agent.id ? "text-white/70" : "text-text-dim"}`}>
-                      {agent.model_name || t("common.unknown")}
+                      {agent.model_provider || t("common.unknown")}
                     </p>
                   </div>
-                  <ArrowRight className={`h-4 w-4 transition-transform ${selectedAgentId === agent.id ? "rotate-90" : "opacity-0 group-hover:opacity-100"}`} />
+                  <ArrowRight className={`h-4 w-4 flex-shrink-0 transition-transform ${selectedAgentId === agent.id ? "rotate-90" : "opacity-0 group-hover:opacity-100"}`} />
                 </button>
               ))
             )}
@@ -815,6 +838,7 @@ export function ChatPage() {
               messageCount={messages.length}
               onClear={clearHistory}
               wsConnected={wsConnected}
+              modelName={selectedAgent?.model_name}
             />
           )}
 
@@ -858,6 +882,8 @@ export function ChatPage() {
               onSend={sendMessage}
               disabled={isLoading}
               placeholder={selectedAgentId ? t("chat.input_placeholder_with_agent", { name: selectedAgent?.name }) : t("chat.transmit_command")}
+              authMissing={isAuthUnavailable(selectedAgent?.auth_status)}
+              providerName={selectedAgent?.model_provider}
             />
           </div>
         </main>

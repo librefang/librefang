@@ -425,8 +425,8 @@ pub struct ModelConfig {
 impl Default for ModelConfig {
     fn default() -> Self {
         Self {
-            provider: "anthropic".to_string(),
-            model: "claude-sonnet-4-20250514".to_string(),
+            provider: "default".to_string(),
+            model: "default".to_string(),
             max_tokens: 4096,
             temperature: 0.7,
             system_prompt: "You are a helpful AI agent.".to_string(),
@@ -734,15 +734,24 @@ pub struct AgentEntry {
 /// A stored prompt version for an agent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromptVersion {
+    #[serde(default)]
     pub id: Uuid,
+    #[serde(default)]
     pub agent_id: AgentId,
+    #[serde(default)]
     pub version: u32,
+    #[serde(default)]
     pub content_hash: String,
     pub system_prompt: String,
+    #[serde(default)]
     pub tools: Vec<String>,
+    #[serde(default)]
     pub variables: Vec<String>,
+    #[serde(default = "chrono::Utc::now")]
     pub created_at: DateTime<Utc>,
+    #[serde(default)]
     pub created_by: String,
+    #[serde(default)]
     pub is_active: bool,
     pub description: Option<String>,
 }
@@ -773,23 +782,32 @@ impl Default for SuccessCriteria {
 /// A/B experiment for prompt testing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromptExperiment {
+    #[serde(default)]
     pub id: Uuid,
     pub name: String,
+    #[serde(default)]
     pub agent_id: AgentId,
+    #[serde(default)]
     pub status: ExperimentStatus,
+    #[serde(default)]
     pub traffic_split: Vec<u8>,
+    #[serde(default)]
     pub success_criteria: SuccessCriteria,
     pub started_at: Option<DateTime<Utc>>,
     pub ended_at: Option<DateTime<Utc>>,
+    #[serde(default = "chrono::Utc::now")]
     pub created_at: DateTime<Utc>,
+    #[serde(default)]
     pub variants: Vec<ExperimentVariant>,
 }
 
 /// Variant within an experiment.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExperimentVariant {
+    #[serde(default)]
     pub id: Uuid,
     pub name: String,
+    #[serde(default)]
     pub prompt_version_id: Uuid,
     pub description: Option<String>,
 }
