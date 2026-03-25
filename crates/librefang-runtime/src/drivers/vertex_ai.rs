@@ -204,7 +204,7 @@ fn rsa_sha256_sign(pem: &str, data: &[u8]) -> Result<Vec<u8>, LlmError> {
     // PKCS#1 v1.5 padding for SHA-256.
     let padded = pkcs1_v15_pad(&digest, n.len())?;
     // RSA raw sign: signature = padded^d mod n.
-    let sig = modpow(&padded, &d, &n);
+    let sig = modpow(&padded, &d, &n)?;
     Ok(sig)
 }
 
@@ -330,12 +330,12 @@ fn pkcs1_v15_pad(digest: &[u8], modulus_len: usize) -> Result<Vec<u8>, LlmError>
 // ─── Big-integer modular exponentiation ─────────────────────────────
 
 /// Compute base^exp mod modulus using big-integer arithmetic (byte arrays).
-fn modpow(base: &[u8], exp: &[u8], modulus: &[u8]) -> Vec<u8> {
+fn modpow(base: &[u8], exp: &[u8], modulus: &[u8]) -> Result<Vec<u8>, LlmError> {
     let n = BigUint::from_bytes(modulus);
     let b = BigUint::from_bytes(base);
     let e = BigUint::from_bytes(exp);
-    let result = b.modpow(&e, &n);
-    result.to_bytes(modulus.len())
+    let result = b.modpow(&e, &n)?;
+    Ok(result.to_bytes(modulus.len()))
 }
 
 /// Minimal big-unsigned-integer for RSA operations.
@@ -435,15 +435,15 @@ impl BigUint {
     }
 
     /// self % modulus using shift-and-subtract.
-    fn rem(&self, modulus: &BigUint) -> BigUint {
+    fn rem(&self, modulus: &BigUint) -> Result<BigUint, LlmError> {
         if modulus.is_zero() {
-            panic!("division by zero");
+            return Err(LlmError::Parse("BigUint division by zero".into()));
         }
         let mut remainder = self.clone();
         let mod_bits = modulus.bit_len();
         let self_bits = self.bit_len();
         if self_bits < mod_bits {
-            return remainder;
+            return Ok(remainder);
         }
 
         let shift = self_bits - mod_bits;
@@ -456,25 +456,25 @@ impl BigUint {
                 shifted = shifted.shr1();
             }
         }
-        remainder
+        Ok(remainder)
     }
 
     /// Modular exponentiation: self^exp mod modulus.
-    fn modpow(&self, exp: &BigUint, modulus: &BigUint) -> BigUint {
+    fn modpow(&self, exp: &BigUint, modulus: &BigUint) -> Result<BigUint, LlmError> {
         if modulus.is_zero() {
-            panic!("modulus cannot be zero");
+            return Err(LlmError::Parse("BigUint modulus cannot be zero".into()));
         }
         let mut result = BigUint::one();
-        let base = self.rem(modulus);
+        let base = self.rem(modulus)?;
         let exp_bits = exp.bit_len();
 
         for i in (0..exp_bits).rev() {
-            result = result.mul(&result).rem(modulus);
+            result = result.mul(&result).rem(modulus)?;
             if exp.bit(i) {
-                result = result.mul(&base).rem(modulus);
+                result = result.mul(&base).rem(modulus)?;
             }
         }
-        result
+        Ok(result)
     }
 
     fn shl(&self, shift: usize) -> BigUint {
@@ -920,7 +920,7 @@ mod tests {
         let base = BigUint::from_bytes(&[3]);
         let exp = BigUint::from_bytes(&[4]);
         let modulus = BigUint::from_bytes(&[5]);
-        let result = base.modpow(&exp, &modulus);
+        let result = base.modpow(&exp, &modulus).unwrap();
         assert_eq!(result.to_bytes(1), vec![1]);
     }
 

@@ -170,7 +170,8 @@ mod tests {
     use librefang_types::tool::ToolDefinition;
 
     fn test_catalog() -> crate::model_catalog::ModelCatalog {
-        crate::model_catalog::ModelCatalog::default()
+        let home = crate::registry_sync::resolve_home_dir_for_tests();
+        crate::model_catalog::ModelCatalog::new(&home)
     }
 
     fn default_config() -> ModelRoutingConfig {
