@@ -10,6 +10,21 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
+// Well-known constants
+// ---------------------------------------------------------------------------
+
+/// Deterministic UUID v5 agent ID for the goals shared-memory namespace.
+///
+/// Both the kernel and the API layer need to agree on this ID so that
+/// goal data written by one can be read by the other.
+pub fn goals_agent_id() -> AgentId {
+    AgentId(Uuid::new_v5(&Uuid::NAMESPACE_OID, b"librefang-goals"))
+}
+
+/// The well-known shared-memory key for goals storage.
+pub const GOALS_STORAGE_KEY: &str = "__librefang_goals";
+
+// ---------------------------------------------------------------------------
 // GoalId
 // ---------------------------------------------------------------------------
 

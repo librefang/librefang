@@ -22,7 +22,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
-use librefang_types::agent::AgentId;
+use librefang_types::goal::{goals_agent_id, GOALS_STORAGE_KEY};
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -30,24 +30,13 @@ use std::sync::Arc;
 // Goals endpoints
 // ---------------------------------------------------------------------------
 
-/// The well-known shared-memory key for goals storage.
-const GOALS_KEY: &str = "__librefang_goals";
-
-/// Shared agent ID for goals KV storage (deterministic UUID v5).
-fn goals_shared_agent_id() -> AgentId {
-    AgentId(uuid::Uuid::new_v5(
-        &uuid::Uuid::NAMESPACE_OID,
-        b"librefang-goals",
-    ))
-}
-
 /// GET /api/goals — List all goals.
 pub async fn list_goals(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let agent_id = goals_shared_agent_id();
+    let agent_id = goals_agent_id();
     match state
         .kernel
         .memory_substrate()
-        .structured_get(agent_id, GOALS_KEY)
+        .structured_get(agent_id, GOALS_STORAGE_KEY)
     {
         Ok(Some(serde_json::Value::Array(arr))) => {
             let total = arr.len();
@@ -66,11 +55,11 @@ pub async fn get_goal(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let agent_id = goals_shared_agent_id();
+    let agent_id = goals_agent_id();
     match state
         .kernel
         .memory_substrate()
-        .structured_get(agent_id, GOALS_KEY)
+        .structured_get(agent_id, GOALS_STORAGE_KEY)
     {
         Ok(Some(serde_json::Value::Array(arr))) => {
             if let Some(goal) = arr.iter().find(|g| g["id"].as_str() == Some(&id)) {
@@ -101,11 +90,11 @@ pub async fn get_goal_children(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let agent_id = goals_shared_agent_id();
+    let agent_id = goals_agent_id();
     match state
         .kernel
         .memory_substrate()
-        .structured_get(agent_id, GOALS_KEY)
+        .structured_get(agent_id, GOALS_STORAGE_KEY)
     {
         Ok(Some(serde_json::Value::Array(arr))) => {
             let children: Vec<&serde_json::Value> = arr
@@ -195,11 +184,11 @@ pub async fn create_goal(
     }
 
     // Single read-then-write to reduce TOCTOU window between parent validation and list append
-    let shared_id = goals_shared_agent_id();
+    let shared_id = goals_agent_id();
     let mut goals: Vec<serde_json::Value> = match state
         .kernel
         .memory_substrate()
-        .structured_get(shared_id, GOALS_KEY)
+        .structured_get(shared_id, GOALS_STORAGE_KEY)
     {
         Ok(Some(serde_json::Value::Array(arr))) => arr,
         _ => Vec::new(),
@@ -219,7 +208,7 @@ pub async fn create_goal(
     goals.push(entry.clone());
     if let Err(e) = state.kernel.memory_substrate().structured_set(
         shared_id,
-        GOALS_KEY,
+        GOALS_STORAGE_KEY,
         serde_json::Value::Array(goals),
     ) {
         tracing::warn!("Failed to save goal: {e}");
@@ -238,11 +227,11 @@ pub async fn update_goal_by_id(
     Path(id): Path<String>,
     Json(req): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    let shared_id = goals_shared_agent_id();
+    let shared_id = goals_agent_id();
     let mut goals: Vec<serde_json::Value> = match state
         .kernel
         .memory_substrate()
-        .structured_get(shared_id, GOALS_KEY)
+        .structured_get(shared_id, GOALS_STORAGE_KEY)
     {
         Ok(Some(serde_json::Value::Array(arr))) => arr,
         _ => Vec::new(),
@@ -390,7 +379,7 @@ pub async fn update_goal_by_id(
 
     if let Err(e) = state.kernel.memory_substrate().structured_set(
         shared_id,
-        GOALS_KEY,
+        GOALS_STORAGE_KEY,
         serde_json::Value::Array(goals),
     ) {
         return (
@@ -410,11 +399,11 @@ pub async fn delete_goal(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let shared_id = goals_shared_agent_id();
+    let shared_id = goals_agent_id();
     let mut goals: Vec<serde_json::Value> = match state
         .kernel
         .memory_substrate()
-        .structured_get(shared_id, GOALS_KEY)
+        .structured_get(shared_id, GOALS_STORAGE_KEY)
     {
         Ok(Some(serde_json::Value::Array(arr))) => arr,
         _ => Vec::new(),
@@ -456,7 +445,7 @@ pub async fn delete_goal(
 
     if let Err(e) = state.kernel.memory_substrate().structured_set(
         shared_id,
-        GOALS_KEY,
+        GOALS_STORAGE_KEY,
         serde_json::Value::Array(goals),
     ) {
         return (

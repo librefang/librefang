@@ -7,6 +7,7 @@ use crate::kernel_handle::KernelHandle;
 use crate::mcp;
 use crate::web_search::{parse_ddg_results, WebToolsContext};
 use librefang_skills::registry::SkillRegistry;
+use librefang_types::goal::GOALS_STORAGE_KEY;
 use librefang_types::taint::{TaintLabel, TaintSink, TaintedValue};
 use librefang_types::tool::{ToolDefinition, ToolResult};
 use librefang_types::tool_compat::normalize_tool_name;
@@ -1868,9 +1869,6 @@ fn tool_memory_list(kernel: Option<&Arc<dyn KernelHandle>>) -> Result<String, St
 // Goal tracking tools
 // ---------------------------------------------------------------------------
 
-/// The well-known shared-memory key for goals storage (mirrors goals.rs).
-const GOALS_KEY: &str = "__librefang_goals";
-
 /// Update goal status and/or progress via the kernel's shared memory.
 async fn tool_goal_update(
     input: &serde_json::Value,
@@ -1901,7 +1899,7 @@ async fn tool_goal_update(
     }
 
     // Load current goals from goals-specific shared memory
-    let mut goals: Vec<serde_json::Value> = match kh.goals_recall(GOALS_KEY)? {
+    let mut goals: Vec<serde_json::Value> = match kh.goals_recall(GOALS_STORAGE_KEY)? {
         Some(serde_json::Value::Array(arr)) => arr,
         _ => return Err(format!("Goal '{goal_id}' not found (no goals exist)")),
     };
@@ -1927,7 +1925,7 @@ async fn tool_goal_update(
     }
 
     // Write back to goals-specific shared memory
-    kh.goals_store(GOALS_KEY, serde_json::Value::Array(goals))?;
+    kh.goals_store(GOALS_STORAGE_KEY, serde_json::Value::Array(goals))?;
 
     let mut parts = vec![format!("Goal '{goal_id}' updated:")];
     if let Some(s) = new_status {

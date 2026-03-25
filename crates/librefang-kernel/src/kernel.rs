@@ -35,6 +35,7 @@ use librefang_types::capability::Capability;
 use librefang_types::config::{AuthProfile, KernelConfig, OutputFormat};
 use librefang_types::error::LibreFangError;
 use librefang_types::event::*;
+use librefang_types::goal::{goals_agent_id, GOALS_STORAGE_KEY};
 use librefang_types::memory::Memory;
 use librefang_types::tool::ToolDefinition;
 
@@ -7886,14 +7887,6 @@ system_prompt = "You are a helpful assistant."
         Some(engine)
     }
 
-    /// Deterministic UUID v5 for the goals shared-memory namespace.
-    fn goals_agent_id() -> AgentId {
-        AgentId(uuid::Uuid::new_v5(
-            &uuid::Uuid::NAMESPACE_OID,
-            b"librefang-goals",
-        ))
-    }
-
     /// Load active goals assigned to a specific agent from the goals store.
     ///
     /// Returns a flat list of `ActiveGoal` structs with children nested.
@@ -7998,7 +7991,7 @@ system_prompt = "You are a helpful assistant."
     fn load_goals_from_storage(&self) -> Vec<serde_json::Value> {
         match self
             .memory
-            .structured_get(Self::goals_agent_id(), "__librefang_goals")
+            .structured_get(goals_agent_id(), GOALS_STORAGE_KEY)
         {
             Ok(Some(serde_json::Value::Array(arr))) => arr,
             _ => vec![],
@@ -8648,7 +8641,7 @@ impl KernelHandle for LibreFangKernel {
     }
 
     fn goals_store(&self, key: &str, value: serde_json::Value) -> Result<(), String> {
-        let agent_id = Self::goals_agent_id();
+        let agent_id = goals_agent_id();
         // Invalidate goals cache on write
         if let Ok(mut cache) = self.goals_cache.lock() {
             *cache = None;
@@ -8659,7 +8652,7 @@ impl KernelHandle for LibreFangKernel {
     }
 
     fn goals_recall(&self, key: &str) -> Result<Option<serde_json::Value>, String> {
-        let agent_id = Self::goals_agent_id();
+        let agent_id = goals_agent_id();
         self.memory
             .structured_get(agent_id, key)
             .map_err(|e| format!("Goals recall failed: {e}"))
