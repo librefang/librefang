@@ -57,13 +57,14 @@ jobs:
             echo "✓ ${PKG_NAME}@${PKG_VERSION} already published to npm, skipping"
           else
             NPM_TAG=""
-            if echo "$PKG_VERSION" | grep -qE '-(beta|rc)[0-9]'; then
+            if echo "$PKG_VERSION" | grep -qE -- '-(beta|rc)[0-9]'; then
               NPM_TAG="--tag next"
-            elif echo "$PKG_VERSION" | grep -qE '\-lts'; then
+            elif echo "$PKG_VERSION" | grep -qE -- '\-lts'; then
               NPM_TAG="--tag lts"
             fi
             npm publish --access public $NPM_TAG
           fi
+          echo "- **npm**: https://www.npmjs.com/package/${PKG_NAME}/v/${PKG_VERSION}" >> $GITHUB_STEP_SUMMARY
 
       - name: Publish to GitHub Packages
         env:
@@ -116,6 +117,7 @@ jobs:
             fi
             npm publish --access public $NPM_TAG
           fi
+          echo "- **npm**: https://www.npmjs.com/package/${PKG_NAME}/v/${PKG_VERSION}" >> $GITHUB_STEP_SUMMARY
 
   # ── Python SDK → PyPI ─────────────────────────────────────────────────────
   sdk_python:
@@ -154,6 +156,11 @@ jobs:
           password: ${{ secrets.PYPI_API_TOKEN }}
           skip-existing: true
 
+      - name: Output publish link
+        run: |
+          PYPI_VERSION=$(grep '^version' pyproject.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          echo "- **PyPI**: https://pypi.org/project/librefang-sdk/${PYPI_VERSION}/" >> $GITHUB_STEP_SUMMARY
+
   # ── Rust SDK → crates.io ──────────────────────────────────────────────────
   sdk_rust:
     name: SDK / Rust (crates.io)
@@ -189,6 +196,7 @@ jobs:
           else
             cargo publish --allow-dirty
           fi
+          echo "- **crates.io**: https://crates.io/crates/librefang/${VERSION}" >> $GITHUB_STEP_SUMMARY
 
   # ── Go SDK — tag for Go modules ──────────────────────────────────────────
   sdk_go:
@@ -228,3 +236,4 @@ jobs:
             -f ref="refs/tags/$GO_TAG" \
             -f sha="$SHA"
           echo "✓ Published Go module tag: $GO_TAG (from $VERSION)"
+          echo "- **Go**: https://pkg.go.dev/github.com/librefang/librefang/sdk/go@v${GO_VERSION}" >> $GITHUB_STEP_SUMMARY
