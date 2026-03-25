@@ -924,7 +924,7 @@ function Downloads(_props: SectionProps) {
 function Install({ t }: SectionProps) {
   const [copied, setCopied] = useState(false)
   const [os, setOs] = useState<'mac' | 'windows' | 'linux' | 'unknown'>('unknown')
-  const cmd = os === 'windows' ? 'irm https://librefang.sh/install.ps1 | iex' : 'curl -fsSL https://librefang.sh/install | sh'
+  const cmd = os === 'windows' ? 'irm https://librefang.ai/install.ps1 | iex' : 'curl -fsSL https://librefang.ai/install | sh'
 
   useEffect(() => {
     const ua = navigator.userAgent.toLowerCase()
@@ -966,7 +966,7 @@ function Install({ t }: SectionProps) {
                 <>
                   <div className="flex gap-3">
                     <span className="text-cyan-600 dark:text-cyan-500 select-none">&gt;</span>
-                    <span className="text-gray-800 dark:text-gray-200">irm https://librefang.sh/install.ps1 | iex</span>
+                    <span className="text-gray-800 dark:text-gray-200">irm https://librefang.ai/install.ps1 | iex</span>
                   </div>
                   <div className="flex gap-3">
                     <span className="text-cyan-600 dark:text-cyan-500 select-none">&gt;</span>
@@ -981,7 +981,7 @@ function Install({ t }: SectionProps) {
                 <>
                   <div className="flex gap-3">
                     <span className="text-cyan-600 dark:text-cyan-500 select-none">$</span>
-                    <span className="text-gray-800 dark:text-gray-200">curl -fsSL https://librefang.sh/install | sh</span>
+                    <span className="text-gray-800 dark:text-gray-200">curl -fsSL https://librefang.ai/install | sh</span>
                   </div>
                   <div className="flex gap-3">
                     <span className="text-cyan-600 dark:text-cyan-500 select-none">$</span>
