@@ -167,6 +167,8 @@ pub async fn start_whatsapp_gateway(kernel: &Arc<super::kernel::LibreFangKernel>
         info!("WhatsApp owner routing configured for {jid}");
     }
 
+    let conversation_ttl_hours = wa_config.conversation_ttl_hours;
+
     // Auto-set the env var so the rest of the system finds the gateway
     std::env::set_var(
         "WHATSAPP_WEB_GATEWAY_URL",
@@ -199,6 +201,9 @@ pub async fn start_whatsapp_gateway(kernel: &Arc<super::kernel::LibreFangKernel>
             if let Some(owner) = owner_jid.as_deref() {
                 cmd.env("WHATSAPP_OWNER_JID", owner);
             }
+
+            // Conversation tracker TTL
+            cmd.env("CONVERSATION_TTL_HOURS", conversation_ttl_hours.to_string());
 
             let child = cmd.spawn();
 
