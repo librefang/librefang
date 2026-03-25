@@ -546,13 +546,10 @@ impl HandDefinition {
     }
 
     /// Backward-compatible accessor: returns the single/coordinator agent manifest.
-    pub fn agent(&self) -> &AgentManifest {
-        self.coordinator()
-            .map(|(_, a)| &a.manifest)
-            .unwrap_or_else(|| {
-                // Should never happen — every hand has at least one agent
-                panic!("HandDefinition '{}' has no agents", self.id)
-            })
+    ///
+    /// Returns `None` if the hand has no agents (should never happen in practice).
+    pub fn agent(&self) -> Option<&AgentManifest> {
+        self.coordinator().map(|(_, a)| &a.manifest)
     }
 
     /// Whether this hand has multiple agents.
@@ -882,7 +879,7 @@ metrics = []
         assert_eq!(def.id, "test");
         assert_eq!(def.category, HandCategory::Content);
         assert_eq!(def.requires.len(), 1);
-        assert_eq!(def.agent().name, "test-hand");
+        assert_eq!(def.agent().unwrap().name, "test-hand");
     }
 
     #[test]
