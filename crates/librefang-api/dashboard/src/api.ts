@@ -534,6 +534,8 @@ export interface GoalItem {
 }
 
 type Json = Record<string, unknown>;
+const DEFAULT_POST_TIMEOUT_MS = 60_000;
+const LONG_RUNNING_TIMEOUT_MS = 300_000;
 
 // Global 401 handler — set by App.tsx to trigger login screen
 let _onUnauthorized: (() => void) | null = null;
@@ -586,7 +588,7 @@ async function get<T>(path: string): Promise<T> {
   return (await response.json()) as T;
 }
 
-async function post<T>(path: string, body: unknown, timeout = 60000): Promise<T> {
+async function post<T>(path: string, body: unknown, timeout = DEFAULT_POST_TIMEOUT_MS): Promise<T> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeout);
 
@@ -608,7 +610,7 @@ async function post<T>(path: string, body: unknown, timeout = 60000): Promise<T>
   } catch (error) {
     clearTimeout(timeoutId);
     if (error instanceof Error && error.name === "AbortError") {
-      throw new Error("Request timeout - installation may take too long");
+      throw new Error(`Request timeout after ${Math.round(timeout / 1000)}s - operation may still be running`);
     }
     throw error;
   }
@@ -687,7 +689,7 @@ export async function sendAgentMessage(
 ): Promise<AgentMessageResponse> {
   return post<AgentMessageResponse>(`/api/agents/${encodeURIComponent(agentId)}/message`, {
     message
-  });
+  }, LONG_RUNNING_TIMEOUT_MS);
 }
 
 export async function listProviders(): Promise<ProviderItem[]> {
@@ -819,7 +821,7 @@ export async function listSkills(): Promise<SkillItem[]> {
 }
 
 export async function installSkill(name: string): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>("/api/skills/install", { name });
+  return post<ApiActionResponse>("/api/skills/install", { name }, LONG_RUNNING_TIMEOUT_MS);
 }
 
 export async function uninstallSkill(name: string): Promise<ApiActionResponse> {
@@ -879,8 +881,11 @@ export async function clawhubGetSkill(slug: string): Promise<ClawHubSkillDetail>
 }
 
 export async function clawhubInstall(slug: string, version?: string): Promise<ApiActionResponse> {
-  // Use default timeout for install - ClawHub can be slow
-  return post<ApiActionResponse>("/api/clawhub/install", { slug, version: version || "latest" });
+  return post<ApiActionResponse>(
+    "/api/clawhub/install",
+    { slug, version: version || "latest" },
+    LONG_RUNNING_TIMEOUT_MS
+  );
 }
 
 // ── Skillhub API ─────────────────────────────────────
@@ -897,7 +902,7 @@ export async function skillhubBrowse(sort?: string): Promise<ClawHubBrowseRespon
 }
 
 export async function skillhubInstall(slug: string): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>("/api/skillhub/install", { slug });
+  return post<ApiActionResponse>("/api/skillhub/install", { slug }, LONG_RUNNING_TIMEOUT_MS);
 }
 
 export async function skillhubGetSkill(slug: string): Promise<ClawHubSkillDetail> {
@@ -1492,7 +1497,11 @@ export interface HandSessionMessage {
 }
 
 export async function sendHandMessage(instanceId: string, message: string): Promise<HandMessageResponse> {
-  return post<HandMessageResponse>(`/api/hands/instances/${encodeURIComponent(instanceId)}/message`, { message });
+  return post<HandMessageResponse>(
+    `/api/hands/instances/${encodeURIComponent(instanceId)}/message`,
+    { message },
+    LONG_RUNNING_TIMEOUT_MS
+  );
 }
 
 export async function getHandSession(instanceId: string): Promise<{ messages: HandSessionMessage[] }> {
@@ -1736,7 +1745,7 @@ export async function getPlugin(name: string): Promise<PluginItem> {
 }
 
 export async function installPlugin(source: { source: string; name?: string; path?: string; url?: string; branch?: string; github_repo?: string }): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>("/api/plugins/install", source);
+  return post<ApiActionResponse>("/api/plugins/install", source, LONG_RUNNING_TIMEOUT_MS);
 }
 
 export async function uninstallPlugin(name: string): Promise<ApiActionResponse> {
@@ -1748,7 +1757,11 @@ export async function scaffoldPlugin(name: string, description: string): Promise
 }
 
 export async function installPluginDeps(name: string): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>(`/api/plugins/${encodeURIComponent(name)}/install-deps`, {});
+  return post<ApiActionResponse>(
+    `/api/plugins/${encodeURIComponent(name)}/install-deps`,
+    {},
+    LONG_RUNNING_TIMEOUT_MS
+  );
 }
 
 export async function listPluginRegistries(): Promise<{ registries: RegistryEntry[] }> {
