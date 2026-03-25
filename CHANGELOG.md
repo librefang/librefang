@@ -9,10 +9,15 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
 ### Added
 
+- Bidirectional intelligent routing with SQLite persistence (#1538) (@f-liva)
+- Add prompt versioning and model performance dashboard (#1552) (@Chukwuebuka-2003)
 - Version display, mobile optimization, workflow scheduling, and config resilience (#1557) (@houko)
 - Add-memory-tool-memory_list (#1565) (@aimlyo)
 - Webui-chat-output-by-line (#1569) (@aimlyo)
 - Homebrew channels, CLI update_channel, dashboard utility extraction (#1576) (@houko)
+- Block chat when provider API key is not configured (#1592) (@houko)
+- Redesign official website (#1599) (@houko)
+- Deploy & changelog React pages, SDK downloads, OS-switch install (#1603) (@houko)
 
 ### Fixed
 
@@ -31,10 +36,30 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 - Use PAT for tag push to trigger release workflows (#1581) (@houko)
 - Tauri MSI version monotonic increment after CalVer DD change (#1583) (@houko)
 - Remove LibreFang prefix from release title (#1585) (@houko)
+- Restore full changelog for 2026.3.25 (#1586) (@houko)
+- Use multi_thread runtime and fallback git identity (#1588) (@houko)
+- Deploy on RC/beta tags and bind 0.0.0.0 in fly.toml (#1590) (@houko)
+- Complete prompt versioning and A/B experiment feature (#1595) (@houko)
+- Avoid premature dashboard timeout for long-running ops (#1596) (@TechWizard9999)
+- Include bearer auth on direct dashboard fetch calls (#1597) (@TechWizard9999)
+- Init-agent-use-config-default-model (#1598) (@aimlyo)
+- Update install commands domain from librefang.sh to librefang.ai (#1604) (@houko)
+- Replace Pages git integration with GitHub Actions deploy (#1605) (@houko)
+- Correct German and Spanish translation grammar (#1606) (@houko)
+- Use releases proxy to avoid GitHub API 403 (#1609) (@houko)
+- Correct xtask release RC/beta auto-numbering and tag cleanup (#1612) (@houko)
+- Dev.to publish fails due to shell expansion in payload (#1613) (@houko)
+- Use workspace version as floor for RC/beta numbering (#1614) (@houko)
 
 ### Performance
 
 - Run test jobs in parallel with quality checks (#1579) (@houko)
+
+### Documentation
+
+- Fix homepage line break and update feature counts (#1593) (@houko)
+- Add new website launch article (#1610) (@houko)
+- Add new website launch article (#1611) (@houko)
 
 
 ## [2026.3.24] - 2026-03-24
