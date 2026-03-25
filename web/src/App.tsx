@@ -870,9 +870,14 @@ function Downloads(_props: SectionProps) {
                 { cmd: 'cargo add librefang', label: 'Rust' },
                 { cmd: 'go get librefang/sdk', label: 'Go' },
               ].map((pkg) => (
-                <button key={pkg.label} className="bg-surface-200 px-3 py-2.5 text-left hover:bg-surface-300 transition-colors" onClick={() => navigator.clipboard.writeText(pkg.cmd)}>
+                <button key={pkg.label} className="bg-surface-200 px-3 py-2.5 text-left hover:bg-surface-300 transition-colors relative group" onClick={(e) => {
+                  navigator.clipboard.writeText(pkg.cmd)
+                  const el = e.currentTarget.querySelector('.copy-tip') as HTMLElement
+                  if (el) { el.classList.remove('opacity-0'); setTimeout(() => el.classList.add('opacity-0'), 1500) }
+                }}>
                   <div className="text-xs text-gray-500 mb-1">{pkg.label}</div>
                   <code className="text-[11px] text-gray-700 dark:text-gray-300 font-mono">{pkg.cmd}</code>
+                  <span className="copy-tip absolute top-1 right-1 text-[9px] text-cyan-600 dark:text-cyan-400 opacity-0 transition-opacity">Copied!</span>
                 </button>
               ))}
             </div>
