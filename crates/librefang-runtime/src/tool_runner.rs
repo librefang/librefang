@@ -658,16 +658,34 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "agent_spawn".to_string(),
-            description: "Spawn a new agent from a TOML manifest. Returns the new agent's ID and name.".to_string(),
+            description: "Spawn a new agent from settings. Returns the new agent's ID and name.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "manifest_toml": {
+                    "name": {
                         "type": "string",
-                        "description": "The agent manifest in TOML format (must include name, module, [model], and [capabilities])"
+                        "description": "The name of the new agent"
+                    },
+                    "system_prompt": {
+                        "type": "string",
+                        "description": "The system prompt for the new agent"
+                    },
+                    "tools": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "List of tools to enable for the new agent, The full tool name must be used"
+                    },
+                    "network": {
+                        "type": "boolean",
+                        "description": "Whether to enable network access for the new agent (required to be true when web_fetch is in tools)"
+                    },
+                    "shell": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "List of allowed shell commands for the new agent (requires shell_exec in tools, e.g., [\"uv *\", \"git *\", \"cargo *\"])"
                     }
                 },
-                "required": ["manifest_toml"]
+                "required": ["name", "system_prompt"]
             }),
         },
         ToolDefinition {
@@ -1707,12 +1725,61 @@ async fn tool_agent_spawn(
     parent_id: Option<&str>,
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
-    let manifest_toml = input["manifest_toml"]
+
+    // Parse input parameters
+    let name = input["name"].as_str().ok_or("Missing 'name' parameter")?;
+    let system_prompt = input["system_prompt"]
         .as_str()
-        .ok_or("Missing 'manifest_toml' parameter")?;
-    let (id, name) = kh.spawn_agent(manifest_toml, parent_id).await?;
+        .ok_or("Missing 'system_prompt' parameter")?;
+
+    // Parse optional parameters
+    let tools: Vec<String> = input["tools"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let network = input["network"].as_bool().unwrap_or(false);
+
+    let shell: Vec<String> = input["shell"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Build the manifest using a simplified intermediate structure
+    let has_shell = tools.iter().any(|t| t == "shell_exec") && !shell.is_empty();
+
+    let mut capabilities = serde_json::json!({
+        "tools": tools,
+    });
+    if network {
+        capabilities["network"] = serde_json::json!(["*"]);
+    }
+    if has_shell {
+        capabilities["shell"] = serde_json::json!(shell);
+    }
+
+    let manifest_json = serde_json::json!({
+        "name": name,
+        "model": {
+            "system_prompt": system_prompt,
+        },
+        "capabilities": capabilities,
+    });
+
+    let manifest_toml = toml::to_string(&manifest_json)
+        .map_err(|e| format!("Failed to serialize to TOML: {}", e))?;
+
+    let (id, agent_name) = kh.spawn_agent(&manifest_toml, parent_id).await?;
     Ok(format!(
-        "Agent spawned successfully.\n  ID: {id}\n  Name: {name}"
+        "Agent spawned successfully.\n  ID: {id}\n  Name: {agent_name}"
     ))
 }
 
