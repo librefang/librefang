@@ -5,7 +5,7 @@ import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
 import { listAgents, getAgentDetail, spawnAgent, suspendAgent, resumeAgent, 
   listPromptVersions, listExperiments, activatePromptVersion, startExperiment, pauseExperiment, completeExperiment,
-  createPromptVersion, createExperiment, PromptVersion, PromptExperiment, ExperimentVariantMetrics, getExperimentMetrics } from "../api";
+  createPromptVersion, createExperiment, deletePromptVersion, PromptVersion, PromptExperiment, ExperimentVariantMetrics, getExperimentMetrics } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -505,6 +505,16 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["experiments", agentId] })
   });
 
+  const completeExpMutation = useMutation({
+    mutationFn: (expId: string) => completeExperiment(expId),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["experiments", agentId] })
+  });
+
+  const deleteVersionMutation = useMutation({
+    mutationFn: (versionId: string) => deletePromptVersion(versionId),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["prompt-versions", agentId] })
+  });
+
   const versions = versionsQuery.data ?? [];
   const experiments = experimentsQuery.data ?? [];
   const metrics = metricsQuery.data ?? [];
@@ -554,6 +564,11 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
                           {!v.is_active && (
                             <Button variant="secondary" size="sm" onClick={() => activateMutation.mutate(v.id)}>
                               <Check className="w-3 h-3 mr-1" /> Activate
+                            </Button>
+                          )}
+                          {!v.is_active && (
+                            <Button variant="secondary" size="sm" onClick={() => deleteVersionMutation.mutate(v.id)}>
+                              <Trash2 className="w-3 h-3" />
                             </Button>
                           )}
                         </div>
@@ -613,11 +628,16 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
                           <Badge variant={exp.status === "running" ? "success" : exp.status === "completed" ? "default" : "warning"}>{exp.status}</Badge>
                         </div>
                         <div className="flex gap-2">
-                          {exp.status === "draft" && <Button variant="secondary" size="sm" onClick={() => startExpMutation.mutate(exp.id)}><Play className="w-3 h-3" /></Button>}
-                          {exp.status === "running" && <Button variant="secondary" size="sm" onClick={() => pauseExpMutation.mutate(exp.id)}><Pause className="w-3 h-3" /></Button>}
+                          {exp.status === "draft" && <Button variant="secondary" size="sm" onClick={() => startExpMutation.mutate(exp.id)}><Play className="w-3 h-3 mr-1" />Start</Button>}
+                          {exp.status === "running" && <Button variant="secondary" size="sm" onClick={() => pauseExpMutation.mutate(exp.id)}><Pause className="w-3 h-3 mr-1" />Pause</Button>}
+                          {(exp.status === "running" || exp.status === "paused") && (
+                            <Button variant="secondary" size="sm" onClick={() => completeExpMutation.mutate(exp.id)}>
+                              <Check className="w-3 h-3 mr-1" />Complete
+                            </Button>
+                          )}
                           {(exp.status === "running" || exp.status === "paused") && (
                             <Button variant="secondary" size="sm" onClick={() => setSelectedMetrics(exp.id)}>
-                              <BarChart3 className="w-3 h-3" /> Metrics
+                              <BarChart3 className="w-3 h-3 mr-1" />Metrics
                             </Button>
                           )}
                         </div>
@@ -633,9 +653,27 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
                   <h5 className="text-xs font-bold mb-3">Experiment Metrics</h5>
                   <div className="space-y-2">
                     {metrics.map((m: ExperimentVariantMetrics) => (
-                      <div key={m.variant_id} className="flex justify-between text-xs">
-                        <span>{m.variant_name}</span>
-                        <span>{m.success_rate?.toFixed(1)}% success ({m.total_requests} reqs)</span>
+                      <div key={m.variant_id} className="p-3 rounded-lg bg-surface border border-border-subtle">
+                        <div className="flex items-center justify-between mb-2">
+                          <span className="font-bold text-xs">{m.variant_name}</span>
+                          <Badge variant={m.success_rate >= 80 ? "success" : m.success_rate >= 50 ? "warning" : "default"}>
+                            {m.success_rate?.toFixed(1)}%
+                          </Badge>
+                        </div>
+                        <div className="grid grid-cols-3 gap-2 text-[10px] text-text-dim">
+                          <div>
+                            <span className="block text-text-dim/60">Requests</span>
+                            <span className="font-mono">{m.total_requests} ({m.successful_requests} ok / {m.failed_requests} err)</span>
+                          </div>
+                          <div>
+                            <span className="block text-text-dim/60">Avg Latency</span>
+                            <span className="font-mono">{m.avg_latency_ms?.toFixed(0)}ms</span>
+                          </div>
+                          <div>
+                            <span className="block text-text-dim/60">Avg Cost</span>
+                            <span className="font-mono">${m.avg_cost_usd?.toFixed(4)}</span>
+                          </div>
+                        </div>
                       </div>
                     ))}
                   </div>

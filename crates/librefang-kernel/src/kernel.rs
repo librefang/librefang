@@ -2702,7 +2702,9 @@ system_prompt = "You are a helpful assistant."
 
         // Record experiment metrics if running an experiment (kernel has cost info)
         if let Some(ref ctx) = result.experiment_context {
-            let success = !result.response.trim().is_empty();
+            let has_content = !result.response.trim().is_empty();
+            let no_tool_errors = result.iterations > 0;
+            let success = has_content && no_tool_errors;
             let _ = self.record_experiment_request(
                 &ctx.experiment_id.to_string(),
                 &ctx.variant_id.to_string(),
@@ -3349,7 +3351,9 @@ system_prompt = "You are a helpful assistant."
 
                     // Record experiment metrics if running an experiment (kernel has cost info)
                     if let Some(ref ctx) = result.experiment_context {
-                        let success = !result.response.trim().is_empty();
+                        let has_content = !result.response.trim().is_empty();
+                        let no_tool_errors = result.iterations > 0;
+                        let success = has_content && no_tool_errors;
                         let _ = kernel_clone.record_experiment_request(
                             &ctx.experiment_id.to_string(),
                             &ctx.variant_id.to_string(),

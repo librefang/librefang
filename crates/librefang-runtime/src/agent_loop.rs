@@ -439,8 +439,19 @@ pub async fn run_agent_loop(
         if let Ok(Some(exp)) = kernel.get_running_experiment(&agent_id) {
             running_experiment = Some(exp.clone());
             if !exp.variants.is_empty() {
-                // Use session ID hash for consistent variant assignment across requests
-                let variant_index = (session.id.0.as_u128() as usize) % exp.variants.len();
+                // Use traffic_split for weighted variant selection, consistent per session
+                let hash_val = (session.id.0.as_u128() % 100) as u8;
+                let mut cumulative = 0u8;
+                let mut variant_index = 0;
+                for (i, &weight) in exp.traffic_split.iter().enumerate() {
+                    cumulative = cumulative.saturating_add(weight);
+                    if hash_val < cumulative {
+                        variant_index = i;
+                        break;
+                    }
+                }
+                // Clamp to valid range
+                variant_index = variant_index.min(exp.variants.len() - 1);
                 let variant = &exp.variants[variant_index];
                 info!(
                     agent = %manifest.name,
@@ -1888,8 +1899,19 @@ pub async fn run_agent_loop_streaming(
         if let Ok(Some(exp)) = kernel.get_running_experiment(&agent_id) {
             running_experiment = Some(exp.clone());
             if !exp.variants.is_empty() {
-                // Use session ID hash for consistent variant assignment across requests
-                let variant_index = (session.id.0.as_u128() as usize) % exp.variants.len();
+                // Use traffic_split for weighted variant selection, consistent per session
+                let hash_val = (session.id.0.as_u128() % 100) as u8;
+                let mut cumulative = 0u8;
+                let mut variant_index = 0;
+                for (i, &weight) in exp.traffic_split.iter().enumerate() {
+                    cumulative = cumulative.saturating_add(weight);
+                    if hash_val < cumulative {
+                        variant_index = i;
+                        break;
+                    }
+                }
+                // Clamp to valid range
+                variant_index = variant_index.min(exp.variants.len() - 1);
                 let variant = &exp.variants[variant_index];
                 info!(
                     agent = %manifest.name,
