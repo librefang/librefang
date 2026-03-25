@@ -371,7 +371,8 @@ pub struct LibreFangKernel {
     /// concurrent readers from seeing a half-updated configuration (e.g. new provider
     /// URLs but old default model). Read-locked in message hot paths so multiple
     /// requests proceed in parallel but block briefly during a reload.
-    config_reload_lock: std::sync::RwLock<()>,
+    /// Uses `tokio::sync::RwLock` so guards are `Send` and can be held across `.await`.
+    config_reload_lock: tokio::sync::RwLock<()>,
     /// Cache for workspace context, identity files, and skill metadata to avoid
     /// redundant filesystem I/O and registry scans on every message.
     prompt_metadata_cache: PromptMetadataCache,
@@ -1871,7 +1872,7 @@ impl LibreFangKernel {
             context_engine_config,
             self_handle: OnceLock::new(),
             provider_unconfigured_logged: std::sync::atomic::AtomicBool::new(false),
-            config_reload_lock: std::sync::RwLock::new(()),
+            config_reload_lock: tokio::sync::RwLock::new(()),
             prompt_metadata_cache: PromptMetadataCache::new(),
             driver_cache: librefang_runtime::drivers::DriverCache::new(),
         };
@@ -2744,10 +2745,7 @@ system_prompt = "You are a helpful assistant."
         // This is non-blocking under normal operation (many readers proceed in
         // parallel) but will briefly wait if a config hot-reload is in progress,
         // ensuring this request sees a fully-consistent configuration snapshot.
-        let _config_guard = self
-            .config_reload_lock
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
+        let _config_guard = self.config_reload_lock.read().await;
 
         let agent_id = self
             .resolve_assistant_target(agent_id, message, sender_context)
@@ -2926,10 +2924,7 @@ system_prompt = "You are a helpful assistant."
         // Acquire a shared read lock on the config reload barrier so we
         // snapshot a fully-consistent configuration before spawning the
         // streaming task. The guard is dropped before `tokio::spawn`.
-        let _config_guard = self
-            .config_reload_lock
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
+        let _config_guard = self.config_reload_lock.blocking_read();
 
         // Enforce quota before spawning the streaming task
         self.scheduler
@@ -5887,10 +5882,7 @@ system_prompt = "You are a helpful assistant."
 
         // Acquire exclusive lock — blocks new message handlers from reading
         // config-derived state until all actions are applied atomically.
-        let _write_guard = self
-            .config_reload_lock
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
+        let _write_guard = self.config_reload_lock.blocking_write();
 
         for action in &plan.hot_actions {
             match action {
