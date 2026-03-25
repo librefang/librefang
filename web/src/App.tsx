@@ -1153,36 +1153,34 @@ function GitHubStats({ t }: SectionProps) {
           </div>
         </FadeIn>
 
-        {/* Star History Chart */}
+        {/* Star History + Contributors - side by side */}
         <FadeIn delay={200}>
-          <div className="bg-surface-100 border border-black/10 dark:border-white/5 p-6 mb-8">
-            <div className="flex items-center justify-between mb-4">
-              <span className="text-sm font-bold text-slate-900 dark:text-white">{gs.starHistory}</span>
-              <a href="https://star-history.com/#librefang/librefang" target="_blank" rel="noopener noreferrer" className="text-xs text-gray-400 dark:text-gray-600 hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors">View Full</a>
+          <div className="grid md:grid-cols-2 gap-4 mb-12">
+            <div className="bg-surface-100 border border-black/10 dark:border-white/5 p-5">
+              <div className="flex items-center justify-between mb-4">
+                <span className="text-sm font-bold text-slate-900 dark:text-white">{gs.starHistory}</span>
+                <a href="https://star-history.com/#librefang/librefang" target="_blank" rel="noopener noreferrer" className="text-xs text-gray-400 dark:text-gray-600 hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors">View Full</a>
+              </div>
+              <div className="h-32 flex items-end gap-0.5">
+                {starHistory.length >= 3 ? (
+                  Array.from({ length: Math.min(30, chartData.length) }, (_, i) => {
+                    const idx = Math.floor((i / Math.min(30, chartData.length)) * chartData.length)
+                    const value = chartData[idx] || 0
+                    return <div key={i} className="flex-1 bg-cyan-500/30 hover:bg-cyan-500 transition-colors rounded-t min-w-0.5" style={{ height: `${Math.max(4, (value / chartMax) * 100)}%` }} />
+                  })
+                ) : (
+                  <div className="w-full h-full flex flex-col items-center justify-center text-gray-500">
+                    <span className="text-3xl font-black text-cyan-600 dark:text-cyan-400 font-mono">{stars}</span>
+                    <span className="text-xs mt-1">{gs.stars}</span>
+                  </div>
+                )}
+              </div>
             </div>
-            <div className="h-36 flex items-end gap-0.5">
-              {starHistory.length >= 3 ? (
-                Array.from({ length: Math.min(30, chartData.length) }, (_, i) => {
-                  const idx = Math.floor((i / Math.min(30, chartData.length)) * chartData.length)
-                  const value = chartData[idx] || 0
-                  return <div key={i} className="flex-1 bg-cyan-500/30 hover:bg-cyan-500 transition-colors rounded-t min-w-0.5" style={{ height: `${Math.max(4, (value / chartMax) * 100)}%` }} />
-                })
-              ) : (
-                <div className="w-full h-full flex flex-col items-center justify-center text-gray-500">
-                  <span className="text-3xl font-black text-cyan-600 dark:text-cyan-400 font-mono">{stars}</span>
-                  <span className="text-xs mt-1">{gs.stars}</span>
-                </div>
-              )}
-            </div>
+            <a href="https://github.com/librefang/librefang/graphs/contributors" target="_blank" rel="noopener noreferrer" className="block bg-surface-100 border border-black/10 dark:border-white/5 hover:border-cyan-500/20 p-5 transition-all">
+              <div className="text-xs font-mono text-gray-500 uppercase tracking-widest mb-3">Contributors</div>
+              <img src="https://contrib.rocks/image?repo=librefang/librefang&anon=0" alt="Contributors" className="w-full h-auto rounded" loading="lazy" />
+            </a>
           </div>
-        </FadeIn>
-
-        {/* Contributors */}
-        <FadeIn delay={300}>
-          <a href="https://github.com/librefang/librefang/graphs/contributors" target="_blank" rel="noopener noreferrer" className="block bg-surface-100 border border-black/10 dark:border-white/5 hover:border-cyan-500/20 p-4 mb-12 transition-all">
-            <div className="text-xs font-mono text-gray-500 uppercase tracking-widest mb-3">Contributors</div>
-            <img src="https://contrib.rocks/image?repo=librefang/librefang&anon=0" alt="Contributors" className="w-full h-auto rounded" loading="lazy" />
-          </a>
         </FadeIn>
 
         <FadeIn delay={400}>
