@@ -387,67 +387,71 @@ function HandDetailPanel({
         className="bg-surface w-full max-w-lg h-[70vh] rounded-2xl shadow-2xl border border-border-subtle flex flex-col overflow-hidden"
         onClick={(e) => e.stopPropagation()}
       >
-        {/* Header */}
-        <div className="px-5 py-3.5 border-b border-border-subtle shrink-0">
-          <div className="flex items-center gap-3">
-            <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${
-              isActive ? isPaused ? "bg-warning/15 text-warning" : "bg-success/15 text-success" : "bg-brand/10 text-brand"
-            }`}>
-              <Hand className="w-4.5 h-4.5" />
-            </div>
-            <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-2">
-                <h2 className="text-sm font-bold truncate">{hand.name || hand.id}</h2>
-                {isActive ? (
-                  isPaused ? <Badge variant="warning" dot>{t("hands.paused")}</Badge> : <Badge variant="success" dot>{t("hands.active_label")}</Badge>
-                ) : hand.requirements_met ? (
-                  <Badge variant="default">{t("hands.ready")}</Badge>
-                ) : (
-                  <Badge variant="warning">{t("hands.missing_req")}</Badge>
-                )}
-                {hand.category && <span className="text-[10px] text-text-dim/50">{t(`hands.cat_${hand.category}`, { defaultValue: hand.category })}</span>}
-              </div>
-            </div>
-            {/* Actions */}
-            <div className="flex items-center gap-1.5 shrink-0">
+        {/* Title bar */}
+        <div className="flex items-center justify-between px-5 py-3 border-b border-border-subtle shrink-0">
+          <h2 className="text-sm font-bold truncate">{hand.name || hand.id}</h2>
+          <button onClick={onClose} className="p-1 rounded-lg text-text-dim/40 hover:text-text hover:bg-main transition-colors">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        {/* Scrollable body */}
+        <div className="flex-1 overflow-y-auto scrollbar-thin">
+          <div className="px-5 py-4 space-y-4">
+            {/* Status + actions */}
+            <div className="flex items-center gap-2">
+              {isActive ? (
+                isPaused
+                  ? <Badge variant="warning" dot>{t("hands.paused")}</Badge>
+                  : <Badge variant="success" dot>{t("hands.active_label")}</Badge>
+              ) : hand.requirements_met ? (
+                <Badge variant="default">{t("hands.ready")}</Badge>
+              ) : (
+                <Badge variant="warning">{t("hands.missing_req")}</Badge>
+              )}
+              {hand.category && (
+                <Badge variant="info">{t(`hands.cat_${hand.category}`, { defaultValue: hand.category })}</Badge>
+              )}
+              <div className="flex-1" />
               {isActive && instance ? (
-                <>
+                <div className="flex items-center gap-1">
                   <button onClick={() => onChat(instance.instance_id, hand.name || hand.id)} disabled={isPaused}
-                    className="p-1.5 rounded-lg text-brand/70 hover:text-brand hover:bg-brand/10 transition-colors disabled:opacity-30" title={t("chat.title")}>
-                    <MessageCircle className="w-4 h-4" />
+                    className="px-2.5 py-1 rounded-lg text-[11px] font-medium text-brand hover:bg-brand/10 transition-colors disabled:opacity-30">
+                    {t("chat.title")}
                   </button>
                   {isPaused ? (
                     <button onClick={() => onResume(instance.instance_id)} disabled={isPending}
-                      className="p-1.5 rounded-lg text-success/70 hover:text-success hover:bg-success/10 transition-colors disabled:opacity-30" title={t("hands.resume")}>
-                      {isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
+                      className="px-2.5 py-1 rounded-lg text-[11px] font-medium text-success hover:bg-success/10 transition-colors disabled:opacity-30">
+                      {isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : t("hands.resume")}
                     </button>
                   ) : (
                     <button onClick={() => onPause(instance.instance_id)} disabled={isPending}
-                      className="p-1.5 rounded-lg text-text-dim/50 hover:text-warning hover:bg-warning/10 transition-colors disabled:opacity-30" title={t("hands.pause")}>
-                      {isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Pause className="w-4 h-4" />}
+                      className="px-2.5 py-1 rounded-lg text-[11px] font-medium text-text-dim hover:bg-main transition-colors disabled:opacity-30">
+                      {isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : t("hands.pause")}
                     </button>
                   )}
                   <button onClick={() => onDeactivate(instance.instance_id)} disabled={isPending}
-                    className="p-1.5 rounded-lg text-text-dim/50 hover:text-error hover:bg-error/10 transition-colors disabled:opacity-30" title={t("hands.deactivate")}>
-                    {isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <PowerOff className="w-4 h-4" />}
+                    className="px-2.5 py-1 rounded-lg text-[11px] font-medium text-error hover:bg-error/10 transition-colors disabled:opacity-30">
+                    {isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : t("hands.deactivate")}
                   </button>
-                </>
+                </div>
               ) : (
                 <button onClick={() => onActivate(hand.id)} disabled={isPending || !hand.requirements_met}
-                  className="p-1.5 rounded-lg text-brand/70 hover:text-brand hover:bg-brand/10 transition-colors disabled:opacity-30 disabled:cursor-not-allowed" title={t("hands.activate")}>
-                  {isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Power className="w-4 h-4" />}
+                  className="px-3 py-1 rounded-lg text-[11px] font-medium text-white bg-brand hover:bg-brand/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
+                  {isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : t("hands.activate")}
                 </button>
               )}
-              <div className="w-px h-5 bg-border-subtle mx-0.5" />
-              <button onClick={onClose} className="p-1.5 rounded-lg text-text-dim/50 hover:text-text hover:bg-main transition-colors">
-                <X className="w-4 h-4" />
-              </button>
             </div>
+
+            {/* Description */}
+            {hand.description && (
+              <p className="text-[13px] text-text-dim leading-relaxed">{hand.description}</p>
+            )}
+
+            {/* Sections */}
+            <DetailTabs key={hand.id} hand={hand} instance={instance} isActive={isActive} settings={settings} settingsQuery={settingsQuery} stats={stats} statsQuery={statsQuery} />
           </div>
         </div>
-
-        {/* Scrollable content — tabbed layout */}
-        <DetailTabs key={hand.id} hand={hand} instance={instance} isActive={isActive} settings={settings} settingsQuery={settingsQuery} stats={stats} statsQuery={statsQuery} />
       </div>
 
     </div>
@@ -458,14 +462,14 @@ function HandDetailPanel({
 
 function Section({ icon, title, count, children, open, onToggle }: { icon: React.ReactNode; title: string; count?: number; children: React.ReactNode; open: boolean; onToggle: () => void }) {
   return (
-    <div className="border border-border-subtle/50 rounded-xl overflow-hidden">
-      <button onClick={onToggle} className="w-full flex items-center gap-2 px-4 py-2.5 text-left hover:bg-main/50 transition-colors">
+    <div>
+      <button onClick={onToggle} className="w-full flex items-center gap-2 py-2 text-left hover:opacity-80 transition-opacity">
+        <ChevronRight className={`w-3 h-3 text-text-dim/40 transition-transform ${open ? "rotate-90" : ""}`} />
         {icon}
-        <span className="text-xs font-bold flex-1">{title}</span>
-        {count !== undefined && <span className="text-[10px] text-text-dim/40">{count}</span>}
-        <ChevronRight className={`w-3.5 h-3.5 text-text-dim/40 transition-transform ${open ? "rotate-90" : ""}`} />
+        <span className="text-[11px] font-semibold flex-1">{title}</span>
+        {count !== undefined && <span className="text-[10px] text-text-dim/30">{count}</span>}
       </button>
-      {open && <div className="px-4 pb-3 pt-1">{children}</div>}
+      {open && <div className="pl-5 pb-2">{children}</div>}
     </div>
   );
 }
@@ -481,20 +485,7 @@ function DetailTabs({ hand, instance, isActive, settings, settingsQuery, stats, 
   const toggle = (id: string) => setOpenSection(prev => prev === id ? null : id);
 
   return (
-        <div className="flex-1 overflow-y-auto scrollbar-thin">
-          <div className="px-6 py-5 space-y-3">
-            {hand.description && (
-              <p className="text-sm text-text-dim leading-relaxed">{hand.description}</p>
-            )}
-
-            {instance && (
-              <div className="p-3 rounded-xl bg-main/50 border border-border-subtle flex items-center gap-4 text-[10px] text-text-dim/60 font-mono">
-                <span>{truncateId(instance.instance_id, 16)}</span>
-                {instance.agent_name && <span>{instance.agent_name}</span>}
-                {instance.activated_at && <span>{formatDateTime(instance.activated_at)}</span>}
-              </div>
-            )}
-
+        <div className="space-y-2">
             {isActive && (
               <Section icon={<BarChart3 className="w-4 h-4 text-brand/60" />} title={t("hands.metrics")} open={openSection === "metrics"} onToggle={() => toggle("metrics")}>
                 {statsQuery.isLoading ? (
@@ -567,7 +558,6 @@ function DetailTabs({ hand, instance, isActive, settings, settingsQuery, stats, 
                 </div>
               </Section>
             )}
-          </div>
         </div>
   );
 }
@@ -681,8 +671,8 @@ function HandCard({
       className={`group relative flex items-center gap-3 p-3 rounded-xl border cursor-pointer transition-colors ${
         isActive
           ? isPaused
-            ? "border-l-4 border-l-warning border-warning/20 bg-warning/5 hover:border-warning/40"
-            : "border-l-4 border-l-success border-success/20 bg-success/5 hover:border-success/40"
+            ? "border-warning/20 bg-warning/5 hover:border-warning/40"
+            : "border-success/20 bg-success/5 hover:border-success/40"
           : "border-border-subtle hover:border-brand/30 bg-surface"
       }`}
       onClick={() => onDetail(hand)}
@@ -973,6 +963,16 @@ export function HandsPage() {
           </div>
           {/* Row 2: Category pills */}
           <div className="flex items-center gap-1.5 overflow-x-auto scrollbar-thin">
+            <button
+              onClick={() => setSelectedCategory("all")}
+              className={`px-2.5 py-1 rounded-lg text-[10px] font-bold whitespace-nowrap transition-colors ${
+                selectedCategory === "all"
+                  ? "bg-brand/10 text-brand border border-brand/30"
+                  : "text-text-dim/60 hover:text-text-dim hover:bg-main border border-transparent"
+              }`}
+            >
+              {t("providers.filter_all")}
+            </button>
             {categories.map((cat) => (
               <button
                 key={cat}
