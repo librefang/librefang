@@ -100,6 +100,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::warn;
 
+use crate::types::ApiErrorResponse;
 // ---------------------------------------------------------------------------
 // Helpers – parse StepMode / ErrorMode from both flat-string and nested-object
 // formats so the frontend can send either:
@@ -284,10 +285,7 @@ pub async fn create_workflow(
     let steps_json = match req["steps"].as_array() {
         Some(s) => s,
         None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Missing 'steps' array"})),
-            );
+            return ApiErrorResponse::bad_request("Missing 'steps' array").into_json_tuple();
         }
     };
 
@@ -301,12 +299,7 @@ pub async fn create_workflow(
                 name: name.to_string(),
             }
         } else {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(
-                    serde_json::json!({"error": format!("Step '{}' needs 'agent_id' or 'agent_name'", step_name)}),
-                ),
-            );
+            return ApiErrorResponse::bad_request(format!("Step '{}' needs 'agent_id' or 'agent_name'", step_name)).into_json_tuple();
         };
 
         let mode = parse_step_mode(&s["mode"], s);
@@ -426,10 +419,7 @@ pub async fn get_workflow(
     let workflow_id = WorkflowId(match id.parse() {
         Ok(u) => u,
         Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid workflow ID"})),
-            );
+            return ApiErrorResponse::bad_request("Invalid workflow ID").into_json_tuple();
         }
     });
 
@@ -464,10 +454,7 @@ pub async fn get_workflow(
                 "layout": w.layout,
             })),
         ),
-        None => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": format!("Workflow '{}' not found", id)})),
-        ),
+        None => ApiErrorResponse::not_found(format!("Workflow '{}' not found", id)).into_json_tuple(),
     }
 }
 
@@ -492,10 +479,7 @@ pub async fn update_workflow(
     let workflow_id = WorkflowId(match id.parse() {
         Ok(u) => u,
         Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid workflow ID"})),
-            );
+            return ApiErrorResponse::bad_request("Invalid workflow ID").into_json_tuple();
         }
     });
 
@@ -508,10 +492,7 @@ pub async fn update_workflow(
     {
         Some(w) => w,
         None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "Workflow not found"})),
-            );
+            return ApiErrorResponse::not_found("Workflow not found").into_json_tuple();
         }
     };
 
@@ -538,12 +519,7 @@ pub async fn update_workflow(
                     name: aname.to_string(),
                 }
             } else {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(
-                        serde_json::json!({"error": format!("Step '{}' needs 'agent_id' or 'agent_name'", step_name)}),
-                    ),
-                );
+                return ApiErrorResponse::bad_request(format!("Step '{}' needs 'agent_id' or 'agent_name'", step_name)).into_json_tuple();
             };
 
             let mode = parse_step_mode(&s["mode"], s);
@@ -596,10 +572,7 @@ pub async fn update_workflow(
         .update_workflow(workflow_id, updated)
         .await
     {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Workflow not found"})),
-        );
+        return ApiErrorResponse::not_found("Workflow not found").into_json_tuple();
     }
 
     (
@@ -629,10 +602,7 @@ pub async fn delete_workflow(
     let workflow_id = WorkflowId(match id.parse() {
         Ok(u) => u,
         Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid workflow ID"})),
-            );
+            return ApiErrorResponse::bad_request("Invalid workflow ID").into_json_tuple();
         }
     });
 
@@ -647,10 +617,7 @@ pub async fn delete_workflow(
             Json(serde_json::json!({"status": "removed", "workflow_id": id})),
         )
     } else {
-        (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Workflow not found"})),
-        )
+        ApiErrorResponse::not_found("Workflow not found").into_json_tuple()
     }
 }
 
@@ -664,10 +631,7 @@ pub async fn run_workflow(
     let workflow_id = WorkflowId(match id.parse() {
         Ok(u) => u,
         Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid workflow ID"})),
-            );
+            return ApiErrorResponse::bad_request("Invalid workflow ID").into_json_tuple();
         }
     });
 
@@ -684,10 +648,7 @@ pub async fn run_workflow(
         ),
         Err(e) => {
             tracing::warn!("Workflow run failed for {id}: {e}");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": "Workflow execution failed"})),
-            )
+            ApiErrorResponse::internal("Workflow execution failed").into_json_tuple()
         }
     }
 }
@@ -739,10 +700,7 @@ pub async fn save_workflow_as_template(
     let workflow_id = WorkflowId(match id.parse() {
         Ok(u) => u,
         Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid workflow ID"})),
-            );
+            return ApiErrorResponse::bad_request("Invalid workflow ID").into_json_tuple();
         }
     });
 
@@ -754,10 +712,7 @@ pub async fn save_workflow_as_template(
     {
         Some(w) => w,
         None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": format!("Workflow '{}' not found", id)})),
-            );
+            return ApiErrorResponse::not_found(format!("Workflow '{}' not found", id)).into_json_tuple();
         }
     };
 
@@ -818,20 +773,14 @@ pub async fn create_trigger(
     let agent_id_str = match req["agent_id"].as_str() {
         Some(id) => id,
         None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Missing 'agent_id'"})),
-            );
+            return ApiErrorResponse::bad_request("Missing 'agent_id'").into_json_tuple();
         }
     };
 
     let agent_id: AgentId = match agent_id_str.parse() {
         Ok(id) => id,
         Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid agent_id"})),
-            );
+            return ApiErrorResponse::bad_request("Invalid agent_id").into_json_tuple();
         }
     };
 
@@ -840,17 +789,11 @@ pub async fn create_trigger(
             Ok(pat) => pat,
             Err(e) => {
                 tracing::warn!("Invalid trigger pattern: {e}");
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({"error": "Invalid trigger pattern"})),
-                );
+                return ApiErrorResponse::bad_request("Invalid trigger pattern").into_json_tuple();
             }
         },
         None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Missing 'pattern'"})),
-            );
+            return ApiErrorResponse::bad_request("Missing 'pattern'").into_json_tuple();
         }
     };
 
@@ -885,12 +828,7 @@ pub async fn create_trigger(
         }
         Err(e) => {
             tracing::warn!("Trigger registration failed: {e}");
-            (
-                StatusCode::NOT_FOUND,
-                Json(
-                    serde_json::json!({"error": "Trigger registration failed (agent not found?)"}),
-                ),
-            )
+            ApiErrorResponse::not_found("Trigger registration failed (agent not found?)").into_json_tuple()
         }
     }
 }
@@ -945,10 +883,7 @@ pub async fn delete_trigger(
     let trigger_id = TriggerId(match id.parse() {
         Ok(u) => u,
         Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid trigger ID"})),
-            );
+            return ApiErrorResponse::bad_request("Invalid trigger ID").into_json_tuple();
         }
     });
 
@@ -958,10 +893,7 @@ pub async fn delete_trigger(
             Json(serde_json::json!({"status": "removed", "trigger_id": id})),
         )
     } else {
-        (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Trigger not found"})),
-        )
+        ApiErrorResponse::not_found("Trigger not found").into_json_tuple()
     }
 }
 
@@ -979,10 +911,7 @@ pub async fn update_trigger(
     let trigger_id = TriggerId(match id.parse() {
         Ok(u) => u,
         Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid trigger ID"})),
-            );
+            return ApiErrorResponse::bad_request("Invalid trigger ID").into_json_tuple();
         }
     });
 
@@ -995,16 +924,10 @@ pub async fn update_trigger(
                 ),
             )
         } else {
-            (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "Trigger not found"})),
-            )
+            ApiErrorResponse::not_found("Trigger not found").into_json_tuple()
         }
     } else {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Missing 'enabled' field"})),
-        )
+        ApiErrorResponse::bad_request("Missing 'enabled' field").into_json_tuple()
     }
 }
 
@@ -1067,22 +990,13 @@ pub async fn get_schedule(
             if let Some(schedule) = arr.iter().find(|s| s["id"].as_str() == Some(&id)) {
                 (StatusCode::OK, Json(schedule.clone()))
             } else {
-                (
-                    StatusCode::NOT_FOUND,
-                    Json(serde_json::json!({"error": format!("Schedule '{}' not found", id)})),
-                )
+                ApiErrorResponse::not_found(format!("Schedule '{}' not found", id)).into_json_tuple()
             }
         }
-        Ok(_) => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": format!("Schedule '{}' not found", id)})),
-        ),
+        Ok(_) => ApiErrorResponse::not_found(format!("Schedule '{}' not found", id)).into_json_tuple(),
         Err(e) => {
             tracing::warn!("Failed to load schedules: {e}");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": format!("Failed to load schedules: {e}")})),
-            )
+            ApiErrorResponse::internal(format!("Failed to load schedules: {e}")).into_json_tuple()
         }
     }
 }
@@ -1105,32 +1019,21 @@ pub async fn create_schedule(
     let name = match req["name"].as_str() {
         Some(n) if !n.is_empty() => n.to_string(),
         _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Missing 'name' field"})),
-            );
+            return ApiErrorResponse::bad_request("Missing 'name' field").into_json_tuple();
         }
     };
 
     let cron = match req["cron"].as_str() {
         Some(c) if !c.is_empty() => c.to_string(),
         _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Missing 'cron' field"})),
-            );
+            return ApiErrorResponse::bad_request("Missing 'cron' field").into_json_tuple();
         }
     };
 
     // Validate cron expression: must be 5 space-separated fields
     let cron_parts: Vec<&str> = cron.split_whitespace().collect();
     if cron_parts.len() != 5 {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(
-                serde_json::json!({"error": "Invalid cron expression: must have 5 fields (min hour dom mon dow)"}),
-            ),
-        );
+        return ApiErrorResponse::bad_request("Invalid cron expression: must have 5 fields (min hour dom mon dow)").into_json_tuple();
     }
 
     let agent_id_str = req["agent_id"].as_str().unwrap_or("").to_string();
@@ -1138,10 +1041,7 @@ pub async fn create_schedule(
 
     // Must have either agent_id or workflow_id
     if agent_id_str.is_empty() && workflow_id_str.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Must provide either agent_id or workflow_id"})),
-        );
+        return ApiErrorResponse::bad_request("Must provide either agent_id or workflow_id").into_json_tuple();
     }
 
     // Validate agent exists if provided
@@ -1157,10 +1057,7 @@ pub async fn create_schedule(
                 .any(|a| a.name == agent_id_str)
         };
         if !agent_exists {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": format!("Agent not found: {agent_id_str}")})),
-            );
+            return ApiErrorResponse::not_found(format!("Agent not found: {agent_id_str}")).into_json_tuple();
         }
     }
 
@@ -1174,18 +1071,10 @@ pub async fn create_schedule(
                 .await
                 .is_none()
             {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(
-                        serde_json::json!({"error": format!("Workflow not found: {workflow_id_str}")}),
-                    ),
-                );
+                return ApiErrorResponse::not_found(format!("Workflow not found: {workflow_id_str}")).into_json_tuple();
             }
         } else {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid workflow_id format"})),
-            );
+            return ApiErrorResponse::bad_request("Invalid workflow_id format").into_json_tuple();
         }
     }
 
@@ -1223,10 +1112,7 @@ pub async fn create_schedule(
         serde_json::Value::Array(schedules),
     ) {
         tracing::warn!("Failed to save schedule: {e}");
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("Failed to save schedule: {e}")})),
-        );
+        return ApiErrorResponse::internal(format!("Failed to save schedule: {e}")).into_json_tuple();
     }
 
     (StatusCode::CREATED, Json(entry))
@@ -1262,10 +1148,7 @@ pub async fn update_schedule(
             if let Some(cron) = req.get("cron").and_then(|v| v.as_str()) {
                 let cron_parts: Vec<&str> = cron.split_whitespace().collect();
                 if cron_parts.len() != 5 {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(serde_json::json!({"error": "Invalid cron expression"})),
-                    );
+                    return ApiErrorResponse::bad_request("Invalid cron expression").into_json_tuple();
                 }
                 s["cron"] = serde_json::Value::String(cron.to_string());
             }
@@ -1280,10 +1163,7 @@ pub async fn update_schedule(
     }
 
     if !found {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Schedule not found"})),
-        );
+        return ApiErrorResponse::not_found("Schedule not found").into_json_tuple();
     }
 
     if let Err(e) = state.kernel.memory_substrate().structured_set(
@@ -1291,10 +1171,7 @@ pub async fn update_schedule(
         SCHEDULES_KEY,
         serde_json::Value::Array(schedules),
     ) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("Failed to update schedule: {e}")})),
-        );
+        return ApiErrorResponse::internal(format!("Failed to update schedule: {e}")).into_json_tuple();
     }
 
     (
@@ -1323,10 +1200,7 @@ pub async fn delete_schedule(
     schedules.retain(|s| s["id"].as_str() != Some(&id));
 
     if schedules.len() == before {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Schedule not found"})),
-        );
+        return ApiErrorResponse::not_found("Schedule not found").into_json_tuple();
     }
 
     if let Err(e) = state.kernel.memory_substrate().structured_set(
@@ -1334,10 +1208,7 @@ pub async fn delete_schedule(
         SCHEDULES_KEY,
         serde_json::Value::Array(schedules),
     ) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("Failed to delete schedule: {e}")})),
-        );
+        return ApiErrorResponse::internal(format!("Failed to delete schedule: {e}")).into_json_tuple();
     }
 
     (
@@ -1365,10 +1236,7 @@ pub async fn run_schedule(
     let schedule = match schedules.iter().find(|s| s["id"].as_str() == Some(&id)) {
         Some(s) => s.clone(),
         None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "Schedule not found"})),
-            );
+            return ApiErrorResponse::not_found("Schedule not found").into_json_tuple();
         }
     };
 
@@ -1410,10 +1278,7 @@ pub async fn run_schedule(
         let wid = match workflow_id_str.parse::<uuid::Uuid>() {
             Ok(u) => WorkflowId(u),
             Err(_) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({"error": "Invalid workflow_id"})),
-                );
+                return ApiErrorResponse::bad_request("Invalid workflow_id").into_json_tuple();
             }
         };
         let input = if message.is_empty() {
@@ -1466,12 +1331,7 @@ pub async fn run_schedule(
         let target_agent = match target_agent {
             Some(a) => a,
             None => {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(
-                        serde_json::json!({"error": "No target agent found. Specify an agent_id or start an agent first."}),
-                    ),
-                );
+                return ApiErrorResponse::not_found("No target agent found. Specify an agent_id or start an agent first.").into_json_tuple();
             }
         };
 
@@ -1525,10 +1385,7 @@ pub async fn list_cron_jobs(
                 state.kernel.cron().list_jobs(aid)
             }
             Err(_) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({"error": "Invalid agent_id"})),
-                );
+                return ApiErrorResponse::bad_request("Invalid agent_id").into_json_tuple();
             }
         }
     } else {
@@ -1560,10 +1417,7 @@ pub async fn create_cron_job(
                 serde_json::from_str(&result).unwrap_or(serde_json::json!({"id": result}));
             (StatusCode::CREATED, Json(parsed))
         }
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": e})),
-        ),
+        Err(e) => ApiErrorResponse::bad_request(e).into_json_tuple(),
     }
 }
 
@@ -1586,16 +1440,10 @@ pub async fn delete_cron_job(
                         Json(serde_json::json!({"status": "deleted"})),
                     )
                 }
-                Err(e) => (
-                    StatusCode::NOT_FOUND,
-                    Json(serde_json::json!({"error": format!("{e}")})),
-                ),
+                Err(e) => ApiErrorResponse::not_found(format!("{e}")).into_json_tuple(),
             }
         }
-        Err(_) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Invalid job ID"})),
-        ),
+        Err(_) => ApiErrorResponse::bad_request("Invalid job ID").into_json_tuple(),
     }
 }
 
@@ -1617,16 +1465,10 @@ pub async fn update_cron_job(
                         Json(serde_json::to_value(&job).unwrap_or_default()),
                     )
                 }
-                Err(e) => (
-                    StatusCode::NOT_FOUND,
-                    Json(serde_json::json!({"error": format!("{e}")})),
-                ),
+                Err(e) => ApiErrorResponse::not_found(format!("{e}")).into_json_tuple(),
             }
         }
-        Err(_) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Invalid job ID"})),
-        ),
+        Err(_) => ApiErrorResponse::bad_request("Invalid job ID").into_json_tuple(),
     }
 }
 
@@ -1651,16 +1493,10 @@ pub async fn toggle_cron_job(
                         Json(serde_json::json!({"id": id, "enabled": enabled})),
                     )
                 }
-                Err(e) => (
-                    StatusCode::NOT_FOUND,
-                    Json(serde_json::json!({"error": format!("{e}")})),
-                ),
+                Err(e) => ApiErrorResponse::not_found(format!("{e}")).into_json_tuple(),
             }
         }
-        Err(_) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Invalid job ID"})),
-        ),
+        Err(_) => ApiErrorResponse::bad_request("Invalid job ID").into_json_tuple(),
     }
 }
 
@@ -1678,16 +1514,10 @@ pub async fn get_cron_job(
                     StatusCode::OK,
                     Json(serde_json::to_value(&meta).unwrap_or_default()),
                 ),
-                None => (
-                    StatusCode::NOT_FOUND,
-                    Json(serde_json::json!({"error": "Job not found"})),
-                ),
+                None => ApiErrorResponse::not_found("Job not found").into_json_tuple(),
             }
         }
-        Err(_) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Invalid job ID"})),
-        ),
+        Err(_) => ApiErrorResponse::bad_request("Invalid job ID").into_json_tuple(),
     }
 }
 
@@ -1705,16 +1535,10 @@ pub async fn cron_job_status(
                     StatusCode::OK,
                     Json(serde_json::to_value(&meta).unwrap_or_default()),
                 ),
-                None => (
-                    StatusCode::NOT_FOUND,
-                    Json(serde_json::json!({"error": "Job not found"})),
-                ),
+                None => ApiErrorResponse::not_found("Job not found").into_json_tuple(),
             }
         }
-        Err(_) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Invalid job ID"})),
-        ),
+        Err(_) => ApiErrorResponse::bad_request("Invalid job ID").into_json_tuple(),
     }
 }
 
@@ -1805,10 +1629,7 @@ pub async fn get_workflow_template(
             StatusCode::OK,
             Json(serde_json::to_value(&t).unwrap_or_default()),
         ),
-        None => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": format!("Template '{}' not found", id)})),
-        ),
+        None => ApiErrorResponse::not_found(format!("Template '{}' not found", id)).into_json_tuple(),
     }
 }
 
@@ -1833,20 +1654,14 @@ pub async fn instantiate_template(
     let template = match state.kernel.templates().get(&id).await {
         Some(t) => t,
         None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": format!("Template '{}' not found", id)})),
-            );
+            return ApiErrorResponse::not_found(format!("Template '{}' not found", id)).into_json_tuple();
         }
     };
 
     let workflow = match state.kernel.templates().instantiate(&template, &params) {
         Ok(w) => w,
         Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": e})),
-            );
+            return ApiErrorResponse::bad_request(e).into_json_tuple();
         }
     };
 

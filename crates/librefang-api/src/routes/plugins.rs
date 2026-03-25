@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use super::AppState;
 
+use crate::types::ApiErrorResponse;
 /// Build routes for the context engine plugin domain.
 pub fn router() -> axum::Router<Arc<AppState>> {
     axum::Router::new()
@@ -93,7 +94,7 @@ pub async fn get_plugin(Path(name): Path<String>) -> impl IntoResponse {
                 "requirements": info.manifest.requirements,
             })),
         ),
-        Err(e) => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": e}))),
+        Err(e) => ApiErrorResponse::not_found(e).into_json_tuple(),
     }
 }
 
@@ -122,10 +123,7 @@ pub async fn install_plugin(Json(body): Json<serde_json::Value>) -> impl IntoRes
             let name = match body.get("name").and_then(|n| n.as_str()) {
                 Some(n) => n.to_string(),
                 None => {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(serde_json::json!({"error": "Missing 'name' for registry install"})),
-                    )
+                    return ApiErrorResponse::bad_request("Missing 'name' for registry install").into_json_tuple()
                 }
             };
             let github_repo = body
@@ -138,10 +136,7 @@ pub async fn install_plugin(Json(body): Json<serde_json::Value>) -> impl IntoRes
             let path = match body.get("path").and_then(|p| p.as_str()) {
                 Some(p) => std::path::PathBuf::from(p),
                 None => {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(serde_json::json!({"error": "Missing 'path' for local install"})),
-                    )
+                    return ApiErrorResponse::bad_request("Missing 'path' for local install").into_json_tuple()
                 }
             };
             librefang_runtime::plugin_manager::PluginSource::Local { path }
@@ -150,10 +145,7 @@ pub async fn install_plugin(Json(body): Json<serde_json::Value>) -> impl IntoRes
             let url = match body.get("url").and_then(|u| u.as_str()) {
                 Some(u) => u.to_string(),
                 None => {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(serde_json::json!({"error": "Missing 'url' for git install"})),
-                    )
+                    return ApiErrorResponse::bad_request("Missing 'url' for git install").into_json_tuple()
                 }
             };
             let branch = body
@@ -163,12 +155,7 @@ pub async fn install_plugin(Json(body): Json<serde_json::Value>) -> impl IntoRes
             librefang_runtime::plugin_manager::PluginSource::Git { url, branch }
         }
         _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(
-                    serde_json::json!({"error": "Invalid source. Use 'registry', 'local', or 'git'"}),
-                ),
-            )
+            return ApiErrorResponse::bad_request("Invalid source. Use 'registry', 'local', or 'git'").into_json_tuple()
         }
     };
 
@@ -211,10 +198,7 @@ pub async fn uninstall_plugin(Json(body): Json<serde_json::Value>) -> impl IntoR
     let name = match body.get("name").and_then(|n| n.as_str()) {
         Some(n) => n,
         None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Missing 'name'"})),
-            )
+            return ApiErrorResponse::bad_request("Missing 'name'").into_json_tuple()
         }
     };
 
@@ -251,10 +235,7 @@ pub async fn scaffold_plugin(Json(body): Json<serde_json::Value>) -> impl IntoRe
     let name = match body.get("name").and_then(|n| n.as_str()) {
         Some(n) => n,
         None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Missing 'name'"})),
-            )
+            return ApiErrorResponse::bad_request("Missing 'name'").into_json_tuple()
         }
     };
     let description = body
@@ -299,10 +280,7 @@ pub async fn install_plugin_deps(Path(name): Path<String>) -> impl IntoResponse 
             StatusCode::OK,
             Json(serde_json::json!({"success": true, "output": output})),
         ),
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": e})),
-        ),
+        Err(e) => ApiErrorResponse::bad_request(e).into_json_tuple(),
     }
 }
 
