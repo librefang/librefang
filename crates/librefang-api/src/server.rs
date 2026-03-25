@@ -90,6 +90,10 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
             "/auth/introspect",
             axum::routing::post(crate::oauth::auth_introspect),
         )
+        .route(
+            "/auth/refresh",
+            axum::routing::post(crate::oauth::auth_refresh),
+        )
 }
 
 /// Resolve a dashboard credential from: 1) env var, 2) vault:KEY syntax, 3) literal value.

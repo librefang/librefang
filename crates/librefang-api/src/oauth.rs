@@ -308,12 +308,56 @@ struct TokenResponse {
     access_token: String,
     #[serde(default)]
     id_token: Option<String>,
-    #[serde(default, rename = "token_type")]
-    _token_type: Option<String>,
+    #[serde(default)]
+    token_type: Option<String>,
     #[serde(default)]
     expires_in: Option<u64>,
-    #[serde(default, rename = "refresh_token")]
-    _refresh_token: Option<String>,
+    #[serde(default)]
+    refresh_token: Option<String>,
+}
+
+// ── Token Store ─────────────────────────────────────────────────────────
+
+/// Stored token entry for a user session, keyed by user subject (`sub`).
+#[derive(Debug, Clone)]
+struct StoredTokens {
+    /// The OAuth2 access token.
+    access_token: String,
+    /// Optional refresh token for obtaining new access tokens.
+    refresh_token: Option<String>,
+    /// When the access token expires (absolute time).
+    expires_at: Option<std::time::Instant>,
+    /// Provider ID that issued these tokens.
+    provider_id: String,
+}
+
+/// In-memory token store. Maps user `sub` to their stored tokens.
+#[derive(Default)]
+pub struct TokenStore {
+    inner: RwLock<HashMap<String, StoredTokens>>,
+}
+
+/// Global token store instance.
+static TOKEN_STORE: std::sync::LazyLock<TokenStore> = std::sync::LazyLock::new(TokenStore::default);
+
+impl TokenStore {
+    /// Store tokens for a user.
+    async fn store(&self, sub: &str, tokens: StoredTokens) {
+        let mut write = self.inner.write().await;
+        write.insert(sub.to_string(), tokens);
+    }
+
+    /// Retrieve stored tokens for a user.
+    async fn get(&self, sub: &str) -> Option<StoredTokens> {
+        let read = self.inner.read().await;
+        read.get(sub).cloned()
+    }
+
+    /// Remove stored tokens for a user (e.g., on logout).
+    async fn remove(&self, sub: &str) {
+        let mut write = self.inner.write().await;
+        write.remove(sub);
+    }
 }
 
 // ── Route: GET /api/auth/providers ──────────────────────────────────────
@@ -485,6 +529,10 @@ struct CallbackResponse {
     provider: String,
     /// User info extracted from the ID token.
     user: CallbackUser,
+    /// Refresh token (if the provider issued one). Clients should store this
+    /// and use `POST /api/auth/refresh` when the access token expires.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    refresh_token: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -766,6 +814,21 @@ async fn handle_code_exchange(
     );
 
     let expires_in = token_resp.expires_in.unwrap_or(ext_auth.session_ttl_secs);
+
+    // Store tokens so we can refresh later when the access token expires.
+    let expires_at = Some(std::time::Instant::now() + std::time::Duration::from_secs(expires_in));
+    TOKEN_STORE
+        .store(
+            &claims.sub,
+            StoredTokens {
+                access_token: token_resp.access_token.clone(),
+                refresh_token: token_resp.refresh_token.clone(),
+                expires_at,
+                provider_id: provider.id.clone(),
+            },
+        )
+        .await;
+
     (
         StatusCode::OK,
         Json(CallbackResponse {
@@ -779,6 +842,7 @@ async fn handle_code_exchange(
                 name: claims.name,
                 picture: claims.picture,
             },
+            refresh_token: token_resp.refresh_token,
         }),
     )
         .into_response()
@@ -932,6 +996,123 @@ pub async fn auth_introspect(
         "active": false,
         "error": "Token could not be validated against any configured provider"
     }))
+}
+
+// ── Route: POST /api/auth/refresh ────────────────────────────────────────
+
+/// Request body for the refresh token endpoint.
+#[derive(Deserialize, utoipa::ToSchema)]
+pub struct RefreshRequest {
+    /// The refresh token obtained from the initial login callback.
+    pub refresh_token: String,
+    /// Optional provider hint (if the user logged in with a specific provider).
+    #[serde(default)]
+    pub provider: Option<String>,
+}
+
+/// Response from the refresh token endpoint.
+#[derive(Serialize)]
+struct RefreshResponse {
+    /// New access token.
+    token: String,
+    /// Token type (always "Bearer").
+    token_type: String,
+    /// Token lifetime in seconds.
+    expires_in: u64,
+    /// New refresh token (if the provider rotated it).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    refresh_token: Option<String>,
+}
+
+/// POST /api/auth/refresh — Exchange a refresh token for a new access token.
+///
+/// When the access token expires, clients can call this endpoint with the
+/// refresh token received during login instead of forcing a full re-authorization.
+#[utoipa::path(post, path = "/api/auth/refresh", tag = "auth", request_body = RefreshRequest, responses((status = 200, description = "New access token", body = serde_json::Value), (status = 400, description = "Missing or invalid refresh token"), (status = 502, description = "Token refresh failed")))]
+pub async fn auth_refresh(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<RefreshRequest>,
+) -> impl IntoResponse {
+    let ext_auth = &state.kernel.config_ref().external_auth;
+    if !ext_auth.enabled {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "External authentication is not configured"})),
+        )
+            .into_response();
+    }
+
+    let providers = resolve_providers(ext_auth).await;
+
+    // Find the provider to use for the refresh.
+    let provider = if let Some(ref pid) = req.provider {
+        providers.iter().find(|p| p.id == *pid)
+    } else if providers.len() == 1 {
+        providers.first()
+    } else {
+        // Try to find the provider from the token store by scanning for a matching refresh token.
+        None
+    };
+
+    let Some(provider) = provider else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "Multiple providers configured; please specify 'provider' in the request"
+            })),
+        )
+            .into_response();
+    };
+
+    // Resolve client secret.
+    let client_secret = std::env::var(&provider.client_secret_env).unwrap_or_default();
+    if client_secret.is_empty() {
+        warn!(
+            env_var = %provider.client_secret_env,
+            provider = %provider.id,
+            "OAuth client secret env var is empty"
+        );
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "OAuth client secret not configured"})),
+        )
+            .into_response();
+    }
+
+    // Exchange the refresh token for new tokens.
+    let token_resp = match exchange_refresh_token(
+        &provider.token_url,
+        &req.refresh_token,
+        &provider.client_id,
+        &client_secret,
+    )
+    .await
+    {
+        Ok(t) => t,
+        Err(e) => {
+            debug!("Refresh token exchange failed: {e}");
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({"error": "Token refresh failed"})),
+            )
+                .into_response();
+        }
+    };
+
+    let expires_in = token_resp.expires_in.unwrap_or(ext_auth.session_ttl_secs);
+
+    info!(provider = %provider.id, "Token refresh successful");
+
+    (
+        StatusCode::OK,
+        Json(RefreshResponse {
+            token: token_resp.access_token,
+            token_type: "Bearer".to_string(),
+            expires_in,
+            refresh_token: token_resp.refresh_token,
+        }),
+    )
+        .into_response()
 }
 
 // ── Auth Middleware ──────────────────────────────────────────────────────
@@ -1226,6 +1407,40 @@ async fn exchange_code(
     resp.json::<TokenResponse>()
         .await
         .map_err(|e| format!("Failed to parse token response: {e}"))
+}
+
+/// Exchange a refresh token for new access/refresh tokens at the token endpoint.
+async fn exchange_refresh_token(
+    token_endpoint: &str,
+    refresh_token: &str,
+    client_id: &str,
+    client_secret: &str,
+) -> Result<TokenResponse, String> {
+    let client = librefang_runtime::http_client::new_client();
+    let resp = client
+        .post(token_endpoint)
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh_token),
+            ("client_id", client_id),
+            ("client_secret", client_secret),
+        ])
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .map_err(|e| format!("Refresh token request failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status().as_u16();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!(
+            "Token endpoint returned HTTP {status} for refresh: {body}"
+        ));
+    }
+
+    resp.json::<TokenResponse>()
+        .await
+        .map_err(|e| format!("Failed to parse refresh token response: {e}"))
 }
 
 /// Fetch JWKS from a URI using the global cache.
