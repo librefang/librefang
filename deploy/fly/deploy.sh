@@ -104,14 +104,14 @@ tui_multiselect() {
     IFS= read -rsn1 key < /dev/tty
 
     if [[ "$key" == $'\x1b' ]]; then
-      read -rsn1 -t 0.01 k2 < /dev/tty
-      read -rsn1 -t 0.01 k3 < /dev/tty
+      read -rsn1 -t 0.1 k2 < /dev/tty || true
+      read -rsn1 -t 0.1 k3 < /dev/tty || true
       key="${key}${k2}${k3}"
     fi
 
     case "$key" in
-      $'\x1b[A' | k)  ((cursor > 0)) && ((cursor--)) ;;
-      $'\x1b[B' | j)  ((cursor < count - 1)) && ((cursor++)) ;;
+      $'\x1b[A' | k)  [[ $cursor -gt 0 ]] && ((cursor--)) || true ;;
+      $'\x1b[B' | j)  [[ $cursor -lt $((count - 1)) ]] && ((cursor++)) || true ;;
       " ")
         if [ "${selected[$cursor]}" -eq 0 ]; then
           selected[$cursor]=1
