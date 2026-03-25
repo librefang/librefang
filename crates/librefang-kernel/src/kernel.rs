@@ -367,6 +367,11 @@ pub struct LibreFangKernel {
     self_handle: OnceLock<Weak<LibreFangKernel>>,
     /// Whether we've already logged the "no provider" audit entry (prevents spam).
     pub(crate) provider_unconfigured_logged: std::sync::atomic::AtomicBool,
+    /// Config reload barrier — write-locked during `apply_hot_actions` to prevent
+    /// concurrent readers from seeing a half-updated configuration (e.g. new provider
+    /// URLs but old default model). Read-locked in message hot paths so multiple
+    /// requests proceed in parallel but block briefly during a reload.
+    config_reload_lock: std::sync::RwLock<()>,
     /// Cache for workspace context, identity files, and skill metadata to avoid
     /// redundant filesystem I/O and registry scans on every message.
     prompt_metadata_cache: PromptMetadataCache,
@@ -1866,6 +1871,7 @@ impl LibreFangKernel {
             context_engine_config,
             self_handle: OnceLock::new(),
             provider_unconfigured_logged: std::sync::atomic::AtomicBool::new(false),
+            config_reload_lock: std::sync::RwLock::new(()),
             prompt_metadata_cache: PromptMetadataCache::new(),
             driver_cache: librefang_runtime::drivers::DriverCache::new(),
         };
@@ -2734,6 +2740,15 @@ system_prompt = "You are a helpful assistant."
         content_blocks: Option<Vec<librefang_types::message::ContentBlock>>,
         sender_context: Option<&SenderContext>,
     ) -> KernelResult<AgentLoopResult> {
+        // Acquire a shared read lock on the config reload barrier.
+        // This is non-blocking under normal operation (many readers proceed in
+        // parallel) but will briefly wait if a config hot-reload is in progress,
+        // ensuring this request sees a fully-consistent configuration snapshot.
+        let _config_guard = self
+            .config_reload_lock
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+
         let agent_id = self
             .resolve_assistant_target(agent_id, message, sender_context)
             .await?;
@@ -2908,6 +2923,14 @@ system_prompt = "You are a helpful assistant."
         tokio::sync::mpsc::Receiver<StreamEvent>,
         tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
     )> {
+        // Acquire a shared read lock on the config reload barrier so we
+        // snapshot a fully-consistent configuration before spawning the
+        // streaming task. The guard is dropped before `tokio::spawn`.
+        let _config_guard = self
+            .config_reload_lock
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+
         // Enforce quota before spawning the streaming task
         self.scheduler
             .check_quota(agent_id)
@@ -3197,6 +3220,10 @@ system_prompt = "You are a helpful assistant."
             message.to_string()
         };
         let kernel_clone = Arc::clone(self);
+
+        // All config-derived values have been snapshotted above; release the
+        // reload barrier before spawning the async task.
+        drop(_config_guard);
 
         let handle = tokio::spawn(async move {
             // Auto-compact if the session is large before running the loop
@@ -5847,12 +5874,23 @@ system_prompt = "You are a helpful assistant."
     }
 
     /// Apply hot-reload actions to the running kernel.
+    ///
+    /// Holds a write lock on `config_reload_lock` for the entire duration so
+    /// that concurrent message handlers (which hold a read lock) cannot observe
+    /// a half-updated configuration.
     fn apply_hot_actions(
         &self,
         plan: &crate::config_reload::ReloadPlan,
         new_config: &librefang_types::config::KernelConfig,
     ) {
         use crate::config_reload::HotAction;
+
+        // Acquire exclusive lock — blocks new message handlers from reading
+        // config-derived state until all actions are applied atomically.
+        let _write_guard = self
+            .config_reload_lock
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
 
         for action in &plan.hot_actions {
             match action {
