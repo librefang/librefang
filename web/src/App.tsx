@@ -781,11 +781,10 @@ function Downloads(_props: SectionProps) {
   const { data: release, isLoading } = useQuery({
     queryKey: ['latestRelease'],
     queryFn: async () => {
-      const res = await fetch('https://api.github.com/repos/librefang/librefang/releases/latest', {
-        headers: { Accept: 'application/vnd.github.v3+json' },
-      })
+      const res = await fetch('https://stats.librefang.ai/api/releases')
       if (!res.ok) throw new Error('Failed')
-      return res.json() as Promise<{ tag_name: string; assets: ReleaseAsset[]; html_url: string }>
+      const releases = await res.json() as { tag_name: string; assets: ReleaseAsset[]; html_url: string }[]
+      return releases[0]
     },
     staleTime: 1000 * 60 * 60,
     retry: 2,

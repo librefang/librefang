@@ -174,12 +174,11 @@ export default function DeployPage() {
     }
   }, [])
 
-  // Fetch latest version from GitHub
+  // Fetch latest version from releases proxy
   useEffect(() => {
-    fetch('https://api.github.com/repos/librefang/librefang/releases/latest', {
-      headers: { Accept: 'application/vnd.github.v3+json' },
-    })
-      .then(r => r.ok ? r.json() as Promise<{ tag_name: string }> : null)
+    fetch('https://stats.librefang.ai/api/releases')
+      .then(r => r.ok ? r.json() as Promise<{ tag_name: string }[]> : null)
+      .then(data => data?.[0] ?? null)
       .then(data => { if (data?.tag_name) setVersion(data.tag_name) })
       .catch(() => {})
   }, [])
