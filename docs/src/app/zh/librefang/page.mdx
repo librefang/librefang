@@ -251,22 +251,44 @@ librefang hand status researcher
 
 ---
 
-## 10 个 Agent 模板
+## 32 个 Agent 模板
 
-LibreFang TUI 内置 10 个 Agent 模板（默认预装 assistant，其他可从 dashboard 安装）：
+来自 [librefang-registry](https://github.com/librefang/librefang-registry/tree/main/agents)，默认预装 assistant，其他可从 dashboard 安装：
 
-| Agent | 用途 | Provider |
-|-------|------|----------|
-| General Assistant | 通用 AI 助手 | Anthropic |
-| Code Helper | 代码审查和调试 | Anthropic |
-| Researcher | 深度研究和分析 | Anthropic |
-| Writer | 创意和技术写作 | Anthropic |
-| Data Analyst | 数据分析、可视化和 SQL | Gemini |
-| DevOps Engineer | 基础设施、CI/CD 和部署 | Groq |
-| Customer Support | 客户服务 | Groq |
-| Tutor | 学习辅导 | Gemini |
-| API Designer | REST/GraphQL API 设计和文档 | Anthropic |
-| Meeting Notes | 会议记录、摘要和行动项 | Groq |
+| Agent | 用途 |
+|-------|------|
+| assistant | 通用助手，日常问答和对话 |
+| hello-world | 入门示例，读取文件、搜索网页 |
+| coder | 代码读写和分析 |
+| code-reviewer | PR 审查、问题识别、改进建议 |
+| debugger | Bug 追踪、堆栈分析、根因定位 |
+| test-engineer | 测试策略设计、测试编写、正确性验证 |
+| architect | 系统架构设计、技术选型评估 |
+| researcher | 网页检索和信息综合 |
+| academic-researcher | 学术论文搜索、文献综述 |
+| writer | 文档和技术写作 |
+| doc-writer | 技术文档、README、API 文档、教程 |
+| analyst | 数据处理、洞察分析、报告生成 |
+| data-scientist | 数据集分析、模型构建、可视化 |
+| ops | 系统监控、诊断、部署管理 |
+| devops-lead | CI/CD、基础设施、部署、事件响应 |
+| security-auditor | 代码漏洞审查、配置检查、威胁建模 |
+| planner | 项目规划、任务拆解、风险评估 |
+| orchestrator | 元 Agent，分解复杂任务并委派给专家 Agent |
+| translator | 多语言翻译和本地化 |
+| tutor | 教学辅导和知识讲解 |
+| customer-support | 工单处理、问题解决、客户沟通 |
+| sales-assistant | CRM 更新、外联、销售管道管理 |
+| recruiter | 简历筛选、候选人联络、招聘管道 |
+| email-assistant | 邮件分类、草拟、日程管理 |
+| meeting-assistant | 会议记录、行动项、后续跟踪 |
+| social-media | 社交媒体内容创作和发布 |
+| personal-finance | 预算追踪、支出分析、理财规划 |
+| legal-assistant | 合同审查、法律研究、合规检查 |
+| health-tracker | 健康指标、用药提醒、健身目标 |
+| travel-planner | 行程规划、预订调研、预算估算 |
+| home-automation | 智能家居控制、自动化规则 |
+| recipe-assistant | 菜谱推荐、膳食计划、食材替换 |
 
 ---
 
