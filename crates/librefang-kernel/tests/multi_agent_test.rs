@@ -178,7 +178,7 @@ fn test_deterministic_id_stable_across_reactivation() {
     let inst1 = kernel.activate_hand("test-clip", HashMap::new()).unwrap();
     let id1 = inst1.agent_id().unwrap();
 
-    // Agent ID is deterministic within the same activation instance.
+    // Agent ID uses legacy format for single-instance activation.
     let expected1 = AgentId::from_hand_agent("test-clip", "main", None);
     assert_eq!(
         id1, expected1,
@@ -196,6 +196,7 @@ fn test_deterministic_id_stable_across_reactivation() {
     let inst2 = kernel.activate_hand("test-clip", HashMap::new()).unwrap();
     let id2 = inst2.agent_id().unwrap();
 
+    // Re-activation also uses legacy format — same ID as first activation.
     let expected2 = AgentId::from_hand_agent("test-clip", "main", None);
     assert_eq!(
         id2, expected2,

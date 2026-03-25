@@ -28,7 +28,7 @@ pub struct UsageTracker {
     pub input_tokens: u64,
     /// Output tokens consumed within the current hourly window.
     pub output_tokens: u64,
-    /// Total tool calls made within the current hourly window (reset by `reset_if_expired` and `reset_usage`).
+    /// Total tool calls made (lifetime counter for snapshot).
     pub tool_calls: u64,
     /// Total LLM API calls made within the current hourly window.
     pub llm_calls: u64,
@@ -45,10 +45,6 @@ pub struct UsageTracker {
 const ONE_MINUTE: Duration = Duration::from_secs(60);
 /// One hour as a Duration constant.
 const ONE_HOUR: Duration = Duration::from_secs(3600);
-/// Fraction of the hourly token budget that may be consumed in any single minute.
-/// A value of 5 means at most 1/5 of the hourly quota is allowed per minute,
-/// preventing agents from burning their entire budget in a burst.
-const BURST_FRACTION_DENOMINATOR: u64 = 5;
 
 impl Default for UsageTracker {
     fn default() -> Self {
@@ -185,9 +181,9 @@ impl AgentScheduler {
             )));
         }
 
-        // --- Burst limit: no more than 1/BURST_FRACTION_DENOMINATOR of the hourly token budget in any single minute ---
+        // --- Burst limit: no more than 1/5 of the hourly token budget in any single minute ---
         if quota.max_llm_tokens_per_hour > 0 {
-            let burst_cap = quota.max_llm_tokens_per_hour / BURST_FRACTION_DENOMINATOR;
+            let burst_cap = quota.max_llm_tokens_per_hour / 5;
             let tokens_last_min = tracker.tokens_in_last_minute();
             if burst_cap > 0 && tokens_last_min > burst_cap {
                 return Err(LibreFangError::QuotaExceeded(format!(

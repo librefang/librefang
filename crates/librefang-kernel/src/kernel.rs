@@ -3010,10 +3010,8 @@ system_prompt = "You are a helpful assistant."
         tokio::sync::mpsc::Receiver<StreamEvent>,
         tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
     )> {
-        // Try to acquire a shared read lock on the config reload barrier.
-        // Use try_read to avoid blocking the runtime — this is a sync fn.
-        // If a reload is in progress we proceed without the guard; the
-        // streaming task will pick up the latest config values when it runs.
+        // Try to acquire config reload barrier (non-blocking — this is a sync fn).
+        // If a reload is in progress we proceed without the guard.
         let _config_guard = self.config_reload_lock.try_read();
 
         // Enforce quota before spawning the streaming task
