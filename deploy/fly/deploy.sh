@@ -95,8 +95,8 @@ tui_multiselect() {
   }
 
   echo "" > /dev/tty
-  info "Select LLM providers to configure (press Enter to skip):" > /dev/tty
-  printf "\033[2m  ↑/↓ move  ·  space toggle  ·  enter confirm\033[0m\n" > /dev/tty
+  info "Select LLM providers to configure:" > /dev/tty
+  printf "\033[2m  ↑/↓ move · space multi-select · enter select & confirm · esc/q skip\033[0m\n" > /dev/tty
   echo "" > /dev/tty
   draw_menu
 
@@ -112,14 +112,27 @@ tui_multiselect() {
     case "$key" in
       $'\x1b[A' | k)  [[ $cursor -gt 0 ]] && ((cursor--)) || true ;;
       $'\x1b[B' | j)  [[ $cursor -lt $((count - 1)) ]] && ((cursor++)) || true ;;
-      " ")
+      " ")  # Space — toggle current item (for multi-select)
         if [ "${selected[$cursor]}" -eq 0 ]; then
           selected[$cursor]=1
         else
           selected[$cursor]=0
         fi
         ;;
-      "")  break ;;
+      "")  # Enter — select current item (if nothing toggled) & confirm
+        local has_selection=0
+        for ((i = 0; i < count; i++)); do
+          if [ "${selected[$i]}" -eq 1 ]; then has_selection=1; break; fi
+        done
+        if [ "$has_selection" -eq 0 ]; then
+          selected[$cursor]=1
+        fi
+        break
+        ;;
+      q | $'\x1b')  # q or Esc — skip without selecting anything
+        for ((i = 0; i < count; i++)); do selected[$i]=0; done
+        break
+        ;;
     esac
 
     printf "\033[%dA" "$count" > /dev/tty
