@@ -293,6 +293,29 @@ pub struct AgentLoopResult {
     /// Distinct from `silent` (agent chose not to reply) — this means the system
     /// couldn't run the agent at all.
     pub provider_not_configured: bool,
+    /// Experiment tracking: when an A/B experiment is running, this holds the variant used.
+    pub experiment_context: Option<ExperimentContext>,
+    /// Latency in milliseconds for this request.
+    pub latency_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExperimentContext {
+    pub experiment_id: uuid::Uuid,
+    pub variant_id: uuid::Uuid,
+    pub variant_name: String,
+    pub request_start: std::time::Instant,
+}
+
+impl Default for ExperimentContext {
+    fn default() -> Self {
+        Self {
+            experiment_id: uuid::Uuid::default(),
+            variant_id: uuid::Uuid::default(),
+            variant_name: String::new(),
+            request_start: std::time::Instant::now(),
+        }
+    }
 }
 
 /// Check if stable_prefix_mode is enabled via manifest metadata.
@@ -399,15 +422,52 @@ pub async fn run_agent_loop(
 ) -> LibreFangResult<AgentLoopResult> {
     info!(agent = %manifest.name, "Starting agent loop");
 
-    // Skip agent loop if no LLM provider is configured (StubDriver).
-    // Return Ok (not Err) — this is a valid state, not a runtime error.
+    // Early return if driver is not configured
     if !driver.is_configured() {
-        info!(agent = %manifest.name, "Skipping agent loop — no LLM provider configured");
         return Ok(AgentLoopResult {
             silent: true,
             provider_not_configured: true,
             ..Default::default()
         });
+    }
+
+    // Check for running A/B experiment and select variant
+    let mut experiment_context: Option<ExperimentContext> = None;
+    let mut running_experiment: Option<librefang_types::agent::PromptExperiment> = None;
+    if let Some(kernel) = kernel.as_ref() {
+        let agent_id = session.agent_id.to_string();
+        if let Ok(Some(exp)) = kernel.get_running_experiment(&agent_id) {
+            running_experiment = Some(exp.clone());
+            if !exp.variants.is_empty() {
+                // Use traffic_split for weighted variant selection, consistent per session
+                let hash_val = (session.id.0.as_u128() % 100) as u8;
+                let mut cumulative = 0u8;
+                let mut variant_index = 0;
+                for (i, &weight) in exp.traffic_split.iter().enumerate() {
+                    cumulative = cumulative.saturating_add(weight);
+                    if hash_val < cumulative {
+                        variant_index = i;
+                        break;
+                    }
+                }
+                // Clamp to valid range
+                variant_index = variant_index.min(exp.variants.len() - 1);
+                let variant = &exp.variants[variant_index];
+                info!(
+                    agent = %manifest.name,
+                    experiment = %exp.name,
+                    variant = %variant.name,
+                    index = variant_index,
+                    "A/B experiment active - using variant"
+                );
+                experiment_context = Some(ExperimentContext {
+                    experiment_id: exp.id,
+                    variant_id: variant.id,
+                    variant_name: variant.name.clone(),
+                    request_start: std::time::Instant::now(),
+                });
+            }
+        }
     }
 
     // Extract hand-allowed env vars from manifest metadata (set by kernel for hand settings)
@@ -537,6 +597,34 @@ pub async fn run_agent_loop(
     // In stable_prefix_mode, memories are injected as a context message instead
     // (see below) to keep the system prompt prefix stable for caching.
     let mut system_prompt = manifest.model.system_prompt.clone();
+
+    // Auto-track the agent's BASE prompt version (before experiment replacement)
+    if let Some(kernel) = kernel.as_ref() {
+        let _ = kernel.auto_track_prompt_version(session.agent_id, &system_prompt);
+    }
+
+    // If running an A/B experiment, use the variant's system prompt instead
+    if let Some(ref ctx) = experiment_context {
+        if let Some(ref exp) = running_experiment {
+            if let Some(kernel) = kernel.as_ref() {
+                if let Some(variant) = exp.variants.iter().find(|v| v.id == ctx.variant_id) {
+                    if let Ok(Some(prompt_version)) =
+                        kernel.get_prompt_version(&variant.prompt_version_id.to_string())
+                    {
+                        debug!(
+                            agent = %manifest.name,
+                            experiment = %exp.name,
+                            variant = %variant.name,
+                            version = prompt_version.version,
+                            "Using experiment variant prompt version"
+                        );
+                        system_prompt = prompt_version.system_prompt.clone();
+                    }
+                }
+            }
+        }
+    }
+
     let memory_context_msg = if !memories.is_empty() {
         let mem_pairs: Vec<(String, String)> = memories
             .iter()
@@ -820,6 +908,8 @@ pub async fn run_agent_loop(
                         memories_used: memories_used.clone(),
                         memory_conflicts: Vec::new(),
                         provider_not_configured: false,
+                        experiment_context: experiment_context.clone(),
+                        latency_ms: 0,
                     });
                 }
 
@@ -1048,6 +1138,8 @@ pub async fn run_agent_loop(
                     memories_used,
                     memory_conflicts,
                     provider_not_configured: false,
+                    experiment_context: experiment_context.clone(),
+                    latency_ms: 0,
                 });
             }
             StopReason::ToolUse => {
@@ -1439,6 +1531,8 @@ pub async fn run_agent_loop(
                         memories_used: memories_used.clone(),
                         memory_conflicts: Vec::new(),
                         provider_not_configured: false,
+                        experiment_context: experiment_context.clone(),
+                        latency_ms: 0,
                     });
                 }
             }
@@ -1486,6 +1580,8 @@ pub async fn run_agent_loop(
                         memories_used,
                         memory_conflicts,
                         provider_not_configured: false,
+                        experiment_context: experiment_context.clone(),
+                        latency_ms: 0,
                     });
                 }
                 // Model hit token limit — add partial response and continue
@@ -1790,8 +1886,48 @@ pub async fn run_agent_loop_streaming(
         return Ok(AgentLoopResult {
             silent: true,
             provider_not_configured: true,
+            experiment_context: None,
             ..Default::default()
         });
+    }
+
+    // Check for running A/B experiment and select variant
+    let mut experiment_context: Option<ExperimentContext> = None;
+    let mut running_experiment: Option<librefang_types::agent::PromptExperiment> = None;
+    if let Some(kernel) = kernel.as_ref() {
+        let agent_id = session.agent_id.to_string();
+        if let Ok(Some(exp)) = kernel.get_running_experiment(&agent_id) {
+            running_experiment = Some(exp.clone());
+            if !exp.variants.is_empty() {
+                // Use traffic_split for weighted variant selection, consistent per session
+                let hash_val = (session.id.0.as_u128() % 100) as u8;
+                let mut cumulative = 0u8;
+                let mut variant_index = 0;
+                for (i, &weight) in exp.traffic_split.iter().enumerate() {
+                    cumulative = cumulative.saturating_add(weight);
+                    if hash_val < cumulative {
+                        variant_index = i;
+                        break;
+                    }
+                }
+                // Clamp to valid range
+                variant_index = variant_index.min(exp.variants.len() - 1);
+                let variant = &exp.variants[variant_index];
+                info!(
+                    agent = %manifest.name,
+                    experiment = %exp.name,
+                    variant = %variant.name,
+                    index = variant_index,
+                    "A/B experiment active - using variant (streaming)"
+                );
+                experiment_context = Some(ExperimentContext {
+                    experiment_id: exp.id,
+                    variant_id: variant.id,
+                    variant_name: variant.name.clone(),
+                    request_start: std::time::Instant::now(),
+                });
+            }
+        }
     }
 
     // Extract hand-allowed env vars from manifest metadata (set by kernel for hand settings)
@@ -1924,6 +2060,34 @@ pub async fn run_agent_loop_streaming(
     // In stable_prefix_mode, memories are injected as a context message instead
     // (see below) to keep the system prompt prefix stable for caching.
     let mut system_prompt = manifest.model.system_prompt.clone();
+
+    // Auto-track the agent's BASE prompt version (before experiment replacement)
+    if let Some(kernel) = kernel.as_ref() {
+        let _ = kernel.auto_track_prompt_version(session.agent_id, &system_prompt);
+    }
+
+    // If running an A/B experiment, use the variant's system prompt instead
+    if let Some(ref ctx) = experiment_context {
+        if let Some(ref exp) = running_experiment {
+            if let Some(kernel) = kernel.as_ref() {
+                if let Some(variant) = exp.variants.iter().find(|v| v.id == ctx.variant_id) {
+                    if let Ok(Some(prompt_version)) =
+                        kernel.get_prompt_version(&variant.prompt_version_id.to_string())
+                    {
+                        debug!(
+                            agent = %manifest.name,
+                            experiment = %exp.name,
+                            variant = %variant.name,
+                            version = prompt_version.version,
+                            "Using experiment variant prompt version (streaming)"
+                        );
+                        system_prompt = prompt_version.system_prompt.clone();
+                    }
+                }
+            }
+        }
+    }
+
     let memory_context_msg = if !memories.is_empty() {
         let mem_pairs: Vec<(String, String)> = memories
             .iter()
@@ -2223,6 +2387,8 @@ pub async fn run_agent_loop_streaming(
                         memories_used: memories_used.clone(),
                         memory_conflicts: Vec::new(),
                         provider_not_configured: false,
+                        experiment_context: experiment_context.clone(),
+                        latency_ms: 0,
                     });
                 }
 
@@ -2421,6 +2587,9 @@ pub async fn run_agent_loop_streaming(
                     }
                 }
 
+                // Experiment metrics are recorded by the kernel after cost calculation
+                // (agent_loop doesn't have access to pricing information)
+
                 // Fire AgentLoopEnd hook
                 if let Some(hook_reg) = hooks {
                     let ctx = crate::hooks::HookContext {
@@ -2447,6 +2616,8 @@ pub async fn run_agent_loop_streaming(
                     memories_used,
                     memory_conflicts,
                     provider_not_configured: false,
+                    experiment_context,
+                    latency_ms: 0,
                 });
             }
             StopReason::ToolUse => {
@@ -2846,6 +3017,8 @@ pub async fn run_agent_loop_streaming(
                         memories_used: memories_used.clone(),
                         memory_conflicts: Vec::new(),
                         provider_not_configured: false,
+                        experiment_context: experiment_context.clone(),
+                        latency_ms: 0,
                     });
                 }
             }
@@ -2892,6 +3065,8 @@ pub async fn run_agent_loop_streaming(
                         memories_used,
                         memory_conflicts,
                         provider_not_configured: false,
+                        experiment_context: experiment_context.clone(),
+                        latency_ms: 0,
                     });
                 }
                 let text = response.text();

@@ -284,4 +284,108 @@ pub trait KernelHandle: Send + Sync {
         let _ = parent_caps;
         self.spawn_agent(manifest_toml, parent_id).await
     }
+
+    /// Get the running experiment for an agent (if any). Default: None.
+    fn get_running_experiment(
+        &self,
+        _agent_id: &str,
+    ) -> Result<Option<librefang_types::agent::PromptExperiment>, String> {
+        Ok(None)
+    }
+
+    /// Record metrics for an experiment variant after a request. Default: no-op.
+    fn record_experiment_request(
+        &self,
+        _experiment_id: &str,
+        _variant_id: &str,
+        _latency_ms: u64,
+        _cost_usd: f64,
+        _success: bool,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// Get a prompt version by ID. Default: None.
+    fn get_prompt_version(
+        &self,
+        _version_id: &str,
+    ) -> Result<Option<librefang_types::agent::PromptVersion>, String> {
+        Ok(None)
+    }
+
+    /// List all prompt versions for an agent. Default: empty vec.
+    fn list_prompt_versions(
+        &self,
+        _agent_id: librefang_types::agent::AgentId,
+    ) -> Result<Vec<librefang_types::agent::PromptVersion>, String> {
+        Ok(Vec::new())
+    }
+
+    /// Create a new prompt version. Default: error.
+    fn create_prompt_version(
+        &self,
+        _version: librefang_types::agent::PromptVersion,
+    ) -> Result<(), String> {
+        Err("Prompt store not available".to_string())
+    }
+
+    /// Delete a prompt version. Default: error.
+    fn delete_prompt_version(&self, _version_id: &str) -> Result<(), String> {
+        Err("Prompt store not available".to_string())
+    }
+
+    /// Set a prompt version as active. Default: error.
+    fn set_active_prompt_version(&self, _version_id: &str, _agent_id: &str) -> Result<(), String> {
+        Err("Prompt store not available".to_string())
+    }
+
+    /// List all experiments for an agent. Default: empty vec.
+    fn list_experiments(
+        &self,
+        _agent_id: librefang_types::agent::AgentId,
+    ) -> Result<Vec<librefang_types::agent::PromptExperiment>, String> {
+        Ok(Vec::new())
+    }
+
+    /// Create a new experiment. Default: error.
+    fn create_experiment(
+        &self,
+        _experiment: librefang_types::agent::PromptExperiment,
+    ) -> Result<(), String> {
+        Err("Prompt store not available".to_string())
+    }
+
+    /// Get an experiment by ID. Default: None.
+    fn get_experiment(
+        &self,
+        _experiment_id: &str,
+    ) -> Result<Option<librefang_types::agent::PromptExperiment>, String> {
+        Ok(None)
+    }
+
+    /// Update experiment status. Default: error.
+    fn update_experiment_status(
+        &self,
+        _experiment_id: &str,
+        _status: librefang_types::agent::ExperimentStatus,
+    ) -> Result<(), String> {
+        Err("Prompt store not available".to_string())
+    }
+
+    /// Get experiment metrics. Default: empty vec.
+    fn get_experiment_metrics(
+        &self,
+        _experiment_id: &str,
+    ) -> Result<Vec<librefang_types::agent::ExperimentVariantMetrics>, String> {
+        Ok(Vec::new())
+    }
+
+    /// Auto-track prompt version if the system prompt changed. Default: no-op.
+    fn auto_track_prompt_version(
+        &self,
+        _agent_id: librefang_types::agent::AgentId,
+        _system_prompt: &str,
+    ) -> Result<(), String> {
+        Ok(())
+    }
 }

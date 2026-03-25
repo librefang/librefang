@@ -832,6 +832,28 @@ impl Default for TelemetryConfig {
     }
 }
 
+/// Configuration for prompt versioning and A/B testing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PromptIntelligenceConfig {
+    /// Enable prompt versioning and A/B testing. Default: false.
+    pub enabled: bool,
+    /// Hash prompts using SHA-256 for version identification. Default: true.
+    pub hash_prompts: bool,
+    /// Maximum number of versions to keep per agent. Default: 50.
+    pub max_versions_per_agent: u32,
+}
+
+impl Default for PromptIntelligenceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            hash_prompts: true,
+            max_versions_per_agent: 50,
+        }
+    }
+}
+
 /// Canvas (Agent-to-UI) configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1548,6 +1570,9 @@ pub struct KernelConfig {
     /// Telemetry / observability configuration (OpenTelemetry + Prometheus).
     #[serde(default)]
     pub telemetry: TelemetryConfig,
+    /// Prompt intelligence configuration (versioning + A/B testing).
+    #[serde(default)]
+    pub prompt_intelligence: PromptIntelligenceConfig,
     /// CLI update channel (stable, beta, rc).
     /// Controls which releases `librefang update` considers.
     #[serde(default)]
@@ -2373,6 +2398,7 @@ impl Default for KernelConfig {
             sanitize: SanitizeConfig::default(),
             inbox: InboxConfig::default(),
             telemetry: TelemetryConfig::default(),
+            prompt_intelligence: PromptIntelligenceConfig::default(),
             update_channel: UpdateChannel::default(),
         }
     }

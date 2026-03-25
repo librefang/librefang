@@ -23,6 +23,7 @@ pub mod media;
 pub mod memory;
 pub mod network;
 pub mod plugins;
+pub mod prompts;
 pub mod providers;
 pub mod skills;
 pub mod system;

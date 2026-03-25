@@ -731,6 +731,112 @@ pub struct AgentEntry {
     pub onboarding_completed_at: Option<DateTime<Utc>>,
 }
 
+/// A stored prompt version for an agent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromptVersion {
+    #[serde(default)]
+    pub id: Uuid,
+    #[serde(default)]
+    pub agent_id: AgentId,
+    #[serde(default)]
+    pub version: u32,
+    #[serde(default)]
+    pub content_hash: String,
+    pub system_prompt: String,
+    #[serde(default)]
+    pub tools: Vec<String>,
+    #[serde(default)]
+    pub variables: Vec<String>,
+    #[serde(default = "chrono::Utc::now")]
+    pub created_at: DateTime<Utc>,
+    #[serde(default)]
+    pub created_by: String,
+    #[serde(default)]
+    pub is_active: bool,
+    pub description: Option<String>,
+}
+
+/// Success criteria for an A/B experiment.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SuccessCriteria {
+    #[serde(default)]
+    pub require_user_helpful: bool,
+    #[serde(default)]
+    pub require_no_tool_errors: bool,
+    #[serde(default)]
+    pub require_non_empty: bool,
+    pub custom_min_score: Option<u8>,
+}
+
+impl Default for SuccessCriteria {
+    fn default() -> Self {
+        Self {
+            require_user_helpful: true,
+            require_no_tool_errors: true,
+            require_non_empty: true,
+            custom_min_score: None,
+        }
+    }
+}
+
+/// A/B experiment for prompt testing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromptExperiment {
+    #[serde(default)]
+    pub id: Uuid,
+    pub name: String,
+    #[serde(default)]
+    pub agent_id: AgentId,
+    #[serde(default)]
+    pub status: ExperimentStatus,
+    #[serde(default)]
+    pub traffic_split: Vec<u8>,
+    #[serde(default)]
+    pub success_criteria: SuccessCriteria,
+    pub started_at: Option<DateTime<Utc>>,
+    pub ended_at: Option<DateTime<Utc>>,
+    #[serde(default = "chrono::Utc::now")]
+    pub created_at: DateTime<Utc>,
+    #[serde(default)]
+    pub variants: Vec<ExperimentVariant>,
+}
+
+/// Variant within an experiment.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExperimentVariant {
+    #[serde(default)]
+    pub id: Uuid,
+    pub name: String,
+    #[serde(default)]
+    pub prompt_version_id: Uuid,
+    pub description: Option<String>,
+}
+
+/// Experiment status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ExperimentStatus {
+    #[default]
+    Draft,
+    Running,
+    Paused,
+    Completed,
+}
+
+/// Metrics per experiment variant.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExperimentVariantMetrics {
+    pub variant_id: Uuid,
+    pub variant_name: String,
+    pub total_requests: u64,
+    pub successful_requests: u64,
+    pub failed_requests: u64,
+    pub success_rate: f64,
+    pub avg_latency_ms: f64,
+    pub avg_cost_usd: f64,
+    pub total_cost_usd: f64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

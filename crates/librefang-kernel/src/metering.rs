@@ -557,7 +557,17 @@ mod tests {
     }
 
     fn test_catalog() -> librefang_runtime::model_catalog::ModelCatalog {
-        librefang_runtime::model_catalog::ModelCatalog::default()
+        // Use process-unique temp dir to avoid conflicts with parallel nextest processes.
+        let home =
+            std::env::temp_dir().join(format!("librefang-metering-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&home);
+        let catalog = librefang_runtime::model_catalog::ModelCatalog::new(&home);
+        if !catalog.list_models().is_empty() {
+            return catalog;
+        }
+        // No providers on disk — sync from registry
+        librefang_runtime::registry_sync::sync_registry(&home);
+        librefang_runtime::model_catalog::ModelCatalog::new(&home)
     }
 
     #[test]
@@ -577,6 +587,7 @@ mod tests {
                 output_tokens: 50,
                 cost_usd: 0.001,
                 tool_calls: 0,
+                latency_ms: 150,
             })
             .unwrap();
 
@@ -600,6 +611,7 @@ mod tests {
                 output_tokens: 5000,
                 cost_usd: 0.05,
                 tool_calls: 0,
+                latency_ms: 300,
             })
             .unwrap();
 
@@ -627,6 +639,7 @@ mod tests {
                 output_tokens: 50000,
                 cost_usd: 100.0,
                 tool_calls: 0,
+                latency_ms: 500,
             })
             .unwrap();
 
@@ -857,6 +870,7 @@ mod tests {
                 output_tokens: 200,
                 cost_usd: 0.005,
                 tool_calls: 3,
+                latency_ms: 100,
             })
             .unwrap();
 
