@@ -10,15 +10,59 @@ All adapters share a common foundation: graceful shutdown via `watch::channel`, 
 - [Channel Configuration](#channel-configuration)
 - [Channel Overrides](#channel-overrides)
 - [Formatter, Rate Limiter, and Policies](#formatter-rate-limiter-and-policies)
-- [Telegram](#telegram)
-- [Discord](#discord)
-- [Slack](#slack)
-- [WhatsApp](#whatsapp)
-- [WeChat (Personal)](#wechat-personal)
-- [Signal](#signal)
-- [Matrix](#matrix)
-- [Email](#email)
-- [WebChat (Built-in)](#webchat-built-in)
+- **Core**
+  - [Telegram](#telegram)
+  - [Discord](#discord)
+  - [Slack](#slack)
+  - [WhatsApp](#whatsapp)
+  - [WeChat (Personal)](#wechat-personal)
+  - [Signal](#signal)
+  - [Matrix](#matrix)
+  - [Email](#email)
+  - [WebChat (Built-in)](#webchat-built-in)
+- **Enterprise**
+  - [Microsoft Teams](#microsoft-teams)
+  - [Mattermost](#mattermost)
+  - [Google Chat](#google-chat)
+  - [Webex](#webex)
+  - [Feishu / Lark](#feishu--lark)
+  - [Rocket.Chat](#rocketchat)
+  - [Zulip](#zulip)
+  - [Flock](#flock)
+  - [Twist](#twist)
+  - [Pumble](#pumble)
+  - [Guilded](#guilded)
+- **Social**
+  - [LINE](#line)
+  - [Viber](#viber)
+  - [Facebook Messenger](#facebook-messenger)
+  - [Reddit](#reddit)
+  - [Mastodon](#mastodon)
+  - [Bluesky](#bluesky)
+  - [LinkedIn](#linkedin)
+  - [Twitch](#twitch)
+- **Community / Developer**
+  - [IRC](#irc)
+  - [XMPP](#xmpp)
+  - [Discourse](#discourse)
+  - [Gitter](#gitter)
+  - [Revolt](#revolt)
+  - [Keybase](#keybase)
+- **Privacy**
+  - [Threema](#threema)
+  - [Nostr](#nostr)
+- **Chinese Platforms**
+  - [DingTalk](#dingtalk)
+  - [QQ](#qq)
+  - [WeCom](#wecom)
+- **IoT / Notifications**
+  - [MQTT](#mqtt)
+  - [Ntfy](#ntfy)
+  - [Gotify](#gotify)
+  - [Nextcloud Talk](#nextcloud-talk)
+  - [Mumble](#mumble)
+- **Generic**
+  - [Webhook](#webhook)
 - [Agent Routing](#agent-routing)
 - [Writing Custom Adapters](#writing-custom-adapters)
 
@@ -616,6 +660,1275 @@ Features:
 - Agent selection (switch between running agents)
 - Token usage display
 - No authentication required on localhost (protected by CORS)
+
+---
+
+## Microsoft Teams
+
+### Prerequisites
+
+- A Microsoft Azure account with access to the [Azure Bot Service](https://learn.microsoft.com/en-us/microsoftteams/platform/)
+- A registered Azure AD application with a client ID and secret
+
+### Setup
+
+1. Go to the [Azure Portal](https://portal.azure.com/) and create a new **Bot Channels Registration** (or Azure Bot resource).
+2. Under **Configuration**, note the **Microsoft App ID**.
+3. Go to **Certificates & secrets** and create a new client secret. Copy it immediately.
+4. In the Teams Admin Center, enable your bot for the organization or upload a custom app manifest.
+5. Set environment variables:
+
+```bash
+export TEAMS_APP_ID=your-azure-app-id
+export TEAMS_APP_SECRET=your-azure-client-secret
+```
+
+6. Add to config:
+
+```toml
+[channels.teams]
+app_id_env = "TEAMS_APP_ID"
+app_secret_env = "TEAMS_APP_SECRET"
+default_agent = "ops"
+```
+
+7. Configure the messaging endpoint in Azure to point to your LibreFang instance's public URL (e.g., `https://your-domain.com/webhook/teams`).
+8. Restart the daemon.
+
+### How It Works
+
+The Teams adapter uses the Microsoft Bot Framework v3 webhook protocol with OAuth2 token exchange. Incoming messages arrive via HTTPS POST webhooks, and the adapter authenticates each request by validating the JWT bearer token against Azure AD. Responses are sent back through the Bot Framework REST API.
+
+---
+
+## Mattermost
+
+### Prerequisites
+
+- A Mattermost server (self-hosted or cloud) with admin access
+- A bot account or personal access token
+
+### Setup
+
+1. In Mattermost, go to **Integrations > Bot Accounts** and create a new bot, or go to **Account Settings > Security > Personal Access Tokens** and generate a token.
+2. Copy the token.
+3. Set environment variables:
+
+```bash
+export MATTERMOST_TOKEN=your-bot-token
+export MATTERMOST_URL=https://mattermost.example.com
+```
+
+4. Add to config:
+
+```toml
+[channels.mattermost]
+token_env = "MATTERMOST_TOKEN"
+url_env = "MATTERMOST_URL"
+default_agent = "ops"
+```
+
+5. Restart the daemon.
+
+### How It Works
+
+The Mattermost adapter connects to the Mattermost server via WebSocket for real-time event delivery and uses the REST v4 API for sending messages. It listens for new post events and routes them to the configured agent.
+
+---
+
+## Google Chat
+
+### Prerequisites
+
+- A Google Cloud project with the [Google Chat API](https://developers.google.com/workspace/chat/) enabled
+- A service account key file (JSON)
+
+### Setup
+
+1. In the [Google Cloud Console](https://console.cloud.google.com/), enable the Google Chat API.
+2. Create a service account and download the JSON key file.
+3. Configure a Chat app in the Google Chat API settings, selecting the **HTTP endpoint** connection type.
+4. Set environment variables:
+
+```bash
+export GOOGLE_CHAT_SA_KEY=/path/to/service-account-key.json
+export GOOGLE_CHAT_SPACE=spaces/AAAA_BBBBBB
+```
+
+5. Add to config:
+
+```toml
+[channels.google_chat]
+sa_key_env = "GOOGLE_CHAT_SA_KEY"
+space_env = "GOOGLE_CHAT_SPACE"
+default_agent = "ops"
+```
+
+6. Restart the daemon.
+
+### How It Works
+
+The Google Chat adapter authenticates using a service account and receives messages via webhook callbacks from Google Chat. Responses are sent back through the Google Chat REST API using the space and thread identifiers from the incoming message.
+
+---
+
+## Webex
+
+### Prerequisites
+
+- A Webex bot token (from the [Webex Developer Portal](https://developer.webex.com/docs/api/getting-started))
+
+### Setup
+
+1. Go to [developer.webex.com](https://developer.webex.com/) and sign in.
+2. Navigate to **My Webex Apps** and create a new Bot.
+3. Copy the bot access token.
+4. Set the environment variable:
+
+```bash
+export WEBEX_BOT_TOKEN=your-webex-bot-token
+```
+
+5. Add to config:
+
+```toml
+[channels.webex]
+token_env = "WEBEX_BOT_TOKEN"
+default_agent = "assistant"
+```
+
+6. Restart the daemon.
+
+### How It Works
+
+The Webex adapter registers a webhook with the Webex API to receive message events. Incoming messages are fetched via the Webex REST API using the message ID from the webhook payload, and responses are posted back through the messages endpoint.
+
+---
+
+## Feishu / Lark
+
+### Prerequisites
+
+- A Feishu (or Lark) custom app with Bot capabilities (from the [Feishu Open Platform](https://open.feishu.cn/document/))
+
+### Setup
+
+1. Go to the [Feishu Open Platform](https://open.feishu.cn/) and create a custom application.
+2. Enable **Bot** under the app's capabilities.
+3. Note the **App ID** and **App Secret** from the app credentials page.
+4. Configure event subscriptions to point to your LibreFang instance's webhook URL.
+5. Set environment variables:
+
+```bash
+export FEISHU_APP_ID=cli_abcdef123456
+export FEISHU_APP_SECRET=your-app-secret
+```
+
+6. Add to config:
+
+```toml
+[channels.feishu]
+app_id_env = "FEISHU_APP_ID"
+app_secret_env = "FEISHU_APP_SECRET"
+default_agent = "assistant"
+```
+
+7. Restart the daemon.
+
+### How It Works
+
+The Feishu adapter uses the Open Platform webhook protocol to receive message events. It obtains a tenant access token using the app credentials, then uses the Feishu REST API to send message replies. Event payloads are verified using the app's verification token.
+
+---
+
+## Rocket.Chat
+
+### Prerequisites
+
+- A Rocket.Chat server with admin access (from [Rocket.Chat](https://developer.rocket.chat/reference/api))
+- A bot user account or personal access token
+
+### Setup
+
+1. In Rocket.Chat, go to **Administration > Rooms** or create a bot user.
+2. Generate a personal access token via **My Account > Personal Access Tokens**.
+3. Set environment variables:
+
+```bash
+export ROCKETCHAT_TOKEN=your-personal-access-token
+export ROCKETCHAT_URL=https://chat.example.com
+```
+
+4. Add to config:
+
+```toml
+[channels.rocketchat]
+token_env = "ROCKETCHAT_TOKEN"
+url_env = "ROCKETCHAT_URL"
+default_agent = "assistant"
+```
+
+5. Restart the daemon.
+
+### How It Works
+
+The Rocket.Chat adapter polls the Rocket.Chat REST API for new messages at a regular interval. Incoming messages are routed to the configured agent, and responses are posted back through the REST API's chat endpoints.
+
+---
+
+## Zulip
+
+### Prerequisites
+
+- A Zulip server account (cloud or self-hosted)
+- A bot created in **Settings > Your bots** (see [Zulip API docs](https://zulip.com/api/))
+
+### Setup
+
+1. In Zulip, go to **Settings > Your bots** and click **Add a new bot**.
+2. Choose **Generic bot** and create it.
+3. Note the bot's email address and API key.
+4. Set environment variables:
+
+```bash
+export ZULIP_EMAIL=my-bot@example.zulipchat.com
+export ZULIP_API_KEY=your-api-key
+export ZULIP_URL=https://example.zulipchat.com
+```
+
+5. Add to config:
+
+```toml
+[channels.zulip]
+email_env = "ZULIP_EMAIL"
+api_key_env = "ZULIP_API_KEY"
+url_env = "ZULIP_URL"
+default_agent = "assistant"
+```
+
+6. Restart the daemon.
+
+### How It Works
+
+The Zulip adapter uses Zulip's event queue API for long-polling. It registers an event queue for message events, then continuously polls the queue for new messages. Responses are sent via the `messages` REST endpoint.
+
+---
+
+## Flock
+
+### Prerequisites
+
+- A Flock bot token (from the [Flock Developer Portal](https://docs.flock.com))
+
+### Setup
+
+1. Go to [docs.flock.com](https://docs.flock.com) and create a new bot.
+2. Copy the bot token.
+3. Set the environment variable:
+
+```bash
+export FLOCK_BOT_TOKEN=your-flock-bot-token
+```
+
+4. Add to config:
+
+```toml
+[channels.flock]
+token_env = "FLOCK_BOT_TOKEN"
+default_agent = "assistant"
+```
+
+5. Restart the daemon.
+
+### How It Works
+
+The Flock adapter receives messages via webhook callbacks from the Flock platform. Responses are sent back through the Flock REST API's `chat.sendMessage` endpoint.
+
+---
+
+## Twist
+
+### Prerequisites
+
+- A Twist account and integration token (from the [Twist Developer Portal](https://developer.twist.com/v3/))
+
+### Setup
+
+1. Go to [developer.twist.com](https://developer.twist.com/) and create a new integration.
+2. Copy the integration token.
+3. Set the environment variable:
+
+```bash
+export TWIST_TOKEN=your-twist-token
+```
+
+4. Add to config:
+
+```toml
+[channels.twist]
+token_env = "TWIST_TOKEN"
+default_agent = "assistant"
+```
+
+5. Restart the daemon.
+
+### How It Works
+
+The Twist adapter polls the Twist REST API v3 for new messages in configured channels and threads. Responses are posted back via the API's comment or message endpoints.
+
+---
+
+## Pumble
+
+### Prerequisites
+
+- A Pumble workspace with bot integration support (see [Pumble Help](https://pumble.com/help))
+
+### Setup
+
+1. In Pumble, configure a bot integration for your workspace.
+2. Copy the bot token.
+3. Set the environment variable:
+
+```bash
+export PUMBLE_BOT_TOKEN=your-pumble-bot-token
+```
+
+4. Add to config:
+
+```toml
+[channels.pumble]
+token_env = "PUMBLE_BOT_TOKEN"
+default_agent = "assistant"
+```
+
+5. Restart the daemon.
+
+### How It Works
+
+The Pumble adapter receives messages via webhook callbacks from the Pumble platform. Responses are sent back through the Pumble API.
+
+---
+
+## Guilded
+
+### Prerequisites
+
+- A Guilded bot token (from the [Guilded API documentation](https://www.guilded.gg/docs/api/))
+
+### Setup
+
+1. Go to your Guilded server settings and create a bot.
+2. Copy the bot token.
+3. Set the environment variable:
+
+```bash
+export GUILDED_BOT_TOKEN=your-guilded-bot-token
+```
+
+4. Add to config:
+
+```toml
+[channels.guilded]
+token_env = "GUILDED_BOT_TOKEN"
+default_agent = "assistant"
+```
+
+5. Restart the daemon.
+
+### How It Works
+
+The Guilded adapter connects to the Guilded API via WebSocket for real-time message events. Responses are sent through the Guilded REST API's channel message endpoints.
+
+---
+
+## LINE
+
+### Prerequisites
+
+- A LINE Messaging API channel (from the [LINE Developers Console](https://developers.line.biz/en/docs/messaging-api/))
+- A publicly accessible webhook URL
+
+### Setup
+
+1. Go to the [LINE Developers Console](https://developers.line.biz/console/) and create a new Messaging API channel.
+2. Note the **Channel Secret** and issue a **Channel Access Token**.
+3. Set environment variables:
+
+```bash
+export LINE_CHANNEL_SECRET=your-channel-secret
+export LINE_ACCESS_TOKEN=your-channel-access-token
+```
+
+4. Add to config:
+
+```toml
+[channels.line]
+channel_secret_env = "LINE_CHANNEL_SECRET"
+access_token_env = "LINE_ACCESS_TOKEN"
+webhook_port = 8443
+default_agent = "assistant"
+```
+
+5. In the LINE Developers Console, set the webhook URL to your LibreFang instance (e.g., `https://your-domain.com:8443/webhook/line`).
+6. Restart the daemon.
+
+### How It Works
+
+The LINE adapter runs an HTTP server on the configured `webhook_port` to receive message events from LINE's Messaging API. Each request is verified using the channel secret's HMAC-SHA256 signature. Responses are sent via the LINE Reply API or Push API.
+
+---
+
+## Viber
+
+### Prerequisites
+
+- A Viber bot token (from the [Viber Developer Portal](https://developers.viber.com/docs/api/))
+- A publicly accessible webhook URL
+
+### Setup
+
+1. Create a bot account on the [Viber Admin Panel](https://partners.viber.com/).
+2. Copy the authentication token.
+3. Set environment variables:
+
+```bash
+export VIBER_AUTH_TOKEN=your-viber-auth-token
+```
+
+4. Add to config:
+
+```toml
+[channels.viber]
+auth_token_env = "VIBER_AUTH_TOKEN"
+webhook_url = "https://your-domain.com:8443/webhook/viber"
+webhook_port = 8443
+default_agent = "assistant"
+```
+
+5. Restart the daemon. The adapter automatically registers the webhook URL with Viber on startup.
+
+### How It Works
+
+The Viber adapter registers a webhook with the Viber API on startup and receives message events via HTTPS POST callbacks. Responses are sent via the Viber REST API's `send_message` endpoint.
+
+---
+
+## Facebook Messenger
+
+### Prerequisites
+
+- A Meta (Facebook) Developer account with a Facebook Page and App (see [Messenger Platform docs](https://developers.facebook.com/docs/messenger-platform/))
+- A publicly accessible webhook URL
+
+### Setup
+
+1. Go to [Meta for Developers](https://developers.facebook.com/) and create or select an app.
+2. Add the **Messenger** product to your app.
+3. Generate a **Page Access Token** for your Facebook Page.
+4. Choose a **Verify Token** (any string you define).
+5. Set environment variables:
+
+```bash
+export MESSENGER_PAGE_TOKEN=your-page-access-token
+export MESSENGER_VERIFY_TOKEN=my-verify-token
+```
+
+6. Add to config:
+
+```toml
+[channels.messenger]
+page_token_env = "MESSENGER_PAGE_TOKEN"
+verify_token_env = "MESSENGER_VERIFY_TOKEN"
+webhook_port = 8443
+default_agent = "assistant"
+```
+
+7. In the Meta Developer Dashboard, set the webhook callback URL (e.g., `https://your-domain.com:8443/webhook/messenger`) and enter your verify token. Subscribe to the `messages` event.
+8. Restart the daemon.
+
+### How It Works
+
+The Messenger adapter runs an HTTP server on the configured `webhook_port` that handles webhook verification (GET) and incoming message events (POST) from the Messenger Platform. Responses are sent via the Send API using the page access token.
+
+---
+
+## Reddit
+
+### Prerequisites
+
+- A Reddit account and a registered [Reddit API application](https://www.reddit.com/dev/api/) (script type)
+
+### Setup
+
+1. Go to [reddit.com/prefs/apps](https://www.reddit.com/prefs/apps) and create a new **script** application.
+2. Note the client ID (under the app name) and client secret.
+3. Set environment variables:
+
+```bash
+export REDDIT_CLIENT_ID=your-client-id
+export REDDIT_CLIENT_SECRET=your-client-secret
+export REDDIT_USERNAME=your-reddit-username
+export REDDIT_PASSWORD=your-reddit-password
+```
+
+4. Add to config:
+
+```toml
+[channels.reddit]
+client_id_env = "REDDIT_CLIENT_ID"
+client_secret_env = "REDDIT_CLIENT_SECRET"
+username_env = "REDDIT_USERNAME"
+password_env = "REDDIT_PASSWORD"
+subreddits = ["mysubreddit"]
+poll_interval = 30
+default_agent = "assistant"
+```
+
+5. Restart the daemon.
+
+### How It Works
+
+The Reddit adapter authenticates via OAuth2 using script-type credentials and polls specified subreddits for new posts and comments at the configured interval. Responses are posted as replies through the Reddit REST API.
+
+---
+
+## Mastodon
+
+### Prerequisites
+
+- A Mastodon account on any instance
+- An application access token (from the instance's **Preferences > Development** page, see [Mastodon API docs](https://docs.joinmastodon.org/api/))
+
+### Setup
+
+1. On your Mastodon instance, go to **Preferences > Development > New Application**.
+2. Grant the scopes `read` and `write`.
+3. Copy the access token.
+4. Set environment variables:
+
+```bash
+export MASTODON_INSTANCE_URL=https://mastodon.social
+export MASTODON_ACCESS_TOKEN=your-access-token
+```
+
+5. Add to config:
+
+```toml
+[channels.mastodon]
+instance_env = "MASTODON_INSTANCE_URL"
+token_env = "MASTODON_ACCESS_TOKEN"
+default_agent = "social-media"
+```
+
+6. Restart the daemon.
+
+### How It Works
+
+The Mastodon adapter connects to the instance's streaming API via Server-Sent Events (SSE) to receive notifications in real time (mentions, direct messages). Responses are posted as toots or direct messages through the Mastodon REST API.
+
+---
+
+## Bluesky
+
+### Prerequisites
+
+- A Bluesky account (see [Bluesky API docs](https://docs.bsky.app))
+- An app password (generated in Bluesky **Settings > App Passwords**)
+
+### Setup
+
+1. In Bluesky, go to **Settings > App Passwords** and create a new app password.
+2. Set environment variables:
+
+```bash
+export BLUESKY_IDENTIFIER=your-handle.bsky.social
+export BLUESKY_APP_PASSWORD=your-app-password
+```
+
+3. Add to config:
+
+```toml
+[channels.bluesky]
+identifier_env = "BLUESKY_IDENTIFIER"
+app_password_env = "BLUESKY_APP_PASSWORD"
+default_agent = "social-media"
+```
+
+4. Restart the daemon.
+
+### How It Works
+
+The Bluesky adapter authenticates using the AT Protocol and monitors notifications (mentions) via REST polling. Responses are posted as reply posts through the AT Protocol's `com.atproto.repo.createRecord` endpoint.
+
+---
+
+## LinkedIn
+
+### Prerequisites
+
+- A LinkedIn Developer application with Messaging API access (see [LinkedIn API docs](https://learn.microsoft.com/en-us/linkedin/))
+- An OAuth2 access token with messaging permissions
+
+### Setup
+
+1. Create an application in the [LinkedIn Developer Portal](https://www.linkedin.com/developers/).
+2. Request access to the Messaging API and complete the OAuth2 flow.
+3. Set the environment variable:
+
+```bash
+export LINKEDIN_ACCESS_TOKEN=your-linkedin-access-token
+```
+
+4. Add to config:
+
+```toml
+[channels.linkedin]
+token_env = "LINKEDIN_ACCESS_TOKEN"
+default_agent = "assistant"
+```
+
+5. Restart the daemon.
+
+### How It Works
+
+The LinkedIn adapter polls the LinkedIn Messaging API for new messages at a regular interval. Responses are sent back through the LinkedIn REST API. Note that LinkedIn API access for messaging is restricted and requires approval from LinkedIn.
+
+---
+
+## Twitch
+
+### Prerequisites
+
+- A Twitch account and an OAuth token with chat permissions (from the [Twitch Developer Portal](https://dev.twitch.tv/docs/irc/))
+
+### Setup
+
+1. Register an application on the [Twitch Developer Console](https://dev.twitch.tv/console/apps).
+2. Generate an OAuth token with the `chat:read` and `chat:edit` scopes (use a tool like [twitchtokengenerator.com](https://twitchtokengenerator.com/)).
+3. Set environment variables:
+
+```bash
+export TWITCH_OAUTH_TOKEN=oauth:your-token-here
+export TWITCH_NICK=your-bot-username
+export TWITCH_CHANNELS=channel1,channel2
+```
+
+4. Add to config:
+
+```toml
+[channels.twitch]
+oauth_token_env = "TWITCH_OAUTH_TOKEN"
+nick_env = "TWITCH_NICK"
+channels = ["channel1", "channel2"]
+default_agent = "assistant"
+```
+
+5. Restart the daemon.
+
+### How It Works
+
+The Twitch adapter connects to Twitch's IRC gateway (`irc.chat.twitch.tv:6697` over TLS) and joins the configured channels. It listens for PRIVMSG events and routes them to the configured agent. Responses are sent as chat messages via the IRC protocol.
+
+---
+
+## IRC
+
+### Prerequisites
+
+- An IRC server address and a nickname for the bot (protocol defined in [RFC 2812](https://datatracker.ietf.org/doc/html/rfc2812))
+
+### Setup
+
+1. Choose an IRC server and channels you want the bot to join.
+2. Set environment variables:
+
+```bash
+export IRC_SERVER=irc.libera.chat:6697
+export IRC_NICK=librefang-bot
+export IRC_CHANNELS=#channel1,#channel2
+# Optional: set a server password
+# export IRC_PASSWORD=your-password
+```
+
+3. Add to config:
+
+```toml
+[channels.irc]
+server_env = "IRC_SERVER"
+nick_env = "IRC_NICK"
+channels = ["#channel1", "#channel2"]
+# password_env = "IRC_PASSWORD"   # optional
+default_agent = "assistant"
+```
+
+4. Restart the daemon.
+
+### How It Works
+
+The IRC adapter connects to the IRC server over TCP (with optional TLS), authenticates, and joins the configured channels. It listens for PRIVMSG events and routes them to the configured agent. Responses are sent as PRIVMSG replies.
+
+---
+
+## XMPP
+
+### Prerequisites
+
+- An XMPP account (JID) and server (see [XMPP extensions](https://xmpp.org/extensions/))
+
+### Setup
+
+1. Create an XMPP account on your server (or use an existing one).
+2. Set environment variables:
+
+```bash
+export XMPP_JID=bot@example.com
+export XMPP_PASSWORD=your-password
+export XMPP_SERVER=example.com
+```
+
+3. Add to config:
+
+```toml
+[channels.xmpp]
+jid_env = "XMPP_JID"
+password_env = "XMPP_PASSWORD"
+server_env = "XMPP_SERVER"
+default_agent = "assistant"
+```
+
+4. Restart the daemon.
+
+### How It Works
+
+The XMPP adapter connects to the XMPP server using the specified JID and password, then listens for incoming message stanzas. Responses are sent back as XMPP message stanzas to the originating JID.
+
+---
+
+## Discourse
+
+### Prerequisites
+
+- A Discourse forum with API access enabled (see [Discourse API docs](https://docs.discourse.org))
+- An API key generated by an admin user
+
+### Setup
+
+1. In Discourse, go to **Admin > API** and create a new API key.
+2. Note the username of the API key owner.
+3. Set environment variables:
+
+```bash
+export DISCOURSE_URL=https://forum.example.com
+export DISCOURSE_API_KEY=your-api-key
+export DISCOURSE_USERNAME=bot-user
+```
+
+4. Add to config:
+
+```toml
+[channels.discourse]
+url_env = "DISCOURSE_URL"
+api_key_env = "DISCOURSE_API_KEY"
+username_env = "DISCOURSE_USERNAME"
+poll_interval = 30
+default_agent = "assistant"
+```
+
+5. Restart the daemon.
+
+### How It Works
+
+The Discourse adapter polls the Discourse REST API for new posts and notifications at the configured interval. Responses are posted as replies through the Discourse posts API.
+
+---
+
+## Gitter
+
+### Prerequisites
+
+- A Gitter account and personal access token (from the [Gitter Developer Portal](https://developer.gitter.im/docs/))
+
+### Setup
+
+1. Go to [developer.gitter.im](https://developer.gitter.im/) and generate a personal access token.
+2. Set the environment variable:
+
+```bash
+export GITTER_TOKEN=your-gitter-token
+```
+
+3. Add to config:
+
+```toml
+[channels.gitter]
+token_env = "GITTER_TOKEN"
+default_agent = "assistant"
+```
+
+4. Restart the daemon.
+
+### How It Works
+
+The Gitter adapter connects to the Gitter Streaming API to receive messages in real time. Responses are sent back via the Gitter REST API's message endpoint.
+
+---
+
+## Revolt
+
+### Prerequisites
+
+- A Revolt bot token (from the [Revolt Developer Portal](https://developers.revolt.chat/api/))
+
+### Setup
+
+1. Go to [app.revolt.chat/settings/bots](https://app.revolt.chat/settings/bots) and create a new bot.
+2. Copy the bot token.
+3. Set the environment variable:
+
+```bash
+export REVOLT_TOKEN=your-revolt-bot-token
+```
+
+4. Add to config:
+
+```toml
+[channels.revolt]
+token_env = "REVOLT_TOKEN"
+default_agent = "assistant"
+```
+
+5. Restart the daemon.
+
+### How It Works
+
+The Revolt adapter connects to the Revolt API via WebSocket for real-time message events. Responses are sent through the Revolt REST API's channel message endpoints.
+
+---
+
+## Keybase
+
+### Prerequisites
+
+- A Keybase account with a paper key (see [Keybase API docs](https://keybase.io/docs/api/))
+
+### Setup
+
+1. Install the [Keybase client](https://keybase.io/download).
+2. Log in and generate a paper key via `keybase paperkey`.
+3. Set environment variables:
+
+```bash
+export KEYBASE_USERNAME=your-keybase-username
+export KEYBASE_PAPERKEY="your paper key words here"
+```
+
+4. Add to config:
+
+```toml
+[channels.keybase]
+username_env = "KEYBASE_USERNAME"
+paperkey_env = "KEYBASE_PAPERKEY"
+default_agent = "assistant"
+```
+
+5. Restart the daemon.
+
+### How It Works
+
+The Keybase adapter uses the Keybase Bot API to poll for new messages. It authenticates with the paper key and listens for chat messages across teams and direct conversations. Responses are sent via the Keybase chat API.
+
+---
+
+## Threema
+
+### Prerequisites
+
+- A Threema Gateway ID and API secret (from the [Threema Gateway](https://gateway.threema.ch/en/developer/api))
+
+### Setup
+
+1. Register for a [Threema Gateway](https://gateway.threema.ch/) account.
+2. Create a Gateway ID and note the ID and secret.
+3. Set environment variables:
+
+```bash
+export THREEMA_ID=*YOUR_ID
+export THREEMA_SECRET=your-api-secret
+```
+
+4. Add to config:
+
+```toml
+[channels.threema]
+id_env = "THREEMA_ID"
+secret_env = "THREEMA_SECRET"
+default_agent = "assistant"
+```
+
+5. Restart the daemon.
+
+### How It Works
+
+The Threema adapter uses the Threema Gateway REST API to send and receive end-to-end encrypted messages. Incoming messages are delivered via webhook callbacks, and responses are sent through the Gateway's message sending endpoint.
+
+---
+
+## Nostr
+
+### Prerequisites
+
+- A Nostr private key (hex or nsec format) and one or more relay URLs (see [Nostr protocol NIPs](https://github.com/nostr-protocol/nips))
+
+### Setup
+
+1. Generate a Nostr key pair if you do not already have one (e.g., using a Nostr client or `openssl`).
+2. Choose one or more relay URLs.
+3. Set environment variables:
+
+```bash
+export NOSTR_PRIVATE_KEY=nsec1your-private-key-here
+export NOSTR_RELAYS=wss://relay.damus.io,wss://nos.lol
+```
+
+4. Add to config:
+
+```toml
+[channels.nostr]
+private_key_env = "NOSTR_PRIVATE_KEY"
+relays = ["wss://relay.damus.io", "wss://nos.lol"]
+default_agent = "assistant"
+```
+
+5. Restart the daemon.
+
+### How It Works
+
+The Nostr adapter connects to the configured relays via WebSocket using the NIP-01 protocol. It subscribes to events that mention or tag the bot's public key and routes them to the configured agent. Responses are published as signed Nostr events to all connected relays.
+
+---
+
+## DingTalk
+
+### Prerequisites
+
+- A DingTalk (Ding Talk) custom robot with webhook access (from the [DingTalk Open Platform](https://open.dingtalk.com/document/))
+
+### Setup
+
+1. In DingTalk, open a group chat and go to **Group Settings > Smart Group Assistant > Add Robot**.
+2. Choose **Custom Robot** and enable the **Security Setting** (sign mode recommended).
+3. Note the webhook access token and signing secret.
+4. Set environment variables:
+
+```bash
+export DINGTALK_ACCESS_TOKEN=your-access-token
+export DINGTALK_SECRET=your-signing-secret
+```
+
+5. Add to config:
+
+```toml
+[channels.dingtalk]
+access_token_env = "DINGTALK_ACCESS_TOKEN"
+secret_env = "DINGTALK_SECRET"
+default_agent = "assistant"
+```
+
+6. Restart the daemon.
+
+### How It Works
+
+The DingTalk adapter receives messages via webhook callbacks from the DingTalk Robot API. Each request is verified using the HMAC-SHA256 signature with the configured secret. Responses are sent back through the DingTalk webhook URL with a signed timestamp.
+
+---
+
+## QQ
+
+### Prerequisites
+
+- A QQ Bot registered on the [QQ Bot Platform](https://bot.q.qq.com/wiki/)
+- An App ID and token
+
+### Setup
+
+1. Go to the [QQ Bot Platform](https://bot.q.qq.com/) and register a bot application.
+2. Note the App ID and token.
+3. Set environment variables:
+
+```bash
+export QQ_APP_ID=your-app-id
+export QQ_TOKEN=your-bot-token
+```
+
+4. Add to config:
+
+```toml
+[channels.qq]
+app_id_env = "QQ_APP_ID"
+token_env = "QQ_TOKEN"
+default_agent = "assistant"
+```
+
+5. Restart the daemon.
+
+### How It Works
+
+The QQ adapter connects to the QQ Bot API via WebSocket for real-time message delivery. It authenticates using the app credentials, listens for message events in authorized guilds and channels, and sends responses through the QQ Bot REST API.
+
+---
+
+## WeCom
+
+### Prerequisites
+
+- A WeCom (WeChat Work) enterprise account with a self-built application (from the [WeCom Developer Portal](https://developer.work.weixin.qq.com/document/))
+
+### Setup
+
+1. In the WeCom admin console, go to **App Management > Self-Built Apps** and create a new application.
+2. Note the Corp ID, Agent ID, and Secret.
+3. Configure the receiving message API callback URL in the app settings.
+4. Set environment variables:
+
+```bash
+export WECOM_CORP_ID=your-corp-id
+export WECOM_AGENT_ID=your-agent-id
+export WECOM_SECRET=your-app-secret
+```
+
+5. Add to config:
+
+```toml
+[channels.wecom]
+corp_id_env = "WECOM_CORP_ID"
+agent_id_env = "WECOM_AGENT_ID"
+secret_env = "WECOM_SECRET"
+default_agent = "assistant"
+```
+
+6. Restart the daemon.
+
+### How It Works
+
+The WeCom adapter uses the WeCom Enterprise API webhook protocol to receive message callbacks. It obtains an access token using the corp credentials and sends responses via the WeCom message sending API. Message payloads are encrypted and decrypted using the configured encoding AES key.
+
+---
+
+## MQTT
+
+### Prerequisites
+
+- An MQTT broker (e.g., Mosquitto, HiveMQ, EMQX) accessible from the LibreFang host (see [MQTT specification](https://mqtt.org))
+- Requires the `all-channels` feature flag at compile time
+
+### Setup
+
+1. Ensure your MQTT broker is running and accessible.
+2. Set environment variables (optional, for authenticated brokers):
+
+```bash
+export MQTT_BROKER_URL=mqtt://broker.example.com:1883
+export MQTT_TOPIC=home/agents/input
+# Optional auth:
+# export MQTT_USERNAME=your-username
+# export MQTT_PASSWORD=your-password
+```
+
+3. Add to config:
+
+```toml
+[channels.mqtt]
+host = "broker.example.com"
+port = 1883
+client_id = "librefang-bot"
+subscribe_topics = ["home/agents/input", "home/agents/commands"]
+response_topic = "home/agents/output"
+qos = "at_least_once"                # at_most_once | at_least_once | exactly_once
+# username_env = "MQTT_USERNAME"     # optional
+# password_env = "MQTT_PASSWORD"     # optional
+keep_alive_secs = 30
+default_agent = "home-assistant"
+```
+
+4. Restart the daemon.
+
+### How It Works
+
+The MQTT adapter uses the `rumqttc` crate to connect to the broker using MQTT v3.1.1/v5. It subscribes to the configured topics for incoming messages and publishes agent responses to the configured response topic. Automatic reconnection with exponential backoff is built in.
+
+---
+
+## Ntfy
+
+### Prerequisites
+
+- Access to an [ntfy](https://docs.ntfy.sh) server (self-hosted or the public instance at `ntfy.sh`)
+
+### Setup
+
+1. Choose a topic name on your ntfy server.
+2. Set environment variables:
+
+```bash
+export NTFY_URL=https://ntfy.sh
+export NTFY_TOPIC=my-librefang-topic
+# Optional: if the topic requires authentication
+# export NTFY_TOKEN=your-access-token
+```
+
+3. Add to config:
+
+```toml
+[channels.ntfy]
+url_env = "NTFY_URL"
+topic_env = "NTFY_TOPIC"
+# token_env = "NTFY_TOKEN"   # optional
+default_agent = "assistant"
+```
+
+4. Restart the daemon.
+
+### How It Works
+
+The ntfy adapter subscribes to a topic on the ntfy server using Server-Sent Events (SSE) for real-time message delivery. Incoming messages are routed to the configured agent, and responses are published back to the topic via the ntfy REST API.
+
+---
+
+## Gotify
+
+### Prerequisites
+
+- A Gotify server instance and an application token (see [Gotify docs](https://gotify.net/docs/))
+
+### Setup
+
+1. In the Gotify web UI, create a new application and copy the token.
+2. Set environment variables:
+
+```bash
+export GOTIFY_URL=https://gotify.example.com
+export GOTIFY_TOKEN=your-application-token
+```
+
+3. Add to config:
+
+```toml
+[channels.gotify]
+url_env = "GOTIFY_URL"
+token_env = "GOTIFY_TOKEN"
+default_agent = "assistant"
+```
+
+4. Restart the daemon.
+
+### How It Works
+
+The Gotify adapter connects to the Gotify server via WebSocket to receive messages in real time. Responses are sent back through the Gotify REST API's message endpoint.
+
+---
+
+## Nextcloud Talk
+
+### Prerequisites
+
+- A Nextcloud instance with the Talk app installed (see [Nextcloud Talk API docs](https://nextcloud-talk.readthedocs.io/))
+- An app password or bot user account
+
+### Setup
+
+1. In Nextcloud, go to **Settings > Security > Devices & sessions** and create an app password, or create a dedicated bot user.
+2. Set environment variables:
+
+```bash
+export NEXTCLOUD_URL=https://nextcloud.example.com
+export NEXTCLOUD_TOKEN=your-app-password-or-token
+```
+
+3. Add to config:
+
+```toml
+[channels.nextcloud]
+url_env = "NEXTCLOUD_URL"
+token_env = "NEXTCLOUD_TOKEN"
+default_agent = "assistant"
+```
+
+4. Restart the daemon.
+
+### How It Works
+
+The Nextcloud Talk adapter polls the Nextcloud Talk REST API for new messages in configured conversations. Responses are posted back as chat messages through the Talk API.
+
+---
+
+## Mumble
+
+### Prerequisites
+
+- A Mumble server (Murmur) accessible from the LibreFang host (see [Mumble protocol documentation](https://wiki.mumble.info/wiki/Protocol))
+
+### Setup
+
+1. Ensure your Mumble server is running and accessible.
+2. Set environment variables:
+
+```bash
+export MUMBLE_SERVER=mumble.example.com:64738
+export MUMBLE_USERNAME=librefang-bot
+# Optional: server password
+# export MUMBLE_PASSWORD=your-password
+```
+
+3. Add to config:
+
+```toml
+[channels.mumble]
+server_env = "MUMBLE_SERVER"
+username_env = "MUMBLE_USERNAME"
+# password_env = "MUMBLE_PASSWORD"   # optional
+default_agent = "assistant"
+```
+
+4. Restart the daemon.
+
+### How It Works
+
+The Mumble adapter connects to the Mumble server using the Mumble TCP protocol and authenticates with the configured credentials. It listens for text messages in the joined channel and routes them to the configured agent. Responses are sent back as text messages.
+
+---
+
+## Webhook
+
+### Prerequisites
+
+- A target URL that accepts HTTP POST requests (no external service registration needed)
+
+### Setup
+
+1. Choose a URL where webhook payloads should be sent.
+2. Choose a shared secret for HMAC-SHA256 signature verification.
+3. Set environment variables:
+
+```bash
+export WEBHOOK_URL=https://your-service.example.com/hook
+export WEBHOOK_SECRET=your-shared-secret
+```
+
+4. Add to config:
+
+```toml
+[channels.webhook]
+url_env = "WEBHOOK_URL"
+secret_env = "WEBHOOK_SECRET"
+default_agent = "assistant"
+```
+
+5. Restart the daemon.
+
+### How It Works
+
+The Webhook adapter provides a generic bidirectional HTTP integration. Incoming messages are received as HTTP POST requests to the LibreFang webhook endpoint, verified via HMAC-SHA256 using the shared secret. Responses are delivered as HTTP POST payloads to the configured URL, also signed with HMAC-SHA256.
 
 ---
 
