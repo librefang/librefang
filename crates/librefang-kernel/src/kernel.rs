@@ -2890,6 +2890,9 @@ system_prompt = "You are a helpful assistant."
             Ok(result) => {
                 // Record token usage for quota tracking
                 self.scheduler.record_usage(agent_id, &result.total_usage);
+                // Record tool calls for rate limiting
+                let tool_count = result.iterations.saturating_sub(1) as u32;
+                self.scheduler.record_tool_calls(agent_id, tool_count);
 
                 // Update last active time
                 let _ = self.registry.set_state(agent_id, AgentState::Running);
@@ -3434,6 +3437,11 @@ system_prompt = "You are a helpful assistant."
                     kernel_clone
                         .scheduler
                         .record_usage(agent_id, &result.total_usage);
+                    // Record tool calls for rate limiting
+                    let tool_count = result.iterations.saturating_sub(1) as u32;
+                    kernel_clone
+                        .scheduler
+                        .record_tool_calls(agent_id, tool_count);
 
                     // Atomically check quotas and persist usage to SQLite
                     // (mirrors non-streaming path — prevents TOCTOU race)
