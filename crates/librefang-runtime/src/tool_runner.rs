@@ -287,7 +287,7 @@ pub async fn execute_tool(
 
         // Inter-agent tools (require kernel handle)
         "agent_send" => tool_agent_send(input, kernel).await,
-        "agent_spawn" => tool_agent_spawn(input, kernel, caller_agent_id).await,
+        "agent_spawn" => tool_agent_spawn(input, kernel, caller_agent_id, allowed_tools).await,
         "agent_list" => tool_agent_list(kernel),
         "agent_kill" => tool_agent_kill(input, kernel),
 
@@ -477,6 +477,23 @@ pub async fn execute_tool(
         other => {
             // Fallback 1: MCP tools (mcp_{server}_{tool} prefix)
             if mcp::is_mcp_tool(other) {
+                // SECURITY: Verify MCP tool is in the agent's allowed_tools list.
+                // The primary check at the top of execute_tool covers this when
+                // allowed_tools is Some, but we add an explicit guard here to
+                // ensure MCP tools are never dispatched without authorization,
+                // even if called from a context that omits allowed_tools.
+                if let Some(allowed) = allowed_tools {
+                    if !allowed.iter().any(|t| t == other) {
+                        warn!(tool = other, "MCP tool not in agent's allowed_tools list");
+                        return ToolResult {
+                            tool_use_id: tool_use_id.to_string(),
+                            content: format!(
+                                "Permission denied: MCP tool '{other}' is not in the agent's allowed tools list"
+                            ),
+                            is_error: true,
+                        };
+                    }
+                }
                 if let Some(mcp_conns) = mcp_connections {
                     let mut conns = mcp_conns.lock().await;
                     let server_name =
@@ -1364,14 +1381,17 @@ fn validate_path(path: &str) -> Result<&str, String> {
     Ok(path)
 }
 
-/// Resolve a file path through the workspace sandbox (if available) or legacy validation.
+/// Resolve a file path through the workspace sandbox.
+///
+/// SECURITY: Returns an error when `workspace_root` is `None` to prevent
+/// unrestricted filesystem access. All file operations MUST be confined
+/// to the agent's workspace directory.
 fn resolve_file_path(raw_path: &str, workspace_root: Option<&Path>) -> Result<PathBuf, String> {
-    if let Some(root) = workspace_root {
-        crate::workspace_sandbox::resolve_sandbox_path(raw_path, root)
-    } else {
-        let _ = validate_path(raw_path)?;
-        Ok(PathBuf::from(raw_path))
-    }
+    let root = workspace_root.ok_or(
+        "Workspace sandbox not configured: file operations are disabled. \
+         Set a workspace_root in the agent manifest or kernel config to enable file tools.",
+    )?;
+    crate::workspace_sandbox::resolve_sandbox_path(raw_path, root)
 }
 
 async fn tool_file_read(
@@ -1723,6 +1743,7 @@ async fn tool_agent_spawn(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
     parent_id: Option<&str>,
+    parent_allowed_tools: Option<&[String]>,
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
 
@@ -1777,7 +1798,27 @@ async fn tool_agent_spawn(
     let manifest_toml = toml::to_string(&manifest_json)
         .map_err(|e| format!("Failed to serialize to TOML: {}", e))?;
 
-    let (id, agent_name) = kh.spawn_agent(&manifest_toml, parent_id).await?;
+    // Build parent capabilities from the parent's allowed tools list.
+    // This prevents a sub-agent from escalating privileges beyond what
+    // its parent is permitted to use (capability inheritance enforcement).
+    //
+    // Tool names imply resource-level capabilities (matching implied_capabilities
+    // logic in ToolProfile): e.g. "web_fetch" implies NetConnect("*"),
+    // "shell_exec" implies ShellExec("*"), "agent_spawn" implies AgentSpawn.
+    // Without this expansion, validate_capability_inheritance would reject
+    // legitimate child capabilities because ToolInvoke("web_fetch") cannot
+    // cover a child's NetConnect("*") — they are different Capability variants.
+    let parent_caps: Vec<librefang_types::capability::Capability> =
+        if let Some(tools) = parent_allowed_tools {
+            tools_to_parent_capabilities(tools)
+        } else {
+            // No allowed_tools means unrestricted parent — grant ToolAll
+            vec![librefang_types::capability::Capability::ToolAll]
+        };
+
+    let (id, agent_name) = kh
+        .spawn_agent_checked(&manifest_toml, parent_id, &parent_caps)
+        .await?;
     Ok(format!(
         "Agent spawned successfully.\n  ID: {id}\n  Name: {agent_name}"
     ))
@@ -3985,13 +4026,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_file_read_missing() {
-        let bad_path = std::env::temp_dir()
-            .join("librefang_test_nonexistent_99999")
-            .join("file.txt");
+        let workspace = tempfile::tempdir().expect("tempdir");
         let result = execute_tool(
             "test-id",
             "file_read",
-            &serde_json::json!({"path": bad_path.to_str().unwrap()}),
+            &serde_json::json!({"path": "nonexistent_99999/file.txt"}),
             None,
             None,
             None,
@@ -4000,7 +4039,7 @@ mod tests {
             None,
             None,
             None,
-            None,
+            Some(workspace.path()),
             None, // media_engine
             None, // media_drivers
             None, // exec_policy
@@ -4020,6 +4059,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_file_read_path_traversal_blocked() {
+        let workspace = tempfile::tempdir().expect("tempdir");
         let result = execute_tool(
             "test-id",
             "file_read",
@@ -4032,7 +4072,7 @@ mod tests {
             None,
             None,
             None,
-            None,
+            Some(workspace.path()),
             None, // media_engine
             None, // media_drivers
             None, // exec_policy
@@ -4049,6 +4089,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_file_write_path_traversal_blocked() {
+        let workspace = tempfile::tempdir().expect("tempdir");
         let result = execute_tool(
             "test-id",
             "file_write",
@@ -4061,7 +4102,7 @@ mod tests {
             None,
             None,
             None,
-            None,
+            Some(workspace.path()),
             None, // media_engine
             None, // media_drivers
             None, // exec_policy
@@ -4078,6 +4119,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_file_list_path_traversal_blocked() {
+        let workspace = tempfile::tempdir().expect("tempdir");
         let result = execute_tool(
             "test-id",
             "file_list",
@@ -4090,7 +4132,7 @@ mod tests {
             None,
             None,
             None,
-            None,
+            Some(workspace.path()),
             None, // media_engine
             None, // media_drivers
             None, // exec_policy
@@ -4224,15 +4266,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_capability_enforcement_allowed() {
+        let workspace = tempfile::tempdir().expect("tempdir");
         let allowed = vec!["file_read".to_string()];
-        // Use a cross-platform nonexistent path
-        let bad_path = std::env::temp_dir()
-            .join("librefang_test_nonexistent_12345")
-            .join("file.txt");
         let result = execute_tool(
             "test-id",
             "file_read",
-            &serde_json::json!({"path": bad_path.to_str().unwrap()}),
+            &serde_json::json!({"path": "nonexistent_12345/file.txt"}),
             None,
             Some(&allowed),
             None,
@@ -4241,7 +4280,7 @@ mod tests {
             None,
             None,
             None,
-            None,
+            Some(workspace.path()),
             None, // media_engine
             None, // media_drivers
             None, // exec_policy
@@ -4252,17 +4291,15 @@ mod tests {
             None, // channel
         )
         .await;
-        // Should fail for file-not-found, NOT for permission denied
+        // Should fail for path resolution, NOT for permission denied
         assert!(
             result.is_error,
             "Expected error but got: {}",
             result.content
         );
         assert!(
-            result.content.contains("Failed to read")
-                || result.content.contains("not found")
-                || result.content.contains("No such file"),
-            "Unexpected error: {}",
+            !result.content.contains("Permission denied"),
+            "Unexpected permission denied: {}",
             result.content
         );
     }
@@ -4731,5 +4768,423 @@ mod tests {
         assert_eq!(output["title"], "Test");
         // Cleanup
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // -----------------------------------------------------------------------
+    // Security fix tests (#1652)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_file_read_no_workspace_root_returns_error() {
+        // SECURITY: file_read must fail when workspace_root is None
+        let result = execute_tool(
+            "test-id",
+            "file_read",
+            &serde_json::json!({"path": "/etc/passwd"}),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None, // workspace_root = None
+            None, // media_engine
+            None, // media_drivers
+            None, // exec_policy
+            None, // tts_engine
+            None, // docker_config
+            None, // process_manager
+            None, // sender_id
+            None, // channel
+        )
+        .await;
+        assert!(
+            result.is_error,
+            "Expected error when workspace_root is None"
+        );
+        assert!(
+            result.content.contains("Workspace sandbox not configured"),
+            "Expected workspace sandbox error, got: {}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn test_file_write_no_workspace_root_returns_error() {
+        // SECURITY: file_write must fail when workspace_root is None
+        let result = execute_tool(
+            "test-id",
+            "file_write",
+            &serde_json::json!({"path": "/tmp/test.txt", "content": "pwned"}),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None, // workspace_root = None
+            None, // media_engine
+            None, // media_drivers
+            None, // exec_policy
+            None, // tts_engine
+            None, // docker_config
+            None, // process_manager
+            None, // sender_id
+            None, // channel
+        )
+        .await;
+        assert!(
+            result.is_error,
+            "Expected error when workspace_root is None"
+        );
+        assert!(
+            result.content.contains("Workspace sandbox not configured"),
+            "Expected workspace sandbox error, got: {}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn test_file_list_no_workspace_root_returns_error() {
+        // SECURITY: file_list must fail when workspace_root is None
+        let result = execute_tool(
+            "test-id",
+            "file_list",
+            &serde_json::json!({"path": "/etc"}),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None, // workspace_root = None
+            None, // media_engine
+            None, // media_drivers
+            None, // exec_policy
+            None, // tts_engine
+            None, // docker_config
+            None, // process_manager
+            None, // sender_id
+            None, // channel
+        )
+        .await;
+        assert!(
+            result.is_error,
+            "Expected error when workspace_root is None"
+        );
+        assert!(
+            result.content.contains("Workspace sandbox not configured"),
+            "Expected workspace sandbox error, got: {}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn test_agent_spawn_capability_escalation_denied() {
+        // SECURITY: sub-agent cannot request tools the parent doesn't have.
+        // Parent only has file_read, but child manifest requests shell_exec.
+        let kernel: Arc<dyn KernelHandle> = Arc::new(SpawnCheckKernel {
+            should_fail_escalation: true,
+        });
+        let parent_allowed = vec!["file_read".to_string(), "agent_spawn".to_string()];
+        let child_manifest = r#"
+name = "escalated-child"
+module = "native"
+[model]
+provider = "groq"
+model = "llama3-8b-8192"
+[capabilities]
+tools = ["shell_exec", "file_read"]
+"#;
+        let result = execute_tool(
+            "test-id",
+            "agent_spawn",
+            &serde_json::json!({"manifest_toml": child_manifest}),
+            Some(&kernel),
+            Some(&parent_allowed),
+            Some("parent-agent-id"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None, // media_engine
+            None, // media_drivers
+            None, // exec_policy
+            None, // tts_engine
+            None, // docker_config
+            None, // process_manager
+            None, // sender_id
+            None, // channel
+        )
+        .await;
+        assert!(
+            result.is_error,
+            "Expected escalation to be denied, got: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains("escalation") || result.content.contains("denied"),
+            "Expected escalation denial message, got: {}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn test_agent_spawn_subset_capabilities_allowed() {
+        // Sub-agent requests only capabilities the parent has — should succeed.
+        let kernel: Arc<dyn KernelHandle> = Arc::new(SpawnCheckKernel {
+            should_fail_escalation: false,
+        });
+        let parent_allowed = vec![
+            "file_read".to_string(),
+            "file_write".to_string(),
+            "agent_spawn".to_string(),
+        ];
+        let child_manifest = r#"
+name = "good-child"
+module = "native"
+[model]
+provider = "groq"
+model = "llama3-8b-8192"
+[capabilities]
+tools = ["file_read"]
+"#;
+        let result = execute_tool(
+            "test-id",
+            "agent_spawn",
+            &serde_json::json!({"manifest_toml": child_manifest}),
+            Some(&kernel),
+            Some(&parent_allowed),
+            Some("parent-agent-id"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None, // media_engine
+            None, // media_drivers
+            None, // exec_policy
+            None, // tts_engine
+            None, // docker_config
+            None, // process_manager
+            None, // sender_id
+            None, // channel
+        )
+        .await;
+        assert!(
+            !result.is_error,
+            "Expected spawn to succeed, got error: {}",
+            result.content
+        );
+        assert!(result.content.contains("spawned successfully"));
+    }
+
+    #[tokio::test]
+    async fn test_mcp_tool_blocked_by_allowed_tools() {
+        // SECURITY: MCP tools not in allowed_tools must be blocked.
+        let allowed = vec!["file_read".to_string(), "mcp_server1_tool_a".to_string()];
+        let result = execute_tool(
+            "test-id",
+            "mcp_server1_tool_b", // Not in allowed list
+            &serde_json::json!({"param": "value"}),
+            None,
+            Some(&allowed),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None, // media_engine
+            None, // media_drivers
+            None, // exec_policy
+            None, // tts_engine
+            None, // docker_config
+            None, // process_manager
+            None, // sender_id
+            None, // channel
+        )
+        .await;
+        assert!(result.is_error);
+        assert!(
+            result.content.contains("Permission denied"),
+            "Expected permission denied for MCP tool, got: {}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mcp_tool_allowed_passes_check() {
+        // MCP tool in the allowed list should pass the capability check
+        // (may still fail due to no MCP connections, but not permission denied)
+        let allowed = vec!["file_read".to_string(), "mcp_myserver_mytool".to_string()];
+        let result = execute_tool(
+            "test-id",
+            "mcp_myserver_mytool", // In allowed list
+            &serde_json::json!({"param": "value"}),
+            None,
+            Some(&allowed),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None, // media_engine
+            None, // media_drivers
+            None, // exec_policy
+            None, // tts_engine
+            None, // docker_config
+            None, // process_manager
+            None, // sender_id
+            None, // channel
+        )
+        .await;
+        // Should fail for "MCP not available", not "Permission denied"
+        assert!(result.is_error);
+        assert!(
+            result.content.contains("MCP not available") || result.content.contains("MCP"),
+            "Expected MCP availability error (not permission denied), got: {}",
+            result.content
+        );
+        assert!(
+            !result.content.contains("Permission denied"),
+            "Should not get permission denied for allowed MCP tool, got: {}",
+            result.content
+        );
+    }
+
+    /// Mock kernel that validates capability inheritance in spawn_agent_checked.
+    struct SpawnCheckKernel {
+        should_fail_escalation: bool,
+    }
+
+    #[async_trait]
+    impl KernelHandle for SpawnCheckKernel {
+        async fn spawn_agent(
+            &self,
+            _manifest_toml: &str,
+            _parent_id: Option<&str>,
+        ) -> Result<(String, String), String> {
+            Ok(("test-id-123".to_string(), "test-agent".to_string()))
+        }
+
+        async fn spawn_agent_checked(
+            &self,
+            _manifest_toml: &str,
+            _parent_id: Option<&str>,
+            parent_caps: &[librefang_types::capability::Capability],
+        ) -> Result<(String, String), String> {
+            if self.should_fail_escalation {
+                // Simulate the kernel finding escalation
+                let child_caps = vec![
+                    librefang_types::capability::Capability::ToolInvoke("shell_exec".to_string()),
+                    librefang_types::capability::Capability::ToolInvoke("file_read".to_string()),
+                ];
+                librefang_types::capability::validate_capability_inheritance(
+                    parent_caps,
+                    &child_caps,
+                )?;
+            }
+            Ok(("test-id-456".to_string(), "good-child".to_string()))
+        }
+
+        async fn send_to_agent(&self, _agent_id: &str, _message: &str) -> Result<String, String> {
+            Err("not used".to_string())
+        }
+
+        fn list_agents(&self) -> Vec<AgentInfo> {
+            vec![]
+        }
+
+        fn kill_agent(&self, _agent_id: &str) -> Result<(), String> {
+            Err("not used".to_string())
+        }
+
+        fn memory_store(&self, _key: &str, _value: serde_json::Value) -> Result<(), String> {
+            Err("not used".to_string())
+        }
+
+        fn memory_recall(&self, _key: &str) -> Result<Option<serde_json::Value>, String> {
+            Err("not used".to_string())
+        }
+
+        fn memory_list(&self) -> Result<Vec<String>, String> {
+            Err("not used".to_string())
+        }
+
+        fn find_agents(&self, _query: &str) -> Vec<AgentInfo> {
+            vec![]
+        }
+
+        async fn task_post(
+            &self,
+            _title: &str,
+            _description: &str,
+            _assigned_to: Option<&str>,
+            _created_by: Option<&str>,
+        ) -> Result<String, String> {
+            Err("not used".to_string())
+        }
+
+        async fn task_claim(&self, _agent_id: &str) -> Result<Option<serde_json::Value>, String> {
+            Err("not used".to_string())
+        }
+
+        async fn task_complete(&self, _task_id: &str, _result: &str) -> Result<(), String> {
+            Err("not used".to_string())
+        }
+
+        async fn task_list(&self, _status: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
+            Err("not used".to_string())
+        }
+
+        async fn task_delete(&self, _task_id: &str) -> Result<bool, String> {
+            Err("not used".to_string())
+        }
+
+        async fn task_retry(&self, _task_id: &str) -> Result<bool, String> {
+            Err("not used".to_string())
+        }
+
+        async fn publish_event(
+            &self,
+            _event_type: &str,
+            _payload: serde_json::Value,
+        ) -> Result<(), String> {
+            Err("not used".to_string())
+        }
+
+        async fn knowledge_add_entity(
+            &self,
+            _entity: librefang_types::memory::Entity,
+        ) -> Result<String, String> {
+            Err("not used".to_string())
+        }
+
+        async fn knowledge_add_relation(
+            &self,
+            _relation: librefang_types::memory::Relation,
+        ) -> Result<String, String> {
+            Err("not used".to_string())
+        }
+
+        async fn knowledge_query(
+            &self,
+            _pattern: librefang_types::memory::GraphPattern,
+        ) -> Result<Vec<librefang_types::memory::GraphMatch>, String> {
+            Err("not used".to_string())
+        }
     }
 }
