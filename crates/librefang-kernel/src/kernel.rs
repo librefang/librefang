@@ -2682,7 +2682,8 @@ system_prompt = "You are a helpful assistant."
         // update canonical memory, do NOT write JSONL mirror, and do NOT
         // append to the daily memory log. The side question is truly ephemeral.
 
-        // Still record metering so cost tracking stays accurate
+        // Atomically check quotas and record metering so cost tracking stays
+        // accurate (prevents TOCTOU race on concurrent ephemeral requests)
         let model = &manifest.model.model;
         let cost = MeteringEngine::estimate_cost_with_catalog(
             &self.model_catalog.read().unwrap_or_else(|e| e.into_inner()),
@@ -2690,7 +2691,7 @@ system_prompt = "You are a helpful assistant."
             result.total_usage.input_tokens,
             result.total_usage.output_tokens,
         );
-        let _ = self.metering.record(&librefang_memory::usage::UsageRecord {
+        let usage_record = librefang_memory::usage::UsageRecord {
             agent_id,
             model: model.clone(),
             input_tokens: result.total_usage.input_tokens,
@@ -2698,7 +2699,19 @@ system_prompt = "You are a helpful assistant."
             cost_usd: cost,
             tool_calls: result.iterations.saturating_sub(1),
             latency_ms,
-        });
+        };
+        if let Err(e) = self.metering.check_all_and_record(
+            &usage_record,
+            &manifest.resources,
+            &self.config.budget,
+        ) {
+            tracing::warn!(
+                agent_id = %agent_id,
+                error = %e,
+                "Post-call quota check failed (ephemeral); recording usage anyway"
+            );
+            let _ = self.metering.record(&usage_record);
+        }
 
         // Record experiment metrics if running an experiment (kernel has cost info)
         if let Some(ref ctx) = result.experiment_context {
@@ -3326,7 +3339,8 @@ system_prompt = "You are a helpful assistant."
                         .scheduler
                         .record_usage(agent_id, &result.total_usage);
 
-                    // Persist usage to SQLite (mirrors non-streaming path)
+                    // Atomically check quotas and persist usage to SQLite
+                    // (mirrors non-streaming path — prevents TOCTOU race)
                     let model = &manifest.model.model;
                     let cost = MeteringEngine::estimate_cost_with_catalog(
                         &kernel_clone
@@ -3337,17 +3351,27 @@ system_prompt = "You are a helpful assistant."
                         result.total_usage.input_tokens,
                         result.total_usage.output_tokens,
                     );
-                    let _ = kernel_clone
-                        .metering
-                        .record(&librefang_memory::usage::UsageRecord {
-                            agent_id,
-                            model: model.clone(),
-                            input_tokens: result.total_usage.input_tokens,
-                            output_tokens: result.total_usage.output_tokens,
-                            cost_usd: cost,
-                            tool_calls: result.iterations.saturating_sub(1),
-                            latency_ms,
-                        });
+                    let usage_record = librefang_memory::usage::UsageRecord {
+                        agent_id,
+                        model: model.clone(),
+                        input_tokens: result.total_usage.input_tokens,
+                        output_tokens: result.total_usage.output_tokens,
+                        cost_usd: cost,
+                        tool_calls: result.iterations.saturating_sub(1),
+                        latency_ms,
+                    };
+                    if let Err(e) = kernel_clone.metering.check_all_and_record(
+                        &usage_record,
+                        &manifest.resources,
+                        &kernel_clone.config.budget,
+                    ) {
+                        tracing::warn!(
+                            agent_id = %agent_id,
+                            error = %e,
+                            "Post-call quota check failed (streaming); recording usage anyway"
+                        );
+                        let _ = kernel_clone.metering.record(&usage_record);
+                    }
 
                     // Record experiment metrics if running an experiment (kernel has cost info)
                     if let Some(ref ctx) = result.experiment_context {
@@ -4271,7 +4295,9 @@ system_prompt = "You are a helpful assistant."
             append_daily_memory_log(workspace, &result.response);
         }
 
-        // Record usage in the metering engine (uses catalog pricing as single source of truth)
+        // Atomically check quotas and record usage in a single SQLite
+        // transaction to prevent the TOCTOU race where concurrent requests
+        // both pass the pre-check before either records its spend.
         let model = &manifest.model.model;
         let cost = MeteringEngine::estimate_cost_with_catalog(
             &self.model_catalog.read().unwrap_or_else(|e| e.into_inner()),
@@ -4279,7 +4305,7 @@ system_prompt = "You are a helpful assistant."
             result.total_usage.input_tokens,
             result.total_usage.output_tokens,
         );
-        let _ = self.metering.record(&librefang_memory::usage::UsageRecord {
+        let usage_record = librefang_memory::usage::UsageRecord {
             agent_id,
             model: model.clone(),
             input_tokens: result.total_usage.input_tokens,
@@ -4287,7 +4313,22 @@ system_prompt = "You are a helpful assistant."
             cost_usd: cost,
             tool_calls: result.iterations.saturating_sub(1),
             latency_ms,
-        });
+        };
+        if let Err(e) = self.metering.check_all_and_record(
+            &usage_record,
+            &manifest.resources,
+            &self.config.budget,
+        ) {
+            // Quota exceeded after the LLM call — log but still return the
+            // result (the tokens were already consumed by the provider).
+            tracing::warn!(
+                agent_id = %agent_id,
+                error = %e,
+                "Post-call quota check failed; usage recorded anyway to keep accounting accurate"
+            );
+            // Fall back to plain record so the cost is not lost from tracking
+            let _ = self.metering.record(&usage_record);
+        }
 
         // Populate cost on the result based on usage_footer mode
         let mut result = result;

@@ -236,6 +236,61 @@ impl MeteringEngine {
         )
     }
 
+    /// Atomically check per-agent quotas and record usage in a single SQLite
+    /// transaction.  This closes the TOCTOU race between `check_quota` and
+    /// `record` — no other writer can sneak in between the check and the
+    /// insert.
+    pub fn check_quota_and_record(
+        &self,
+        record: &UsageRecord,
+        quota: &ResourceQuota,
+    ) -> LibreFangResult<()> {
+        self.store.check_quota_and_record(
+            record,
+            quota.max_cost_per_hour_usd,
+            quota.max_cost_per_day_usd,
+            quota.max_cost_per_month_usd,
+        )
+    }
+
+    /// Atomically check global budget limits and record usage in a single
+    /// SQLite transaction.
+    pub fn check_global_budget_and_record(
+        &self,
+        record: &UsageRecord,
+        budget: &librefang_types::config::BudgetConfig,
+    ) -> LibreFangResult<()> {
+        self.store.check_global_budget_and_record(
+            record,
+            budget.max_hourly_usd,
+            budget.max_daily_usd,
+            budget.max_monthly_usd,
+        )
+    }
+
+    /// Atomically check both per-agent quotas and global budget limits, then
+    /// record the usage event — all within a single SQLite transaction.
+    ///
+    /// This is the preferred method for recording usage after an LLM call,
+    /// as it prevents the race condition where concurrent requests both pass
+    /// the quota check before either records its usage.
+    pub fn check_all_and_record(
+        &self,
+        record: &UsageRecord,
+        quota: &ResourceQuota,
+        budget: &librefang_types::config::BudgetConfig,
+    ) -> LibreFangResult<()> {
+        self.store.check_all_and_record(
+            record,
+            quota.max_cost_per_hour_usd,
+            quota.max_cost_per_day_usd,
+            quota.max_cost_per_month_usd,
+            budget.max_hourly_usd,
+            budget.max_daily_usd,
+            budget.max_monthly_usd,
+        )
+    }
+
     /// Clean up old usage records.
     pub fn cleanup(&self, days: u32) -> LibreFangResult<usize> {
         self.store.cleanup_old(days)
