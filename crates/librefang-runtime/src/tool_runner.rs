@@ -1739,6 +1739,50 @@ async fn tool_agent_send(
         .await
 }
 
+/// Expand a list of tool names into full `Capability` grants for the parent.
+///
+/// Tool names at the `execute_tool` level (e.g. `"file_read"`, `"shell_exec"`)
+/// are `ToolInvoke` capabilities. But a child manifest may also request
+/// resource-level capabilities (`NetConnect`, `ShellExec`, `AgentSpawn`, etc.)
+/// that are *implied* by tool names. Without expanding, `validate_capability_inheritance`
+/// would reject legitimate child capabilities because `ToolInvoke("web_fetch")`
+/// cannot cover a child's `NetConnect("*")` — they are different enum variants.
+///
+/// This mirrors the `ToolProfile::implied_capabilities()` logic in agent.rs.
+fn tools_to_parent_capabilities(tools: &[String]) -> Vec<librefang_types::capability::Capability> {
+    use librefang_types::capability::Capability;
+
+    let mut caps: Vec<Capability> = tools
+        .iter()
+        .map(|t| Capability::ToolInvoke(t.clone()))
+        .collect();
+
+    let has_net = tools.iter().any(|t| t.starts_with("web_") || t == "*");
+    let has_shell = tools.iter().any(|t| t == "shell_exec" || t == "*");
+    let has_agent_spawn = tools.iter().any(|t| t == "agent_spawn" || t == "*");
+    let has_agent_msg = tools.iter().any(|t| t.starts_with("agent_") || t == "*");
+    let has_memory = tools.iter().any(|t| t.starts_with("memory_") || t == "*");
+
+    if has_net {
+        caps.push(Capability::NetConnect("*".into()));
+    }
+    if has_shell {
+        caps.push(Capability::ShellExec("*".into()));
+    }
+    if has_agent_spawn {
+        caps.push(Capability::AgentSpawn);
+    }
+    if has_agent_msg {
+        caps.push(Capability::AgentMessage("*".into()));
+    }
+    if has_memory {
+        caps.push(Capability::MemoryRead("*".into()));
+        caps.push(Capability::MemoryWrite("*".into()));
+    }
+
+    caps
+}
+
 async fn tool_agent_spawn(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
@@ -4302,6 +4346,14 @@ mod tests {
             "Unexpected permission denied: {}",
             result.content
         );
+        assert!(
+            result.content.contains("Failed to read")
+                || result.content.contains("not found")
+                || result.content.contains("No such file")
+                || result.content.contains("does not exist"),
+            "Expected file-not-found error, got: {}",
+            result.content
+        );
     }
 
     #[tokio::test]
@@ -4988,6 +5040,64 @@ tools = ["file_read"]
         assert!(result.content.contains("spawned successfully"));
     }
 
+    #[test]
+    fn test_tools_to_parent_capabilities_expands_resource_caps() {
+        use librefang_types::capability::Capability;
+
+        let tools = vec![
+            "file_read".to_string(),
+            "web_fetch".to_string(),
+            "shell_exec".to_string(),
+            "agent_spawn".to_string(),
+            "memory_store".to_string(),
+        ];
+        let caps = tools_to_parent_capabilities(&tools);
+
+        // Should have ToolInvoke for each tool name
+        assert!(caps.contains(&Capability::ToolInvoke("file_read".into())));
+        assert!(caps.contains(&Capability::ToolInvoke("web_fetch".into())));
+        assert!(caps.contains(&Capability::ToolInvoke("shell_exec".into())));
+        assert!(caps.contains(&Capability::ToolInvoke("agent_spawn".into())));
+        assert!(caps.contains(&Capability::ToolInvoke("memory_store".into())));
+
+        // Should also have implied resource-level capabilities
+        assert!(
+            caps.contains(&Capability::NetConnect("*".into())),
+            "web_fetch should imply NetConnect"
+        );
+        assert!(
+            caps.contains(&Capability::ShellExec("*".into())),
+            "shell_exec should imply ShellExec"
+        );
+        assert!(
+            caps.contains(&Capability::AgentSpawn),
+            "agent_spawn should imply AgentSpawn"
+        );
+        assert!(
+            caps.contains(&Capability::AgentMessage("*".into())),
+            "agent_spawn should imply AgentMessage"
+        );
+        assert!(
+            caps.contains(&Capability::MemoryRead("*".into())),
+            "memory_store should imply MemoryRead"
+        );
+        assert!(
+            caps.contains(&Capability::MemoryWrite("*".into())),
+            "memory_store should imply MemoryWrite"
+        );
+    }
+
+    #[test]
+    fn test_tools_to_parent_capabilities_no_false_expansion() {
+        use librefang_types::capability::Capability;
+
+        // Only file_read — should NOT imply any resource caps
+        let tools = vec!["file_read".to_string()];
+        let caps = tools_to_parent_capabilities(&tools);
+        assert_eq!(caps.len(), 1);
+        assert!(caps.contains(&Capability::ToolInvoke("file_read".into())));
+    }
+
     #[tokio::test]
     async fn test_mcp_tool_blocked_by_allowed_tools() {
         // SECURITY: MCP tools not in allowed_tools must be blocked.
@@ -5082,16 +5192,20 @@ tools = ["file_read"]
 
         async fn spawn_agent_checked(
             &self,
-            _manifest_toml: &str,
+            manifest_toml: &str,
             _parent_id: Option<&str>,
             parent_caps: &[librefang_types::capability::Capability],
         ) -> Result<(String, String), String> {
             if self.should_fail_escalation {
-                // Simulate the kernel finding escalation
-                let child_caps = vec![
-                    librefang_types::capability::Capability::ToolInvoke("shell_exec".to_string()),
-                    librefang_types::capability::Capability::ToolInvoke("file_read".to_string()),
-                ];
+                // Parse child manifest to extract capabilities, mimicking real kernel behavior
+                let manifest: librefang_types::agent::AgentManifest =
+                    toml::from_str(manifest_toml).map_err(|e| format!("Invalid manifest: {e}"))?;
+                let child_caps: Vec<librefang_types::capability::Capability> = manifest
+                    .capabilities
+                    .tools
+                    .iter()
+                    .map(|t| librefang_types::capability::Capability::ToolInvoke(t.clone()))
+                    .collect();
                 librefang_types::capability::validate_capability_inheritance(
                     parent_caps,
                     &child_caps,
