@@ -1,222 +1,976 @@
-# Agent 模板
+# Agent 模板目录
 
-LibreFang 提供 32 个 Agent 模板（来自 [registry](https://github.com/librefang/librefang-registry/tree/main/agents)，默认预装 assistant，其他可从 dashboard 安装）。
+LibreFang 提供 **32 个 Agent 模板**，来自 [registry](https://github.com/librefang/librefang-registry/tree/main/agents)。`assistant` 模板已预装，其他模板可从 Dashboard 安装。每个模板都是一个可直接生成的 `agent.toml` 清单文件，位于 `agents/` 目录下。模板覆盖软件工程、业务运营、个人效率和日常任务等领域。
 
----
+## 快速开始
 
-## 10 个内置模板
-
-| Agent | 描述 | 能力 |
-|-------|------|------|
-| hello-world | 入门示例，可读取文件、搜索网页 | file_read, file_list, web_fetch, web_search |
-| coder | 代码开发和调试 | code_execute, file_read, file_write, git |
-| researcher | 深度研究和分析 | web_search, web_fetch, memory_recall |
-| writer | 内容创作和编辑 | file_write, memory_recall |
-| analyst | 数据分析和洞察 | data_analysis, file_read |
-| architect | 系统架构设计 | memory_recall, web_fetch |
-| ops | 运维自动化 | shell_execute, file_read |
-| security-auditor | 安全审计 | code_analysis, security_scan |
-| planner | 项目规划和任务管理 | memory_store, memory_recall |
-| debugger | 问题诊断和调试 | code_analysis, shell_execute |
-| translator | 多语言翻译 | memory_recall |
-| tutor | 学习和辅导 | memory_recall, web_fetch |
-| personal-finance | 个人财务管理 | data_analysis, file_read |
-| travel-planner | 旅行规划 | web_search, memory_recall |
-| social-media | 社交媒体管理 | web_fetch, memory_store |
-| meeting-assistant | 会议助手 | calendar, email |
-| email-assistant | 邮件助手 | email, file_read |
-| recruiter | 招聘和人才发现 | web_search, memory_recall |
-| data-scientist | 数据科学分析 | python, pandas, jupyter |
-| test-engineer | 测试工程 | code_execute, file_read |
-| doc-writer | 文档编写 | file_write, memory_recall |
-| customer-support | 客户支持 | memory_recall, email |
-| sales-assistant | 销售助手 | web_search, memory_store |
-| legal-assistant | 法律助手 | web_fetch, memory_recall |
-| health-tracker | 健康追踪 | data_analysis, memory_store |
-| home-automation | 家居自动化 | shell_execute, web_fetch |
-| assistant | 通用助手 | web_fetch, memory_recall |
-| orchestrator | 多 Agent 协调 | agent_spawn |
-| devops-lead | DevOps 领导 | shell_execute, kubernetes |
-
----
-
-## 使用模板
-
-### 生成 Agent
+通过 CLI 生成任意模板：
 
 ```bash
-librefang agent spawn agents/hello-world/agent.toml
+librefang spawn orchestrator
+librefang spawn coder
+librefang spawn --template agents/writer/agent.toml
 ```
 
-### 查看模板
+通过 REST API 生成：
 
 ```bash
-ls agents/
+# 通过内置模板名称生成
+curl -X POST http://localhost:4545/api/agents \
+  -H "Content-Type: application/json" \
+  -d '{"template": "coder"}'
+
+# 生成时覆盖参数
+curl -X POST http://localhost:4545/api/agents \
+  -H "Content-Type: application/json" \
+  -d '{"template": "writer", "model": "gemini-2.5-flash"}'
+```
+
+向运行中的 Agent 发送消息：
+
+```bash
+curl -X POST http://localhost:4545/api/agents/{id}/message \
+  -H "Content-Type: application/json" \
+  -d '{"content": "Write unit tests for the auth module"}'
 ```
 
 ---
 
-## 模板结构
+## 模板层级
 
-```
-agents/
-└── hello-world/
-    ├── agent.toml      # Agent 清单
-    └── SKILL.md      # (可选) 领域知识
-```
+模板按任务复杂度和使用的 LLM 模型分为 4 个层级。层级越高，使用的模型能力越强（成本也越高），适用于需要深度推理的任务。
 
-### agent.toml 示例
+### 第 1 层 -- 前沿 (DeepSeek)
 
-```toml
-name = "hello-world"
-version = "0.1.0"
-description = "A friendly greeting agent"
-author = "librefang"
-module = "builtin:chat"
+适用于需要最深层推理的任务：多 Agent 编排、系统架构设计和安全分析。
 
-[model]
-provider = "default"
-model = "default"
-max_tokens = 4096
-temperature = 0.6
+| 模板 | 供应商 | 模型 |
+|------|--------|------|
+| orchestrator | deepseek | deepseek-chat |
+| architect | deepseek | deepseek-chat |
+| security-auditor | deepseek | deepseek-chat |
 
-[system_prompt]
-prompt = "You are Hello World..."
+如果 DeepSeek API 密钥不可用，所有第 1 层 Agent 将回退到 `groq/llama-3.3-70b-versatile`。
 
-[capabilities]
-tools = ["file_read", "file_list", "web_fetch"]
-network = ["*"]
-memory_read = ["*"]
-memory_write = ["self.*"]
+### 第 2 层 -- 强力 (Gemini 2.5 Flash)
 
-[resources]
-max_llm_tokens_per_hour = 100000
+适用于需要较强分析和编码能力的任务：软件工程、数据科学、研究、测试和法律审查。
+
+| 模板 | 供应商 | 模型 |
+|------|--------|------|
+| coder | gemini | gemini-2.5-flash |
+| code-reviewer | gemini | gemini-2.5-flash |
+| data-scientist | gemini | gemini-2.5-flash |
+| debugger | gemini | gemini-2.5-flash |
+| researcher | gemini | gemini-2.5-flash |
+| analyst | gemini | gemini-2.5-flash |
+| test-engineer | gemini | gemini-2.5-flash |
+| legal-assistant | gemini | gemini-2.5-flash |
+
+如果 Gemini API 密钥不可用，所有第 2 层 Agent 将回退到 `groq/llama-3.3-70b-versatile`。
+
+### 第 3 层 -- 均衡 (Groq + Gemini 回退)
+
+适用于日常业务和效率类任务：规划、写作、邮件、客户支持、销售、招聘和会议。
+
+| 模板 | 供应商 | 模型 | 回退模型 |
+|------|--------|------|----------|
+| planner | groq | llama-3.3-70b-versatile | gemini/gemini-2.0-flash |
+| writer | groq | llama-3.3-70b-versatile | gemini/gemini-2.0-flash |
+| doc-writer | groq | llama-3.3-70b-versatile | gemini/gemini-2.0-flash |
+| devops-lead | groq | llama-3.3-70b-versatile | gemini/gemini-2.0-flash |
+| assistant | groq | llama-3.3-70b-versatile | gemini/gemini-2.0-flash |
+| email-assistant | groq | llama-3.3-70b-versatile | gemini/gemini-2.0-flash |
+| social-media | groq | llama-3.3-70b-versatile | gemini/gemini-2.0-flash |
+| customer-support | groq | llama-3.3-70b-versatile | gemini/gemini-2.0-flash |
+| sales-assistant | groq | llama-3.3-70b-versatile | gemini/gemini-2.0-flash |
+| recruiter | groq | llama-3.3-70b-versatile | gemini/gemini-2.0-flash |
+| meeting-assistant | groq | llama-3.3-70b-versatile | gemini/gemini-2.0-flash |
+
+### 第 4 层 -- 快速 (仅 Groq)
+
+适用于轻量级高速任务：运维监控、翻译、辅导、健康追踪、预算管理、旅行和家居自动化。未配置回退模型（`ops` 除外，它使用更小的 8B 模型以提高速度）。
+
+| 模板 | 供应商 | 模型 |
+|------|--------|------|
+| ops | groq | llama-3.1-8b-instant |
+| hello-world | groq | llama-3.3-70b-versatile |
+| translator | groq | llama-3.3-70b-versatile |
+| tutor | groq | llama-3.3-70b-versatile |
+| health-tracker | groq | llama-3.3-70b-versatile |
+| personal-finance | groq | llama-3.3-70b-versatile |
+| travel-planner | groq | llama-3.3-70b-versatile |
+| home-automation | groq | llama-3.3-70b-versatile |
+
+---
+
+## 模板目录
+
+### orchestrator
+
+**第 1 层 -- 前沿** | `deepseek/deepseek-chat` | 回退：`groq/llama-3.3-70b-versatile`
+
+> 元 Agent，负责分解复杂任务、委派给专业 Agent 并综合结果。
+
+orchestrator 是 Agent 集群的指挥中心。它分析用户请求，将其拆分为子任务，使用 `agent_list` 发现可用的专业 Agent，通过 `agent_send` 委派工作，在需要时生成新 Agent，并将所有响应综合为连贯的最终答案。它会在执行前说明委派策略，并避免将过于简单的任务进行委派。
+
+- **标签**：无
+- **Temperature**：0.3
+- **最大 token**：8192
+- **Token 配额**：500,000/小时
+- **调度方式**：持续检查，每 120 秒一次
+- **工具**：`agent_send`、`agent_spawn`、`agent_list`、`agent_kill`、`memory_store`、`memory_recall`、`file_read`、`file_write`
+- **能力**：`agent_spawn = true`、`agent_message = ["*"]`、`memory_read = ["*"]`、`memory_write = ["*"]`
+
+```bash
+librefang spawn orchestrator
+# "Plan and execute a full security audit of the codebase"
 ```
 
 ---
 
-## 创建自定义 Agent
+### architect
 
-### 最小配置
+**第 1 层 -- 前沿** | `deepseek/deepseek-chat` | 回退：`groq/llama-3.3-70b-versatile`
+
+> 系统架构师。设计软件架构、评估权衡方案、编写技术规格文档。
+
+遵循关注点分离、性能感知设计、简洁优于花哨、为变更而设计但不过度工程化等原则进行系统设计。明确需求、识别关键组件、定义接口和数据流、评估权衡因素（延迟、吞吐量、复杂度、可维护性），并记录带有理由的决策。输出使用清晰的标题、ASCII 图表和结构化推理。
+
+- **标签**：`architecture`、`design`、`planning`
+- **Temperature**：0.3
+- **最大 token**：8192
+- **Token 配额**：200,000/小时
+- **工具**：`file_read`、`file_list`、`memory_store`、`memory_recall`、`agent_send`
+- **能力**：`agent_message = ["*"]`、`memory_read = ["*"]`、`memory_write = ["self.*", "shared.*"]`
+
+```bash
+librefang spawn architect
+# "Design a microservices architecture for the payment processing system"
+```
+
+---
+
+### security-auditor
+
+**第 1 层 -- 前沿** | `deepseek/deepseek-chat` | 回退：`groq/llama-3.3-70b-versatile`
+
+> 安全专家。审查代码漏洞、检查配置、执行威胁建模。
+
+关注 OWASP Top 10、输入验证、认证缺陷、加密误用、注入攻击（SQL、命令注入、XSS、SSTI）、不安全反序列化、密钥管理、依赖漏洞、竞态条件和权限提升。映射攻击面、追踪来自不可信输入的数据流、检查信任边界、审查错误处理、评估加密实现。以严重性级别（CRITICAL/HIGH/MEDIUM/LOW/INFO）报告发现，格式为：发现、影响、证据、修复建议。
+
+- **标签**：`security`、`audit`、`vulnerability`
+- **Temperature**：0.2
+- **最大 token**：4096
+- **Token 配额**：150,000/小时
+- **调度方式**：在 `event:agent_spawned`、`event:agent_terminated` 事件时主动触发
+- **工具**：`file_read`、`file_list`、`shell_exec`、`memory_store`、`memory_recall`
+- **Shell 访问**：`cargo audit *`、`cargo tree *`、`git log *`
+- **能力**：`memory_read = ["*"]`、`memory_write = ["self.*", "shared.*"]`
+
+```bash
+librefang spawn security-auditor
+# "Audit the authentication module for vulnerabilities"
+```
+
+---
+
+### coder
+
+**第 2 层 -- 强力** | `gemini/gemini-2.5-flash` | 回退：`groq/llama-3.3-70b-versatile`
+
+> 专业软件工程师。阅读、编写和分析代码。
+
+以逐步推理的方式编写干净的生产级代码。先读取文件理解上下文，然后进行精确修改。始终为产出的代码编写测试。支持 Rust、Python、JavaScript 及其他语言。
+
+- **标签**：`coding`、`implementation`、`rust`、`python`
+- **Temperature**：0.3
+- **最大 token**：8192
+- **Token 配额**：200,000/小时
+- **最大并发工具数**：10
+- **工具**：`file_read`、`file_write`、`file_list`、`shell_exec`
+- **Shell 访问**：`cargo *`、`rustc *`、`git *`、`npm *`、`python *`
+- **能力**：`memory_read = ["*"]`、`memory_write = ["self.*"]`
+
+```bash
+librefang spawn coder
+# "Implement a rate limiter using the token bucket algorithm in Rust"
+```
+
+---
+
+### code-reviewer
+
+**第 2 层 -- 强力** | `gemini/gemini-2.5-flash` | 回退：`groq/llama-3.3-70b-versatile`
+
+> 资深代码审查者。审查 PR，识别问题，按生产标准提出改进建议。
+
+按优先级审查代码：正确性、安全性、性能、可维护性、风格。按文件分组反馈并标注严重性标签：`[MUST FIX]`、`[SHOULD FIX]`、`[NIT]`、`[PRAISE]`。解释"为什么"，而不仅仅是"是什么"。为提议的更改提供具体代码建议。认可好的代码，在已有格式化工具的情况下避免纠结代码风格。
+
+- **标签**：`review`、`code-quality`、`best-practices`
+- **Temperature**：0.3
+- **最大 token**：4096
+- **Token 配额**：150,000/小时
+- **工具**：`file_read`、`file_list`、`shell_exec`、`memory_store`、`memory_recall`
+- **Shell 访问**：`cargo clippy *`、`cargo fmt *`、`git diff *`、`git log *`
+- **能力**：`memory_read = ["*"]`、`memory_write = ["self.*", "shared.*"]`
+
+```bash
+librefang spawn code-reviewer
+# "Review the changes in the last 3 commits for production readiness"
+```
+
+---
+
+### data-scientist
+
+**第 2 层 -- 强力** | `gemini/gemini-2.5-flash` | 回退：`groq/llama-3.3-70b-versatile`
+
+> 数据科学家。分析数据集、构建模型、创建可视化、进行统计分析。
+
+遵循结构化方法论：理解问题、探索数据（形状、分布、缺失值）、使用适当的统计方法进行分析、在需要时构建预测模型、清晰传达发现。工具箱包括描述统计、假设检验（t 检验、卡方检验、ANOVA）、相关/回归分析、时间序列、聚类、降维和 A/B 测试设计。
+
+- **标签**：无
+- **Temperature**：0.3
+- **最大 token**：4096
+- **Token 配额**：150,000/小时
+- **工具**：`file_read`、`file_write`、`file_list`、`shell_exec`、`memory_store`、`memory_recall`
+- **Shell 访问**：`python *`
+- **能力**：`memory_read = ["*"]`、`memory_write = ["self.*", "shared.*"]`
+
+```bash
+librefang spawn data-scientist
+# "Analyze this CSV dataset and identify the top 3 factors correlated with churn"
+```
+
+---
+
+### debugger
+
+**第 2 层 -- 强力** | `gemini/gemini-2.5-flash` | 回退：`groq/llama-3.3-70b-versatile`
+
+> 调试专家。追踪 Bug、分析堆栈跟踪、执行根因分析。
+
+遵循严格的方法论：复现、隔离（通过代码/数据的二分查找）、识别根因（而非仅仅是症状）、修复（最小正确修复）、验证（回归测试）。关注常见模式：差一错误、null/None、竞态条件、资源泄漏。检查错误处理路径和近期更改。以 Bug 报告、根因、修复、预防的格式呈现发现。
+
+- **标签**：无
+- **Temperature**：0.2
+- **最大 token**：4096
+- **Token 配额**：150,000/小时
+- **工具**：`file_read`、`file_list`、`shell_exec`、`memory_store`、`memory_recall`
+- **Shell 访问**：`cargo *`、`git log *`、`git diff *`、`git show *`
+- **能力**：`memory_read = ["*"]`、`memory_write = ["self.*", "shared.*"]`
+
+```bash
+librefang spawn debugger
+# "The API returns 500 on POST /api/agents when the name contains unicode -- find the root cause"
+```
+
+---
+
+### researcher
+
+**第 2 层 -- 强力** | `gemini/gemini-2.5-flash` | 回退：`groq/llama-3.3-70b-versatile`
+
+> 研究 Agent。获取网页内容并综合信息。
+
+获取网页、阅读文档，并将发现综合为清晰、结构化的报告。始终引用来源，将事实与分析分开，并标注不确定性。将研究任务拆解为子问题并逐一系统调查。
+
+- **标签**：`research`、`analysis`、`web`
+- **Temperature**：0.5
+- **最大 token**：4096
+- **Token 配额**：150,000/小时
+- **工具**：`web_fetch`、`file_read`、`file_write`、`file_list`
+- **能力**：`network = ["*"]`、`memory_read = ["*"]`、`memory_write = ["self.*", "shared.*"]`
+
+```bash
+librefang spawn researcher
+# "Research the current state of WebAssembly component model and summarize the key proposals"
+```
+
+---
+
+### analyst
+
+**第 2 层 -- 强力** | `gemini/gemini-2.5-flash` | 回退：`groq/llama-3.3-70b-versatile`
+
+> 数据分析师。处理数据、生成洞察、创建报告。
+
+分析数据、发现模式、生成洞察并创建结构化报告。展示方法论，使用数字和证据支持结论。先读取文件了解数据结构，然后以摘要、关键指标、详细分析和建议的形式呈现发现。
+
+- **标签**：无
+- **Temperature**：0.4
+- **最大 token**：4096
+- **Token 配额**：150,000/小时
+- **工具**：`file_read`、`file_write`、`file_list`、`shell_exec`
+- **Shell 访问**：`python *`、`cargo *`
+- **能力**：`memory_read = ["*"]`、`memory_write = ["self.*", "shared.*"]`
+
+```bash
+librefang spawn analyst
+# "Analyze the server access logs and report traffic patterns by hour and endpoint"
+```
+
+---
+
+### test-engineer
+
+**第 2 层 -- 强力** | `gemini/gemini-2.5-flash` | 回退：`groq/llama-3.3-70b-versatile`
+
+> 质量保证工程师。设计测试策略、编写测试、验证正确性。
+
+测试应描述行为而非实现。偏好快速、确定性的测试。设计单元测试、集成测试、属性测试、边界用例测试和回归测试。遵循 Arrange-Act-Assert 模式，使用描述性测试名称（`test_X_when_Y_should_Z`）。审查测试覆盖率以识别未测试的路径和遗漏的边界用例。
+
+- **标签**：`testing`、`qa`、`validation`
+- **Temperature**：0.3
+- **最大 token**：4096
+- **Token 配额**：150,000/小时
+- **工具**：`file_read`、`file_write`、`file_list`、`shell_exec`、`memory_store`、`memory_recall`
+- **Shell 访问**：`cargo test *`、`cargo check *`
+- **能力**：`memory_read = ["*"]`、`memory_write = ["self.*", "shared.*"]`
+
+```bash
+librefang spawn test-engineer
+# "Write comprehensive tests for the rate limiter module covering edge cases"
+```
+
+---
+
+### legal-assistant
+
+**第 2 层 -- 强力** | `gemini/gemini-2.5-flash` | 回退：`groq/llama-3.3-70b-versatile`
+
+> 法律助手，用于合同审查、法律研究、合规检查和文档起草。
+
+系统性审查合同，涵盖当事方、终止条款、付款条件、赔偿条款、知识产权条款、保密条款、适用法律和不可抗力。起草保密协议、服务协议、服务条款、隐私政策和雇佣协议。检查 GDPR、SOC 2、HIPAA、PCI DSS、CCPA/CPRA、ADA 和 OSHA 的合规性。始终附带免责声明，说明输出不构成法律建议。
+
+- **标签**：`legal`、`contracts`、`compliance`、`research`、`review`、`documents`
+- **Temperature**：0.2
+- **最大 token**：8192
+- **Token 配额**：200,000/小时
+- **最大并发工具数**：5
+- **工具**：`file_read`、`file_write`、`file_list`、`memory_store`、`memory_recall`、`web_fetch`
+- **能力**：`network = ["*"]`、`memory_read = ["*"]`、`memory_write = ["self.*", "shared.*"]`
+
+```bash
+librefang spawn legal-assistant
+# "Review this NDA and flag any one-sided or problematic clauses"
+```
+
+---
+
+### planner
+
+**第 3 层 -- 均衡** | `groq/llama-3.3-70b-versatile` | 回退：`gemini/gemini-2.0-flash`
+
+> 项目规划师。创建项目计划、拆解 Epic、估算工作量、识别风险和依赖关系。
+
+遵循结构化方法论：范围界定（包含/排除）、分解（从 Epic 到 Story 再到 Task）、排序（依赖关系和关键路径）、估算（S/M/L/XL 附带理由）、风险评估（技术和进度）、里程碑（附带验收标准）。提供范围估算（最优/可能/最差），优先处理风险最高的部分，并为未知因素预留 20-30% 的缓冲。
+
+- **标签**：无
+- **Temperature**：0.3
+- **最大 token**：8192
+- **Token 配额**：200,000/小时
+- **工具**：`file_read`、`file_list`、`memory_store`、`memory_recall`、`agent_send`
+- **能力**：`agent_message = ["*"]`、`memory_read = ["*"]`、`memory_write = ["self.*", "shared.*"]`
+
+```bash
+librefang spawn planner
+# "Create a project plan for migrating our monolith to microservices over 6 months"
+```
+
+---
+
+### writer
+
+**第 3 层 -- 均衡** | `groq/llama-3.3-70b-versatile` | 回退：`gemini/gemini-2.0-flash`
+
+> 内容写作者。创建文档、文章和技术文章。
+
+擅长文档、技术写作、博客文章和清晰表达。使用主动语态简洁写作，通过标题和要点组织内容结构。读取现有文件获取上下文，并在被要求时将输出写入文件。
+
+- **标签**：无
+- **Temperature**：0.7
+- **最大 token**：4096
+- **Token 配额**：100,000/小时
+- **工具**：`file_read`、`file_write`、`file_list`
+- **能力**：`memory_read = ["*"]`、`memory_write = ["self.*"]`
+
+```bash
+librefang spawn writer
+# "Write a blog post about the benefits of agent-based architectures"
+```
+
+---
+
+### doc-writer
+
+**第 3 层 -- 均衡** | `groq/llama-3.3-70b-versatile` | 回退：`gemini/gemini-2.0-flash`
+
+> 技术文档工程师。编写文档、README 文件、API 文档、教程和架构指南。
+
+以读者为中心写作：先说"为什么"，再说"是什么"，最后说"怎么做"。采用渐进式披露（从概览到细节）。编写 README、API 文档、架构文档、教程、参考文档和架构决策记录（ADR）。使用主动语态、短句，并为每个非简单概念提供代码示例。
+
+- **标签**：无
+- **Temperature**：0.4
+- **最大 token**：8192
+- **Token 配额**：200,000/小时
+- **工具**：`file_read`、`file_write`、`file_list`、`memory_store`、`memory_recall`
+- **能力**：`memory_read = ["*"]`、`memory_write = ["self.*", "shared.*"]`
+
+```bash
+librefang spawn doc-writer
+# "Write API documentation for all the /api/agents endpoints"
+```
+
+---
+
+### devops-lead
+
+**第 3 层 -- 均衡** | `groq/llama-3.3-70b-versatile` | 回退：`gemini/gemini-2.0-flash`
+
+> DevOps 负责人。管理 CI/CD、基础设施、部署、监控和事件响应。
+
+涵盖 CI/CD 流水线设计、容器编排（Docker、Kubernetes）、基础设施即代码（Terraform、Pulumi）、监控与可观测性（Prometheus、Grafana、OpenTelemetry）、事件响应、安全加固和容量规划。设计具有快速反馈循环、不可变制品和自动回滚的流水线。
+
+- **标签**：无
+- **Temperature**：0.2
+- **最大 token**：4096
+- **Token 配额**：150,000/小时
+- **工具**：`file_read`、`file_write`、`file_list`、`shell_exec`、`memory_store`、`memory_recall`、`agent_send`
+- **Shell 访问**：`docker *`、`git *`、`cargo *`、`kubectl *`
+- **能力**：`agent_message = ["*"]`、`memory_read = ["*"]`、`memory_write = ["self.*", "shared.*"]`
+
+```bash
+librefang spawn devops-lead
+# "Design a CI/CD pipeline for our Rust workspace with staging and production environments"
+```
+
+---
+
+### assistant
+
+**第 3 层 -- 均衡** | `groq/llama-3.3-70b-versatile` | 回退：`gemini/gemini-2.0-flash`
+
+> 通用助手。LibreFang 的默认 Agent，用于日常任务、问答和对话。
+
+多功能的默认 Agent，覆盖对话智能、任务执行、研究与综合、写作与沟通、问题解决、Agent 委派（将专业任务路由到合适的专家）、知识管理和创意头脑风暴。作为用户可信赖的首选联络点 -- 直接处理大多数任务，在专家能做得更好时委派给专家。
+
+- **标签**：`general`、`assistant`、`default`、`multipurpose`、`conversation`、`productivity`
+- **Temperature**：0.5
+- **最大 token**：8192
+- **Token 配额**：300,000/小时
+- **最大并发工具数**：10
+- **工具**：`file_read`、`file_write`、`file_list`、`memory_store`、`memory_recall`、`web_fetch`、`shell_exec`、`agent_send`、`agent_list`
+- **Shell 访问**：`python *`、`cargo *`、`git *`、`npm *`
+- **能力**：`network = ["*"]`、`agent_message = ["*"]`、`memory_read = ["*"]`、`memory_write = ["self.*", "shared.*"]`
+
+```bash
+librefang spawn assistant
+# "Help me plan my week and draft replies to these three emails"
+```
+
+---
+
+### email-assistant
+
+**第 3 层 -- 均衡** | `groq/llama-3.3-70b-versatile` | 回退：`gemini/gemini-2.0-flash`
+
+> 邮件分诊、起草、日程安排和收件箱管理 Agent。
+
+按紧急程度、类别和所需操作快速分诊收到的邮件。根据收件人和情况起草专业邮件。管理基于邮件的日程安排和跟进事务。识别重复出现的邮件模式并生成可复用模板。为长邮件线程和高流量收件箱生成简洁摘要。
+
+- **标签**：`email`、`communication`、`triage`、`drafting`、`scheduling`、`productivity`
+- **Temperature**：0.4
+- **最大 token**：8192
+- **Token 配额**：150,000/小时
+- **最大并发工具数**：5
+- **工具**：`file_read`、`file_write`、`file_list`、`memory_store`、`memory_recall`、`web_fetch`
+- **能力**：`network = ["*"]`、`memory_read = ["*"]`、`memory_write = ["self.*", "shared.*"]`
+
+```bash
+librefang spawn email-assistant
+# "Triage these 15 emails and draft responses for the urgent ones"
+```
+
+---
+
+### social-media
+
+**第 3 层 -- 均衡** | `groq/llama-3.3-70b-versatile` | 回退：`gemini/gemini-2.0-flash`
+
+> 社交媒体内容创作、排期和互动策略 Agent。
+
+为 Twitter/X、LinkedIn、Instagram、Facebook、TikTok、Reddit、Mastodon、Bluesky 和 Threads 制作平台优化的内容。规划内容日历、设计互动策略、分析互动数据、定义品牌语调指南、优化标签和 SEO。根据平台从专业思想领导力到轻松活泼调整语调。
+
+- **标签**：`social-media`、`content`、`marketing`、`engagement`、`scheduling`、`analytics`
+- **Temperature**：0.7
+- **最大 token**：4096
+- **Token 配额**：120,000/小时
+- **最大并发工具数**：5
+- **工具**：`file_read`、`file_write`、`file_list`、`memory_store`、`memory_recall`、`web_fetch`
+- **能力**：`network = ["*"]`、`memory_read = ["*"]`、`memory_write = ["self.*", "shared.*"]`
+
+```bash
+librefang spawn social-media
+# "Create a week of LinkedIn posts about our open-source launch"
+```
+
+---
+
+### customer-support
+
+**第 3 层 -- 均衡** | `groq/llama-3.3-70b-versatile` | 回退：`gemini/gemini-2.0-flash`
+
+> 客户支持 Agent，用于工单处理、问题解决和客户沟通。
+
+按类别、严重性、产品领域和客户等级分诊支持工单。遵循系统化的故障排除工作流进行问题诊断。编写富有同理心、以解决方案为导向的客户回复。管理知识库内容和升级交接。监控客户情绪并生成支持指标摘要。
+
+- **标签**：`support`、`customer-service`、`tickets`、`helpdesk`、`communication`、`resolution`
+- **Temperature**：0.3
+- **最大 token**：4096
+- **Token 配额**：200,000/小时
+- **最大并发工具数**：5
+- **工具**：`file_read`、`file_write`、`file_list`、`memory_store`、`memory_recall`、`web_fetch`
+- **能力**：`network = ["*"]`、`memory_read = ["*"]`、`memory_write = ["self.*", "shared.*"]`
+
+```bash
+librefang spawn customer-support
+# "Triage this batch of support tickets and draft responses for the top 5 urgent ones"
+```
+
+---
+
+### sales-assistant
+
+**第 3 层 -- 均衡** | `groq/llama-3.3-70b-versatile` | 回退：`gemini/gemini-2.0-flash`
+
+> 销售助手，用于 CRM 更新、外联起草、销售管道管理和交易跟踪。
+
+使用 AIDA 框架起草个性化的冷启动外联邮件。使用结构化更新管理 CRM 数据。分析销售管道的加权价值、风险交易和转化率。准备包含潜在客户调研的通话前简报。构建竞争对手分析卡片并执行赢/输分析。
+
+- **标签**：`sales`、`crm`、`outreach`、`pipeline`、`prospecting`、`deals`
+- **Temperature**：0.5
+- **最大 token**：4096
+- **Token 配额**：150,000/小时
+- **最大并发工具数**：5
+- **工具**：`file_read`、`file_write`、`file_list`、`memory_store`、`memory_recall`、`web_fetch`
+- **能力**：`network = ["*"]`、`memory_read = ["*"]`、`memory_write = ["self.*", "shared.*"]`
+
+```bash
+librefang spawn sales-assistant
+# "Draft a 3-touch outreach sequence for CTOs at mid-market SaaS companies"
+```
+
+---
+
+### recruiter
+
+**第 3 层 -- 均衡** | `groq/llama-3.3-70b-versatile` | 回退：`gemini/gemini-2.0-flash`
+
+> 招聘 Agent，用于简历筛选、候选人外联、职位描述编写和招聘管道管理。
+
+根据职位要求使用结构化匹配评分评估简历。编写包容性强、易于搜索的职位描述。起草个性化的候选人外联序列。准备包含 STAR 格式行为面试问题的结构化面试指南。跟踪候选人在招聘管道各阶段的进度并生成报告。积极支持包容性招聘实践。
+
+- **标签**：`recruiting`、`hiring`、`resume`、`outreach`、`talent`、`hr`
+- **Temperature**：0.4
+- **最大 token**：4096
+- **Token 配额**：150,000/小时
+- **最大并发工具数**：5
+- **工具**：`file_read`、`file_write`、`file_list`、`memory_store`、`memory_recall`、`web_fetch`
+- **能力**：`network = ["*"]`、`memory_read = ["*"]`、`memory_write = ["self.*", "shared.*"]`
+
+```bash
+librefang spawn recruiter
+# "Screen these 10 resumes against the senior backend engineer job requirements"
+```
+
+---
+
+### meeting-assistant
+
+**第 3 层 -- 均衡** | `groq/llama-3.3-70b-versatile` | 回退：`gemini/gemini-2.0-flash`
+
+> 会议记录、行动项、议程准备和跟进追踪 Agent。
+
+创建结构化、有时间限制的议程。将原始会议记录或转录内容转化为包含执行摘要、关键讨论要点、决策和行动项的清晰结构化会议纪要。提取每个承诺的责任人、截止日期和优先级。起草跟进邮件并安排提醒。跨多个相关会议进行综合以识别主题和遗漏。
+
+- **标签**：`meetings`、`notes`、`action-items`、`agenda`、`follow-up`、`productivity`
+- **Temperature**：0.3
+- **最大 token**：8192
+- **Token 配额**：150,000/小时
+- **最大并发工具数**：5
+- **工具**：`file_read`、`file_write`、`file_list`、`memory_store`、`memory_recall`
+- **能力**：`memory_read = ["*"]`、`memory_write = ["self.*", "shared.*"]`
+
+```bash
+librefang spawn meeting-assistant
+# "Process this meeting transcript and extract all action items with owners and deadlines"
+```
+
+---
+
+### ops
+
+**第 4 层 -- 快速** | `groq/llama-3.1-8b-instant` | 无回退
+
+> DevOps Agent。监控系统、运行诊断、管理部署。
+
+监控系统健康状况、运行诊断并协助部署。精确且谨慎 -- 在执行命令前说明命令的作用。除非明确要求进行更改，否则倾向于只读操作。以结构化格式报告：状态、详情、建议操作。使用集群中最小的模型（8B）以在日常运维检查中获得最快速度。
+
+- **标签**：无
+- **Temperature**：0.2
+- **最大 token**：2048
+- **Token 配额**：50,000/小时
+- **调度方式**：每 5 分钟定期执行
+- **工具**：`shell_exec`、`file_read`、`file_list`
+- **Shell 访问**：`docker *`、`git *`、`cargo *`、`systemctl *`、`ps *`、`df *`、`free *`
+- **能力**：`memory_read = ["*"]`、`memory_write = ["self.*"]`
+
+```bash
+librefang spawn ops
+# "Check disk usage, memory, and running containers"
+```
+
+---
+
+### hello-world
+
+**第 4 层 -- 快速** | `groq/llama-3.3-70b-versatile` | 无回退
+
+> 一个友好的问候 Agent，可以读取文件和获取网页。
+
+最简单的 Agent 模板 -- 一个具有基本只读能力的最小入门 Agent。没有系统提示、没有标签、没有 Shell 访问。适合作为自定义 Agent 的起点或用于测试 Agent 系统是否正常工作。
+
+- **标签**：无
+- **Temperature**：默认
+- **最大 token**：默认
+- **Token 配额**：100,000/小时
+- **工具**：`file_read`、`file_list`、`web_fetch`
+- **能力**：`memory_read = ["*"]`、`memory_write = ["self.*"]`、`agent_spawn = false`
+
+```bash
+librefang spawn hello-world
+# "Hello! What can you do?"
+```
+
+---
+
+### translator
+
+**第 4 层 -- 快速** | `groq/llama-3.3-70b-versatile` | 无回退
+
+> 多语言翻译 Agent，用于文档翻译、本地化和跨文化沟通。
+
+在 20 多种主要语言之间进行翻译，高度忠实于原文的含义、语气和意图。处理上下文和文化适配、文档格式保留、软件本地化（JSON、YAML、PO/POT、XLIFF）、技术/专业翻译、翻译质量保证（回译、一致性检查）和术语表管理。对歧义短语标注多种翻译选项。
+
+- **标签**：`translation`、`languages`、`localization`、`multilingual`、`communication`、`i18n`
+- **Temperature**：0.3
+- **最大 token**：8192
+- **Token 配额**：200,000/小时
+- **最大并发工具数**：5
+- **工具**：`file_read`、`file_write`、`file_list`、`memory_store`、`memory_recall`、`web_fetch`
+- **能力**：`network = ["*"]`、`memory_read = ["*"]`、`memory_write = ["self.*", "shared.*"]`
+
+```bash
+librefang spawn translator
+# "Translate this README from English to Japanese and Spanish, preserving code blocks"
+```
+
+---
+
+### tutor
+
+**第 4 层 -- 快速** | `groq/llama-3.3-70b-versatile` | 无回退
+
+> 教学和讲解 Agent，用于学习、辅导和教育内容创建。
+
+使用费曼技巧在学习者的水平上解释概念。使用苏格拉底式提问引导发现。教授数学、计算机科学、自然科学、人文学科、社会科学和专业技能。逐步讲解问题过程，展示推理而非仅给出答案。创建包含间隔重复的结构化学习计划。提供练习题并附带详细的建设性反馈。
+
+- **标签**：`education`、`teaching`、`tutoring`、`learning`、`explanation`、`knowledge`
+- **Temperature**：0.5
+- **最大 token**：8192
+- **Token 配额**：200,000/小时
+- **最大并发工具数**：5
+- **工具**：`file_read`、`file_write`、`file_list`、`memory_store`、`memory_recall`、`shell_exec`、`web_fetch`
+- **Shell 访问**：`python *`
+- **能力**：`network = ["*"]`、`memory_read = ["*"]`、`memory_write = ["self.*", "shared.*"]`
+
+```bash
+librefang spawn tutor
+# "Teach me how binary search trees work, starting from the basics"
+```
+
+---
+
+### health-tracker
+
+**第 4 层 -- 快速** | `groq/llama-3.3-70b-versatile` | 无回退
+
+> 健康追踪 Agent，用于健康指标、用药提醒、健身目标和生活习惯管理。
+
+追踪体重、血压、心率、睡眠、饮水量、步数、情绪和自定义指标。管理用药计划，包括剂量、时间和补药日期。设定 SMART 健身目标并制定渐进式训练计划。记录饮食并估算营养成分。应用循证的习惯养成原则。生成定期健康报告。始终附带免责声明，说明它不是医疗专业人员。
+
+- **标签**：`health`、`wellness`、`fitness`、`medication`、`habits`、`tracking`
+- **Temperature**：0.3
+- **最大 token**：4096
+- **Token 配额**：100,000/小时
+- **最大并发工具数**：5
+- **调度方式**：每 1 小时定期执行
+- **工具**：`file_read`、`file_write`、`file_list`、`memory_store`、`memory_recall`
+- **能力**：`memory_read = ["*"]`、`memory_write = ["self.*"]`
+
+```bash
+librefang spawn health-tracker
+# "Log today's metrics: weight 175lbs, sleep 7.5 hours, mood 8/10, 8000 steps"
+```
+
+---
+
+### personal-finance
+
+**第 4 层 -- 快速** | `groq/llama-3.3-70b-versatile` | 无回退
+
+> 个人理财 Agent，用于预算跟踪、开支分析、储蓄目标和财务规划。
+
+使用 50/30/20、零基预算和信封法等框架创建详细预算。处理任何格式的开支数据（CSV、手动列表）并对交易进行分类。定义和跟踪储蓄目标及预计时间线。分析债务组合并模拟雪崩法与滚雪球法的还款策略。生成包含净资产、债务收入比和储蓄率的财务健康报告。始终附带免责声明，说明输出不构成财务建议。
+
+- **标签**：`finance`、`budget`、`expenses`、`savings`、`planning`、`money`
+- **Temperature**：0.2
+- **最大 token**：8192
+- **Token 配额**：150,000/小时
+- **最大并发工具数**：5
+- **工具**：`file_read`、`file_write`、`file_list`、`memory_store`、`memory_recall`、`shell_exec`
+- **Shell 访问**：`python *`
+- **能力**：`memory_read = ["*"]`、`memory_write = ["self.*", "shared.*"]`
+
+```bash
+librefang spawn personal-finance
+# "Analyze this month's expense CSV and show me where I'm over budget"
+```
+
+---
+
+### travel-planner
+
+**第 4 层 -- 快速** | `groq/llama-3.3-70b-versatile` | 无回退
+
+> 旅行规划 Agent，用于行程创建、预订研究、预算估算和旅行后勤。
+
+构建逐日行程，包含预计时间、交通、餐饮推荐和应急方案。提供全面的目的地指南，涵盖最佳访问时间、景点、风俗、安全、美食和签证要求。按多个价格档位创建详细的旅行预算。按类型、社区和预算推荐住宿。规划交通后勤，包括航班、火车和当地公共交通。生成定制化的行李清单。
+
+- **标签**：`travel`、`planning`、`itinerary`、`booking`、`logistics`、`vacation`
+- **Temperature**：0.5
+- **最大 token**：8192
+- **Token 配额**：150,000/小时
+- **最大并发工具数**：5
+- **工具**：`file_read`、`file_write`、`file_list`、`memory_store`、`memory_recall`、`web_fetch`
+- **能力**：`network = ["*"]`、`memory_read = ["*"]`、`memory_write = ["self.*", "shared.*"]`
+
+```bash
+librefang spawn travel-planner
+# "Plan a 10-day trip to Japan for 2 people, mid-range budget, mix of culture and food"
+```
+
+---
+
+### home-automation
+
+**第 4 层 -- 快速** | `groq/llama-3.3-70b-versatile` | 无回退
+
+> 智能家居控制 Agent，用于 IoT 设备管理、自动化规则和家庭监控。
+
+管理智能家居设备（灯光、恒温器、安防、家电、传感器）。使用事件-条件-动作模式设计自动化工作流。为常见场景（晨间日程、电影之夜、就寝、外出模式）配置多设备场景。监控能源消耗并推荐优化方案。配置家庭安防工作流。排查 IoT 连接问题并桥接不同生态系统（Home Assistant、HomeKit、SmartThings）。了解 Matter/Thread 协议的采用情况。
+
+- **标签**：`smart-home`、`iot`、`automation`、`devices`、`monitoring`、`home`
+- **Temperature**：0.2
+- **最大 token**：4096
+- **Token 配额**：100,000/小时
+- **最大并发工具数**：10
+- **工具**：`file_read`、`file_write`、`file_list`、`memory_store`、`memory_recall`、`shell_exec`、`web_fetch`
+- **Shell 访问**：`curl *`、`python *`、`ping *`
+- **能力**：`network = ["*"]`、`memory_read = ["*"]`、`memory_write = ["self.*", "shared.*"]`
+
+```bash
+librefang spawn home-automation
+# "Create a bedtime automation: lock doors, arm cameras, dim lights, set thermostat to 68F"
+```
+
+---
+
+## 自定义模板
+
+`agents/custom/` 目录保留给你自己的 Agent 模板。按照以下清单格式创建新的 `agent.toml` 文件。
+
+### 清单格式
 
 ```toml
+# 必填字段
 name = "my-agent"
 version = "0.1.0"
-description = "My custom agent"
+description = "What this agent does in one sentence."
+author = "your-name"
 module = "builtin:chat"
 
+# 可选元数据
+tags = ["tag1", "tag2"]
+
+# 模型配置（必填）
 [model]
+provider = "gemini"                  # 供应商：gemini、deepseek、groq、openai、anthropic 等
+model = "gemini-2.5-flash"           # 模型标识符
+api_key_env = "GEMINI_API_KEY"       # 存放 API 密钥的环境变量
+max_tokens = 4096                    # 每次响应的最大输出 token 数
+temperature = 0.3                    # 创造性（0.0 = 确定性，1.0 = 创造性）
+system_prompt = """Your agent's personality, capabilities, and instructions go here.
+Be specific about what the agent should and should not do."""
+
+# 可选回退模型（当主模型不可用时使用）
+[[fallback_models]]
 provider = "groq"
 model = "llama-3.3-70b-versatile"
-```
+api_key_env = "GROQ_API_KEY"
 
-### 完整配置
-
-```toml
-name = "my-agent"
-version = "0.1.0"
-description = "A helpful assistant"
-author = "you"
-module = "builtin:chat"
-
-[model]
-provider = "default"
-model = "default"
-max_tokens = 4096
-temperature = 0.7
-
-[system_prompt]
-prompt = "You are a helpful assistant..."
-
-[resources]
-max_llm_tokens_per_hour = 100000
-max_iterations = 100
-
-[capabilities]
-tools = ["file_read", "file_list", "web_fetch"]
-network = ["*"]
-memory_read = ["*"]
-memory_write = ["self.*"]
-agent_spawn = false
-
+# 可选调度（用于自主/后台 Agent）
 [schedule]
-enabled = false
-cron = "0 9 * * *"
+periodic = { cron = "every 5m" }                                     # 定期执行
+# continuous = { check_interval_secs = 120 }                         # 持续循环
+# proactive = { conditions = ["event:agent_spawned"] }               # 事件触发
 
-[channels]
-telegram_enabled = true
-discord_enabled = false
+# 资源限制
+[resources]
+max_llm_tokens_per_hour = 150000    # 每小时 Token 预算
+max_concurrent_tools = 5            # 最大并行工具执行数
+
+# 能力授权（最小权限原则）
+[capabilities]
+tools = ["file_read", "file_write", "file_list", "shell_exec",
+         "memory_store", "memory_recall", "web_fetch",
+         "agent_send", "agent_list", "agent_spawn", "agent_kill"]
+network = ["*"]                     # 网络访问模式
+memory_read = ["*"]                 # Agent 可读取的记忆命名空间
+memory_write = ["self.*"]           # Agent 可写入的记忆命名空间
+agent_spawn = true                  # 此 Agent 是否可以生成其他 Agent？
+agent_message = ["*"]               # 可以向哪些 Agent 发送消息？
+shell = ["python *", "cargo *"]     # 允许的 Shell 命令模式（白名单）
 ```
 
----
+### 可用工具
 
-## Agent 字段参考
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `name` | String | Agent 名称 |
-| `version` | String | 版本号 |
-| `description` | String | 描述 |
-| `author` | String | 作者 |
-| `module` | String | 模块 (builtin:chat) |
-| `model.provider` | String | LLM 提供商 |
-| `model.model` | String | 模型名称 |
-| `model.max_tokens` | Integer | 最大 token |
-| `model.temperature` | Float | 采样温度 |
-| `system_prompt` | String | 系统提示 |
-| `capabilities.tools` | Array | 可用工具 |
-| `capabilities.network` | Array | 网络访问 |
-| `capabilities.memory_read` | Array | 记忆读取 |
-| `capabilities.memory_write` | Array | 记忆写入 |
-| `capabilities.agent_spawn` | Boolean | 是否可以生成子 Agent |
-
----
-
-## 工具列表
-
-| 工具 | 说明 |
+| 工具 | 描述 |
 |------|------|
-| file_read | 读取文件 |
-| file_write | 写入文件 |
-| file_list | 列出目录 |
-| shell_execute | 执行 Shell |
-| web_fetch | 获取网页 |
-| web_search | 搜索网页 |
-| memory_store | 存储记忆 |
-| memory_recall | 回忆记忆 |
-| code_execute | 执行代码 |
-| git | Git 操作 |
-| python | Python REPL |
-| jupyter | Jupyter 笔记本 |
+| `file_read` | 读取文件内容 |
+| `file_write` | 写入/创建文件 |
+| `file_list` | 列出目录内容 |
+| `shell_exec` | 执行 Shell 命令（受 `shell` 白名单限制） |
+| `memory_store` | 将键值数据持久化到记忆中 |
+| `memory_recall` | 从记忆中检索数据 |
+| `web_fetch` | 从 URL 获取内容（具有 SSRF 防护） |
+| `agent_send` | 向另一个 Agent 发送消息 |
+| `agent_list` | 列出所有运行中的 Agent |
+| `agent_spawn` | 生成一个新 Agent |
+| `agent_kill` | 终止一个运行中的 Agent |
+
+### 自定义 Agent 提示
+
+1. **从最小配置开始**。仅授予 Agent 实际需要的工具和能力。之后随时可以添加更多。
+2. **编写清晰的系统提示**。系统提示是模板中最重要的部分。明确说明 Agent 的角色、方法论、输出格式和限制。
+3. **设置合适的 temperature**。精确/分析类任务使用 0.2，均衡任务使用 0.5，创意类任务使用 0.7 及以上。
+4. **使用 Shell 白名单**。永远不要授予 `shell = ["*"]`。白名单指定具体的命令模式，如 `shell = ["python *", "cargo test *"]`。
+5. **设置 Token 预算**。使用 `max_llm_tokens_per_hour` 防止成本失控。从 100,000 开始，根据使用情况调整。
+6. **添加回退模型**。如果主模型有速率限制或可用性问题，添加一个 `[[fallback_models]]` 条目。
+7. **使用记忆实现连续性**。授予 `memory_store` 和 `memory_recall` 以便 Agent 可以跨会话持久化上下文。
 
 ---
 
-## 模块类型
+## 生成 Agent
 
-| 模块 | 说明 |
-|------|------|
-| builtin:chat | 通用聊天 |
-| builtin:researcher | 研究 |
-| builtin:writer | 写作 |
-| builtin:coder | 编码 |
-
----
-
-## CLI 命令
+### CLI
 
 ```bash
-# 生成 Agent
-librefang agent spawn agents/hello-world/agent.toml
+# 通过模板名称生成
+librefang spawn coder
 
-# 列出所有 Agent
-librefang agent list
+# 生成时指定自定义名称
+librefang spawn coder --name "backend-coder"
 
-# 与 Agent 聊天
-librefang agent chat <agent-id>
+# 从 TOML 文件路径生成
+librefang spawn --template agents/custom/my-agent.toml
+
+# 列出运行中的 Agent
+librefang agents
+
+# 发送消息
+librefang message <agent-id> "Write a function to parse TOML files"
 
 # 终止 Agent
-librefang agent kill <agent-id>
-
-# 查看 Agent 状态
-librefang agent status <agent-id>
+librefang kill <agent-id>
 ```
+
+### REST API
+
+```bash
+# 从模板生成
+POST /api/agents
+{"template": "coder"}
+
+# 生成时覆盖参数
+POST /api/agents
+{"template": "coder", "name": "backend-coder", "model": "deepseek-chat"}
+
+# 发送消息
+POST /api/agents/{id}/message
+{"content": "Implement the auth module"}
+
+# WebSocket（流式传输）
+WS /api/agents/{id}/ws
+
+# 列出 Agent
+GET /api/agents
+
+# 删除 Agent
+DELETE /api/agents/{id}
+```
+
+### OpenAI 兼容 API
+
+```bash
+# 通过 OpenAI 兼容端点使用任意 Agent
+POST /v1/chat/completions
+{
+  "model": "librefang:coder",
+  "messages": [{"role": "user", "content": "Write a Rust HTTP server"}],
+  "stream": true
+}
+
+# 列出可用模型
+GET /v1/models
+```
+
+### Orchestrator 委派
+
+orchestrator Agent 可以通过编程方式生成和委派给任何其他 Agent：
+
+```
+User: "Build a REST API with tests and documentation"
+
+Orchestrator:
+1. agent_send(coder, "Implement the REST API endpoints")
+2. agent_send(test-engineer, "Write integration tests for these endpoints")
+3. agent_send(doc-writer, "Document the API endpoints")
+4. Synthesize all results into a final report
+```
+
+---
+
+## 环境变量
+
+设置以下 API 密钥以启用对应的模型供应商：
+
+| 变量 | 供应商 | 使用者 |
+|------|--------|--------|
+| `DEEPSEEK_API_KEY` | DeepSeek | 第 1 层（orchestrator、architect、security-auditor） |
+| `GEMINI_API_KEY` | Google Gemini | 第 2 层主模型，第 3 层回退 |
+| `GROQ_API_KEY` | Groq | 第 3 层主模型，第 1/2 层回退，第 4 层 |
+
+至少设置 `GROQ_API_KEY` 以启用所有第 3 层和第 4 层 Agent。添加 `GEMINI_API_KEY` 以启用第 2 层 Agent。添加 `DEEPSEEK_API_KEY` 以启用第 1 层前沿 Agent。
