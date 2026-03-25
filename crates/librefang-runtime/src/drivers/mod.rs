@@ -608,7 +608,7 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
     },
     ProviderEntry {
         name: "nvidia-nim",
-        aliases: &[],
+        aliases: &["nvidia", "nim"],
         base_url: NVIDIA_NIM_BASE_URL,
         api_key_env: "NVIDIA_API_KEY",
         key_required: true,

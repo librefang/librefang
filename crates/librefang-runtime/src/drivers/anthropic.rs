@@ -557,9 +557,22 @@ impl LlmDriver for AnthropicDriver {
                                 input_json,
                             }) = blocks.get(block_idx)
                             {
-                                let input: serde_json::Value = ensure_object(
-                                    serde_json::from_str(input_json).unwrap_or_default(),
-                                );
+                                let input: serde_json::Value = match serde_json::from_str::<
+                                    serde_json::Value,
+                                >(
+                                    input_json
+                                ) {
+                                    Ok(v) => ensure_object(v),
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            tool = %name,
+                                            raw_args = %input_json,
+                                            error = %e,
+                                            "Malformed tool call arguments from Anthropic stream, using empty object"
+                                        );
+                                        ensure_object(serde_json::Value::Null)
+                                    }
+                                };
                                 let _ = tx
                                     .send(StreamEvent::ToolUseEnd {
                                         id: id.clone(),
@@ -610,8 +623,20 @@ impl LlmDriver for AnthropicDriver {
                         name,
                         input_json,
                     } => {
-                        let input: serde_json::Value =
-                            ensure_object(serde_json::from_str(&input_json).unwrap_or_default());
+                        let input: serde_json::Value = match serde_json::from_str::<serde_json::Value>(
+                            &input_json,
+                        ) {
+                            Ok(v) => ensure_object(v),
+                            Err(e) => {
+                                tracing::warn!(
+                                    tool = %name,
+                                    raw_args = %input_json,
+                                    error = %e,
+                                    "Malformed tool call arguments from Anthropic, using empty object"
+                                );
+                                ensure_object(serde_json::Value::Null)
+                            }
+                        };
                         content.push(ContentBlock::ToolUse {
                             id: id.clone(),
                             name: name.clone(),

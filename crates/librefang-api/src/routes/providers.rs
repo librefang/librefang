@@ -1413,7 +1413,7 @@ pub async fn catalog_status(State(state): State<Arc<AppState>>) -> impl IntoResp
 
 /// GET /api/providers/ollama/detect — Probe localhost for Ollama availability
 pub async fn detect_ollama() -> impl IntoResponse {
-    let client = match reqwest::Client::builder()
+    let client = match librefang_runtime::http_client::client_builder()
         .timeout(std::time::Duration::from_secs(3))
         .build()
     {

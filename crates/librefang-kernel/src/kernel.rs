@@ -87,6 +87,27 @@ impl CachedSkillMetadata {
     }
 }
 
+/// Cached tool list for an agent, keyed by agent ID.
+/// Stores the computed tool definitions along with generation counters that were
+/// current at the time the cache was populated, enabling staleness detection.
+#[derive(Clone, Debug)]
+struct CachedToolList {
+    tools: Arc<Vec<ToolDefinition>>,
+    skill_generation: u64,
+    mcp_generation: u64,
+    created_at: std::time::Instant,
+}
+
+impl CachedToolList {
+    fn is_expired(&self) -> bool {
+        self.created_at.elapsed() > PROMPT_CACHE_TTL
+    }
+
+    fn is_stale(&self, skill_gen: u64, mcp_gen: u64) -> bool {
+        self.skill_generation != skill_gen || self.mcp_generation != mcp_gen
+    }
+}
+
 /// Thread-safe cache for prompt-building metadata. Avoids redundant filesystem
 /// scans and skill registry iteration on every incoming message.
 ///
@@ -97,6 +118,9 @@ impl CachedSkillMetadata {
 struct PromptMetadataCache {
     workspace: dashmap::DashMap<PathBuf, CachedWorkspaceMetadata>,
     skills: dashmap::DashMap<String, CachedSkillMetadata>,
+    /// Per-agent cached tool list. Invalidated by TTL, generation counters
+    /// (skill reload / MCP tool changes), or explicit removal.
+    tools: dashmap::DashMap<AgentId, CachedToolList>,
 }
 
 impl PromptMetadataCache {
@@ -104,6 +128,7 @@ impl PromptMetadataCache {
         Self {
             workspace: dashmap::DashMap::new(),
             skills: dashmap::DashMap::new(),
+            tools: dashmap::DashMap::new(),
         }
     }
 
@@ -111,6 +136,7 @@ impl PromptMetadataCache {
     fn invalidate_all(&self) {
         self.workspace.clear();
         self.skills.clear();
+        self.tools.clear();
     }
 
     /// Build a cache key for the skill allowlist.
@@ -370,9 +396,19 @@ pub struct LibreFangKernel {
     /// Cache for workspace context, identity files, and skill metadata to avoid
     /// redundant filesystem I/O and registry scans on every message.
     prompt_metadata_cache: PromptMetadataCache,
+    /// Generation counter for skill registry — bumped on every hot-reload.
+    /// Used by the tool list cache to detect staleness.
+    skill_generation: std::sync::atomic::AtomicU64,
+    /// Generation counter for MCP tool definitions — bumped whenever mcp_tools
+    /// are modified (connect, disconnect, rebuild). Used by the tool list cache.
+    mcp_generation: std::sync::atomic::AtomicU64,
     /// Lazy-loading driver cache — avoids recreating HTTP clients for the same
     /// provider/key/url combination on every agent message.
     driver_cache: librefang_runtime::drivers::DriverCache,
+    /// Hot-reloadable budget configuration. Initialised from `config.budget` at
+    /// boot and mutated safely via [`update_budget_config`] from the API layer,
+    /// replacing the previous `unsafe` raw-pointer mutation pattern.
+    budget_config: std::sync::RwLock<librefang_types::config::BudgetConfig>,
 }
 
 /// Bounded in-memory delivery receipt tracker.
@@ -825,6 +861,25 @@ impl LibreFangKernel {
     #[inline]
     pub fn config_ref(&self) -> &KernelConfig {
         &self.config
+    }
+
+    /// Return a snapshot of the current budget configuration.
+    ///
+    /// This reads from the `RwLock`-protected copy that can be updated at
+    /// runtime via [`update_budget_config`], so callers always see the
+    /// latest values set through the API.
+    pub fn budget_config(&self) -> librefang_types::config::BudgetConfig {
+        self.budget_config.read().unwrap().clone()
+    }
+
+    /// Safely mutate the runtime budget configuration.
+    ///
+    /// The caller supplies a closure that receives `&mut BudgetConfig`.
+    /// All writes are serialised through an `RwLock` write-guard, which
+    /// eliminates the data-race hazard of the old raw-pointer approach.
+    pub fn update_budget_config(&self, f: impl FnOnce(&mut librefang_types::config::BudgetConfig)) {
+        let mut guard = self.budget_config.write().unwrap();
+        f(&mut guard);
     }
 
     /// LibreFang home directory path (shorthand for `config.home_dir`).
@@ -1777,6 +1832,7 @@ impl LibreFangKernel {
         let initial_bindings = config.bindings.clone();
         let initial_broadcast = config.broadcast.clone();
         let auto_reply_engine = crate::auto_reply::AutoReplyEngine::new(config.auto_reply.clone());
+        let initial_budget = config.budget.clone();
 
         // Initialize command queue with configured concurrency limits
         let command_queue = librefang_runtime::command_lane::CommandQueue::with_capacities(
@@ -1867,7 +1923,10 @@ impl LibreFangKernel {
             self_handle: OnceLock::new(),
             provider_unconfigured_logged: std::sync::atomic::AtomicBool::new(false),
             prompt_metadata_cache: PromptMetadataCache::new(),
+            skill_generation: std::sync::atomic::AtomicU64::new(0),
+            mcp_generation: std::sync::atomic::AtomicU64::new(0),
             driver_cache: librefang_runtime::drivers::DriverCache::new(),
+            budget_config: std::sync::RwLock::new(initial_budget),
         };
 
         // Initialize proactive memory system (mem0-style) from config.
@@ -2026,7 +2085,7 @@ impl LibreFangKernel {
 
                     // Apply global budget defaults to restored agents
                     apply_budget_defaults(
-                        &kernel.config.budget,
+                        &kernel.budget_config(),
                         &mut restored_entry.manifest.resources,
                     );
 
@@ -2299,7 +2358,7 @@ system_prompt = "You are a helpful assistant."
         }
 
         // Apply global budget defaults to agent resource quotas
-        apply_budget_defaults(&self.config.budget, &mut manifest.resources);
+        apply_budget_defaults(&self.budget_config(), &mut manifest.resources);
 
         // Create workspace directory for the agent.
         // Hand agents set a relative workspace path (hands/<hand>/<role>) resolved
@@ -2682,7 +2741,8 @@ system_prompt = "You are a helpful assistant."
         // update canonical memory, do NOT write JSONL mirror, and do NOT
         // append to the daily memory log. The side question is truly ephemeral.
 
-        // Still record metering so cost tracking stays accurate
+        // Atomically check quotas and record metering so cost tracking stays
+        // accurate (prevents TOCTOU race on concurrent ephemeral requests)
         let model = &manifest.model.model;
         let cost = MeteringEngine::estimate_cost_with_catalog(
             &self.model_catalog.read().unwrap_or_else(|e| e.into_inner()),
@@ -2690,7 +2750,7 @@ system_prompt = "You are a helpful assistant."
             result.total_usage.input_tokens,
             result.total_usage.output_tokens,
         );
-        let _ = self.metering.record(&librefang_memory::usage::UsageRecord {
+        let usage_record = librefang_memory::usage::UsageRecord {
             agent_id,
             model: model.clone(),
             input_tokens: result.total_usage.input_tokens,
@@ -2698,7 +2758,19 @@ system_prompt = "You are a helpful assistant."
             cost_usd: cost,
             tool_calls: result.iterations.saturating_sub(1),
             latency_ms,
-        });
+        };
+        if let Err(e) = self.metering.check_all_and_record(
+            &usage_record,
+            &manifest.resources,
+            &self.config.budget,
+        ) {
+            tracing::warn!(
+                agent_id = %agent_id,
+                error = %e,
+                "Post-call quota check failed (ephemeral); recording usage anyway"
+            );
+            let _ = self.metering.record(&usage_record);
+        }
 
         // Record experiment metrics if running an experiment (kernel has cost info)
         if let Some(ref ctx) = result.experiment_context {
@@ -3010,7 +3082,7 @@ system_prompt = "You are a helpful assistant."
         };
 
         let tools = self.available_tools(agent_id);
-        let tools = entry.mode.filter_tools(tools);
+        let tools = entry.mode.filter_tools((*tools).clone());
         let driver = self.resolve_driver(&entry.manifest)?;
 
         // Look up model's actual context window from the catalog
@@ -3326,7 +3398,8 @@ system_prompt = "You are a helpful assistant."
                         .scheduler
                         .record_usage(agent_id, &result.total_usage);
 
-                    // Persist usage to SQLite (mirrors non-streaming path)
+                    // Atomically check quotas and persist usage to SQLite
+                    // (mirrors non-streaming path — prevents TOCTOU race)
                     let model = &manifest.model.model;
                     let cost = MeteringEngine::estimate_cost_with_catalog(
                         &kernel_clone
@@ -3337,17 +3410,27 @@ system_prompt = "You are a helpful assistant."
                         result.total_usage.input_tokens,
                         result.total_usage.output_tokens,
                     );
-                    let _ = kernel_clone
-                        .metering
-                        .record(&librefang_memory::usage::UsageRecord {
-                            agent_id,
-                            model: model.clone(),
-                            input_tokens: result.total_usage.input_tokens,
-                            output_tokens: result.total_usage.output_tokens,
-                            cost_usd: cost,
-                            tool_calls: result.iterations.saturating_sub(1),
-                            latency_ms,
-                        });
+                    let usage_record = librefang_memory::usage::UsageRecord {
+                        agent_id,
+                        model: model.clone(),
+                        input_tokens: result.total_usage.input_tokens,
+                        output_tokens: result.total_usage.output_tokens,
+                        cost_usd: cost,
+                        tool_calls: result.iterations.saturating_sub(1),
+                        latency_ms,
+                    };
+                    if let Err(e) = kernel_clone.metering.check_all_and_record(
+                        &usage_record,
+                        &manifest.resources,
+                        &kernel_clone.config.budget,
+                    ) {
+                        tracing::warn!(
+                            agent_id = %agent_id,
+                            error = %e,
+                            "Post-call quota check failed (streaming); recording usage anyway"
+                        );
+                        let _ = kernel_clone.metering.record(&usage_record);
+                    }
 
                     // Record experiment metrics if running an experiment (kernel has cost info)
                     if let Some(ref ctx) = result.experiment_context {
@@ -3921,7 +4004,7 @@ system_prompt = "You are a helpful assistant."
         let messages_before = session.messages.len();
 
         let tools = self.available_tools(agent_id);
-        let tools = entry.mode.filter_tools(tools);
+        let tools = entry.mode.filter_tools((*tools).clone());
 
         info!(
             agent = %entry.name,
@@ -4271,7 +4354,9 @@ system_prompt = "You are a helpful assistant."
             append_daily_memory_log(workspace, &result.response);
         }
 
-        // Record usage in the metering engine (uses catalog pricing as single source of truth)
+        // Atomically check quotas and record usage in a single SQLite
+        // transaction to prevent the TOCTOU race where concurrent requests
+        // both pass the pre-check before either records its spend.
         let model = &manifest.model.model;
         let cost = MeteringEngine::estimate_cost_with_catalog(
             &self.model_catalog.read().unwrap_or_else(|e| e.into_inner()),
@@ -4279,7 +4364,7 @@ system_prompt = "You are a helpful assistant."
             result.total_usage.input_tokens,
             result.total_usage.output_tokens,
         );
-        let _ = self.metering.record(&librefang_memory::usage::UsageRecord {
+        let usage_record = librefang_memory::usage::UsageRecord {
             agent_id,
             model: model.clone(),
             input_tokens: result.total_usage.input_tokens,
@@ -4287,7 +4372,22 @@ system_prompt = "You are a helpful assistant."
             cost_usd: cost,
             tool_calls: result.iterations.saturating_sub(1),
             latency_ms,
-        });
+        };
+        if let Err(e) = self.metering.check_all_and_record(
+            &usage_record,
+            &manifest.resources,
+            &self.config.budget,
+        ) {
+            // Quota exceeded after the LLM call — log but still return the
+            // result (the tokens were already consumed by the provider).
+            tracing::warn!(
+                agent_id = %agent_id,
+                error = %e,
+                "Post-call quota check failed; usage recorded anyway to keep accounting accurate"
+            );
+            // Fall back to plain record so the cost is not lost from tracking
+            let _ = self.metering.record(&usage_record);
+        }
 
         // Populate cost on the result based on usage_footer mode
         let mut result = result;
@@ -4986,6 +5086,9 @@ system_prompt = "You are a helpful assistant."
             let _ = self.memory.save_agent(&entry);
         }
 
+        // Invalidate cached tool list — skill allowlist change affects available tools
+        self.prompt_metadata_cache.tools.remove(&agent_id);
+
         info!(agent_id = %agent_id, skills = ?skills, "Agent skills updated");
         Ok(())
     }
@@ -5033,6 +5136,9 @@ system_prompt = "You are a helpful assistant."
             let _ = self.memory.save_agent(&entry);
         }
 
+        // Invalidate cached tool list — MCP server allowlist change affects available tools
+        self.prompt_metadata_cache.tools.remove(&agent_id);
+
         info!(agent_id = %agent_id, servers = ?servers, "Agent MCP servers updated");
         Ok(())
     }
@@ -5051,6 +5157,9 @@ system_prompt = "You are a helpful assistant."
         if let Some(entry) = self.registry.get(agent_id) {
             let _ = self.memory.save_agent(&entry);
         }
+
+        // Invalidate cached tool list — tool filter change affects available tools
+        self.prompt_metadata_cache.tools.remove(&agent_id);
 
         info!(
             agent_id = %agent_id,
@@ -5391,10 +5500,24 @@ system_prompt = "You are a helpful assistant."
     // ─── Hand lifecycle ─────────────────────────────────────────────────────
 
     /// Activate a hand: check requirements, create instance, spawn agent.
+    ///
+    /// When `instance_id` is `Some`, the instance is created with that UUID
+    /// so that deterministic agent IDs remain stable across daemon restarts.
     pub fn activate_hand(
         &self,
         hand_id: &str,
         config: std::collections::HashMap<String, serde_json::Value>,
+    ) -> KernelResult<librefang_hands::HandInstance> {
+        self.activate_hand_with_id(hand_id, config, None)
+    }
+
+    /// Like [`activate_hand`](Self::activate_hand) but allows specifying an
+    /// existing instance UUID (used during daemon restart recovery).
+    pub fn activate_hand_with_id(
+        &self,
+        hand_id: &str,
+        config: std::collections::HashMap<String, serde_json::Value>,
+        instance_id: Option<uuid::Uuid>,
     ) -> KernelResult<librefang_hands::HandInstance> {
         use librefang_hands::HandError;
 
@@ -5429,7 +5552,7 @@ system_prompt = "You are a helpful assistant."
         // Create the instance in the registry
         let instance = self
             .hand_registry
-            .activate(hand_id, config)
+            .activate_with_id(hand_id, config, instance_id)
             .map_err(|e| match e {
                 HandError::AlreadyActive(id) => KernelError::LibreFang(LibreFangError::Internal(
                     format!("Hand already active: {id}"),
@@ -5480,7 +5603,8 @@ system_prompt = "You are a helpful assistant."
                     warn!(agent = %old_id, error = %e, "Failed to kill old hand agent");
                 }
                 // Migrate cron jobs to the same role in the new hand
-                let new_id = AgentId::from_hand_agent(hand_id, &old_role);
+                let new_id =
+                    AgentId::from_hand_agent(hand_id, &old_role, Some(instance.instance_id));
                 let migrated = self.cron_scheduler.reassign_agent_jobs(old_id, new_id);
                 if migrated > 0 {
                     let _ = self.cron_scheduler.persist();
@@ -5634,8 +5758,11 @@ system_prompt = "You are a helpful assistant."
                 "hands/{safe_hand}/{safe_role}"
             )));
 
-            // Deterministic agent ID: hand_id + role
-            let deterministic_id = AgentId::from_hand_agent(hand_id, role);
+            // Deterministic agent ID: hand_id + role + instance_id
+            // Each instance gets unique agent IDs while remaining deterministic
+            // per-instance (survives daemon restarts when instance_id is persisted).
+            let deterministic_id =
+                AgentId::from_hand_agent(hand_id, role, Some(instance.instance_id));
             let agent_id = self.spawn_agent_inner(
                 manifest,
                 None,
@@ -6164,8 +6291,9 @@ system_prompt = "You are a helpful assistant."
                 let config = saved_hand.config;
                 let old_agent_id = saved_hand.old_agent_ids;
                 let status = saved_hand.status;
+                let persisted_instance_id = saved_hand.instance_id;
                 // The persisted coordinator role is informational here.
-                // `activate_hand` always re-derives the coordinator from the
+                // `activate_hand_with_id` always re-derives the coordinator from the
                 // latest hand definition before spawning agents.
                 // Check if hand's agent.toml has enabled=false — skip reactivation
                 let hand_agent_name = format!("{}-hand", hand_id);
@@ -6183,7 +6311,7 @@ system_prompt = "You are a helpful assistant."
                         }
                     }
                 }
-                match self.activate_hand(&hand_id, config) {
+                match self.activate_hand_with_id(&hand_id, config, persisted_instance_id) {
                     Ok(inst) => {
                         if matches!(status, librefang_hands::HandStatus::Paused) {
                             if let Err(e) = self.pause_hand(inst.instance_id) {
@@ -7312,6 +7440,8 @@ system_prompt = "You are a helpful assistant."
                     // Cache tool definitions
                     if let Ok(mut tools) = self.mcp_tools.lock() {
                         tools.extend(conn.tools().iter().cloned());
+                        self.mcp_generation
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
                     info!(
                         server = %server_config.name,
@@ -7436,6 +7566,8 @@ system_prompt = "You are a helpful assistant."
                     let tool_count = conn.tools().len();
                     if let Ok(mut tools) = self.mcp_tools.lock() {
                         tools.extend(conn.tools().iter().cloned());
+                        self.mcp_generation
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
                     self.extension_health
                         .report_ok(&server_config.name, tool_count);
@@ -7481,6 +7613,8 @@ system_prompt = "You are a helpful assistant."
                 for conn in conns.iter() {
                     tools.extend(conn.tools().iter().cloned());
                 }
+                self.mcp_generation
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
             for name in &removed {
                 self.extension_health.unregister(name);
@@ -7526,6 +7660,8 @@ system_prompt = "You are a helpful assistant."
                     for conn in conns.iter() {
                         tools.extend(conn.tools().iter().cloned());
                     }
+                    self.mcp_generation
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
             }
         }
@@ -7570,6 +7706,8 @@ system_prompt = "You are a helpful assistant."
                 let tool_count = conn.tools().len();
                 if let Ok(mut tools) = self.mcp_tools.lock() {
                     tools.extend(conn.tools().iter().cloned());
+                    self.mcp_generation
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
                 self.extension_health.report_ok(id, tool_count);
                 info!(
@@ -7632,13 +7770,27 @@ system_prompt = "You are a helpful assistant."
     ///
     /// If `capabilities.tools` is empty (or contains `"*"`), all tools are
     /// available (backwards compatible).
-    fn available_tools(&self, agent_id: AgentId) -> Vec<ToolDefinition> {
+    fn available_tools(&self, agent_id: AgentId) -> Arc<Vec<ToolDefinition>> {
+        // Check the tool list cache first — avoids recomputing builtins, skill tools,
+        // and MCP tools on every message for the same agent.
+        let skill_gen = self
+            .skill_generation
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let mcp_gen = self
+            .mcp_generation
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if let Some(cached) = self.prompt_metadata_cache.tools.get(&agent_id) {
+            if !cached.is_expired() && !cached.is_stale(skill_gen, mcp_gen) {
+                return Arc::clone(&cached.tools);
+            }
+        }
+
         let all_builtins = builtin_tool_definitions();
 
         // Look up agent entry for profile, skill/MCP allowlists, and declared tools
         let entry = self.registry.get(agent_id);
         if entry.as_ref().is_some_and(|e| e.manifest.tools_disabled) {
-            return Vec::new();
+            return Arc::new(Vec::new());
         }
         let (skill_allowlist, mcp_allowlist, tool_profile, skills_disabled) = entry
             .as_ref()
@@ -7817,7 +7969,19 @@ system_prompt = "You are a helpful assistant."
             all_tools.retain(|t| t.name != "shell_exec");
         }
 
-        all_tools
+        // Store in cache for subsequent calls with the same agent
+        let tools = Arc::new(all_tools);
+        self.prompt_metadata_cache.tools.insert(
+            agent_id,
+            CachedToolList {
+                tools: Arc::clone(&tools),
+                skill_generation: skill_gen,
+                mcp_generation: mcp_gen,
+                created_at: std::time::Instant::now(),
+            },
+        );
+
+        tools
     }
 
     /// Collect prompt context from prompt-only skills for system prompt injection.
@@ -7846,6 +8010,10 @@ system_prompt = "You are a helpful assistant."
 
         // Invalidate cached skill metadata so next message picks up changes
         self.prompt_metadata_cache.skills.clear();
+
+        // Bump skill generation so the tool list cache detects staleness
+        self.skill_generation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Check whether the context engine plugin (if any) is allowed for an agent.
