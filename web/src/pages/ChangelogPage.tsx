@@ -52,6 +52,18 @@ function renderMarkdown(md: string): string {
     '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>'
   )
 
+  // GitHub issue/PR references: #1234 → link
+  html = html.replace(
+    /(?<![&\w])#(\d+)/g,
+    '<a href="https://github.com/librefang/librefang/issues/$1" target="_blank" rel="noopener noreferrer">#$1</a>'
+  )
+
+  // GitHub @username → link
+  html = html.replace(
+    /(?<![&\w])@([a-zA-Z0-9-]+)/g,
+    '<a href="https://github.com/$1" target="_blank" rel="noopener noreferrer">@$1</a>'
+  )
+
   // Blockquotes
   html = html.replace(/^> (.+)$/gm, '<blockquote>$1</blockquote>')
 
