@@ -452,12 +452,8 @@ async fn handle_text_message(
                         .read()
                         .ok()
                         .and_then(|cat| {
-                            cat.get_provider(provider).map(|p| {
-                                matches!(
-                                    p.auth_status,
-                                    librefang_types::model_catalog::AuthStatus::Missing
-                                )
-                            })
+                            cat.get_provider(provider)
+                                .map(|p| !p.auth_status.is_available())
                         })
                         .unwrap_or(false);
                     if is_missing {

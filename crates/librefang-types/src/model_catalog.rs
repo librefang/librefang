@@ -106,19 +106,35 @@ impl fmt::Display for ModelTier {
 pub enum AuthStatus {
     /// API key is present in the environment.
     Configured,
+    /// No API key, but a CLI tool (e.g. claude-code) is available as fallback.
+    ConfiguredCli,
     /// API key is missing.
     #[default]
     Missing,
     /// No API key required (local providers).
     NotRequired,
+    /// CLI-based provider but CLI is not installed.
+    CliNotInstalled,
+}
+
+impl AuthStatus {
+    /// Returns true if the provider is usable (key or CLI available).
+    pub fn is_available(self) -> bool {
+        matches!(
+            self,
+            AuthStatus::Configured | AuthStatus::ConfiguredCli | AuthStatus::NotRequired
+        )
+    }
 }
 
 impl fmt::Display for AuthStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             AuthStatus::Configured => write!(f, "configured"),
+            AuthStatus::ConfiguredCli => write!(f, "configured_cli"),
             AuthStatus::Missing => write!(f, "missing"),
             AuthStatus::NotRequired => write!(f, "not_required"),
+            AuthStatus::CliNotInstalled => write!(f, "cli_not_installed"),
         }
     }
 }
@@ -355,8 +371,10 @@ mod tests {
     #[test]
     fn test_auth_status_display() {
         assert_eq!(AuthStatus::Configured.to_string(), "configured");
+        assert_eq!(AuthStatus::ConfiguredCli.to_string(), "configured_cli");
         assert_eq!(AuthStatus::Missing.to_string(), "missing");
         assert_eq!(AuthStatus::NotRequired.to_string(), "not_required");
+        assert_eq!(AuthStatus::CliNotInstalled.to_string(), "cli_not_installed");
     }
 
     #[test]

@@ -708,7 +708,7 @@ fn enrich_agent_json(
                 .unwrap_or_else(|| "unknown".to_string());
             let auth = cat
                 .get_provider(provider)
-                .map(|p| format!("{:?}", p.auth_status).to_lowercase())
+                .map(|p| p.auth_status.to_string())
                 .unwrap_or_else(|| "unknown".to_string());
             (tier, auth)
         })
@@ -1089,10 +1089,7 @@ pub async fn send_message(
             };
             if let Some(catalog) = state.kernel.model_catalog_ref().read().ok().as_ref() {
                 if let Some(p) = catalog.get_provider(provider) {
-                    if matches!(
-                        p.auth_status,
-                        librefang_types::model_catalog::AuthStatus::Missing
-                    ) {
+                    if !p.auth_status.is_available() {
                         return (
                             StatusCode::PRECONDITION_FAILED,
                             Json(
