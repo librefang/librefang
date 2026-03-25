@@ -573,6 +573,30 @@
       el.textContent = msg;
       el.classList.add('show');
     }
+
+    // Handle ?platform= URL parameter
+    (function() {
+      const params = new URLSearchParams(window.location.search);
+      const platform = params.get('platform');
+      if (!platform) return;
+      switch (platform) {
+        case 'fly':
+          showFlyDeploy();
+          break;
+        case 'render':
+          window.location.href = 'https://dashboard.render.com/blueprint/new?repo=https://github.com/librefang/librefang';
+          break;
+        case 'railway':
+          window.location.href = 'https://railway.com/deploy/Bb7HnN';
+          break;
+        case 'gcp':
+          window.location.href = 'https://github.com/librefang/librefang/tree/main/deploy/gcp';
+          break;
+        case 'docker':
+          window.location.href = 'https://github.com/librefang/librefang/blob/main/deploy/docker-compose.yml';
+          break;
+      }
+    })();
   </script>
 </body>
 </html>
