@@ -877,6 +877,7 @@ function Downloads(_props: SectionProps) {
                 }}>
                   <div className="text-xs text-gray-500 mb-1">{pkg.label}</div>
                   <code className="text-[11px] text-gray-700 dark:text-gray-300 font-mono">{pkg.cmd}</code>
+                  <Copy className="absolute top-2 right-2 w-3 h-3 text-gray-400 dark:text-gray-600 opacity-0 group-hover:opacity-100 transition-opacity" />
                   <span className="copy-tip absolute top-1 right-1 text-[9px] text-cyan-600 dark:text-cyan-400 opacity-0 transition-opacity">Copied!</span>
                 </button>
               ))}
