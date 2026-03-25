@@ -862,7 +862,7 @@ function Downloads(_props: SectionProps) {
                   {[
                     { name: 'Fly.io', url: 'https://flyio.librefang.ai', icon: Zap },
                     { name: 'Railway', url: 'https://railway.com/deploy/Bb7HnN', icon: ArrowRight },
-                    { name: 'Render', url: 'https://render.librefang.ai', icon: Layers },
+                    { name: 'Render', url: 'https://dashboard.render.com/blueprint/new?repo=https://github.com/librefang/librefang', icon: Layers },
                     { name: 'GCP', url: 'https://github.com/librefang/librefang/tree/main/deploy/gcp', icon: Network },
                     { name: 'Docker', url: 'https://github.com/librefang/librefang/blob/main/deploy/docker-compose.yml', icon: Box },
                   ].map((p) => (
