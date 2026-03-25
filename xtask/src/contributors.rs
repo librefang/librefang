@@ -57,6 +57,30 @@ fn gh_api(endpoint: &str) -> Result<serde_json::Value, Box<dyn std::error::Error
     Ok(serde_json::Value::Array(all_items))
 }
 
+fn download_avatar_as_data_uri(avatar_url: &str) -> Option<String> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+
+    let url = format!("{}&s=96", avatar_url);
+    let output = Command::new("curl")
+        .args(["-fsSL", "--max-time", "10", &url])
+        .output()
+        .ok()?;
+    if !output.status.success() || output.stdout.is_empty() {
+        return None;
+    }
+    let b64 = STANDARD.encode(&output.stdout);
+    let mime = if output.stdout.starts_with(b"\x89PNG") {
+        "image/png"
+    } else if output.stdout.starts_with(b"\xff\xd8") {
+        "image/jpeg"
+    } else if output.stdout.starts_with(b"GIF") {
+        "image/gif"
+    } else {
+        "image/png"
+    };
+    Some(format!("data:{};base64,{}", mime, b64))
+}
+
 fn generate_contributors_svg(
     repo: &str,
     output: &str,
@@ -111,8 +135,15 @@ fn generate_contributors_svg(
         let html_url = c["html_url"].as_str().unwrap_or("#");
         let avatar_url = c["avatar_url"].as_str().unwrap_or("");
 
-        // Use avatar URL directly (GitHub serves SVG-embeddable images)
-        let avatar_src = format!("{}&s=96", avatar_url);
+        // Download avatar and embed as base64 data URI
+        // (GitHub's CSP blocks external image loads inside SVGs)
+        let avatar_src = match download_avatar_as_data_uri(avatar_url) {
+            Some(data_uri) => data_uri,
+            None => {
+                eprintln!("  Warning: failed to download avatar for {}", login);
+                format!("{}&s=96", avatar_url)
+            }
+        };
 
         svg.push_str(&format!(
             "  <a xlink:href=\"{}\" target=\"_blank\">\n",
