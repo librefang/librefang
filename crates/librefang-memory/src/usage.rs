@@ -3,7 +3,7 @@
 use chrono::Utc;
 use librefang_types::agent::AgentId;
 use librefang_types::error::{LibreFangError, LibreFangResult};
-use rusqlite::Connection;
+use rusqlite::{Connection, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 
@@ -153,21 +153,24 @@ impl UsageStore {
         max_daily: f64,
         max_monthly: f64,
     ) -> LibreFangResult<()> {
-        let conn = self
+        let mut conn = self
             .conn
             .lock()
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
-        // BEGIN IMMEDIATE acquires a reserved lock up-front, ensuring no other
-        // writer can interleave between our SELECT and INSERT.
-        conn.execute_batch("BEGIN IMMEDIATE")
+        // IMMEDIATE transaction acquires a reserved lock up-front, ensuring no
+        // other writer can interleave between our SELECT and INSERT.  The RAII
+        // guard auto-rolls back on drop if we return early (error or quota
+        // exceeded), so every error path is safe.
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
         let agent_str = record.agent_id.0.to_string();
 
         // Check hourly quota
         if max_hourly > 0.0 {
-            let cost: f64 = conn
+            let cost: f64 = tx
                 .query_row(
                     "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
                      WHERE agent_id = ?1 AND timestamp > datetime('now', '-1 hour')",
@@ -176,7 +179,6 @@ impl UsageStore {
                 )
                 .map_err(|e| LibreFangError::Memory(e.to_string()))?;
             if cost + record.cost_usd >= max_hourly {
-                let _ = conn.execute_batch("ROLLBACK");
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Agent {} exceeded hourly cost quota: ${:.4} + ${:.4} / ${:.4}",
                     record.agent_id, cost, record.cost_usd, max_hourly
@@ -186,7 +188,7 @@ impl UsageStore {
 
         // Check daily quota
         if max_daily > 0.0 {
-            let cost: f64 = conn
+            let cost: f64 = tx
                 .query_row(
                     "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
                      WHERE agent_id = ?1 AND timestamp > datetime('now', 'start of day')",
@@ -195,7 +197,6 @@ impl UsageStore {
                 )
                 .map_err(|e| LibreFangError::Memory(e.to_string()))?;
             if cost + record.cost_usd >= max_daily {
-                let _ = conn.execute_batch("ROLLBACK");
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Agent {} exceeded daily cost quota: ${:.4} + ${:.4} / ${:.4}",
                     record.agent_id, cost, record.cost_usd, max_daily
@@ -205,7 +206,7 @@ impl UsageStore {
 
         // Check monthly quota
         if max_monthly > 0.0 {
-            let cost: f64 = conn
+            let cost: f64 = tx
                 .query_row(
                     "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
                      WHERE agent_id = ?1 AND timestamp > datetime('now', 'start of month')",
@@ -214,7 +215,6 @@ impl UsageStore {
                 )
                 .map_err(|e| LibreFangError::Memory(e.to_string()))?;
             if cost + record.cost_usd >= max_monthly {
-                let _ = conn.execute_batch("ROLLBACK");
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Agent {} exceeded monthly cost quota: ${:.4} + ${:.4} / ${:.4}",
                     record.agent_id, cost, record.cost_usd, max_monthly
@@ -223,9 +223,9 @@ impl UsageStore {
         }
 
         // All checks passed — insert the record within the same transaction
-        Self::insert_record(&conn, record)?;
+        Self::insert_record(&tx, record)?;
 
-        conn.execute_batch("COMMIT")
+        tx.commit()
             .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(())
     }
@@ -240,17 +240,18 @@ impl UsageStore {
         max_daily: f64,
         max_monthly: f64,
     ) -> LibreFangResult<()> {
-        let conn = self
+        let mut conn = self
             .conn
             .lock()
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
-        conn.execute_batch("BEGIN IMMEDIATE")
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
         // Check global hourly budget
         if max_hourly > 0.0 {
-            let cost: f64 = conn
+            let cost: f64 = tx
                 .query_row(
                     "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
                      WHERE timestamp > datetime('now', '-1 hour')",
@@ -259,7 +260,6 @@ impl UsageStore {
                 )
                 .map_err(|e| LibreFangError::Memory(e.to_string()))?;
             if cost + record.cost_usd >= max_hourly {
-                let _ = conn.execute_batch("ROLLBACK");
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Global hourly budget exceeded: ${:.4} + ${:.4} / ${:.4}",
                     cost, record.cost_usd, max_hourly
@@ -269,7 +269,7 @@ impl UsageStore {
 
         // Check global daily budget
         if max_daily > 0.0 {
-            let cost: f64 = conn
+            let cost: f64 = tx
                 .query_row(
                     "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
                      WHERE timestamp > datetime('now', 'start of day')",
@@ -278,7 +278,6 @@ impl UsageStore {
                 )
                 .map_err(|e| LibreFangError::Memory(e.to_string()))?;
             if cost + record.cost_usd >= max_daily {
-                let _ = conn.execute_batch("ROLLBACK");
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Global daily budget exceeded: ${:.4} + ${:.4} / ${:.4}",
                     cost, record.cost_usd, max_daily
@@ -288,7 +287,7 @@ impl UsageStore {
 
         // Check global monthly budget
         if max_monthly > 0.0 {
-            let cost: f64 = conn
+            let cost: f64 = tx
                 .query_row(
                     "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
                      WHERE timestamp > datetime('now', 'start of month')",
@@ -297,7 +296,6 @@ impl UsageStore {
                 )
                 .map_err(|e| LibreFangError::Memory(e.to_string()))?;
             if cost + record.cost_usd >= max_monthly {
-                let _ = conn.execute_batch("ROLLBACK");
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Global monthly budget exceeded: ${:.4} + ${:.4} / ${:.4}",
                     cost, record.cost_usd, max_monthly
@@ -306,15 +304,16 @@ impl UsageStore {
         }
 
         // All checks passed — insert the record
-        Self::insert_record(&conn, record)?;
+        Self::insert_record(&tx, record)?;
 
-        conn.execute_batch("COMMIT")
+        tx.commit()
             .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(())
     }
 
     /// Atomically check both per-agent quotas and global budget limits, then
     /// record the usage event — all within a single SQLite transaction.
+    #[allow(clippy::too_many_arguments)]
     pub fn check_all_and_record(
         &self,
         record: &UsageRecord,
@@ -325,19 +324,20 @@ impl UsageStore {
         global_max_daily: f64,
         global_max_monthly: f64,
     ) -> LibreFangResult<()> {
-        let conn = self
+        let mut conn = self
             .conn
             .lock()
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
-        conn.execute_batch("BEGIN IMMEDIATE")
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
         let agent_str = record.agent_id.0.to_string();
 
         // ── Per-agent quota checks ──────────────────────────────────
         if agent_max_hourly > 0.0 {
-            let cost: f64 = conn
+            let cost: f64 = tx
                 .query_row(
                     "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
                      WHERE agent_id = ?1 AND timestamp > datetime('now', '-1 hour')",
@@ -346,7 +346,6 @@ impl UsageStore {
                 )
                 .map_err(|e| LibreFangError::Memory(e.to_string()))?;
             if cost + record.cost_usd >= agent_max_hourly {
-                let _ = conn.execute_batch("ROLLBACK");
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Agent {} exceeded hourly cost quota: ${:.4} + ${:.4} / ${:.4}",
                     record.agent_id, cost, record.cost_usd, agent_max_hourly
@@ -355,7 +354,7 @@ impl UsageStore {
         }
 
         if agent_max_daily > 0.0 {
-            let cost: f64 = conn
+            let cost: f64 = tx
                 .query_row(
                     "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
                      WHERE agent_id = ?1 AND timestamp > datetime('now', 'start of day')",
@@ -364,7 +363,6 @@ impl UsageStore {
                 )
                 .map_err(|e| LibreFangError::Memory(e.to_string()))?;
             if cost + record.cost_usd >= agent_max_daily {
-                let _ = conn.execute_batch("ROLLBACK");
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Agent {} exceeded daily cost quota: ${:.4} + ${:.4} / ${:.4}",
                     record.agent_id, cost, record.cost_usd, agent_max_daily
@@ -373,7 +371,7 @@ impl UsageStore {
         }
 
         if agent_max_monthly > 0.0 {
-            let cost: f64 = conn
+            let cost: f64 = tx
                 .query_row(
                     "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
                      WHERE agent_id = ?1 AND timestamp > datetime('now', 'start of month')",
@@ -382,7 +380,6 @@ impl UsageStore {
                 )
                 .map_err(|e| LibreFangError::Memory(e.to_string()))?;
             if cost + record.cost_usd >= agent_max_monthly {
-                let _ = conn.execute_batch("ROLLBACK");
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Agent {} exceeded monthly cost quota: ${:.4} + ${:.4} / ${:.4}",
                     record.agent_id, cost, record.cost_usd, agent_max_monthly
@@ -392,7 +389,7 @@ impl UsageStore {
 
         // ── Global budget checks ────────────────────────────────────
         if global_max_hourly > 0.0 {
-            let cost: f64 = conn
+            let cost: f64 = tx
                 .query_row(
                     "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
                      WHERE timestamp > datetime('now', '-1 hour')",
@@ -401,7 +398,6 @@ impl UsageStore {
                 )
                 .map_err(|e| LibreFangError::Memory(e.to_string()))?;
             if cost + record.cost_usd >= global_max_hourly {
-                let _ = conn.execute_batch("ROLLBACK");
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Global hourly budget exceeded: ${:.4} + ${:.4} / ${:.4}",
                     cost, record.cost_usd, global_max_hourly
@@ -410,7 +406,7 @@ impl UsageStore {
         }
 
         if global_max_daily > 0.0 {
-            let cost: f64 = conn
+            let cost: f64 = tx
                 .query_row(
                     "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
                      WHERE timestamp > datetime('now', 'start of day')",
@@ -419,7 +415,6 @@ impl UsageStore {
                 )
                 .map_err(|e| LibreFangError::Memory(e.to_string()))?;
             if cost + record.cost_usd >= global_max_daily {
-                let _ = conn.execute_batch("ROLLBACK");
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Global daily budget exceeded: ${:.4} + ${:.4} / ${:.4}",
                     cost, record.cost_usd, global_max_daily
@@ -428,7 +423,7 @@ impl UsageStore {
         }
 
         if global_max_monthly > 0.0 {
-            let cost: f64 = conn
+            let cost: f64 = tx
                 .query_row(
                     "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
                      WHERE timestamp > datetime('now', 'start of month')",
@@ -437,7 +432,6 @@ impl UsageStore {
                 )
                 .map_err(|e| LibreFangError::Memory(e.to_string()))?;
             if cost + record.cost_usd >= global_max_monthly {
-                let _ = conn.execute_batch("ROLLBACK");
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Global monthly budget exceeded: ${:.4} + ${:.4} / ${:.4}",
                     cost, record.cost_usd, global_max_monthly
@@ -446,9 +440,9 @@ impl UsageStore {
         }
 
         // All checks passed — insert the record
-        Self::insert_record(&conn, record)?;
+        Self::insert_record(&tx, record)?;
 
-        conn.execute_batch("COMMIT")
+        tx.commit()
             .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(())
     }
