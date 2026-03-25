@@ -295,7 +295,7 @@
           <div class="platform-demo"><a href="https://flyio.librefang.ai" target="_blank" rel="noopener" onclick="event.stopPropagation()">Live Demo →</a></div>
         </div>
 
-        <div class="platform-card accent-green" onclick="window.open('https://render.com/deploy?repo=https://github.com/librefang/librefang','_blank')">
+        <div class="platform-card accent-green" onclick="setPlatformParam('render');window.open('https://dashboard.render.com/blueprint/new?repo=https://github.com/librefang/librefang','_blank')">
           <span class="platform-badge badge-easiest">Easiest</span>
           <div class="platform-icon"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><circle cx="6" cy="6" r="1" fill="currentColor"/><circle cx="6" cy="18" r="1" fill="currentColor"/></svg></div>
           <div class="platform-name">Render</div>
@@ -304,20 +304,20 @@
           <div class="platform-warning">Free tier: sleeps after 15 min, no persistent storage</div>
         </div>
 
-        <a class="platform-card accent-blue" href="https://railway.com/template/d7ebcd2f-8107-4b3f-8860-4693bc72d018" target="_blank" rel="noopener">
+        <a class="platform-card accent-blue" href="https://railway.com/deploy/Bb7HnN" target="_blank" rel="noopener" onclick="setPlatformParam('railway')">
           <div class="platform-icon"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg></div>
           <div class="platform-name">Railway</div>
           <div class="platform-desc">Simple deploy with $5 free credit</div>
         </a>
 
-        <a class="platform-card accent-blue" href="https://github.com/librefang/librefang/tree/main/deploy/gcp" target="_blank" rel="noopener">
+        <a class="platform-card accent-blue" href="https://github.com/librefang/librefang/tree/main/deploy/gcp" target="_blank" rel="noopener" onclick="setPlatformParam('gcp')">
           <span class="platform-badge badge-terraform">Terraform</span>
           <div class="platform-icon"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg></div>
           <div class="platform-name">GCP</div>
           <div class="platform-desc">Free forever (e2-micro), 30GB storage</div>
         </a>
 
-        <a class="platform-card accent-blue" href="https://github.com/librefang/librefang/blob/main/deploy/docker-compose.yml" target="_blank" rel="noopener">
+        <a class="platform-card accent-blue" href="https://github.com/librefang/librefang/blob/main/deploy/docker-compose.yml" target="_blank" rel="noopener" onclick="setPlatformParam('docker')">
           <div class="platform-icon"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12H2"/><path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/><line x1="6" y1="16" x2="6.01" y2="16"/><line x1="10" y1="16" x2="10.01" y2="16"/></svg></div>
           <div class="platform-name">Docker</div>
           <div class="platform-desc">One command, runs anywhere</div>
@@ -464,12 +464,22 @@
   </div>
 
   <script>
+    function setPlatformParam(platform) {
+      var url = new URL(window.location);
+      url.searchParams.set('platform', platform);
+      history.replaceState(null, '', url);
+    }
+
     function showFlyDeploy() {
+      setPlatformParam('flyio');
       document.getElementById('platform-selection').style.display = 'none';
       document.getElementById('fly-deploy').style.display = 'block';
     }
 
     function showPlatforms() {
+      var url = new URL(window.location);
+      url.searchParams.delete('platform');
+      history.replaceState(null, '', url);
       document.getElementById('fly-deploy').style.display = 'none';
       document.getElementById('platform-selection').style.display = 'block';
     }
@@ -580,7 +590,7 @@
       const platform = params.get('platform');
       if (!platform) return;
       switch (platform) {
-        case 'fly':
+        case 'flyio':
           showFlyDeploy();
           break;
         case 'render':

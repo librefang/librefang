@@ -860,7 +860,7 @@ function Downloads(_props: SectionProps) {
                 </div>
                 <div className="space-y-1.5">
                   {[
-                    { name: 'Fly.io', url: 'https://deploy.librefang.ai/?platform=fly', icon: Zap },
+                    { name: 'Fly.io', url: 'https://deploy.librefang.ai/?platform=flyio', icon: Zap },
                     { name: 'Railway', url: 'https://deploy.librefang.ai/?platform=railway', icon: ArrowRight },
                     { name: 'Render', url: 'https://deploy.librefang.ai/?platform=render', icon: Layers },
                     { name: 'GCP', url: 'https://deploy.librefang.ai/?platform=gcp', icon: Network },
