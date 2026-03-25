@@ -106,11 +106,7 @@ jobs:
         run: |
           IMAGE=ghcr.io/librefang/librefang
           VERSION=${{ steps.version.outputs.version }}
-          TAGS="-t $IMAGE:$VERSION"
-          # Only tag :latest for stable releases (not beta/rc)
-          if ! echo "$VERSION" | grep -qE -- '-(beta|rc)[0-9]'; then
-            TAGS="$TAGS -t $IMAGE:latest"
-          fi
+          TAGS="-t $IMAGE:$VERSION -t $IMAGE:latest"
           # LTS releases also get :lts tag
           if echo "$VERSION" | grep -qE -- '\-lts'; then
             TAGS="$TAGS -t $IMAGE:lts"
