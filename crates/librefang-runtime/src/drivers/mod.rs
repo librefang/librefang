@@ -1106,10 +1106,12 @@ mod tests {
     #[test]
     fn test_custom_provider_key_no_url_helpful_error() {
         // Custom provider with key set (via env) but no base_url should give helpful error.
-        let unique_key = "test-nvidia-key-67890";
-        std::env::set_var("NVIDIA_API_KEY", unique_key);
+        // Use a provider name NOT in the registry so create_driver cannot resolve a built-in base_url.
+        // ("nvidia" became a registry alias in #1660, breaking this test's assumption.)
+        let unique_key = "test-mycustomllm-key-67890";
+        std::env::set_var("MYCUSTOMLLM_API_KEY", unique_key);
         let config = DriverConfig {
-            provider: "nvidia".to_string(),
+            provider: "mycustomllm".to_string(),
             api_key: None,
             base_url: None,
             vertex_ai: librefang_types::config::VertexAiConfig::default(),
@@ -1124,7 +1126,7 @@ mod tests {
             "Error should mention base_url: {}",
             err
         );
-        std::env::remove_var("NVIDIA_API_KEY");
+        std::env::remove_var("MYCUSTOMLLM_API_KEY");
     }
 
     #[test]
