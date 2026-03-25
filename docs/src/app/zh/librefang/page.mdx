@@ -16,19 +16,27 @@ Hands 是 LibreFang 的核心创新——预构建的自主能力包，独立运
 
 | Hand | 功能 |
 |------|------|
-| **Clip** | YouTube 视频下载、剪辑、自动生成字幕和垂直短视频 |
-| **Lead** | 每日潜在客户发现、丰富信息、评分排序 |
-| **Collector** | OSINT 级情报收集、目标监控、知识图谱构建 |
-| **Predictor** | 超级预测引擎、置信区间、校准推理链 |
-| **Researcher** | 深度自主研究、多源交叉引用、CRAAP 评估 |
-| **Twitter** | 自主 Twitter/X 账号管理、内容创作、排程发布 |
+| **Analytics** | 数据收集、分析、可视化、仪表板和自动报告 |
+| **API Tester** | API 端点发现、请求验证、负载测试、回归检测 |
 | **Browser** | Web 自动化、填写表单、点击按钮、多步骤工作流 |
+| **Clip** | 长视频转短视频、自动字幕和缩略图 |
+| **Collector** | 情报收集、目标监控、变更检测、知识图谱构建 |
+| **Creator** | AI 媒体工作室、图像/视频/音乐/语音生成 |
+| **DevOps** | CI/CD 管理、基础设施监控、部署自动化、事件响应 |
+| **Lead** | 潜在客户发现、信息丰富、评分排序、定时投递 |
+| **LinkedIn** | LinkedIn 资料优化、内容创作、社交拓展 |
+| **Predictor** | 信号收集、推理链构建、校准预测、准确度追踪 |
+| **Reddit** | 子版块监控、内容发布、回复管理、互动追踪 |
+| **Researcher** | 深度研究、交叉引用、事实核查、结构化报告 |
+| **Strategist** | 市场调研、竞争分析、商业规划、战略建议 |
+| **Trader** | 多信号分析、多空博弈推理、风险管理、投资组合分析 |
+| **Twitter** | Twitter/X 内容创作、定时发布、互动管理、绩效追踪 |
 
 ### 架构
 
 ```text
 librefang-kernel      编排、工作流、计量、RBAC、调度
-librefang-runtime     Agent 循环、3 个 LLM 驱动、53 个工具、WASM 沙箱
+librefang-runtime     Agent 循环、49 个 LLM 驱动、53 个工具、WASM 沙箱
 librefang-api         140+ REST/WS/SSE 端点
 librefang-channels    44 个消息适配器
 librefang-memory      SQLite 持久化、向量嵌入
@@ -142,37 +150,20 @@ librefang hand status researcher
 
 ## 10 个 Agent 模板
 
-LibreFang 提供 10 个 Agent 模板（默认预装 assistant，其他可从 dashboard 安装）：
+LibreFang TUI 内置 10 个 Agent 模板（默认预装 assistant，其他可从 dashboard 安装）：
 
-| Agent | 用途 |
-|-------|------|
-| hello-world | 入门示例，可读取文件、搜索网页 |
-| coder | 代码开发和调试 |
-| researcher | 深度研究和分析 |
-| writer | 内容创作和编辑 |
-| analyst | 数据分析和洞察 |
-| architect | 系统架构设计 |
-| ops | 运维自动化 |
-| security-auditor | 安全审计 |
-| planner | 项目规划和任务管理 |
-| debugger | 问题诊断和调试 |
-| translator | 多语言翻译 |
-| tutor | 学习和辅导 |
-| personal-finance | 个人财务管理 |
-| travel-planner | 旅行规划 |
-| social-media | 社交媒体管理 |
-| meeting-assistant | 会议助手 |
-| email-assistant | 邮件助手 |
-| recruiter | 招聘和人才发现 |
-| data-scientist | 数据科学分析 |
-| test-engineer | 测试工程 |
-| doc-writer | 文档编写 |
-| customer-support | 客户支持 |
-| sales-assistant | 销售助手 |
-| legal-assistant | 法律助手 |
-| health-tracker | 健康追踪 |
-| home-automation | 家居自动化 |
-| hello-world | 入门示例 |
+| Agent | 用途 | Provider |
+|-------|------|----------|
+| General Assistant | 通用 AI 助手 | Anthropic |
+| Code Helper | 代码审查和调试 | Anthropic |
+| Researcher | 深度研究和分析 | Anthropic |
+| Writer | 创意和技术写作 | Anthropic |
+| Data Analyst | 数据分析、可视化和 SQL | Gemini |
+| DevOps Engineer | 基础设施、CI/CD 和部署 | Groq |
+| Customer Support | 客户服务 | Groq |
+| Tutor | 学习辅导 | Gemini |
+| API Designer | REST/GraphQL API 设计和文档 | Anthropic |
+| Meeting Notes | 会议记录、摘要和行动项 | Groq |
 
 ---
 

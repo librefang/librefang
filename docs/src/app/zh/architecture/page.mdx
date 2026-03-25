@@ -36,8 +36,8 @@ librefang-api            REST/WS/SSE API 服务器 (Axum 0.8), 76 个端点
     |
 librefang-kernel         内核: 组装所有子系统、工作流引擎、RBAC、计量
     |
-    +-- librefang-runtime    Agent 循环、3 个 LLM 驱动、60 个工具、WASM 沙箱、MCP、A2A
-    +-- librefang-channels   42 个通道适配器、桥接器、格式化器、速率限制器
+    +-- librefang-runtime    Agent 循环、49 个 LLM 驱动、60 个工具、WASM 沙箱、MCP、A2A
+    +-- librefang-channels   44 个通道适配器、桥接器、格式化器、速率限制器
     +-- librefang-wire       OFP 点对点网络，HMAC-SHA256 认证
     +-- librefang-migrate    迁移引擎 (OpenClaw YAML→TOML)
     +-- librefang-skills     60 个内置技能、FangHub 市场、ClawHub 客户端
@@ -217,7 +217,7 @@ LibreFang 使用多层稳定性保护：
 
 ## 通道系统
 
-42 个通道适配器：
+44 个通道适配器：
 
 **核心**: Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Email
 
