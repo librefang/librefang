@@ -743,9 +743,19 @@ impl LlmDriver for OpenAIDriver {
 
             if let Some(calls) = choice.message.tool_calls {
                 for call in calls {
-                    let input: serde_json::Value = ensure_object(
-                        serde_json::from_str(&call.function.arguments).unwrap_or_default(),
-                    );
+                    let input: serde_json::Value =
+                        match serde_json::from_str::<serde_json::Value>(&call.function.arguments) {
+                            Ok(v) => ensure_object(v),
+                            Err(e) => {
+                                tracing::warn!(
+                                    tool = %call.function.name,
+                                    raw_args = %call.function.arguments,
+                                    error = %e,
+                                    "Malformed tool call arguments from LLM, using empty object"
+                                );
+                                ensure_object(serde_json::Value::Null)
+                            }
+                        };
                     content.push(ContentBlock::ToolUse {
                         id: call.id.clone(),
                         name: call.function.name.clone(),
@@ -1433,7 +1443,18 @@ impl LlmDriver for OpenAIDriver {
 
             for (id, name, arguments) in &tool_accum {
                 let input: serde_json::Value =
-                    ensure_object(serde_json::from_str(arguments).unwrap_or_default());
+                    match serde_json::from_str::<serde_json::Value>(arguments) {
+                        Ok(v) => ensure_object(v),
+                        Err(e) => {
+                            tracing::warn!(
+                                tool = %name,
+                                raw_args = %arguments,
+                                error = %e,
+                                "Malformed tool call arguments from LLM stream, using empty object"
+                            );
+                            ensure_object(serde_json::Value::Null)
+                        }
+                    };
                 content.push(ContentBlock::ToolUse {
                     id: id.clone(),
                     name: name.clone(),
@@ -1645,8 +1666,18 @@ fn parse_groq_failed_tool_call(body: &str) -> Option<CompletionResponse> {
         };
 
         // Parse args as JSON Value
-        let args_value: serde_json::Value =
-            ensure_object(serde_json::from_str(args).unwrap_or_default());
+        let args_value: serde_json::Value = match serde_json::from_str::<serde_json::Value>(args) {
+            Ok(v) => ensure_object(v),
+            Err(e) => {
+                tracing::warn!(
+                    tool = %name,
+                    raw_args = %args,
+                    error = %e,
+                    "Malformed tool call arguments from Groq recovery, using empty object"
+                );
+                ensure_object(serde_json::Value::Null)
+            }
+        };
 
         tool_calls.push(ToolCall {
             id: format!("groq_recovered_{}", tool_calls.len()),
