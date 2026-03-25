@@ -89,6 +89,7 @@ pub struct McpConnection {
 }
 
 /// Transport handle — abstraction over stdio subprocess or HTTP.
+#[derive(Debug)]
 enum McpTransportHandle {
     Stdio {
         child: Box<tokio::process::Child>,
