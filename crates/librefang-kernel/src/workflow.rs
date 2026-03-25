@@ -224,6 +224,45 @@ pub struct WorkflowEngine {
     runs: Arc<RwLock<HashMap<WorkflowRunId, WorkflowRun>>>,
 }
 
+/// Evaluate a conditional expression against the previous step output.
+///
+/// Supports:
+/// - Simple substring match: `"keyword"` — true if `input` contains `keyword`
+/// - Negation: `"!keyword"` — true if `input` does NOT contain `keyword`
+/// - AND: `"a && b"` — true if both `a` and `b` are found
+/// - OR: `"a || b"` — true if either `a` or `b` is found
+///
+/// AND binds tighter than OR (standard precedence). All matching is
+/// case-insensitive (caller should pass lowercased input).
+fn evaluate_condition(input: &str, condition: &str) -> bool {
+    let condition = condition.trim();
+
+    // OR: split on `||` first (lower precedence)
+    if condition.contains("||") {
+        return condition
+            .split("||")
+            .any(|branch| evaluate_condition(input, branch.trim()));
+    }
+
+    // AND: split on `&&`
+    if condition.contains("&&") {
+        return condition
+            .split("&&")
+            .all(|part| evaluate_condition(input, part.trim()));
+    }
+
+    // Negation
+    if let Some(inner) = condition.strip_prefix('!') {
+        let inner = inner.trim();
+        let cond_lower = inner.to_lowercase();
+        return !input.contains(&cond_lower);
+    }
+
+    // Simple substring match
+    let cond_lower = condition.to_lowercase();
+    input.contains(&cond_lower)
+}
+
 impl WorkflowEngine {
     /// Create a new workflow engine.
     pub fn new() -> Self {
@@ -930,7 +969,36 @@ impl WorkflowEngine {
                 }
 
                 StepMode::Collect => {
-                    current_input = all_outputs.join("\n\n---\n\n");
+                    // Build structured JSON from step results accumulated so far.
+                    let step_results: Vec<StepResult> = self
+                        .runs
+                        .read()
+                        .await
+                        .get(&run_id)
+                        .map(|r| r.step_results.clone())
+                        .unwrap_or_default();
+
+                    // Collect results that correspond to the current all_outputs batch.
+                    // Take the last N step results where N = all_outputs.len().
+                    let n = all_outputs.len();
+                    let relevant = if step_results.len() >= n {
+                        &step_results[step_results.len() - n..]
+                    } else {
+                        &step_results[..]
+                    };
+
+                    let results_json: Vec<serde_json::Value> = relevant
+                        .iter()
+                        .map(|sr| {
+                            serde_json::json!({
+                                "agent": sr.agent_name,
+                                "output": sr.output,
+                            })
+                        })
+                        .collect();
+
+                    let merged = serde_json::json!({ "results": results_json });
+                    current_input = serde_json::to_string(&merged).unwrap_or_default();
                     all_outputs.clear();
                     all_outputs.push(current_input.clone());
                     if let Some(ref var) = step.output_var {
@@ -940,9 +1008,10 @@ impl WorkflowEngine {
 
                 StepMode::Conditional { condition } => {
                     let prev_lower = current_input.to_lowercase();
-                    let cond_lower = condition.to_lowercase();
 
-                    if !prev_lower.contains(&cond_lower) {
+                    let condition_met = evaluate_condition(&prev_lower, condition);
+
+                    if !condition_met {
                         info!(
                             step = i + 1,
                             name = %step.name,

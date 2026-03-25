@@ -4606,4 +4606,29 @@ type = "number"
             _ => panic!("Expected JsonSchema variant"),
         }
     }
+
+    /// Compile-time guard: KernelConfig::default() must survive a TOML
+    /// serialize → deserialize → serialize roundtrip.  If a field is added
+    /// to the struct but omitted from the `Default` impl (or vice-versa),
+    /// this test will fail.
+    #[test]
+    fn test_kernel_config_default_roundtrip() {
+        let original = KernelConfig::default();
+
+        // Serialize to TOML.
+        let toml_str =
+            toml::to_string(&original).expect("KernelConfig::default() must serialize to TOML");
+
+        // Deserialize back.
+        let restored: KernelConfig =
+            toml::from_str(&toml_str).expect("KernelConfig TOML roundtrip deserialization failed");
+
+        // Serialize again and compare — both TOML strings must be identical.
+        let toml_str2 = toml::to_string(&restored).expect("KernelConfig re-serialization failed");
+
+        assert_eq!(
+            toml_str, toml_str2,
+            "KernelConfig default roundtrip mismatch — a field may be missing from Default impl"
+        );
+    }
 }
