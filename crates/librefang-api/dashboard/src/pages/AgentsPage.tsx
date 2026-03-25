@@ -472,7 +472,6 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
       const variants = selectedVariantIds.map((vId, i) => {
         const ver = versions.find(v => v.id === vId);
         return {
-          id: "",
           name: i === 0 ? "Control" : `Variant ${String.fromCharCode(65 + i)}`,
           prompt_version_id: vId,
           description: ver ? `v${ver.version}` : undefined,

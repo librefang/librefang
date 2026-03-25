@@ -308,9 +308,9 @@ impl PromptStore {
             description: Some(format!("Auto-tracked v{next_version}")),
         };
 
-        // Deactivate current and activate new
+        // Create first, then activate (set_active deactivates all others then activates this one)
+        self.create_version(version.clone())?;
         self.set_active_version(version.id, agent_id)?;
-        self.create_version(version)?;
 
         Ok(true)
     }
