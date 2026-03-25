@@ -5638,9 +5638,12 @@ system_prompt = "You are a helpful assistant."
                 if let Err(e) = self.kill_agent(old_id) {
                     warn!(agent = %old_id, error = %e, "Failed to kill old hand agent");
                 }
-                // Migrate cron jobs to the same role in the new hand
+                // Migrate cron jobs to the same role in the new hand.
+                // Pass `instance_id` (the caller's parameter) so that
+                // `activate_hand()` (None) preserves legacy IDs while
+                // `activate_hand_with_id(_, _, Some(uuid))` uses the new format.
                 let new_id =
-                    AgentId::from_hand_agent(hand_id, &old_role, Some(instance.instance_id));
+                    AgentId::from_hand_agent(hand_id, &old_role, instance_id);
                 let migrated = self.cron_scheduler.reassign_agent_jobs(old_id, new_id);
                 if migrated > 0 {
                     let _ = self.cron_scheduler.persist();
@@ -5794,11 +5797,13 @@ system_prompt = "You are a helpful assistant."
                 "hands/{safe_hand}/{safe_role}"
             )));
 
-            // Deterministic agent ID: hand_id + role + instance_id
-            // Each instance gets unique agent IDs while remaining deterministic
-            // per-instance (survives daemon restarts when instance_id is persisted).
+            // Deterministic agent ID: hand_id + role [+ instance_id].
+            // When `instance_id` is None (first activation via `activate_hand`),
+            // uses the legacy format so existing hands keep their original IDs.
+            // When `instance_id` is Some (multi-instance or restart recovery),
+            // uses the new format with instance UUID for uniqueness.
             let deterministic_id =
-                AgentId::from_hand_agent(hand_id, role, Some(instance.instance_id));
+                AgentId::from_hand_agent(hand_id, role, instance_id);
             let agent_id = self.spawn_agent_inner(
                 manifest,
                 None,
