@@ -20,6 +20,8 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 - Add -- to grep patterns in release workflows (#1622) (@houko)
 - Use isolated test dir for model_catalog tests (#1627) (@houko)
 - Resolve DMG asset name mismatch in Homebrew Cask sync (#1628) (@houko)
+- Embed contributor avatars as base64 in SVG (#1630) (@houko)
+- Always tag Docker image as :latest (#1631) (@houko)
 
 ### Maintenance
 
