@@ -210,23 +210,21 @@ jobs:
               "https://api.github.com/repos/${{ github.repository }}/releases/tags/$TAG" \
               > release.json
 
-            VERSION="${TAG#v}"
+            # Match DMG assets by suffix (Tauri version differs from tag version)
+            ARM_DMG=$(jq -r '[.assets[].name | select(endswith("_aarch64.dmg"))][0] // empty' release.json)
+            X86_DMG=$(jq -r '[.assets[].name | select(endswith("_x64.dmg"))][0] // empty' release.json)
 
-            ARM_DMG="LibreFang_${VERSION}_aarch64.dmg"
-            X86_DMG="LibreFang_${VERSION}_x64.dmg"
-
-            ARM_OK=$(jq -r --arg name "$ARM_DMG" '.assets[] | select(.name == $name) | .name' release.json)
-            X86_OK=$(jq -r --arg name "$X86_DMG" '.assets[] | select(.name == $name) | .name' release.json)
-
-            if [ -n "$ARM_OK" ] && [ -n "$X86_OK" ]; then
+            if [ -n "$ARM_DMG" ] && [ -n "$X86_DMG" ]; then
               echo "✓ Both DMG assets found on attempt $attempt"
+              echo "  ARM: $ARM_DMG"
+              echo "  x86: $X86_DMG"
               break
             fi
 
             if [ "$attempt" -eq 10 ]; then
               echo "::error::DMG assets not found in release after 10 attempts"
-              echo "  ARM DMG: ${ARM_OK:-MISSING}"
-              echo "  x86 DMG: ${X86_OK:-MISSING}"
+              echo "  ARM DMG: ${ARM_DMG:-MISSING}"
+              echo "  x86 DMG: ${X86_DMG:-MISSING}"
               exit 1
             fi
 
@@ -241,6 +239,18 @@ jobs:
           TAG="${{ github.ref_name }}"
           VERSION="${TAG#v}"
 
+          # Resolve actual DMG names (Tauri version differs from tag version)
+          ARM_DMG=$(jq -r '[.assets[].name | select(endswith("_aarch64.dmg"))][0] // empty' release.json)
+          X86_DMG=$(jq -r '[.assets[].name | select(endswith("_x64.dmg"))][0] // empty' release.json)
+          # Extract Tauri version from DMG filename for cask version field
+          TAURI_VERSION=$(echo "$ARM_DMG" | sed 's/^LibreFang_//; s/_aarch64\.dmg$//')
+
+          if [ -z "$ARM_DMG" ] || [ -z "$X86_DMG" ]; then
+            echo "::error::DMG assets not found in release.json"
+            exit 1
+          fi
+          echo "DMG version (Tauri): $TAURI_VERSION"
+
           asset_sha() {
             local sha_url
             sha_url="$(jq -r --arg name "${1}.sha256" '.assets[] | select(.name == $name) | .browser_download_url' release.json)"
@@ -252,9 +262,6 @@ jobs:
               curl -fsSL "$sha_url" | awk '{print $1}'
             fi
           }
-
-          ARM_DMG="LibreFang_${VERSION}_aarch64.dmg"
-          X86_DMG="LibreFang_${VERSION}_x64.dmg"
 
           ARM_SHA="$(asset_sha "$ARM_DMG")"
           X86_SHA="$(asset_sha "$X86_DMG")"
@@ -320,7 +327,7 @@ jobs:
           cask "${cask_name}" do
             arch arm: "aarch64", intel: "x64"
 
-            version "${VERSION}"
+            version "${TAURI_VERSION}"
 
             on_arm do
               sha256 "${ARM_SHA}"
