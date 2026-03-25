@@ -4,7 +4,8 @@ import {
   Terminal, Cpu, Shield, Zap, Network, ChevronRight, ChevronDown, ExternalLink,
   Copy, Check, Menu, X, Box, Layers, Radio, Eye,
   Scissors, Users, Globe, ArrowRight, Github, Monitor,
-  Star, GitFork, CircleDot, GitPullRequest, MessageSquare
+  Star, GitFork, CircleDot, GitPullRequest, MessageSquare,
+  Sun, Moon
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { useQuery } from '@tanstack/react-query'
@@ -97,6 +98,8 @@ function Nav({ t, lang, onSwitchLang }: NavProps) {
   const [langOpen, setLangOpen] = useState(false)
   const [scrolled, setScrolled] = useState(false)
   const [activeSection, setActiveSection] = useState('')
+  const theme = useAppStore((s) => s.theme)
+  const toggleTheme = useAppStore((s) => s.toggleTheme)
   const currentLangName = languages.find(l => l.code === lang)?.name || 'English'
 
   useEffect(() => {
@@ -205,6 +208,14 @@ function Nav({ t, lang, onSwitchLang }: NavProps) {
               </div>
             )}
           </div>
+
+          <button
+            onClick={toggleTheme}
+            className="p-2 text-gray-400 hover:text-cyan-400 transition-colors"
+            aria-label="Toggle theme"
+          >
+            {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+          </button>
 
           <a
             href="https://github.com/librefang/librefang"
@@ -438,23 +449,31 @@ function Architecture({ t }: SectionProps) {
                     >
                       <div className="pt-4">
                         {i === 0 && (
-                          <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 gap-2">
-                            {(registry?.channels && registry.channels.length > 0
-                              ? registry.channels
-                              : []
+                          <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 gap-2">
+                            {sortByPopularity(
+                              registry?.channels && registry.channels.length > 0 ? registry.channels : []
                             ).map(ch => (
-                              <div key={ch.id} className="px-2 py-1.5 bg-surface-200 border border-white/5 text-xs text-gray-400 font-mono text-center truncate">{ch.name}</div>
+                              <div key={ch.id} className={cn(
+                                'px-2 py-1.5 border text-xs font-mono text-center truncate',
+                                isPopular(ch) ? 'bg-amber-500/10 border-amber-500/30 text-amber-300' : 'bg-surface-200 border-white/5 text-gray-400'
+                              )}>
+                                {ch.name}{isPopular(ch) && ' 🔥'}
+                              </div>
                             ))}
                           </div>
                         )}
                         {i === 1 && (
                           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-2">
-                            {(registry?.hands && registry.hands.length > 0
-                              ? registry.hands
-                              : []
+                            {sortByPopularity(
+                              registry?.hands && registry.hands.length > 0 ? registry.hands : []
                             ).map(h => (
-                              <div key={h.id} className="px-3 py-2 bg-surface-200 border border-white/5">
-                                <div className="text-sm text-white font-semibold">{h.name}</div>
+                              <div key={h.id} className={cn(
+                                'px-3 py-2 border',
+                                isPopular(h) ? 'bg-amber-500/10 border-amber-500/30' : 'bg-surface-200 border-white/5'
+                              )}>
+                                <div className="text-sm text-white font-semibold">
+                                  {h.name}{isPopular(h) && ' 🔥'}
+                                </div>
                                 <div className="text-[10px] text-gray-600 font-mono uppercase">{h.category}</div>
                               </div>
                             ))}
@@ -476,6 +495,19 @@ function Architecture({ t }: SectionProps) {
   )
 }
 
+// ─── Popular items (read from tags field) ───
+function isPopular(item: { tags?: string[] }): boolean {
+  return item.tags?.includes('popular') ?? false
+}
+
+function sortByPopularity<T extends { tags?: string[] }>(items: T[]): T[] {
+  return [...items].sort((a, b) => {
+    const ap = isPopular(a) ? 0 : 1
+    const bp = isPopular(b) ? 0 : 1
+    return ap - bp
+  })
+}
+
 // ─── Hands (Features) — horizontal scroll carousel ───
 const categoryColors: Record<string, string> = {
   content: 'text-amber-400 border-amber-400/20',
@@ -489,7 +521,8 @@ const categoryColors: Record<string, string> = {
 function Hands({ t }: SectionProps) {
   const { data: registry } = useRegistry()
   const lang = useAppStore((s) => s.lang)
-  const hands = registry?.hands && registry.hands.length > 0 ? registry.hands : []
+  const rawHands = registry?.hands && registry.hands.length > 0 ? registry.hands : []
+  const hands = sortByPopularity(rawHands)
   const scrollRef = useRef<HTMLDivElement>(null)
 
   return (

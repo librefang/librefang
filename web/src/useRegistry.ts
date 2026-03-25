@@ -15,6 +15,7 @@ const DetailSchema = z.object({
   description: z.string(),
   category: z.string(),
   icon: z.string(),
+  tags: z.array(z.string()).optional(),
   i18n: z.record(z.string(), I18nEntrySchema).optional(),
 })
 

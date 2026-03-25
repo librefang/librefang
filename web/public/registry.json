@@ -66,27 +66,12 @@
       "description": "Autonomous web browser — navigates sites, fills forms, clicks buttons, and completes multi-step web tasks with user approval for purchases",
       "category": "productivity",
       "icon": "🌐",
+      "tags": [
+        "popular"
+      ],
       "i18n": {
-        "zh": {
-          "description": "自主浏览器——导航网站、填写表单、点击按钮，购买需用户审批"
-        },
         "zh-TW": {
           "description": "自主瀏覽器——導航網站、填寫表單、點擊按鈕，購買需用戶審批"
-        },
-        "ja": {
-          "description": "自律型ウェブブラウザ——サイト操作、フォーム入力、購入はユーザー承認制"
-        },
-        "es": {
-          "description": "Navegador web autónomo — navega sitios, completa formularios, compras con aprobación del usuario"
-        },
-        "fr": {
-          "description": "Navigateur web autonome — navigue sur les sites, remplit les formulaires, clique sur les boutons et exécute des tâches web multi-étapes avec approbation utilisateur pour les achats"
-        },
-        "de": {
-          "description": "Autonomer Webbrowser — navigiert Seiten, füllt Formulare aus, Käufe nur mit Nutzerfreigabe"
-        },
-        "ko": {
-          "description": "자율 웹 브라우저 — 사이트 탐색, 폼 입력, 구매 시 사용자 승인 필요"
         }
       }
     },
@@ -96,27 +81,12 @@
       "description": "Turns long-form video into viral short clips with captions and thumbnails",
       "category": "content",
       "icon": "\\U0001F3AC",
+      "tags": [
+        "popular"
+      ],
       "i18n": {
-        "zh": {
-          "description": "将长视频自动转为带字幕和封面的竖版短视频"
-        },
         "zh-TW": {
           "description": "將長影片自動轉為帶字幕和封面的直式短影音"
-        },
-        "ja": {
-          "description": "長編動画をキャプション・サムネイル付きバイラルショートに変換"
-        },
-        "es": {
-          "description": "Convierte videos largos en clips cortos virales con subtítulos y miniaturas"
-        },
-        "fr": {
-          "description": "Transforme les longues vidéos en clips courts viraux avec sous-titres et miniatures"
-        },
-        "de": {
-          "description": "Wandelt Langvideos in virale Kurzclips mit Untertiteln und Thumbnails um"
-        },
-        "ko": {
-          "description": "긴 영상을 자막과 썸네일이 포함된 바이럴 쇼츠로 변환"
         }
       }
     },
@@ -126,27 +96,12 @@
       "description": "Autonomous intelligence collector — monitors any target continuously with change detection and knowledge graphs",
       "category": "data",
       "icon": "🔍",
+      "tags": [
+        "popular"
+      ],
       "i18n": {
-        "zh": {
-          "description": "自主情报收集器——持续监控目标，变化检测与知识图谱"
-        },
         "zh-TW": {
           "description": "自主情報收集器——持續監控目標，變化偵測與知識圖譜"
-        },
-        "ja": {
-          "description": "自律型インテリジェンスコレクター——変更検出とナレッジグラフで対象を継続監視"
-        },
-        "es": {
-          "description": "Recopilador autónomo de inteligencia — monitorea objetivos continuamente con detección de cambios y grafos de conocimiento"
-        },
-        "fr": {
-          "description": "Collecteur autonome de renseignements — surveille toute cible en continu avec détection de changements et graphes de connaissances"
-        },
-        "de": {
-          "description": "Autonomer Intelligence-Sammler — überwacht Ziele kontinuierlich mit Änderungserkennung und Wissensgraphen"
-        },
-        "ko": {
-          "description": "자율 인텔리전스 수집기 — 변경 감지와 지식 그래프로 대상을 지속 모니터링"
         }
       }
     },
@@ -216,27 +171,12 @@
       "description": "Autonomous lead generation — discovers, enriches, and delivers qualified leads on a schedule",
       "category": "data",
       "icon": "📊",
+      "tags": [
+        "popular"
+      ],
       "i18n": {
-        "zh": {
-          "description": "自主获客——按计划发现、充实并交付合格线索"
-        },
         "zh-TW": {
           "description": "自主獲客——按排程發現、充實並交付合格線索"
-        },
-        "ko": {
-          "description": "자율 리드 생성 — 일정에 따라 잠재 고객을 발견, 보강, 전달"
-        },
-        "ja": {
-          "description": "自律型リード生成——スケジュールに従い見込み客を発見・充実・配信"
-        },
-        "es": {
-          "description": "Generación autónoma de leads — descubre, enriquece y entrega leads cualificados según horario"
-        },
-        "fr": {
-          "description": "Génération autonome de prospects — découvre, enrichit et livre des prospects qualifiés selon un calendrier"
-        },
-        "de": {
-          "description": "Autonome Leadgenerierung — entdeckt, bereichert und liefert qualifizierte Leads nach Zeitplan"
         }
       }
     },
@@ -336,27 +276,12 @@
       "description": "Autonomous deep researcher — exhaustive investigation, cross-referencing, fact-checking, and structured reports",
       "category": "productivity",
       "icon": "🧪",
+      "tags": [
+        "popular"
+      ],
       "i18n": {
-        "zh": {
-          "description": "自主深度研究员——详尽调查、交叉引用、事实核查与结构化报告"
-        },
         "zh-TW": {
           "description": "自主深度研究員——詳盡調查、交叉引用、事實查核與結構化報告"
-        },
-        "ko": {
-          "description": "자율 심층 연구원 — 철저한 조사, 교차 참조, 팩트체크, 구조화된 보고서"
-        },
-        "ja": {
-          "description": "自律型ディープリサーチャー——徹底調査、相互参照、ファクトチェック、構造化レポート"
-        },
-        "es": {
-          "description": "Investigador autónomo profundo — investigación exhaustiva, referencias cruzadas, verificación de hechos e informes estructurados"
-        },
-        "fr": {
-          "description": "Chercheur autonome en profondeur — recherche exhaustive, références croisées, vérification des faits et rapports structurés"
-        },
-        "de": {
-          "description": "Autonomer Tiefenforscher — umfassende Untersuchung, Querverweise, Faktenprüfung und strukturierte Berichte"
         }
       }
     },
@@ -396,27 +321,12 @@
       "description": "Autonomous market intelligence and trading engine — multi-signal analysis, adversarial bull/bear reasoning, calibrated confidence scoring, strict risk management, and portfolio-level analytics",
       "category": "data",
       "icon": "📈",
+      "tags": [
+        "popular"
+      ],
       "i18n": {
-        "zh": {
-          "description": "自主市场情报与交易引擎——多信号分析、多空对抗推理、校准置信度、严格风控与组合级分析"
-        },
         "zh-TW": {
           "description": "自主市場情報與交易引擎——多訊號分析、多空對抗推理、校準置信度、嚴格風控與投組分析"
-        },
-        "es": {
-          "description": "Motor autónomo de inteligencia de mercado y trading — análisis multi-señal, razonamiento adversarial alcista/bajista, scoring de confianza calibrado, gestión estricta de riesgos y analítica a nivel de portafolio"
-        },
-        "ja": {
-          "description": "自律型マーケットインテリジェンス＆トレーディングエンジン——マルチシグナル分析、ブル/ベア対抗推論、校正済み信頼度スコアリング、厳格なリスク管理とポートフォリオ分析"
-        },
-        "fr": {
-          "description": "Moteur autonome d'intelligence de marché et de trading — analyse multi-signaux, raisonnement adversarial haussier/baissier, score de confiance calibré, gestion stricte des risques et analytique de portefeuille"
-        },
-        "de": {
-          "description": "Autonome Marktintelligenz und Handelsengine — Multi-Signal-Analyse, adversariales Bull/Bear-Reasoning, kalibriertes Vertrauensscoring, striktes Risikomanagement und Portfolio-Analytik"
-        },
-        "ko": {
-          "description": "자율 시장 인텔리전스 및 거래 엔진 — 다중 신호 분석, 강세/약세 적대적 추론, 보정된 신뢰도 평가, 엄격한 리스크 관리 및 포트폴리오 분석"
         }
       }
     },
@@ -426,27 +336,12 @@
       "description": "Autonomous Twitter/X manager — content creation, scheduled posting, engagement, and performance tracking",
       "category": "communication",
       "icon": "\\U0001D54F",
+      "tags": [
+        "popular"
+      ],
       "i18n": {
-        "zh": {
-          "description": "自主 Twitter/X 管理——内容创作、定时发布、互动与效果追踪"
-        },
         "zh-TW": {
           "description": "自主 Twitter/X 管理——內容創作、排程發布、互動與效果追蹤"
-        },
-        "es": {
-          "description": "Gestor autónomo de Twitter/X — creación de contenido, publicación programada, engagement y seguimiento de rendimiento"
-        },
-        "ja": {
-          "description": "自律型 Twitter/X マネージャー——コンテンツ作成、予約投稿、エンゲージメントと実績追跡"
-        },
-        "fr": {
-          "description": "Gestionnaire Twitter/X autonome — création de contenu, publication programmée, interactions et suivi des performances"
-        },
-        "de": {
-          "description": "Autonomer Twitter/X-Manager — Inhaltserstellung, geplantes Posten, Engagement- und Performance-Tracking"
-        },
-        "ko": {
-          "description": "자율 Twitter/X 관리자 — 콘텐츠 제작, 예약 게시, 참여 및 성과 추적"
         }
       }
     }
@@ -485,6 +380,9 @@
       "description": "DingTalk bot adapter for sending messages to DingTalk groups and conversations",
       "category": "enterprise",
       "icon": "🔔",
+      "tags": [
+        "popular"
+      ],
       "i18n": {
         "zh": {
           "description": "钉钉机器人适配器，向钉钉群组和会话发送消息"
@@ -512,6 +410,9 @@
       "description": "Discord bot adapter for sending and receiving messages in Discord servers and channels",
       "category": "messaging",
       "icon": "🎮",
+      "tags": [
+        "popular"
+      ],
       "i18n": {
         "zh": {
           "description": "Discord 机器人适配器，在 Discord 服务器和频道中收发消息"
@@ -593,6 +494,9 @@
       "description": "Feishu (Lark) bot adapter for messaging within the Feishu collaboration platform",
       "category": "enterprise",
       "icon": "🐦",
+      "tags": [
+        "popular"
+      ],
       "i18n": {
         "zh": {
           "description": "飞书机器人适配器，在飞书协作平台中收发消息"
@@ -890,6 +794,9 @@
       "description": "Matrix adapter for decentralized messaging via the Matrix client-server API",
       "category": "messaging",
       "icon": "🟩",
+      "tags": [
+        "popular"
+      ],
       "i18n": {
         "zh": {
           "description": "Matrix 适配器，通过 Matrix 客户端-服务器 API 进行去中心化通信"
@@ -1241,6 +1148,9 @@
       "description": "Signal adapter for secure end-to-end encrypted messaging via Signal CLI",
       "category": "messaging",
       "icon": "🔒",
+      "tags": [
+        "popular"
+      ],
       "i18n": {
         "zh": {
           "description": "Signal 适配器，通过 Signal CLI 进行端到端加密安全通信"
@@ -1268,6 +1178,9 @@
       "description": "Slack bot adapter for sending and receiving messages in Slack workspaces",
       "category": "enterprise",
       "icon": "💜",
+      "tags": [
+        "popular"
+      ],
       "i18n": {
         "zh": {
           "description": "Slack 机器人适配器，在 Slack 工作区中收发消息"
@@ -1295,6 +1208,9 @@
       "description": "Microsoft Teams adapter for messaging and notifications in Teams channels",
       "category": "enterprise",
       "icon": "🟦",
+      "tags": [
+        "popular"
+      ],
       "i18n": {
         "zh": {
           "description": "Microsoft Teams 适配器，在 Teams 频道中收发消息和通知"
@@ -1322,6 +1238,9 @@
       "description": "Telegram Bot API adapter for sending and receiving messages",
       "category": "messaging",
       "icon": "📱",
+      "tags": [
+        "popular"
+      ],
       "i18n": {
         "zh": {
           "description": "Telegram Bot API 适配器，收发消息"
@@ -1511,6 +1430,9 @@
       "description": "WeChat Official Account adapter for messaging on the WeChat platform",
       "category": "messaging",
       "icon": "💚",
+      "tags": [
+        "popular"
+      ],
       "i18n": {
         "zh": {
           "description": "微信公众号适配器，在微信平台上收发消息"
@@ -1565,6 +1487,9 @@
       "description": "WhatsApp Business API adapter for sending and receiving messages on WhatsApp",
       "category": "messaging",
       "icon": "📱",
+      "tags": [
+        "popular"
+      ],
       "i18n": {
         "zh": {
           "description": "WhatsApp Business API 适配器，在 WhatsApp 上收发消息"
@@ -1648,5 +1573,5 @@
   "workflowsCount": 9,
   "agentsCount": 32,
   "pluginsCount": 10,
-  "fetchedAt": "2026-03-25T04:14:02.794Z"
+  "fetchedAt": "2026-03-25T04:36:30.905Z"
 }

@@ -50,6 +50,10 @@
         else if (path.startsWith('/es')) lang = 'es';
         document.documentElement.lang = lang;
         window.__INITIAL_LANG__ = lang;
+
+        // Initialize theme
+        var theme = localStorage.getItem('theme') || 'dark';
+        document.documentElement.classList.add(theme);
       })();
     </script>
     <script type="application/ld+json">
@@ -84,5 +88,11 @@
 
     <!-- Visit Counter -->
     <script src="https://counter.librefang.ai/script.js" async></script>
+
+    <script>
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.register('/sw.js').catch(() => {})
+      }
+    </script>
   </body>
 </html>

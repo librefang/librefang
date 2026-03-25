@@ -12,7 +12,7 @@ if (token) HEADERS['Authorization'] = `Bearer ${token}`
 
 interface GHItem { name: string; type: string }
 interface I18nEntry { description: string }
-interface Detail { id: string; name: string; description: string; category: string; icon: string; i18n?: Record<string, I18nEntry> }
+interface Detail { id: string; name: string; description: string; category: string; icon: string; tags?: string[]; i18n?: Record<string, I18nEntry> }
 
 async function fetchDir(path: string): Promise<GHItem[]> {
   const res = await fetch(`${API}/${path}`, { headers: HEADERS })
@@ -38,7 +38,12 @@ function parseToml(text: string): Detail {
       i18n[lang] = { description: descMatch[1]! }
     }
   }
+  // Parse tags = ["popular", ...]
+  const tagsMatch = text.match(/^tags\s*=\s*\[([^\]]*)\]/m)
+  const tags = tagsMatch ? tagsMatch[1]!.match(/"([^"]*)"/g)?.map(s => s.replace(/"/g, '')) : undefined
+
   const result: Detail = { id: get('id'), name: get('name'), description: get('description'), category: get('category'), icon: get('icon') }
+  if (tags && tags.length > 0) result.tags = tags
   if (Object.keys(i18n).length > 0) result.i18n = i18n
   return result
 }

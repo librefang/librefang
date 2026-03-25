@@ -416,7 +416,10 @@ async function refreshRegistryCache(env) {
         i18n[lang] = { description: descMatch[1] }
       }
     }
+    const tagsMatch = text.match(/^tags\s*=\s*\[([^\]]*)\]/m)
+    const tags = tagsMatch ? tagsMatch[1].match(/"([^"]*)"/g)?.map(s => s.replace(/"/g, '')) : undefined
     const result = { id: get('id'), name: get('name'), description: get('description'), category: get('category'), icon: get('icon') }
+    if (tags && tags.length > 0) result.tags = tags
     if (Object.keys(i18n).length > 0) result.i18n = i18n
     return result
   }

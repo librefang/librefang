@@ -3,6 +3,30 @@
 @tailwind utilities;
 
 @layer base {
+  :root {
+    --bg-surface: #f8fafc;
+    --bg-surface-100: #f1f5f9;
+    --bg-surface-200: #e2e8f0;
+    --bg-surface-300: #cbd5e1;
+    --text-primary: #0f172a;
+    --text-secondary: #475569;
+    --text-muted: #94a3b8;
+    --border: rgba(0, 0, 0, 0.1);
+    --cyan-accent: #0891b2;
+  }
+
+  .dark {
+    --bg-surface: #070b14;
+    --bg-surface-100: #0c1222;
+    --bg-surface-200: #111827;
+    --bg-surface-300: #1a2235;
+    --text-primary: #e2e8f0;
+    --text-secondary: #94a3b8;
+    --text-muted: #6b7280;
+    --border: rgba(255, 255, 255, 0.05);
+    --cyan-accent: #06b6d4;
+  }
+
   * {
     margin: 0;
     padding: 0;
@@ -15,8 +39,8 @@
 
   body {
     font-family: 'Inter', 'Noto Sans SC', 'Noto Sans TC', 'Noto Sans JP', 'Noto Sans KR', system-ui, sans-serif;
-    background-color: #070b14;
-    color: #e2e8f0;
+    background-color: var(--bg-surface);
+    color: var(--text-primary);
     min-height: 100vh;
     -webkit-font-smoothing: antialiased;
   }

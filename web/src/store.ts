@@ -35,6 +35,8 @@ function loadCJKFont(lang: string) {
 interface AppState {
   lang: string
   switchLang: (code: string) => void
+  theme: 'dark' | 'light'
+  toggleTheme: () => void
 }
 
 export const useAppStore = create<AppState>((set) => ({
@@ -45,5 +47,15 @@ export const useAppStore = create<AppState>((set) => ({
     window.history.pushState(null, '', url)
     document.documentElement.lang = code
     loadCJKFont(code)
+  },
+  theme: (typeof window !== 'undefined' && localStorage.getItem('theme') as 'dark' | 'light') || 'dark',
+  toggleTheme: () => {
+    set((state) => {
+      const next = state.theme === 'dark' ? 'light' : 'dark'
+      localStorage.setItem('theme', next)
+      document.documentElement.classList.toggle('dark', next === 'dark')
+      document.documentElement.classList.toggle('light', next === 'light')
+      return { theme: next }
+    })
   },
 }))
