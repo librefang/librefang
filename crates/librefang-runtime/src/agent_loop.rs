@@ -598,6 +598,11 @@ pub async fn run_agent_loop(
     // (see below) to keep the system prompt prefix stable for caching.
     let mut system_prompt = manifest.model.system_prompt.clone();
 
+    // Auto-track the agent's BASE prompt version (before experiment replacement)
+    if let Some(kernel) = kernel.as_ref() {
+        let _ = kernel.auto_track_prompt_version(session.agent_id, &system_prompt);
+    }
+
     // If running an A/B experiment, use the variant's system prompt instead
     if let Some(ref ctx) = experiment_context {
         if let Some(ref exp) = running_experiment {
@@ -618,11 +623,6 @@ pub async fn run_agent_loop(
                 }
             }
         }
-    }
-
-    // Auto-track prompt version if prompt intelligence is enabled
-    if let Some(kernel) = kernel.as_ref() {
-        let _ = kernel.auto_track_prompt_version(session.agent_id, &system_prompt);
     }
 
     let memory_context_msg = if !memories.is_empty() {
@@ -2061,6 +2061,11 @@ pub async fn run_agent_loop_streaming(
     // (see below) to keep the system prompt prefix stable for caching.
     let mut system_prompt = manifest.model.system_prompt.clone();
 
+    // Auto-track the agent's BASE prompt version (before experiment replacement)
+    if let Some(kernel) = kernel.as_ref() {
+        let _ = kernel.auto_track_prompt_version(session.agent_id, &system_prompt);
+    }
+
     // If running an A/B experiment, use the variant's system prompt instead
     if let Some(ref ctx) = experiment_context {
         if let Some(ref exp) = running_experiment {
@@ -2081,11 +2086,6 @@ pub async fn run_agent_loop_streaming(
                 }
             }
         }
-    }
-
-    // Auto-track prompt version if prompt intelligence is enabled
-    if let Some(kernel) = kernel.as_ref() {
-        let _ = kernel.auto_track_prompt_version(session.agent_id, &system_prompt);
     }
 
     let memory_context_msg = if !memories.is_empty() {
