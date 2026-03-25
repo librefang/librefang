@@ -2597,6 +2597,25 @@ plugin_registries = ["acme-corp/librefang-plugins"]
 
 ---
 
+### `[prompt_intelligence]`
+
+配置 Prompt 版本管理和 A/B 实验功能。启用后，LibreFang 自动追踪 prompt 版本历史，支持运行 A/B 实验对比不同 prompt 变体。详细文档见 [Prompt 智能指南](/zh/prompt-intelligence)。
+
+```toml
+[prompt_intelligence]
+enabled = false
+hash_prompts = true
+max_versions_per_agent = 50
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | `false` | 总开关。关闭时不追踪 prompt 版本，不运行实验 |
+| `hash_prompts` | bool | `true` | 计算 prompt 内容哈希用于去重 |
+| `max_versions_per_agent` | u32 | `50` | 每个 agent 最大 prompt 版本数，超出后自动清理最旧的非活跃版本 |
+
+---
+
 ## 环境变量
 
 以下是配置中引用的所有环境变量的完整表格。这些变量不由配置文件本身读取——它们在运行时由内核和通道适配器读取。
