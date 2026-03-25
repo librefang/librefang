@@ -1,332 +1,595 @@
 # 技能开发
 
-LibreFang 技能系统允许您创建可插拔的工具包来扩展 Agent 的能力。
+技能是可插拔的工具包，用于扩展 LibreFang 中 Agent 的能力。一个技能将一个或多个工具及其实现打包在一起，让 Agent 能够完成内置工具无法覆盖的任务。本指南涵盖技能创建、清单格式、Python 和 WASM 运行时、发布到 FangHub 以及 CLI 管理。
+
+## 目录
+
+- [概述](#overview)
+- [技能格式](#skill-format)
+- [Python 技能](#python-skills)
+- [WASM 技能](#wasm-skills)
+- [技能依赖声明](#skill-requirements)
+- [安装技能](#installing-skills)
+- [发布到 FangHub](#publishing-to-fanghub)
+- [CLI 命令](#cli-commands)
+- [OpenClaw 兼容性](#openclaw-compatibility)
+- [最佳实践](#best-practices)
 
 ---
 
 ## 概述
 
-技能是包含以下内容的包：
+一个技能由以下部分组成：
 
-- **skill.toml** - 清单文件
-- **代码** - Python / WASM / Node.js / PromptOnly
-- **SKILL.md** (可选) - 领域知识参考
+1. 一个**清单文件**（`skill.toml` 或 `SKILL.md`），声明元数据、运行时类型、提供的工具和依赖需求。
+2. 一个**入口点**（Python 脚本、WASM 模块、Node.js 模块或纯提示词 Markdown），实现工具逻辑。
 
----
+技能安装到 `~/.librefang/skills/` 目录下。官方技能可在注册中心获取，也可从仪表盘直接安装。
 
-## 60 个内置技能
+### 支持的运行时
 
-技能安装到 `~/.librefang/skills/`。官方技能可从 dashboard 按需安装。
+| 运行时 | 语言 | 沙箱隔离 | 说明 |
+|---------|----------|-----------|-------|
+| `python` | Python 3.8+ | 否（使用 `env_clear()` 的子进程） | 最易编写。使用 stdin/stdout JSON 协议。 |
+| `wasm` | Rust、C、Go 等 | 是（Wasmtime 双重计量） | 完全沙箱隔离。适合安全敏感的工具。 |
+| `node` | JavaScript/TypeScript | 否（子进程） | OpenClaw 兼容。 |
+| `prompt_only` | Markdown | 不适用 | 专家知识注入系统提示词。无代码执行。 |
+| `builtin` | Rust | 不适用 | 编译到二进制文件中。仅用于核心工具。 |
 
-| 类别 | 技能示例 |
-|------|----------|
-| 开发 | git, docker, kubernetes, code_review |
-| 数据 | python, pandas, numpy, jupyter |
-| 网络 | http, websockets, rest_api |
-| 系统 | bash, file_system, process |
-| AI/ML | openai, anthropic, huggingface |
-| 工具 | search, scrape, parse_json |
+### 60 个内置技能
 
----
+LibreFang 提供 60 个专家知识技能，可从仪表盘安装：
 
-## 创建自定义技能
+| 类别 | 技能 |
+|----------|--------|
+| DevOps 与基础设施 | `ci-cd`, `ansible`, `prometheus`, `nginx`, `kubernetes`, `terraform`, `helm`, `docker`, `sysadmin`, `shell-scripting`, `linux-networking` |
+| 云服务 | `aws`, `gcp`, `azure` |
+| 编程语言 | `rust-expert`, `python-expert`, `typescript-expert`, `golang-expert` |
+| 前端 | `react-expert`, `nextjs-expert`, `css-expert` |
+| 数据库 | `postgres-expert`, `redis-expert`, `sqlite-expert`, `mongodb`, `elasticsearch`, `sql-analyst` |
+| API 与 Web | `graphql-expert`, `openapi-expert`, `api-tester`, `oauth-expert` |
+| AI/ML | `ml-engineer`, `llm-finetuning`, `vector-db`, `prompt-engineer` |
+| 安全 | `security-audit`, `crypto-expert`, `compliance` |
+| 开发工具 | `github`, `git-expert`, `jira`, `linear-tools`, `sentry`, `code-reviewer`, `regex-expert` |
+| 写作 | `technical-writer`, `writing-coach`, `email-writer`, `presentation` |
+| 数据 | `data-analyst`, `data-pipeline` |
+| 协作 | `slack-tools`, `notion`, `confluence`, `figma-expert` |
+| 职业 | `interview-prep`, `project-manager` |
+| 高级 | `wasm-expert`, `pdf-reader`, `web-search` |
 
-### 1. 创建技能清单
+这些都是使用 SKILL.md 格式的 `prompt_only` 技能 -- 专家知识会被注入到 Agent 的系统提示词中。
 
-创建 `skill.toml`：
+### SKILL.md 格式
 
-```toml
-name = "my-skill"
-version = "1.0.0"
-description = "A custom skill for X"
-author = "you"
-
-[runtime]
-type = "python"  # python/wasm/nodejs/prompt_only
-entrypoint = "main.py"
-
-[config]
-timeout = 30
-memory = "256MB"
-
-[tools]
-provided = ["my_tool"]
-
-[requirements]
-packages = ["requests"]
-```
-
-### 2. 实现代码
-
-`main.py`:
-
-```python
-import requests
-
-def my_tool(query: str) -> str:
-    """My custom tool"""
-    return f"Result for: {query}"
-```
-
-### 3. 添加知识 (可选)
-
-创建 `SKILL.md`:
+SKILL.md 格式（也被 OpenClaw 使用）使用 YAML frontmatter 和 Markdown 正文：
 
 ```markdown
-# My Skill
+---
+name: rust-expert
+description: Expert Rust programming knowledge
+---
 
-## Domain Knowledge
+# Rust Expert
 
-This skill handles X specific scenarios...
+## Key Principles
+- Ownership and borrowing rules...
+- Lifetime annotations...
 
-## Examples
+## Common Patterns
+...
+```
 
-Example 1: ...
+SKILL.md 文件会被自动解析并转换为 `prompt_only` 技能。所有 SKILL.md 文件在被引入之前都会经过自动化的**提示词注入扫描器**检测，识别覆盖尝试、数据泄露模式和 shell 引用。
+
+---
+
+## 技能格式
+
+### 目录结构
+
+```
+my-skill/
+  skill.toml          # 清单文件（必需）
+  src/
+    main.py           # 入口点（Python 技能）
+  README.md           # 可选文档
+```
+
+### 清单文件（skill.toml）
+
+```toml
+[skill]
+name = "web-summarizer"
+version = "0.1.0"
+description = "Summarizes any web page into bullet points"
+author = "librefang-community"
+license = "MIT"
+tags = ["web", "summarizer", "research"]
+
+[runtime]
+type = "python"
+entry = "src/main.py"
+
+[[tools.provided]]
+name = "summarize_url"
+description = "Fetch a URL and return a concise bullet-point summary"
+input_schema = { type = "object", properties = { url = { type = "string", description = "The URL to summarize" } }, required = ["url"] }
+
+[[tools.provided]]
+name = "extract_links"
+description = "Extract all links from a web page"
+input_schema = { type = "object", properties = { url = { type = "string" } }, required = ["url"] }
+
+[requirements]
+tools = ["web_fetch"]
+capabilities = ["NetConnect(*)"]
+```
+
+### 清单各节说明
+
+#### [skill] -- 元数据
+
+| 字段 | 类型 | 必填 | 说明 |
+|-------|------|----------|-------------|
+| `name` | string | 是 | 唯一的技能名称（用作安装目录名） |
+| `version` | string | 否 | 语义版本号（默认：`"0.1.0"`） |
+| `description` | string | 否 | 人类可读的描述 |
+| `author` | string | 否 | 作者名称或组织 |
+| `license` | string | 否 | 许可证标识符（如 `"MIT"`、`"Apache-2.0"`） |
+| `tags` | array | 否 | 用于在 FangHub 中发现的标签 |
+
+#### [runtime] -- 执行配置
+
+| 字段 | 类型 | 必填 | 说明 |
+|-------|------|----------|-------------|
+| `type` | string | 是 | `"python"`、`"wasm"`、`"node"` 或 `"builtin"` |
+| `entry` | string | 是 | 入口点文件的相对路径 |
+
+#### [[tools.provided]] -- 工具定义
+
+每个 `[[tools.provided]]` 条目定义技能提供的一个工具：
+
+| 字段 | 类型 | 必填 | 说明 |
+|-------|------|----------|-------------|
+| `name` | string | 是 | 工具名称（在所有工具中必须唯一） |
+| `description` | string | 是 | 展示给 LLM 的描述 |
+| `input_schema` | object | 是 | 定义工具输入参数的 JSON Schema |
+
+#### [requirements] -- 宿主环境需求
+
+| 字段 | 类型 | 说明 |
+|-------|------|-------------|
+| `tools` | array | 该技能需要宿主提供的内置工具 |
+| `capabilities` | array | Agent 必须具备的能力字符串 |
+
+---
+
+## Python 技能
+
+Python 技能是最容易编写的。它们以子进程方式运行，通过 stdin/stdout 上的 JSON 进行通信。
+
+### 协议
+
+1. LibreFang 向脚本的 stdin 发送一个 JSON 载荷：
+
+```json
+{
+  "tool": "summarize_url",
+  "input": {
+    "url": "https://example.com"
+  },
+  "agent_id": "uuid-...",
+  "agent_name": "researcher"
+}
+```
+
+2. 脚本处理输入后，将 JSON 结果写入 stdout：
+
+```json
+{
+  "result": "- Point one\n- Point two\n- Point three"
+}
+```
+
+如果发生错误，返回一个错误对象：
+
+```json
+{
+  "error": "Failed to fetch URL: connection refused"
+}
+```
+
+### 示例：网页摘要器
+
+`src/main.py`：
+
+```python
+#!/usr/bin/env python3
+"""LibreFang skill: web-summarizer"""
+import json
+import sys
+import urllib.request
+
+
+def summarize_url(url: str) -> str:
+    """Fetch a URL and return a basic summary."""
+    req = urllib.request.Request(url, headers={"User-Agent": "LibreFang-Skill/1.0"})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        content = resp.read().decode("utf-8", errors="replace")
+
+    # Simple extraction: first 500 chars as summary
+    text = content[:500].strip()
+    return f"Summary of {url}:\n{text}..."
+
+
+def extract_links(url: str) -> str:
+    """Extract all links from a web page."""
+    import re
+
+    req = urllib.request.Request(url, headers={"User-Agent": "LibreFang-Skill/1.0"})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        content = resp.read().decode("utf-8", errors="replace")
+
+    links = re.findall(r'href="(https?://[^"]+)"', content)
+    unique_links = list(dict.fromkeys(links))
+    return "\n".join(unique_links[:50])
+
+
+def main():
+    payload = json.loads(sys.stdin.read())
+    tool_name = payload["tool"]
+    input_data = payload["input"]
+
+    try:
+        if tool_name == "summarize_url":
+            result = summarize_url(input_data["url"])
+        elif tool_name == "extract_links":
+            result = extract_links(input_data["url"])
+        else:
+            print(json.dumps({"error": f"Unknown tool: {tool_name}"}))
+            return
+
+        print(json.dumps({"result": result}))
+    except Exception as e:
+        print(json.dumps({"error": str(e)}))
+
+
+if __name__ == "__main__":
+    main()
+```
+
+### 使用 LibreFang Python SDK
+
+对于更高级的技能，可以使用 Python SDK（`sdk/python/librefang_sdk.py`）：
+
+```python
+#!/usr/bin/env python3
+from librefang_sdk import SkillHandler
+
+handler = SkillHandler()
+
+@handler.tool("summarize_url")
+def summarize_url(url: str) -> str:
+    # Your implementation here
+    return "Summary..."
+
+@handler.tool("extract_links")
+def extract_links(url: str) -> str:
+    # Your implementation here
+    return "link1\nlink2"
+
+if __name__ == "__main__":
+    handler.run()
 ```
 
 ---
 
-## 技能类型
+## WASM 技能
 
-### Python 技能
+WASM 技能在沙箱化的 Wasmtime 环境中运行。它们非常适合安全敏感的操作，因为沙箱强制执行资源限制和能力约束。
 
-```toml
-[runtime]
-type = "python"
-entrypoint = "main.py"
+### 构建 WASM 技能
 
-[requirements]
-packages = ["requests", "pandas"]
+1. 用 Rust（或任何可以编译为 WASM 的语言）编写技能：
+
+```rust
+// src/lib.rs
+use std::io::{self, Read};
+
+#[no_mangle]
+pub extern "C" fn _start() {
+    let mut input = String::new();
+    io::stdin().read_to_string(&mut input).unwrap();
+
+    let payload: serde_json::Value = serde_json::from_str(&input).unwrap();
+    let tool = payload["tool"].as_str().unwrap_or("");
+    let input_data = &payload["input"];
+
+    let result = match tool {
+        "my_tool" => {
+            let param = input_data["param"].as_str().unwrap_or("");
+            format!("Processed: {param}")
+        }
+        _ => format!("Unknown tool: {tool}"),
+    };
+
+    println!("{}", serde_json::json!({"result": result}));
+}
 ```
 
-### WASM 技能
+2. 编译为 WASM：
+
+```bash
+cargo build --target wasm32-wasi --release
+```
+
+3. 在清单文件中引用 `.wasm` 文件：
 
 ```toml
 [runtime]
 type = "wasm"
-entrypoint = "skill.wasm"
+entry = "target/wasm32-wasi/release/my_skill.wasm"
 ```
 
-### Node.js 技能
+### 沙箱限制
 
-```toml
-[runtime]
-type = "nodejs"
-entrypoint = "index.js"
+WASM 沙箱强制执行以下限制：
 
-[requirements]
-packages = ["axios"]
-```
+- **燃料限制**：最大计算步数（防止无限循环）。
+- **内存限制**：最大内存分配量。
+- **能力限制**：仅授予 Agent 的能力生效。
 
-### Prompt Only 技能
-
-```toml
-[runtime]
-type = "prompt_only"
-prompt_file = "system_prompt.md"
-```
+这些限制来源于 Agent 清单中 `[resources]` 节的配置。
 
 ---
 
-## 技能清单参考
+## 技能依赖声明
+
+技能可以在 `[requirements]` 节中声明依赖需求：
+
+### 工具依赖
+
+如果你的技能需要调用内置工具（例如，在处理之前用 `web_fetch` 下载页面）：
 
 ```toml
-name = "skill-name"
-version = "1.0.0"
-description = "Skill description"
-author = "author"
-
-[runtime]
-type = "python"  # python/wasm/nodejs/prompt_only
-entrypoint = "main.py"
-timeout = 30
-
-[config]
-environment = {}
-settings = {}
-
-[tools]
-provided = ["tool1", "tool2"]
-
 [requirements]
-packages = ["package1"]
-env_vars = ["API_KEY"]
+tools = ["web_fetch", "file_read"]
+```
 
-[capabilities]
-network = true
-file_system = false
+技能注册中心会在加载技能之前验证 Agent 是否具备这些工具。
 
-[dependencies]
-skills = ["other_skill"]
+### 能力依赖
+
+如果你的技能需要特定的能力：
+
+```toml
+[requirements]
+capabilities = ["NetConnect(*)", "ShellExec(python3)"]
 ```
 
 ---
 
 ## 安装技能
 
-<Note>
-**提示**: 使用 `librefang skill list` 查看已安装技能，`librefang skill search` 搜索新技能。
-</Note>
-
-### 从本地安装
+### 从本地目录安装
 
 ```bash
-librefang skill install ./my-skill
+librefang skill install /path/to/my-skill
 ```
+
+此命令会读取 `skill.toml`，验证清单，并将技能复制到 `~/.librefang/skills/my-skill/`。
 
 ### 从 FangHub 安装
 
 ```bash
-librefang skill install fanghub:skill-name
+librefang skill install web-summarizer
 ```
 
-### 从 URL 安装
+此命令会从 FangHub 市场注册中心下载技能。
+
+### 从 Git 仓库安装
 
 ```bash
-librefang skill install https://example.com/skill.tar.gz
+librefang skill install https://github.com/user/librefang-skill-example.git
 ```
 
----
-
-## 技能管理
-
-### 列出技能
+### 列出已安装的技能
 
 ```bash
 librefang skill list
 ```
 
-### 搜索技能
+输出：
 
-```bash
-librefang skill search "python"
+```
+3 skill(s) installed:
+
+NAME                 VERSION    TOOLS    DESCRIPTION
+----------------------------------------------------------------------
+web-summarizer       0.1.0      2        Summarizes any web page into bullet points
+data-analyzer        0.2.1      3        Statistical analysis tools
+code-formatter       1.0.0      1        Format code in 20+ languages
 ```
 
 ### 移除技能
 
 ```bash
-librefang skill remove my-skill
-```
-
-### 验证技能
-
-```bash
-librefang skill verify my-skill
+librefang skill remove web-summarizer
 ```
 
 ---
 
-## 在 Agent 中使用技能
+## 发布到 FangHub
 
-在 Agent 清单中声明技能：
+FangHub 是 LibreFang 的社区技能市场。
 
-```toml
-[capabilities]
-skills = ["my_skill"]
-tools = ["my_skill.my_tool"]
+### 准备技能
+
+1. 确保 `skill.toml` 包含完整的元数据：
+   - `name`、`version`、`description`、`author`、`license`、`tags`
+2. 包含一个 `README.md`，写明使用说明。
+3. 在本地测试你的技能：
+
+```bash
+librefang skill install /path/to/my-skill
+# 创建一个包含该技能工具的 Agent 并进行测试
 ```
+
+### 搜索 FangHub
+
+```bash
+librefang skill search "web scraping"
+```
+
+输出：
+
+```
+Skills matching "web scraping":
+
+  web-summarizer (42 stars)
+    Summarizes any web page into bullet points
+    https://fanghub.dev/skills/web-summarizer
+
+  page-scraper (28 stars)
+    Extract structured data from web pages
+    https://fanghub.dev/skills/page-scraper
+```
+
+### 发布
+
+发布到 FangHub 可通过以下命令完成：
+
+```bash
+librefang skill publish
+```
+
+此命令会验证清单、打包技能并上传到 FangHub 注册中心。
 
 ---
 
-## 技能开发最佳实践
+## CLI 命令
 
-1. **保持专注** - 一个技能做一件事
-2. **添加文档** - SKILL.md 帮助 Agent 理解何时使用
-3. **处理错误** - 返回有意义的错误消息
-4. **设置超时** - 防止技能卡住
-5. **验证输入** - 检查参数有效性
-
----
-
-## 技能安全
-
-### 提示注入扫描
-
-LibreFang 自动扫描技能中的提示注入：
-
-```python
-def scan_prompt_content(content: str) -> bool:
-    """检测覆盖尝试、数据外泄、shell 引用"""
-    # 实现检测逻辑
-```
-
-### 技能验证
+### 完整技能命令参考
 
 ```bash
-librefang skill verify my-skill
-```
+# 安装技能（本地目录、FangHub 名称或 git URL）
+librefang skill install <source>
 
-验证内容：
-- SHA256 校验
-- 权限检查
-- 依赖检查
-
----
-
-## FangHub 市场
-
-FangHub 是 LibreFang 技能市场：
-
-```bash
-# 搜索技能
-librefang skill search "data analysis"
-
-# 安装技能
-librefang skill install fanghub:data-analysis
-
-# 列出热门
-librefang skill trending
-```
-
----
-
-## 迁移技能
-
-### 从 OpenFang 迁移
-
-LibreFang 兼容 OpenFang 技能（共享相同格式）：
-
-```bash
-# 自动迁移
-librefang migrate --from openfang
-
-# 手动迁移
-cp -r ~/.openfang/skills/* ~/.librefang/skills/
-```
-
-### 从 OpenClaw 迁移
-
-LibreFang 兼容 OpenClaw 技能：
-
-```bash
-# 自动迁移
-librefang migrate --from openclaw
-
-# 手动迁移
-cp -r ~/.openclaw/skills/* ~/.librefang/skills/
-```
-
----
-
-## 故障排除
-
-### 技能不加载
-
-```bash
-# 检查技能状态
+# 列出所有已安装的技能
 librefang skill list
 
-# 验证技能
-librefang skill verify my-skill
+# 移除已安装的技能
+librefang skill remove <name>
 
-# 查看日志
-RUST_LOG=debug librefang skill list
+# 在 FangHub 中搜索技能
+librefang skill search <query>
+
+# 创建新的技能脚手架（交互式）
+librefang skill create
 ```
 
-### 权限错误
-
-确保技能文件有正确权限：
+### 创建技能脚手架
 
 ```bash
-chmod +x skills/*/main.py
+librefang skill create
 ```
+
+此交互式命令会提示输入：
+- 技能名称
+- 描述
+- 运行时类型（python/node/wasm）
+
+生成的内容：
+
+```
+~/.librefang/skills/my-skill/
+  skill.toml        # 预填充的清单文件
+  src/
+    main.py         # 入门入口点（Python 技能）
+```
+
+生成的入口点包含一个可运行的模板，能够从 stdin 读取 JSON 并将 JSON 写入 stdout。
+
+### 在 Agent 清单中使用技能
+
+在 Agent 清单的 `skills` 字段中引用技能：
+
+```toml
+name = "my-assistant"
+version = "0.1.0"
+description = "An assistant with extra skills"
+author = "librefang"
+module = "builtin:chat"
+skills = ["web-summarizer", "data-analyzer"]
+
+[model]
+provider = "groq"
+model = "llama-3.3-70b-versatile"
+
+[capabilities]
+tools = ["file_read", "web_fetch", "summarize_url"]
+memory_read = ["*"]
+memory_write = ["self.*"]
+```
+
+内核在 Agent 启动时加载技能工具和提示词，并将它们与 Agent 的基础能力合并。
+
+---
+
+## OpenClaw 兼容性
+
+LibreFang 可以安装和运行 OpenClaw 格式的技能。技能安装器会自动检测 OpenClaw 技能（通过查找 `package.json` + `index.ts`/`index.js`）并进行转换。
+
+### 自动转换
+
+```bash
+librefang skill install /path/to/openclaw-skill
+```
+
+如果目录包含 OpenClaw 风格的技能（Node.js 包），LibreFang 会：
+
+1. 检测 OpenClaw 格式。
+2. 从 `package.json` 生成 `skill.toml` 清单。
+3. 将工具名称映射为 LibreFang 约定。
+4. 将技能复制到 LibreFang 技能目录。
+
+### 手动转换
+
+如果自动转换不起作用，可以手动创建 `skill.toml`：
+
+```toml
+[skill]
+name = "my-openclaw-skill"
+version = "1.0.0"
+description = "Converted from OpenClaw"
+
+[runtime]
+type = "node"
+entry = "index.js"
+
+[[tools.provided]]
+name = "my_tool"
+description = "Tool description"
+input_schema = { type = "object", properties = { input = { type = "string" } }, required = ["input"] }
+```
+
+将此文件放在现有的 `index.js`/`index.ts` 旁边，然后安装：
+
+```bash
+librefang skill install /path/to/skill-directory
+```
+
+通过 `librefang migrate --from openfang` 或 `librefang migrate --from openclaw` 导入的技能也会被扫描并记录在迁移报告中，附带手动重新安装的说明。
+
+---
+
+## 最佳实践
+
+1. **保持技能专注** -- 一个技能应该专注做好一件事。
+2. **声明最小依赖** -- 只请求技能实际需要的工具和能力。
+3. **使用描述性的工具名称** -- LLM 通过读取工具名称和描述来决定何时使用它。
+4. **提供清晰的输入 Schema** -- 为每个参数添加描述，让 LLM 知道应该传入什么。
+5. **优雅地处理错误** -- 始终返回 JSON 错误对象，而不是让程序崩溃。
+6. **谨慎管理版本** -- 使用语义版本控制；破坏性变更需要递增主版本号。
+7. **用多个 Agent 测试** -- 验证技能是否能在不同的 Agent 模板和提供商下正常工作。
+8. **包含 README** -- 记录安装步骤、依赖项和使用示例。

@@ -1,246 +1,2186 @@
 # 通道适配器
 
-LibreFang 支持 45 个消息平台适配器，连接您的 agent 到用户所在的每个平台。
+LibreFang 通过 **45 个通道适配器** 连接各类消息平台，让用户可以在所有主流通信平台上与 Agent 交互。适配器覆盖消费级即时通讯、企业协作、社交媒体、社区平台、隐私优先协议、通用 Webhook 以及可扩展的 Sidecar 进程。
 
-<Note>
-**提示**: 每个通道都可以单独配置访问控制、速率限制和过滤规则。
-</Note>
+所有适配器共享统一的基础能力：通过 `watch::channel` 实现优雅关闭、连接失败时指数退避重试、使用 `Zeroizing<String>` 保护密钥、超出平台长度限制时自动拆分消息、支持按通道覆盖模型/提示词、DM/群组策略控制、按用户速率限制，以及输出格式化（Markdown、TelegramHTML、SlackMrkdwn、PlainText）。
+
+## 目录
+
+- [通道配置](#channel-configuration)
+- [通道覆盖](#channel-overrides)
+- [格式化器、速率限制器与策略](#formatter-rate-limiter-and-policies)
+- **核心**
+  - [Telegram](#telegram)
+  - [Discord](#discord)
+  - [Slack](#slack)
+  - [WhatsApp](#whatsapp)
+  - [微信（个人）](#wechat-personal)
+  - [Signal](#signal)
+  - [Matrix](#matrix)
+  - [Email](#email)
+  - [WebChat（内置）](#webchat-built-in)
+- **企业**
+  - [Microsoft Teams](#microsoft-teams)
+  - [Mattermost](#mattermost)
+  - [Google Chat](#google-chat)
+  - [Webex](#webex)
+  - [飞书 / Lark](#feishu--lark)
+  - [Rocket.Chat](#rocketchat)
+  - [Zulip](#zulip)
+  - [Flock](#flock)
+  - [Twist](#twist)
+  - [Pumble](#pumble)
+  - [Guilded](#guilded)
+- **社交**
+  - [LINE](#line)
+  - [Viber](#viber)
+  - [Facebook Messenger](#facebook-messenger)
+  - [Reddit](#reddit)
+  - [Mastodon](#mastodon)
+  - [Bluesky](#bluesky)
+  - [LinkedIn](#linkedin)
+  - [Twitch](#twitch)
+- **社区 / 开发者**
+  - [IRC](#irc)
+  - [XMPP](#xmpp)
+  - [Discourse](#discourse)
+  - [Gitter](#gitter)
+  - [Revolt](#revolt)
+  - [Keybase](#keybase)
+- **隐私**
+  - [Threema](#threema)
+  - [Nostr](#nostr)
+- **国内平台**
+  - [钉钉](#dingtalk)
+  - [QQ](#qq)
+  - [企业微信](#wecom)
+- **IoT / 通知**
+  - [MQTT](#mqtt)
+  - [Ntfy](#ntfy)
+  - [Gotify](#gotify)
+  - [Nextcloud Talk](#nextcloud-talk)
+  - [Mumble](#mumble)
+- **通用**
+  - [Webhook](#webhook)
+- [Agent 路由](#agent-routing)
+- [编写自定义适配器](#writing-custom-adapters)
 
 ---
 
-## 支持的平台
+## 通道配置
 
-### 核心平台
+<Note>
+所有通道凭证支持四种存储方式（优先级从高到低）：
+- **系统环境变量**: `export TELEGRAM_BOT_TOKEN=...`
+- **加密金库**（推荐）: `librefang vault set TELEGRAM_BOT_TOKEN`
+- **.env 文件**: `librefang config set-key telegram` 或直接编辑 `~/.librefang/.env`
+- **secrets.env**: 通过仪表板 "Set API Key" 按钮写入 `~/.librefang/secrets.env`
 
-| 平台 | 说明 | 状态 |
-|------|------|------|
-| Telegram | Bot API | ✅ |
-| Discord | Bot API | ✅ |
-| Slack | Bot API | ✅ |
-| WhatsApp | Business API | ✅ |
-| Signal | Bot API | ✅ |
-| Matrix | Client API | ✅ |
-| Email | IMAP/SMTP | ✅ |
+以下示例展示全部四种方式。生产环境建议使用 vault。
+</Note>
 
-### 企业平台
+所有通道配置位于 `~/.librefang/config.toml` 的 `[channels]` 段落下。每个通道是一个子段落：
 
-| 平台 | 说明 |
-|------|------|
-| Microsoft Teams | Bot Framework |
-| Mattermost | Webhook/API |
-| Google Chat | Bot API |
-| Webex | Bot API |
-| Feishu/Lark | Open Platform |
-| Zulip | API |
+```toml
+[channels.telegram]
+bot_token_env = "TELEGRAM_BOT_TOKEN"
+default_agent = "assistant"
+allowed_users = ["123456789"]
 
-### 社交平台
+[channels.discord]
+bot_token_env = "DISCORD_BOT_TOKEN"
+default_agent = "coder"
 
-| 平台 | 说明 |
-|------|------|
-| LINE | Messaging API |
-| Viber | Bot API |
-| Facebook Messenger | Graph API |
-| Mastodon | Client API |
-| Bluesky | AT Protocol |
-| Reddit | OAuth API |
-| LinkedIn | Marketing API |
-| Twitch | PubSub |
+[channels.slack]
+bot_token_env = "SLACK_BOT_TOKEN"
+app_token_env = "SLACK_APP_TOKEN"
+default_agent = "ops"
 
-### 社区平台
+# 企业示例
+[channels.teams]
+app_id_env = "TEAMS_APP_ID"
+app_secret_env = "TEAMS_APP_SECRET"
+default_agent = "ops"
 
-| 平台 | 说明 |
-|------|------|
-| IRC | Client/Server |
-| XMPP | Client API |
-| Guilded | HTTP API |
-| Revolt | HTTP API |
-| Keybase | Client API |
-| Discourse | API |
-| Gitter | Client API |
+# 社交示例
+[channels.mastodon]
+token_env = "MASTODON_TOKEN"
+instance = "https://mastodon.social"
+default_agent = "social-media"
 
-### 隐私平台
+# IoT/MQTT 示例（需要 all-channels feature flag）
+[channels.mqtt]
+host = "broker.example.com"
+port = 1883
+client_id = "librefang-bot"
+subscribe_topics = ["home/agents/input", "home/agents/commands"]
+response_topic = "home/agents/output"
+qos = "at_least_once"                # at_most_once | at_least_once | exactly_once
+# username_env = "MQTT_USERNAME"     # 可选
+# password_env = "MQTT_PASSWORD"     # 可选
+keep_alive_secs = 30
+default_agent = "home-assistant"
+```
 
-| 平台 | 说明 |
-|------|------|
-| Threema | Gateway API |
-| Nostr | NIP-04/26 |
-| Mumble | Murmur API |
-| Nextcloud Talk | HTTP API |
-| Rocket.Chat | Client API |
-| Ntfy | HTTP API |
-| Gotify | HTTP API |
+### 通用字段
 
-### 工作平台
+- `bot_token_env` / `token_env` -- 保存 Bot/访问令牌的环境变量名。LibreFang 在启动时从该环境变量读取令牌。所有密钥以 `Zeroizing<String>` 存储，释放时自动清零。
+- `default_agent` -- 当没有特定路由规则时，接收消息的 Agent 名称（或 ID）。
+- `allowed_users` -- 可选的平台用户 ID 白名单。留空表示允许所有用户。
+- `overrides` -- 可选的按通道行为覆盖（参见下方[通道覆盖](#channel-overrides)）。
 
-| 平台 | 说明 |
-|------|------|
-| Pumble | HTTP API |
-| Flock | Webhook/API |
-| Twist | API |
-| DingTalk | Open API |
-| Zalo | API |
-| QQ | Bot API |
-| WeCom / 企业微信 | 企业 API |
-| 微信（个人） | iLink Bot API |
+### 环境变量参考（核心通道）
 
-### IoT / 集成
+| 通道 | 必需的环境变量 |
+|------|---------------|
+| Telegram | `TELEGRAM_BOT_TOKEN` |
+| Discord | `DISCORD_BOT_TOKEN` |
+| Slack | `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN` |
+| WhatsApp | `WA_ACCESS_TOKEN`, `WA_PHONE_ID`, `WA_VERIFY_TOKEN` |
+| Matrix | `MATRIX_TOKEN` |
+| Email | `EMAIL_PASSWORD` |
 
-| 平台 | 说明 | 功能标志 |
-|------|------|----------|
-| MQTT | MQTT v3.1.1/v5 pub/sub（使用 rumqttc 库） | `all-channels` |
+其他通道的环境变量详见上方[全部 45 个通道](#all-44-channels)表格。
 
-**MQTT 说明:** 需要在编译时启用 `all-channels` feature flag。支持订阅主题接收消息、发布 agent 响应到响应主题，内置自动重连和指数退避。支持 QoS 三种级别（AtMostOnce / AtLeastOnce / ExactlyOnce），支持用户名/密码认证。
+---
 
-**MQTT 配置示例:**
+## 通道覆盖
+
+每个通道适配器都支持 `ChannelOverrides`，允许在不修改 Agent manifest 的情况下按通道自定义行为。在 `config.toml` 中添加 `[channels.<name>.overrides]` 段落：
+
+```toml
+[channels.telegram.overrides]
+model = "gemini-2.5-flash"
+system_prompt = "You are a concise Telegram assistant. Keep replies under 200 words."
+dm_policy = "respond"
+group_policy = "mention_only"
+rate_limit_per_user = 10
+threading = true
+output_format = "telegram_html"
+usage_footer = "compact"
+```
+
+### 覆盖字段
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `model` | `Option<String>` | Agent 默认值 | 覆盖此通道使用的 LLM 模型。 |
+| `system_prompt` | `Option<String>` | Agent 默认值 | 覆盖此通道的系统提示词。 |
+| `dm_policy` | `DmPolicy` | `Respond` | 如何处理私信。 |
+| `group_policy` | `GroupPolicy` | `MentionOnly` | 如何处理群组/频道消息。 |
+| `rate_limit_per_user` | `u32` | `0`（无限制） | 每用户每分钟最大消息数。 |
+| `threading` | `bool` | `false` | 以线程回复形式发送响应（仅限支持的平台）。 |
+| `output_format` | `Option<OutputFormat>` | `Markdown` | 此通道的输出格式。 |
+| `usage_footer` | `Option<UsageFooterMode>` | 无 | 是否在响应末尾附加 token 用量信息。 |
+
+---
+
+## 格式化器、速率限制器与策略
+
+### 输出格式化器
+
+`formatter` 模块（`librefang-channels/src/formatter.rs`）将 LLM 输出的 Markdown 转换为平台原生格式：
+
+| OutputFormat | 目标格式 | 说明 |
+|-------------|----------|------|
+| `Markdown` | 标准 Markdown | 默认值；原样传递。 |
+| `TelegramHtml` | Telegram HTML 子集 | 将 `**bold**` 转换为 `<b>`、`` `code` `` 转换为 `<code>` 等。 |
+| `SlackMrkdwn` | Slack mrkdwn | 将 `**bold**` 转换为 `*bold*`、链接转换为 `<url\|text>` 等。 |
+| `PlainText` | 纯文本 | 去除所有格式。 |
+
+### 按用户速率限制器
+
+`ChannelRateLimiter`（`librefang-channels/src/rate_limiter.rs`）使用 `DashMap` 跟踪每用户消息计数。当通道覆盖中设置了 `rate_limit_per_user` 时，限制器以滑动窗口方式限制每分钟最多 N 条消息。超出限制的消息会收到友好的拒绝提示。
+
+### DM 策略
+
+控制适配器如何处理私信：
+
+| DmPolicy | 行为 |
+|----------|------|
+| `Respond` | 回复所有私信（默认）。 |
+| `AllowedOnly` | 仅回复 `allowed_users` 中用户的私信。 |
+| `Ignore` | 静默丢弃所有私信。 |
+
+### 群组策略
+
+控制适配器如何处理群聊、频道和房间中的消息：
+
+| GroupPolicy | 行为 |
+|-------------|------|
+| `All` | 回复群组中的所有消息。 |
+| `MentionOnly` | 仅在 Bot 被 @提及时回复（默认）。 |
+| `CommandsOnly` | 仅回复 `/command` 命令消息。 |
+| `Ignore` | 静默忽略所有群组消息。 |
+
+策略在 `dispatch_message()` 中执行，早于消息到达 Agent 循环。这意味着被忽略的消息不会消耗任何 LLM token。
+
+---
+
+## Telegram
+
+### 前置条件
+
+- 一个 Telegram Bot 令牌（从 [@BotFather](https://t.me/botfather) 获取）
+
+### 设置步骤
+
+1. 打开 Telegram，给 `@BotFather` 发消息。
+2. 发送 `/newbot` 并按照提示创建一个新 Bot。
+3. 复制 Bot 令牌。
+4. 设置环境变量：
+
+```bash
+export TELEGRAM_BOT_TOKEN=your-token          # 环境变量
+librefang vault set TELEGRAM_BOT_TOKEN        # 加密金库（推荐）
+librefang config set-key telegram             # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+5. 添加到配置文件：
+
+```toml
+[channels.telegram]
+bot_token_env = "TELEGRAM_BOT_TOKEN"
+default_agent = "assistant"
+# 可选：限制为特定 Telegram 用户 ID
+# allowed_users = ["123456789"]
+
+[channels.telegram.overrides]
+# 可选：使用 Telegram 原生 HTML 格式
+# output_format = "telegram_html"
+# group_policy = "mention_only"
+```
+
+6. 重启守护进程：
+
+```bash
+librefang start
+```
+
+### 工作原理
+
+Telegram 适配器使用 `getUpdates` API 进行长轮询，每隔几秒轮询一次，长轮询超时为 30 秒。API 调用失败时应用指数退避（从 1 秒开始，最长 60 秒）。通过 `watch::channel` 协调关闭。
+
+来自授权用户的消息会转换为 `ChannelMessage` 事件并路由到配置的 Agent。响应通过 `sendMessage` API 发回。过长的响应会使用共享的 `split_message()` 工具自动拆分为多条消息，以遵守 Telegram 4096 字符限制。
+
+### 交互式设置
+
+```bash
+librefang channel setup telegram
+```
+
+此命令将以交互方式引导你完成设置流程。
+
+---
+
+## Discord
+
+### 前置条件
+
+- 一个 Discord 应用和 Bot（从 [Discord 开发者门户](https://discord.com/developers/applications) 创建）
+
+### 设置步骤
+
+1. 前往 [Discord 开发者门户](https://discord.com/developers/applications)。
+2. 点击 "New Application" 并命名。
+3. 进入 **Bot** 部分，点击 "Add Bot"。
+4. 复制 Bot 令牌。
+5. 在 **Privileged Gateway Intents** 下，启用：
+   - **Message Content Intent**（读取消息内容所需）
+6. 前往 **OAuth2 > URL Generator**：
+   - 选择作用域：`bot`
+   - 选择权限：`Send Messages`、`Read Message History`
+   - 复制生成的 URL 并打开它，将 Bot 邀请到你的服务器。
+7. 设置环境变量：
+
+```bash
+export DISCORD_BOT_TOKEN=your-token           # 环境变量
+librefang vault set DISCORD_BOT_TOKEN         # 加密金库（推荐）
+librefang config set-key discord              # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+8. 添加到配置文件：
+
+```toml
+[channels.discord]
+bot_token_env = "DISCORD_BOT_TOKEN"
+default_agent = "coder"
+```
+
+9. 重启守护进程。
+
+### 工作原理
+
+Discord 适配器通过 WebSocket（v10）连接到 Discord Gateway。它监听 `MESSAGE_CREATE` 事件并将消息路由到配置的 Agent。响应通过 REST API 的 `channels/{id}/messages` 端点发送。
+
+适配器自动处理 Gateway 重连、心跳和会话恢复。
+
+---
+
+## Slack
+
+### 前置条件
+
+- 一个启用了 Socket Mode 的 Slack 应用
+
+### 设置步骤
+
+1. 前往 [Slack API](https://api.slack.com/apps)，点击 "Create New App" > "From Scratch"。
+2. 启用 **Socket Mode**（Settings > Socket Mode）：
+   - 生成一个 App-Level Token，作用域为 `connections:write`。
+   - 复制令牌（`xapp-...`）。
+3. 前往 **OAuth & Permissions**，添加 Bot Token Scopes：
+   - `chat:write`
+   - `app_mentions:read`
+   - `im:history`
+   - `im:read`
+   - `im:write`
+4. 将应用安装到你的工作区。
+5. 复制 Bot User OAuth Token（`xoxb-...`）。
+6. 设置环境变量：
+
+```bash
+export SLACK_APP_TOKEN=xapp-...               # 环境变量
+export SLACK_BOT_TOKEN=xoxb-...
+librefang vault set SLACK_APP_TOKEN           # 加密金库（推荐）
+librefang vault set SLACK_BOT_TOKEN
+librefang config set-key slack                # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+7. 添加到配置文件：
+
+```toml
+[channels.slack]
+bot_token_env = "SLACK_BOT_TOKEN"
+app_token_env = "SLACK_APP_TOKEN"
+default_agent = "ops"
+
+[channels.slack.overrides]
+# 可选：使用 Slack 原生 mrkdwn 格式
+# output_format = "slack_mrkdwn"
+# threading = true
+```
+
+8. 重启守护进程。
+
+### 工作原理
+
+Slack 适配器使用 Socket Mode，通过 WebSocket 连接到 Slack 服务器。这避免了需要公网 Webhook URL 的问题。适配器接收事件（应用提及、私信）并路由到配置的 Agent。响应通过 `chat.postMessage` Web API 发送。当 `threading = true` 时，回复通过 `thread_ts` 发送到消息所在的线程。
+
+---
+
+## WhatsApp
+
+### 前置条件
+
+- 一个拥有 WhatsApp Cloud API 访问权限的 Meta Business 账户
+
+### 设置步骤
+
+1. 前往 [Meta for Developers](https://developers.facebook.com/)。
+2. 创建一个 Business App。
+3. 添加 WhatsApp 产品。
+4. 设置一个测试电话号码（或使用生产号码）。
+5. 复制：
+   - Phone Number ID
+   - 永久访问令牌
+   - 选择一个 Verify Token（你自定义的任意字符串）
+6. 设置环境变量：
+
+```bash
+export WA_PHONE_ID=your-phone-id              # 环境变量
+export WA_ACCESS_TOKEN=your-access-token
+export WA_VERIFY_TOKEN=your-verify-token
+librefang vault set WA_PHONE_ID               # 加密金库（推荐）
+librefang vault set WA_ACCESS_TOKEN
+librefang vault set WA_VERIFY_TOKEN
+librefang config set-key whatsapp             # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+7. 添加到配置文件：
+
+```toml
+[channels.whatsapp]
+mode = "cloud_api"
+phone_number_id_env = "WA_PHONE_ID"
+access_token_env = "WA_ACCESS_TOKEN"
+verify_token_env = "WA_VERIFY_TOKEN"
+webhook_port = 8443
+default_agent = "assistant"
+```
+
+8. 在 Meta 管理后台设置 Webhook，指向你服务器的公网 URL：
+   - URL：`https://your-domain.com:8443/webhook/whatsapp`
+   - Verify Token：你上面选择的值
+   - 订阅：`messages`
+
+9. 重启守护进程。
+
+### 工作原理
+
+WhatsApp 适配器运行一个 HTTP 服务器（监听配置的 `webhook_port`），接收来自 WhatsApp Cloud API 的 Webhook 请求。它处理 Webhook 验证（GET）和消息接收（POST）。响应通过 Cloud API 的 `messages` 端点发送。
+
+---
+
+## 微信（个人）
+
+### 前置条件
+
+- 一个个人微信账号（推荐 iOS 8.0.70+ 版本）
+- WeChat ClawBot 插件访问权限（目前灰度发布中）
+
+### 设置步骤
+
+1. 添加到配置文件：
+
+```toml
+[channels.wechat]
+# bot_token 通过扫码自动获取
+# 如果保存了上次会话的 token，在此设置可跳过扫码登录：
+# bot_token_env = "WECHAT_BOT_TOKEN"
+default_agent = "assistant"
+allowed_users = []        # 留空允许所有人；格式: "hash@im.wechat"
+```
+
+2. 启动（或重启）LibreFang 守护进程。
+3. 守护进程日志中会显示一个二维码 -- 用微信扫码确认。
+4. 确认后，适配器开始接收消息。
+
+> **提示：** 首次扫码登录后，将 `bot_token` 保存到环境变量，这样后续重启时可以跳过扫码流程。
+
+### 工作原理
+
+微信适配器使用腾讯官方的 **iLink 协议**（`ilinkai.weixin.qq.com`），与 WeChat ClawBot 插件使用的协议相同。不涉及第三方代理或非官方 API。
+
+**连接流程：**
+1. **扫码登录** -- 调用 `GET /ilink/bot/get_bot_qrcode` 生成二维码，然后轮询 `GET /ilink/bot/get_qrcode_status` 直到用户扫码确认。返回一个 `bot_token` 供后续所有请求使用。
+2. **长轮询** -- 调用 `POST /ilink/bot/getupdates` 并附带游标（`get_updates_buf`）。服务器最长保持连接 35 秒直到有新消息，然后返回消息及更新后的游标。
+3. **发送** -- 调用 `POST /ilink/bot/sendmessage` 并附带收到消息中的 `context_token`，将回复关联到正确的对话。
+4. **输入中** -- 调用 `POST /ilink/bot/sendtyping` 并附带 `typing_ticket`（通过 `POST /ilink/bot/getconfig` 获取）来显示输入中指示器。
+
+**支持的消息类型：** 文本、图片、语音、文件、视频（全部 5 种 iLink item 类型）。
+
+**重连机制：** 如果配置了 `bot_token`，适配器会跳过扫码登录直接恢复轮询。网络错误时应用指数退避（2 秒到最长 60 秒）。
+
+### 限制
+
+- **媒体上传** 暂不支持（CDN 流程涉及 AES-128-ECB 加密）。可以接收媒体消息；发送媒体时回退为文本占位符。
+- **群聊** 检测暂未实现。
+- **流式** 响应暂不支持（消息以完整文本发送）。
+- **灰度发布** -- iLink API 可能尚未对所有微信账号开放。
+
+---
+
+## Signal
+
+### 前置条件
+
+- 已安装 Signal CLI 并关联了一个手机号
+
+### 设置步骤
+
+1. 安装 [signal-cli](https://github.com/AsamK/signal-cli)。
+2. 注册或关联一个手机号。
+3. 添加到配置文件：
+
+```toml
+[channels.signal]
+signal_cli_path = "/usr/local/bin/signal-cli"
+phone_number = "+1234567890"
+default_agent = "assistant"
+```
+
+4. 重启守护进程。
+
+### 工作原理
+
+Signal 适配器以守护进程模式将 `signal-cli` 作为子进程启动，通过 JSON-RPC 通信。传入的消息从 signal-cli 输出流中读取并路由到配置的 Agent。
+
+---
+
+## Matrix
+
+### 前置条件
+
+- 一个 Matrix homeserver 账户和访问令牌
+
+### 设置步骤
+
+1. 在你的 Matrix homeserver 上创建一个 Bot 账户。
+2. 生成访问令牌。
+3. 设置环境变量：
+
+```bash
+export MATRIX_TOKEN=your-token                # 环境变量
+librefang vault set MATRIX_TOKEN              # 加密金库（推荐）
+librefang config set-key matrix               # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+4. 添加到配置文件：
+
+```toml
+[channels.matrix]
+homeserver_url = "https://matrix.org"
+access_token_env = "MATRIX_TOKEN"
+user_id = "@librefang-bot:matrix.org"
+default_agent = "assistant"
+```
+
+5. 将 Bot 邀请到你希望它监控的房间。
+6. 重启守护进程。
+
+### 工作原理
+
+Matrix 适配器使用 Matrix Client-Server API。它通过长轮询（带超时的 `/sync`）与 homeserver 同步，处理已加入房间中的新消息。响应通过 `/rooms/{roomId}/send` 端点发送。
+
+---
+
+## Email
+
+### 前置条件
+
+- 一个支持 IMAP 和 SMTP 访问的邮箱账户
+
+### 设置步骤
+
+1. 对于 Gmail，创建一个[应用专用密码](https://myaccount.google.com/apppasswords)。
+2. 设置环境变量：
+
+```bash
+export EMAIL_PASSWORD=your-password           # 环境变量
+librefang vault set EMAIL_PASSWORD            # 加密金库（推荐）
+librefang config set-key email                # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+3. 添加到配置文件：
+
+```toml
+[channels.email]
+imap_host = "imap.gmail.com"
+imap_port = 993
+smtp_host = "smtp.gmail.com"
+smtp_port = 587
+username = "you@gmail.com"
+password_env = "EMAIL_PASSWORD"
+poll_interval = 30
+default_agent = "email-assistant"
+```
+
+4. 重启守护进程。
+
+### 工作原理
+
+邮件适配器按配置的间隔轮询 IMAP 收件箱。新邮件被解析（主题 + 正文）并路由到配置的 Agent。响应作为回复邮件通过 SMTP 发送，保留主题行线程。
+
+---
+
+## WebChat（内置）
+
+WebChat UI 内嵌在守护进程中，无需额外配置。守护进程运行时访问：
+
+```
+http://127.0.0.1:4545/
+```
+
+功能：
+- 通过 WebSocket 实时聊天
+- 流式响应（文本增量实时到达）
+- Agent 选择（在运行中的 Agent 之间切换）
+- Token 用量显示
+- 在 localhost 上无需认证（通过 CORS 保护）
+
+---
+
+## Microsoft Teams
+
+### 前置条件
+
+- 拥有 [Azure Bot Service](https://learn.microsoft.com/en-us/microsoftteams/platform/) 访问权限的 Microsoft Azure 账户
+- 已注册的 Azure AD 应用，具备 Client ID 和 Secret
+
+### 设置步骤
+
+1. 前往 [Azure 门户](https://portal.azure.com/)，创建新的 **Bot Channels Registration**（或 Azure Bot 资源）。
+2. 在 **Configuration** 中记录 **Microsoft App ID**。
+3. 前往 **Certificates & secrets**，创建新的客户端密钥并立即复制。
+4. 在 Teams 管理中心为组织启用 Bot，或上传自定义应用 manifest。
+5. 设置环境变量：
+
+```bash
+export TEAMS_APP_ID=your-azure-app-id         # 环境变量
+export TEAMS_APP_SECRET=your-azure-client-secret
+librefang vault set TEAMS_APP_ID              # 加密金库（推荐）
+librefang vault set TEAMS_APP_SECRET
+librefang config set-key teams                # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+6. 添加到配置文件：
+
+```toml
+[channels.teams]
+app_id_env = "TEAMS_APP_ID"
+app_secret_env = "TEAMS_APP_SECRET"
+default_agent = "ops"
+```
+
+7. 在 Azure 中将消息端点配置为指向 LibreFang 实例的公网 URL（例如 `https://your-domain.com/webhook/teams`）。
+8. 重启守护进程。
+
+### 工作原理
+
+Teams 适配器使用 Microsoft Bot Framework v3 webhook 协议配合 OAuth2 令牌交换。传入消息通过 HTTPS POST webhook 到达，适配器通过验证 Azure AD 签发的 JWT Bearer Token 对每个请求进行认证。响应通过 Bot Framework REST API 发送。
+
+---
+
+## Mattermost
+
+### 前置条件
+
+- 一个 Mattermost 服务器（自托管或云版本），具备管理员权限
+- Bot 账户或个人访问令牌
+
+### 设置步骤
+
+1. 在 Mattermost 中，前往 **Integrations > Bot Accounts** 创建新 Bot，或前往 **Account Settings > Security > Personal Access Tokens** 生成令牌。
+2. 复制令牌。
+3. 设置环境变量：
+
+```bash
+export MATTERMOST_TOKEN=your-bot-token        # 环境变量
+export MATTERMOST_URL=https://mattermost.example.com
+librefang vault set MATTERMOST_TOKEN          # 加密金库（推荐）
+librefang vault set MATTERMOST_URL
+librefang config set-key mattermost           # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+4. 添加到配置文件：
+
+```toml
+[channels.mattermost]
+token_env = "MATTERMOST_TOKEN"
+url_env = "MATTERMOST_URL"
+default_agent = "ops"
+```
+
+5. 重启守护进程。
+
+### 工作原理
+
+Mattermost 适配器通过 WebSocket 连接到 Mattermost 服务器接收实时事件，并使用 REST v4 API 发送消息。它监听新帖子事件并路由到配置的 Agent。
+
+---
+
+## Google Chat
+
+### 前置条件
+
+- 已启用 [Google Chat API](https://developers.google.com/workspace/chat/) 的 Google Cloud 项目
+- 服务账户密钥文件（JSON）
+
+### 设置步骤
+
+1. 在 [Google Cloud 控制台](https://console.cloud.google.com/) 中启用 Google Chat API。
+2. 创建服务账户并下载 JSON 密钥文件。
+3. 在 Google Chat API 设置中配置 Chat 应用，选择 **HTTP endpoint** 连接类型。
+4. 设置环境变量：
+
+```bash
+export GOOGLE_CHAT_SA_KEY=/path/to/sa-key.json  # 环境变量
+export GOOGLE_CHAT_SPACE=spaces/AAAA_BBBBBB
+librefang vault set GOOGLE_CHAT_SA_KEY        # 加密金库（推荐）
+librefang vault set GOOGLE_CHAT_SPACE
+librefang config set-key google_chat          # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+5. 添加到配置文件：
+
+```toml
+[channels.google_chat]
+sa_key_env = "GOOGLE_CHAT_SA_KEY"
+space_env = "GOOGLE_CHAT_SPACE"
+default_agent = "ops"
+```
+
+6. 重启守护进程。
+
+### 工作原理
+
+Google Chat 适配器使用服务账户进行认证，通过 Google Chat 的 webhook 回调接收消息。响应通过 Google Chat REST API 使用传入消息中的 space 和 thread 标识符发送。
+
+---
+
+## Webex
+
+### 前置条件
+
+- Webex Bot 令牌（从 [Webex 开发者门户](https://developer.webex.com/docs/api/getting-started) 获取）
+
+### 设置步骤
+
+1. 前往 [developer.webex.com](https://developer.webex.com/) 并登录。
+2. 导航到 **My Webex Apps** 并创建新 Bot。
+3. 复制 Bot 访问令牌。
+4. 设置环境变量：
+
+```bash
+export WEBEX_BOT_TOKEN=your-webex-bot-token   # 环境变量
+librefang vault set WEBEX_BOT_TOKEN           # 加密金库（推荐）
+librefang config set-key webex                # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+5. 添加到配置文件：
+
+```toml
+[channels.webex]
+token_env = "WEBEX_BOT_TOKEN"
+default_agent = "assistant"
+```
+
+6. 重启守护进程。
+
+### 工作原理
+
+Webex 适配器向 Webex API 注册 webhook 以接收消息事件。传入消息通过 webhook 负载中的消息 ID 使用 Webex REST API 获取，响应通过 messages 端点发送。
+
+---
+
+## 飞书 / Lark
+
+### 前置条件
+
+- 具备 Bot 能力的飞书（或 Lark）自建应用（从[飞书开放平台](https://open.feishu.cn/document/)创建）
+
+### 设置步骤
+
+1. 前往[飞书开放平台](https://open.feishu.cn/)，创建自建应用。
+2. 在应用能力中启用 **机器人**。
+3. 从应用凭证页面记录 **App ID** 和 **App Secret**。
+4. 配置事件订阅，指向 LibreFang 实例的 webhook URL。
+5. 设置环境变量：
+
+```bash
+export FEISHU_APP_ID=your-app-id              # 环境变量
+export FEISHU_APP_SECRET=your-app-secret
+librefang vault set FEISHU_APP_ID             # 加密金库（推荐）
+librefang vault set FEISHU_APP_SECRET
+librefang config set-key feishu               # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+6. 添加到配置文件：
+
+```toml
+[channels.feishu]
+app_id_env = "FEISHU_APP_ID"
+app_secret_env = "FEISHU_APP_SECRET"
+default_agent = "assistant"
+```
+
+7. 重启守护进程。
+
+### 工作原理
+
+飞书适配器使用开放平台 webhook 协议接收消息事件。它使用应用凭证获取 tenant access token，然后通过飞书 REST API 发送消息回复。事件负载通过应用的验证令牌进行校验。
+
+---
+
+## Rocket.Chat
+
+### 前置条件
+
+- 具备管理员权限的 Rocket.Chat 服务器（参见 [Rocket.Chat API](https://developer.rocket.chat/reference/api)）
+- Bot 用户账户或个人访问令牌
+
+### 设置步骤
+
+1. 在 Rocket.Chat 中，前往 **Administration > Rooms** 或创建 Bot 用户。
+2. 通过 **My Account > Personal Access Tokens** 生成个人访问令牌。
+3. 设置环境变量：
+
+```bash
+export ROCKETCHAT_TOKEN=your-access-token     # 环境变量
+export ROCKETCHAT_URL=https://chat.example.com
+librefang vault set ROCKETCHAT_TOKEN          # 加密金库（推荐）
+librefang vault set ROCKETCHAT_URL
+librefang config set-key rocketchat           # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+4. 添加到配置文件：
+
+```toml
+[channels.rocketchat]
+token_env = "ROCKETCHAT_TOKEN"
+url_env = "ROCKETCHAT_URL"
+default_agent = "assistant"
+```
+
+5. 重启守护进程。
+
+### 工作原理
+
+Rocket.Chat 适配器定期轮询 Rocket.Chat REST API 获取新消息。传入消息路由到配置的 Agent，响应通过 REST API 的聊天端点发送。
+
+---
+
+## Zulip
+
+### 前置条件
+
+- Zulip 服务器账户（云版或自托管版）
+- 在 **Settings > Your bots** 中创建的 Bot（参见 [Zulip API 文档](https://zulip.com/api/)）
+
+### 设置步骤
+
+1. 在 Zulip 中，前往 **Settings > Your bots**，点击 **Add a new bot**。
+2. 选择 **Generic bot** 类型并创建。
+3. 记录 Bot 的邮箱地址和 API 密钥。
+4. 设置环境变量：
+
+```bash
+export ZULIP_EMAIL=bot@example.zulipchat.com  # 环境变量
+export ZULIP_API_KEY=your-api-key
+export ZULIP_URL=https://example.zulipchat.com
+librefang vault set ZULIP_EMAIL               # 加密金库（推荐）
+librefang vault set ZULIP_API_KEY
+librefang vault set ZULIP_URL
+librefang config set-key zulip                # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+5. 添加到配置文件：
+
+```toml
+[channels.zulip]
+email_env = "ZULIP_EMAIL"
+api_key_env = "ZULIP_API_KEY"
+url_env = "ZULIP_URL"
+default_agent = "assistant"
+```
+
+6. 重启守护进程。
+
+### 工作原理
+
+Zulip 适配器使用 Zulip 的 event queue API 进行长轮询。它注册一个消息事件队列，然后持续轮询该队列获取新消息。响应通过 `messages` REST 端点发送。
+
+---
+
+## Flock
+
+### 前置条件
+
+- Flock Bot 令牌（从 [Flock 开发者门户](https://docs.flock.com) 获取）
+
+### 设置步骤
+
+1. 前往 [docs.flock.com](https://docs.flock.com)，创建新 Bot。
+2. 复制 Bot 令牌。
+3. 设置环境变量：
+
+```bash
+export FLOCK_BOT_TOKEN=your-flock-bot-token   # 环境变量
+librefang vault set FLOCK_BOT_TOKEN           # 加密金库（推荐）
+librefang config set-key flock                # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+4. 添加到配置文件：
+
+```toml
+[channels.flock]
+token_env = "FLOCK_BOT_TOKEN"
+default_agent = "assistant"
+```
+
+5. 重启守护进程。
+
+### 工作原理
+
+Flock 适配器通过 webhook 回调接收来自 Flock 平台的消息。响应通过 Flock REST API 的 `chat.sendMessage` 端点发送。
+
+---
+
+## Twist
+
+### 前置条件
+
+- Twist 账户和集成令牌（从 [Twist 开发者门户](https://developer.twist.com/v3/) 获取）
+
+### 设置步骤
+
+1. 前往 [developer.twist.com](https://developer.twist.com/)，创建新集成。
+2. 复制集成令牌。
+3. 设置环境变量：
+
+```bash
+export TWIST_TOKEN=your-twist-token           # 环境变量
+librefang vault set TWIST_TOKEN               # 加密金库（推荐）
+librefang config set-key twist                # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+4. 添加到配置文件：
+
+```toml
+[channels.twist]
+token_env = "TWIST_TOKEN"
+default_agent = "assistant"
+```
+
+5. 重启守护进程。
+
+### 工作原理
+
+Twist 适配器轮询 Twist REST API v3 获取配置频道和线程中的新消息。响应通过 API 的评论或消息端点发送。
+
+---
+
+## Pumble
+
+### 前置条件
+
+- 支持 Bot 集成的 Pumble 工作区（参见 [Pumble 帮助文档](https://pumble.com/help)）
+
+### 设置步骤
+
+1. 在 Pumble 中，为工作区配置 Bot 集成。
+2. 复制 Bot 令牌。
+3. 设置环境变量：
+
+```bash
+export PUMBLE_BOT_TOKEN=your-pumble-bot-token # 环境变量
+librefang vault set PUMBLE_BOT_TOKEN          # 加密金库（推荐）
+librefang config set-key pumble               # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+4. 添加到配置文件：
+
+```toml
+[channels.pumble]
+token_env = "PUMBLE_BOT_TOKEN"
+default_agent = "assistant"
+```
+
+5. 重启守护进程。
+
+### 工作原理
+
+Pumble 适配器通过 webhook 回调接收来自 Pumble 平台的消息。响应通过 Pumble API 发送。
+
+---
+
+## Guilded
+
+### 前置条件
+
+- Guilded Bot 令牌（从 [Guilded API 文档](https://www.guilded.gg/docs/api/) 获取）
+
+### 设置步骤
+
+1. 前往 Guilded 服务器设置，创建 Bot。
+2. 复制 Bot 令牌。
+3. 设置环境变量：
+
+```bash
+export GUILDED_BOT_TOKEN=your-guilded-token   # 环境变量
+librefang vault set GUILDED_BOT_TOKEN         # 加密金库（推荐）
+librefang config set-key guilded              # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+4. 添加到配置文件：
+
+```toml
+[channels.guilded]
+token_env = "GUILDED_BOT_TOKEN"
+default_agent = "assistant"
+```
+
+5. 重启守护进程。
+
+### 工作原理
+
+Guilded 适配器通过 WebSocket 连接到 Guilded API 接收实时消息事件。响应通过 Guilded REST API 的频道消息端点发送。
+
+---
+
+## LINE
+
+### 前置条件
+
+- LINE Messaging API 频道（从 [LINE Developers Console](https://developers.line.biz/en/docs/messaging-api/) 创建）
+- 可公网访问的 webhook URL
+
+### 设置步骤
+
+1. 前往 [LINE Developers Console](https://developers.line.biz/console/)，创建新的 Messaging API 频道。
+2. 记录 **Channel Secret** 并签发 **Channel Access Token**。
+3. 设置环境变量：
+
+```bash
+export LINE_CHANNEL_SECRET=your-secret        # 环境变量
+export LINE_ACCESS_TOKEN=your-access-token
+librefang vault set LINE_CHANNEL_SECRET       # 加密金库（推荐）
+librefang vault set LINE_ACCESS_TOKEN
+librefang config set-key line                 # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+4. 添加到配置文件：
+
+```toml
+[channels.line]
+channel_secret_env = "LINE_CHANNEL_SECRET"
+access_token_env = "LINE_ACCESS_TOKEN"
+webhook_port = 8443
+default_agent = "assistant"
+```
+
+5. 在 LINE Developers Console 中将 webhook URL 设置为 LibreFang 实例的地址（例如 `https://your-domain.com:8443/webhook/line`）。
+6. 重启守护进程。
+
+### 工作原理
+
+LINE 适配器在配置的 `webhook_port` 上运行 HTTP 服务器，接收来自 LINE Messaging API 的消息事件。每个请求通过 Channel Secret 的 HMAC-SHA256 签名进行验证。响应通过 LINE Reply API 或 Push API 发送。
+
+---
+
+## Viber
+
+### 前置条件
+
+- Viber Bot 令牌（从 [Viber 开发者门户](https://developers.viber.com/docs/api/) 获取）
+- 可公网访问的 webhook URL
+
+### 设置步骤
+
+1. 在 [Viber Admin Panel](https://partners.viber.com/) 创建 Bot 账户。
+2. 复制认证令牌。
+3. 设置环境变量：
+
+```bash
+export VIBER_AUTH_TOKEN=your-viber-auth-token  # 环境变量
+librefang vault set VIBER_AUTH_TOKEN           # 加密金库（推荐）
+librefang config set-key viber                # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+4. 添加到配置文件：
+
+```toml
+[channels.viber]
+auth_token_env = "VIBER_AUTH_TOKEN"
+webhook_url = "https://your-domain.com:8443/webhook/viber"
+webhook_port = 8443
+default_agent = "assistant"
+```
+
+5. 重启守护进程。适配器在启动时自动向 Viber 注册 webhook URL。
+
+### 工作原理
+
+Viber 适配器在启动时向 Viber API 注册 webhook，并通过 HTTPS POST 回调接收消息事件。响应通过 Viber REST API 的 `send_message` 端点发送。
+
+---
+
+## Facebook Messenger
+
+### 前置条件
+
+- Meta（Facebook）开发者账户，拥有 Facebook 主页和应用（参见 [Messenger Platform 文档](https://developers.facebook.com/docs/messenger-platform/)）
+- 可公网访问的 webhook URL
+
+### 设置步骤
+
+1. 前往 [Meta for Developers](https://developers.facebook.com/)，创建或选择一个应用。
+2. 为应用添加 **Messenger** 产品。
+3. 为 Facebook 主页生成 **Page Access Token**。
+4. 选择一个 **Verify Token**（你自定义的任意字符串）。
+5. 设置环境变量：
+
+```bash
+export MESSENGER_PAGE_TOKEN=your-page-token   # 环境变量
+export MESSENGER_VERIFY_TOKEN=your-verify-token
+librefang vault set MESSENGER_PAGE_TOKEN      # 加密金库（推荐）
+librefang vault set MESSENGER_VERIFY_TOKEN
+librefang config set-key messenger            # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+6. 添加到配置文件：
+
+```toml
+[channels.messenger]
+page_token_env = "MESSENGER_PAGE_TOKEN"
+verify_token_env = "MESSENGER_VERIFY_TOKEN"
+webhook_port = 8443
+default_agent = "assistant"
+```
+
+7. 在 Meta 开发者面板中设置 webhook 回调 URL（例如 `https://your-domain.com:8443/webhook/messenger`），输入 verify token，并订阅 `messages` 事件。
+8. 重启守护进程。
+
+### 工作原理
+
+Messenger 适配器在配置的 `webhook_port` 上运行 HTTP 服务器，处理来自 Messenger Platform 的 webhook 验证（GET）和传入消息事件（POST）。响应通过 Send API 使用 page access token 发送。
+
+---
+
+## Reddit
+
+### 前置条件
+
+- Reddit 账户和已注册的 [Reddit API 应用](https://www.reddit.com/dev/api/)（script 类型）
+
+### 设置步骤
+
+1. 前往 [reddit.com/prefs/apps](https://www.reddit.com/prefs/apps)，创建新的 **script** 类型应用。
+2. 记录 Client ID（在应用名称下方）和 Client Secret。
+3. 设置环境变量：
+
+```bash
+export REDDIT_CLIENT_ID=your-client-id        # 环境变量
+export REDDIT_CLIENT_SECRET=your-client-secret
+export REDDIT_USERNAME=your-reddit-username
+export REDDIT_PASSWORD=your-reddit-password
+librefang vault set REDDIT_CLIENT_ID          # 加密金库（推荐）
+librefang vault set REDDIT_CLIENT_SECRET
+librefang vault set REDDIT_USERNAME
+librefang vault set REDDIT_PASSWORD
+librefang config set-key reddit               # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+4. 添加到配置文件：
+
+```toml
+[channels.reddit]
+client_id_env = "REDDIT_CLIENT_ID"
+client_secret_env = "REDDIT_CLIENT_SECRET"
+username_env = "REDDIT_USERNAME"
+password_env = "REDDIT_PASSWORD"
+subreddits = ["mysubreddit"]
+poll_interval = 30
+default_agent = "assistant"
+```
+
+5. 重启守护进程。
+
+### 工作原理
+
+Reddit 适配器使用 script 类型凭证通过 OAuth2 认证，按配置的间隔轮询指定子版块的新帖子和评论。响应通过 Reddit REST API 作为回复发布。
+
+---
+
+## Mastodon
+
+### 前置条件
+
+- 任意实例上的 Mastodon 账户
+- 应用访问令牌（从实例的 **Preferences > Development** 页面生成，参见 [Mastodon API 文档](https://docs.joinmastodon.org/api/)）
+
+### 设置步骤
+
+1. 在 Mastodon 实例上，前往 **Preferences > Development > New Application**。
+2. 授予 `read` 和 `write` 作用域。
+3. 复制访问令牌。
+4. 设置环境变量：
+
+```bash
+export MASTODON_INSTANCE_URL=https://mastodon.social  # 环境变量
+export MASTODON_ACCESS_TOKEN=your-access-token
+librefang vault set MASTODON_INSTANCE_URL     # 加密金库（推荐）
+librefang vault set MASTODON_ACCESS_TOKEN
+librefang config set-key mastodon             # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+5. 添加到配置文件：
+
+```toml
+[channels.mastodon]
+instance_env = "MASTODON_INSTANCE_URL"
+token_env = "MASTODON_ACCESS_TOKEN"
+default_agent = "social-media"
+```
+
+6. 重启守护进程。
+
+### 工作原理
+
+Mastodon 适配器通过 Server-Sent Events (SSE) 连接到实例的流式 API，实时接收通知（提及、私信）。响应通过 Mastodon REST API 以嘟文或私信形式发布。
+
+---
+
+## Bluesky
+
+### 前置条件
+
+- Bluesky 账户（参见 [Bluesky API 文档](https://docs.bsky.app)）
+- 应用密码（在 Bluesky **Settings > App Passwords** 中生成）
+
+### 设置步骤
+
+1. 在 Bluesky 中，前往 **Settings > App Passwords**，创建新的应用密码。
+2. 设置环境变量：
+
+```bash
+export BLUESKY_IDENTIFIER=your-handle.bsky.social  # 环境变量
+export BLUESKY_APP_PASSWORD=your-app-password
+librefang vault set BLUESKY_IDENTIFIER        # 加密金库（推荐）
+librefang vault set BLUESKY_APP_PASSWORD
+librefang config set-key bluesky              # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+3. 添加到配置文件：
+
+```toml
+[channels.bluesky]
+identifier_env = "BLUESKY_IDENTIFIER"
+app_password_env = "BLUESKY_APP_PASSWORD"
+default_agent = "social-media"
+```
+
+4. 重启守护进程。
+
+### 工作原理
+
+Bluesky 适配器使用 AT Protocol 认证，并通过 REST 轮询监控通知（提及）。响应通过 AT Protocol 的 `com.atproto.repo.createRecord` 端点作为回复帖子发布。
+
+---
+
+## LinkedIn
+
+### 前置条件
+
+- 具备 Messaging API 访问权限的 LinkedIn 开发者应用（参见 [LinkedIn API 文档](https://learn.microsoft.com/en-us/linkedin/)）
+- 具有消息权限的 OAuth2 访问令牌
+
+### 设置步骤
+
+1. 在 [LinkedIn 开发者门户](https://www.linkedin.com/developers/) 创建应用。
+2. 申请 Messaging API 访问权限并完成 OAuth2 流程。
+3. 设置环境变量：
+
+```bash
+export LINKEDIN_ACCESS_TOKEN=your-token       # 环境变量
+librefang vault set LINKEDIN_ACCESS_TOKEN     # 加密金库（推荐）
+librefang config set-key linkedin             # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+4. 添加到配置文件：
+
+```toml
+[channels.linkedin]
+token_env = "LINKEDIN_ACCESS_TOKEN"
+default_agent = "assistant"
+```
+
+5. 重启守护进程。
+
+### 工作原理
+
+LinkedIn 适配器定期轮询 LinkedIn Messaging API 获取新消息。响应通过 LinkedIn REST API 发送。注意：LinkedIn 的消息 API 访问受限，需要 LinkedIn 审批。
+
+---
+
+## Twitch
+
+### 前置条件
+
+- Twitch 账户和具有聊天权限的 OAuth 令牌（从 [Twitch 开发者门户](https://dev.twitch.tv/docs/irc/) 获取）
+
+### 设置步骤
+
+1. 在 [Twitch Developer Console](https://dev.twitch.tv/console/apps) 注册应用。
+2. 生成具有 `chat:read` 和 `chat:edit` 作用域的 OAuth 令牌（可使用 [twitchtokengenerator.com](https://twitchtokengenerator.com/) 等工具）。
+3. 设置环境变量：
+
+```bash
+export TWITCH_OAUTH_TOKEN=oauth:your-token    # 环境变量
+export TWITCH_NICK=your-bot-username
+export TWITCH_CHANNELS=channel1,channel2
+librefang vault set TWITCH_OAUTH_TOKEN        # 加密金库（推荐）
+librefang vault set TWITCH_NICK
+librefang vault set TWITCH_CHANNELS
+librefang config set-key twitch               # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+4. 添加到配置文件：
+
+```toml
+[channels.twitch]
+oauth_token_env = "TWITCH_OAUTH_TOKEN"
+nick_env = "TWITCH_NICK"
+channels = ["channel1", "channel2"]
+default_agent = "assistant"
+```
+
+5. 重启守护进程。
+
+### 工作原理
+
+Twitch 适配器通过 TLS 连接到 Twitch IRC 网关（`irc.chat.twitch.tv:6697`）并加入配置的频道。它监听 PRIVMSG 事件并路由到配置的 Agent。响应通过 IRC 协议作为聊天消息发送。
+
+---
+
+## IRC
+
+### 前置条件
+
+- IRC 服务器地址和 Bot 昵称（协议定义见 [RFC 2812](https://datatracker.ietf.org/doc/html/rfc2812)）
+
+### 设置步骤
+
+1. 选择 IRC 服务器和要加入的频道。
+2. 设置环境变量：
+
+```bash
+export IRC_SERVER=irc.libera.chat:6697        # 环境变量
+export IRC_NICK=librefang-bot
+export IRC_CHANNELS=#channel1,#channel2
+# export IRC_PASSWORD=your-password           # 可选
+librefang vault set IRC_SERVER                # 加密金库（推荐）
+librefang vault set IRC_NICK
+librefang vault set IRC_CHANNELS
+# librefang vault set IRC_PASSWORD            # 可选
+librefang config set-key irc                  # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+3. 添加到配置文件：
+
+```toml
+[channels.irc]
+server_env = "IRC_SERVER"
+nick_env = "IRC_NICK"
+channels = ["#channel1", "#channel2"]
+# password_env = "IRC_PASSWORD"   # optional
+default_agent = "assistant"
+```
+
+4. 重启守护进程。
+
+### 工作原理
+
+IRC 适配器通过 TCP（可选 TLS）连接到 IRC 服务器，进行认证并加入配置的频道。它监听 PRIVMSG 事件并路由到配置的 Agent。响应以 PRIVMSG 回复形式发送。
+
+---
+
+## XMPP
+
+### 前置条件
+
+- XMPP 账户（JID）和服务器（参见 [XMPP 扩展协议](https://xmpp.org/extensions/)）
+
+### 设置步骤
+
+1. 在服务器上创建 XMPP 账户（或使用已有账户）。
+2. 设置环境变量：
+
+```bash
+export XMPP_JID=bot@example.com               # 环境变量
+export XMPP_PASSWORD=your-password
+export XMPP_SERVER=example.com
+librefang vault set XMPP_JID                  # 加密金库（推荐）
+librefang vault set XMPP_PASSWORD
+librefang vault set XMPP_SERVER
+librefang config set-key xmpp                 # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+3. 添加到配置文件：
+
+```toml
+[channels.xmpp]
+jid_env = "XMPP_JID"
+password_env = "XMPP_PASSWORD"
+server_env = "XMPP_SERVER"
+default_agent = "assistant"
+```
+
+4. 重启守护进程。
+
+### 工作原理
+
+XMPP 适配器使用指定的 JID 和密码连接到 XMPP 服务器，然后监听传入的消息节（message stanza）。响应以 XMPP 消息节形式发送到原始 JID。
+
+---
+
+## Discourse
+
+### 前置条件
+
+- 启用了 API 访问的 Discourse 论坛（参见 [Discourse API 文档](https://docs.discourse.org)）
+- 管理员用户生成的 API 密钥
+
+### 设置步骤
+
+1. 在 Discourse 中，前往 **Admin > API** 并创建新的 API 密钥。
+2. 记录 API 密钥所有者的用户名。
+3. 设置环境变量：
+
+```bash
+export DISCOURSE_URL=https://forum.example.com  # 环境变量
+export DISCOURSE_API_KEY=your-api-key
+export DISCOURSE_USERNAME=bot-user
+librefang vault set DISCOURSE_URL             # 加密金库（推荐）
+librefang vault set DISCOURSE_API_KEY
+librefang vault set DISCOURSE_USERNAME
+librefang config set-key discourse            # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+4. 添加到配置文件：
+
+```toml
+[channels.discourse]
+url_env = "DISCOURSE_URL"
+api_key_env = "DISCOURSE_API_KEY"
+username_env = "DISCOURSE_USERNAME"
+poll_interval = 30
+default_agent = "assistant"
+```
+
+5. 重启守护进程。
+
+### 工作原理
+
+Discourse 适配器按配置的间隔轮询 Discourse REST API 获取新帖子和通知。响应通过 Discourse 帖子 API 作为回复发布。
+
+---
+
+## Gitter
+
+### 前置条件
+
+- Gitter 账户和个人访问令牌（从 [Gitter 开发者门户](https://developer.gitter.im/docs/) 获取）
+
+### 设置步骤
+
+1. 前往 [developer.gitter.im](https://developer.gitter.im/)，生成个人访问令牌。
+2. 设置环境变量：
+
+```bash
+export GITTER_TOKEN=your-gitter-token         # 环境变量
+librefang vault set GITTER_TOKEN              # 加密金库（推荐）
+librefang config set-key gitter               # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+3. 添加到配置文件：
+
+```toml
+[channels.gitter]
+token_env = "GITTER_TOKEN"
+default_agent = "assistant"
+```
+
+4. 重启守护进程。
+
+### 工作原理
+
+Gitter 适配器连接到 Gitter Streaming API 实时接收消息。响应通过 Gitter REST API 的消息端点发送。
+
+---
+
+## Revolt
+
+### 前置条件
+
+- Revolt Bot 令牌（从 [Revolt 开发者门户](https://developers.revolt.chat/api/) 获取）
+
+### 设置步骤
+
+1. 前往 [app.revolt.chat/settings/bots](https://app.revolt.chat/settings/bots)，创建新 Bot。
+2. 复制 Bot 令牌。
+3. 设置环境变量：
+
+```bash
+export REVOLT_TOKEN=your-revolt-bot-token     # 环境变量
+librefang vault set REVOLT_TOKEN              # 加密金库（推荐）
+librefang config set-key revolt               # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+4. 添加到配置文件：
+
+```toml
+[channels.revolt]
+token_env = "REVOLT_TOKEN"
+default_agent = "assistant"
+```
+
+5. 重启守护进程。
+
+### 工作原理
+
+Revolt 适配器通过 WebSocket 连接到 Revolt API 接收实时消息事件。响应通过 Revolt REST API 的频道消息端点发送。
+
+---
+
+## Keybase
+
+### 前置条件
+
+- Keybase 账户和 Paper Key（参见 [Keybase API 文档](https://keybase.io/docs/api/)）
+
+### 设置步骤
+
+1. 安装 [Keybase 客户端](https://keybase.io/download)。
+2. 登录并通过 `keybase paperkey` 生成 Paper Key。
+3. 设置环境变量：
+
+```bash
+export KEYBASE_USERNAME=your-username         # 环境变量
+export KEYBASE_PAPERKEY="your paper key words here"
+librefang vault set KEYBASE_USERNAME          # 加密金库（推荐）
+librefang vault set KEYBASE_PAPERKEY
+librefang config set-key keybase              # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+4. 添加到配置文件：
+
+```toml
+[channels.keybase]
+username_env = "KEYBASE_USERNAME"
+paperkey_env = "KEYBASE_PAPERKEY"
+default_agent = "assistant"
+```
+
+5. 重启守护进程。
+
+### 工作原理
+
+Keybase 适配器使用 Keybase Bot API 轮询新消息。它使用 Paper Key 认证，监听团队和私聊对话中的消息。响应通过 Keybase 聊天 API 发送。
+
+---
+
+## Threema
+
+### 前置条件
+
+- Threema Gateway ID 和 API 密钥（从 [Threema Gateway](https://gateway.threema.ch/en/developer/api) 获取）
+
+### 设置步骤
+
+1. 注册 [Threema Gateway](https://gateway.threema.ch/) 账户。
+2. 创建 Gateway ID 并记录 ID 和密钥。
+3. 设置环境变量：
+
+```bash
+export THREEMA_ID=*YOUR_ID                    # 环境变量
+export THREEMA_SECRET=your-api-secret
+librefang vault set THREEMA_ID                # 加密金库（推荐）
+librefang vault set THREEMA_SECRET
+librefang config set-key threema              # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+4. 添加到配置文件：
+
+```toml
+[channels.threema]
+id_env = "THREEMA_ID"
+secret_env = "THREEMA_SECRET"
+default_agent = "assistant"
+```
+
+5. 重启守护进程。
+
+### 工作原理
+
+Threema 适配器使用 Threema Gateway REST API 发送和接收端到端加密消息。传入消息通过 webhook 回调送达，响应通过 Gateway 的消息发送端点发送。
+
+---
+
+## Nostr
+
+### 前置条件
+
+- Nostr 私钥（hex 或 nsec 格式）和一个或多个 relay URL（参见 [Nostr 协议 NIPs](https://github.com/nostr-protocol/nips)）
+
+### 设置步骤
+
+1. 如果还没有密钥对，生成一个（例如使用 Nostr 客户端或 `openssl`）。
+2. 选择一个或多个 relay URL。
+3. 设置环境变量：
+
+```bash
+export NOSTR_PRIVATE_KEY=nsec1your-key        # 环境变量
+export NOSTR_RELAYS=wss://relay.damus.io,wss://nos.lol
+librefang vault set NOSTR_PRIVATE_KEY         # 加密金库（推荐）
+librefang vault set NOSTR_RELAYS
+librefang config set-key nostr                # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+4. 添加到配置文件：
+
+```toml
+[channels.nostr]
+private_key_env = "NOSTR_PRIVATE_KEY"
+relays = ["wss://relay.damus.io", "wss://nos.lol"]
+default_agent = "assistant"
+```
+
+5. 重启守护进程。
+
+### 工作原理
+
+Nostr 适配器使用 NIP-01 协议通过 WebSocket 连接到配置的 relay。它订阅提及或标记 Bot 公钥的事件，并路由到配置的 Agent。响应以签名的 Nostr 事件形式发布到所有已连接的 relay。
+
+---
+
+## 钉钉
+
+### 前置条件
+
+- 具有 webhook 访问权限的钉钉自定义机器人（从[钉钉开放平台](https://open.dingtalk.com/document/)创建）
+
+### 设置步骤
+
+1. 在钉钉中，打开群聊，前往 **群设置 > 智能群助手 > 添加机器人**。
+2. 选择 **自定义机器人**，启用 **安全设置**（建议使用签名模式）。
+3. 记录 webhook 访问令牌和签名密钥。
+4. 设置环境变量：
+
+```bash
+export DINGTALK_ACCESS_TOKEN=your-token       # 环境变量
+export DINGTALK_SECRET=your-signing-secret
+librefang vault set DINGTALK_ACCESS_TOKEN     # 加密金库（推荐）
+librefang vault set DINGTALK_SECRET
+librefang config set-key dingtalk             # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+5. 添加到配置文件：
+
+```toml
+[channels.dingtalk]
+access_token_env = "DINGTALK_ACCESS_TOKEN"
+secret_env = "DINGTALK_SECRET"
+default_agent = "assistant"
+```
+
+6. 重启守护进程。
+
+### 工作原理
+
+钉钉适配器通过 webhook 回调接收来自钉钉机器人 API 的消息。每个请求使用配置的密钥通过 HMAC-SHA256 签名进行验证。响应通过带有签名时间戳的钉钉 webhook URL 发送。
+
+---
+
+## QQ
+
+### 前置条件
+
+- 在 [QQ 机器人平台](https://bot.q.qq.com/wiki/) 注册的 QQ Bot
+- App ID 和令牌
+
+### 设置步骤
+
+1. 前往 [QQ 机器人平台](https://bot.q.qq.com/)，注册 Bot 应用。
+2. 记录 App ID 和令牌。
+3. 设置环境变量：
+
+```bash
+export QQ_APP_ID=your-app-id                 # 环境变量
+export QQ_TOKEN=your-bot-token
+librefang vault set QQ_APP_ID                # 加密金库（推荐）
+librefang vault set QQ_TOKEN
+librefang config set-key qq                   # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+4. 添加到配置文件：
+
+```toml
+[channels.qq]
+app_id_env = "QQ_APP_ID"
+token_env = "QQ_TOKEN"
+default_agent = "assistant"
+```
+
+5. 重启守护进程。
+
+### 工作原理
+
+QQ 适配器通过 WebSocket 连接到 QQ Bot API 接收实时消息。它使用应用凭证认证，监听已授权频道和子频道中的消息事件，并通过 QQ Bot REST API 发送响应。
+
+---
+
+## 企业微信
+
+### 前置条件
+
+- 具有自建应用的企业微信账户（从[企业微信开发者文档](https://developer.work.weixin.qq.com/document/)获取）
+
+### 设置步骤
+
+1. 在企业微信管理后台，前往 **应用管理 > 自建应用**，创建新应用。
+2. 记录 Corp ID、Agent ID 和 Secret。
+3. 在应用设置中配置接收消息 API 的回调 URL。
+4. 设置环境变量：
+
+```bash
+export WECOM_CORP_ID=your-corp-id             # 环境变量
+export WECOM_AGENT_ID=your-agent-id
+export WECOM_SECRET=your-app-secret
+librefang vault set WECOM_CORP_ID             # 加密金库（推荐）
+librefang vault set WECOM_AGENT_ID
+librefang vault set WECOM_SECRET
+librefang config set-key wecom                # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+5. 添加到配置文件：
+
+```toml
+[channels.wecom]
+corp_id_env = "WECOM_CORP_ID"
+agent_id_env = "WECOM_AGENT_ID"
+secret_env = "WECOM_SECRET"
+default_agent = "assistant"
+```
+
+6. 重启守护进程。
+
+### 工作原理
+
+企业微信适配器使用企业微信 API 的 webhook 协议接收消息回调。它使用企业凭证获取 access token，并通过企业微信消息发送 API 发送响应。消息负载使用配置的 EncodingAESKey 进行加解密。
+
+---
+
+## MQTT
+
+### 前置条件
+
+- LibreFang 主机可访问的 MQTT broker（例如 Mosquitto、HiveMQ、EMQX），参见 [MQTT 规范](https://mqtt.org)
+- 编译时需要启用 `all-channels` feature flag
+
+### 设置步骤
+
+1. 确保 MQTT broker 已运行且可访问。
+2. 设置环境变量（可选，用于需要认证的 broker）：
+
+```bash
+export MQTT_BROKER_URL=mqtt://broker:1883     # 环境变量
+export MQTT_TOPIC=home/agents/input
+# export MQTT_USERNAME=your-username          # 可选
+# export MQTT_PASSWORD=your-password          # 可选
+librefang vault set MQTT_BROKER_URL           # 加密金库（推荐）
+librefang vault set MQTT_TOPIC
+# librefang vault set MQTT_USERNAME           # 可选
+# librefang vault set MQTT_PASSWORD           # 可选
+librefang config set-key mqtt                 # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+3. 添加到配置文件：
 
 ```toml
 [channels.mqtt]
 host = "broker.example.com"
 port = 1883
 client_id = "librefang-bot"
-subscribe_topics = ["home/agents/input"]
+subscribe_topics = ["home/agents/input", "home/agents/commands"]
 response_topic = "home/agents/output"
-qos = "at_least_once"
+qos = "at_least_once"                # at_most_once | at_least_once | exactly_once
+# username_env = "MQTT_USERNAME"     # optional
+# password_env = "MQTT_PASSWORD"     # optional
+keep_alive_secs = 30
 default_agent = "home-assistant"
 ```
 
----
+4. 重启守护进程。
 
-## 配置
+### 工作原理
 
-### Telegram
-
-```toml
-[telegram]
-bot_token_env = "TELEGRAM_BOT_TOKEN"
-allowed_users = ["user_id_1", "user_id_2"]
-```
-
-### Discord
-
-```toml
-[discord]
-bot_token_env = "DISCORD_BOT_TOKEN"
-guild_ids = ["server_id_1", "server_id_2"]
-```
-
-### Slack
-
-```toml
-[slack]
-bot_token_env = "SLACK_BOT_TOKEN"
-app_token_env = "SLACK_APP_TOKEN"
-```
-
-### 微信（个人）
-
-通过腾讯官方 iLink 协议（`ilinkai.weixin.qq.com`）接入个人微信，与 WeChat ClawBot 插件使用相同的底层协议。
-
-```toml
-[channels.wechat]
-# bot_token_env = "WECHAT_BOT_TOKEN"  # 可选：保存上次登录的 token，跳过扫码
-default_agent = "assistant"
-allowed_users = []                    # 留空允许所有人；格式: "hash@im.wechat"
-```
-
-**使用方式：**
-1. 启动 LibreFang 后，日志中会显示二维码
-2. 用微信扫码确认登录
-3. 开始收发消息
-
-**支持的消息类型：** 文本、图片、语音、文件、视频
-
-**限制：** 媒体上传暂不支持（CDN AES-128-ECB 加密流程待实现），群聊检测暂不支持。
+MQTT 适配器使用 `rumqttc` crate 通过 MQTT v3.1.1/v5 连接到 broker。它订阅配置的主题接收传入消息，并将 Agent 响应发布到配置的响应主题。内置自动重连和指数退避机制。
 
 ---
 
-## 通道覆盖
+## Ntfy
 
-每个通道支持覆盖设置：
+### 前置条件
 
-```toml
-[channels.telegram]
-model = "claude-sonnet-4-20250514"
-system_prompt = "你是一个客服 agent"
-dm_policy = "allow"  # allow/deny
-group_policy = "allow"  # allow/deny
-rate_limit = 10  # 每分钟消息数
-output_format = "markdown"  # markdown/html/plaintext
-```
+- 可访问的 [ntfy](https://docs.ntfy.sh) 服务器（自托管或公共实例 `ntfy.sh`）
 
-### 覆盖选项
+### 设置步骤
 
-| 选项 | 说明 |
-|------|------|
-| `model` | 覆盖默认模型 |
-| `system_prompt` | 覆盖系统提示 |
-| `dm_policy` | DM 策略 (allow/deny) |
-| `group_policy` | 群组策略 (allow/deny) |
-| `rate_limit` | 每分钟限制 |
-| `output_format` | 输出格式 |
-
----
-
-## 速率限制
-
-每个通道有内置速率限制：
-
-- **每用户限制** - 防止滥用
-- **每通道限制** - 平台限制
-- **成本感知** - 跟踪 token 使用
-
-```toml
-[channels.telegram]
-rate_limit = 10  # 每分钟 10 条消息
-```
-
----
-
-## 格式化
-
-LibreFang 自动格式化消息：
-
-- **Telegram** → HTML
-- **Slack** → Mrkdwn
-- **Discord** → 嵌入
-- **其他** → 纯文本
-
----
-
-## CLI 命令
+1. 在 ntfy 服务器上选择一个主题名称。
+2. 设置环境变量：
 
 ```bash
-# 列出通道状态
-librefang channel list
-
-# 设置新通道
-librefang channel setup telegram
-
-# 测试通道
-librefang channel test telegram
-
-# 启用通道
-librefang channel enable telegram
-
-# 禁用通道
-librefang channel disable telegram
+export NTFY_URL=https://ntfy.sh               # 环境变量
+export NTFY_TOPIC=my-librefang-topic
+# export NTFY_TOKEN=your-access-token         # 可选
+librefang vault set NTFY_URL                  # 加密金库（推荐）
+librefang vault set NTFY_TOPIC
+# librefang vault set NTFY_TOKEN              # 可选
+librefang config set-key ntfy                 # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
 ```
 
+3. 添加到配置文件：
+
+```toml
+[channels.ntfy]
+url_env = "NTFY_URL"
+topic_env = "NTFY_TOPIC"
+# token_env = "NTFY_TOKEN"   # optional
+default_agent = "assistant"
+```
+
+4. 重启守护进程。
+
+### 工作原理
+
+ntfy 适配器使用 Server-Sent Events (SSE) 订阅 ntfy 服务器上的主题以实时接收消息。传入消息路由到配置的 Agent，响应通过 ntfy REST API 发布回该主题。
+
 ---
 
-## 消息路由
+## Gotify
 
-`AgentRouter` 根据规则路由消息：
+### 前置条件
 
-- **用户匹配** - 特定用户
-- **通道匹配** - 特定通道
-- **内容匹配** - 关键词/正则
+- Gotify 服务器实例和应用令牌（参见 [Gotify 文档](https://gotify.net/docs/)）
+
+### 设置步骤
+
+1. 在 Gotify Web UI 中，创建新应用并复制令牌。
+2. 设置环境变量：
+
+```bash
+export GOTIFY_URL=https://gotify.example.com  # 环境变量
+export GOTIFY_TOKEN=your-application-token
+librefang vault set GOTIFY_URL                # 加密金库（推荐）
+librefang vault set GOTIFY_TOKEN
+librefang config set-key gotify               # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+3. 添加到配置文件：
+
+```toml
+[channels.gotify]
+url_env = "GOTIFY_URL"
+token_env = "GOTIFY_TOKEN"
+default_agent = "assistant"
+```
+
+4. 重启守护进程。
+
+### 工作原理
+
+Gotify 适配器通过 WebSocket 连接到 Gotify 服务器实时接收消息。响应通过 Gotify REST API 的消息端点发送。
 
 ---
 
-## 最佳实践
+## Nextcloud Talk
 
-1. **限制访问** - 使用 `allowed_users` 限制谁可以访问
-2. **设置速率限制** - 防止滥用
-3. **使用覆盖** - 为不同通道定制行为
-4. **监控使用** - 定期检查通道统计
+### 前置条件
+
+- 安装了 Talk 应用的 Nextcloud 实例（参见 [Nextcloud Talk API 文档](https://nextcloud-talk.readthedocs.io/)）
+- 应用密码或 Bot 用户账户
+
+### 设置步骤
+
+1. 在 Nextcloud 中，前往 **Settings > Security > Devices & sessions** 创建应用密码，或创建专用 Bot 用户。
+2. 设置环境变量：
+
+```bash
+export NEXTCLOUD_URL=https://nextcloud.example.com  # 环境变量
+export NEXTCLOUD_TOKEN=your-app-password
+librefang vault set NEXTCLOUD_URL             # 加密金库（推荐）
+librefang vault set NEXTCLOUD_TOKEN
+librefang config set-key nextcloud            # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+3. 添加到配置文件：
+
+```toml
+[channels.nextcloud]
+url_env = "NEXTCLOUD_URL"
+token_env = "NEXTCLOUD_TOKEN"
+default_agent = "assistant"
+```
+
+4. 重启守护进程。
+
+### 工作原理
+
+Nextcloud Talk 适配器轮询 Nextcloud Talk REST API 获取配置对话中的新消息。响应通过 Talk API 作为聊天消息发送。
+
+---
+
+## Mumble
+
+### 前置条件
+
+- LibreFang 主机可访问的 Mumble 服务器（Murmur），参见 [Mumble 协议文档](https://wiki.mumble.info/wiki/Protocol)
+
+### 设置步骤
+
+1. 确保 Mumble 服务器已运行且可访问。
+2. 设置环境变量：
+
+```bash
+export MUMBLE_SERVER=mumble.example.com:64738 # 环境变量
+export MUMBLE_USERNAME=librefang-bot
+# export MUMBLE_PASSWORD=your-password        # 可选
+librefang vault set MUMBLE_SERVER             # 加密金库（推荐）
+librefang vault set MUMBLE_USERNAME
+# librefang vault set MUMBLE_PASSWORD         # 可选
+librefang config set-key mumble               # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+3. 添加到配置文件：
+
+```toml
+[channels.mumble]
+server_env = "MUMBLE_SERVER"
+username_env = "MUMBLE_USERNAME"
+# password_env = "MUMBLE_PASSWORD"   # optional
+default_agent = "assistant"
+```
+
+4. 重启守护进程。
+
+### 工作原理
+
+Mumble 适配器使用 Mumble TCP 协议连接到 Mumble 服务器并使用配置的凭证认证。它监听已加入频道中的文本消息并路由到配置的 Agent。响应以文本消息形式发送。
+
+---
+
+## Webhook
+
+### 前置条件
+
+- 可接受 HTTP POST 请求的目标 URL（无需注册外部服务）
+
+### 设置步骤
+
+1. 选择 webhook 负载要发送到的 URL。
+2. 选择用于 HMAC-SHA256 签名验证的共享密钥。
+3. 设置环境变量：
+
+```bash
+export WEBHOOK_URL=https://your-service.example.com/hook  # 环境变量
+export WEBHOOK_SECRET=your-shared-secret
+librefang vault set WEBHOOK_URL               # 加密金库（推荐）
+librefang vault set WEBHOOK_SECRET
+librefang config set-key webhook              # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+4. 添加到配置文件：
+
+```toml
+[channels.webhook]
+url_env = "WEBHOOK_URL"
+secret_env = "WEBHOOK_SECRET"
+default_agent = "assistant"
+```
+
+5. 重启守护进程。
+
+### 工作原理
+
+Webhook 适配器提供通用的双向 HTTP 集成。传入消息以 HTTP POST 请求形式发送到 LibreFang 的 webhook 端点，通过共享密钥的 HMAC-SHA256 进行验证。响应以 HTTP POST 负载形式送达配置的 URL，同样使用 HMAC-SHA256 签名。
+
+---
+
+## Agent 路由
+
+`AgentRouter` 决定哪个 Agent 接收传入的消息。路由逻辑如下：
+
+1. **按通道默认值**：每个通道配置都有一个 `default_agent` 字段。来自该通道的消息会发送到该 Agent。
+2. **用户-Agent 绑定**：如果用户之前已与特定 Agent 关联（通过命令或配置），来自该用户的消息会路由到该 Agent。
+3. **命令前缀**：用户可以在聊天中发送类似 `/agent coder` 的命令来切换 Agent。后续消息将路由到 "coder" Agent。
+4. **兜底**：如果没有匹配的路由规则，消息会发送到第一个可用的 Agent。
+
+---
+
+## 编写自定义适配器
+
+要添加对新消息平台的支持，需要实现 `ChannelAdapter` trait。该 trait 定义在 `crates/librefang-channels/src/types.rs` 中。
+
+### ChannelAdapter Trait
+
+```rust
+pub trait ChannelAdapter: Send + Sync {
+    /// Human-readable name of this adapter.
+    fn name(&self) -> &str;
+
+    /// The channel type this adapter handles.
+    fn channel_type(&self) -> ChannelType;
+
+    /// Start receiving messages. Returns a stream of incoming messages.
+    async fn start(
+        &self,
+    ) -> Result<Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>, Box<dyn std::error::Error>>;
+
+    /// Send a response back to a user on this channel.
+    async fn send(
+        &self,
+        user: &ChannelUser,
+        content: ChannelContent,
+    ) -> Result<(), Box<dyn std::error::Error>>;
+
+    /// Send a typing indicator (optional -- default no-op).
+    async fn send_typing(&self, _user: &ChannelUser) -> Result<(), Box<dyn std::error::Error>> {
+        Ok(())
+    }
+
+    /// Stop the adapter and clean up resources.
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error>>;
+
+    /// Get the current health status of this adapter (optional -- default returns disconnected).
+    fn status(&self) -> ChannelStatus {
+        ChannelStatus::default()
+    }
+
+    /// Send a response as a thread reply (optional -- default falls back to `send()`).
+    async fn send_in_thread(
+        &self,
+        user: &ChannelUser,
+        content: ChannelContent,
+        _thread_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.send(user, content).await
+    }
+}
+```
+
+### 1. 定义你的适配器
+
+创建 `crates/librefang-channels/src/myplatform.rs`：
+
+```rust
+use crate::types::{
+    ChannelAdapter, ChannelContent, ChannelMessage, ChannelStatus, ChannelType, ChannelUser,
+};
+use futures::stream::{self, Stream};
+use std::pin::Pin;
+use tokio::sync::watch;
+use zeroize::Zeroizing;
+
+pub struct MyPlatformAdapter {
+    token: Zeroizing<String>,
+    client: reqwest::Client,
+    shutdown: watch::Receiver<bool>,
+}
+
+impl MyPlatformAdapter {
+    pub fn new(token: String, shutdown: watch::Receiver<bool>) -> Self {
+        Self {
+            token: Zeroizing::new(token),
+            client: reqwest::Client::new(),
+            shutdown,
+        }
+    }
+}
+
+impl ChannelAdapter for MyPlatformAdapter {
+    fn name(&self) -> &str {
+        "MyPlatform"
+    }
+
+    fn channel_type(&self) -> ChannelType {
+        ChannelType::Custom("myplatform".to_string())
+    }
+
+    async fn start(
+        &self,
+    ) -> Result<Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>, Box<dyn std::error::Error>> {
+        // Return a stream that yields ChannelMessage items.
+        // Use self.shutdown to detect when the daemon is stopping.
+        // Apply exponential backoff on connection failures.
+        let stream = stream::empty(); // Replace with your polling/WebSocket logic
+        Ok(Box::pin(stream))
+    }
+
+    async fn send(
+        &self,
+        user: &ChannelUser,
+        content: ChannelContent,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // Send the response back to the platform.
+        // Use split_message() if the platform has message length limits.
+        // Use self.client and self.token to call the platform's API.
+        Ok(())
+    }
+
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error>> {
+        // Clean shutdown: close connections, stop polling.
+        Ok(())
+    }
+
+    fn status(&self) -> ChannelStatus {
+        ChannelStatus::default()
+    }
+}
+```
+
+**新适配器要点：**
+- 使用 `ChannelType::Custom("myplatform".to_string())` 作为通道类型。只有最常用的 9 个通道有命名的 `ChannelType` 变体（`Telegram`、`WhatsApp`、`Slack`、`Discord`、`Signal`、`Matrix`、`Email`、`Teams`、`Mattermost`）。其他通道一律使用 `Custom(String)`。
+- 将密钥包装在 `Zeroizing<String>` 中，释放时自动从内存清零。
+- 接受 `watch::Receiver<bool>` 以便与守护进程协调关闭。
+- 使用指数退避增强连接失败时的容错性。
+- 使用共享的 `split_message(text, max_len)` 工具处理有消息长度限制的平台。
+
+### 2. 注册模块
+
+在 `crates/librefang-channels/src/lib.rs` 中：
+
+```rust
+pub mod myplatform;
+```
+
+### 3. 接入 Bridge
+
+在 `crates/librefang-api/src/channel_bridge.rs` 中，为你的适配器添加初始化逻辑，与已有的适配器并列。
+
+### 4. 添加配置支持
+
+在 `librefang-types` 中添加配置结构体：
+
+```rust
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MyPlatformConfig {
+    pub token_env: String,
+    pub default_agent: Option<String>,
+    #[serde(default)]
+    pub overrides: ChannelOverrides,
+}
+```
+
+将其添加到 `ChannelsConfig` 结构体和 `config.toml` 的解析逻辑中。`overrides` 字段让你的通道自动获得模型/提示词覆盖、DM/群组策略、速率限制、线程回复和输出格式选择的支持。
+
+### 5. 添加 CLI 设置向导
+
+在 `crates/librefang-cli/src/main.rs` 中，为 `cmd_channel_setup` 添加一个分支，包含你平台的分步设置说明。
+
+### 6. 测试
+
+编写集成测试。使用 `ChannelMessage` 类型模拟传入消息，无需连接真实平台。

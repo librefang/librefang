@@ -1,222 +1,267 @@
-# Agent 模板
+# Agent 模板目录
 
-LibreFang 提供 30 个 Agent 模板（默认预装 assistant，其他可从 dashboard 安装）。
+LibreFang 提供 **32 个 Agent 模板**，来自 [registry](https://github.com/librefang/librefang-registry/tree/main/agents)。`assistant` 模板已预装，其他模板可从 Dashboard 安装。每个模板都是一个可直接生成的 `agent.toml` 清单文件，位于 `agents/` 目录下。
 
----
+所有模板均使用 `provider = "default"` 和 `model = "default"`，即继承你在 `config.toml` 中配置的默认供应商和模型。你可以在生成时覆盖这些设置。
 
-## 30 个内置模板
+## 快速开始
 
-| Agent | 描述 | 能力 |
-|-------|------|------|
-| hello-world | 入门示例，可读取文件、搜索网页 | file_read, file_list, web_fetch, web_search |
-| coder | 代码开发和调试 | code_execute, file_read, file_write, git |
-| researcher | 深度研究和分析 | web_search, web_fetch, memory_recall |
-| writer | 内容创作和编辑 | file_write, memory_recall |
-| analyst | 数据分析和洞察 | data_analysis, file_read |
-| architect | 系统架构设计 | memory_recall, web_fetch |
-| ops | 运维自动化 | shell_execute, file_read |
-| security-auditor | 安全审计 | code_analysis, security_scan |
-| planner | 项目规划和任务管理 | memory_store, memory_recall |
-| debugger | 问题诊断和调试 | code_analysis, shell_execute |
-| translator | 多语言翻译 | memory_recall |
-| tutor | 学习和辅导 | memory_recall, web_fetch |
-| personal-finance | 个人财务管理 | data_analysis, file_read |
-| travel-planner | 旅行规划 | web_search, memory_recall |
-| social-media | 社交媒体管理 | web_fetch, memory_store |
-| meeting-assistant | 会议助手 | calendar, email |
-| email-assistant | 邮件助手 | email, file_read |
-| recruiter | 招聘和人才发现 | web_search, memory_recall |
-| data-scientist | 数据科学分析 | python, pandas, jupyter |
-| test-engineer | 测试工程 | code_execute, file_read |
-| doc-writer | 文档编写 | file_write, memory_recall |
-| customer-support | 客户支持 | memory_recall, email |
-| sales-assistant | 销售助手 | web_search, memory_store |
-| legal-assistant | 法律助手 | web_fetch, memory_recall |
-| health-tracker | 健康追踪 | data_analysis, memory_store |
-| home-automation | 家居自动化 | shell_execute, web_fetch |
-| assistant | 通用助手 | web_fetch, memory_recall |
-| orchestrator | 多 Agent 协调 | agent_spawn |
-| devops-lead | DevOps 领导 | shell_execute, kubernetes |
-
----
-
-## 使用模板
-
-### 生成 Agent
+通过 CLI 生成任意模板：
 
 ```bash
-librefang agent spawn agents/hello-world/agent.toml
+librefang spawn orchestrator
+librefang spawn coder
+librefang spawn --template agents/writer/agent.toml
 ```
 
-### 查看模板
+通过 REST API 生成：
+
+通过内置模板名称生成：
 
 ```bash
-ls agents/
+curl -X POST http://localhost:4545/api/agents \
+  -H "Content-Type: application/json" \
+  -d '{"template": "coder"}'
+```
+
+生成时覆盖模型：
+
+```bash
+curl -X POST http://localhost:4545/api/agents \
+  -H "Content-Type: application/json" \
+  -d '{"template": "writer", "model": "claude-sonnet-4-20250514"}'
+```
+
+向运行中的 Agent 发送消息：
+
+```bash
+curl -X POST http://localhost:4545/api/agents/{id}/message \
+  -H "Content-Type: application/json" \
+  -d '{"content": "Write unit tests for the auth module"}'
 ```
 
 ---
 
-## 模板结构
+## 软件工程
 
-```
-agents/
-└── hello-world/
-    ├── agent.toml      # Agent 清单
-    └── SKILL.md      # (可选) 领域知识
-```
+面向开发者的 Agent 模板，覆盖编码、审查、调试、测试、架构和运维。
 
-### agent.toml 示例
+| 模板 | 描述 | Temperature | max_tokens |
+|------|------|-------------|------------|
+| [coder](https://github.com/librefang/librefang-registry/tree/main/agents/coder) | 代码读写和分析 | 0.3 | 8192 |
+| [code-reviewer](https://github.com/librefang/librefang-registry/tree/main/agents/code-reviewer) | PR 审查、问题识别、改进建议 | 0.3 | 4096 |
+| [debugger](https://github.com/librefang/librefang-registry/tree/main/agents/debugger) | Bug 追踪、堆栈分析、根因定位 | 0.2 | 4096 |
+| [test-engineer](https://github.com/librefang/librefang-registry/tree/main/agents/test-engineer) | 测试策略设计、测试编写、正确性验证 | 0.3 | 4096 |
+| [architect](https://github.com/librefang/librefang-registry/tree/main/agents/architect) | 系统架构设计、技术选型评估 | 0.3 | 8192 |
+| [ops](https://github.com/librefang/librefang-registry/tree/main/agents/ops) | 系统监控、诊断、部署管理 | 0.2 | 2048 |
+| [devops-lead](https://github.com/librefang/librefang-registry/tree/main/agents/devops-lead) | CI/CD、基础设施、部署、事件响应 | 0.2 | 4096 |
+| [security-auditor](https://github.com/librefang/librefang-registry/tree/main/agents/security-auditor) | 代码漏洞审查、配置检查、威胁建模 | 0.2 | 4096 |
+| [planner](https://github.com/librefang/librefang-registry/tree/main/agents/planner) | 项目规划、任务拆解、风险评估 | 0.3 | 8192 |
 
-```toml
-name = "hello-world"
-version = "0.1.0"
-description = "A friendly greeting agent"
-author = "librefang"
-module = "builtin:chat"
-
-[model]
-provider = "default"
-model = "default"
-max_tokens = 4096
-temperature = 0.6
-
-[system_prompt]
-prompt = "You are Hello World..."
-
-[capabilities]
-tools = ["file_read", "file_list", "web_fetch"]
-network = ["*"]
-memory_read = ["*"]
-memory_write = ["self.*"]
-
-[resources]
-max_llm_tokens_per_hour = 100000
+```bash
+librefang spawn coder
+librefang spawn debugger
+librefang spawn architect
 ```
 
 ---
 
-## 创建自定义 Agent
+## 研究与分析
 
-### 最小配置
+面向信息检索、数据处理和学术研究的 Agent 模板。
+
+| 模板 | 描述 | Temperature | max_tokens |
+|------|------|-------------|------------|
+| [researcher](https://github.com/librefang/librefang-registry/tree/main/agents/researcher) | 网页检索和信息综合 | 0.5 | 4096 |
+| [academic-researcher](https://github.com/librefang/librefang-registry/tree/main/agents/academic-researcher) | 学术研究，论文搜索、文献综述 | 0.3 | 8192 |
+| [analyst](https://github.com/librefang/librefang-registry/tree/main/agents/analyst) | 数据分析、洞察生成、报告 | 0.4 | 4096 |
+| [data-scientist](https://github.com/librefang/librefang-registry/tree/main/agents/data-scientist) | 数据集分析、模型构建、可视化 | 0.3 | 4096 |
+
+```bash
+librefang spawn researcher
+librefang spawn data-scientist
+```
+
+---
+
+## 写作与文档
+
+面向内容创作、技术文档和翻译的 Agent 模板。
+
+| 模板 | 描述 | Temperature | max_tokens |
+|------|------|-------------|------------|
+| [writer](https://github.com/librefang/librefang-registry/tree/main/agents/writer) | 文档和技术写作 | 0.7 | 4096 |
+| [doc-writer](https://github.com/librefang/librefang-registry/tree/main/agents/doc-writer) | 技术文档、README、API 文档、教程 | 0.4 | 8192 |
+| [translator](https://github.com/librefang/librefang-registry/tree/main/agents/translator) | 多语言翻译和本地化 | 0.3 | 8192 |
+
+```bash
+librefang spawn writer
+librefang spawn doc-writer
+librefang spawn translator
+```
+
+---
+
+## 商业与沟通
+
+面向客户支持、销售、招聘和日常沟通的 Agent 模板。
+
+| 模板 | 描述 | Temperature | max_tokens |
+|------|------|-------------|------------|
+| [customer-support](https://github.com/librefang/librefang-registry/tree/main/agents/customer-support) | 工单处理、问题解决、客户沟通 | 0.3 | 4096 |
+| [sales-assistant](https://github.com/librefang/librefang-registry/tree/main/agents/sales-assistant) | CRM 更新、外联、销售管道管理 | 0.5 | 4096 |
+| [recruiter](https://github.com/librefang/librefang-registry/tree/main/agents/recruiter) | 简历筛选、候选人联络、招聘管道 | 0.4 | 4096 |
+| [email-assistant](https://github.com/librefang/librefang-registry/tree/main/agents/email-assistant) | 邮件分类、草拟、日程管理 | 0.4 | 8192 |
+| [meeting-assistant](https://github.com/librefang/librefang-registry/tree/main/agents/meeting-assistant) | 会议记录、行动项、后续跟踪 | 0.3 | 8192 |
+| [social-media](https://github.com/librefang/librefang-registry/tree/main/agents/social-media) | 社交媒体内容创作和发布 | 0.7 | 4096 |
+
+```bash
+librefang spawn customer-support
+librefang spawn email-assistant
+librefang spawn meeting-assistant
+```
+
+---
+
+## 个人与生活
+
+面向个人理财、健康、旅行、家居等日常生活场景的 Agent 模板。
+
+| 模板 | 描述 | Temperature | max_tokens |
+|------|------|-------------|------------|
+| [personal-finance](https://github.com/librefang/librefang-registry/tree/main/agents/personal-finance) | 预算追踪、支出分析、理财规划 | 0.2 | 8192 |
+| [legal-assistant](https://github.com/librefang/librefang-registry/tree/main/agents/legal-assistant) | 合同审查、法律研究、合规检查 | 0.2 | 8192 |
+| [health-tracker](https://github.com/librefang/librefang-registry/tree/main/agents/health-tracker) | 健康指标、用药提醒、健身目标 | 0.3 | 4096 |
+| [travel-planner](https://github.com/librefang/librefang-registry/tree/main/agents/travel-planner) | 行程规划、预订调研、预算估算 | 0.5 | 8192 |
+| [home-automation](https://github.com/librefang/librefang-registry/tree/main/agents/home-automation) | 智能家居控制、自动化规则 | 0.2 | 4096 |
+| [recipe-assistant](https://github.com/librefang/librefang-registry/tree/main/agents/recipe-assistant) | 菜谱推荐、膳食计划、食材替换 | 0.5 | 4096 |
+| [tutor](https://github.com/librefang/librefang-registry/tree/main/agents/tutor) | 教学辅导和知识讲解 | 0.5 | 8192 |
+
+```bash
+librefang spawn personal-finance
+librefang spawn travel-planner
+librefang spawn tutor
+```
+
+---
+
+## 系统
+
+LibreFang 内置的系统级 Agent 模板。
+
+| 模板 | 描述 | Temperature | max_tokens |
+|------|------|-------------|------------|
+| [assistant](https://github.com/librefang/librefang-registry/tree/main/agents/assistant) | 通用助手，日常问答和对话（默认 Agent） | 0.5 | 8192 |
+| [hello-world](https://github.com/librefang/librefang-registry/tree/main/agents/hello-world) | 入门示例，读取文件、搜索网页 | 0.6 | 4096 |
+| [orchestrator](https://github.com/librefang/librefang-registry/tree/main/agents/orchestrator) | 元 Agent，分解复杂任务并委派给专家 | 0.3 | 8192 |
+
+`assistant` 是 LibreFang 的默认 Agent，安装后即可使用。`hello-world` 适合用来验证系统是否正常工作或作为自定义模板的起点。`orchestrator` 可以生成和协调其他 Agent，适合处理需要多个专业 Agent 协作的复杂任务。
+
+```bash
+librefang spawn assistant
+librefang spawn hello-world
+librefang spawn orchestrator
+```
+
+---
+
+## 模型配置
+
+所有模板均使用 `provider = "default"` 和 `model = "default"`。这意味着 Agent 会继承你在 `~/.librefang/config.toml` 中配置的默认供应商和模型。
 
 ```toml
-name = "my-agent"
-version = "0.1.0"
-description = "My custom agent"
-module = "builtin:chat"
-
-[model]
+# ~/.librefang/config.toml 示例
+[llm]
 provider = "groq"
 model = "llama-3.3-70b-versatile"
+api_key_env = "GROQ_API_KEY"
 ```
 
-### 完整配置
-
-```toml
-name = "my-agent"
-version = "0.1.0"
-description = "A helpful assistant"
-author = "you"
-module = "builtin:chat"
-
-[model]
-provider = "default"
-model = "default"
-max_tokens = 4096
-temperature = 0.7
-
-[system_prompt]
-prompt = "You are a helpful assistant..."
-
-[resources]
-max_llm_tokens_per_hour = 100000
-max_iterations = 100
-
-[capabilities]
-tools = ["file_read", "file_list", "web_fetch"]
-network = ["*"]
-memory_read = ["*"]
-memory_write = ["self.*"]
-agent_spawn = false
-
-[schedule]
-enabled = false
-cron = "0 9 * * *"
-
-[channels]
-telegram_enabled = true
-discord_enabled = false
-```
-
----
-
-## Agent 字段参考
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `name` | String | Agent 名称 |
-| `version` | String | 版本号 |
-| `description` | String | 描述 |
-| `author` | String | 作者 |
-| `module` | String | 模块 (builtin:chat) |
-| `model.provider` | String | LLM 提供商 |
-| `model.model` | String | 模型名称 |
-| `model.max_tokens` | Integer | 最大 token |
-| `model.temperature` | Float | 采样温度 |
-| `system_prompt` | String | 系统提示 |
-| `capabilities.tools` | Array | 可用工具 |
-| `capabilities.network` | Array | 网络访问 |
-| `capabilities.memory_read` | Array | 记忆读取 |
-| `capabilities.memory_write` | Array | 记忆写入 |
-| `capabilities.agent_spawn` | Boolean | 是否可以生成子 Agent |
-
----
-
-## 工具列表
-
-| 工具 | 说明 |
-|------|------|
-| file_read | 读取文件 |
-| file_write | 写入文件 |
-| file_list | 列出目录 |
-| shell_execute | 执行 Shell |
-| web_fetch | 获取网页 |
-| web_search | 搜索网页 |
-| memory_store | 存储记忆 |
-| memory_recall | 回忆记忆 |
-| code_execute | 执行代码 |
-| git | Git 操作 |
-| python | Python REPL |
-| jupyter | Jupyter 笔记本 |
-
----
-
-## 模块类型
-
-| 模块 | 说明 |
-|------|------|
-| builtin:chat | 通用聊天 |
-| builtin:researcher | 研究 |
-| builtin:writer | 写作 |
-| builtin:coder | 编码 |
-
----
-
-## CLI 命令
+你可以在生成 Agent 时覆盖默认配置：
 
 ```bash
-# 生成 Agent
-librefang agent spawn agents/hello-world/agent.toml
+# CLI 覆盖
+librefang spawn coder --provider openai --model gpt-4o
 
-# 列出所有 Agent
-librefang agent list
-
-# 与 Agent 聊天
-librefang agent chat <agent-id>
-
-# 终止 Agent
-librefang agent kill <agent-id>
-
-# 查看 Agent 状态
-librefang agent status <agent-id>
+# API 覆盖
+curl -X POST http://localhost:4545/api/agents \
+  -H "Content-Type: application/json" \
+  -d '{"template": "coder", "provider": "openai", "model": "gpt-4o"}'
 ```
+
+---
+
+## 自定义模板
+
+`agents/custom/` 目录保留给你自己的 Agent 模板。按照以下清单格式创建新的 `agent.toml` 文件。
+
+### 清单格式
+
+```toml
+# 必填字段
+name = "my-agent"
+version = "0.1.0"
+description = "What this agent does in one sentence."
+author = "your-name"
+module = "builtin:chat"
+
+# 可选元数据
+tags = ["tag1", "tag2"]
+
+# 模型配置
+[model]
+provider = "default"                 # 继承 config.toml 中的默认供应商
+model = "default"                    # 继承 config.toml 中的默认模型
+max_tokens = 4096                    # 每次响应的最大输出 token 数
+temperature = 0.3                    # 创造性（0.0 = 确定性，1.0 = 创造性）
+system_prompt = """Your agent's personality, capabilities, and instructions go here.
+Be specific about what the agent should and should not do."""
+
+# 可选调度（用于自主/后台 Agent）
+[schedule]
+periodic = { cron = "every 5m" }                                     # 定期执行
+# continuous = { check_interval_secs = 120 }                         # 持续循环
+# proactive = { conditions = ["event:agent_spawned"] }               # 事件触发
+
+# 资源限制
+[resources]
+max_llm_tokens_per_hour = 150000    # 每小时 Token 预算
+max_concurrent_tools = 5            # 最大并行工具执行数
+
+# 能力授权（最小权限原则）
+[capabilities]
+tools = ["file_read", "file_write", "file_list", "shell_exec",
+         "memory_store", "memory_recall", "web_fetch",
+         "agent_send", "agent_list", "agent_spawn", "agent_kill"]
+network = ["*"]                     # 网络访问模式
+memory_read = ["*"]                 # Agent 可读取的记忆命名空间
+memory_write = ["self.*"]           # Agent 可写入的记忆命名空间
+agent_spawn = true                  # 此 Agent 是否可以生成其他 Agent
+agent_message = ["*"]               # 可以向哪些 Agent 发送消息
+shell = ["python *", "cargo *"]     # 允许的 Shell 命令模式（白名单）
+```
+
+### 可用工具
+
+| 工具 | 描述 |
+|------|------|
+| `file_read` | 读取文件内容 |
+| `file_write` | 写入/创建文件 |
+| `file_list` | 列出目录内容 |
+| `shell_exec` | 执行 Shell 命令（受 `shell` 白名单限制） |
+| `memory_store` | 将键值数据持久化到记忆中 |
+| `memory_recall` | 从记忆中检索数据 |
+| `web_fetch` | 从 URL 获取内容（具有 SSRF 防护） |
+| `agent_send` | 向另一个 Agent 发送消息 |
+| `agent_list` | 列出所有运行中的 Agent |
+| `agent_spawn` | 生成一个新 Agent |
+| `agent_kill` | 终止一个运行中的 Agent |
+
+### 自定义 Agent 提示
+
+1. **从最小配置开始**。仅授予 Agent 实际需要的工具和能力。之后随时可以添加更多。
+2. **编写清晰的系统提示**。系统提示是模板中最重要的部分。明确说明 Agent 的角色、方法论、输出格式和限制。
+3. **设置合适的 temperature**。精确/分析类任务使用 0.2，均衡任务使用 0.5，创意类任务使用 0.7 及以上。
+4. **使用 Shell 白名单**。永远不要授予 `shell = ["*"]`。白名单指定具体的命令模式，如 `shell = ["python *", "cargo test *"]`。
+5. **设置 Token 预算**。使用 `max_llm_tokens_per_hour` 防止成本失控。从 100,000 开始，根据使用情况调整。
+6. **使用记忆实现连续性**。授予 `memory_store` 和 `memory_recall` 以便 Agent 可以跨会话持久化上下文。
