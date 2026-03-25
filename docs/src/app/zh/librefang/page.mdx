@@ -281,7 +281,15 @@ export OPENAI_API_KEY=sk-...
 export GROQ_API_KEY=gsk_...
 ```
 
-也可以通过 CLI 安全存储：`librefang config set-key groq <your-key>`
+也可以通过 CLI 存储密钥：
+
+```bash
+# 加密金库（推荐）
+librefang vault set GROQ_API_KEY
+
+# 或写入 .env 文件
+librefang config set-key groq
+```
 
 ### 3. 编辑配置
 

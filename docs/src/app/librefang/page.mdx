@@ -247,6 +247,16 @@ export GROQ_API_KEY=gsk_...
 
 Add the export to your shell profile (`~/.bashrc`, `~/.zshrc`, etc.) to persist it.
 
+Or store keys via CLI:
+
+```bash
+# Encrypted vault (recommended)
+librefang vault set GROQ_API_KEY
+
+# Or write to .env file
+librefang config set-key groq
+```
+
 ### Edit the Config
 
 The default config uses Anthropic. To change the provider, edit `~/.librefang/config.toml`:
