@@ -83,20 +83,24 @@ tui_multiselect() {
 
   draw_menu() {
     for ((i = 0; i < count; i++)); do
-      local marker="  "
-      if [ "${selected[$i]}" -eq 1 ]; then marker="✓ "; fi
+      local checkbox="[ ]"
+      if [ "${selected[$i]}" -eq 1 ]; then checkbox="[\033[1;32m✓\033[0m]"; fi
+
+      local pointer="  "
+      if [ "$i" -eq "$cursor" ]; then pointer="\033[1;36m❯\033[0m "; fi
 
       if [ "$i" -eq "$cursor" ]; then
-        printf "\033[K  \033[30;47m %s %-16s  %-24s \033[0m\n" "$marker" "${PROVIDER_NAMES[$i]}" "${PROVIDER_KEYS[$i]}" > /dev/tty
+        printf "\033[K  ${pointer}${checkbox} \033[1m%-16s\033[0m  \033[2m%s\033[0m\n" "${PROVIDER_NAMES[$i]}" "${PROVIDER_KEYS[$i]}" > /dev/tty
       else
-        printf "\033[K   %s %-16s  \033[2m%s\033[0m\n" "$marker" "${PROVIDER_NAMES[$i]}" "${PROVIDER_KEYS[$i]}" > /dev/tty
+        printf "\033[K  ${pointer}${checkbox} %-16s  \033[2m%s\033[0m\n" "${PROVIDER_NAMES[$i]}" "${PROVIDER_KEYS[$i]}" > /dev/tty
       fi
     done
   }
 
   echo "" > /dev/tty
   info "Select LLM providers to configure:" > /dev/tty
-  printf "\033[2m  ↑/↓ move · space multi-select · enter select & confirm · esc/q skip\033[0m\n" > /dev/tty
+  echo "" > /dev/tty
+  printf "  \033[1;33m↑/↓\033[0m navigate  \033[1;33mspace\033[0m toggle  \033[1;33menter\033[0m confirm  \033[1;33mesc\033[0m skip\n" > /dev/tty
   echo "" > /dev/tty
   draw_menu
 
