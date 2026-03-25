@@ -287,7 +287,7 @@ pub async fn execute_tool(
 
         // Inter-agent tools (require kernel handle)
         "agent_send" => tool_agent_send(input, kernel).await,
-        "agent_spawn" => tool_agent_spawn(input, kernel, caller_agent_id).await,
+        "agent_spawn" => tool_agent_spawn(input, kernel, caller_agent_id, allowed_tools).await,
         "agent_list" => tool_agent_list(kernel),
         "agent_kill" => tool_agent_kill(input, kernel),
 
@@ -477,6 +477,25 @@ pub async fn execute_tool(
         other => {
             // Fallback 1: MCP tools (mcp_{server}_{tool} prefix)
             if mcp::is_mcp_tool(other) {
+                // SECURITY: MCP tools must also pass capability enforcement.
+                // The top-level allowed_tools check only covers normalized built-in
+                // names; MCP tool names bypass it when allowed_tools is None or
+                // does not list the specific MCP tool.
+                if let Some(allowed) = allowed_tools {
+                    if !allowed.iter().any(|t| t == other) {
+                        warn!(
+                            tool = other,
+                            "Capability denied: MCP tool not in allowed list"
+                        );
+                        return ToolResult {
+                            tool_use_id: tool_use_id.to_string(),
+                            content: format!(
+                                "Permission denied: agent does not have capability to use MCP tool '{other}'"
+                            ),
+                            is_error: true,
+                        };
+                    }
+                }
                 if let Some(mcp_conns) = mcp_connections {
                     let mut conns = mcp_conns.lock().await;
                     let server_name =
@@ -1364,14 +1383,13 @@ fn validate_path(path: &str) -> Result<&str, String> {
     Ok(path)
 }
 
-/// Resolve a file path through the workspace sandbox (if available) or legacy validation.
+/// Resolve a file path through the workspace sandbox.
+/// SECURITY: workspace_root is REQUIRED. When not configured, all file access
+/// is denied to prevent sandbox bypass via absolute paths like `/etc/passwd`.
 fn resolve_file_path(raw_path: &str, workspace_root: Option<&Path>) -> Result<PathBuf, String> {
-    if let Some(root) = workspace_root {
-        crate::workspace_sandbox::resolve_sandbox_path(raw_path, root)
-    } else {
-        let _ = validate_path(raw_path)?;
-        Ok(PathBuf::from(raw_path))
-    }
+    let root = workspace_root
+        .ok_or_else(|| "Workspace root not configured; file access denied".to_string())?;
+    crate::workspace_sandbox::resolve_sandbox_path(raw_path, root)
 }
 
 async fn tool_file_read(
@@ -1723,6 +1741,7 @@ async fn tool_agent_spawn(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
     parent_id: Option<&str>,
+    parent_allowed_tools: Option<&[String]>,
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
 
@@ -1741,6 +1760,21 @@ async fn tool_agent_spawn(
                 .collect()
         })
         .unwrap_or_default();
+
+    // SECURITY: Validate capability inheritance — child tools must be a subset
+    // of the parent's allowed tools to prevent privilege escalation.
+    if let Some(parent_tools) = parent_allowed_tools {
+        let parent_set: HashSet<&str> = parent_tools.iter().map(|s| s.as_str()).collect();
+        for child_tool in &tools {
+            if !parent_set.contains(child_tool.as_str()) {
+                return Err(format!(
+                    "Privilege escalation denied: child requests tool '{}' \
+                     but parent does not have this capability",
+                    child_tool
+                ));
+            }
+        }
+    }
 
     let network = input["network"].as_bool().unwrap_or(false);
 
