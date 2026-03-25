@@ -205,7 +205,7 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     let current = read_workspace_version(&root)?;
     // Include prerelease tags so rc/beta compare against previous rc/beta
-    let prev_tag = find_latest_tag(&root, true);
+    let mut prev_tag = find_latest_tag(&root, true);
 
     // --- Determine version ---
     let version = if let Some(v) = args.version {
@@ -217,31 +217,39 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
             // Default to stable
             base_version
         } else {
-            // Count existing tags for this day to auto-increment rc/beta numbers
-            let beta_count = Command::new("git")
+            // Find max existing rc/beta number for this day and increment
+            let beta_re =
+                Regex::new(&format!(r"^v{}-beta(\d+)$", regex::escape(&base_version))).unwrap();
+            let next_beta = Command::new("git")
                 .args(["tag", "-l", &format!("v{}-beta*", base_version)])
                 .current_dir(&root)
                 .output()
                 .map(|o| {
                     String::from_utf8_lossy(&o.stdout)
                         .lines()
-                        .filter(|l| !l.trim().is_empty())
-                        .count()
+                        .filter_map(|l| beta_re.captures(l.trim()))
+                        .filter_map(|cap| cap.get(1)?.as_str().parse::<u64>().ok())
+                        .max()
+                        .unwrap_or(0)
                 })
-                .unwrap_or(0);
-            let rc_count = Command::new("git")
+                .unwrap_or(0)
+                + 1;
+            let rc_re =
+                Regex::new(&format!(r"^v{}-rc(\d+)$", regex::escape(&base_version))).unwrap();
+            let next_rc = Command::new("git")
                 .args(["tag", "-l", &format!("v{}-rc*", base_version)])
                 .current_dir(&root)
                 .output()
                 .map(|o| {
                     String::from_utf8_lossy(&o.stdout)
                         .lines()
-                        .filter(|l| !l.trim().is_empty())
-                        .count()
+                        .filter_map(|l| rc_re.captures(l.trim()))
+                        .filter_map(|cap| cap.get(1)?.as_str().parse::<u64>().ok())
+                        .max()
+                        .unwrap_or(0)
                 })
-                .unwrap_or(0);
-            let next_beta = beta_count + 1;
-            let next_rc = rc_count + 1;
+                .unwrap_or(0)
+                + 1;
 
             // Compute LTS: YYYY.M.PATCH-lts
             let lts_base = {
@@ -349,8 +357,36 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // --- Clean up existing tag if re-releasing ---
-    let mut prev_tag = prev_tag;
+    // Save prev_tag BEFORE deletion so changelog range stays correct.
+    // If we're overwriting the current tag, find the tag before it for changelog.
     if tag_exists {
+        // Find the tag that precedes the one we're about to delete
+        let output = Command::new("git")
+            .args(["tag", "--sort=-creatordate"])
+            .current_dir(&root)
+            .output()
+            .ok();
+        if let Some(output) = output {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let mut found_current = false;
+            for line in stdout.lines() {
+                let t = line.trim();
+                if t == tag {
+                    found_current = true;
+                    continue;
+                }
+                if found_current
+                    && t.starts_with('v')
+                    && t.len() > 1
+                    && t.as_bytes()[1].is_ascii_digit()
+                    && !t.contains("alpha")
+                {
+                    prev_tag = Some(t.to_string());
+                    break;
+                }
+            }
+        }
+
         println!();
         println!("Cleaning up existing tag '{}'...", tag);
         let _ = git(&root, &["tag", "-d", &tag]);
@@ -373,12 +409,21 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
         if branch_exists {
             let _ = git(&root, &["branch", "-D", &release_branch_check]);
         }
-        let _ = Command::new("git")
-            .args(["push", "origin", "--delete", &release_branch_check])
+        // Only delete remote branch if it exists
+        let remote_branch_exists = Command::new("git")
+            .args(["ls-remote", "--heads", "origin", &release_branch_check])
             .current_dir(&root)
-            .status();
+            .output()
+            .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+            .unwrap_or(false);
+        if remote_branch_exists {
+            let _ = Command::new("git")
+                .args(["push", "origin", "--delete", &release_branch_check])
+                .current_dir(&root)
+                .status();
+        }
 
-        // Delete existing GitHub Release
+        // Delete existing GitHub Release so CI can recreate it
         let _ = Command::new("gh")
             .args([
                 "release",
@@ -390,9 +435,7 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
             ])
             .current_dir(&root)
             .status();
-
-        // Re-compute prev_tag since we deleted the old one
-        prev_tag = find_latest_tag(&root, true);
+        println!("✓ Cleaned up {}", tag);
     }
 
     // --- Generate changelog ---
