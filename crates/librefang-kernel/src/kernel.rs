@@ -373,6 +373,10 @@ pub struct LibreFangKernel {
     /// Lazy-loading driver cache — avoids recreating HTTP clients for the same
     /// provider/key/url combination on every agent message.
     driver_cache: librefang_runtime::drivers::DriverCache,
+    /// Hot-reloadable budget configuration. Initialised from `config.budget` at
+    /// boot and mutated safely via [`update_budget_config`] from the API layer,
+    /// replacing the previous `unsafe` raw-pointer mutation pattern.
+    budget_config: std::sync::RwLock<librefang_types::config::BudgetConfig>,
 }
 
 /// Bounded in-memory delivery receipt tracker.
@@ -825,6 +829,28 @@ impl LibreFangKernel {
     #[inline]
     pub fn config_ref(&self) -> &KernelConfig {
         &self.config
+    }
+
+    /// Return a snapshot of the current budget configuration.
+    ///
+    /// This reads from the `RwLock`-protected copy that can be updated at
+    /// runtime via [`update_budget_config`], so callers always see the
+    /// latest values set through the API.
+    pub fn budget_config(&self) -> librefang_types::config::BudgetConfig {
+        self.budget_config.read().unwrap().clone()
+    }
+
+    /// Safely mutate the runtime budget configuration.
+    ///
+    /// The caller supplies a closure that receives `&mut BudgetConfig`.
+    /// All writes are serialised through an `RwLock` write-guard, which
+    /// eliminates the data-race hazard of the old raw-pointer approach.
+    pub fn update_budget_config(
+        &self,
+        f: impl FnOnce(&mut librefang_types::config::BudgetConfig),
+    ) {
+        let mut guard = self.budget_config.write().unwrap();
+        f(&mut guard);
     }
 
     /// LibreFang home directory path (shorthand for `config.home_dir`).
@@ -1868,6 +1894,7 @@ impl LibreFangKernel {
             provider_unconfigured_logged: std::sync::atomic::AtomicBool::new(false),
             prompt_metadata_cache: PromptMetadataCache::new(),
             driver_cache: librefang_runtime::drivers::DriverCache::new(),
+            budget_config: std::sync::RwLock::new(config.budget.clone()),
         };
 
         // Initialize proactive memory system (mem0-style) from config.
@@ -2026,7 +2053,7 @@ impl LibreFangKernel {
 
                     // Apply global budget defaults to restored agents
                     apply_budget_defaults(
-                        &kernel.config.budget,
+                        &kernel.budget_config(),
                         &mut restored_entry.manifest.resources,
                     );
 
@@ -2299,7 +2326,7 @@ system_prompt = "You are a helpful assistant."
         }
 
         // Apply global budget defaults to agent resource quotas
-        apply_budget_defaults(&self.config.budget, &mut manifest.resources);
+        apply_budget_defaults(&self.budget_config(), &mut manifest.resources);
 
         // Create workspace directory for the agent.
         // Hand agents set a relative workspace path (hands/<hand>/<role>) resolved
