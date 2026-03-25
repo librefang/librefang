@@ -1,8 +1,6 @@
 # LibreFang 架构
 
-本文档描述 LibreFang 内部架构——用 Rust 编写的开源 Agent 操作系统。
-
----
+本文档描述 LibreFang 的内部架构——用 Rust 编写的开源 Agent 操作系统。内容涵盖 crate 结构、内核启动序列、Agent 生命周期、内存子系统、LLM 驱动抽象、基于能力的安全模型、OFP Wire 协议、安全加固体系、通道与技能系统，以及 Agent 稳定性子系统。
 
 ## 目录
 
@@ -20,68 +18,74 @@
 - [MCP 和 A2A 协议](#mcp-和-a2a-协议)
 - [Wire 协议 (OFP)](#wire-协议-ofp)
 - [桌面应用](#桌面应用)
+- [子系统架构图](#子系统架构图)
 
 ---
 
 ## Crate 结构
 
-LibreFang 组织为 Cargo 工作空间，包含 15 个 crates（14 个代码 crates + xtask）。
+LibreFang 组织为 Cargo 工作空间，包含 15 个 crates（14 个代码 crates + xtask）。依赖关系自上而下流动（底层 crate 不依赖上层）。
 
 ```
 librefang-cli            CLI 接口、守护进程自动检测、MCP 服务器
     |
 librefang-desktop        Tauri 2.0 桌面应用 (WebView + 系统托盘)
     |
-librefang-api            REST/WS/SSE API 服务器 (Axum 0.8), 76 个端点
+librefang-api            REST/WS/SSE API 服务器 (Axum 0.8), 230+ 个端点
     |
 librefang-kernel         内核: 组装所有子系统、工作流引擎、RBAC、计量
     |
-    +-- librefang-runtime    Agent 循环、49 个 LLM 驱动、60 个工具、WASM 沙箱、MCP、A2A
-    +-- librefang-channels   44 个通道适配器、桥接器、格式化器、速率限制器
-    +-- librefang-wire       OFP 点对点网络，HMAC-SHA256 认证
-    +-- librefang-migrate    迁移引擎 (OpenClaw YAML→TOML)
-    +-- librefang-skills     60 个内置技能、FangHub 市场、ClawHub 客户端
+    +-- librefang-runtime      Agent 循环、3 个 LLM 驱动、60 个工具、WASM 沙箱、MCP、A2A
+    +-- librefang-channels     44 个通道适配器、桥接器、格式化器、速率限制器
+    +-- librefang-wire         OFP 点对点网络，HMAC-SHA256 认证
+    +-- librefang-migrate      迁移引擎 (OpenClaw YAML->TOML)
+    +-- librefang-skills       60 个内置技能、FangHub 市场、ClawHub 客户端
+    +-- librefang-extensions   扩展与集成系统（凭证保险库、OAuth2 PKCE、一键 MCP 配置）
+    +-- librefang-hands        自主 Hands 系统（注册表中的 15 个 hand agent）
     |
 librefang-memory         SQLite 内存子系统、会话、语义搜索、使用追踪
     |
-librefang-types          共享类型: Agent、Capability、Event、Memory、Message、Tool、Config
+librefang-types          共享类型: Agent、Capability、Event、Memory、Message、Tool、Config、
+                        Taint、ManifestSigning、ModelCatalog、MCP/A2A 配置、Web 配置
 ```
 
 ### Crate 职责
 
 | Crate | 说明 |
 |-------|------|
-| **librefang-types** | 核心类型定义。定义 `AgentManifest`、`AgentId`、`Capability`、`ToolDefinition`、`KernelConfig`、污点追踪、Ed25519 清单签名、模型目录类型、MCP/A2A 配置类型。 |
-| **librefang-memory** | SQLite 内存子系统（schema v5）。提供结构化 KV 存储、向量嵌入语义搜索、知识图谱、会话管理、任务板、使用事件持久化。5 个 schema 版本。 |
-| **librefang-runtime** | Agent 执行引擎。包含 agent 循环、3 个原生 LLM 驱动（Anthropic、Gemini、OpenAI 兼容）、60 个内置工具、WASM 沙箱（Wasmtime 双燃料+epoch 计量）、MCP 客户端/服务器、A2A 协议、Web 搜索引擎、SSRF 保护、循环守卫、会话修复、LLM 会话压缩器、Merkle 哈希链审计追踪。 |
-| **librefang-kernel** | 中央协调器。`LibreFangKernel` 组装所有子系统：`AgentRegistry`、`AgentScheduler`、`CapabilityManager`、`EventBus`、`Supervisor`、`WorkflowEngine`、`TriggerEngine`、`BackgroundExecutor`、`WasmSandbox`、`ModelCatalog`、`MeteringEngine`、`ModelRouter`、`AuthManager`、`HeartbeatMonitor`。 |
-| **librefang-api** | 基于 Axum 0.8 的 HTTP API 服务器，76 个端点。包含 REST、WebSocket、SSE 端点。OpenAI 兼容端点 (`/v1/chat/completions`)。中间件：Bearer 认证、请求 ID 注入、结构化日志、GCRA 速率限制、安全头。 |
-| **librefang-channels** | 通道桥接层，42 个适配器。包括 Telegram、Discord、Slack、WhatsApp、Signal、Matrix、Email 等。功能：消息路由、生命周期协调、速率限制、格式化器、通道覆盖。 |
-| **librefang-wire** | LibreFang 协议 (OFP) 点对点通信。TCP 上的 JSON 帧消息，HMAC-SHA256 双向认证。 |
-| **librefang-cli** | 基于 Clap 的 CLI。支持所有命令：`init`、`start`、`status`、`doctor`、`agent spawn/list/chat/kill`、`workflow`、`trigger`、`skill`、`channel`、`config`、`chat`、`mcp`。 |
-| **librefang-desktop** | Tauri 2.0 原生桌面应用。在进程内启动内核，后台线程运行 axum 服务器，系统托盘、桌面通知、单实例强制。 |
-| **librefang-migrate** | 迁移引擎。支持 OpenClaw (~/openclaw/)。将 YAML 配置转换为 TOML，映射工具名称，导入 agent 清单。 |
-| **librefang-skills** | 可插拔工具捆绑的技能系统。60 个内置技能。技能是 `skill.toml` + Python/WASM/Node.js/PromptOnly 代码。技能注册表管理已安装和捆绑的技能。FangHub 客户端连接到市场。提示注入扫描器检测覆盖尝试。 |
-| **xtask** | 构建自动化任务 (cargo-xtask 模式)。 |
+| **librefang-types** | 所有 crate 共用的核心类型定义。定义 `AgentManifest`、`AgentId`、`Capability`、`Event`、`ToolDefinition`、`KernelConfig`、`LibreFangError`、污点追踪（`TaintLabel`、`TaintSet`）、Ed25519 清单签名、模型目录类型（`ModelCatalogEntry`、`ProviderInfo`、`ModelTier`）、工具兼容性映射（21 个 OpenClaw 到 LibreFang 的映射）、MCP/A2A 配置类型和 Web 配置类型。所有配置结构体使用 `#[serde(default)]` 以实现向前兼容的 TOML 解析。 |
+| **librefang-memory** | 基于 SQLite 的内存子系统（schema v5）。使用 `Arc<Mutex<Connection>>` 配合 `spawn_blocking` 实现异步桥接。提供结构化 KV 存储、基于向量嵌入的语义搜索、知识图谱（实体和关系）、会话管理、任务板、使用事件持久化（`usage_events` 表、`UsageStore`），以及跨通道记忆的规范会话。五个 schema 版本：V1 核心、V2 协作、V3 嵌入、V4 使用、V5 规范会话。 |
+| **librefang-runtime** | Agent 执行引擎。包含 Agent 循环（`run_agent_loop`、`run_agent_loop_streaming`）、3 个原生 LLM 驱动（Anthropic、Gemini、OpenAI 兼容，覆盖 49 个提供商）、60 个内置工具、WASM 沙箱（Wasmtime 双燃料+epoch 计量）、MCP 客户端/服务器（JSON-RPC 2.0 over stdio/SSE）、A2A 协议（AgentCard、任务管理）、Web 搜索引擎（4 个提供商：Tavily/Brave/Perplexity/DuckDuckGo）、带 SSRF 保护的 Web 抓取、循环守卫（基于 SHA256 的工具循环检测）、会话修复（历史验证）、LLM 会话压缩器（块感知）、Merkle 哈希链审计追踪、嵌入驱动、浏览器自动化（Playwright，`browser.rs`）、Docker 沙箱执行（`docker_sandbox.rs`）、图像生成（`image_gen.rs`）、文本转语音（`tts.rs`）、插件管理器（`plugin_manager.rs`）、上下文引擎（`context_engine.rs`）、主动记忆（`proactive_memory.rs`）和进程管理器（`process_manager.rs`）。定义了 `KernelHandle` trait，使 Agent 间工具调用不产生循环 crate 依赖。 |
+| **librefang-kernel** | 中央协调器。`LibreFangKernel` 组装所有子系统：`AgentRegistry`、`AgentScheduler`、`CapabilityManager`、`EventBus`、`Supervisor`、`WorkflowEngine`、`TriggerEngine`、`BackgroundExecutor`、`WasmSandbox`、`ModelCatalog`、`MeteringEngine`、`ModelRouter`、`AuthManager`（RBAC）、`HeartbeatMonitor`、`SetupWizard`、`SkillRegistry`、MCP 连接和 `WebToolsContext`。实现 `KernelHandle` 以支持 Agent 间操作。处理 Agent 创建/终止、消息分发、工作流执行、触发器评估、能力继承验证和优雅关闭（带状态持久化）。 |
+| **librefang-api** | 基于 Axum 0.8 的 HTTP API 服务器，提供 230+ 个端点。路由涵盖 agents、workflows、triggers、memory、channels、templates、models、providers、skills、ClawHub、MCP、health、status、version 和 shutdown。WebSocket 处理器用于实时 Agent 聊天和流式输出。SSE 端点用于流式响应。OpenAI 兼容端点（`POST /v1/chat/completions`、`GET /v1/models`）。A2A 端点（`/.well-known/agent.json`、`/a2a/*`）。中间件：Bearer token 认证、请求 ID 注入、结构化请求日志、GCRA 速率限制器（感知成本）、安全头（CSP、X-Frame-Options 等）、健康端点信息脱敏。提供两个仪表板 UI：传统的 Alpine.js SPA（`static/index_body.html`）和现代 React 仪表板（`static/react/`，基于 Vite + React + TanStack Router/Query 构建）。两个仪表板共存，共享同一套 REST/WS API。 |
+| **librefang-channels** | 通道桥接层，包含 44 个适配器。每个适配器实现 `ChannelAdapter` trait。包括：Telegram、Discord、Slack、WhatsApp、Signal、Matrix、Email、Webhook、MQTT、Sidecar、Teams、Mattermost、IRC、Google Chat、Twitch、Rocket.Chat、Zulip、XMPP、LINE、Viber、Messenger、Reddit、Mastodon、Bluesky、Feishu、Revolt、Nextcloud、Guilded、Keybase、Threema、Nostr、Webex、Pumble、Flock、Twist、Mumble、DingTalk、QQ、WeCom（企业微信）、Discourse、Gitter、Ntfy、Gotify、LinkedIn。功能特性：`AgentRouter` 消息路由、`BridgeManager` 生命周期协调、`ChannelRateLimiter`（基于 DashMap 的每用户追踪）、`formatter.rs`（Markdown 转 TelegramHTML/SlackMrkdwn/PlainText）、`ChannelOverrides`（模型/系统提示/私聊策略/群聊策略/速率限制/消息线程/输出格式）、私聊/群聊策略执行、sidecar_channels 辅助通道接入机制。 |
+| **librefang-wire** | LibreFang 协议 (OFP)，用于 Agent 间点对点通信。TCP 上的 JSON 帧消息，HMAC-SHA256 双向认证（nonce + 通过 `subtle` crate 实现常数时间验证）。`PeerNode` 监听连接并管理节点。`PeerRegistry` 跟踪已知远程节点及其 Agent。 |
+| **librefang-cli** | 基于 Clap 的 CLI。支持所有命令：`init`、`start`、`status`、`doctor`、`agent spawn/list/chat/kill`、`workflow list/create/run`、`trigger list/create/delete`、`migrate`、`skill install/list/remove/search/create`、`channel list/setup/test/enable/disable`、`config show/edit`、`chat`、`mcp`。守护进程自动检测：检查 `~/.librefang/daemon.json` 并发送健康探测；当守护进程运行时使用 HTTP 通信，否则回退到进程内启动内核。内置 MCP 服务器模式。 |
+| **librefang-desktop** | Tauri 2.0 原生桌面应用。在进程内启动内核，后台线程运行 axum 服务器，WebView 指向 `http://127.0.0.1:{随机端口}`。功能特性：系统托盘（显示/浏览器/状态/退出）、单实例强制、桌面通知、关闭时隐藏到托盘。IPC 命令：`get_port`、`get_status`。通过 `#[cfg(desktop)]` 守卫实现移动端就绪。 |
+| **librefang-migrate** | 迁移引擎。支持 OpenClaw（`~/.openclaw/`）。将 YAML 配置转换为 TOML，映射工具名称，映射提供商名称，导入 Agent 清单，复制内存文件，转换通道配置。生成包含已导入项、已跳过项和警告的 `MigrationReport`。 |
+| **librefang-skills** | 可插拔工具捆绑的技能系统。60 个内置技能通过 `include_str!()` 编译进二进制。技能由 `skill.toml` + Python/WASM/Node.js/PromptOnly 代码组成。`SkillManifest` 定义元数据、运行时配置、提供的工具和依赖要求。`SkillRegistry` 管理已安装和已捆绑的技能。`FangHubClient` 连接 FangHub 市场。`ClawHubClient` 连接 clawhub.ai 实现跨生态技能发现。`SKILL.md` 解析器用于 OpenClaw 兼容性（YAML frontmatter + Markdown 正文）。`SkillVerifier` 提供 SHA256 验证。提示注入扫描器（`scan_prompt_content()`）检测覆盖尝试、数据窃取和 shell 引用。 |
+| **librefang-extensions** | 扩展与集成系统。提供凭证保险库以安全存储第三方服务凭证，OAuth2 PKCE 流程用于用户授权集成，以及一键 MCP 配置助手以快速对接流行的外部服务。 |
+| **librefang-hands** | 自主 Hands 系统。15 个来自注册表的 hand agent，各自独立运行并具备专业领域能力：analytics、apitester、browser、clip、collector、devops、lead、linkedin、predictor、reddit、researcher、strategist、trader、twitter。每个 hand 暴露结构化的工具接口，可通过 `hand_activate`/`hand_deactivate` 工具在运行时激活或停用。 |
+| **xtask** | 构建自动化任务（cargo-xtask 模式）。 |
 
 ---
 
 ## 内核启动序列
 
-当调用 `LibreFangKernel::boot_with_config()` 时，执行以下序列：
+当调用 `LibreFangKernel::boot_with_config()` 时（无论是由守护进程调用还是由 CLI/桌面应用在进程内调用），执行以下序列：
 
 ```
 1. 加载配置
-   - 读取 ~/.librefang/config.toml
-   - 应用 #[serde(default)] 默认值
-   - 验证配置并记录警告
+   - 读取 ~/.librefang/config.toml（或指定路径）
+   - 对缺失字段应用 #[serde(default)] 默认值
+   - 验证配置并记录警告（缺失 API 密钥等）
 
 2. 创建数据目录
    - 确保 ~/.librefang/data/ 存在
 
 3. 初始化内存子系统
    - 打开 SQLite 数据库 (librefang.db)
-   - 运行 schema 迁移 (到 v5)
+   - 运行 schema 迁移（到 v5）
    - 设置记忆衰减率
 
 4. 初始化 LLM 驱动
@@ -90,159 +94,599 @@ librefang-types          共享类型: Agent、Capability、Event、Memory、Mes
    - 验证驱动配置
 
 5. 初始化模型目录
-   - 构建包含 130+ 个内置模型、20+ 别名、28 个提供商的 ModelCatalog
-   - 运行 detect_auth() 检查环境变量存在（从不读取密钥）
+   - 构建包含 130+ 个内置模型、20+ 别名、49 个提供商的 ModelCatalog
+   - 从 ~/.librefang/providers/*.toml 加载提供商定义（注册表预装 + 用户自定义）
+   - 运行 detect_auth() 检查环境变量存在（从不读取密钥内容）
+   - 存储为 kernel.model_catalog
 
 6. 初始化计量引擎
-   - 创建带有成本目录的 MeteringEngine
+   - 创建带有成本目录的 MeteringEngine（28+ 个模型系列）
+   - 接入模型目录作为定价来源
 
 7. 初始化模型路由器
-   - 创建带有任务复杂度评分的 ModelRouter
+   - 创建带有 TaskComplexity 评分的 ModelRouter
+   - 验证已配置的模型并解析别名
 
 8. 初始化核心子系统
-   - AgentRegistry (基于 DashMap 的并发 agent 存储)
-   - CapabilityManager (基于 DashMap 的能力授予)
-   - EventBus (异步广播频道)
-   - AgentScheduler (每个 agent 的配额追踪)
-   - Supervisor (健康监控)
-   - WorkflowEngine (工作流注册和执行)
-   - TriggerEngine (事件模式匹配)
-   - BackgroundExecutor (持续/周期性 agent 循环)
-   - WasmSandbox (Wasmtime 引擎)
+   - AgentRegistry（基于 DashMap 的并发 Agent 存储）
+   - CapabilityManager（基于 DashMap 的能力授予）
+   - EventBus（异步广播频道）
+   - AgentScheduler（每个 Agent 的配额追踪，按小时窗口重置）
+   - Supervisor（健康监控，panic/重启计数器）
+   - WorkflowEngine（工作流注册和执行，运行驱逐上限 200）
+   - TriggerEngine（事件模式匹配）
+   - BackgroundExecutor（持续/周期性 Agent 循环）
+   - WasmSandbox（Wasmtime 引擎，双燃料+epoch 计量）
 
 9. 初始化 RBAC 认证管理器
    - 创建带有 UserRole 层次结构的 AuthManager
+   - 设置通道身份解析
 
 10. 初始化技能注册表
     - 通过 parse_bundled() 加载 60 个内置技能
     - 从磁盘加载用户安装的技能
+    - 将技能工具接入 tool_runner 回退链
+    - 将 PromptOnly 技能上下文注入系统提示
 
 11. 初始化 Web 工具上下文
-    - 创建 WebSearchEngine (4 提供商级联)
-    - 创建 WebFetchEngine (SSRF 保护)
+    - 创建 WebSearchEngine（4 提供商级联：Tavily->Brave->Perplexity->DDG）
+    - 创建 WebFetchEngine（SSRF 保护）
+    - 打包为 WebToolsContext
 
-12. 恢复持久化的 agent
-    - 从 SQLite 加载所有 agent
+12. 恢复持久化的 Agent
+    - 从 SQLite 加载所有 Agent
+    - 在内存中重新注册（注册表、能力、调度器）
+    - 设置状态为 Running
 
 13. 发布 KernelStarted 事件
 
 14. 返回内核实例
 ```
 
+当守护进程将内核包装为 `Arc` 后，还会执行以下步骤：
+
+```
+15. 设置自引用句柄（用于触发器分发的弱 Arc 引用）
+
+16. 连接 MCP 服务器
+    - 后台连接已配置的 MCP 服务器（stdio/SSE）
+    - 将工具命名为 mcp_{server}_{tool}
+    - 将连接存储在 kernel.mcp_connections
+
+17. 启动心跳监控器
+    - 后台 tokio 任务用于 Agent 健康检查
+    - 异常时发布 HealthCheckFailed 事件
+
+18. 启动后台 Agent 循环（持续型、周期型、主动型）
+```
+
 ---
 
 ## Agent 生命周期
 
+### 状态
+
 ```
-[Created] → [Initializing] → [Running] → [Paused]
-                                  ↓
-                              [Stopped]
+    spawn                    message/tick              kill
+      |                         |                       |
+      v                         v                       v
+  [Running] <------------> [Running] ---------> [Terminated]
+      |                                              ^
+      |          shutdown                            |
+      +----------> [Suspended] ---------------------+
+                      |          reboot/restore
+                      +------> [Running]
 ```
 
-### 状态说明
+- **Running**：Agent 处于活跃状态，可以接收消息。
+- **Suspended**：Agent 已暂停（例如守护进程关闭期间）。持久化到 SQLite 以便下次启动时恢复。
+- **Terminated**：Agent 已被终止。从注册表和持久化存储中移除。
 
-| 状态 | 说明 |
-|------|------|
-| Created | Agent 清单已创建 |
-| Initializing | 正在加载配置和能力 |
-| Running | 活跃处理消息 |
-| Paused | 暂停，可恢复 |
-| Stopped | 已终止，状态已保存 |
+### 创建流程
+
+1. 生成新的 `AgentId`（UUID v4）和 `SessionId`。
+2. 在内存子系统中创建会话。
+3. 解析清单并提取能力。
+4. 验证能力继承（`validate_capability_inheritance()` 防止权限提升）。
+5. 通过 `CapabilityManager` 授予能力。
+6. 注册到 `AgentScheduler`（配额追踪）。
+7. 创建 `AgentEntry` 并注册到 `AgentRegistry`。
+8. 通过 `memory.save_agent()` 持久化到 SQLite。
+9. 如果 Agent 有父级，更新父级的子节点列表。
+10. 注册主动触发器（如果调度模式为 `Proactive`）。
+11. 发布 `Lifecycle::Spawned` 事件并评估触发器。
+
+### 消息流程
+
+1. **RBAC 检查**：`AuthManager` 解析通道身份并检查用户角色权限。
+2. **通道策略检查**：`ChannelBridgeHandle.authorize_channel_user()` 执行私聊/群聊策略。
+3. **配额检查**：`AgentScheduler` 验证 Agent 是否超出每小时 token 限制。
+4. **条目查找**：从注册表获取 `AgentEntry`。
+5. **模块分发**：根据 `manifest.module` 选择执行路径：
+   - `builtin:chat` 或无法识别的模块：LLM Agent 循环（助手通过工具处理路由）
+   - `wasm:path/to/module.wasm`：WASM 沙箱执行
+   - `python:path/to/script.py`：Python 子进程执行（env_clear() + 选择性变量注入）
+6. **LLM Agent 循环**（针对 `builtin:chat`）：
+   a. 从内存加载或创建会话。
+   b. 将规范上下文摘要（跨通道记忆）加载到系统提示中。
+   c. 将稳定性准则追加到系统提示。
+   d. 解析 LLM 驱动（使用 Agent 级别覆盖或内核默认值）。
+   e. 收集可用工具（按能力过滤 + 技能工具 + MCP 工具）。
+   f. 初始化循环守卫（工具循环检测）。
+   g. 运行会话修复（验证并修复消息历史）。
+   h. 运行迭代循环：向 LLM 发送消息、执行工具调用、累积结果。
+   i. 当超过阈值时自动压缩会话（块感知压缩）。
+   j. 将更新后的会话和规范会话保存回内存。
+7. **成本估算**：`MeteringEngine.estimate_cost_with_catalog()` 以美元计算成本。
+8. **记录使用量**：更新 token 计数的配额追踪；持久化使用事件。
+9. **返回结果**：`AgentLoopResult` 包含响应文本、token 使用量、迭代次数和 `cost_usd`。
+
+### 终止流程
+
+1. 检查调用方是否持有 `AgentKill(target_name)` 能力。
+2. 从 `AgentRegistry` 移除。
+3. 通过 `BackgroundExecutor` 停止后台循环。
+4. 从 `AgentScheduler` 注销。
+5. 吊销所有能力。
+6. 从 `EventBus` 取消订阅。
+7. 移除触发器。
+8. 从持久化存储（SQLite）中删除。
 
 ---
 
 ## Agent 循环稳定性
 
-LibreFang 使用多层稳定性保护：
+Agent 循环包含多层加固机制以防止失控行为：
 
-1. **循环守卫** - SHA256 工具循环检测，带熔断器
-2. **会话修复** - 7 阶段消息历史验证
-3. **LLM 会话压缩器** - 块感知的上下文压缩
-4. **Merkle 哈希链审计追踪** - 加密链接的完整操作链
+### 循环守卫
+
+`LoopGuard` 检测 Agent 是否陷入使用相同参数反复调用同一工具的循环。使用 `(tool_name, params)` 的 SHA256 哈希来识别重复。
+
+- **警告阈值**（默认 3）：记录警告并向 LLM 注入提示信息。
+- **阻止阈值**（默认 5）：拒绝工具调用并向 LLM 返回错误。
+- **熔断器**（默认 30）：完全终止 Agent 循环。
+
+通过 `LoopGuardConfig` 配置。
+
+### 会话修复
+
+`validate_and_repair()` 在每次 Agent 循环迭代前运行，确保消息历史一致性：
+
+- 丢弃孤立的 `ToolResult` 消息（无匹配的 `ToolUse`）。
+- 移除空消息。
+- 合并连续的相同角色消息。
+
+### 工具结果截断
+
+`truncate_tool_result()` 对工具输出强制执行 50,000 字符硬上限。被截断的结果包含标记，显示原始大小。
+
+### 工具超时
+
+所有工具执行都包装在 60 秒的 `tokio::time::timeout` 中。超时的工具向 LLM 返回超时错误，而不是无限挂起。
+
+### 最大续接次数
+
+`MAX_CONTINUATIONS = 3` 防止无限的"请继续"循环。在 3 次续接尝试后，Agent 返回部分响应而不是请求新一轮。
+
+### Agent 间调用深度限制
+
+`MAX_AGENT_CALL_DEPTH = 5` 通过工具运行器中的 `tokio::task_local!` 强制执行。防止无界的递归 Agent 间调用。
+
+### 稳定性准则
+
+`STABILITY_GUIDELINES` 被追加到每个 Agent 的系统提示中。其中包含反循环和反重试的行为规则，引导 LLM 避免退化模式。
+
+### 块感知压缩
+
+会话压缩器处理所有内容块类型（Text、ToolUse、ToolResult、Image），而不是假设消息仅包含文本。当会话超过配置阈值（默认为上下文窗口的 80%）时自动触发压缩，保留最近的消息（默认 20 条）。
 
 ---
 
 ## 内存子系统
 
-- **SQLite 持久化** - 结构化 KV 存储
-- **向量嵌入** - 语义搜索能力
-- **知识图谱** - 实体和关系
-- **会话管理** - 跨通道记忆
-- **使用追踪** - 成本和使用统计
+内存子系统（`librefang-memory`）提供六个存储层：
+
+### 1. 结构化 KV 存储
+
+基于 SQLite 的每 Agent 键值存储。键为字符串，值为 JSON。由 `memory_store` 和 `memory_recall` 工具使用。
+
+共享内存命名空间（固定 Agent ID `00000000-...01`）支持跨 Agent 数据共享。
+
+```
+agent_id | key         | value
+---------|-------------|------------------
+uuid-a   | preferences | {"theme": "dark"}
+uuid-b   | state       | {"step": 3}
+shared   | project     | {"name": "foo"}
+```
+
+### 2. 语义搜索
+
+基于向量嵌入的相似度记忆检索。文档通过配置的嵌入驱动进行向量化并存储。查询时对搜索内容进行嵌入，通过余弦相似度匹配。
+
+### 3. 知识图谱
+
+用于结构化知识的实体-关系存储。Agent 可以存储实体（包含类型和属性）及实体间的关系。支持图遍历查询。
+
+### 4. 会话管理器
+
+对话历史存储。每个 Agent 拥有一个包含消息历史的会话（用户、助手、工具调用、工具结果、图像）。会话追踪上下文窗口的 token 计数。会话持久化到 SQLite，在内核重启时恢复。
+
+### 5. 任务板
+
+用于多 Agent 协作的共享任务队列：
+- `task_post`：创建包含标题、描述和可选指派人的任务。
+- `task_claim`：认领下一个可用任务。
+- `task_complete`：将任务标记为完成并附带结果。
+- `task_list`：按状态（待处理、已认领、已完成）筛选列出任务。
+
+### 6. 使用追踪与规范会话
+
+- **使用追踪**：`usage_events` 表持久化每个 Agent 的 token 计数、成本估算和模型使用情况。`UsageStore` 提供查询和聚合 API。
+- **规范会话**：跨通道记忆。`CanonicalSession` 追踪用户在多个通道间的对话上下文。压缩产生的摘要被注入系统提示。存储在 `canonical_sessions` 表中（schema v5）。
+
+### SQLite 架构
+
+所有内存操作通过 `Arc<Mutex<Connection>>` 配合 Tokio 的 `spawn_blocking` 实现异步桥接。这确保了线程安全而无需异步 SQLite 驱动。Schema 迁移在五个版本间自动运行。
 
 ---
 
 ## LLM 驱动抽象
 
-3 个原生驱动：
+`LlmDriver` trait（`librefang-runtime`）为所有 LLM 提供商提供统一接口：
 
-| 驱动 | 提供商 |
-|------|--------|
-| Anthropic | Claude 系列 |
-| Gemini | Google Gemini 系列 |
-| OpenAI 兼容 | 28 个提供商 (Groq、DeepSeek、OpenRouter 等) |
+```rust
+#[async_trait]
+pub trait LlmDriver: Send + Sync {
+    async fn send_message(
+        &self,
+        model: &str,
+        system_prompt: &str,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+    ) -> Result<LlmResponse, LibreFangError>;
+
+    async fn send_message_streaming(
+        &self,
+        model: &str,
+        system_prompt: &str,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        tx: mpsc::Sender<StreamEvent>,
+    ) -> Result<LlmResponse, LibreFangError>;
+
+    fn key_required(&self) -> bool;
+}
+```
+
+### 提供商架构
+
+三个原生驱动实现覆盖全部 49 个提供商、130+ 个模型：
+
+1. **AnthropicDriver**：原生 Anthropic Messages API。处理 Claude 特有功能（内容块包括图像、工具调用块、流式增量更新）。支持 `ContentBlock::Image`，带媒体类型验证和 5MB 上限。
+
+2. **GeminiDriver**：原生 Google Gemini API（v1beta）。使用 `x-goog-api-key` 认证、`systemInstruction`、`functionDeclarations`、`streamGenerateContent?alt=sse`。将 Gemini 函数调用响应映射到统一的 `ToolUse` 停止原因。
+
+3. **OpenAiCompatDriver**：OpenAI 兼容的 Chat Completions API。适用于任何实现 OpenAI API 格式的提供商。通过不同的 base URL 为每个提供商配置。覆盖 26+ 个提供商，包括 OpenAI、DeepSeek、Groq、Mistral、Together 及本地运行器。
+
+### 提供商配置
+
+| 提供商 | 驱动 | Base URL | 需要密钥 |
+|--------|------|----------|----------|
+| `anthropic` | Anthropic | `https://api.anthropic.com` | 是 |
+| `gemini` | Gemini | `https://generativelanguage.googleapis.com` | 是 |
+| `openai` | OpenAI-compat | `https://api.openai.com` | 是 |
+| `deepseek` | OpenAI-compat | `https://api.deepseek.com` | 是 |
+| `groq` | OpenAI-compat | `https://api.groq.com/openai` | 是 |
+| `openrouter` | OpenAI-compat | `https://openrouter.ai/api` | 是 |
+| `mistral` | OpenAI-compat | `https://api.mistral.ai` | 是 |
+| `together` | OpenAI-compat | `https://api.together.xyz` | 是 |
+| `fireworks` | OpenAI-compat | `https://api.fireworks.ai/inference` | 是 |
+| `perplexity` | OpenAI-compat | `https://api.perplexity.ai` | 是 |
+| `cohere` | OpenAI-compat | `https://api.cohere.ai` | 是 |
+| `ai21` | OpenAI-compat | `https://api.ai21.com` | 是 |
+| `cerebras` | OpenAI-compat | `https://api.cerebras.ai` | 是 |
+| `sambanova` | OpenAI-compat | `https://api.sambanova.ai` | 是 |
+| `huggingface` | OpenAI-compat | `https://api-inference.huggingface.co` | 是 |
+| `xai` | OpenAI-compat | `https://api.x.ai` | 是 |
+| `replicate` | OpenAI-compat | `https://api.replicate.com` | 是 |
+| `nvidia` | OpenAI-compat | `https://integrate.api.nvidia.com` | 是 |
+| `voyage` | OpenAI-compat | `https://api.voyageai.com` | 是 |
+| `anyscale` | OpenAI-compat | `https://api.endpoints.anyscale.com` | 是 |
+| `deepinfra` | OpenAI-compat | `https://api.deepinfra.com` | 是 |
+| `azure` | OpenAI-compat | `https://{resource}.openai.azure.com` | 是 |
+| `bedrock` | OpenAI-compat | `https://bedrock-runtime.{region}.amazonaws.com` | 是 |
+| `vertex` | OpenAI-compat | `https://{region}-aiplatform.googleapis.com` | 是 |
+| `claude-code` | OpenAI-compat | `http://localhost:3000`（Claude Code 本地代理） | 否 |
+| `ollama` | OpenAI-compat | `http://localhost:11434` | 否 |
+| `vllm` | OpenAI-compat | `http://localhost:8000` | 否 |
+| `lmstudio` | OpenAI-compat | `http://localhost:1234` | 否 |
+
+### 每 Agent 驱动解析
+
+每个 Agent 可以覆盖内核的默认提供商：
+
+```toml
+[model]
+provider = "openai"                   # 不同于内核默认值
+model = "gpt-4o"
+api_key_env = "OPENAI_API_KEY"        # 自定义密钥环境变量
+base_url = "https://custom.api.com"   # 可选的自定义端点
+```
+
+解析 Agent 的驱动时：
+1. 如果 Agent 使用与内核默认相同的提供商（且无自定义密钥/URL），复用内核的共享驱动实例。
+2. 否则，为该 Agent 创建专用驱动。
+
+### 重试与速率限制
+
+LLM 调用对限流（429）和过载（529）响应使用指数退避重试。重试逻辑内置在驱动层。所有 API 密钥字段使用 `Zeroizing<String>`，在丢弃时自动清除内存。
+
+---
+
+## 模型目录
+
+`ModelCatalog`（`librefang-runtime/src/model_catalog.rs`）提供所有已知模型、提供商和别名的注册表。
+
+### 注册表内容
+
+- **130+ 个内置模型**，涵盖 28+ 个模型系列（Claude、GPT、Gemini、DeepSeek、Llama、Mixtral、Command、Jamba、Grok 等）
+- **20+ 个别名**，便于快捷使用（例如 `claude` -> `claude-sonnet-4-20250514`、`grok` -> `grok-2`）
+- **49 个提供商**，带认证状态检测
+- **动态目录加载**：`~/.librefang/providers/*.toml` 中的提供商定义（注册表预装 + 用户自定义）在启动时合并，允许用户定义提供商而无需重新编译
+
+### 类型
+
+- `ModelCatalogEntry`：模型 ID、显示名称、提供商、层级、上下文窗口、成本费率。
+- `ProviderInfo`：提供商名称、驱动类型、base URL、密钥环境变量、认证状态。
+- `ModelTier`：Frontier、Smart、Balanced、Fast（映射到成本和能力层级）。
+- `AuthStatus`：Detected、NotDetected（基于环境变量存在与否，不读取密钥内容）。
+
+### 集成点
+
+- **计量**：`estimate_cost_with_catalog()` 使用目录条目作为定价来源。
+- **路由器**：`ModelRouter.validate_models()` 和 `resolve_aliases()` 引用目录。
+- **API**：4 个端点（`/api/models`、`/api/models/{id}`、`/api/models/aliases`、`/api/providers`）。`/api/providers` 端点返回全部 28 个内置提供商以及动态加载的自定义提供商。
+- **通道**：通过 `ChannelBridgeHandle` 支持 `/models` 和 `/providers` 聊天命令。
 
 ---
 
 ## 基于能力的安全模型
 
-- **能力门** - 基于角色的访问控制
-- **污点追踪** - 敏感信息从源到汇
-- **Ed25519 签名** - Agent 清单加密签名
+每个 Agent 操作都受到能力检查。能力在 Agent 清单中声明，在运行时强制执行。
+
+### 能力类型
+
+```rust
+pub enum Capability {
+    // 工具访问
+    ToolInvoke(String),       // 访问特定工具（例如 "file_read"）
+    ToolAll,                  // 访问所有工具
+
+    // 内存访问
+    MemoryRead(String),       // 读取范围（例如 "*"、"self.*"）
+    MemoryWrite(String),      // 写入范围
+
+    // 网络访问
+    NetConnect(String),       // 连接到主机（例如 "api.example.com"、"*"）
+
+    // Agent 操作
+    AgentSpawn,               // 可以创建新 Agent
+    AgentMessage(String),     // 可以向匹配模式的 Agent 发送消息
+    AgentKill(String),        // 可以终止匹配模式的 Agent
+
+    // Shell 访问
+    ShellExec(String),        // 可以执行匹配模式的 shell 命令
+
+    // OFP 网络
+    OfpDiscover,              // 可以发现远程节点
+    OfpConnect(String),       // 可以连接到特定节点
+    OfpAdvertise,             // 可以向节点广播
+
+    // 网络监听
+    NetListen(u16),           // 可以绑定并监听端口
+
+    // LLM 访问
+    LlmQuery(String),         // 可以查询特定模型/提供商
+    LlmMaxTokens(u64),        // 每次 LLM 调用的最大 token 数
+
+    // 环境变量访问
+    EnvRead(String),          // 可以读取特定环境变量
+
+    // 经济/计量
+    EconSpend(f64),           // 美元消费上限
+    EconEarn,                 // 可以赚取积分（收入型 Agent）
+    EconTransfer(String),     // 可以向另一个 Agent 转移积分
+}
+```
+
+### 能力继承验证
+
+`validate_capability_inheritance()` 防止 Agent 创建子 Agent 时的权限提升。子 Agent 永远不能获得其父 Agent 不持有的能力。这在创建时、授予任何能力之前强制执行。
+
+### 清单声明
+
+```toml
+[capabilities]
+tools = ["file_read", "file_list", "web_fetch"]
+memory_read = ["*"]
+memory_write = ["self.*"]
+network = ["api.anthropic.com"]
+shell = []
+agent_spawn = false
+agent_message = ["coder", "researcher"]
+agent_kill = []
+ofp_discover = false
+ofp_connect = []
+```
+
+### 执行流程
+
+```
+工具调用请求
+    |
+    v
+CapabilityManager.check(agent_id, ToolInvoke("file_read"))
+    |
+    +-- 已授予 --> 验证路径（遍历检查） --> 执行工具
+    |
+    +-- 已拒绝 --> 向 LLM 返回"权限被拒绝"错误
+```
+
+`CapabilityManager` 使用 `DashMap<AgentId, Vec<Capability>>` 实现无锁并发访问。能力在创建时授予（经过继承验证后），在终止时吊销。
+
+工具运行器还通过在传递给 LLM 之前过滤工具列表来强制执行能力。如果 LLM 幻觉出 Agent 授权列表之外的工具名称，工具运行器会以权限错误拒绝。
 
 ---
 
 ## 安全加固
 
-16 层安全系统：
+LibreFang 实现了 16 个安全系统，分为关键修复和先进防御两类：
 
-1. WASM 双计量沙箱
-2. Merkle 哈希链审计追踪
-3. 信息流污点追踪
-4. Ed25519 签名 Agent 清单
-5. SSRF 保护
-6. Secret 零化
-7. OFP 双向认证
-8. 能力门
-9. 安全头
-10. 健康端点重写
-11. 子进程沙箱
-12. 提示注入扫描器
-13. 循环守卫
-14. 会话修复
-15. 路径遍历防护
-16. GCRA 速率限制器
+### 路径遍历防护
+
+WASM 宿主函数中的 `safe_resolve_path()` 和 `safe_resolve_parent()` 防止目录遍历攻击。`tool_runner.rs` 中的路径验证（`validate_path`）保护文件工具。能力检查在路径解析之前运行（先拒绝，再验证）。
+
+### 子进程隔离
+
+`subprocess_sandbox.rs` 为 Python/Node 技能运行时提供安全执行环境。所有子进程调用使用 `cmd.env_clear()` 后选择性注入环境变量，防止密钥泄露。
+
+### SSRF 保护
+
+`is_ssrf_target()` 和 `is_private_ip()` 阻止对私有 IP 和云元数据端点（169.254.169.254 等）的请求。DNS 解析经过检查以防止 DNS 重绑定攻击。应用于 `host_net_fetch` 和 `web_fetch.rs`。
+
+### WASM 双重计量
+
+WASM 沙箱同时使用 Wasmtime 燃料计量（指令计数）和 epoch 中断（通过看门狗线程的墙钟超时）。这同时防止 CPU 密集型和时间密集型的失控模块。
+
+### Merkle 审计追踪
+
+`audit.rs` 实现 Merkle 哈希链，每个审计条目包含前一条目的哈希。这提供了所有 Agent 操作的防篡改日志。
+
+### 信息流污点追踪
+
+`librefang-types` 中的 `taint.rs` 实现污点标签和污点集合。来自外部源的数据携带污点标签，这些标签在操作过程中传播，支持信息流分析。
+
+### Ed25519 清单签名
+
+`manifest_signing.rs` 为 Agent 清单提供 Ed25519 数字签名。确保清单的完整性和真实性。
+
+### OFP HMAC-SHA256 双向认证
+
+Wire 协议认证在握手双方使用 `hmac_sign(secret, nonce + node_id)`。Nonce 防止重放攻击。通过 `subtle` crate 进行常数时间验证以防止计时攻击。
+
+### 安全头中间件
+
+所有 API 响应上设置 CSP、X-Frame-Options、X-Content-Type-Options、X-XSS-Protection、Referrer-Policy 和 Permissions-Policy 头。
+
+### GCRA 速率限制器
+
+通用信元速率算法（Generic Cell Rate Algorithm），带成本感知的令牌桶。按 IP 追踪，带过期条目清理。可配置突发和持续速率。
+
+### 健康端点信息脱敏
+
+公开健康端点（`/api/health`）仅返回最少状态信息。详细健康端点（`/api/health/detail`）需要认证，显示数据库统计、Agent 数量和子系统状态。
+
+### 提示注入扫描器
+
+技能 crate 中的 `scan_prompt_content()` 检测技能内容中的覆盖尝试、数据窃取模式和 shell 引用。应用于所有已捆绑和已安装的技能以及 SKILL.md 自动转换。
+
+### Secret 零化
+
+所有 LLM 驱动的 API 密钥字段使用 `zeroize` crate 的 `Zeroizing<String>`。密钥在驱动被丢弃时自动从内存中擦除。配置结构体的 `Debug` 实现对密钥字段进行脱敏。
+
+### 仅本地回退
+
+未配置 API 密钥时，系统回退到仅本地模式，防止意外暴露未认证的端点。
+
+### 循环守卫与会话修复
+
+参见上文 [Agent 循环稳定性](#agent-循环稳定性) 章节。
+
+### 安全依赖
+
+`sha2`、`hmac`、`hex`、`subtle`、`ed25519-dalek`、`rand`、`zeroize`、`governor`
 
 ---
 
 ## 通道系统
 
-44 个通道适配器：
+通道系统（`librefang-channels`）提供 44 个适配器，用于消息平台集成。
 
-**核心**: Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Email
+### 适配器列表
 
-**企业**: Microsoft Teams, Mattermost, Google Chat, Webex, Feishu/Lark, Zulip
+| 批次 | 通道 |
+|------|------|
+| **第一批 (15)** | Telegram、Discord、Slack、WhatsApp、Signal、Matrix、Email、Teams、Mattermost、IRC、Google Chat、Twitch、Rocket.Chat、Zulip、XMPP |
+| **第二批 (8)** | LINE、Viber、Messenger、Reddit、Mastodon、Bluesky、Feishu、Revolt |
+| **第三批 (9)** | Nextcloud、Guilded、Keybase、Threema、Nostr、Webex、Pumble、Flock、Twist |
+| **第四批 (12)** | Mumble、DingTalk、QQ、WeCom（企业微信）、Discourse、Gitter、Ntfy、Gotify、Webhook、LinkedIn、MQTT、Sidecar |
 
-**社交**: LINE, Viber, Facebook Messenger, Mastodon, Bluesky, Reddit, LinkedIn, Twitch
+> 共计：44 个适配器。Sidecar 适配器允许使用任何语言编写的外部进程通过 stdin/stdout 上的 JSON-RPC 充当通道适配器。
 
-**社区**: IRC, XMPP, Guilded, Revolt, Keybase, Discourse, Gitter
+### 通道功能
+
+- **通道覆盖**：按通道配置模型、系统提示、私聊策略、群聊策略、速率限制、消息线程和输出格式。
+- **私聊/群聊策略**：`DmPolicy` 和 `GroupPolicy` 枚举控制谁可以在私聊和群聊中与 Agent 交互。
+- **格式化器**：`formatter.rs` 将 Markdown 转换为平台特定格式（TelegramHTML、SlackMrkdwn、PlainText）。
+- **速率限制器**：`ChannelRateLimiter` 使用基于 DashMap 的每用户追踪防止消息洪水。
+- **消息线程**：`send_in_thread()` trait 方法用于支持线程对话的平台。
+- **聊天命令**：`/models`、`/providers`、`/new`、`/compact`、`/model`、`/stop`、`/usage`、`/think` 由 `ChannelBridgeHandle` 处理。
 
 ---
 
 ## 技能系统
 
-60 个内置技能，编译到二进制中。
+技能系统（`librefang-skills`）提供 60 个内置技能并支持外部技能安装。
 
-技能类型：
-- Python
-- WASM
-- Node.js
-- PromptOnly
+### 技能类型
 
-技能结构：
-- `skill.toml` - 清单
-- 代码文件
-- `SKILL.md` - 领域知识参考
+- **Python**：在子进程沙箱中执行的 Python 脚本。
+- **Node.js**：Node.js 脚本（OpenClaw 兼容性）。
+- **WASM**：在 WASM 沙箱中执行的 WebAssembly 模块。
+- **PromptOnly**：将上下文注入 LLM 系统提示而不执行代码的技能。
+
+### 内置技能 (60)
+
+通过 `bundled.rs` 中的 `include_str!()` 编译进二进制。分为三个层级：
+
+- **第一层 (8)**：github、docker、web-search、code-reviewer、sql-analyst、git-expert、sysadmin、writing-coach
+- **第二层 (6)**：kubernetes、terraform、aws、jira、data-analyst、api-tester
+- **第三层 (6)**：pdf-reader、slack-tools、notion、sentry、mongodb、regex-expert
+- **另外 40 个技能**在扩展阶段添加
+
+### 安全管线
+
+所有技能在激活前通过安全管线：
+
+1. **SHA256 验证**（`SkillVerifier`）：确保技能内容与其声明的哈希匹配。
+2. **提示注入扫描**（`scan_prompt_content()`）：检测技能提示和描述中的恶意模式。
+3. **信任边界标记**：系统提示中技能注入的上下文用信任边界标记包裹。
+4. **子进程 env_clear()**：技能代码执行使用环境隔离。
+
+### 工具分类（60 个内置工具）
+
+| 分类 | 工具 |
+|------|------|
+| **文件与补丁 (4)** | file_read、file_write、file_list、apply_patch |
+| **Web 与位置 (3)** | web_search、web_fetch、location_get |
+| **Shell 与 Docker (2)** | shell_exec、docker_exec |
+| **Agent 操作 (6)** | agent_spawn、agent_send、agent_list、agent_kill、agent_find、system_time |
+| **内存与知识 (5)** | memory_store、memory_recall、knowledge_add_entity、knowledge_add_relation、knowledge_query |
+| **任务与事件 (5)** | task_post、task_claim、task_complete、task_list、event_publish |
+| **浏览器自动化 (10)** | browser_navigate、browser_click、browser_type、browser_screenshot、browser_read_page、browser_close、browser_scroll、browser_wait、browser_run_js、browser_back |
+| **进程管理 (5)** | process_start、process_poll、process_write、process_kill、process_list |
+| **媒体与 AI (6)** | image_analyze、media_describe、media_transcribe、image_generate、text_to_speech、speech_to_text |
+| **Hands 控制 (4)** | hand_list、hand_activate、hand_status、hand_deactivate |
+| **调度与通信 (7)** | cron_create、cron_list、cron_cancel、channel_send、schedule_create、schedule_list、schedule_delete |
+| **A2A 与 Canvas (3)** | a2a_discover、a2a_send、canvas_present |
+
+### 生态桥接
+
+- **FangHub**：LibreFang 原生市场（`FangHubClient`）。
+- **ClawHub**：跨生态兼容性（`ClawHubClient` 连接 clawhub.ai）。
+- **SKILL.md 解析器**：自动将 OpenClaw SKILL.md 格式（YAML frontmatter + Markdown 正文）转换为 `skill.toml`。
+- **工具兼容**：`tool_compat.rs` 中的 21 个 OpenClaw 到 LibreFang 工具名称映射。
 
 ---
 
@@ -250,54 +694,345 @@ LibreFang 使用多层稳定性保护：
 
 媒体生成子系统（`librefang-runtime::media`）采用与 LLM 驱动相同的模式，提供跨提供商的图像、TTS、视频和音乐生成能力。
 
-- **`MediaDriver` trait** — 每种模态的异步方法，默认返回 `NotSupported`
-- **`MediaDriverCache`** — 线程安全、惰性初始化的驱动缓存（`DashMap`）
-- **`MediaCapability` 枚举** — `ImageGeneration`、`TextToSpeech`、`VideoGeneration`、`MusicGeneration`
-- **自动检测** — `detect_for_capability()` 自动选择首个已配置的提供商
+### 架构
+
+- **`MediaDriver` trait** -- 每种模态的异步方法，默认实现返回 `NotSupported`
+- **`MediaDriverCache`** -- 基于 `DashMap` 的线程安全惰性初始化缓存（与 LLM `DriverCache` 相同模式）
+- **`MediaCapability` 枚举** -- `ImageGeneration`、`TextToSpeech`、`VideoGeneration`、`MusicGeneration`
+- **自动检测** -- `detect_for_capability()` 按模态选择首个已配置的提供商
+
+### 提供商支持
 
 | 提供商 | 图像 | TTS | 视频 | 音乐 |
 |--------|------|-----|------|------|
 | OpenAI | gpt-image-1, dall-e-3 | tts-1, tts-1-hd | -- | -- |
 | MiniMax | image-01 | speech-2.8-hd | T2V-01 | music-2.5 |
 
+### 视频生成流程
+
+视频生成采用异步方式（提交/轮询/获取）：
+
+1. `submit_video()` -- 返回 `task_id`
+2. `poll_video()` -- 返回 `Pending` / `Processing` / `Completed` / `Failed`
+3. `get_video_result()` -- 返回文件 URL、尺寸、时长
+
+---
+
+## Hands 系统
+
+Hands 系统（`librefang-hands`）提供 15 个内置的自主 hand agent，每个专注于特定领域。
+
+### 内置 Hands (15)
+
+| Hand | 领域 |
+|------|------|
+| `analytics` | 商业分析与指标 |
+| `apitester` | API 测试与验证 |
+| `browser` | 通过 Playwright 进行 Web 浏览与抓取 |
+| `clip` | 内容剪辑与提取 |
+| `collector` | 数据收集与聚合 |
+| `creator` | 媒体生成（图像、视频、音乐、TTS） |
+| `devops` | CI/CD 管线与基础设施 |
+| `lead` | 潜在客户获取与外联 |
+| `linkedin` | LinkedIn 职业社交自动化 |
+| `predictor` | 预测分析与预报 |
+| `reddit` | Reddit 内容与社区管理 |
+| `researcher` | 深度研究与信息收集 |
+| `strategist` | 战略规划与决策支持 |
+| `trader` | 交易信号与市场分析 |
+| `twitter` | Twitter/X 内容与社区管理 |
+
+### Hand 生命周期工具
+
+Hands 通过四个内置工具在运行时管理：
+
+- `hand_list` -- 列出所有可用的 hands 及其当前状态
+- `hand_activate` -- 激活一个 hand agent，可选配置覆盖
+- `hand_status` -- 查询 hand 的运行状态和近期活动
+- `hand_deactivate` -- 优雅地关闭一个 hand agent
+
 ---
 
 ## MCP 和 A2A 协议
 
-### MCP (Model Context Protocol)
+### Model Context Protocol (MCP)
 
-- JSON-RPC 2.0 over stdio/SSE
-- MCP 客户端/服务器
-- 工具命名空间: `mcp_{server}_{tool}`
+LibreFang 同时实现了 MCP 客户端和服务器：
 
-### A2A (Agent to Agent)
+- **MCP 客户端**（`mcp.rs`）：JSON-RPC 2.0 over stdio 或 SSE 传输。连接外部 MCP 服务器。工具命名为 `mcp_{server}_{tool}` 以防止冲突。在 `start_background_agents()` 中后台连接。
+- **MCP 服务器**（`mcp_server.rs`）：通过 MCP 协议暴露 LibreFang 的 60 个内置工具。使外部工具可以将 LibreFang 作为工具提供者使用。
+- **配置**：`KernelConfig.mcp_servers`（`McpServerConfigEntry` 的 Vec，包含 name、command、args、env、transport）。
+- **API**：`/api/mcp/servers` 返回已配置和已连接的服务器及其工具列表。
 
-- AgentCard 发现
-- 任务管理
-- 端点: `/.well-known/agent.json`, `/a2a/*`
+### Agent-to-Agent 协议 (A2A)
+
+Google 的 A2A 协议，用于跨系统 Agent 通信：
+
+- **A2A 服务器**（`a2a.rs`）：在 `/.well-known/agent.json` 发布 `AgentCard`。处理任务生命周期（发送、获取、取消）。
+- **A2A 客户端**（`a2a.rs`）：发现并与远程 A2A 兼容 Agent 通信。
+- **端点**：`/.well-known/agent.json`、`/a2a/agents`、`/a2a/tasks/send`、`/a2a/tasks/{id}`、`/a2a/tasks/{id}/cancel`。
+- **配置**：`KernelConfig.a2a`（可选的 `A2aConfig`）。
 
 ---
 
 ## Wire 协议 (OFP)
 
-LibreFang 协议 (OFP) 用于 Agent 间点对点通信：
+LibreFang 协议 (OFP) 实现跨机器的 Agent 间点对点通信。
 
-- TCP 上的 JSON 帧消息
-- HMAC-SHA256 双向认证
-- Nonce + 常数时间验证
-- `PeerNode` 监听连接
-- `PeerRegistry` 跟踪已知远程节点
+### 架构
+
+```
+Machine A                          Machine B
++-----------+                      +-----------+
+| PeerNode  | ---TCP (JSON)------> | PeerNode  |
+| port 4545 | <---TCP (JSON)------ | port 4545 |
++-----------+                      +-----------+
+| PeerRegistry |                   | PeerRegistry |
+| - Known peers |                  | - Known peers |
+| - Remote agents |                | - Remote agents |
++---------------+                  +---------------+
+```
+
+### HMAC-SHA256 双向认证
+
+在交换任何协议消息之前，双方进行认证：
+
+1. 发起方发送 `{nonce, node_id, hmac_sign(shared_secret, nonce + node_id)}`。
+2. 响应方使用常数时间比较（`subtle` crate）验证 HMAC。
+3. 响应方发送自己的 `{nonce, node_id, hmac}` 质询。
+4. 发起方验证。
+5. 双向验证成功后，连接建立。
+
+通过 `PeerConfig.shared_secret`（必需）和 `config.toml` 中的 `NetworkConfig.shared_secret` 配置。
+
+### 协议消息
+
+所有消息为 JSON 帧格式（TCP 上的换行符分隔 JSON）：
+
+```
+WireMessage {
+    id: UUID,
+    sender: PeerId,
+    payload: WireRequest | WireResponse
+}
+```
+
+**请求类型：**
+- `Discover` -- 请求节点信息和 Agent 列表
+- `Advertise` -- 向节点公告本地 Agent
+- `RouteMessage` -- 向远程 Agent 发送消息
+- `Ping` -- 保活
+
+**响应类型：**
+- `DiscoverResponse` -- 节点信息和 Agent 列表
+- `RouteResponse` -- Agent 对路由消息的响应
+- `Pong` -- 保活响应
+
+### PeerRegistry
+
+追踪所有已知节点及其广播的 Agent：
+
+```rust
+pub struct PeerEntry {
+    pub id: PeerId,
+    pub addr: SocketAddr,
+    pub agents: Vec<RemoteAgent>,
+    pub last_seen: Instant,
+}
+
+pub struct RemoteAgent {
+    pub agent_id: String,
+    pub name: String,
+    pub description: String,
+    pub tags: Vec<String>,
+}
+```
+
+### 能力门控
+
+OFP 操作需要相应能力：
+- `OfpDiscover` -- 发送发现请求所需
+- `OfpConnect(addr)` -- 连接特定节点所需
+- `OfpAdvertise` -- 向节点广播 Agent 所需
 
 ---
 
 ## 桌面应用
 
-Tauri 2.0 原生应用：
+桌面应用（`librefang-desktop`）将完整的 LibreFang 技术栈包装在原生 Tauri 2.0 应用中。
 
-- 进程内启动内核
-- 后台线程运行 axum 服务器
-- WebView 指向本地服务器
-- 系统托盘 (显示/浏览器/状态/退出)
-- 单实例强制
-- 桌面通知
-- 关闭时隐藏到托盘
+### 架构
+
+```
++-------------------------------------------+
+| Tauri 2.0 Shell                           |
+| +---------------------------------------+ |
+| | WebView (WebKit/WebView2)             | |
+| | -> http://127.0.0.1:{random_port}     | |
+| +---------------------------------------+ |
+| +---------------------------------------+ |
+| | System Tray                           | |
+| | Show | Browser | Status | Quit        | |
+| +---------------------------------------+ |
+| +---------------------------------------+ |
+| | Background Thread                     | |
+| | +- Own Tokio Runtime                  | |
+| |    +- LibreFangKernel (in-process)     | |
+| |    +- Axum Server (build_router())    | |
+| |    +- ServerHandle { port, shutdown } | |
+| +---------------------------------------+ |
++-------------------------------------------+
+```
+
+### 功能特性
+
+- **进程内内核**：无需单独的守护进程。内核在应用进程内启动。
+- **随机端口**：避免端口冲突。端口通过 IPC 命令 `get_port` 传递。
+- **系统托盘**：显示窗口、在浏览器中打开、状态指示、退出。双击显示窗口。
+- **单实例**：`tauri-plugin-single-instance` 防止多个应用实例同时运行。
+- **通知**：`tauri-plugin-notification` 用于桌面提醒。
+- **隐藏到托盘**：关闭窗口时隐藏到托盘而非退出（桌面平台）。
+- **移动端就绪**：托盘和单实例使用 `#[cfg(desktop)]` 守卫；`#[cfg_attr(mobile, tauri::mobile_entry_point)]`。
+
+---
+
+## 子系统架构图
+
+```
++-------------------------------------------------------------------+
+|                         librefang-cli                                |
+|  [init] [start] [agent] [workflow] [trigger] [skill] [channel]     |
+|  [migrate] [config] [chat] [status] [doctor] [mcp]                 |
++-------------------------------------------------------------------+
+         |                    |
+         | (HTTP/守护进程)     | (进程内)
+         v                    v
++-------------------------------------------------------------------+
+|                         librefang-api                                |
+|  +-------------+  +----------+  +--------+  +------------------+   |
+|  | REST 路由   |  | WS 聊天  |  | SSE    |  | OpenAI /v1/      |   |
+|  | (230+ 端点) |  +----------+  +--------+  +------------------+   |
+|  +-------------+  +------------------+  +-----------------------+   |
+|  | 认证+RBAC   |  | 安全头           |  | GCRA 速率限制器       |   |
+|  +-------------+  +------------------+  +-----------------------+   |
+|  +---------------------+  +------------------------------------+   |
+|  | A2A 端点             |  | 健康信息脱敏                      |   |
+|  +---------------------+  +------------------------------------+   |
++-------------------------------------------------------------------+
+         |
+         v
++-------------------------------------------------------------------+
+|                       librefang-kernel                               |
+|  +----------------+  +------------------+  +-------------------+   |
+|  | AgentRegistry  |  | AgentScheduler   |  | CapabilityManager |   |
+|  | (DashMap)      |  | (配额+计量)      |  | (DashMap+继承)    |   |
+|  +----------------+  +------------------+  +-------------------+   |
+|  +----------------+  +------------------+  +-------------------+   |
+|  | EventBus       |  | Supervisor       |  | AuthManager       |   |
+|  | (广播)         |  | (健康监控)        |  | (RBAC 多用户)     |   |
+|  +----------------+  +------------------+  +-------------------+   |
+|  +----------------+  +------------------+  +-------------------+   |
+|  | WorkflowEngine |  | TriggerEngine    |  | BackgroundExec    |   |
+|  | (管线)         |  | (事件模式)        |  | (持续/定时)       |   |
+|  +----------------+  +------------------+  +-------------------+   |
+|  +----------------+  +------------------+  +-------------------+   |
+|  | ModelCatalog   |  | MeteringEngine   |  | ModelRouter       |   |
+|  | (130+ 模型)    |  | (成本追踪)        |  | (自动选择)        |   |
+|  +----------------+  +------------------+  +-------------------+   |
+|  +----------------+  +------------------+  +-------------------+   |
+|  | HeartbeatMon   |  | SetupWizard      |  | SkillRegistry     |   |
+|  | (Agent 健康)   |  | (NL Agent 配置)   |  | (60 个内置)       |   |
+|  +----------------+  +------------------+  +-------------------+   |
+|  +----------------+  +------------------+                          |
+|  | MCP 连接       |  | WebToolsContext  |                          |
+|  | (stdio/SSE)   |  | (搜索+抓取)       |                          |
+|  +----------------+  +------------------+                          |
++-------------------------------------------------------------------+
+         |
+    +----+-------------------+------------------+---------+
+    |                        |                   |         |
+    v                        v                   v         v
++------------------+  +--------------+  +--------+  +-----------+
+| librefang-runtime |  | librefang-    |  | open-  |  | librefang- |
+|                  |  | channels     |  | fang-  |  | skills    |
+| +------------+   |  |              |  | wire   |  |           |
+| | Agent 循环  |   |  | +----------+|  |        |  | +-------+ |
+| | +循环守卫   |   |  | | 44 通道  ||  | +----+ |  | |60 内置| |
+| | +会话修复   |   |  | | 适配器   ||  | |OFP | |  | |技能   | |
+| +------------+   |  | +----------+|  | |HMAC| |  | +-------+ |
+| +------------+   |  | +----------+|  | +----+ |  | +-------+ |
+| | 3 LLM 驱动 |   |  | |格式化器  ||  | +----+ |  | |FangHub| |
+| | (28 提供商) |   |  | |速率限制  ||  | |Peer| |  | |ClawHub| |
+| +------------+   |  | |私聊/群聊  ||  | |Reg | |  | +-------+ |
+| +------------+   |  | +----------+|  | +----+ |  | +-------+ |
+| | 60 个工具   |   |  | +----------+|  +--------+  | |验证   | |
+| +------------+   |  | |AgentRouter|               | |注入   | |
+| +------------+   |  | +----------+|               | |扫描   | |
+| | WASM 沙箱   |   |  +--------------+              | +-------+ |
+| | (双重计量)  |  |                                +-----------+
+| +------------+   |
+| +------------+   |
+| | MCP 客户端  |   |
+| | MCP 服务器  |   |
+| +------------+   |
+| +------------+   |
+| | A2A 协议    |   |
+| +------------+   |
+| +------------+   |
+| | Web 搜索    |   |  4 引擎: Tavily/Brave/Perplexity/DDG
+| | Web 抓取    |   |  SSRF 保护 + TTL 缓存
+| +------------+   |
+| +------------+   |
+| | 审计追踪    |   |  Merkle 哈希链
+| | 压缩器      |   |  块感知会话压缩
+| +------------+   |
+| +------------+   |
+| | KernelHandl|   |  (此处定义 trait，
+| | (trait)    |   |   在 kernel 中实现)
+| +------------+   |
++------------------+
+         |
+         v
++------------------+
+| librefang-memory  |
+| +------------+   |
+| | KV 存储    |   |  每 Agent + 共享命名空间
+| +------------+   |
+| +------------+   |
+| | 语义搜索    |   |  向量嵌入 + 余弦相似度
+| +------------+   |
+| +------------+   |
+| | 知识图谱    |   |  实体-关系图
+| |            |   |
+| +------------+   |
+| +------------+   |
+| | 会话        |   |  对话历史 + token 追踪
+| +------------+   |
+| +------------+   |
+| | 任务板      |   |  协作用共享任务队列
+| +------------+   |
+| +------------+   |
+| | 使用存储    |   |  Token 计数、成本、模型使用
+| +------------+   |
+| +------------+   |
+| | 规范会话    |   |  跨通道会话记忆
+| |            |   |
+| +------------+   |
+| +------------+   |
+| | SQLite v5  |   |  Arc<Mutex<Connection>> + spawn_blocking
+| +------------+   |
++------------------+
+         |
+         v
++------------------+
+| librefang-types   |
+| Agent, Capability|
+| Event, Memory    |
+| Message, Tool    |
+| Config, Error    |
+| Taint, Signing   |
+| ModelCatalog     |
+| MCP/A2A Config   |
+| Web Config       |
++------------------+
+```

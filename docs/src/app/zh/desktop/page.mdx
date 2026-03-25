@@ -1,39 +1,81 @@
-# 桌面应用
+# LibreFang 桌面应用
 
-LibreFang 桌面应用使用 Tauri 2.0 构建，提供原生桌面体验。
+LibreFang 桌面应用是基于 [Tauri 2.0](https://v2.tauri.app/) 构建的原生桌面封装，将整个 LibreFang Agent OS 打包为一个可安装的应用程序。用户无需运行 CLI 守护进程再打开浏览器，而是直接获得一个原生窗口，具备系统托盘集成、操作系统通知和单实例强制等功能——底层驱动的内核和 API 服务器与无头部署模式完全相同。
 
-<Note>
-**支持平台**: Windows、macOS、Linux (AppImage/deb)
-</Note>
-
----
-
-## 概述
-
-LibreFang 桌面应用特点：
-- Tauri 2.0 原生应用
-- 系统托盘集成
-- 桌面通知
-- 全局快捷键
-- 单实例运行
+**Crate:** `librefang-desktop`
+**Identifier:** `ai.librefang.desktop`
+**Product name:** LibreFang
 
 ---
 
-## 安装
+## 架构
 
-### 从源码构建
+桌面应用采用内嵌服务器模式：
 
-```bash
-# 克隆仓库
-git clone https://github.com/librefang/librefang.git
-cd librefang
-
-# 开发模式
-cargo tauri dev
-
-# 构建发布版本
-cargo tauri build
 ```
++-------------------------------------------+
+|  Tauri 2.0 Process                        |
+|                                           |
+|  +-----------+    +--------------------+  |
+|  |  Main     |    | Background Thread  |  |
+|  |  Thread   |    | ("librefang-server")|  |
+|  |           |    |                    |  |
+|  | WebView   |    | tokio runtime      |  |
+|  | Window    |--->| axum API server    |  |
+|  | (main)    |    | channel bridges    |  |
+|  |           |    | background agents  |  |
+|  | System    |    |                    |  |
+|  | Tray      |    | LibreFang Kernel    |  |
+|  +-----------+    +--------------------+  |
+|       |                    |              |
+|       |   http://127.0.0.1:{port}        |
+|       +------------------------------------
++-------------------------------------------+
+```
+
+### 启动流程
+
+1. **初始化日志追踪** -- 配置 `tracing_subscriber`，使用 `RUST_LOG` 环境变量控制日志级别，默认值为 `librefang=info,tauri=info`。
+2. **内核启动** -- `LibreFangKernel::boot(None)` 加载默认配置（来自 `config.toml` 或内置默认值），使用 `Arc` 包装。调用 `set_self_handle()` 以启用内核的自引用操作。
+3. **端口绑定** -- 在主线程上使用 `std::net::TcpListener` 绑定到 `127.0.0.1:0`，由操作系统分配一个随机可用端口。这确保在创建任何窗口之前就已获知端口号。
+4. **服务器线程** -- 生成一个名为 `"librefang-server"` 的专用操作系统线程。该线程创建自己的 `tokio::runtime::Builder::new_multi_thread()` 运行时，并执行：
+   - `kernel.start_background_agents()` -- 心跳监控、自主 Agent 等。
+   - `run_embedded_server()` -- 通过 `librefang_api::server::build_router()` 构建 axum 路由器，将 `std::net::TcpListener` 转换为 `tokio::net::TcpListener`，并以优雅关闭模式运行服务。
+5. **Tauri 应用** -- 组装 Tauri builder，包含插件、托管状态、IPC 命令、系统托盘，以及指向 `http://127.0.0.1:{port}` 的 WebView 窗口。
+6. **事件循环** -- Tauri 运行原生事件循环。退出时调用 `server_handle.shutdown()` 停止内嵌服务器和内核。
+
+### ServerHandle
+
+`ServerHandle` 结构体（定义在 `src/server.rs` 中）管理内嵌服务器的生命周期：
+
+```rust
+pub struct ServerHandle {
+    pub port: u16,
+    pub kernel: Arc<LibreFangKernel>,
+    shutdown_tx: watch::Sender<bool>,
+    server_thread: Option<std::thread::JoinHandle<()>>,
+}
+```
+
+- **`port`** -- 内嵌服务器监听的端口。
+- **`kernel`** -- 内核的共享引用，Tauri 应用也会使用它来处理 IPC 命令和通知。
+- **`shutdown_tx`** -- 一个 `tokio::sync::watch` 通道。发送 `true` 会触发 axum 服务器的优雅关闭。
+- **`server_thread`** -- 后台线程的 join handle。`shutdown()` 方法会 join 该线程以确保干净终止。
+
+调用 `shutdown()` 会发送关闭信号、join 后台线程，并调用 `kernel.shutdown()`。`Drop` 实现会作为尽力而为的兜底措施发送关闭信号，但不会阻塞等待线程 join。
+
+### 优雅关闭
+
+axum 服务器通过 `with_graceful_shutdown()` 连接到 watch 通道：
+
+```rust
+let server = axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
+    .with_graceful_shutdown(async move {
+        let _ = shutdown_rx.wait_for(|v| *v).await;
+    });
+```
+
+服务器关闭后，通道桥接（Telegram、Slack 等）通过 `bridge.stop().await` 停止。
 
 ---
 
@@ -41,100 +83,209 @@ cargo tauri build
 
 ### 系统托盘
 
-桌面应用包含系统托盘菜单：
+系统托盘（定义在 `src/tray.rs` 中）提供快捷操作，无需打开主窗口：
 
-| 选项 | 说明 |
-|------|------|
-| 显示 | 显示主窗口 |
-| 浏览器 | 打开仪表板 |
-| 状态 | 查看运行状态 |
-| 退出 | 退出应用 |
-
-### 桌面通知
-
-LibreFang 发送桌面通知：
-- Agent 完成消息
-- 工作流状态更新
-- 错误警报
-
-### 全局快捷键
-
-| 快捷键 | 功能 |
+| 菜单项 | 行为 |
 |--------|------|
-| Ctrl+Shift+L | 打开/关闭 LibreFang |
-| Ctrl+Shift+C | 快速聊天 |
+| **Show Window** | 对主 WebView 窗口调用 `show()`、`unminimize()` 和 `set_focus()` |
+| **Open in Browser** | 从托管的 `PortState` 读取端口，在默认浏览器中打开 `http://127.0.0.1:{port}` |
+| **Agents: N running** | 禁用（仅信息展示）——显示当前 Agent 数量 |
+| **Status: Running (uptime)** | 禁用（仅信息展示）——以人类可读格式显示运行时间 |
+| **Launch at Login** | 复选框——通过 `tauri-plugin-autostart` 切换操作系统级别的开机自启 |
+| **Check for Updates...** | 检查更新、下载、安装并在有可用更新时重启。通过通知显示进度/成功/失败状态 |
+| **Open Config Directory** | 在操作系统文件管理器中打开 `~/.librefang/` |
+| **Quit LibreFang** | 记录退出事件并调用 `app.exit(0)` |
 
-### 单实例
+托盘提示文本为 **"LibreFang Agent OS"**。
 
-桌面应用强制单实例运行：
-- 第二个实例激活现有窗口
-- 防止重复进程
+**左键单击托盘图标**会显示主窗口（与 "Show Window" 菜单项效果相同）。此功能通过 `on_tray_icon_event` 监听 `MouseButton::Left` 配合 `MouseButtonState::Up` 实现。
+
+### 单实例强制
+
+在桌面平台上，`tauri-plugin-single-instance` 防止同时运行多个 LibreFang 实例。当第二个实例尝试启动时，现有实例的主窗口会被显示、取消最小化并获得焦点：
+
+```rust
+#[cfg(desktop)]
+{
+    builder = builder.plugin(tauri_plugin_single_instance::init(
+        |app, _args, _cwd| {
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.show();
+                let _ = w.unminimize();
+                let _ = w.set_focus();
+            }
+        },
+    ));
+}
+```
+
+### 关闭时最小化到托盘
+
+关闭窗口不会退出应用程序。窗口会被隐藏，关闭事件会被阻止：
+
+```rust
+.on_window_event(|window, event| {
+    #[cfg(desktop)]
+    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+        let _ = window.hide();
+        api.prevent_close();
+    }
+})
+```
+
+要真正退出应用，请使用系统托盘菜单中的 **"Quit LibreFang"** 选项。
+
+### 原生操作系统通知
+
+应用订阅内核的事件总线，并使用 `tauri-plugin-notification` 将关键事件转发为原生桌面通知：
+
+| 事件 | 通知标题 | 内容 |
+|------|---------|------|
+| `LifecycleEvent::Crashed` | "Agent Crashed" | `Agent {id} crashed: {error}` |
+| `LifecycleEvent::Spawned` | "Agent Started" | `Agent "{name}" is now running` |
+| `SystemEvent::HealthCheckFailed` | "Health Check Failed" | `Agent {id} unresponsive for {secs}s` |
+
+其他所有事件均被静默跳过。通知监听器作为通过 `tauri::async_runtime::spawn` 生成的异步任务运行，并能优雅地处理广播延迟（记录警告后继续运行）。
 
 ---
 
-## 配置
+## IPC 命令
 
-### 托盘设置
+注册了十一个 Tauri IPC 命令，可通过 WebView 前端的 `invoke()` 调用：
 
-```toml
-[desktop]
-tray_enabled = true
-tray_icon = "default"
+### `get_port`
 
-[notifications]
-enabled = true
-sound = true
+返回内嵌服务器监听的端口号（`u16`）。
+
+```typescript
+// Frontend usage
+const port: number = await invoke("get_port");
 ```
 
-### 快捷键设置
+### `get_status`
 
-```toml
-[shortcuts]
-toggle = "Ctrl+Shift+L"
-quick_chat = "Ctrl+Shift+C"
+返回包含运行时状态的 JSON 对象：
+
+```json
+{
+  "status": "running",
+  "port": 8042,
+  "agents": 5,
+  "uptime_secs": 3600
+}
 ```
+
+- `agents` -- 从 `kernel.registry.list()` 获取的已注册 Agent 数量。
+- `uptime_secs` -- 自内核状态初始化（启动时通过 `Instant::now()` 记录）以来经过的秒数。
+
+### `get_agent_count`
+
+以简单整数形式返回已注册 Agent 的数量（`usize`）。
+
+```typescript
+const count: number = await invoke("get_agent_count");
+```
+
+### `import_agent_toml`
+
+打开原生文件选择器用于选择 `.toml` 文件。验证所选文件是否为有效的 `AgentManifest`，将其复制到 `~/.librefang/agents/{name}/agent.toml`，并启动该 Agent。成功时返回 Agent 名称。
+
+### `import_skill_file`
+
+打开原生文件选择器用于选择技能文件（`.md`、`.toml`、`.py`、`.js`、`.wasm`）。将文件复制到 `~/.librefang/skills/` 并触发技能注册表的热重载。
+
+### `get_autostart` / `set_autostart`
+
+检查或切换 LibreFang 是否在操作系统登录时自动启动。使用 `tauri-plugin-autostart`（macOS 上使用 launchd，Windows 上使用注册表，Linux 上使用 systemd）。
+
+### `check_for_updates`
+
+检查可用更新但不安装。返回一个 `UpdateInfo` 对象：
+
+```json
+{ "available": true, "version": "0.2.0", "body": "Release notes..." }
+```
+
+### `install_update`
+
+下载并安装最新更新，然后重启应用。成功时命令不会返回（应用会重启）。失败时返回错误字符串。
+
+```typescript
+await invoke("install_update"); // App restarts if update succeeds
+```
+
+### `open_config_dir` / `open_logs_dir`
+
+在操作系统文件管理器中打开 `~/.librefang/` 或 `~/.librefang/logs/`。
 
 ---
 
-## 架构
+## 窗口配置
 
-### 工作原理
+主窗口在 `setup` 闭包中以编程方式创建（不通过 `tauri.conf.json`，该文件声明了空的 `windows: []` 数组）：
+
+| 属性 | 值 |
+|------|-----|
+| Window label | `"main"` |
+| Title | `"LibreFang"` |
+| URL | `http://127.0.0.1:{port}`（外部地址） |
+| Inner size | 1280 x 800 |
+| Minimum inner size | 800 x 600 |
+| Position | 居中 |
+
+窗口使用 `WebviewUrl::External(...)` 而非打包的前端资源，因为 WebView 渲染的是 axum 提供的 UI。
+
+### 自动更新
+
+应用在启动 10 秒后检查更新。如有可用更新，会自动下载、安装并重启应用。用户也可通过系统托盘手动触发检查。
+
+**流程：**
+1. 启动检查（10 秒延迟） → `check_for_update()` → 如有可用更新 → 通知用户 → `download_and_install_update()` → 应用重启
+2. 托盘 "Check for Updates" → 相同流程，安装失败时显示失败通知
+
+**配置**（在 `tauri.conf.json` 中）：
+- `plugins.updater.pubkey` -- Ed25519 公钥（必须与签名私钥匹配）
+- `plugins.updater.endpoints` -- 指向 `latest.json` 的 URL（托管在 GitHub Releases 上）
+- `plugins.updater.windows.installMode` -- `"passive"`（无完整 UI 的安装模式）
+
+**签名：** 每个发布包都使用 `TAURI_SIGNING_PRIVATE_KEY`（GitHub Secret）签名。`tauri-action` 生成的 `latest.json` 包含各平台的下载 URL 和签名。
+
+详见 [Production Checklist](production-checklist.md) 了解密钥生成和设置说明。
+
+### CSP
+
+`tauri.conf.json` 配置了内容安全策略，允许连接到本地内嵌服务器：
 
 ```
-┌─────────────────────────────────────┐
-│           Desktop App              │
-├─────────────────────────────────────┤
-│  Tauri 2.0                         │
-│  ├── WebView (前端)                │
-│  ├── System Tray                   │
-│  ├── Notifications                 │
-│  └── Global Shortcuts              │
-├─────────────────────────────────────┤
-│  Rust Backend                      │
-│  ├── Kernel (进程内)               │
-│  ├── Axum Server (后台线程)        │
-│  └── IPC Commands                  │
-└─────────────────────────────────────┘
+default-src 'self' http://127.0.0.1:* ws://127.0.0.1:*;
+img-src 'self' data: http://127.0.0.1:*;
+style-src 'self' 'unsafe-inline';
+script-src 'self' 'unsafe-inline'
 ```
 
-### 启动流程
-
-1. 应用启动
-2. 在进程内启动 LibreFang 内核
-3. 后台线程启动 Axum 服务器
-4. WebView 连接到本地服务器
-5. 系统托盘图标出现
+这允许 WebView 从本地 API 服务器加载内容，同时阻止外部资源加载。axum API 服务器还提供额外的安全头中间件。
 
 ---
 
-## React Dashboard
+## 构建
 
-嵌入式 Web UI 包含两套并存的前端实现：
+### 前置条件
 
-- **旧版 Alpine.js dashboard** — 位于 `crates/librefang-api/static/`，以单一 HTML 文件形式提供，无需构建步骤。
-- **React dashboard** — 位于 `crates/librefang-api/dashboard-react/`，基于 Vite + React + TanStack Router + TanStack Query 构建的现代 SPA。编译产物提交至 `crates/librefang-api/static/react/`，通过 `/react/` 路由访问。
+- **Rust**（stable 工具链）
+- **Tauri CLI v2**: `cargo install tauri-cli --version "^2"`
+- **平台特定依赖**：
+  - **Windows**: WebView2（Windows 10/11 已内置）、Visual Studio Build Tools
+  - **macOS**: Xcode Command Line Tools
+  - **Linux**: `libwebkit2gtk-4.1-dev`、`libappindicator3-dev`、`librsvg2-dev`、`libssl-dev`、`build-essential`
 
-修改前端代码后，可通过以下命令重新构建 React dashboard：
+### React Dashboard
+
+内嵌 Web UI 由 axum API 服务器提供服务，包含两套并存的前端实现：
+
+- **旧版 Alpine.js dashboard** -- 从 `crates/librefang-api/static/` 以单个 HTML 文件形式提供。始终可用，无需构建步骤。
+- **React dashboard** -- 位于 `crates/librefang-api/dashboard-react/`。基于 Vite + React + TanStack Router + TanStack Query 构建。编译产物提交至 `crates/librefang-api/static/react/`，通过 `/react/` 路由访问。
+
+修改前端代码后，重新构建 React dashboard：
 
 ```bash
 cd crates/librefang-api/dashboard-react
@@ -142,88 +293,137 @@ npm install
 npm run build
 ```
 
-输出写入 `../static/react/`，axum 服务器下次启动时自动加载。
+输出写入 `../static/react/`，下次启动内嵌 axum 服务器时自动加载。
+
+### 开发模式
+
+```bash
+cd crates/librefang-desktop
+cargo tauri dev
+```
+
+这会以热重载模式启动应用。在 debug 构建中，控制台窗口可见以便查看日志追踪输出。
+
+### 生产构建
+
+```bash
+cd crates/librefang-desktop
+cargo tauri build
+```
+
+这会生成平台特定的安装包：
+- **Windows**: `.msi` 和 `.exe`（NSIS）安装包
+- **macOS**: `.dmg` 和 `.app` 应用包
+- **Linux**: `.deb`、`.rpm` 和 `.AppImage`
+
+发布二进制文件通过以下代码在 Windows 上隐藏控制台窗口：
+
+```rust
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+```
+
+### 打包配置
+
+来自 `tauri.conf.json`：
+
+```json
+{
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/icon.png",
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png"
+    ]
+  }
+}
+```
+
+`"targets": "all"` 设置会为当前平台生成所有可用的包格式。图标提供了多种分辨率，另有 `icon.ico` 供 Windows 使用。
 
 ---
 
-## 开发
+## 插件
 
-### 前端开发
+| 插件 | 版本 | 用途 |
+|------|------|------|
+| `tauri-plugin-notification` | 2 | 为内核事件和更新进度提供原生操作系统通知 |
+| `tauri-plugin-shell` | 2 | 从 WebView 访问 Shell/进程 |
+| `tauri-plugin-dialog` | 2 | Agent/技能导入的原生文件选择器 |
+| `tauri-plugin-single-instance` | 2 | 防止多实例运行（仅桌面端） |
+| `tauri-plugin-autostart` | 2 | 操作系统登录时自动启动（仅桌面端） |
+| `tauri-plugin-updater` | 2 | 从 GitHub Releases 进行签名自动更新（仅桌面端） |
+| `tauri-plugin-global-shortcut` | 2 | Ctrl+Shift+O/N/C 快捷键（仅桌面端） |
 
-```bash
-# 安装依赖
-cd librefang-desktop
-npm install
+### 能力声明
 
-# 开发模式
-npm run tauri dev
+默认能力集（定义在 `capabilities/default.json` 中）授予以下权限：
 
-# 构建
-npm run tauri build
+```json
+{
+  "identifier": "default",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "notification:default",
+    "shell:default",
+    "dialog:default",
+    "global-shortcut:allow-register",
+    "global-shortcut:allow-unregister",
+    "global-shortcut:allow-is-registered",
+    "autostart:default",
+    "updater:default"
+  ]
+}
 ```
 
-### IPC 命令
+仅 `"main"` 窗口获得这些权限。
 
-```typescript
-// 获取端口
-const port = await invoke<string>("get_port");
+---
 
-// 获取状态
-const status = await invoke<Status>("get_status");
+## 移动端支持
+
+代码库包含条件编译守卫以支持移动平台：
+
+- **入口点**：`run()` 函数标注了 `#[cfg_attr(mobile, tauri::mobile_entry_point)]`，允许 Tauri 将其用作移动端入口点。
+- **仅桌面端功能**：系统托盘设置、单实例强制和关闭时最小化到托盘都通过 `#[cfg(desktop)]` 门控，在移动端目标编译时被排除。
+- **移动端目标**：Tauri 2.0 框架在结构上支持 iOS 和 Android 构建，但内核和 API 服务器仍会在设备上以进程内方式启动。
+
+---
+
+## 文件结构
+
+```
+crates/librefang-desktop/
+  build.rs                 # tauri_build::build()
+  Cargo.toml               # Crate 依赖和元数据
+  tauri.conf.json           # Tauri 应用配置
+  capabilities/
+    default.json            # 主窗口的权限授予
+  gen/
+    schemas/                # 自动生成的 Tauri schema
+  icons/
+    icon.png                # 源图标 (327 KB)
+    icon.ico                # Windows 图标
+    32x32.png               # 小图标
+    128x128.png             # 标准图标
+    128x128@2x.png          # HiDPI 图标
+  src/
+    main.rs                 # 二进制入口点（调用 lib::run()）
+    lib.rs                  # Tauri 应用构建器、状态类型、事件监听器
+    commands.rs             # IPC 命令处理器（get_port、get_status、get_agent_count）
+    server.rs               # ServerHandle、内核启动、内嵌 axum 服务器
+    tray.rs                 # 系统托盘菜单和事件处理器
 ```
 
 ---
 
-## 构建
+## 环境变量
 
-### Windows
+| 变量 | 作用 |
+|------|------|
+| `RUST_LOG` | 控制日志追踪的详细程度。未设置时默认为 `librefang=info,tauri=info`。 |
 
-```bash
-cargo tauri build --target x86_64-pc-windows-msvc
-```
-
-### macOS
-
-```bash
-cargo tauri build --target x86_64-apple-darwin
-cargo tauri build --target aarch64-apple-darwin
-```
-
-### Linux
-
-```bash
-cargo tauri build --target x86_64-unknown-linux-gnu
-```
-
----
-
-## 故障排除
-
-### 应用不启动
-
-```bash
-# 查看日志
-tail -f ~/.librefang/logs/desktop.log
-
-# 检查依赖
-cargo tauri info
-```
-
-### 托盘图标不显示
-
-确保系统托盘支持已启用：
-```toml
-[desktop]
-tray_enabled = true
-```
-
-### 通知不工作
-
-检查通知权限：
-```bash
-# macOS
-open SystemPreferences > Notifications
-
-# Linux
-notify-send "test" "LibreFang"
-```
+其他所有 LibreFang 环境变量（API 密钥、配置等）照常生效，因为桌面应用启动的内核与无头守护进程完全相同。
