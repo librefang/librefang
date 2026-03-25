@@ -315,10 +315,11 @@ impl McpConnection {
             .await
             .map_err(|e| format!("MCP handshake failed for '{resolved_command}': {e}"))?;
 
-        // Discover tools via rmcp
-        let tools = client
-            .list_all_tools()
+        // Discover tools via rmcp (with timeout)
+        let timeout = std::time::Duration::from_secs(60);
+        let tools = tokio::time::timeout(timeout, client.list_all_tools())
             .await
+            .map_err(|_| format!("MCP tools/list timed out after 60s for '{resolved_command}'"))?
             .map_err(|e| format!("MCP tools/list failed: {e}"))?;
 
         Ok((McpInner::Rmcp(client), Some(tools)))
@@ -599,10 +600,17 @@ impl McpConnection {
                     }
                 }
 
-                let result = client
-                    .call_tool(params)
-                    .await
-                    .map_err(|e| format!("MCP tool call failed: {e}"))?;
+                let timeout = std::time::Duration::from_secs(self.config.timeout_secs);
+                let result: rmcp::model::CallToolResult =
+                    tokio::time::timeout(timeout, client.call_tool(params))
+                        .await
+                        .map_err(|_| {
+                            format!(
+                                "MCP tool call timed out after {}s",
+                                self.config.timeout_secs
+                            )
+                        })?
+                        .map_err(|e| format!("MCP tool call failed: {e}"))?;
 
                 // Extract text content from response
                 let texts: Vec<String> = result
@@ -614,11 +622,18 @@ impl McpConnection {
                     })
                     .collect();
 
-                if texts.is_empty() {
-                    Ok(serde_json::to_string(&result.content)
-                        .unwrap_or_else(|_| "No content".to_string()))
+                let output = if texts.is_empty() {
+                    serde_json::to_string(&result.content)
+                        .unwrap_or_else(|_| "No content".to_string())
                 } else {
-                    Ok(texts.join("\n"))
+                    texts.join("\n")
+                };
+
+                // Check if the server reported an error via is_error flag
+                if result.is_error == Some(true) {
+                    Err(output)
+                } else {
+                    Ok(output)
                 }
             }
 
