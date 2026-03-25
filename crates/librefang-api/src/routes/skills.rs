@@ -63,6 +63,10 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
             axum::routing::post(install_hand_deps),
         )
         .route(
+            "/hands/{hand_id}/secret",
+            axum::routing::post(set_hand_secret),
+        )
+        .route(
             "/hands/{hand_id}/settings",
             axum::routing::get(get_hand_settings).put(update_hand_settings),
         )
@@ -1767,6 +1771,82 @@ pub async fn deactivate_hand(
             Json(serde_json::json!({"error": format!("{e}")})),
         ),
     }
+}
+
+/// POST /api/hands/{hand_id}/secret — Set an environment variable (secret) for a hand requirement.
+#[utoipa::path(
+    post,
+    path = "/api/hands/{hand_id}/secret",
+    tag = "hands",
+    params(("hand_id" = String, Path, description = "Hand ID")),
+    request_body = serde_json::Value,
+    responses((status = 200, description = "Secret saved", body = serde_json::Value))
+)]
+pub async fn set_hand_secret(
+    State(state): State<Arc<AppState>>,
+    Path(hand_id): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let env_key = match body["key"].as_str() {
+        Some(k) if !k.trim().is_empty() => k.trim().to_string(),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Missing 'key' field (env var name)"})),
+            );
+        }
+    };
+    let value = match body["value"].as_str() {
+        Some(v) if !v.trim().is_empty() => v.trim().to_string(),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Missing or empty 'value' field"})),
+            );
+        }
+    };
+
+    // Verify this key belongs to a requirement of the specified hand
+    let valid = {
+        let defs = state.kernel.hands().list_definitions();
+        defs.iter()
+            .find(|d| d.id == hand_id)
+            .map(|def| {
+                def.requirements
+                    .iter()
+                    .any(|r| r.check_value == env_key || r.key == env_key)
+            })
+            .unwrap_or(false)
+    };
+
+    if !valid {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(
+                serde_json::json!({"error": format!("'{}' is not a requirement of hand '{}'", env_key, hand_id)}),
+            ),
+        );
+    }
+
+    // Write to secrets.env
+    let secrets_path = state.kernel.home_dir().join("secrets.env");
+    if let Err(e) = write_secret_env(&secrets_path, &env_key, &value) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("Failed to write secret: {e}")})),
+        );
+    }
+
+    // Set in current process
+    // SAFETY: single-threaded secret writes during user-initiated config
+    unsafe {
+        std::env::set_var(&env_key, &value);
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({"ok": true, "key": env_key})),
+    )
 }
 
 /// GET /api/hands/{hand_id}/settings — Get settings schema and current values for a hand.

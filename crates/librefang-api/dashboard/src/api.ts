@@ -1459,6 +1459,10 @@ export async function getHandSettings(handId: string): Promise<HandSettingsRespo
   return get<HandSettingsResponse>(`/api/hands/${encodeURIComponent(handId)}/settings`);
 }
 
+export async function setHandSecret(handId: string, key: string, value: string): Promise<{ ok: boolean }> {
+  return post<{ ok: boolean }>(`/api/hands/${encodeURIComponent(handId)}/secret`, { key, value });
+}
+
 export interface HandMessageResponse {
   response: string;
   input_tokens?: number;

@@ -14,6 +14,7 @@ import {
   resumeHand,
   getHandStats,
   getHandSettings,
+  setHandSecret,
   type HandDefinitionItem,
   type HandInstanceItem,
   type HandStatsResponse,
@@ -461,6 +462,65 @@ function HandDetailPanel({
 
 /* ── Detail tabs content ─────────────────────────────────── */
 
+function RequirementsForm({ handId, requirements }: { handId: string; requirements: HandDefinitionItem["requirements"] }) {
+  const { t } = useTranslation();
+  const queryClient = useQueryClient();
+  const addToast = useUIStore((s) => s.addToast);
+  const [values, setValues] = useState<Record<string, string>>({});
+  const [saving, setSaving] = useState<string | null>(null);
+
+  if (!requirements || requirements.length === 0) return null;
+
+  const handleSave = async (key: string) => {
+    const val = values[key]?.trim();
+    if (!val) return;
+    setSaving(key);
+    try {
+      await setHandSecret(handId, key, val);
+      setValues(prev => ({ ...prev, [key]: "" }));
+      addToast(t("common.success"), "success");
+      queryClient.invalidateQueries({ queryKey: ["hands"] });
+    } catch (e: unknown) {
+      addToast(e instanceof Error ? e.message : t("common.error"), "error");
+    } finally {
+      setSaving(null);
+    }
+  };
+
+  return (
+    <div className="space-y-2.5">
+      {requirements.map((r) => (
+        <div key={r.key}>
+          <div className="flex items-center gap-2 mb-1">
+            {r.satisfied ? <CheckCircle2 className="w-3.5 h-3.5 text-success shrink-0" /> : <XCircle className="w-3.5 h-3.5 text-error shrink-0" />}
+            <span className={`text-[11px] font-medium ${r.satisfied ? "text-text-dim" : "text-text"}`}>{r.label || r.key}</span>
+            {r.optional && <span className="text-[9px] text-text-dim/40">(optional)</span>}
+          </div>
+          {!r.satisfied && r.key && (
+            <div className="flex gap-1.5 ml-5">
+              <input
+                type="password"
+                placeholder={r.key}
+                value={values[r.key ?? ""] ?? ""}
+                onChange={(e) => setValues(prev => ({ ...prev, [r.key!]: e.target.value }))}
+                onKeyDown={(e) => { if (e.key === "Enter") handleSave(r.key!); }}
+                className="flex-1 px-2.5 py-1.5 rounded-lg border border-border-subtle bg-main text-[11px] font-mono outline-none focus:border-brand placeholder:text-text-dim/30"
+              />
+              <button
+                onClick={() => handleSave(r.key!)}
+                disabled={!values[r.key ?? ""]?.trim() || saving === r.key}
+                className="px-2.5 py-1.5 rounded-lg text-[11px] font-medium text-white bg-brand hover:bg-brand/90 transition-colors disabled:opacity-40"
+              >
+                {saving === r.key ? <Loader2 className="w-3 h-3 animate-spin" /> : t("common.save")}
+              </button>
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function DetailTabs({ hand, instance, isActive, settings, settingsQuery, stats, statsQuery }: {
   hand: HandDefinitionItem; instance: HandInstanceItem | undefined; isActive: boolean;
   settings: HandSettingsResponse; settingsQuery: any; stats: HandStatsResponse; statsQuery: any;
@@ -539,15 +599,7 @@ function DetailTabs({ hand, instance, isActive, settings, settingsQuery, stats, 
         )}
 
         {activeTab === "requirements" && hand.requirements && (
-          <div className="space-y-1">
-            {hand.requirements.map((r) => (
-              <div key={r.key} className="flex items-center gap-2 text-[11px]">
-                {r.satisfied ? <CheckCircle2 className="w-3.5 h-3.5 text-success shrink-0" /> : <XCircle className="w-3.5 h-3.5 text-error shrink-0" />}
-                <span className={r.satisfied ? "text-text-dim" : "text-error"}>{r.label || r.key}</span>
-                {r.optional && <span className="text-[9px] text-text-dim/40">(optional)</span>}
-              </div>
-            ))}
-          </div>
+          <RequirementsForm handId={hand.id} requirements={hand.requirements} />
         )}
 
         {activeTab === "tools" && hand.tools && (
