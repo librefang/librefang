@@ -9,8 +9,15 @@ use dashmap::DashMap;
 use librefang_types::agent::AgentId;
 use librefang_types::event::{Event, EventPayload, LifecycleEvent, SystemEvent};
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info};
+use std::time::{Duration, Instant};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
+
+/// Default cooldown duration after a trigger fires (in seconds).
+const DEFAULT_COOLDOWN_SECS: u64 = 5;
+
+/// Default maximum number of triggers that can fire from a single event.
+const DEFAULT_MAX_TRIGGERS_PER_EVENT: usize = 10;
 
 /// Unique identifier for a trigger.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -81,6 +88,11 @@ pub struct Trigger {
     /// Enables cross-session wake: one agent's trigger can wake a different agent.
     #[serde(default)]
     pub target_agent: Option<AgentId>,
+    /// Cooldown duration in seconds after this trigger fires before it can fire again.
+    /// `None` means use the default cooldown (`DEFAULT_COOLDOWN_SECS`).
+    /// Set to `Some(0)` to disable cooldown for this trigger.
+    #[serde(default)]
+    pub cooldown_secs: Option<u64>,
 }
 
 /// The trigger engine manages event-to-agent routing.
@@ -89,14 +101,30 @@ pub struct TriggerEngine {
     triggers: DashMap<TriggerId, Trigger>,
     /// Index: agent_id → list of trigger IDs belonging to that agent.
     agent_triggers: DashMap<AgentId, Vec<TriggerId>>,
+    /// Per-trigger last fire timestamp for cooldown enforcement.
+    last_fired: DashMap<TriggerId, Instant>,
+    /// Maximum number of triggers that can fire from a single event.
+    max_triggers_per_event: usize,
 }
 
 impl TriggerEngine {
-    /// Create a new trigger engine.
+    /// Create a new trigger engine with default settings.
     pub fn new() -> Self {
         Self {
             triggers: DashMap::new(),
             agent_triggers: DashMap::new(),
+            last_fired: DashMap::new(),
+            max_triggers_per_event: DEFAULT_MAX_TRIGGERS_PER_EVENT,
+        }
+    }
+
+    /// Create a new trigger engine with a custom per-event trigger budget.
+    pub fn with_max_triggers_per_event(max: usize) -> Self {
+        Self {
+            triggers: DashMap::new(),
+            agent_triggers: DashMap::new(),
+            last_fired: DashMap::new(),
+            max_triggers_per_event: max,
         }
     }
 
@@ -134,6 +162,7 @@ impl TriggerEngine {
             fire_count: 0,
             max_fires,
             target_agent,
+            cooldown_secs: None,
         };
         let id = trigger.id;
         self.triggers.insert(id, trigger);
@@ -161,6 +190,7 @@ impl TriggerEngine {
             if let Some(mut list) = self.agent_triggers.get_mut(&trigger.agent_id) {
                 list.retain(|id| *id != trigger_id);
             }
+            self.last_fired.remove(&trigger_id);
             true
         } else {
             false
@@ -172,6 +202,7 @@ impl TriggerEngine {
         if let Some((_, trigger_ids)) = self.agent_triggers.remove(&agent_id) {
             for id in trigger_ids {
                 self.triggers.remove(&id);
+                self.last_fired.remove(&id);
             }
         }
     }
@@ -191,6 +222,7 @@ impl TriggerEngine {
         let mut taken = Vec::with_capacity(trigger_ids.len());
         for id in trigger_ids {
             if let Some((_, t)) = self.triggers.remove(&id) {
+                self.last_fired.remove(&id);
                 taken.push(t);
             }
         }
@@ -225,6 +257,7 @@ impl TriggerEngine {
                 fire_count: old.fire_count,
                 max_fires: old.max_fires,
                 target_agent: old.target_agent,
+                cooldown_secs: old.cooldown_secs,
             };
             self.triggers.insert(new_id, trigger);
             self.agent_triggers
@@ -305,9 +338,17 @@ impl TriggerEngine {
 
     /// Evaluate an event against all triggers. Returns a list of
     /// (agent_id, message_to_send) pairs for matching triggers.
+    ///
+    /// Applies two layers of storm prevention:
+    /// 1. **Per-trigger cooldown** — after firing, a trigger is suppressed for
+    ///    `cooldown_secs` (default `DEFAULT_COOLDOWN_SECS`). Set `cooldown_secs = Some(0)`
+    ///    on a trigger to disable its cooldown.
+    /// 2. **Per-event budget** — at most `max_triggers_per_event` triggers may fire
+    ///    from a single event evaluation. Excess matches are dropped with a warning.
     pub fn evaluate(&self, event: &Event) -> Vec<(AgentId, String)> {
         let event_description = describe_event(event);
         let mut matches = Vec::new();
+        let now = Instant::now();
 
         for mut entry in self.triggers.iter_mut() {
             let trigger = entry.value_mut();
@@ -322,7 +363,32 @@ impl TriggerEngine {
                 continue;
             }
 
+            // Check per-trigger cooldown
+            let cooldown =
+                Duration::from_secs(trigger.cooldown_secs.unwrap_or(DEFAULT_COOLDOWN_SECS));
+            if !cooldown.is_zero() {
+                if let Some(last) = self.last_fired.get(&trigger.id) {
+                    if now.duration_since(*last) < cooldown {
+                        debug!(
+                            trigger_id = %trigger.id,
+                            "Trigger skipped (cooldown active)"
+                        );
+                        continue;
+                    }
+                }
+            }
+
             if matches_pattern(&trigger.pattern, event, &event_description) {
+                // Enforce per-event trigger budget
+                if matches.len() >= self.max_triggers_per_event {
+                    warn!(
+                        trigger_id = %trigger.id,
+                        budget = self.max_triggers_per_event,
+                        "Per-event trigger budget exhausted, skipping remaining matches"
+                    );
+                    break;
+                }
+
                 let message = trigger
                     .prompt_template
                     .replace("{{event}}", &event_description);
@@ -330,6 +396,7 @@ impl TriggerEngine {
                 let recipient = trigger.target_agent.unwrap_or(trigger.agent_id);
                 matches.push((recipient, message));
                 trigger.fire_count += 1;
+                self.last_fired.insert(trigger.id, now);
 
                 debug!(
                     trigger_id = %trigger.id,
@@ -583,12 +650,14 @@ mod tests {
     fn test_max_fires() {
         let engine = TriggerEngine::new();
         let agent_id = AgentId::new();
-        engine.register(
+        let tid = engine.register(
             agent_id,
             TriggerPattern::All,
             "Event: {{event}}".to_string(),
             2, // max 2 fires
         );
+        // Disable cooldown so we can fire rapidly in the test.
+        engine.triggers.get_mut(&tid).unwrap().cooldown_secs = Some(0);
 
         let event = Event::new(
             AgentId::new(),
@@ -891,6 +960,139 @@ mod tests {
             restored[0].target_agent,
             Some(target),
             "target_agent should survive take/restore"
+        );
+    }
+
+    // -- cooldown & per-event budget ----------------------------------------
+
+    #[test]
+    fn test_cooldown_suppresses_rapid_refire() {
+        let engine = TriggerEngine::new();
+        let agent_id = AgentId::new();
+        // Register trigger with default cooldown (5s)
+        engine.register(
+            agent_id,
+            TriggerPattern::All,
+            "Event: {{event}}".to_string(),
+            0,
+        );
+
+        let event = Event::new(
+            AgentId::new(),
+            EventTarget::Broadcast,
+            EventPayload::System(SystemEvent::HealthCheck {
+                status: "ok".to_string(),
+            }),
+        );
+
+        // First evaluation fires
+        assert_eq!(engine.evaluate(&event).len(), 1);
+        // Immediate second evaluation should be suppressed by cooldown
+        assert_eq!(engine.evaluate(&event).len(), 0);
+    }
+
+    #[test]
+    fn test_zero_cooldown_allows_rapid_refire() {
+        let engine = TriggerEngine::new();
+        let agent_id = AgentId::new();
+        let tid = engine.register(
+            agent_id,
+            TriggerPattern::All,
+            "Event: {{event}}".to_string(),
+            0,
+        );
+        // Explicitly disable cooldown
+        engine.triggers.get_mut(&tid).unwrap().cooldown_secs = Some(0);
+
+        let event = Event::new(
+            AgentId::new(),
+            EventTarget::Broadcast,
+            EventPayload::System(SystemEvent::HealthCheck {
+                status: "ok".to_string(),
+            }),
+        );
+
+        assert_eq!(engine.evaluate(&event).len(), 1);
+        assert_eq!(engine.evaluate(&event).len(), 1);
+        assert_eq!(engine.evaluate(&event).len(), 1);
+    }
+
+    #[test]
+    fn test_per_event_trigger_budget() {
+        // Create engine with a budget of 3 triggers per event
+        let engine = TriggerEngine::with_max_triggers_per_event(3);
+        let agents: Vec<AgentId> = (0..5).map(|_| AgentId::new()).collect();
+
+        // Register 5 triggers — all match All pattern
+        for agent_id in &agents {
+            let tid = engine.register(
+                *agent_id,
+                TriggerPattern::All,
+                "Event: {{event}}".to_string(),
+                0,
+            );
+            // Disable cooldown so all are eligible
+            engine.triggers.get_mut(&tid).unwrap().cooldown_secs = Some(0);
+        }
+
+        let event = Event::new(
+            AgentId::new(),
+            EventTarget::Broadcast,
+            EventPayload::System(SystemEvent::HealthCheck {
+                status: "ok".to_string(),
+            }),
+        );
+
+        // Only 3 should fire due to budget
+        let matches = engine.evaluate(&event);
+        assert_eq!(matches.len(), 3);
+    }
+
+    #[test]
+    fn test_cooldown_clears_on_remove() {
+        let engine = TriggerEngine::new();
+        let agent_id = AgentId::new();
+        let tid = engine.register(
+            agent_id,
+            TriggerPattern::All,
+            "Event: {{event}}".to_string(),
+            0,
+        );
+
+        let event = Event::new(
+            AgentId::new(),
+            EventTarget::Broadcast,
+            EventPayload::System(SystemEvent::HealthCheck {
+                status: "ok".to_string(),
+            }),
+        );
+
+        // Fire to create a last_fired entry
+        engine.evaluate(&event);
+        assert!(engine.last_fired.contains_key(&tid));
+
+        // Remove should clean up
+        engine.remove(tid);
+        assert!(!engine.last_fired.contains_key(&tid));
+    }
+
+    #[test]
+    fn test_restore_preserves_cooldown_secs() {
+        let engine = TriggerEngine::new();
+        let old_agent = AgentId::new();
+        let new_agent = AgentId::new();
+        let tid = engine.register(old_agent, TriggerPattern::All, "a".to_string(), 0);
+        engine.triggers.get_mut(&tid).unwrap().cooldown_secs = Some(30);
+
+        let taken = engine.take_agent_triggers(old_agent);
+        assert_eq!(taken[0].cooldown_secs, Some(30));
+
+        engine.restore_triggers(new_agent, taken);
+        let restored = engine.list_agent_triggers(new_agent);
+        assert_eq!(
+            restored[0].cooldown_secs,
+            Some(30),
+            "cooldown_secs should survive take/restore"
         );
     }
 }
