@@ -280,10 +280,10 @@ impl PromptStore {
         created_by: &str,
     ) -> LibreFangResult<bool> {
         let content_hash = {
-            use std::hash::{Hash, Hasher};
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            system_prompt.hash(&mut hasher);
-            format!("{:016x}", hasher.finish())
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(system_prompt.as_bytes());
+            format!("{:x}", hasher.finalize())
         };
 
         // Check if active version has the same hash
