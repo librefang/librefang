@@ -870,9 +870,9 @@ function Downloads(_props: SectionProps) {
                 { name: 'cargo install librefang', label: 'Rust' },
                 { name: 'go get .../librefang/sdk/go', label: 'Go' },
               ].map((pkg) => (
-                <div key={pkg.label} className="bg-surface-200 px-3 py-2.5">
+                <div key={pkg.label} className="bg-surface-200 px-3 py-2.5 overflow-hidden">
                   <div className="text-xs text-gray-500 mb-1">{pkg.label}</div>
-                  <code className="text-xs text-gray-700 dark:text-gray-300 font-mono">{pkg.name}</code>
+                  <code className="text-[11px] text-gray-700 dark:text-gray-300 font-mono break-all leading-relaxed">{pkg.name}</code>
                 </div>
               ))}
             </div>
