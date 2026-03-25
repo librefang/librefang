@@ -15,7 +15,9 @@ import {
   getHandStats,
   getHandDetail,
   getHandSettings,
+  listAgents,
   setHandSecret,
+  type AgentItem,
   type HandDefinitionItem,
   type HandInstanceItem,
   type HandStatsResponse,
@@ -457,22 +459,6 @@ function HandDetailPanel({
               <p className="text-[13px] text-text-dim leading-relaxed">{hand.description}</p>
             )}
 
-            {/* Agent info */}
-            {agent && (
-              <div className="rounded-xl border border-border-subtle bg-main/30 p-3 space-y-1.5">
-                <div className="flex items-center justify-between">
-                  <span className="text-[11px] font-semibold">{agent.name}</span>
-                  <div className="flex items-center gap-1.5">
-                    <Badge variant="info">{agent.provider}</Badge>
-                    <span className="text-[10px] font-mono text-text-dim/60">{agent.model}</span>
-                  </div>
-                </div>
-                {agent.description && (
-                  <p className="text-[10px] text-text-dim/60 leading-relaxed">{agent.description}</p>
-                )}
-              </div>
-            )}
-
             {/* Sections */}
             <DetailTabs key={hand.id} hand={hand} instance={instance} isActive={isActive} settings={settings} settingsQuery={settingsQuery} stats={stats} statsQuery={statsQuery} />
           </div>
@@ -563,8 +549,20 @@ function DetailTabs({ hand, instance, isActive, settings, settingsQuery, stats, 
   const hasMetrics = isActive && !statsQuery.isLoading && stats.metrics &&
     Object.entries(stats.metrics).some(([, m]) => m.value != null && String(m.value) !== "-" && String(m.value) !== "");
 
-  type Tab = "settings" | "requirements" | "tools" | "metrics";
+  // Fetch workspace agents belonging to this hand
+  const agentsQuery = useQuery({ queryKey: ["agents", "list", "hands"], queryFn: listAgents, staleTime: 30000 });
+  const handPrefix = (hand.name || hand.id).replace(/ Hand$/i, "").toLowerCase().replace(/\s+/g, "-");
+  const workspaceAgents = useMemo(() =>
+    (agentsQuery.data ?? []).filter(a => {
+      const n = a.name.toLowerCase();
+      return n.startsWith(handPrefix + ":") || n === handPrefix + "-hand";
+    }),
+    [agentsQuery.data, handPrefix]
+  );
+
+  type Tab = "agents" | "settings" | "requirements" | "tools" | "metrics";
   const tabs: { id: Tab; label: string; count?: number; show: boolean }[] = [
+    { id: "agents", label: t("nav.agents"), count: workspaceAgents.length, show: workspaceAgents.length > 0 },
     { id: "settings", label: t("hands.settings"), count: settings.settings?.length, show: true },
     { id: "requirements", label: t("hands.requirements"), count: hand.requirements?.length, show: !!(hand.requirements && hand.requirements.length > 0) },
     { id: "tools", label: t("hands.tools"), count: hand.tools?.length, show: !!(hand.tools && hand.tools.length > 0) },
@@ -601,6 +599,28 @@ function DetailTabs({ hand, instance, isActive, settings, settingsQuery, stats, 
                 <p className="text-sm font-bold text-brand">{String(m.value)}</p>
               </div>
             ))}
+          </div>
+        )}
+
+        {activeTab === "agents" && (
+          <div className="space-y-2">
+            {workspaceAgents.map((a) => {
+              const subName = a.name.includes(":") ? a.name.split(":")[1] : a.name;
+              return (
+                <div key={a.id} className="flex items-center gap-3 p-2.5 rounded-lg border border-border-subtle bg-main/30">
+                  <div className={`w-7 h-7 rounded-lg flex items-center justify-center text-[11px] font-bold ${
+                    (a.state || "").toLowerCase() === "running" ? "bg-success/10 text-success" : "bg-main text-text-dim/40"
+                  }`}>
+                    {subName.charAt(0).toUpperCase()}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-[11px] font-semibold truncate">{subName}</p>
+                    <p className="text-[10px] text-text-dim/50 truncate">{a.model_name}</p>
+                  </div>
+                  <Badge variant="info">{a.model_provider}</Badge>
+                </div>
+              );
+            })}
           </div>
         )}
 
