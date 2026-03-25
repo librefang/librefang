@@ -392,7 +392,7 @@ impl BrowserSession {
             if attempt > 0 {
                 tokio::time::sleep(Duration::from_millis(300)).await;
             }
-            let resp = match reqwest::get(list_url).await {
+            let resp = match crate::http_client::new_client().get(list_url).send().await {
                 Ok(r) => r,
                 Err(_) => continue,
             };

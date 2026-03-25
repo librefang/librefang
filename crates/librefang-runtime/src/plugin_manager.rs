@@ -259,8 +259,7 @@ async fn install_from_registry(
     let base_url = format!("https://api.github.com/repos/{github_repo}/contents/plugins");
     let listing_url = format!("{base_url}/{name}");
 
-    let client = reqwest::Client::builder()
-        .user_agent(crate::USER_AGENT)
+    let client = crate::http_client::client_builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|e| format!("HTTP client error: {e}"))?;
@@ -319,8 +318,7 @@ pub struct RegistryPluginEntry {
 pub async fn list_registry_plugins(github_repo: &str) -> Result<Vec<RegistryPluginEntry>, String> {
     validate_github_repo(github_repo)?;
     let url = format!("https://api.github.com/repos/{github_repo}/contents/plugins");
-    let client = reqwest::Client::builder()
-        .user_agent(crate::USER_AGENT)
+    let client = crate::http_client::client_builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
         .map_err(|e| format!("HTTP client error: {e}"))?;
