@@ -7,21 +7,9 @@ set -euo pipefail
 REPO="https://github.com/librefang/librefang.git"
 REGION="nrt"
 
-# --- 0. App naming ---
-echo ""
-read -rp "$(printf '\033[1;34m→\033[0m') App name (leave empty for auto-generated): " CUSTOM_NAME < /dev/tty
-if [ -n "$CUSTOM_NAME" ]; then
-  # Sanitize: lowercase, replace non-alphanumeric with dash, trim dashes
-  APP_NAME=$(echo "$CUSTOM_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g; s/--*/-/g; s/^-//; s/-$//')
-  if [ -z "$APP_NAME" ]; then
-    APP_NAME="librefang-$(openssl rand -hex 4)"
-  fi
-else
-  APP_NAME="librefang-$(openssl rand -hex 4)"
-fi
-
 info()  { printf "\033[1;34m→\033[0m %s\n" "$1"; }
 ok()    { printf "\033[1;32m✓\033[0m %s\n" "$1"; }
+warn()  { printf "\033[1;33m⚠\033[0m %s\n" "$1"; }
 err()   { printf "\033[1;31m✗\033[0m %s\n" "$1" >&2; exit 1; }
 
 # --- 1. Check / Install flyctl ---
@@ -45,9 +33,28 @@ info "Cloning LibreFang..."
 git clone --depth 1 "$REPO" "$TMPDIR/librefang"
 cd "$TMPDIR/librefang"
 
-# --- 4. Create app ---
-info "Creating Fly app: $APP_NAME (region: $REGION)..."
-flyctl apps create "$APP_NAME" --machines
+# --- 4. Name & create app ---
+while true; do
+  echo ""
+  read -rp "$(printf '\033[1;34m→\033[0m') App name (leave empty for auto-generated): " CUSTOM_NAME < /dev/tty
+  if [ -n "$CUSTOM_NAME" ]; then
+    APP_NAME=$(echo "$CUSTOM_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g; s/--*/-/g; s/^-//; s/-$//')
+    if [ -z "$APP_NAME" ]; then
+      warn "Invalid name. Please try again."
+      continue
+    fi
+  else
+    APP_NAME="librefang-$(openssl rand -hex 4)"
+  fi
+
+  info "Creating Fly app: $APP_NAME (region: $REGION)..."
+  if flyctl apps create "$APP_NAME" --machines 2>/dev/null; then
+    ok "App created: $APP_NAME"
+    break
+  else
+    warn "Name '$APP_NAME' is already taken. Please choose another name."
+  fi
+done
 
 # Update fly.toml with generated app name
 sed -i.bak "s/^app = .*/app = \"$APP_NAME\"/" deploy/fly/fly.toml && rm -f deploy/fly/fly.toml.bak
