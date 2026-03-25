@@ -25,6 +25,7 @@ use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 use crate::routes::AppState;
+use crate::types::ApiErrorResponse;
 
 type HmacSha256 = Hmac<Sha256>;
 

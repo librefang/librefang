@@ -37,11 +37,8 @@ pub struct ValidationError {
 
 impl IntoResponse for ValidationError {
     fn into_response(self) -> Response {
-        let body = serde_json::json!({
-            "error": self.message,
-            "type": "validation_error",
-        });
-        (self.status, Json(body)).into_response()
+        crate::types::ApiErrorResponse::with_code(self.status, self.message, "validation_error")
+            .into_response()
     }
 }
 

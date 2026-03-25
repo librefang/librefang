@@ -1,6 +1,7 @@
 //! Media generation API routes — image, TTS, video, and music generation.
 
 use super::AppState;
+use crate::types::ApiErrorResponse;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -33,8 +34,8 @@ const KNOWN_MEDIA_PROVIDERS: &[&str] = &["openai", "gemini", "elevenlabs", "mini
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
-/// Convert a `MediaError` to an HTTP status code + JSON body.
-fn media_error_response(err: MediaError) -> (StatusCode, Json<serde_json::Value>) {
+/// Convert a `MediaError` into a standardized [`ApiErrorResponse`].
+fn media_error_response(err: MediaError) -> ApiErrorResponse {
     let (status, code) = match &err {
         MediaError::NotSupported(_) => (StatusCode::BAD_REQUEST, "not_supported"),
         MediaError::MissingKey(_) => (StatusCode::UNPROCESSABLE_ENTITY, "missing_key"),
@@ -49,13 +50,7 @@ fn media_error_response(err: MediaError) -> (StatusCode, Json<serde_json::Value>
         MediaError::TaskNotFound(_) => (StatusCode::NOT_FOUND, "task_not_found"),
         MediaError::Other(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
     };
-    (
-        status,
-        Json(serde_json::json!({
-            "error": err.to_string(),
-            "code": code,
-        })),
-    )
+    ApiErrorResponse::with_code(status, err.to_string(), code)
 }
 
 /// Resolve a media driver from the request-level provider hint or auto-detect.
@@ -104,11 +99,7 @@ pub async fn generate_image(
 ) -> impl IntoResponse {
     // Validate request
     if let Err(e) = body.validate() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": e})),
-        )
-            .into_response();
+        return ApiErrorResponse::bad_request(e).into_response();
     }
 
     // Resolve driver
@@ -177,11 +168,7 @@ pub async fn synthesize_speech(
     Json(body): Json<MediaTtsRequest>,
 ) -> impl IntoResponse {
     if let Err(e) = body.validate() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": e})),
-        )
-            .into_response();
+        return ApiErrorResponse::bad_request(e).into_response();
     }
 
     let driver = match resolve_driver(
@@ -220,11 +207,7 @@ pub async fn synthesize_speech(
             "sample_rate": result.sample_rate,
         }))
         .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("Failed to save audio: {e}")})),
-        )
-            .into_response(),
+        Err(e) => ApiErrorResponse::internal(format!("Failed to save audio: {e}")).into_response(),
     }
 }
 
@@ -236,11 +219,7 @@ pub async fn submit_video(
     Json(body): Json<MediaVideoRequest>,
 ) -> impl IntoResponse {
     if let Err(e) = body.validate() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": e})),
-        )
-            .into_response();
+        return ApiErrorResponse::bad_request(e).into_response();
     }
 
     let driver = match resolve_driver(
@@ -281,10 +260,7 @@ pub async fn poll_video_task(
     let provider = match params.get("provider") {
         Some(p) => p.clone(),
         None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Missing required query parameter: provider"})),
-            )
+            return ApiErrorResponse::bad_request("Missing required query parameter: provider")
                 .into_response();
         }
     };
@@ -337,11 +313,7 @@ pub async fn generate_music(
     Json(body): Json<MediaMusicRequest>,
 ) -> impl IntoResponse {
     if let Err(e) = body.validate() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": e})),
-        )
-            .into_response();
+        return ApiErrorResponse::bad_request(e).into_response();
     }
 
     let driver = match resolve_driver(
@@ -378,11 +350,7 @@ pub async fn generate_music(
             "sample_rate": result.sample_rate,
         }))
         .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("Failed to save audio: {e}")})),
-        )
-            .into_response(),
+        Err(e) => ApiErrorResponse::internal(format!("Failed to save audio: {e}")).into_response(),
     }
 }
 

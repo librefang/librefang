@@ -1,6 +1,174 @@
 //! Request/response types for the LibreFang API.
 
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use axum::Json;
 use serde::{Deserialize, Serialize};
+
+// ---------------------------------------------------------------------------
+// Standardized API error response envelope
+// ---------------------------------------------------------------------------
+
+/// Standardized error response returned by all API endpoints.
+///
+/// The JSON envelope always contains `error` (human-readable message).
+/// Optional fields `code` and `type` carry the same machine-readable tag
+/// (kept in sync for backward compatibility — old clients may parse either).
+/// `details` carries additional structured context when available.
+///
+/// # Examples
+///
+/// Minimal:
+/// ```json
+/// {"error": "Agent not found"}
+/// ```
+///
+/// With code/type:
+/// ```json
+/// {"error": "Missing API key", "code": "missing_key", "type": "missing_key"}
+/// ```
+///
+/// With details:
+/// ```json
+/// {"error": "Validation failed", "code": "validation_error", "type": "validation_error",
+///  "details": {"field": "name", "max_length": 256}}
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ApiErrorResponse {
+    /// Human-readable error message.
+    pub error: String,
+
+    /// Machine-readable error code (e.g. `"not_found"`, `"validation_error"`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+
+    /// Backward-compatible alias for `code`. Always kept in sync with `code`.
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub error_type: Option<String>,
+
+    /// Optional structured details (e.g. field-level validation info).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<serde_json::Value>,
+
+    /// HTTP status code (not serialized — used only for the response status line).
+    #[serde(skip)]
+    #[schema(ignore)]
+    pub status: StatusCode,
+}
+
+impl ApiErrorResponse {
+    /// Create an error response with only a message and HTTP status.
+    pub fn new(status: StatusCode, error: impl Into<String>) -> Self {
+        Self {
+            error: error.into(),
+            code: None,
+            error_type: None,
+            details: None,
+            status,
+        }
+    }
+
+    /// Create an error response with a machine-readable code.
+    ///
+    /// The `code` value is duplicated into `type` for backward compatibility.
+    pub fn with_code(
+        status: StatusCode,
+        error: impl Into<String>,
+        code: impl Into<String>,
+    ) -> Self {
+        let code_str = code.into();
+        Self {
+            error: error.into(),
+            code: Some(code_str.clone()),
+            error_type: Some(code_str),
+            details: None,
+            status,
+        }
+    }
+
+    /// Attach structured details to the error response.
+    pub fn with_details(mut self, details: serde_json::Value) -> Self {
+        self.details = Some(details);
+        self
+    }
+
+    // -- Convenience constructors for common HTTP status codes --
+
+    /// 400 Bad Request.
+    pub fn bad_request(error: impl Into<String>) -> Self {
+        Self::with_code(StatusCode::BAD_REQUEST, error, "bad_request")
+    }
+
+    /// 401 Unauthorized.
+    pub fn unauthorized(error: impl Into<String>) -> Self {
+        Self::with_code(StatusCode::UNAUTHORIZED, error, "unauthorized")
+    }
+
+    /// 404 Not Found.
+    pub fn not_found(error: impl Into<String>) -> Self {
+        Self::with_code(StatusCode::NOT_FOUND, error, "not_found")
+    }
+
+    /// 409 Conflict.
+    pub fn conflict(error: impl Into<String>) -> Self {
+        Self::with_code(StatusCode::CONFLICT, error, "conflict")
+    }
+
+    /// 422 Unprocessable Entity.
+    pub fn unprocessable(error: impl Into<String>) -> Self {
+        Self::with_code(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            error,
+            "unprocessable_entity",
+        )
+    }
+
+    /// 429 Too Many Requests.
+    pub fn too_many_requests(error: impl Into<String>) -> Self {
+        Self::with_code(StatusCode::TOO_MANY_REQUESTS, error, "rate_limited")
+    }
+
+    /// 500 Internal Server Error.
+    pub fn internal(error: impl Into<String>) -> Self {
+        Self::with_code(StatusCode::INTERNAL_SERVER_ERROR, error, "internal_error")
+    }
+
+    /// 502 Bad Gateway.
+    pub fn bad_gateway(error: impl Into<String>) -> Self {
+        Self::with_code(StatusCode::BAD_GATEWAY, error, "bad_gateway")
+    }
+
+    /// 503 Service Unavailable.
+    pub fn service_unavailable(error: impl Into<String>) -> Self {
+        Self::with_code(
+            StatusCode::SERVICE_UNAVAILABLE,
+            error,
+            "service_unavailable",
+        )
+    }
+
+    /// Convert to a `(StatusCode, Json<Value>)` tuple for use in handlers
+    /// that mix error and success responses with the same return type.
+    pub fn to_json_tuple(self) -> (StatusCode, Json<serde_json::Value>) {
+        let status = self.status;
+        (
+            status,
+            Json(serde_json::to_value(&self).unwrap_or_default()),
+        )
+    }
+}
+
+impl IntoResponse for ApiErrorResponse {
+    fn into_response(self) -> Response {
+        (self.status, Json(self)).into_response()
+    }
+}
+
+impl std::fmt::Display for ApiErrorResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.error)
+    }
+}
 
 /// Request to spawn an agent from a TOML manifest string or a template name.
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -479,5 +647,114 @@ mod tests {
         assert_eq!(json["total"], 3);
         assert_eq!(json["offset"], 0);
         assert!(json["limit"].is_null());
+    }
+
+    // ── ApiErrorResponse tests ────────────────────────────────────
+
+    #[test]
+    fn api_error_minimal_serialization() {
+        let err = ApiErrorResponse::new(StatusCode::BAD_REQUEST, "something went wrong");
+        let json = serde_json::to_value(&err).unwrap();
+        assert_eq!(json["error"], "something went wrong");
+        // code and type should be absent when not set
+        assert!(json.get("code").is_none());
+        assert!(json.get("type").is_none());
+        assert!(json.get("details").is_none());
+    }
+
+    #[test]
+    fn api_error_with_code_has_both_code_and_type() {
+        let err =
+            ApiErrorResponse::with_code(StatusCode::NOT_FOUND, "Agent not found", "not_found");
+        let json = serde_json::to_value(&err).unwrap();
+        assert_eq!(json["error"], "Agent not found");
+        assert_eq!(json["code"], "not_found");
+        assert_eq!(json["type"], "not_found");
+        // status field should not appear in JSON
+        assert!(json.get("status").is_none());
+    }
+
+    #[test]
+    fn api_error_with_details() {
+        let err = ApiErrorResponse::bad_request("Validation failed")
+            .with_details(serde_json::json!({"field": "name", "max_length": 256}));
+        let json = serde_json::to_value(&err).unwrap();
+        assert_eq!(json["error"], "Validation failed");
+        assert_eq!(json["code"], "bad_request");
+        assert_eq!(json["type"], "bad_request");
+        assert_eq!(json["details"]["field"], "name");
+        assert_eq!(json["details"]["max_length"], 256);
+    }
+
+    #[test]
+    fn api_error_convenience_constructors() {
+        assert_eq!(
+            ApiErrorResponse::bad_request("x").status,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            ApiErrorResponse::unauthorized("x").status,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            ApiErrorResponse::not_found("x").status,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(ApiErrorResponse::conflict("x").status, StatusCode::CONFLICT);
+        assert_eq!(
+            ApiErrorResponse::unprocessable("x").status,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(
+            ApiErrorResponse::too_many_requests("x").status,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_eq!(
+            ApiErrorResponse::internal("x").status,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(
+            ApiErrorResponse::bad_gateway("x").status,
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(
+            ApiErrorResponse::service_unavailable("x").status,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    #[test]
+    fn api_error_code_type_backward_compat() {
+        // Old clients parsing "type" still get the same value as "code"
+        let err = ApiErrorResponse::not_found("gone");
+        let json = serde_json::to_value(&err).unwrap();
+        assert_eq!(json["code"], json["type"]);
+    }
+
+    #[test]
+    fn api_error_deserialization() {
+        // Clients should be able to deserialize the envelope
+        let json_str = r#"{"error":"bad","code":"bad_request","type":"bad_request"}"#;
+        let err: ApiErrorResponse = serde_json::from_str(json_str).unwrap();
+        assert_eq!(err.error, "bad");
+        assert_eq!(err.code.as_deref(), Some("bad_request"));
+        assert_eq!(err.error_type.as_deref(), Some("bad_request"));
+    }
+
+    #[test]
+    fn api_error_deserialization_minimal() {
+        // Minimal envelope with only "error" field
+        let json_str = r#"{"error":"oops"}"#;
+        let err: ApiErrorResponse = serde_json::from_str(json_str).unwrap();
+        assert_eq!(err.error, "oops");
+        assert!(err.code.is_none());
+        assert!(err.error_type.is_none());
+        assert!(err.details.is_none());
+    }
+
+    #[test]
+    fn api_error_display() {
+        let err = ApiErrorResponse::bad_request("test message");
+        assert_eq!(format!("{err}"), "test message");
     }
 }

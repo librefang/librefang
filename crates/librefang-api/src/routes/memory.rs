@@ -78,6 +78,7 @@ pub fn router() -> axum::Router<Arc<AppState>> {
             axum::routing::post(memory_import_agent),
         )
 }
+use crate::types::ApiErrorResponse;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -134,10 +135,7 @@ fn get_pm_store(
         .proactive_memory_store()
         .cloned()
         .ok_or_else(|| {
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({"error": "Proactive memory is not enabled"})),
-            )
+            ApiErrorResponse::service_unavailable("Proactive memory is not enabled").to_json_tuple()
         })
 }
 
@@ -148,10 +146,7 @@ fn default_user_id() -> String {
 /// Log the full error server-side but return a generic message to the client.
 fn internal_error(e: impl std::fmt::Display) -> (StatusCode, Json<serde_json::Value>) {
     tracing::error!("Memory operation failed: {e}");
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(serde_json::json!({"error": "Internal server error"})),
-    )
+    ApiErrorResponse::internal("Internal server error").to_json_tuple()
 }
 
 // ---------------------------------------------------------------------------
@@ -329,7 +324,10 @@ pub async fn memory_update(
     if body.content.trim().is_empty() {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Content must not be empty"})),
+            Json(
+                serde_json::to_value(&ApiErrorResponse::bad_request("Content must not be empty"))
+                    .unwrap_or_default(),
+            ),
         );
     }
 
@@ -339,7 +337,10 @@ pub async fn memory_update(
         Ok(None) => {
             return (
                 StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "Memory not found"})),
+                Json(
+                    serde_json::to_value(&ApiErrorResponse::not_found("Memory not found"))
+                        .unwrap_or_default(),
+                ),
             );
         }
         Err(e) => {
@@ -357,7 +358,10 @@ pub async fn memory_update(
         ),
         Ok(false) => (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Memory not found"})),
+            Json(
+                serde_json::to_value(&ApiErrorResponse::not_found("Memory not found"))
+                    .unwrap_or_default(),
+            ),
         ),
         Err(e) => internal_error(e),
     }
@@ -390,7 +394,10 @@ pub async fn memory_delete(
         Ok(None) => {
             return (
                 StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "Memory not found"})),
+                Json(
+                    serde_json::to_value(&ApiErrorResponse::not_found("Memory not found"))
+                        .unwrap_or_default(),
+                ),
             );
         }
         Err(e) => {
@@ -405,7 +412,10 @@ pub async fn memory_delete(
         ),
         Ok(false) => (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Memory not found"})),
+            Json(
+                serde_json::to_value(&ApiErrorResponse::not_found("Memory not found"))
+                    .unwrap_or_default(),
+            ),
         ),
         Err(e) => internal_error(e),
     }
@@ -440,7 +450,10 @@ pub async fn memory_bulk_delete(
         None => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "missing 'ids' array"})),
+                Json(
+                    serde_json::to_value(&ApiErrorResponse::bad_request("missing 'ids' array"))
+                        .unwrap_or_default(),
+                ),
             );
         }
     };
@@ -556,15 +569,11 @@ pub async fn memory_clear_level(
             librefang_types::memory::MemoryLevel::from(level_str.as_str())
         }
         _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "error": format!(
-                        "Invalid memory level '{}'. Must be one of: user, session, agent",
-                        level_str
-                    )
-                })),
-            );
+            return ApiErrorResponse::bad_request(format!(
+                "Invalid memory level '{}'. Must be one of: user, session, agent",
+                level_str
+            ))
+            .to_json_tuple();
         }
     };
 
@@ -1141,7 +1150,12 @@ pub async fn memory_config_patch(
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": format!("Failed to read config: {e}")})),
+                Json(
+                    serde_json::to_value(&ApiErrorResponse::internal(format!(
+                        "Failed to read config: {e}"
+                    )))
+                    .unwrap_or_default(),
+                ),
             );
         }
     };
@@ -1150,7 +1164,12 @@ pub async fn memory_config_patch(
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": format!("Failed to parse config: {e}")})),
+                Json(
+                    serde_json::to_value(&ApiErrorResponse::internal(format!(
+                        "Failed to parse config: {e}"
+                    )))
+                    .unwrap_or_default(),
+                ),
             );
         }
     };
@@ -1213,7 +1232,12 @@ pub async fn memory_config_patch(
     if let Err(e) = std::fs::write(&config_path, &new_content) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("Failed to write config: {e}")})),
+            Json(
+                serde_json::to_value(&ApiErrorResponse::internal(format!(
+                    "Failed to write config: {e}"
+                )))
+                .unwrap_or_default(),
+            ),
         );
     }
 

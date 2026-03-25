@@ -51,6 +51,7 @@ pub fn protocol_router() -> axum::Router<std::sync::Arc<AppState>> {
             axum::routing::post(a2a_cancel_task),
         )
 }
+use crate::types::ApiErrorResponse;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -123,7 +124,12 @@ pub async fn get_peer(
         None => {
             return (
                 StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "Peer networking is not enabled"})),
+                Json(
+                    serde_json::to_value(&ApiErrorResponse::not_found(
+                        "Peer networking is not enabled",
+                    ))
+                    .unwrap_or_default(),
+                ),
             );
         }
     };
@@ -146,7 +152,10 @@ pub async fn get_peer(
         ),
         None => (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Peer not found"})),
+            Json(
+                serde_json::to_value(&ApiErrorResponse::not_found("Peer not found"))
+                    .unwrap_or_default(),
+            ),
         ),
     }
 }
@@ -304,7 +313,10 @@ pub async fn a2a_send_task(
     if agents.is_empty() {
         return (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "No agents available"})),
+            Json(
+                serde_json::to_value(&ApiErrorResponse::not_found("No agents available"))
+                    .unwrap_or_default(),
+            ),
         );
     }
 
@@ -347,7 +359,12 @@ pub async fn a2a_send_task(
                 ),
                 None => (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({"error": "Task disappeared after completion"})),
+                    Json(
+                        serde_json::to_value(&ApiErrorResponse::internal(
+                            "Task disappeared after completion",
+                        ))
+                        .unwrap_or_default(),
+                    ),
                 ),
             }
         }
@@ -366,7 +383,12 @@ pub async fn a2a_send_task(
                 ),
                 None => (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({"error": format!("Agent error: {e}")})),
+                    Json(
+                        serde_json::to_value(&ApiErrorResponse::internal(format!(
+                            "Agent error: {e}"
+                        )))
+                        .unwrap_or_default(),
+                    ),
                 ),
             }
         }
@@ -396,7 +418,13 @@ pub async fn a2a_get_task(
         ),
         None => (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": format!("Task '{}' not found", task_id)})),
+            Json(
+                serde_json::to_value(&ApiErrorResponse::not_found(format!(
+                    "Task '{}' not found",
+                    task_id
+                )))
+                .unwrap_or_default(),
+            ),
         ),
     }
 }
@@ -425,13 +453,24 @@ pub async fn a2a_cancel_task(
             ),
             None => (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": "Task disappeared after cancellation"})),
+                Json(
+                    serde_json::to_value(&ApiErrorResponse::internal(
+                        "Task disappeared after cancellation",
+                    ))
+                    .unwrap_or_default(),
+                ),
             ),
         }
     } else {
         (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": format!("Task '{}' not found", task_id)})),
+            Json(
+                serde_json::to_value(&ApiErrorResponse::not_found(format!(
+                    "Task '{}' not found",
+                    task_id
+                )))
+                .unwrap_or_default(),
+            ),
         )
     }
 }
@@ -586,7 +625,13 @@ pub async fn a2a_get_external_agent(
 
     (
         StatusCode::NOT_FOUND,
-        Json(serde_json::json!({"error": format!("A2A agent '{}' not found", id)})),
+        Json(
+            serde_json::to_value(&ApiErrorResponse::not_found(format!(
+                "A2A agent '{}' not found",
+                id
+            )))
+            .unwrap_or_default(),
+        ),
     )
 }
 
@@ -609,7 +654,10 @@ pub async fn a2a_discover_external(
         None => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Missing 'url' field"})),
+                Json(
+                    serde_json::to_value(&ApiErrorResponse::bad_request("Missing 'url' field"))
+                        .unwrap_or_default(),
+                ),
             )
         }
     };
@@ -618,7 +666,7 @@ pub async fn a2a_discover_external(
     if let Err(reason) = is_url_safe_for_ssrf(&url) {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": reason})),
+            Json(serde_json::to_value(&ApiErrorResponse::bad_request(reason)).unwrap_or_default()),
         );
     }
 
@@ -648,10 +696,7 @@ pub async fn a2a_discover_external(
                 })),
             )
         }
-        Err(e) => (
-            StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({"error": e})),
-        ),
+        Err(e) => ApiErrorResponse::bad_gateway(e).to_json_tuple(),
     }
 }
 
@@ -674,7 +719,10 @@ pub async fn a2a_send_external(
         None => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Missing 'url' field"})),
+                Json(
+                    serde_json::to_value(&ApiErrorResponse::bad_request("Missing 'url' field"))
+                        .unwrap_or_default(),
+                ),
             )
         }
     };
@@ -683,7 +731,10 @@ pub async fn a2a_send_external(
         None => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Missing 'message' field"})),
+                Json(
+                    serde_json::to_value(&ApiErrorResponse::bad_request("Missing 'message' field"))
+                        .unwrap_or_default(),
+                ),
             )
         }
     };
@@ -695,10 +746,7 @@ pub async fn a2a_send_external(
             StatusCode::OK,
             Json(serde_json::to_value(&task).unwrap_or_default()),
         ),
-        Err(e) => (
-            StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({"error": e})),
-        ),
+        Err(e) => ApiErrorResponse::bad_gateway(e).to_json_tuple(),
     }
 }
 
@@ -725,7 +773,12 @@ pub async fn a2a_external_task_status(
         None => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Missing 'url' query parameter"})),
+                Json(
+                    serde_json::to_value(&ApiErrorResponse::bad_request(
+                        "Missing 'url' query parameter",
+                    ))
+                    .unwrap_or_default(),
+                ),
             )
         }
     };
@@ -736,10 +789,7 @@ pub async fn a2a_external_task_status(
             StatusCode::OK,
             Json(serde_json::to_value(&task).unwrap_or_default()),
         ),
-        Err(e) => (
-            StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({"error": e})),
-        ),
+        Err(e) => ApiErrorResponse::bad_gateway(e).to_json_tuple(),
     }
 }
 
@@ -1218,14 +1268,20 @@ pub async fn comms_send(
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid from_agent_id"})),
+                Json(
+                    serde_json::to_value(&ApiErrorResponse::bad_request("Invalid from_agent_id"))
+                        .unwrap_or_default(),
+                ),
             )
         }
     };
     if state.kernel.agent_registry().get(from_id).is_none() {
         return (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Source agent not found"})),
+            Json(
+                serde_json::to_value(&ApiErrorResponse::not_found("Source agent not found"))
+                    .unwrap_or_default(),
+            ),
         );
     }
 
@@ -1235,14 +1291,20 @@ pub async fn comms_send(
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid to_agent_id"})),
+                Json(
+                    serde_json::to_value(&ApiErrorResponse::bad_request("Invalid to_agent_id"))
+                        .unwrap_or_default(),
+                ),
             )
         }
     };
     if state.kernel.agent_registry().get(to_id).is_none() {
         return (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Target agent not found"})),
+            Json(
+                serde_json::to_value(&ApiErrorResponse::not_found("Target agent not found"))
+                    .unwrap_or_default(),
+            ),
         );
     }
 
@@ -1250,7 +1312,12 @@ pub async fn comms_send(
     if req.message.len() > 64 * 1024 {
         return (
             StatusCode::PAYLOAD_TOO_LARGE,
-            Json(serde_json::json!({"error": "Message too large (max 64KB)"})),
+            Json(
+                serde_json::to_value(&ApiErrorResponse::bad_request(
+                    "Message too large (max 64KB)",
+                ))
+                .unwrap_or_default(),
+            ),
         );
     }
 
@@ -1291,7 +1358,12 @@ pub async fn comms_send(
         }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("Message delivery failed: {e}")})),
+            Json(
+                serde_json::to_value(&ApiErrorResponse::internal(format!(
+                    "Message delivery failed: {e}"
+                )))
+                .unwrap_or_default(),
+            ),
         ),
     }
 }
@@ -1313,7 +1385,10 @@ pub async fn comms_task(
     if req.title.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Title is required"})),
+            Json(
+                serde_json::to_value(&ApiErrorResponse::bad_request("Title is required"))
+                    .unwrap_or_default(),
+            ),
         );
     }
 
@@ -1337,7 +1412,12 @@ pub async fn comms_task(
         ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("Failed to post task: {e}")})),
+            Json(
+                serde_json::to_value(&ApiErrorResponse::internal(format!(
+                    "Failed to post task: {e}"
+                )))
+                .unwrap_or_default(),
+            ),
         ),
     }
 }

@@ -48,6 +48,7 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
 use super::network::remove_toml_section;
 use super::skills::{remove_secret_env, write_secret_env};
 use super::AppState;
+use crate::types::ApiErrorResponse;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -191,13 +192,23 @@ pub async fn create_alias(
     if alias.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Missing required field: alias"})),
+            Json(
+                serde_json::to_value(&ApiErrorResponse::bad_request(
+                    "Missing required field: alias",
+                ))
+                .unwrap_or_default(),
+            ),
         );
     }
     if model_id.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Missing required field: model_id"})),
+            Json(
+                serde_json::to_value(&ApiErrorResponse::bad_request(
+                    "Missing required field: model_id",
+                ))
+                .unwrap_or_default(),
+            ),
         );
     }
 
@@ -210,7 +221,13 @@ pub async fn create_alias(
     if !catalog.add_alias(&alias, &model_id) {
         return (
             StatusCode::CONFLICT,
-            Json(serde_json::json!({"error": format!("Alias '{}' already exists", alias)})),
+            Json(
+                serde_json::to_value(&ApiErrorResponse::conflict(format!(
+                    "Alias '{}' already exists",
+                    alias
+                )))
+                .unwrap_or_default(),
+            ),
         );
     }
 
@@ -239,7 +256,13 @@ pub async fn delete_alias(
     if !catalog.remove_alias(&alias) {
         return (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": format!("Alias '{}' not found", alias)})),
+            Json(
+                serde_json::to_value(&ApiErrorResponse::not_found(format!(
+                    "Alias '{}' not found",
+                    alias
+                )))
+                .unwrap_or_default(),
+            ),
         );
     }
 
@@ -286,7 +309,13 @@ pub async fn get_model(
         }
         None => (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": format!("Model '{}' not found", id)})),
+            Json(
+                serde_json::to_value(&ApiErrorResponse::not_found(format!(
+                    "Model '{}' not found",
+                    id
+                )))
+                .unwrap_or_default(),
+            ),
         ),
     }
 }
@@ -473,7 +502,13 @@ pub async fn get_provider(
             None => {
                 return (
                     StatusCode::NOT_FOUND,
-                    Json(serde_json::json!({"error": format!("Provider '{}' not found", name)})),
+                    Json(
+                        serde_json::to_value(&ApiErrorResponse::not_found(format!(
+                            "Provider '{}' not found",
+                            name
+                        )))
+                        .unwrap_or_default(),
+                    ),
                 );
             }
         }
@@ -546,7 +581,10 @@ pub async fn add_custom_model(
     if id.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Missing required field: id"})),
+            Json(
+                serde_json::to_value(&ApiErrorResponse::bad_request("Missing required field: id"))
+                    .unwrap_or_default(),
+            ),
         );
     }
 
@@ -632,7 +670,13 @@ pub async fn remove_custom_model(
     if !catalog.remove_custom_model(&model_id) {
         return (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": format!("Custom model '{}' not found", model_id)})),
+            Json(
+                serde_json::to_value(&ApiErrorResponse::not_found(format!(
+                    "Custom model '{}' not found",
+                    model_id
+                )))
+                .unwrap_or_default(),
+            ),
         );
     }
 
@@ -660,7 +704,12 @@ pub async fn set_provider_key(
         _ => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Missing or empty 'key' field"})),
+                Json(
+                    serde_json::to_value(&ApiErrorResponse::bad_request(
+                        "Missing or empty 'key' field",
+                    ))
+                    .unwrap_or_default(),
+                ),
             );
         }
     };
@@ -687,7 +736,12 @@ pub async fn set_provider_key(
     if let Err(e) = write_secret_env(&secrets_path, &env_var, &key) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("Failed to write secrets.env: {e}")})),
+            Json(
+                serde_json::to_value(&ApiErrorResponse::internal(format!(
+                    "Failed to write secrets.env: {e}"
+                )))
+                .unwrap_or_default(),
+            ),
         );
     }
 
@@ -860,7 +914,12 @@ pub async fn delete_provider_key(
     if env_var.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Provider does not require an API key"})),
+            Json(
+                serde_json::to_value(&ApiErrorResponse::bad_request(
+                    "Provider does not require an API key",
+                ))
+                .unwrap_or_default(),
+            ),
         );
     }
 

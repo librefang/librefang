@@ -34,6 +34,7 @@ use super::skills::{
     write_secret_env,
 };
 use super::AppState;
+use crate::types::ApiErrorResponse;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -1137,7 +1138,12 @@ pub async fn get_channel(
         None => {
             return (
                 StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": format!("Unknown channel: {name}")})),
+                Json(
+                    serde_json::to_value(&ApiErrorResponse::not_found(format!(
+                        "Unknown channel: {name}"
+                    )))
+                    .unwrap_or_default(),
+                ),
             )
         }
     };
@@ -1208,7 +1214,10 @@ pub async fn configure_channel(
         None => {
             return (
                 StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "Unknown channel"})),
+                Json(
+                    serde_json::to_value(&ApiErrorResponse::not_found("Unknown channel"))
+                        .unwrap_or_default(),
+                ),
             )
         }
     };
@@ -1218,7 +1227,10 @@ pub async fn configure_channel(
         None => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Missing 'fields' object"})),
+                Json(
+                    serde_json::to_value(&ApiErrorResponse::bad_request("Missing 'fields' object"))
+                        .unwrap_or_default(),
+                ),
             )
         }
     };
@@ -1242,14 +1254,22 @@ pub async fn configure_channel(
             if let Err(msg) = validate_env_var(env_var, value) {
                 return (
                     StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({"error": msg})),
+                    Json(
+                        serde_json::to_value(&ApiErrorResponse::bad_request(msg))
+                            .unwrap_or_default(),
+                    ),
                 );
             }
             // Secret field — write to secrets.env and set in process
             if let Err(e) = write_secret_env(&secrets_path, env_var, value) {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({"error": format!("Failed to write secret: {e}")})),
+                    Json(
+                        serde_json::to_value(&ApiErrorResponse::internal(format!(
+                            "Failed to write secret: {e}"
+                        )))
+                        .unwrap_or_default(),
+                    ),
                 );
             }
             // SAFETY: We are the only writer; this is a single-threaded config operation
@@ -1275,7 +1295,12 @@ pub async fn configure_channel(
     if let Err(e) = upsert_channel_config(&config_path, &name, &config_fields) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("Failed to write config: {e}")})),
+            Json(
+                serde_json::to_value(&ApiErrorResponse::internal(format!(
+                    "Failed to write config: {e}"
+                )))
+                .unwrap_or_default(),
+            ),
         );
     }
 
@@ -1335,7 +1360,10 @@ pub async fn remove_channel(
         None => {
             return (
                 StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "Unknown channel"})),
+                Json(
+                    serde_json::to_value(&ApiErrorResponse::not_found("Unknown channel"))
+                        .unwrap_or_default(),
+                ),
             )
         }
     };
@@ -1361,7 +1389,12 @@ pub async fn remove_channel(
     if let Err(e) = remove_channel_config(&config_path, &name) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("Failed to remove config: {e}")})),
+            Json(
+                serde_json::to_value(&ApiErrorResponse::internal(format!(
+                    "Failed to remove config: {e}"
+                )))
+                .unwrap_or_default(),
+            ),
         );
     }
 
