@@ -45,6 +45,7 @@ use axum::Json;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::types::ApiErrorResponse;
 // ---------------------------------------------------------------------------
 // Channel status endpoints — data-driven registry for all 40 adapters
 // ---------------------------------------------------------------------------
@@ -1139,10 +1140,7 @@ pub async fn get_channel(
     let meta = match find_channel_meta(&name) {
         Some(m) => m,
         None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": format!("Unknown channel: {name}")})),
-            )
+            return ApiErrorResponse::not_found(format!("Unknown channel: {name}")).into_json_tuple()
         }
     };
 
@@ -1210,20 +1208,14 @@ pub async fn configure_channel(
     let meta = match find_channel_meta(&name) {
         Some(m) => m,
         None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "Unknown channel"})),
-            )
+            return ApiErrorResponse::not_found("Unknown channel").into_json_tuple()
         }
     };
 
     let fields = match body.get("fields").and_then(|v| v.as_object()) {
         Some(f) => f,
         None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Missing 'fields' object"})),
-            )
+            return ApiErrorResponse::bad_request("Missing 'fields' object").into_json_tuple()
         }
     };
 
@@ -1244,17 +1236,11 @@ pub async fn configure_channel(
         if let Some(env_var) = field_def.env_var {
             // Validate env var name and value before writing
             if let Err(msg) = validate_env_var(env_var, value) {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({"error": msg})),
-                );
+                return ApiErrorResponse::bad_request(msg).into_json_tuple();
             }
             // Secret field — write to secrets.env and set in process
             if let Err(e) = write_secret_env(&secrets_path, env_var, value) {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({"error": format!("Failed to write secret: {e}")})),
-                );
+                return ApiErrorResponse::internal(format!("Failed to write secret: {e}")).into_json_tuple();
             }
             // SAFETY: We are the only writer; this is a single-threaded config operation
             unsafe {
@@ -1277,10 +1263,7 @@ pub async fn configure_channel(
 
     // Write config.toml section
     if let Err(e) = upsert_channel_config(&config_path, &name, &config_fields) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("Failed to write config: {e}")})),
-        );
+        return ApiErrorResponse::internal(format!("Failed to write config: {e}")).into_json_tuple();
     }
 
     // Hot-reload: activate the channel immediately
@@ -1337,10 +1320,7 @@ pub async fn remove_channel(
     let meta = match find_channel_meta(&name) {
         Some(m) => m,
         None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "Unknown channel"})),
-            )
+            return ApiErrorResponse::not_found("Unknown channel").into_json_tuple()
         }
     };
 
@@ -1363,10 +1343,7 @@ pub async fn remove_channel(
 
     // Remove config section
     if let Err(e) = remove_channel_config(&config_path, &name) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("Failed to remove config: {e}")})),
-        );
+        return ApiErrorResponse::internal(format!("Failed to remove config: {e}")).into_json_tuple();
     }
 
     // Hot-reload: deactivate the channel immediately
