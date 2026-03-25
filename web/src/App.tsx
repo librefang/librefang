@@ -868,9 +868,9 @@ function Downloads(_props: SectionProps) {
                     { name: 'cargo install librefang', label: 'Rust SDK' },
                     { name: 'go get github.com/librefang/librefang/sdk/go', label: 'Go SDK' },
                   ].map((pkg) => (
-                    <div key={pkg.label} className="flex items-center justify-between px-3 py-2 hover:bg-surface-200 transition-colors group">
-                      <code className="text-xs text-gray-700 dark:text-gray-300 font-mono">{pkg.name}</code>
-                      <span className="text-xs text-gray-400 dark:text-gray-600">{pkg.label}</span>
+                    <div key={pkg.label} className="flex items-center justify-between gap-2 px-3 py-2 hover:bg-surface-200 transition-colors group">
+                      <code className="text-xs text-gray-700 dark:text-gray-300 font-mono truncate min-w-0">{pkg.name}</code>
+                      <span className="text-xs text-gray-400 dark:text-gray-600 shrink-0">{pkg.label}</span>
                     </div>
                   ))}
                 </div>
