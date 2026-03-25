@@ -347,6 +347,15 @@ function Hero({ t, registry }: SectionProps & { registry?: import('./useRegistry
                 </a>
               </div>
             </FadeIn>
+
+            <FadeIn delay={450}>
+              <div className="lg:hidden mt-8 inline-flex items-center gap-3 px-4 py-2 bg-surface-100 border border-black/10 dark:border-white/5 rounded font-mono text-xs">
+                <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
+                <span className="text-gray-500 dark:text-gray-400">4 agents running</span>
+                <span className="text-gray-300 dark:text-gray-600">·</span>
+                <span className="text-gray-500 dark:text-gray-400">38MB</span>
+              </div>
+            </FadeIn>
           </div>
 
           {/* Right: system preview terminal */}
@@ -642,7 +651,7 @@ function Performance({ t }: SectionProps) {
                 <div className="text-xs text-gray-500 uppercase tracking-widest mb-3">{row.metric}</div>
                 <div className="flex justify-between items-baseline">
                   <div className="text-sm text-gray-500">{t.performance.others}: <span className="font-mono">{row.others}</span></div>
-                  <div className="text-lg font-bold font-mono text-cyan-600 dark:text-cyan-400">{row.librefang}</div>
+                  <div className="text-xl font-black font-mono text-cyan-600 dark:text-cyan-400">{row.librefang}</div>
                 </div>
               </div>
             ))}
@@ -820,7 +829,7 @@ function Downloads(_props: SectionProps) {
           <div className="grid md:grid-cols-2 gap-6 mb-8">
             {categories.map((cat) => (
               <FadeIn key={cat.label}>
-                <div className="bg-surface-100 border border-black/10 dark:border-white/5 p-6">
+                <div className="bg-surface-100 border border-black/10 dark:border-white/5 p-6 hover:-translate-y-0.5 transition-transform">
                   <div className="flex items-center gap-3 mb-4">
                     <cat.icon className="w-5 h-5 text-cyan-600 dark:text-cyan-500" />
                     <div>
@@ -976,6 +985,8 @@ function Install({ t }: SectionProps) {
 
 // ─── FAQ ───
 function FAQ({ t }: SectionProps) {
+  const [openIndex, setOpenIndex] = useState<number | null>(0)
+
   return (
     <section id="faq" className="py-28 px-6 scroll-mt-20">
       <div className="max-w-6xl mx-auto">
@@ -987,15 +998,27 @@ function FAQ({ t }: SectionProps) {
         <div className="space-y-px">
           {t.faq.items.map((item, i) => (
             <FadeIn key={i} delay={i * 60}>
-              <details className="group border border-black/10 dark:border-white/5 bg-surface-100 hover:bg-surface-200 transition-colors" open={i === 0}>
-                <summary className="flex items-center justify-between px-6 py-5 cursor-pointer select-none list-none">
+              <div className="border border-black/10 dark:border-white/5 bg-surface-100 transition-colors">
+                <button
+                  onClick={() => setOpenIndex(openIndex === i ? null : i)}
+                  className="w-full flex items-center justify-between px-6 py-5 text-left"
+                >
                   <span className="font-semibold text-slate-900 dark:text-white text-sm pr-4">{item.q}</span>
-                  <ChevronRight className="w-4 h-4 text-gray-400 dark:text-gray-600 group-open:rotate-90 transition-transform shrink-0" />
-                </summary>
-                <div className="px-6 pb-5 text-sm text-gray-600 dark:text-gray-400 leading-relaxed border-t border-black/10 dark:border-white/5 pt-4">
-                  {item.a}
-                </div>
-              </details>
+                  <ChevronRight className={cn('w-4 h-4 text-gray-300 dark:text-gray-600 transition-transform shrink-0', openIndex === i && 'rotate-90 text-cyan-600 dark:text-cyan-500')} />
+                </button>
+                {openIndex === i && (
+                  <motion.div
+                    initial={{ height: 0, opacity: 0 }}
+                    animate={{ height: 'auto', opacity: 1 }}
+                    transition={{ duration: 0.3, ease: 'easeOut' }}
+                    className="overflow-hidden"
+                  >
+                    <div className="px-6 pb-5 text-sm text-gray-500 dark:text-gray-400 leading-relaxed border-t border-black/10 dark:border-white/5 pt-4">
+                      {item.a}
+                    </div>
+                  </motion.div>
+                )}
+              </div>
             </FadeIn>
           ))}
         </div>
