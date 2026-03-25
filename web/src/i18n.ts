@@ -11,7 +11,7 @@ export interface PerformanceRow {
 }
 
 export interface Translation {
-  nav: { architecture: string; hands: string; performance: string; install: string; docs: string }
+  nav: { architecture: string; hands: string; performance: string; install: string; downloads?: string; docs: string }
   hero: {
     badge: string
     title1: string
@@ -108,7 +108,7 @@ export interface Translation {
     steps: { title: string; desc: string }[]
     cta: string
   }
-  footer: { docs: string; license: string; privacy: string }
+  footer: { docs: string; license: string; privacy: string; changelog: string }
 }
 
 export const languages: Language[] = [
@@ -123,7 +123,7 @@ export const languages: Language[] = [
 
 export const translations: Record<string, Translation> = {
   en: {
-    nav: { architecture: 'Architecture', hands: 'Hands', performance: 'Performance', install: 'Install', docs: 'Docs' },
+    nav: { architecture: 'Architecture', hands: 'Hands', performance: 'Performance', install: 'Install', downloads: 'Downloads', docs: 'Docs' },
     hero: {
       badge: 'Open Source',
       title1: 'The Agent',
@@ -289,11 +289,11 @@ export const translations: Record<string, Translation> = {
       ],
       cta: 'Read Contributing Guide',
     },
-    footer: { docs: 'Docs', license: 'License', privacy: 'Privacy' },
+    footer: { docs: 'Docs', license: 'License', privacy: 'Privacy', changelog: 'Changelog' },
   },
 
   zh: {
-    nav: { architecture: '架构', hands: '能力单元', performance: '性能', install: '安装', docs: '文档' },
+    nav: { architecture: '架构', hands: '能力单元', performance: '性能', install: '安装', downloads: '下载', docs: '文档' },
     hero: {
       badge: '开源',
       title1: 'Agent',
@@ -433,11 +433,11 @@ export const translations: Record<string, Translation> = {
       ],
       cta: '阅读贡献指南',
     },
-    footer: { docs: '文档', license: '许可证', privacy: '隐私' },
+    footer: { docs: '文档', license: '许可证', privacy: '隐私', changelog: '更新日志' },
   },
 
   'zh-TW': {
-    nav: { architecture: '架構', hands: '能力單元', performance: '效能', install: '安裝', docs: '文件' },
+    nav: { architecture: '架構', hands: '能力單元', performance: '效能', install: '安裝', downloads: '下載', docs: '文件' },
     hero: {
       badge: '開源',
       title1: 'Agent',
@@ -577,11 +577,11 @@ export const translations: Record<string, Translation> = {
       ],
       cta: '閱讀貢獻指南',
     },
-    footer: { docs: '文件', license: '授權', privacy: '隱私' },
+    footer: { docs: '文件', license: '授權', privacy: '隱私', changelog: '更新日誌' },
   },
 
   ja: {
-    nav: { architecture: 'アーキテクチャ', hands: 'Hands', performance: 'パフォーマンス', install: 'インストール', docs: 'ドキュメント' },
+    nav: { architecture: 'アーキテクチャ', hands: 'Hands', performance: 'パフォーマンス', install: 'インストール', downloads: 'ダウンロード', docs: 'ドキュメント' },
     hero: {
       badge: 'オープンソース',
       title1: 'Agent',
@@ -721,11 +721,11 @@ export const translations: Record<string, Translation> = {
       ],
       cta: 'コントリビュートガイドを読む',
     },
-    footer: { docs: 'ドキュメント', license: 'ライセンス', privacy: 'プライバシー' },
+    footer: { docs: 'ドキュメント', license: 'ライセンス', privacy: 'プライバシー', changelog: '変更履歴' },
   },
 
   ko: {
-    nav: { architecture: '아키텍처', hands: 'Hands', performance: '성능', install: '설치', docs: '문서' },
+    nav: { architecture: '아키텍처', hands: 'Hands', performance: '성능', install: '설치', downloads: '다운로드', docs: '문서' },
     hero: {
       badge: '오픈소스',
       title1: 'Agent',
@@ -865,11 +865,11 @@ export const translations: Record<string, Translation> = {
       ],
       cta: '기여 가이드 읽기',
     },
-    footer: { docs: '문서', license: '라이선스', privacy: '개인정보' },
+    footer: { docs: '문서', license: '라이선스', privacy: '개인정보', changelog: '변경 이력' },
   },
 
   de: {
-    nav: { architecture: 'Architektur', hands: 'Hands', performance: 'Leistung', install: 'Installation', docs: 'Dokumentation' },
+    nav: { architecture: 'Architektur', hands: 'Hands', performance: 'Leistung', install: 'Installation', downloads: 'Downloads', docs: 'Dokumentation' },
     hero: {
       badge: 'Open Source',
       title1: 'Das Agent',
@@ -1009,11 +1009,11 @@ export const translations: Record<string, Translation> = {
       ],
       cta: 'Beitragsrichtlinien lesen',
     },
-    footer: { docs: 'Dokumentation', license: 'Lizenz', privacy: 'Datenschutz' },
+    footer: { docs: 'Dokumentation', license: 'Lizenz', privacy: 'Datenschutz', changelog: 'Changelog' },
   },
 
   es: {
-    nav: { architecture: 'Arquitectura', hands: 'Hands', performance: 'Rendimiento', install: 'Instalar', docs: 'Documentación' },
+    nav: { architecture: 'Arquitectura', hands: 'Hands', performance: 'Rendimiento', install: 'Instalar', downloads: 'Descargas', docs: 'Documentación' },
     hero: {
       badge: 'Código Abierto',
       title1: 'El Sistema Operativo',
@@ -1153,6 +1153,6 @@ export const translations: Record<string, Translation> = {
       ],
       cta: 'Leer Guía de Contribución',
     },
-    footer: { docs: 'Documentación', license: 'Licencia', privacy: 'Privacidad' },
+    footer: { docs: 'Documentación', license: 'Licencia', privacy: 'Privacidad', changelog: 'Cambios' },
   },
 }

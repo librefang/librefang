@@ -96,12 +96,29 @@ function Nav({ t, lang, onSwitchLang }: NavProps) {
   const [open, setOpen] = useState(false)
   const [langOpen, setLangOpen] = useState(false)
   const [scrolled, setScrolled] = useState(false)
+  const [activeSection, setActiveSection] = useState('')
   const currentLangName = languages.find(l => l.code === lang)?.name || 'English'
 
   useEffect(() => {
     const onScroll = () => setScrolled(window.scrollY > 20)
     window.addEventListener('scroll', onScroll, { passive: true })
     return () => window.removeEventListener('scroll', onScroll)
+  }, [])
+
+  useEffect(() => {
+    const sections = document.querySelectorAll('section[id]')
+    const observer = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (entry.isIntersecting) {
+            setActiveSection(entry.target.id)
+          }
+        }
+      },
+      { threshold: 0.3, rootMargin: '-80px 0px -50% 0px' }
+    )
+    sections.forEach(s => observer.observe(s))
+    return () => observer.disconnect()
   }, [])
 
   useEffect(() => {
@@ -131,6 +148,7 @@ function Nav({ t, lang, onSwitchLang }: NavProps) {
     { label: t.workflows?.label || 'Workflows', href: '#workflows' },
     { label: t.nav.performance, href: '#performance' },
     { label: t.nav.install, href: '#install' },
+    { label: t.nav.downloads || 'Downloads', href: '#downloads' },
     { label: t.nav.docs, href: 'https://docs.librefang.ai', external: true },
   ]
 
@@ -151,7 +169,10 @@ function Nav({ t, lang, onSwitchLang }: NavProps) {
               href={link.href}
               target={link.external ? '_blank' : undefined}
               rel={link.external ? 'noopener noreferrer' : undefined}
-              className="px-3 py-1.5 text-sm text-gray-400 hover:text-cyan-400 transition-colors font-medium flex items-center gap-1"
+              className={cn(
+                'px-3 py-1.5 text-sm transition-colors font-medium flex items-center gap-1',
+                activeSection === link.href.replace('#', '') ? 'text-cyan-400' : 'text-gray-400 hover:text-cyan-400'
+              )}
             >
               {link.label}
               {link.external && <ExternalLink className="w-3 h-3" />}
@@ -274,11 +295,11 @@ function Hero({ t, registry }: SectionProps & { registry?: import('./useRegistry
 
             <FadeIn delay={400}>
               <div className="flex flex-col sm:flex-row gap-3">
-                <a href="#install" className="inline-flex items-center justify-center gap-2 px-6 py-3 bg-cyan-500 hover:bg-cyan-400 text-surface font-bold rounded transition-all hover:shadow-lg hover:shadow-cyan-500/20">
+                <a href="#install" onClick={() => trackEvent('click', 'hero_get_started')} className="inline-flex items-center justify-center gap-2 px-6 py-3 bg-cyan-500 hover:bg-cyan-400 text-surface font-bold rounded transition-all hover:shadow-lg hover:shadow-cyan-500/20">
                   {t.hero.getStarted}
                   <ArrowRight className="w-4 h-4" />
                 </a>
-                <a href="https://github.com/librefang/librefang" target="_blank" rel="noopener noreferrer" className="inline-flex items-center justify-center gap-2 px-6 py-3 border border-white/10 hover:border-white/20 text-gray-300 font-semibold rounded transition-all hover:bg-white/5">
+                <a href="https://github.com/librefang/librefang" target="_blank" rel="noopener noreferrer" onClick={() => trackEvent('click', 'hero_github')} className="inline-flex items-center justify-center gap-2 px-6 py-3 border border-white/10 hover:border-white/20 text-gray-300 font-semibold rounded transition-all hover:bg-white/5">
                   <Github className="w-4 h-4" />
                   {t.hero.viewGithub}
                 </a>
@@ -816,7 +837,7 @@ function Install({ t }: SectionProps) {
                 <div className="w-2.5 h-2.5 rounded-full bg-white/10" />
               </div>
               <span className="text-[10px] font-mono text-gray-600 uppercase tracking-widest">{t.install.terminal}</span>
-              <button onClick={copy} className="text-gray-500 hover:text-cyan-400 transition-colors p-1" aria-label="Copy">
+              <button onClick={() => { copy(); trackEvent('click', 'install_copy') }} className="text-gray-500 hover:text-cyan-400 transition-colors p-1" aria-label="Copy">
                 {copied ? <Check className="w-3.5 h-3.5 text-cyan-400" /> : <Copy className="w-3.5 h-3.5" />}
               </button>
             </div>
@@ -869,7 +890,7 @@ function Install({ t }: SectionProps) {
 function FAQ({ t }: SectionProps) {
   return (
     <section id="faq" className="py-28 px-6 scroll-mt-20">
-      <div className="max-w-3xl mx-auto">
+      <div className="max-w-6xl mx-auto">
         <FadeIn>
           <div className="text-xs font-mono text-cyan-500 uppercase tracking-widest mb-3">{t.faq.label}</div>
           <h2 className="text-3xl md:text-5xl font-black text-white tracking-tight mb-12">{t.faq.title}</h2>
@@ -1126,11 +1147,39 @@ function Footer({ t }: SectionProps) {
           <a href="https://docs.librefang.ai" target="_blank" rel="noopener noreferrer" className="hover:text-cyan-400 transition-colors">{t.footer.docs}</a>
           <a href="https://github.com/librefang/librefang" target="_blank" rel="noopener noreferrer" className="hover:text-cyan-400 transition-colors">GitHub</a>
           <a href="https://github.com/librefang/librefang/blob/main/LICENSE" target="_blank" rel="noopener noreferrer" className="hover:text-cyan-400 transition-colors">{t.footer.license}</a>
+          <a href="/changelog/" className="hover:text-cyan-400 transition-colors">{t.footer.changelog}</a>
           <a href="/privacy/" className="hover:text-cyan-400 transition-colors">{t.footer.privacy}</a>
         </div>
         <div className="text-xs text-gray-700">&copy; {new Date().getFullYear()} LibreFang.ai</div>
       </div>
     </footer>
+  )
+}
+
+// ─── GA event tracking ───
+function trackEvent(action: string, label: string) {
+  if (typeof window !== 'undefined' && 'gtag' in window) {
+    (window as any).gtag('event', action, { event_category: 'engagement', event_label: label })
+  }
+}
+
+// ─── Back to top ───
+function BackToTop() {
+  const [show, setShow] = useState(false)
+  useEffect(() => {
+    const onScroll = () => setShow(window.scrollY > window.innerHeight)
+    window.addEventListener('scroll', onScroll, { passive: true })
+    return () => window.removeEventListener('scroll', onScroll)
+  }, [])
+  if (!show) return null
+  return (
+    <button
+      onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
+      className="fixed bottom-6 right-6 z-40 p-3 bg-surface-200 border border-white/10 hover:border-cyan-500/30 hover:bg-cyan-500/10 text-gray-400 hover:text-cyan-400 transition-all rounded"
+      aria-label="Back to top"
+    >
+      <ArrowRight className="w-4 h-4 -rotate-90" />
+    </button>
   )
 }
 
@@ -1183,6 +1232,7 @@ export default function App() {
       <GitHubStats t={t} />
       <Community t={t} />
       <Footer t={t} />
+      <BackToTop />
     </div>
   )
 }
