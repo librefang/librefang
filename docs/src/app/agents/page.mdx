@@ -16,16 +16,20 @@ librefang spawn --template agents/writer/agent.toml
 
 Spawn via the REST API:
 
+Spawn from a built-in template:
+
 ```bash
-# Spawn from a built-in template name
 curl -X POST http://localhost:4545/api/agents \
   -H "Content-Type: application/json" \
   -d '{"template": "coder"}'
+```
 
-# Spawn with a model override
+Spawn with a model override:
+
+```bash
 curl -X POST http://localhost:4545/api/agents \
   -H "Content-Type: application/json" \
-  -d '{"template": "writer", "model": "gemini-2.5-flash"}'
+  -d '{"template": "writer", "model": "claude-sonnet-4-20250514"}'
 ```
 
 Send a message to a running agent:

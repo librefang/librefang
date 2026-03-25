@@ -16,16 +16,20 @@ librefang spawn --template agents/writer/agent.toml
 
 通过 REST API 生成：
 
+通过内置模板名称生成：
+
 ```bash
-# 通过内置模板名称生成
 curl -X POST http://localhost:4545/api/agents \
   -H "Content-Type: application/json" \
   -d '{"template": "coder"}'
+```
 
-# 生成时覆盖参数
+生成时覆盖模型：
+
+```bash
 curl -X POST http://localhost:4545/api/agents \
   -H "Content-Type: application/json" \
-  -d '{"template": "writer", "model": "gemini-2.5-flash"}'
+  -d '{"template": "writer", "model": "claude-sonnet-4-20250514"}'
 ```
 
 向运行中的 Agent 发送消息：
