@@ -15,6 +15,7 @@
     "fetch-registry": "tsx scripts/fetch-registry.ts",
     "prebuild": "tsx scripts/fetch-registry.ts",
     "build": "vite build",
+    "lint": "tsc --noEmit",
     "preview": "vite preview"
   },
   "dependencies": {
