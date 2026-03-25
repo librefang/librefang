@@ -1663,13 +1663,16 @@ export async function getA2ATaskStatus(taskId: string): Promise<A2ATaskStatus> {
 // ── Auth check ───────────────────────────────────────
 
 export async function checkAuthRequired(): Promise<boolean> {
-  // Retry a few times in case daemon is still booting
+  // Ask the server what auth mode is configured instead of probing a
+  // public endpoint (the old /api/status check always returned 200).
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      const response = await fetch("/api/status", {
-        headers: { ...authHeader() },
-      });
-      return response.status === 401;
+      const mode = await checkDashboardAuthMode();
+      if (mode === "none") return false;
+      // Auth is configured — if we already hold a stored key/token,
+      // assume it is valid; a 401 on a real request will trigger the
+      // global onUnauthorized handler and re-show the login dialog.
+      return !hasApiKey();
     } catch {
       // Network error — daemon may not be up yet, wait and retry
       await new Promise((r) => setTimeout(r, 1000));
