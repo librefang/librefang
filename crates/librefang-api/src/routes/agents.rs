@@ -4157,34 +4157,31 @@ pub async fn inject_message(
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "invalid agent ID"})),
-            );
+            return ApiErrorResponse::bad_request("invalid agent ID").into_response();
         }
     };
 
     // Reject oversized injection messages
     const MAX_INJECT_SIZE: usize = 16 * 1024; // 16KB
     if req.message.len() > MAX_INJECT_SIZE {
-        return (
-            StatusCode::PAYLOAD_TOO_LARGE,
-            Json(serde_json::json!({"error": "injection message too large"})),
-        );
+        return ApiErrorResponse::bad_request("injection message too large")
+            .with_status(StatusCode::PAYLOAD_TOO_LARGE)
+            .into_response();
     }
 
     match state.kernel.inject_message(agent_id, &req.message).await {
         Ok(injected) => (
             StatusCode::OK,
             Json(serde_json::json!({"injected": injected})),
-        ),
+        )
+            .into_response(),
         Err(e) => {
-            let status = if e.to_string().contains("not found") {
-                StatusCode::NOT_FOUND
+            if e.to_string().contains("not found") {
+                ApiErrorResponse::not_found(e.to_string())
             } else {
-                StatusCode::INTERNAL_SERVER_ERROR
-            };
-            (status, Json(serde_json::json!({"error": e.to_string()})))
+                ApiErrorResponse::internal(e.to_string())
+            }
+            .into_response()
         }
     }
 }
