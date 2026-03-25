@@ -124,7 +124,6 @@ jobs:
     name: Deploy to Fly.io
     runs-on: ubuntu-latest
     needs: [docker-manifest]
-    if: ${{ !contains(github.ref, '-beta') && !contains(github.ref, '-rc') }}
     steps:
       - uses: actions/checkout@v6
       - uses: superfly/flyctl-actions/setup-flyctl@v1
@@ -138,7 +137,6 @@ jobs:
     name: Deploy to Render
     runs-on: ubuntu-latest
     needs: [docker-manifest]
-    if: ${{ !contains(github.ref, '-beta') && !contains(github.ref, '-rc') }}
     steps:
       - name: Trigger Render deploy
         env:
