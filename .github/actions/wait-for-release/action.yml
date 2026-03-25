@@ -30,7 +30,7 @@ runs:
         fi
         # Detect pre-release tags (-betaN, -rcN)
         PRERELEASE_FLAG=""
-        if echo "$TAG" | grep -qE '-(beta|rc)[0-9]'; then
+        if echo "$TAG" | grep -qE -- '-(beta|rc)[0-9]'; then
           PRERELEASE_FLAG="--prerelease"
         fi
         gh release create "$TAG" \

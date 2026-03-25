@@ -138,12 +138,12 @@ jobs:
 
           # Detect pre-release tags (-betaN, -rcN)
           PRERELEASE_FLAG=""
-          if echo "$TAG" | grep -qE '-(beta|rc)[0-9]'; then
+          if echo "$TAG" | grep -qE -- '-(beta|rc)[0-9]'; then
             PRERELEASE_FLAG="--prerelease"
           fi
 
           # LTS releases get a special label
-          if echo "$TAG" | grep -qE '\-lts$'; then
+          if echo "$TAG" | grep -qE -- '\-lts$'; then
             # v2026.3.0-lts -> release/2026.3
             LTS_BASE="${TAG#v}"
             LTS_BASE="${LTS_BASE%-lts}"

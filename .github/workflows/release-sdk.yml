@@ -57,9 +57,9 @@ jobs:
             echo "✓ ${PKG_NAME}@${PKG_VERSION} already published to npm, skipping"
           else
             NPM_TAG=""
-            if echo "$PKG_VERSION" | grep -qE '-(beta|rc)[0-9]'; then
+            if echo "$PKG_VERSION" | grep -qE -- '-(beta|rc)[0-9]'; then
               NPM_TAG="--tag next"
-            elif echo "$PKG_VERSION" | grep -qE '\-lts'; then
+            elif echo "$PKG_VERSION" | grep -qE -- '\-lts'; then
               NPM_TAG="--tag lts"
             fi
             npm publish --access public $NPM_TAG
