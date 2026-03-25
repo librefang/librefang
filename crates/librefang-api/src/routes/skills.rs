@@ -1812,7 +1812,7 @@ pub async fn set_hand_secret(
         defs.iter()
             .find(|d| d.id == hand_id)
             .map(|def| {
-                def.requirements
+                def.requires
                     .iter()
                     .any(|r| r.check_value == env_key || r.key == env_key)
             })
