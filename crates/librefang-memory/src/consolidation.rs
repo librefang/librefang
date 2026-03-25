@@ -45,6 +45,9 @@ impl ConsolidationEngine {
 
         // Phase 2: merge highly similar memories (>90% text similarity).
         // Load all active memories and group pairs for merging.
+        // Cap at 100 merges per consolidation run to avoid O(n²) blowup on
+        // large memory stores.
+        const MAX_MERGES_PER_RUN: u64 = 100;
         let mut memories_merged: u64 = 0;
         {
             let mut stmt = conn
@@ -68,7 +71,7 @@ impl ConsolidationEngine {
             // Track which IDs have been absorbed into another memory.
             let mut absorbed: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-            for i in 0..rows.len() {
+            'outer: for i in 0..rows.len() {
                 if absorbed.contains(&rows[i].0) {
                     continue;
                 }
@@ -98,6 +101,10 @@ impl ConsolidationEngine {
 
                         absorbed.insert(rows[j].0.clone());
                         memories_merged += 1;
+
+                        if memories_merged >= MAX_MERGES_PER_RUN {
+                            break 'outer;
+                        }
                     }
                 }
             }

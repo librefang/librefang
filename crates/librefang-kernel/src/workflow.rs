@@ -240,18 +240,29 @@ pub struct WorkflowEngine {
 fn evaluate_condition(input: &str, condition: &str) -> bool {
     let condition = condition.trim();
 
-    // OR: split on `||` first (lower precedence)
-    if condition.contains("||") {
-        return condition
-            .split("||")
-            .any(|branch| evaluate_condition(input, branch.trim()));
+    // OR: split on `||` first (lower precedence), but only outside quotes.
+    if let Some(parts) = split_outside_quotes(condition, "||") {
+        // Filter out empty parts to prevent `"a || || b"` from being always-true
+        let parts: Vec<_> = parts
+            .iter()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if parts.len() > 1 {
+            return parts.iter().any(|branch| evaluate_condition(input, branch));
+        }
     }
 
-    // AND: split on `&&`
-    if condition.contains("&&") {
-        return condition
-            .split("&&")
-            .all(|part| evaluate_condition(input, part.trim()));
+    // AND: split on `&&`, only outside quotes.
+    if let Some(parts) = split_outside_quotes(condition, "&&") {
+        let parts: Vec<_> = parts
+            .iter()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if parts.len() > 1 {
+            return parts.iter().all(|part| evaluate_condition(input, part));
+        }
     }
 
     // Negation
@@ -264,6 +275,58 @@ fn evaluate_condition(input: &str, condition: &str) -> bool {
     // Simple substring match
     let cond_lower = condition.to_lowercase();
     input.contains(&cond_lower)
+}
+
+/// Split `s` on `delimiter` only when the delimiter occurs outside of quoted
+/// strings (both single and double quotes). Returns `None` if the string
+/// contains no occurrence of `delimiter` outside quotes, otherwise returns the
+/// parts.
+fn split_outside_quotes(s: &str, delimiter: &str) -> Option<Vec<String>> {
+    let delim_bytes = delimiter.as_bytes();
+    let delim_len = delim_bytes.len();
+    let bytes = s.as_bytes();
+
+    let mut parts = Vec::new();
+    let mut current_start = 0;
+    let mut in_quote: Option<u8> = None; // tracks the quote character we're inside
+    let mut i = 0;
+
+    while i < bytes.len() {
+        let ch = bytes[i];
+
+        // Toggle quote state on unescaped quote characters
+        if ch == b'"' || ch == b'\'' {
+            match in_quote {
+                Some(q) if q == ch => in_quote = None,
+                None => in_quote = Some(ch),
+                _ => {} // inside a different quote type, ignore
+            }
+            i += 1;
+            continue;
+        }
+
+        // Check for delimiter match only when outside quotes
+        if in_quote.is_none()
+            && i + delim_len <= bytes.len()
+            && &bytes[i..i + delim_len] == delim_bytes
+        {
+            parts.push(s[current_start..i].to_string());
+            i += delim_len;
+            current_start = i;
+            continue;
+        }
+
+        i += 1;
+    }
+
+    // Push the remaining segment
+    parts.push(s[current_start..].to_string());
+
+    if parts.len() > 1 {
+        Some(parts)
+    } else {
+        None
+    }
 }
 
 impl WorkflowEngine {
