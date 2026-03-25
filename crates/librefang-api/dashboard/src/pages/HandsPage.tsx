@@ -13,6 +13,7 @@ import {
   pauseHand,
   resumeHand,
   getHandStats,
+  getHandDetail,
   getHandSettings,
   setHandSecret,
   type HandDefinitionItem,
@@ -362,6 +363,14 @@ function HandDetailPanel({
   const { t } = useTranslation();
   const isPaused = instance?.status === "paused";
 
+  const detailQuery = useQuery({
+    queryKey: ["hands", "detail", hand.id],
+    queryFn: () => getHandDetail(hand.id),
+    enabled: !!hand.id,
+  });
+  const detail = detailQuery.data as Record<string, unknown> | undefined;
+  const agent = detail?.agent as { name?: string; model?: string; provider?: string; description?: string } | undefined;
+
   const settingsQuery = useQuery({
     queryKey: ["hands", "settings", hand.id],
     queryFn: () => getHandSettings(hand.id),
@@ -446,6 +455,22 @@ function HandDetailPanel({
             {/* Description */}
             {hand.description && (
               <p className="text-[13px] text-text-dim leading-relaxed">{hand.description}</p>
+            )}
+
+            {/* Agent info */}
+            {agent && (
+              <div className="rounded-xl border border-border-subtle bg-main/30 p-3 space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-semibold">{agent.name}</span>
+                  <div className="flex items-center gap-1.5">
+                    <Badge variant="info">{agent.provider}</Badge>
+                    <span className="text-[10px] font-mono text-text-dim/60">{agent.model}</span>
+                  </div>
+                </div>
+                {agent.description && (
+                  <p className="text-[10px] text-text-dim/60 leading-relaxed">{agent.description}</p>
+                )}
+              </div>
             )}
 
             {/* Sections */}
