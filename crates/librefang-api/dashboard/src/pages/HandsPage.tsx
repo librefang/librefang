@@ -943,59 +943,49 @@ export function HandsPage() {
 
       {/* Filters */}
       {hands.length > 0 && (
-        <div className="flex flex-col sm:flex-row gap-3">
-          {/* Status + Category pills */}
-          <div className="flex items-center gap-1.5 overflow-x-auto scrollbar-thin pb-1 shrink-0">
-            {(["all", "active", "inactive"] as const).map((s) => {
-              const label = s === "all" ? t("providers.filter_all") : s === "active" ? t("hands.active_label") : t("hands.inactive_label");
-              const count = s === "all" ? hands.length : s === "active" ? activeCount : hands.length - activeCount;
-              return (
-                <button key={s} onClick={() => setStatusFilter(s)}
-                  className={`px-3 py-1.5 rounded-xl text-[11px] font-bold whitespace-nowrap transition-colors ${
-                    statusFilter === s
-                      ? "bg-brand text-white shadow-sm shadow-brand/20"
-                      : "bg-main text-text-dim hover:text-text hover:bg-main/80 border border-border-subtle"
-                  }`}>
-                  {label} ({count})
-                </button>
-              );
-            })}
-            <div className="w-px h-5 bg-border-subtle mx-1" />
-            <button
-              onClick={() => setSelectedCategory("all")}
-              className={`px-3 py-1.5 rounded-xl text-[11px] font-bold whitespace-nowrap transition-colors ${
-                selectedCategory === "all"
-                  ? "bg-brand text-white shadow-sm shadow-brand/20"
-                  : "bg-main text-text-dim hover:text-text hover:bg-main/80 border border-border-subtle"
-              }`}
-            >
-              {t("providers.filter_all")}
-            </button>
+        <div className="space-y-3">
+          {/* Row 1: Status tabs + Search */}
+          <div className="flex items-center gap-3">
+            <div className="flex items-center gap-1 shrink-0">
+              {(["all", "active", "inactive"] as const).map((s) => {
+                const label = s === "all" ? t("providers.filter_all") : s === "active" ? t("hands.active_label") : t("hands.inactive_label");
+                const count = s === "all" ? hands.length : s === "active" ? activeCount : hands.length - activeCount;
+                return (
+                  <button key={s} onClick={() => setStatusFilter(s)}
+                    className={`px-3 py-1.5 rounded-lg text-[11px] font-bold whitespace-nowrap transition-colors ${
+                      statusFilter === s
+                        ? "bg-brand text-white shadow-sm"
+                        : "text-text-dim hover:text-text hover:bg-main"
+                    }`}>
+                    {label} <span className="opacity-60">({count})</span>
+                  </button>
+                );
+              })}
+            </div>
+            <div className="flex-1">
+              <Input
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder={t("hands.search_placeholder")}
+                leftIcon={<Search className="h-4 w-4" />}
+              />
+            </div>
+          </div>
+          {/* Row 2: Category pills */}
+          <div className="flex items-center gap-1.5 overflow-x-auto scrollbar-thin">
             {categories.map((cat) => (
               <button
                 key={cat}
-                onClick={() =>
-                  setSelectedCategory(selectedCategory === cat ? "all" : cat)
-                }
-                className={`px-3 py-1.5 rounded-xl text-[11px] font-bold whitespace-nowrap transition-colors ${
+                onClick={() => setSelectedCategory(selectedCategory === cat ? "all" : cat)}
+                className={`px-2.5 py-1 rounded-lg text-[10px] font-bold whitespace-nowrap transition-colors ${
                   selectedCategory === cat
-                    ? "bg-brand text-white shadow-sm shadow-brand/20"
-                    : "bg-main text-text-dim hover:text-text hover:bg-main/80 border border-border-subtle"
+                    ? "bg-brand/10 text-brand border border-brand/30"
+                    : "text-text-dim/60 hover:text-text-dim hover:bg-main border border-transparent"
                 }`}
               >
                 {t(`hands.cat_${cat}`, { defaultValue: cat })}
               </button>
             ))}
-          </div>
-
-          {/* Search */}
-          <div className="flex-1">
-            <Input
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder={t("hands.search_placeholder")}
-              leftIcon={<Search className="h-4 w-4" />}
-            />
           </div>
         </div>
       )}
