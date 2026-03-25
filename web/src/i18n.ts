@@ -877,7 +877,7 @@ export const translations: Record<string, Translation> = {
     nav: { architecture: 'Architektur', hands: 'Hands', performance: 'Leistung', install: 'Installation', downloads: 'Downloads', docs: 'Dokumentation' },
     hero: {
       badge: 'Open Source',
-      title1: 'Das Agent',
+      title1: 'Der Agent',
       title2: 'Betriebssystem',
       typing: [
         'autonome Agenten 24/7 betreiben',
@@ -908,11 +908,11 @@ export const translations: Record<string, Translation> = {
     hands: {
       label: 'Fähigkeitseinheiten',
       title: '15 eingebaute Hands',
-      desc: 'Jede Hand bringt eigenes Modell, Tools und Workflow mit. Aktivieren, nicht zusammenbauen.',
+      desc: 'Jede Hand bringt ihr eigenes Modell, Tools und Workflow mit. Aktivieren, nicht zusammenbauen.',
       items: [
         { name: 'Clip', desc: 'YouTube-Videos automatisch in vertikale Shorts umwandeln, mit KI-Untertiteln. Auto-Veröffentlichung auf Telegram.' },
         { name: 'Lead', desc: 'Tägliche Interessenten-Entdeckung mit ICP-Bewertung, Deduplizierung, CSV-Export.' },
-        { name: 'Collector', desc: 'OSINT-grade Intelligenz-Überwachung mit Änderungserkennung.' },
+        { name: 'Collector', desc: 'OSINT-Niveau Intelligenz-Überwachung mit Änderungserkennung.' },
         { name: 'Predictor', desc: 'Kalibrierte probabilistische Prognose-Engine für Märkte und Ergebnisse.' },
         { name: 'Researcher', desc: 'Tiefenforschung mit Quellenglaubwürdigkeitsbewertung.' },
         { name: 'Trader', desc: 'Autonome Marktintelligenz und Trading-Engine — Multi-Signal-Analyse, adversariales Reasoning, Risikomanagement.' },
@@ -1022,8 +1022,8 @@ export const translations: Record<string, Translation> = {
     nav: { architecture: 'Arquitectura', hands: 'Hands', performance: 'Rendimiento', install: 'Instalar', downloads: 'Descargas', docs: 'Documentación' },
     hero: {
       badge: 'Código Abierto',
-      title1: 'El Sistema Operativo',
-      title2: 'para Agentes',
+      title1: 'El Agente',
+      title2: 'Sistema Operativo',
       typing: [
         'ejecutar agentes autónomos 24/7',
         'reemplazar flujos de trabajo completos',
@@ -1114,7 +1114,7 @@ export const translations: Record<string, Translation> = {
       open: 'Abrir',
     },
     meta: {
-      title: 'LibreFang - El Sistema Operativo para Agentes',
+      title: 'LibreFang - Sistema Operativo para Agentes',
       description: 'LibreFang es un sistema operativo de agentes de grado de producción construido en Rust. 180ms de arranque en frío, 40MB de memoria, 16 capas de seguridad, 44 adaptadores de canal. Ejecuta agentes de IA autónomos 24/7.',
     },
     workflows: {
