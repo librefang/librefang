@@ -50,53 +50,46 @@ librefang-desktop     Tauri 2.0 原生应用
 
 ## 安装
 
-### 一键安装脚本
+### CLI 安装
 
-**Linux / macOS / WSL**:
+CLI 是 LibreFang 的核心命令行工具，用于管理 Agent、Hands、工作流等。
+
+**一键安装脚本（推荐）**
+
+Linux / macOS / WSL:
 ```bash
 curl -fsSL https://librefang.ai/install.sh | sh
 ```
 
-**Windows (PowerShell)**:
+Windows (PowerShell):
 ```powershell
 irm https://librefang.ai/install.ps1 | iex
 ```
 
-安装脚本会自动检测平台和架构，下载对应二进制，验证 SHA256 校验和，配置 PATH 并启动守护进程。
+脚本自动检测平台和架构，下载二进制，验证 SHA256 校验和，配置 PATH 并启动守护进程。
 
-可通过环境变量自定义：
+环境变量：
 - `LIBREFANG_INSTALL_DIR` — 安装目录（默认 `~/.librefang/bin`）
 - `LIBREFANG_VERSION` — 指定版本（默认最新）
 - `LIBREFANG_AUTO_START` — 是否自动启动（默认 1）
 
-### Homebrew (macOS / Linux)
+**Homebrew**
 
 ```bash
 brew tap librefang/tap
-brew install librefang              # CLI
-brew install --cask librefang       # 桌面应用
-```
-
-Beta / RC 通道：
-```bash
+brew install librefang              # Stable
 brew install librefang-beta         # Beta
 brew install librefang-rc           # RC
 ```
 
-### npm
+**npm**
 
 ```bash
-npm install -g @librefang/cli       # CLI
-npm install @librefang/sdk          # JavaScript/TypeScript SDK
+npm install -g @librefang/cli       # Stable
+npm install -g @librefang/cli@next  # Beta / RC
 ```
 
-### pip
-
-```bash
-pip install librefang-sdk           # Python SDK
-```
-
-### Cargo
+**Cargo**
 
 ```bash
 cargo install --git https://github.com/librefang/librefang librefang-cli
@@ -109,13 +102,7 @@ cd librefang
 cargo install --path crates/librefang-cli
 ```
 
-### Go
-
-```bash
-go get github.com/librefang/librefang/sdk/go
-```
-
-### Docker
+**Docker**
 
 ```bash
 docker run -d \
@@ -133,20 +120,65 @@ cd librefang/deploy
 docker compose up -d
 ```
 
-### 桌面应用
+**验证安装**
+
+```bash
+librefang --version
+```
+
+---
+
+### SDK 安装
+
+SDK 用于在你的应用中集成 LibreFang API。
+
+**JavaScript / TypeScript**
+
+```bash
+npm install @librefang/sdk          # Stable
+npm install @librefang/sdk@next     # Beta / RC
+```
+
+**Python**
+
+```bash
+pip install librefang-sdk           # Stable
+pip install librefang-sdk --pre     # Beta / RC (PEP 440: b1, rc1)
+```
+
+**Rust**
+
+```bash
+cargo add librefang
+```
+
+**Go**
+
+```bash
+go get github.com/librefang/librefang/sdk/go
+```
+
+---
+
+### 桌面应用安装
+
+Tauri 2.0 原生桌面应用，详见 [桌面应用](/zh/desktop)。
+
+**Homebrew Cask**
+
+```bash
+brew tap librefang/tap
+brew install --cask librefang       # Stable
+brew install --cask librefang-beta  # Beta
+brew install --cask librefang-rc    # RC
+```
+
+**直接下载**
 
 从 [GitHub Releases](https://github.com/librefang/librefang/releases) 下载：
 - **macOS**: `.dmg`（Universal）
 - **Windows**: `.msi`
 - **Linux**: `.appimage` / `.deb`
-
-或通过 Homebrew Cask：`brew install --cask librefang`
-
-### 验证安装
-
-```bash
-librefang --version
-```
 
 ---
 

@@ -18,53 +18,46 @@ Project website: [https://librefang.ai/](https://librefang.ai/)
 
 ## Installation
 
-### Quick Install Script
+### CLI
 
-**Linux / macOS / WSL**:
+The CLI is the core command-line tool for managing agents, hands, workflows, and more.
+
+**Quick Install Script (Recommended)**
+
+Linux / macOS / WSL:
 ```bash
 curl -fsSL https://librefang.ai/install.sh | sh
 ```
 
-**Windows (PowerShell)**:
+Windows (PowerShell):
 ```powershell
 irm https://librefang.ai/install.ps1 | iex
 ```
 
-The install script auto-detects platform and architecture, downloads the correct binary, verifies SHA256 checksums, configures PATH, and starts the daemon.
+The script auto-detects platform and architecture, downloads the binary, verifies SHA256 checksums, configures PATH, and starts the daemon.
 
-Environment variables for customization:
+Environment variables:
 - `LIBREFANG_INSTALL_DIR` — install directory (default: `~/.librefang/bin`)
 - `LIBREFANG_VERSION` — specific version (default: latest)
 - `LIBREFANG_AUTO_START` — auto-start daemon (default: 1)
 
-### Homebrew (macOS / Linux)
+**Homebrew**
 
 ```bash
 brew tap librefang/tap
-brew install librefang              # CLI
-brew install --cask librefang       # Desktop app
-```
-
-Beta / RC channels:
-```bash
+brew install librefang              # Stable
 brew install librefang-beta         # Beta
 brew install librefang-rc           # RC
 ```
 
-### npm
+**npm**
 
 ```bash
-npm install -g @librefang/cli       # CLI
-npm install @librefang/sdk          # JavaScript/TypeScript SDK
+npm install -g @librefang/cli       # Stable
+npm install -g @librefang/cli@next  # Beta / RC
 ```
 
-### pip
-
-```bash
-pip install librefang-sdk           # Python SDK
-```
-
-### Cargo
+**Cargo**
 
 ```bash
 cargo install --git https://github.com/librefang/librefang librefang-cli
@@ -77,13 +70,7 @@ cd librefang
 cargo install --path crates/librefang-cli
 ```
 
-### Go
-
-```bash
-go get github.com/librefang/librefang/sdk/go
-```
-
-### Docker
+**Docker**
 
 ```bash
 docker run -d \
@@ -101,20 +88,65 @@ cd librefang/deploy
 docker compose up -d
 ```
 
+**Verify Installation**
+
+```bash
+librefang --version
+```
+
+---
+
+### SDK
+
+SDKs for integrating LibreFang API into your applications.
+
+**JavaScript / TypeScript**
+
+```bash
+npm install @librefang/sdk          # Stable
+npm install @librefang/sdk@next     # Beta / RC
+```
+
+**Python**
+
+```bash
+pip install librefang-sdk           # Stable
+pip install librefang-sdk --pre     # Beta / RC (PEP 440: b1, rc1)
+```
+
+**Rust**
+
+```bash
+cargo add librefang
+```
+
+**Go**
+
+```bash
+go get github.com/librefang/librefang/sdk/go
+```
+
+---
+
 ### Desktop App
+
+Native Tauri 2.0 desktop application. See [Desktop](/desktop) for details.
+
+**Homebrew Cask**
+
+```bash
+brew tap librefang/tap
+brew install --cask librefang       # Stable
+brew install --cask librefang-beta  # Beta
+brew install --cask librefang-rc    # RC
+```
+
+**Direct Download**
 
 Download from [GitHub Releases](https://github.com/librefang/librefang/releases):
 - **macOS**: `.dmg` (Universal)
 - **Windows**: `.msi`
 - **Linux**: `.appimage` / `.deb`
-
-Or via Homebrew Cask: `brew install --cask librefang`
-
-### Verify Installation
-
-```bash
-librefang --version
-```
 
 ---
 
