@@ -407,17 +407,22 @@ impl McpConnection {
         method: &str,
         params: Option<serde_json::Value>,
     ) -> Result<Option<serde_json::Value>, String> {
-        let McpInner::Sse {
-            client,
-            url,
-            next_id,
-        } = &mut self.inner
-        else {
-            return Err("sse_send_request called on non-SSE transport".to_string());
+        // Extract owned copies of the values we need before any async work,
+        // so we don't hold a borrow of `self.inner` across an await point
+        // (which would conflict with the concurrent borrow of `self.config`).
+        let (client, url, id) = match &mut self.inner {
+            McpInner::Sse {
+                client,
+                url,
+                next_id,
+            } => {
+                let id = *next_id;
+                *next_id += 1;
+                (client.clone(), url.clone(), id)
+            }
+            _ => return Err("sse_send_request called on non-SSE transport".to_string()),
         };
-
-        let id = *next_id;
-        *next_id += 1;
+        let timeout_secs = self.config.timeout_secs;
 
         let request = JsonRpcRequest {
             jsonrpc: "2.0",
@@ -431,7 +436,7 @@ impl McpConnection {
         let response = client
             .post(url.as_str())
             .json(&request)
-            .timeout(std::time::Duration::from_secs(self.config.timeout_secs))
+            .timeout(std::time::Duration::from_secs(timeout_secs))
             .send()
             .await
             .map_err(|e| format!("MCP SSE request failed: {e}"))?;
@@ -557,17 +562,37 @@ impl McpConnection {
         name: &str,
         arguments: &serde_json::Value,
     ) -> Result<String, String> {
-        // Look up the original tool name from the server (preserves hyphens etc.)
-        let raw_name = self
+        // Resolve to an owned String immediately so the borrow of self.original_names
+        // and self.config.name ends before any mutable operations below.
+        let raw_name: String = self
             .original_names
             .get(name)
-            .map(|s| s.as_str())
-            .or_else(|| strip_mcp_prefix(&self.config.name, name))
-            .unwrap_or(name);
+            .cloned()
+            .or_else(|| strip_mcp_prefix(&self.config.name, name).map(|s| s.to_string()))
+            .unwrap_or_else(|| name.to_string());
 
-        match &mut self.inner {
-            McpInner::Rmcp(client) => {
-                let mut params = rmcp::model::CallToolRequestParam::new(raw_name);
+        // Determine the transport kind without holding any reference into self.inner
+        // across an await or across a mutable reborrow of self.  Using a simple
+        // tag enum avoids E0502 / E0521 caused by overlapping borrows.
+        enum TransportKind {
+            Rmcp,
+            Sse,
+            HttpCompat,
+        }
+        let kind = match &self.inner {
+            McpInner::Rmcp(_) => TransportKind::Rmcp,
+            McpInner::Sse { .. } => TransportKind::Sse,
+            McpInner::HttpCompat { .. } => TransportKind::HttpCompat,
+        };
+        // `self.inner` borrow from the match above ends here.
+
+        match kind {
+            TransportKind::Rmcp => {
+                let McpInner::Rmcp(client) = &mut self.inner else {
+                    unreachable!()
+                };
+
+                let mut params = rmcp::model::CallToolRequestParam::new(raw_name.as_str());
                 if let Some(obj) = arguments.as_object() {
                     if !obj.is_empty() {
                         params.arguments = Some(obj.clone());
@@ -597,7 +622,9 @@ impl McpConnection {
                 }
             }
 
-            McpInner::Sse { .. } => {
+            TransportKind::Sse => {
+                // `self.inner` is no longer borrowed here, so calling
+                // `self.sse_send_request` (which takes `&mut self`) is safe.
                 let params = serde_json::json!({
                     "name": raw_name,
                     "arguments": arguments,
@@ -627,7 +654,14 @@ impl McpConnection {
                 }
             }
 
-            McpInner::HttpCompat { client } => {
+            TransportKind::HttpCompat => {
+                // Clone the reqwest::Client so we can release the borrow of
+                // self.inner before borrowing self.config (avoids E0502).
+                let client = match &self.inner {
+                    McpInner::HttpCompat { client } => client.clone(),
+                    _ => unreachable!(),
+                };
+
                 if let McpTransport::HttpCompat {
                     base_url,
                     headers,
@@ -635,11 +669,11 @@ impl McpConnection {
                 } = &self.config.transport
                 {
                     Self::call_http_compat_tool(
-                        client,
+                        &client,
                         base_url,
                         headers,
                         tools,
-                        raw_name,
+                        raw_name.as_str(),
                         arguments,
                         self.config.timeout_secs,
                     )
