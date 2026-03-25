@@ -1032,7 +1032,7 @@ const communityHrefs: string[] = [
   'https://github.com/librefang/librefang/pulls',
   'https://github.com/librefang/librefang/issues',
   'https://github.com/librefang/librefang/discussions',
-  'https://discord.gg/librefang',
+  'https://discord.gg/DzTYqAZZmc',
 ]
 const communityIcons: LucideIcon[] = [GitPullRequest, CircleDot, MessageSquare, MessageSquare]
 
