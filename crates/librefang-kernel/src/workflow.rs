@@ -217,6 +217,7 @@ pub struct StepResult {
 }
 
 /// The workflow engine — manages definitions and executes pipeline runs.
+#[derive(Clone)]
 pub struct WorkflowEngine {
     /// Registered workflow definitions.
     workflows: Arc<RwLock<HashMap<WorkflowId, Workflow>>>,
@@ -270,7 +271,7 @@ impl WorkflowEngine {
         for run in runs {
             map.insert(run.id, run);
         }
-        info!(count, "Loaded persisted workflow runs from disk");
+        debug!(count, "Loaded persisted workflow runs from disk");
         Ok(count)
     }
 
@@ -316,42 +317,8 @@ impl WorkflowEngine {
         if self.persist_path.is_none() {
             return;
         }
-        let runs = Arc::clone(&self.runs);
-        let path = self.persist_path.clone();
-        let _ = tokio::task::spawn_blocking(move || {
-            // Build a temporary engine-like struct just for persistence
-            let guard = runs.blocking_read();
-            let terminal: Vec<&WorkflowRun> = guard
-                .values()
-                .filter(|r| {
-                    matches!(
-                        r.state,
-                        WorkflowRunState::Completed | WorkflowRunState::Failed
-                    )
-                })
-                .collect();
-            let data = match serde_json::to_string_pretty(&terminal) {
-                Ok(d) => d,
-                Err(e) => {
-                    warn!("Failed to serialize workflow runs: {e}");
-                    return;
-                }
-            };
-            drop(guard);
-            if let Some(ref p) = path {
-                let tmp_path = p.with_extension("json.tmp");
-                if let Err(e) = std::fs::write(&tmp_path, data.as_bytes()) {
-                    warn!("Failed to write workflow runs temp file: {e}");
-                    return;
-                }
-                if let Err(e) = std::fs::rename(&tmp_path, p) {
-                    warn!("Failed to rename workflow runs file: {e}");
-                    return;
-                }
-                debug!("Persisted workflow runs to disk");
-            }
-        })
-        .await;
+        let engine = self.clone();
+        let _ = tokio::task::spawn_blocking(move || engine.persist_runs()).await;
     }
 
     /// Register a new workflow definition.
