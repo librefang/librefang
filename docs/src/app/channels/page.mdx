@@ -6,7 +6,6 @@ All adapters share a common foundation: graceful shutdown via `watch::channel`, 
 
 ## Table of Contents
 
-- [All 45 Channels](#all-44-channels)
 - [Channel Configuration](#channel-configuration)
 - [Channel Overrides](#channel-overrides)
 - [Formatter, Rate Limiter, and Policies](#formatter-rate-limiter-and-policies)
@@ -65,102 +64,6 @@ All adapters share a common foundation: graceful shutdown via `watch::channel`, 
   - [Webhook](#webhook)
 - [Agent Routing](#agent-routing)
 - [Writing Custom Adapters](#writing-custom-adapters)
-
----
-
-## All 45 Channels
-
-### Core (7)
-
-| Channel | Protocol | Env Vars | ChannelType Variant |
-|---------|----------|----------|---------------------|
-| [Telegram](https://github.com/librefang/librefang-registry/tree/main/channels/telegram.toml) | Bot API long-polling | `TELEGRAM_BOT_TOKEN` | `Telegram` |
-| [Discord](https://github.com/librefang/librefang-registry/tree/main/channels/discord.toml) | Gateway WebSocket v10 | `DISCORD_BOT_TOKEN` | `Discord` |
-| [Slack](https://github.com/librefang/librefang-registry/tree/main/channels/slack.toml) | Socket Mode WebSocket | `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN` | `Slack` |
-| [WhatsApp](https://github.com/librefang/librefang-registry/tree/main/channels/whatsapp.toml) | Cloud API webhook | `WA_ACCESS_TOKEN`, `WA_PHONE_ID`, `WA_VERIFY_TOKEN` | `WhatsApp` |
-| [Signal](https://github.com/librefang/librefang-registry/tree/main/channels/signal.toml) | signal-cli REST/JSON-RPC | _(system service)_ | `Signal` |
-| [Matrix](https://github.com/librefang/librefang-registry/tree/main/channels/matrix.toml) | Client-Server API `/sync` | `MATRIX_TOKEN` | `Matrix` |
-| [Email](https://github.com/librefang/librefang-registry/tree/main/channels/email.toml) | IMAP + SMTP | `EMAIL_PASSWORD` | `Email` |
-
-### Enterprise (8)
-
-| Channel | Protocol | Env Vars | ChannelType Variant |
-|---------|----------|----------|---------------------|
-| [Microsoft Teams](https://github.com/librefang/librefang-registry/tree/main/channels/teams.toml) | Bot Framework v3 webhook + OAuth2 | `TEAMS_APP_ID`, `TEAMS_APP_SECRET` | `Teams` |
-| [Mattermost](https://github.com/librefang/librefang-registry/tree/main/channels/mattermost.toml) | WebSocket + REST v4 | `MATTERMOST_TOKEN`, `MATTERMOST_URL` | `Mattermost` |
-| [Google Chat](https://github.com/librefang/librefang-registry/tree/main/channels/google_chat.toml) | Service account webhook | `GOOGLE_CHAT_SA_KEY`, `GOOGLE_CHAT_SPACE` | `Custom("google_chat")` |
-| [Webex](https://github.com/librefang/librefang-registry/tree/main/channels/webex.toml) | Bot SDK WebSocket | `WEBEX_BOT_TOKEN` | `Custom("webex")` |
-| [Feishu / Lark](https://github.com/librefang/librefang-registry/tree/main/channels/feishu.toml) | Open Platform webhook | `FEISHU_APP_ID`, `FEISHU_APP_SECRET` | `Custom("feishu")` |
-| [Rocket.Chat](https://github.com/librefang/librefang-registry/tree/main/channels/rocketchat.toml) | REST polling | `ROCKETCHAT_TOKEN`, `ROCKETCHAT_URL` | `Custom("rocketchat")` |
-| [Zulip](https://github.com/librefang/librefang-registry/tree/main/channels/zulip.toml) | Event queue long-polling | `ZULIP_EMAIL`, `ZULIP_API_KEY`, `ZULIP_URL` | `Custom("zulip")` |
-| [XMPP](https://github.com/librefang/librefang-registry/tree/main/channels/xmpp.toml) | XMPP protocol (stub) | `XMPP_JID`, `XMPP_PASSWORD`, `XMPP_SERVER` | `Custom("xmpp")` |
-
-### Social (8)
-
-| Channel | Protocol | Env Vars | ChannelType Variant |
-|---------|----------|----------|---------------------|
-| [LINE](https://github.com/librefang/librefang-registry/tree/main/channels/line.toml) | Messaging API webhook | `LINE_CHANNEL_SECRET`, `LINE_CHANNEL_TOKEN` | `Custom("line")` |
-| [Viber](https://github.com/librefang/librefang-registry/tree/main/channels/viber.toml) | Bot API webhook | `VIBER_AUTH_TOKEN` | `Custom("viber")` |
-| [Facebook Messenger](https://github.com/librefang/librefang-registry/tree/main/channels/messenger.toml) | Platform API webhook | `MESSENGER_PAGE_TOKEN`, `MESSENGER_VERIFY_TOKEN` | `Custom("messenger")` |
-| [Mastodon](https://github.com/librefang/librefang-registry/tree/main/channels/mastodon.toml) | Streaming API WebSocket | `MASTODON_TOKEN`, `MASTODON_INSTANCE` | `Custom("mastodon")` |
-| [Bluesky](https://github.com/librefang/librefang-registry/tree/main/channels/bluesky.toml) | AT Protocol WebSocket | `BLUESKY_HANDLE`, `BLUESKY_APP_PASSWORD` | `Custom("bluesky")` |
-| [Reddit](https://github.com/librefang/librefang-registry/tree/main/channels/reddit.toml) | OAuth2 polling | `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USERNAME`, `REDDIT_PASSWORD` | `Custom("reddit")` |
-| [LinkedIn](https://github.com/librefang/librefang-registry/tree/main/channels/linkedin.toml) | Messaging API polling | `LINKEDIN_ACCESS_TOKEN` | `Custom("linkedin")` |
-| [Twitch](https://github.com/librefang/librefang-registry/tree/main/channels/twitch.toml) | IRC gateway | `TWITCH_TOKEN`, `TWITCH_CHANNEL` | `Custom("twitch")` |
-
-### Community (6)
-
-| Channel | Protocol | Env Vars | ChannelType Variant |
-|---------|----------|----------|---------------------|
-| [IRC](https://github.com/librefang/librefang-registry/tree/main/channels/irc.toml) | Raw TCP PRIVMSG | `IRC_SERVER`, `IRC_NICK`, `IRC_PASSWORD` | `Custom("irc")` |
-| [Guilded](https://github.com/librefang/librefang-registry/tree/main/channels/guilded.toml) | WebSocket | `GUILDED_BOT_TOKEN` | `Custom("guilded")` |
-| [Revolt](https://github.com/librefang/librefang-registry/tree/main/channels/revolt.toml) | WebSocket | `REVOLT_BOT_TOKEN` | `Custom("revolt")` |
-| [Keybase](https://github.com/librefang/librefang-registry/tree/main/channels/keybase.toml) | Bot API polling | `KEYBASE_USERNAME`, `KEYBASE_PAPERKEY` | `Custom("keybase")` |
-| [Discourse](https://github.com/librefang/librefang-registry/tree/main/channels/discourse.toml) | REST polling | `DISCOURSE_API_KEY`, `DISCOURSE_URL` | `Custom("discourse")` |
-| [Gitter](https://github.com/librefang/librefang-registry/tree/main/channels/gitter.toml) | Streaming API | `GITTER_TOKEN` | `Custom("gitter")` |
-
-### Self-hosted (1)
-
-| Channel | Protocol | Env Vars | ChannelType Variant |
-|---------|----------|----------|---------------------|
-| [Nextcloud Talk](https://github.com/librefang/librefang-registry/tree/main/channels/nextcloud.toml) | REST polling | `NEXTCLOUD_TOKEN`, `NEXTCLOUD_URL` | `Custom("nextcloud")` |
-
-### Privacy (3)
-
-| Channel | Protocol | Env Vars | ChannelType Variant |
-|---------|----------|----------|---------------------|
-| [Threema](https://github.com/librefang/librefang-registry/tree/main/channels/threema.toml) | Gateway API webhook | `THREEMA_ID`, `THREEMA_SECRET` | `Custom("threema")` |
-| [Nostr](https://github.com/librefang/librefang-registry/tree/main/channels/nostr.toml) | NIP-01 relay WebSocket | `NOSTR_PRIVATE_KEY`, `NOSTR_RELAY` | `Custom("nostr")` |
-| [Mumble](https://github.com/librefang/librefang-registry/tree/main/channels/mumble.toml) | TCP text protocol | `MUMBLE_SERVER`, `MUMBLE_USERNAME`, `MUMBLE_PASSWORD` | `Custom("mumble")` |
-
-### Workplace (7)
-
-| Channel | Protocol | Env Vars | ChannelType Variant |
-|---------|----------|----------|---------------------|
-| [Pumble](https://github.com/librefang/librefang-registry/tree/main/channels/pumble.toml) | Webhook | `PUMBLE_WEBHOOK_URL`, `PUMBLE_TOKEN` | `Custom("pumble")` |
-| [Flock](https://github.com/librefang/librefang-registry/tree/main/channels/flock.toml) | Webhook | `FLOCK_TOKEN` | `Custom("flock")` |
-| [Twist](https://github.com/librefang/librefang-registry/tree/main/channels/twist.toml) | API v3 polling | `TWIST_TOKEN` | `Custom("twist")` |
-| [DingTalk](https://github.com/librefang/librefang-registry/tree/main/channels/dingtalk.toml) | Robot API webhook | `DINGTALK_TOKEN`, `DINGTALK_SECRET` | `Custom("dingtalk")` |
-| [QQ](https://github.com/librefang/librefang-registry/tree/main/channels/qq.toml) | Bot API long-polling | `QQ_BOT_TOKEN`, `QQ_BOT_APPID` | `Custom("qq")` |
-| [WeCom / WeChat Work](https://github.com/librefang/librefang-registry/tree/main/channels/wecom.toml) | Enterprise API webhook | `WECOM_CORP_ID`, `WECOM_AGENT_ID`, `WECOM_SECRET` | `Custom("wecom")` |
-| [WeChat (Personal)](https://github.com/librefang/librefang-registry/tree/main/channels/wechat.toml) | iLink Bot API long-polling | _(QR code login)_ | `WeChat` |
-
-### Notification (2)
-
-| Channel | Protocol | Env Vars | ChannelType Variant |
-|---------|----------|----------|---------------------|
-| [ntfy](https://github.com/librefang/librefang-registry/tree/main/channels/ntfy.toml) | SSE pub/sub | `NTFY_TOPIC`, `NTFY_SERVER` | `Custom("ntfy")` |
-| [Gotify](https://github.com/librefang/librefang-registry/tree/main/channels/gotify.toml) | WebSocket | `GOTIFY_TOKEN`, `GOTIFY_URL` | `Custom("gotify")` |
-
-### Integration (3)
-
-| Channel | Protocol | Env Vars | ChannelType Variant |
-|---------|----------|----------|---------------------|
-| [Webhook](https://github.com/librefang/librefang-registry/tree/main/channels/webhook.toml) | Generic HTTP with HMAC-SHA256 | `WEBHOOK_URL`, `WEBHOOK_SECRET` | `Custom("webhook")` |
-| [MQTT](https://github.com/librefang/librefang-registry/tree/main/channels/mqtt.toml) | MQTT v3.1.1/v5 pub/sub | `MQTT_HOST`, `MQTT_USERNAME`, `MQTT_PASSWORD` (optional) | `Custom("mqtt")` |
-| Sidecar | JSON-RPC over stdin/stdout | _(configured per sidecar)_ | `Custom("sidecar")` |
-
-**MQTT Notes:** Requires the `all-channels` feature flag at compile time. Uses the `rumqttc` crate for MQTT v3.1.1/v5 support with automatic reconnection and exponential backoff. Subscribes to configurable topics for incoming messages and publishes agent responses to a configurable response topic.
 
 ---
 
@@ -227,7 +130,7 @@ default_agent = "home-assistant"
 | Matrix | `MATRIX_TOKEN` |
 | Email | `EMAIL_PASSWORD` |
 
-Env vars for all other channels are listed in the [All 45 Channels](#all-44-channels) tables above.
+Env vars for each channel are listed in their respective setup sections below.
 
 ---
 
