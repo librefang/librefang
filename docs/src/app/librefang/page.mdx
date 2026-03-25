@@ -201,14 +201,34 @@ Initialization runs automatically on first `librefang start` (or via the install
 librefang init
 ```
 
-This creates:
+This creates the `~/.librefang/` directory (customizable via `LIBREFANG_HOME`):
 
 ```
 ~/.librefang/
-  config.toml    # Main configuration
-  data/          # Database and runtime data
-  agents/        # Agent manifests (optional)
+├── config.toml                # Main configuration file
+├── aliases.toml               # Model and command aliases
+├── data/
+│   ├── librefang.db           #   SQLite database (memory, sessions, knowledge graph)
+│   └── state.db               #   Daemon state persistence
+├── registry/                  # Synced from librefang-registry
+│   ├── agents/                #   32 agent templates
+│   ├── hands/                 #   15 hand definitions
+│   ├── providers/             #   49 provider configs
+│   ├── skills/                #   Skill definitions
+│   ├── workflows/             #   Workflow templates
+│   └── plugins/               #   Plugin definitions
+├── workspaces/                # Runtime working directories
+│   ├── agents/                #   Active agent working directories
+│   └── hands/                 #   Active hand working directories
+├── skills/                    # User-installed skills
+├── plugins/                   # User-installed plugins
+├── vault.enc                  # Encrypted credential vault
+├── logs/                      # Application logs
+├── cache/                     # Temporary cache
+└── bin/                       # CLI binary (if installed via script)
 ```
+
+See [Architecture - User Data Directory](/architecture#user-data-directory) for the full reference.
 
 ### Set Up an API Key
 

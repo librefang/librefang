@@ -235,7 +235,36 @@ sudo systemctl enable --now librefang
 librefang init
 ```
 
-创建 `~/.librefang/` 目录和默认配置文件。详见 [CLI 参考](/zh/cli)。
+创建 `~/.librefang/` 目录和默认配置文件（可通过 `LIBREFANG_HOME` 环境变量自定义路径）。详见 [CLI 参考](/zh/cli)。
+
+初始化后的目录结构：
+
+```
+~/.librefang/
+├── config.toml                # 主配置文件
+├── aliases.toml               # 模型和命令别名
+├── data/
+│   ├── librefang.db           #   SQLite 数据库（内存、会话、知识图谱）
+│   └── state.db               #   守护进程状态持久化
+├── registry/                  # 从 librefang-registry 同步
+│   ├── agents/                #   32 个 Agent 模板
+│   ├── hands/                 #   15 个 Hand 定义
+│   ├── providers/             #   49 个提供商配置
+│   ├── skills/                #   技能定义
+│   ├── workflows/             #   工作流模板
+│   └── plugins/               #   插件定义
+├── workspaces/                # 运行时工作目录
+│   ├── agents/                #   活跃 Agent 工作目录
+│   └── hands/                 #   活跃 Hand 工作目录
+├── skills/                    # 用户安装的技能
+├── plugins/                   # 用户安装的插件
+├── vault.enc                  # 加密凭证金库
+├── logs/                      # 应用日志
+├── cache/                     # 临时缓存
+└── bin/                       # CLI 二进制（脚本安装时）
+```
+
+完整目录说明详见 [系统架构 - 用户数据目录](/zh/architecture#用户数据目录)。
 
 ### 2. 配置 API Key
 
