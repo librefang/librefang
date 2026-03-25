@@ -24,7 +24,7 @@ This document describes the internal architecture of LibreFang, the open-source 
 
 ## Crate Structure
 
-LibreFang is organized as a Cargo workspace with 14 crates (13 code crates + xtask). Dependencies flow downward (lower crates depend on nothing above them).
+LibreFang is organized as a Cargo workspace with 15 crates (14 code crates + xtask). Dependencies flow downward (lower crates depend on nothing above them).
 
 ```
 librefang-cli            CLI interface, daemon auto-detect, MCP server
@@ -41,7 +41,7 @@ librefang-kernel         Kernel: assembles all subsystems, workflow engine, RBAC
     +-- librefang-migrate      Migration engine (OpenClaw YAML->TOML)
     +-- librefang-skills       60 bundled skills, FangHub marketplace, ClawHub client
     +-- librefang-extensions   Extension & integration system (credential vault, OAuth2 PKCE, one-click MCP setup)
-    +-- librefang-hands        Autonomous Hands system (14 built-in hand agents)
+    +-- librefang-hands        Autonomous Hands system (15 hand agents from registry)
     |
 librefang-memory         SQLite memory substrate, sessions, semantic search, usage tracking
     |
@@ -65,7 +65,7 @@ librefang-types          Shared types: Agent, Capability, Event, Memory, Message
 | **librefang-migrate** | Migration engine. Supports OpenClaw (`~/.openclaw/`). Converts YAML configs to TOML, maps tool names, maps provider names, imports agent manifests, copies memory files, converts channel configs. Produces a `MigrationReport` with imported items, skipped items, and warnings. |
 | **librefang-skills** | Skill system for pluggable tool bundles. 60 bundled skills compiled via `include_str!()`. Skills are `skill.toml` + Python/WASM/Node.js/PromptOnly code. `SkillManifest` defines metadata, runtime config, provided tools, and requirements. `SkillRegistry` manages installed and bundled skills. `FangHubClient` connects to FangHub marketplace. `ClawHubClient` connects to clawhub.ai for cross-ecosystem skill discovery. `SKILL.md` parser for OpenClaw compatibility (YAML frontmatter + Markdown body). `SkillVerifier` with SHA256 verification. Prompt injection scanner (`scan_prompt_content()`) detects override attempts, data exfiltration, and shell references. |
 | **librefang-extensions** | Extension and integration system. Provides a credential vault for securely storing third-party service credentials, OAuth2 PKCE flow for user-authorized integrations, and one-click MCP setup helpers for popular external services. |
-| **librefang-hands** | Autonomous Hands system. 14 built-in hand agents that operate independently with specialized domain expertise: analytics, apitester, browser, clip, collector, devops, lead, linkedin, predictor, reddit, researcher, strategist, trader, twitter. Each hand exposes a structured tool surface and can be activated/deactivated at runtime via the `hand_activate`/`hand_deactivate` tools. |
+| **librefang-hands** | Autonomous Hands system. 15 hand agents from registry that operate independently with specialized domain expertise: analytics, apitester, browser, clip, collector, devops, lead, linkedin, predictor, reddit, researcher, strategist, trader, twitter. Each hand exposes a structured tool surface and can be activated/deactivated at runtime via the `hand_activate`/`hand_deactivate` tools. |
 | **xtask** | Build automation tasks (cargo-xtask pattern). |
 
 ---
