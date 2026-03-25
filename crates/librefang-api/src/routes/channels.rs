@@ -27,6 +27,10 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
             "/channels/wechat/qr/status",
             axum::routing::get(wechat_qr_status),
         )
+        .route(
+            "/channels/registry",
+            axum::routing::get(list_channel_registry),
+        )
 }
 
 use super::skills::{
@@ -1808,7 +1812,7 @@ const WECHAT_ILINK_BASE: &str = "https://ilinkai.weixin.qq.com";
 )]
 /// POST /api/channels/wechat/qr/start — Request a QR code from iLink for WeChat login.
 pub async fn wechat_qr_start() -> impl IntoResponse {
-    let client = match reqwest::Client::builder()
+    let client = match librefang_runtime::http_client::client_builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
     {
@@ -1887,7 +1891,7 @@ pub async fn wechat_qr_status(
     // iLink uses long-polling: the request hangs until the user scans or it
     // times out server-side (~30s). Use a generous timeout so we don't mistake
     // a normal long-poll wait for a network error.
-    let client = match reqwest::Client::builder()
+    let client = match librefang_runtime::http_client::client_builder()
         .timeout(std::time::Duration::from_secs(35))
         .build()
     {
@@ -1943,4 +1947,25 @@ pub async fn wechat_qr_status(
             "message": "Waiting for scan..."
         })),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Channel registry metadata — loaded from ~/.librefang/channels/*.toml
+// ---------------------------------------------------------------------------
+
+/// Return channel metadata from the registry (synced from librefang-registry).
+///
+/// `GET /api/channels/registry`
+#[utoipa::path(
+    get,
+    path = "/api/channels/registry",
+    tag = "channels",
+    responses(
+        (status = 200, description = "Channel metadata from registry", body = Vec<serde_json::Value>)
+    )
+)]
+pub async fn list_channel_registry(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let channels_dir = state.kernel.home_dir().join("channels");
+    let metadata = librefang_runtime::channel_registry::load_channel_metadata(&channels_dir);
+    Json(serde_json::to_value(&metadata).unwrap_or_default())
 }

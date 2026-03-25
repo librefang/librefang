@@ -459,11 +459,14 @@ pub async fn run_daemon(
         }
     }
 
+    // Track background task handles for graceful shutdown
+    let mut bg_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+
     // Config file hot-reload watcher (polls every 30 seconds)
     {
         let k = kernel.clone();
         let config_path = kernel.config_ref().home_dir.join("config.toml");
-        tokio::spawn(async move {
+        bg_tasks.push(tokio::spawn(async move {
             let mut last_modified = std::fs::metadata(&config_path)
                 .and_then(|m| m.modified())
                 .ok();
@@ -487,7 +490,7 @@ pub async fn run_daemon(
                     }
                 }
             }
-        });
+        }));
     }
 
     let (app, state) = build_router(kernel.clone(), addr).await;
@@ -561,7 +564,7 @@ pub async fn run_daemon(
     // Background: sync model catalog from community repo on startup, then every 24 hours
     {
         let kernel = state.kernel.clone();
-        tokio::spawn(async move {
+        bg_tasks.push(tokio::spawn(async move {
             loop {
                 match librefang_runtime::catalog_sync::sync_catalog_to(
                     &kernel.config_ref().home_dir,
@@ -586,7 +589,7 @@ pub async fn run_daemon(
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(24 * 60 * 60)).await;
             }
-        });
+        }));
     }
 
     // Use SO_REUSEADDR to allow binding immediately after reboot (avoids TIME_WAIT).
@@ -615,6 +618,15 @@ pub async fn run_daemon(
     )
     .with_graceful_shutdown(shutdown_signal(api_shutdown))
     .await?;
+
+    // Abort tracked background tasks (config reload watcher, catalog sync)
+    for handle in &bg_tasks {
+        handle.abort();
+    }
+    for handle in bg_tasks {
+        let _ = handle.await;
+    }
+    info!("Background tasks stopped");
 
     // Clean up daemon info file
     if let Some(info_path) = daemon_info_path {

@@ -120,9 +120,16 @@ fn safe_resolve_parent(path: &str) -> Result<std::path::PathBuf, serde_json::Val
 // SSRF protection
 // ---------------------------------------------------------------------------
 
+/// SSRF-validated DNS resolution result for the WASM host function path.
+struct SsrfResolved {
+    hostname: String,
+    resolved: Vec<std::net::SocketAddr>,
+}
+
 /// SSRF protection: check if a hostname resolves to a private/internal IP.
-/// This defeats DNS rebinding by checking the RESOLVED address, not the hostname.
-fn is_ssrf_target(url: &str) -> Result<(), serde_json::Value> {
+/// Returns the resolved addresses on success so the caller can pin DNS and
+/// prevent TOCTOU / DNS-rebinding attacks.
+fn is_ssrf_target(url: &str) -> Result<SsrfResolved, serde_json::Value> {
     // Only allow http:// and https:// schemes (block file://, gopher://, ftp://)
     if !url.starts_with("http://") && !url.starts_with("https://") {
         return Err(json!({"error": "Only http:// and https:// URLs are allowed"}));
@@ -146,17 +153,34 @@ fn is_ssrf_target(url: &str) -> Result<(), serde_json::Value> {
     // Resolve DNS and check every returned IP
     let port = if url.starts_with("https") { 443 } else { 80 };
     let socket_addr = format!("{hostname}:{port}");
-    if let Ok(addrs) = socket_addr.to_socket_addrs() {
-        for addr in addrs {
-            let ip = addr.ip();
-            if ip.is_loopback() || ip.is_unspecified() || is_private_ip(&ip) {
-                return Err(json!({"error": format!(
-                    "SSRF blocked: {hostname} resolves to private IP {ip}"
-                )}));
+    let mut resolved = Vec::new();
+    match socket_addr.to_socket_addrs() {
+        Ok(addrs) => {
+            for addr in addrs {
+                let ip = addr.ip();
+                if ip.is_loopback() || ip.is_unspecified() || is_private_ip(&ip) {
+                    return Err(json!({"error": format!(
+                        "SSRF blocked: {hostname} resolves to private IP {ip}"
+                    )}));
+                }
+                resolved.push(addr);
             }
         }
+        Err(e) => {
+            return Err(json!({"error": format!(
+                "SSRF blocked: DNS resolution failed for {hostname}: {e}"
+            )}));
+        }
     }
-    Ok(())
+    if resolved.is_empty() {
+        return Err(json!({"error": format!(
+            "SSRF blocked: DNS resolution returned no addresses for {hostname}"
+        )}));
+    }
+    Ok(SsrfResolved {
+        hostname: hostname.to_string(),
+        resolved,
+    })
 }
 
 fn is_private_ip(ip: &std::net::IpAddr) -> bool {
@@ -279,10 +303,11 @@ fn host_net_fetch(state: &GuestState, params: &serde_json::Value) -> serde_json:
         .unwrap_or("GET");
     let body = params.get("body").and_then(|b| b.as_str()).unwrap_or("");
 
-    // SECURITY: SSRF protection — check resolved IP against private ranges
-    if let Err(e) = is_ssrf_target(url) {
-        return e;
-    }
+    // SECURITY: SSRF protection — resolve DNS once and validate IPs
+    let ssrf_result = match is_ssrf_target(url) {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
 
     // Extract host:port from URL for capability check
     let host = extract_host_from_url(url);
@@ -291,7 +316,13 @@ fn host_net_fetch(state: &GuestState, params: &serde_json::Value) -> serde_json:
     }
 
     state.tokio_handle.block_on(async {
-        let client = crate::http_client::proxied_client();
+        // Build a DNS-pinned client so the HTTP request connects to the
+        // same IPs we already validated (prevents DNS-rebinding TOCTOU).
+        let mut builder = crate::http_client::proxied_client_builder();
+        for addr in &ssrf_result.resolved {
+            builder = builder.resolve(&ssrf_result.hostname, *addr);
+        }
+        let client = builder.build().expect("HTTP client build");
         let request = match method.to_uppercase().as_str() {
             "POST" => client.post(url).body(body.to_string()),
             "PUT" => client.put(url).body(body.to_string()),
