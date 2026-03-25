@@ -200,11 +200,11 @@ sudo systemctl enable --now librefang
 librefang init
 ```
 
-这会创建 `~/.librefang/` 目录和默认配置文件。
+创建 `~/.librefang/` 目录和默认配置文件。详见 [CLI 参考](/zh/cli)。
 
 ### 2. 配置 API Key
 
-LibreFang 需要至少一个 LLM 提供商 API Key：
+LibreFang 需要至少一个 LLM 提供商 API Key。支持 49 个驱动，详见 [LLM 提供商](/zh/providers)。
 
 ```bash
 # Anthropic (Claude)
@@ -217,9 +217,11 @@ export OPENAI_API_KEY=sk-...
 export GROQ_API_KEY=gsk_...
 ```
 
+也可以通过 CLI 安全存储：`librefang config set-key groq <your-key>`
+
 ### 3. 编辑配置
 
-编辑 `~/.librefang/config.toml`：
+编辑 `~/.librefang/config.toml`，完整配置项参考 [配置文件](/zh/configuration)：
 
 ```toml
 [default_model]
@@ -237,9 +239,26 @@ listen_addr = "127.0.0.1:4545"
 librefang start
 ```
 
-启动后访问 http://127.0.0.1:4545/ 查看仪表板。
+启动后访问 http://127.0.0.1:4545/ 查看仪表板。守护进程提供 REST API、WebSocket、SSE 和 Web UI，详见 [API 参考](/zh/api)。
 
-### 5. 激活 Hand
+### 5. 创建 Agent
+
+从 32 个模板中选择一个创建 Agent，详见 [Agent 模板](/zh/agents)：
+
+```bash
+# 创建 hello-world agent
+librefang agent spawn agents/hello-world/agent.toml
+
+# 与 agent 聊天
+librefang agent chat <agent-id>
+
+# 或使用快捷方式
+librefang chat
+```
+
+### 6. 激活 Hand
+
+Hands 是自主执行的能力包，详见 [自主 Hands](/zh/hands)：
 
 ```bash
 # 激活 Researcher Hand
@@ -248,6 +267,50 @@ librefang hand activate researcher
 # 查看状态
 librefang hand status researcher
 ```
+
+### 7. 连接通道
+
+将 Agent 接入消息平台，支持 44 个通道适配器，详见 [通道适配器](/zh/channels)：
+
+```bash
+# 设置 Telegram 通道
+librefang channel setup telegram
+
+# 查看所有通道状态
+librefang channel list
+```
+
+### 8. 安装技能
+
+从 FangHub 安装技能扩展 Agent 能力，详见 [技能开发](/zh/skills)：
+
+```bash
+# 搜索技能
+librefang skill search "web scraping"
+
+# 安装技能
+librefang skill install <source>
+```
+
+### 9. 配置工作流
+
+将多个 Agent 编排为 DAG 工作流，详见 [工作流](/zh/workflows)：
+
+```bash
+# 创建工作流
+librefang workflow create workflow.json
+
+# 运行工作流
+librefang workflow run <id> <input>
+```
+
+### 10. 运行诊断
+
+```bash
+librefang doctor
+```
+
+遇到问题参考 [故障排除](/zh/troubleshooting)，生产部署参考 [生产部署](/zh/production)。
 
 ---
 
@@ -334,89 +397,44 @@ librefang agent spawn my-agent.toml
 
 ## CLI 命令参考
 
-### Agent 管理
+完整命令列表和用法详见 [CLI 参考](/zh/cli)。
 
 ```bash
-# 生成 Agent
-librefang agent spawn agents/hello-world/agent.toml
+librefang init                          # 初始化
+librefang start                         # 启动守护进程
+librefang status                        # 查看状态
+librefang doctor                        # 运行诊断
 
-# 列出所有 Agent
-librefang agent list
+librefang agent spawn <manifest.toml>   # 创建 Agent
+librefang agent list                    # 列出 Agent
+librefang agent chat <id>               # 与 Agent 聊天
+librefang agent kill <id>               # 终止 Agent
 
-# 与 Agent 聊天
-librefang agent chat <agent-id>
+librefang hand list                     # 列出 Hands
+librefang hand activate <name>          # 激活 Hand
+librefang hand pause <name>             # 暂停 Hand
 
-# 终止 Agent
-librefang agent kill <agent-id>
-```
+librefang workflow list                 # 列出工作流
+librefang workflow create <file.json>   # 创建工作流
+librefang workflow run <id> <input>     # 运行工作流
 
-### Hand 管理
+librefang skill install <source>        # 安装技能
+librefang skill list                    # 列出技能
+librefang skill search <query>          # 搜索 FangHub
 
-```bash
-# 列出所有 Hands
-librefang hand list
+librefang channel list                  # 列出通道
+librefang channel setup <channel>       # 设置通道
 
-# 激活 Hand
-librefang hand activate researcher
-
-# 查看状态
-librefang hand status researcher
-
-# 暂停 Hand
-librefang hand pause researcher
-```
-
-### 工作流
-
-```bash
-# 列出工作流
-librefang workflow list
-
-# 创建工作流
-librefang workflow create <file.json>
-
-# 运行工作流
-librefang workflow run <id> <input>
-```
-
-### 技能
-
-```bash
-# 安装技能
-librefang skill install <source>
-
-# 列出已安装技能
-librefang skill list
-
-# 搜索 FangHub
-librefang skill search <query>
-```
-
-### 通道
-
-```bash
-# 列出通道状态
-librefang channel list
-
-# 设置通道
-librefang channel setup telegram
-```
-
-### 诊断
-
-```bash
-# 运行诊断
-librefang doctor
-
-# 查看状态
-librefang status
+librefang config show                   # 查看配置
+librefang config set-key <provider> <key>  # 保存 API Key
+librefang migrate --from openfang       # 从 OpenFang 迁移
 ```
 
 ---
 
 ## 16 层安全系统
 
-LibreFang 采用深度防御策略，包含 16 个独立的安全层：
+LibreFang 采用深度防御策略，包含 16 个独立的安全层。详见 [安全](/zh/security)。
 
 1. **WASM 双计量沙箱** - 燃料计量 + 时代中断
 2. **Merkle 哈希链审计追踪** - 加密链接的完整操作链
@@ -439,6 +457,8 @@ LibreFang 采用深度防御策略，包含 16 个独立的安全层：
 
 ## 44 个通道适配器
 
+详见 [通道适配器](/zh/channels)。
+
 **核心**: Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Email
 
 **企业**: Microsoft Teams, Mattermost, Google Chat, Webex, Feishu/Lark, Zulip
@@ -451,11 +471,15 @@ LibreFang 采用深度防御策略，包含 16 个独立的安全层：
 
 ## 49 个 LLM 驱动
 
+详见 [LLM 提供商](/zh/providers)。
+
 Anthropic, Gemini, OpenAI, Groq, DeepSeek, OpenRouter, Together, Mistral, Fireworks, Cohere, Perplexity, xAI, AI21, Cerebras, SambaNova, HuggingFace, Replicate, Ollama, vLLM, LM Studio, Qwen, MiniMax, Zhipu, Moonshot, Qianfan, Bedrock
 
 ---
 
 ## OpenAI 兼容 API
+
+完整 API 参考详见 [API 参考](/zh/api)，SDK 详见 [SDK 参考](/zh/sdk)。
 
 ```bash
 curl -X POST localhost:4545/v1/chat/completions \
@@ -470,6 +494,8 @@ curl -X POST localhost:4545/v1/chat/completions \
 ---
 
 ## 开发
+
+详见 [开发指南](/zh/development)。
 
 ```bash
 # 构建工作空间
@@ -487,7 +513,11 @@ cargo fmt --all -- --check
 
 ---
 
-## 从 OpenFang 迁移
+## 迁移
+
+详见 [迁移指南](/zh/migration)。
+
+### 从 OpenFang 迁移
 
 ```bash
 # 迁移一切（自动检测 ~/.openfang）
@@ -502,7 +532,7 @@ librefang migrate --from openfang --dry-run
 
 ---
 
-## 从 OpenClaw 迁移
+### 从 OpenClaw 迁移
 
 ```bash
 # 迁移一切
