@@ -5,8 +5,20 @@ set -euo pipefail
 # Usage: curl -sL https://raw.githubusercontent.com/librefang/librefang/main/deploy/fly/deploy.sh | bash
 
 REPO="https://github.com/librefang/librefang.git"
-APP_NAME="librefang-$(openssl rand -hex 4)"
 REGION="nrt"
+
+# --- 0. App naming ---
+echo ""
+read -rp "$(printf '\033[1;34m→\033[0m') App name (leave empty for auto-generated): " CUSTOM_NAME < /dev/tty
+if [ -n "$CUSTOM_NAME" ]; then
+  # Sanitize: lowercase, replace non-alphanumeric with dash, trim dashes
+  APP_NAME=$(echo "$CUSTOM_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g; s/--*/-/g; s/^-//; s/-$//')
+  if [ -z "$APP_NAME" ]; then
+    APP_NAME="librefang-$(openssl rand -hex 4)"
+  fi
+else
+  APP_NAME="librefang-$(openssl rand -hex 4)"
+fi
 
 info()  { printf "\033[1;34m→\033[0m %s\n" "$1"; }
 ok()    { printf "\033[1;32m✓\033[0m %s\n" "$1"; }
