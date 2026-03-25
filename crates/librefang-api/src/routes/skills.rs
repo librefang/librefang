@@ -1258,6 +1258,13 @@ pub async fn get_hand(
                     },
                     "agents": def.agents.iter().map(|(role, a)| {
                         let dm = &state.kernel.config_ref().default_model;
+                        let agent_i18n = i18n_entry.and_then(|l| l.agents.get(role.as_str()));
+                        let resolved_agent_name = agent_i18n
+                            .and_then(|ai| ai.name.as_deref())
+                            .unwrap_or(&a.manifest.name);
+                        let resolved_agent_desc = agent_i18n
+                            .and_then(|ai| ai.description.as_deref())
+                            .unwrap_or(&a.manifest.description);
                         // Extract Phase/Step headings from system_prompt
                         let steps: Vec<&str> = a.manifest.model.system_prompt
                             .lines()
@@ -1272,8 +1279,8 @@ pub async fn get_hand(
                             .collect();
                         serde_json::json!({
                             "role": role,
-                            "name": a.manifest.name,
-                            "description": a.manifest.description,
+                            "name": resolved_agent_name,
+                            "description": resolved_agent_desc,
                             "coordinator": a.coordinator,
                             "provider": if a.manifest.model.provider == "default" { &dm.provider } else { &a.manifest.model.provider },
                             "model": if a.manifest.model.model == "default" { &dm.model } else { &a.manifest.model.model },
