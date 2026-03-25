@@ -42,6 +42,7 @@ api-error-manifest-invalid = 無効なマニフェスト: { $error }
 # 認証エラー
 api-error-auth-invalid-key = 無効な API キー
 api-error-auth-missing-header = Authorization: Bearer <api_key> ヘッダーがありません
+api-error-auth-missing = このプロバイダーのAPIキーが設定されていません
 
 # セッションエラー
 api-error-session-load-failed = セッションの読み込みに失敗しました

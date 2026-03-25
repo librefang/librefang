@@ -444,14 +444,14 @@ const MessageBubble = memo(function MessageBubble({ message }: { message: ChatMe
 });
 
 // Input box - with shortcut hints
-function ChatInput({ onSend, disabled, placeholder }: { onSend: (msg: string) => void; disabled: boolean; placeholder: string }) {
+function ChatInput({ onSend, disabled, placeholder, authMissing, providerName }: { onSend: (msg: string) => void; disabled: boolean; placeholder: string; authMissing?: boolean; providerName?: string }) {
   const { t } = useTranslation();
   const [message, setMessage] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (message.trim() && !disabled) {
+    if (message.trim() && !effectiveDisabled) {
       onSend(message);
       setMessage("");
     }
@@ -467,8 +467,17 @@ function ChatInput({ onSend, disabled, placeholder }: { onSend: (msg: string) =>
   const showingSlash = message.startsWith("/") && !message.includes(" ");
   const filteredCmds = showingSlash ? SLASH_COMMANDS.filter(c => c.cmd.startsWith(message)) : [];
 
+  const effectiveDisabled = disabled || !!authMissing;
+
   return (
     <form onSubmit={handleSubmit} className="space-y-2">
+      {/* Auth missing warning */}
+      {authMissing && (
+        <div className="flex items-center gap-2 rounded-xl border border-warning/30 bg-warning/5 px-4 py-2.5 text-sm text-warning">
+          <AlertCircle className="h-4 w-4 flex-shrink-0" />
+          <span>{t("chat.auth_missing", { provider: providerName || "unknown" })}</span>
+        </div>
+      )}
       {/* Slash command autocomplete */}
       {showingSlash && filteredCmds.length > 0 && (
         <div className="rounded-xl border border-border-subtle bg-surface shadow-lg p-1 mb-1">
@@ -495,14 +504,14 @@ function ChatInput({ onSend, disabled, placeholder }: { onSend: (msg: string) =>
               }
             }}
             placeholder={placeholder}
-            disabled={disabled}
+            disabled={effectiveDisabled}
             rows={1}
             className="w-full min-h-[44px] sm:min-h-[52px] max-h-[150px] rounded-2xl border border-border-subtle bg-surface px-3 sm:px-5 py-2.5 sm:py-3.5 text-sm focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none resize-none placeholder:text-text-dim/40 shadow-sm"
           />
         </div>
         <button
           type="submit"
-          disabled={!message.trim() || disabled}
+          disabled={!message.trim() || effectiveDisabled}
           className="group relative px-3.5 sm:px-5 py-2.5 sm:py-3.5 rounded-2xl bg-gradient-to-r from-brand to-brand/90 text-white font-bold text-sm shadow-lg shadow-brand/20 hover:shadow-brand/40 hover:-translate-y-0.5 transition-all duration-300 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:translate-y-0"
         >
           <Send className="h-4 w-4" />
@@ -773,7 +782,8 @@ export function ChatPage() {
                   </div>
                   <div className="min-w-0 flex-1">
                     <p className={`text-sm font-bold truncate ${(agent.state || "").toLowerCase() !== "running" ? "opacity-50" : ""}`}>{agent.name}</p>
-                    <p className={`text-[10px] truncate ${selectedAgentId === agent.id ? "text-white/70" : "text-text-dim"}`}>
+                    <p className={`text-[10px] truncate flex items-center gap-1 ${selectedAgentId === agent.id ? "text-white/70" : "text-text-dim"}`}>
+                      {agent.auth_status === "missing" && <AlertCircle className="h-3 w-3 text-warning flex-shrink-0" />}
                       {agent.model_name || t("common.unknown")}
                     </p>
                   </div>
@@ -858,6 +868,8 @@ export function ChatPage() {
               onSend={sendMessage}
               disabled={isLoading}
               placeholder={selectedAgentId ? t("chat.input_placeholder_with_agent", { name: selectedAgent?.name }) : t("chat.transmit_command")}
+              authMissing={selectedAgent?.auth_status === "missing"}
+              providerName={selectedAgent?.model_provider}
             />
           </div>
         </main>

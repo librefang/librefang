@@ -25,6 +25,7 @@ api-error-manifest-signature-failed = Echec de la verification de la signature d
 # Auth errors
 api-error-auth-invalid-key = Cle API non valide
 api-error-auth-missing-header = En-tete Authorization: Bearer <api_key> manquant
+api-error-auth-missing = La cle API de ce fournisseur n'est pas configuree
 
 # Session errors
 api-error-session-load-failed = Echec du chargement de la session

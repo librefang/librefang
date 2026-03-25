@@ -289,7 +289,8 @@
     "end_history": "历史记录末尾", "welcome_system": "连接已建立。", "input_placeholder_with_agent": "向 {{name}} 发送消息...",
     "generating": "生成中...", "clear_chat": "清空对话", "send_hint": "Enter 发送 · ⌘+↵ 换行",
     "you": "你", "bot": "Bot",
-    "ws_connected": "WS", "ws_streaming": "流式"
+    "ws_connected": "WS", "ws_streaming": "流式",
+    "auth_missing": "供应商 \"{{provider}}\" 的 API Key 未配置，请在 设置 > 供应商 中设置后再对话。"
   },
   "goals": {
     "title": "目标", "subtitle": "战略规划和任务跟踪。", "total": "总目标", "pending": "待处理", "in_progress": "进行中", "completed": "已完成",

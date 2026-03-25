@@ -1038,12 +1038,13 @@ pub async fn send_message(
     // `ErrorTranslator` wraps a `FluentBundle` which is `!Send`, so it must
     // not be held across an await boundary (axum requires `Send` futures).
     let l = super::resolve_lang(lang.as_ref());
-    let (err_invalid_id, err_too_large, err_not_found) = {
+    let (err_invalid_id, err_too_large, err_not_found, err_auth_missing) = {
         let t = ErrorTranslator::new(l);
         (
             t.t("api-error-agent-invalid-id"),
             t.t("api-error-message-too-large"),
             t.t("api-error-agent-not-found"),
+            t.t("api-error-auth-missing"),
         )
     };
 
@@ -1072,6 +1073,36 @@ pub async fn send_message(
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": err_not_found})),
         );
+    }
+
+    // Reject messages when the agent's provider has no API key configured
+    {
+        let registry = state.kernel.agent_registry();
+        if let Some(entry) = registry.get(agent_id) {
+            let dm = &state.kernel.config_ref().default_model;
+            let provider = if entry.manifest.model.provider.is_empty()
+                || entry.manifest.model.provider == "default"
+            {
+                &dm.provider
+            } else {
+                &entry.manifest.model.provider
+            };
+            if let Some(catalog) = state.kernel.model_catalog_ref().read().ok().as_ref() {
+                if let Some(p) = catalog.get_provider(provider) {
+                    if matches!(
+                        p.auth_status,
+                        librefang_types::model_catalog::AuthStatus::Missing
+                    ) {
+                        return (
+                            StatusCode::PRECONDITION_FAILED,
+                            Json(
+                                serde_json::json!({"error": format!("{} (provider: {})", err_auth_missing, provider)}),
+                            ),
+                        );
+                    }
+                }
+            }
+        }
     }
 
     // Resolve file attachments into image content blocks

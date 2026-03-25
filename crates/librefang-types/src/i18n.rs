@@ -323,6 +323,7 @@ mod tests {
             "api-error-agent-spawn-failed",
             "api-error-message-too-large",
             "api-error-auth-invalid-key",
+            "api-error-auth-missing",
             "api-error-not-found",
             "api-error-internal",
         ];

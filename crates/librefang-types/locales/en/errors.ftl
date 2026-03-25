@@ -43,6 +43,7 @@ api-error-manifest-invalid = Invalid manifest: { $error }
 # Auth errors
 api-error-auth-invalid-key = Invalid API key
 api-error-auth-missing-header = Missing Authorization: Bearer <api_key> header
+api-error-auth-missing = API key not configured for this provider
 
 # Session errors
 api-error-session-load-failed = Session load failed
