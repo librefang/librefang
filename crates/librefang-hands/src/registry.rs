@@ -375,10 +375,15 @@ impl HandRegistry {
         // Hold the lock for the duration of check + insert to prevent races.
         let _guard = self.activate_lock.lock().unwrap_or_else(|e| e.into_inner());
 
-        // Check if already active
-        for entry in self.instances.iter() {
-            if entry.hand_id == hand_id && entry.status == HandStatus::Active {
-                return Err(HandError::AlreadyActive(hand_id.to_string()));
+        // Check if already active — only block when instance_id is None
+        // (single-instance mode). When Some(uuid) is passed, it's an explicit
+        // multi-instance request (e.g. daemon restart recovery) and should be
+        // allowed through.
+        if instance_id.is_none() {
+            for entry in self.instances.iter() {
+                if entry.hand_id == hand_id && entry.status == HandStatus::Active {
+                    return Err(HandError::AlreadyActive(hand_id.to_string()));
+                }
             }
         }
 
