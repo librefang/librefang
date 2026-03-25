@@ -744,12 +744,9 @@ mod tests {
     use super::*;
 
     /// Ensure the test home dir has synced registry content.
+    /// resolve_home_dir_for_tests() handles sync internally via OnceLock.
     fn ensure_test_home() -> std::path::PathBuf {
-        let home = librefang_runtime::registry_sync::resolve_home_dir_for_tests();
-        if librefang_runtime::registry_sync::needs_sync(&home) {
-            librefang_runtime::registry_sync::sync_registry(&home);
-        }
-        home
+        librefang_runtime::registry_sync::resolve_home_dir_for_tests()
     }
 
     #[test]
