@@ -865,7 +865,7 @@ function Downloads(_props: SectionProps) {
                   {[
                     { name: 'pip install librefang', label: 'Python SDK' },
                     { name: 'npm i @librefang/sdk', label: 'Node.js SDK' },
-                    { name: 'cargo install librefang', label: 'Rust CLI' },
+                    { name: 'cargo install librefang', label: 'Rust SDK' },
                     { name: 'curl -fsSL librefang.sh/install | sh', label: 'Shell' },
                   ].map((pkg) => (
                     <div key={pkg.label} className="flex items-center justify-between px-3 py-2 hover:bg-surface-200 transition-colors group">
