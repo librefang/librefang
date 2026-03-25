@@ -247,15 +247,14 @@ export GROQ_API_KEY=gsk_...
 
 Add the export to your shell profile (`~/.bashrc`, `~/.zshrc`, etc.) to persist it.
 
-Or store keys via CLI:
+LibreFang supports three layers of key storage (highest priority first):
 
-```bash
-# Encrypted vault (recommended)
-librefang vault set GROQ_API_KEY
-
-# Or write to .env file
-librefang config set-key groq
-```
+| Layer | File | How to set | Notes |
+|-------|------|-----------|-------|
+| System env vars | — | `export GROQ_API_KEY=...` | Highest priority, never overridden |
+| Encrypted vault | `vault.enc` | `librefang vault set GROQ_API_KEY` | AES encrypted, recommended |
+| .env file | `.env` | `librefang config set-key groq` | Plaintext, written by CLI |
+| secrets.env | `secrets.env` | Dashboard "Set API Key" button | Plaintext, written by dashboard |
 
 ### Edit the Config
 
