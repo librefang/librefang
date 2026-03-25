@@ -5494,10 +5494,8 @@ system_prompt = "You are a helpful assistant."
                     warn!(agent = %old_id, error = %e, "Failed to kill old hand agent");
                 }
                 // Migrate cron jobs to the same role in the new hand
-                // Backward compat: pass the original instance_id Option so that
-                // legacy single-instance hands (instance_id=None) keep the old
-                // hash format "{hand_id}:{role}" and don't orphan cron jobs.
-                let new_id = AgentId::from_hand_agent(hand_id, &old_role, instance_id);
+                let new_id =
+                    AgentId::from_hand_agent(hand_id, &old_role, Some(instance.instance_id));
                 let migrated = self.cron_scheduler.reassign_agent_jobs(old_id, new_id);
                 if migrated > 0 {
                     let _ = self.cron_scheduler.persist();
@@ -5651,10 +5649,11 @@ system_prompt = "You are a helpful assistant."
                 "hands/{safe_hand}/{safe_role}"
             )));
 
-            // Deterministic agent ID: hand_id + role (+ instance_id when multi-instance).
-            // Backward compat: instance_id=None preserves the legacy hash format
-            // so existing single-instance hands keep their original agent IDs.
-            let deterministic_id = AgentId::from_hand_agent(hand_id, role, instance_id);
+            // Deterministic agent ID: hand_id + role + instance_id
+            // Each instance gets unique agent IDs while remaining deterministic
+            // per-instance (survives daemon restarts when instance_id is persisted).
+            let deterministic_id =
+                AgentId::from_hand_agent(hand_id, role, Some(instance.instance_id));
             let agent_id = self.spawn_agent_inner(
                 manifest,
                 None,

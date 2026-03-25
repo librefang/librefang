@@ -831,7 +831,7 @@ mod tests {
 
     #[test]
     fn hand_instance_new() {
-        let instance = HandInstance::new("clip", HashMap::new());
+        let instance = HandInstance::new("clip", HashMap::new(), None);
         assert_eq!(instance.hand_id, "clip");
         assert_eq!(instance.status, HandStatus::Active);
         assert!(instance.agent_ids.is_empty());
@@ -840,7 +840,7 @@ mod tests {
 
     #[test]
     fn hand_instance_prefers_explicit_coordinator_role() {
-        let mut instance = HandInstance::new("research", HashMap::new());
+        let mut instance = HandInstance::new("research", HashMap::new(), None);
         instance
             .agent_ids
             .insert("analyst".to_string(), AgentId::new());
