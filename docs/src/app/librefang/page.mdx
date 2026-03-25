@@ -18,43 +18,74 @@ Project website: [https://librefang.ai/](https://librefang.ai/)
 
 ## Installation
 
-### Option 1: Cargo Install (Any Platform)
+### Quick Install Script
 
-LibreFang does not publish GitHub Releases yet. The current recommended install path is:
+**Linux / macOS / WSL**:
+```bash
+curl -fsSL https://librefang.ai/install.sh | sh
+```
+
+**Windows (PowerShell)**:
+```powershell
+irm https://librefang.ai/install.ps1 | iex
+```
+
+The install script auto-detects platform and architecture, downloads the correct binary, verifies SHA256 checksums, configures PATH, and starts the daemon.
+
+Environment variables for customization:
+- `LIBREFANG_INSTALL_DIR` — install directory (default: `~/.librefang/bin`)
+- `LIBREFANG_VERSION` — specific version (default: latest)
+- `LIBREFANG_AUTO_START` — auto-start daemon (default: 1)
+
+### Homebrew (macOS / Linux)
+
+```bash
+brew tap librefang/tap
+brew install librefang              # CLI
+brew install --cask librefang       # Desktop app
+```
+
+Beta / RC channels:
+```bash
+brew install librefang-beta         # Beta
+brew install librefang-rc           # RC
+```
+
+### npm
+
+```bash
+npm install -g @librefang/cli       # CLI
+npm install @librefang/sdk          # JavaScript/TypeScript SDK
+```
+
+### pip
+
+```bash
+pip install librefang-sdk           # Python SDK
+```
+
+### Cargo
 
 ```bash
 cargo install --git https://github.com/librefang/librefang librefang-cli
 ```
 
 Or build from source:
-
 ```bash
 git clone https://github.com/librefang/librefang.git
 cd librefang
 cargo install --path crates/librefang-cli
 ```
 
-### Option 2: Shell Installer (Linux / macOS, for future releases)
+### Go
 
 ```bash
-curl -fsSL https://librefang.ai/install.sh | sh
+go get github.com/librefang/librefang/sdk/go
 ```
 
-Use this once LibreFang starts publishing GitHub Releases. The script installs the CLI binary to `~/.librefang/bin/`.
-
-### Option 3: PowerShell Installer (Windows, for future releases)
-
-```powershell
-irm https://librefang.ai/install.ps1 | iex
-```
-
-Use this once LibreFang starts publishing GitHub Releases. The script verifies SHA256 checksums and adds the CLI to your user PATH.
-
-### Option 4: Docker
+### Docker
 
 ```bash
-docker pull ghcr.io/librefang/librefang:latest
-
 docker run -d \
   --name librefang \
   -p 4545:4545 \
@@ -63,19 +94,64 @@ docker run -d \
   ghcr.io/librefang/librefang:latest
 ```
 
-Or use Docker Compose:
-
+Docker Compose:
 ```bash
 git clone https://github.com/librefang/librefang.git
-cd librefang
-# Set your API keys in environment or .env file
+cd librefang/deploy
 docker compose up -d
 ```
+
+### Desktop App
+
+Download from [GitHub Releases](https://github.com/librefang/librefang/releases):
+- **macOS**: `.dmg` (Universal)
+- **Windows**: `.msi`
+- **Linux**: `.appimage` / `.deb`
+
+Or via Homebrew Cask: `brew install --cask librefang`
 
 ### Verify Installation
 
 ```bash
 librefang --version
+```
+
+---
+
+## One-Click Cloud Deployment
+
+Visit [deploy.librefang.ai](https://deploy.librefang.ai/) for all cloud deployment options.
+
+### Fly.io
+
+```bash
+curl -sL https://raw.githubusercontent.com/librefang/librefang/main/deploy/fly/deploy.sh | bash
+```
+
+### Railway
+
+[![Railway](https://img.shields.io/badge/Railway-Deploy-0B0D0E?logo=railway)](https://railway.app/template/librefang)
+
+### Render
+
+[![Render](https://img.shields.io/badge/Render-Deploy-46E3B7?logo=render)](https://render.com/deploy?repo=https://github.com/librefang/librefang)
+
+### GCP (Terraform)
+
+Deploy on GCP always-free tier (e2-micro):
+
+```bash
+cd deploy/gcp
+cp terraform.tfvars.example terraform.tfvars
+# Edit terraform.tfvars with your project_id and API keys
+terraform init && terraform apply
+```
+
+### Linux systemd
+
+```bash
+sudo cp deploy/librefang.service /etc/systemd/system/
+sudo systemctl enable --now librefang
 ```
 
 ---
