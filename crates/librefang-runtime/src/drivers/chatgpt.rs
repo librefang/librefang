@@ -1158,10 +1158,11 @@ mod tests {
         );
 
         assert_eq!(content_blocks.len(), 1);
-        match &content_blocks[0] {
-            ContentBlock::Text { text, .. } => assert_eq!(text, "Hello world!"),
-            _ => panic!("Expected Text block"),
-        }
+        assert!(
+            matches!(&content_blocks[0], ContentBlock::Text { text, .. } if text == "Hello world!"),
+            "Expected Text block with 'Hello world!', got {:?}",
+            content_blocks[0]
+        );
         assert!(tool_calls.is_empty());
         assert_eq!(stop_reason, StopReason::EndTurn);
     }
@@ -1226,16 +1227,16 @@ mod tests {
         );
 
         assert_eq!(content_blocks.len(), 2);
-        match &content_blocks[0] {
-            ContentBlock::Text { text, .. } => assert_eq!(text, "Answer"),
-            _ => panic!("Expected Text block"),
-        }
-        match &content_blocks[1] {
-            ContentBlock::Thinking { thinking, .. } => {
-                assert_eq!(thinking, "I thought about this carefully.")
-            }
-            _ => panic!("Expected Thinking block"),
-        }
+        assert!(
+            matches!(&content_blocks[0], ContentBlock::Text { text, .. } if text == "Answer"),
+            "Expected Text block with 'Answer', got {:?}",
+            content_blocks[0]
+        );
+        assert!(
+            matches!(&content_blocks[1], ContentBlock::Thinking { thinking, .. } if thinking == "I thought about this carefully."),
+            "Expected Thinking block, got {:?}",
+            content_blocks[1]
+        );
     }
 
     #[test]
