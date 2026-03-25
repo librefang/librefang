@@ -793,17 +793,8 @@ mod tests {
 
     /// Build a catalog for tests.
     ///
-    /// Tries in order:
-    /// 1. `~/.librefang/providers/` (after registry sync)
-    /// 2. Auto-sync from GitHub registry if empty
     fn test_catalog() -> ModelCatalog {
         let home = crate::registry_sync::resolve_home_dir_for_tests();
-        let catalog = ModelCatalog::new(&home);
-        if !catalog.list_models().is_empty() {
-            return catalog;
-        }
-        // No providers on disk — auto-sync from registry
-        crate::registry_sync::sync_registry(&home);
         ModelCatalog::new(&home)
     }
 
@@ -1017,7 +1008,7 @@ mod tests {
 
     #[test]
     fn test_default_creates_valid_catalog() {
-        let catalog = ModelCatalog::default();
+        let catalog = test_catalog();
         assert!(!catalog.list_models().is_empty());
         assert!(!catalog.list_providers().is_empty());
     }

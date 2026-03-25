@@ -1,6 +1,7 @@
 //! Budget and usage tracking handlers.
 
 use super::AppState;
+use crate::types::ApiErrorResponse;
 
 /// Build routes for the budget and usage domain.
 pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
@@ -223,7 +224,7 @@ pub async fn budget_status(State(state): State<Arc<AppState>>) -> impl IntoRespo
     let status = state
         .kernel
         .metering_ref()
-        .budget_status(&state.kernel.config_ref().budget);
+        .budget_status(&state.kernel.budget_config());
     Json(serde_json::to_value(&status).unwrap_or_default())
 }
 
@@ -238,44 +239,39 @@ pub async fn update_budget(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    // SAFETY: Budget config is updated in-place. Since KernelConfig is behind
-    // an Arc and we only have &self, we use ptr mutation (same pattern as OFP).
-    let config_ptr = state.kernel.config_ref() as *const librefang_types::config::KernelConfig
-        as *mut librefang_types::config::KernelConfig;
-
     // Apply updates — accept both config field names (max_hourly_usd) and
     // GET response field names (hourly_limit) so read-modify-write works.
-    unsafe {
+    state.kernel.update_budget_config(|budget| {
         if let Some(v) = body["max_hourly_usd"]
             .as_f64()
             .or_else(|| body["hourly_limit"].as_f64())
         {
-            (*config_ptr).budget.max_hourly_usd = v;
+            budget.max_hourly_usd = v;
         }
         if let Some(v) = body["max_daily_usd"]
             .as_f64()
             .or_else(|| body["daily_limit"].as_f64())
         {
-            (*config_ptr).budget.max_daily_usd = v;
+            budget.max_daily_usd = v;
         }
         if let Some(v) = body["max_monthly_usd"]
             .as_f64()
             .or_else(|| body["monthly_limit"].as_f64())
         {
-            (*config_ptr).budget.max_monthly_usd = v;
+            budget.max_monthly_usd = v;
         }
         if let Some(v) = body["alert_threshold"].as_f64() {
-            (*config_ptr).budget.alert_threshold = v.clamp(0.0, 1.0);
+            budget.alert_threshold = v.clamp(0.0, 1.0);
         }
         if let Some(v) = body["default_max_llm_tokens_per_hour"].as_u64() {
-            (*config_ptr).budget.default_max_llm_tokens_per_hour = v;
+            budget.default_max_llm_tokens_per_hour = v;
         }
-    }
+    });
 
     let status = state
         .kernel
         .metering_ref()
-        .budget_status(&state.kernel.config_ref().budget);
+        .budget_status(&state.kernel.budget_config());
     Json(serde_json::to_value(&status).unwrap_or_default())
 }
 
@@ -294,20 +290,14 @@ pub async fn agent_budget_status(
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid agent ID"})),
-            )
+            return ApiErrorResponse::bad_request("Invalid agent ID").into_response();
         }
     };
 
     let entry = match state.kernel.agent_registry().get(agent_id) {
         Some(e) => e,
         None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "Agent not found"})),
-            )
+            return ApiErrorResponse::not_found("Agent not found").into_response();
         }
     };
 
@@ -349,6 +339,7 @@ pub async fn agent_budget_status(
             },
         })),
     )
+        .into_response()
 }
 
 /// GET /api/budget/agents — Per-agent cost ranking (top spenders).
@@ -405,10 +396,7 @@ pub async fn update_agent_budget(
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid agent ID"})),
-            )
+            return ApiErrorResponse::bad_request("Invalid agent ID").into_response();
         }
     };
 
@@ -418,12 +406,10 @@ pub async fn update_agent_budget(
     let tokens = body["max_llm_tokens_per_hour"].as_u64();
 
     if hourly.is_none() && daily.is_none() && monthly.is_none() && tokens.is_none() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(
-                serde_json::json!({"error": "Provide at least one of: max_cost_per_hour_usd, max_cost_per_day_usd, max_cost_per_month_usd, max_llm_tokens_per_hour"}),
-            ),
-        );
+        return ApiErrorResponse::bad_request(
+            "Provide at least one of: max_cost_per_hour_usd, max_cost_per_day_usd, max_cost_per_month_usd, max_llm_tokens_per_hour",
+        )
+        .into_response();
     }
 
     match state
@@ -442,10 +428,8 @@ pub async fn update_agent_budget(
                 StatusCode::OK,
                 Json(serde_json::json!({"status": "ok", "message": "Agent budget updated"})),
             )
+                .into_response()
         }
-        Err(e) => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": format!("{e}")})),
-        ),
+        Err(e) => ApiErrorResponse::not_found(format!("{e}")).into_response(),
     }
 }
