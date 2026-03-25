@@ -885,24 +885,35 @@ function Downloads(_props: SectionProps) {
           </div>
         </FadeIn>
 
-        {/* Deploy, All Releases */}
+        {/* One-Click Deploy */}
         <FadeIn delay={200}>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <a href="https://deploy.librefang.ai/" target="_blank" rel="noopener noreferrer" className="flex items-center gap-3 bg-surface-100 border border-black/10 dark:border-white/5 hover:border-cyan-500/20 px-5 py-4 transition-all group">
-              <Globe className="w-5 h-5 text-cyan-500/60 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 shrink-0" />
-              <div>
-                <div className="text-sm font-bold text-slate-900 dark:text-white">{l('onlineDeply')}</div>
-                <div className="text-xs text-gray-500">deploy.librefang.ai</div>
-              </div>
-            </a>
-            <a href="https://github.com/librefang/librefang/releases" target="_blank" rel="noopener noreferrer" className="flex items-center gap-3 bg-surface-100 border border-black/10 dark:border-white/5 hover:border-cyan-500/20 px-5 py-4 transition-all group">
-              <Github className="w-5 h-5 text-cyan-500/60 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 shrink-0" />
-              <div>
-                <div className="text-sm font-bold text-slate-900 dark:text-white">{l('allReleases')}</div>
-                <div className="text-xs text-gray-500">GitHub Releases</div>
-              </div>
-            </a>
+          <div className="bg-surface-100 border border-black/10 dark:border-white/5 p-5 mb-6">
+            <div className="flex items-center gap-3 mb-4">
+              <Globe className="w-5 h-5 text-cyan-600 dark:text-cyan-500" />
+              <h3 className="text-base font-bold text-slate-900 dark:text-white">{l('onlineDeply')}</h3>
+            </div>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              {[
+                { name: 'Fly.io', url: 'https://fly.io/docs/hands-on/install-flyctl/', icon: '🚀' },
+                { name: 'Railway', url: 'https://railway.app/new', icon: '🚂' },
+                { name: 'Render', url: 'https://render.com/deploy', icon: '⚡' },
+                { name: 'GCP', url: 'https://cloud.google.com/run', icon: '☁️' },
+              ].map((p) => (
+                <a key={p.name} href={p.url} target="_blank" rel="noopener noreferrer" className="bg-surface-200 px-3 py-3 text-center hover:bg-surface-300 transition-colors group">
+                  <div className="text-lg mb-1">{p.icon}</div>
+                  <div className="text-xs font-semibold text-gray-700 dark:text-gray-300 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors">{p.name}</div>
+                </a>
+              ))}
+            </div>
           </div>
+        </FadeIn>
+
+        {/* All Releases */}
+        <FadeIn delay={300}>
+          <a href="https://github.com/librefang/librefang/releases" target="_blank" rel="noopener noreferrer" className="flex items-center justify-center gap-2 bg-surface-100 border border-black/10 dark:border-white/5 hover:border-cyan-500/20 px-5 py-3 transition-all group">
+            <Github className="w-4 h-4 text-cyan-500/60 group-hover:text-cyan-600 dark:group-hover:text-cyan-400" />
+            <span className="text-sm font-semibold text-gray-700 dark:text-gray-300 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors">{l('allReleases')}</span>
+          </a>
         </FadeIn>
       </div>
     </section>
