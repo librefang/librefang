@@ -14,6 +14,7 @@ import type { Translation } from './i18n'
 import { useRegistry, getLocalizedDesc } from './useRegistry'
 import { useAppStore } from './store'
 import { cn } from './lib/utils'
+import DeployPage from './pages/DeployPage'
 
 
 // ─── Language detection ───
@@ -860,13 +861,13 @@ function Downloads(_props: SectionProps) {
                 </div>
                 <div className="space-y-1.5">
                   {[
-                    { name: 'Fly.io', url: 'https://deploy.librefang.ai/?platform=flyio', icon: Zap },
-                    { name: 'Railway', url: 'https://railway.com/deploy/Bb7HnN', icon: ArrowRight },
-                    { name: 'Render', url: 'https://dashboard.render.com/blueprint/new?repo=https://github.com/librefang/librefang', icon: Layers },
-                    { name: 'GCP', url: 'https://github.com/librefang/librefang/tree/main/deploy/gcp', icon: Network },
-                    { name: 'Docker', url: 'https://github.com/librefang/librefang/blob/main/deploy/docker-compose.yml', icon: Box },
+                    { name: 'Fly.io', url: '/deploy?platform=flyio', icon: Zap, external: false },
+                    { name: 'Railway', url: 'https://railway.com/deploy/Bb7HnN', icon: ArrowRight, external: true },
+                    { name: 'Render', url: 'https://dashboard.render.com/blueprint/new?repo=https://github.com/librefang/librefang', icon: Layers, external: true },
+                    { name: 'GCP', url: 'https://github.com/librefang/librefang/tree/main/deploy/gcp', icon: Network, external: true },
+                    { name: 'Docker', url: 'https://github.com/librefang/librefang/blob/main/deploy/docker-compose.yml', icon: Box, external: true },
                   ].map((p) => (
-                    <a key={p.name} href={p.url} target="_blank" rel="noopener noreferrer" className="flex items-center gap-3 px-3 py-2 hover:bg-surface-200 transition-colors group">
+                    <a key={p.name} href={p.url} target={p.external ? '_blank' : undefined} rel={p.external ? 'noopener noreferrer' : undefined} className="flex items-center gap-3 px-3 py-2 hover:bg-surface-200 transition-colors group">
                       <p.icon className="w-4 h-4 text-gray-400 dark:text-gray-600 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors shrink-0" />
                       <span className="text-sm text-gray-700 dark:text-gray-300 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors">{p.name}</span>
                     </a>
@@ -1321,6 +1322,7 @@ function BackToTop() {
 export default function App() {
   const lang = useAppStore((s) => s.lang)
   const switchLang = useAppStore((s) => s.switchLang)
+  const [isDeployPage] = useState(() => window.location.pathname.startsWith('/deploy'))
 
   useEffect(() => {
     document.documentElement.lang = lang
@@ -1337,6 +1339,10 @@ export default function App() {
 
   // Update meta tags on language change
   useEffect(() => {
+    if (isDeployPage) {
+      document.title = 'Deploy LibreFang'
+      return
+    }
     if (t.meta) {
       document.title = t.meta.title
       const descMeta = document.querySelector('meta[name="description"]')
@@ -1346,7 +1352,11 @@ export default function App() {
       const ogDesc = document.querySelector('meta[property="og:description"]')
       if (ogDesc) ogDesc.setAttribute('content', t.meta.description)
     }
-  }, [lang, t])
+  }, [lang, t, isDeployPage])
+
+  if (isDeployPage) {
+    return <DeployPage />
+  }
 
   return (
     <main className="min-h-screen">
