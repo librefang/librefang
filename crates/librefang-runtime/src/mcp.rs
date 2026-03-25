@@ -592,7 +592,7 @@ impl McpConnection {
                     unreachable!()
                 };
 
-                let mut params = rmcp::model::CallToolRequestParam::new(raw_name.as_str());
+                let mut params = rmcp::model::CallToolRequestParams::new(raw_name.clone());
                 if let Some(obj) = arguments.as_object() {
                     if !obj.is_empty() {
                         params.arguments = Some(obj.clone());
