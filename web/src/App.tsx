@@ -3,10 +3,11 @@ import { motion } from 'framer-motion'
 import {
   Terminal, Cpu, Shield, Zap, Network, ChevronRight, ChevronDown, ExternalLink,
   Copy, Check, Menu, X, Box, Layers, Radio, Eye,
-  Scissors, Users, Globe, ArrowRight, Github,
+  Scissors, Users, Globe, ArrowRight, Github, Monitor,
   Star, GitFork, CircleDot, GitPullRequest, MessageSquare
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
+import { useQuery } from '@tanstack/react-query'
 import { translations, languages } from './i18n'
 import type { Translation } from './i18n'
 import { useRegistry, getLocalizedDesc } from './useRegistry'
@@ -484,7 +485,7 @@ function Hands({ t }: SectionProps) {
         <FadeIn>
           <div
             ref={scrollRef}
-            className="overflow-x-auto scrollbar-hide -mr-6 pr-6 pb-4"
+            className="overflow-x-auto scrollbar-hide -mr-6 pr-6 pb-4 touch-pan-x"
           >
             <div className="grid grid-rows-2 grid-flow-col gap-3 w-max">
               {hands.map((hand) => {
@@ -590,6 +591,197 @@ function Workflows({ t }: SectionProps) {
             )
           })}
         </div>
+      </div>
+    </section>
+  )
+}
+
+// ─── Downloads ───
+
+interface ReleaseAsset {
+  name: string
+  browser_download_url: string
+  size: number
+}
+
+interface DownloadItem {
+  label: string
+  desc: string
+  icon: LucideIcon
+  assets: { name: string; url: string; size: string }[]
+}
+
+function formatSize(bytes: number): string {
+  if (bytes > 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(0)}MB`
+  return `${(bytes / 1024).toFixed(0)}KB`
+}
+
+function categorizeAssets(assets: ReleaseAsset[]): DownloadItem[] {
+  const desktop: DownloadItem = {
+    label: 'Desktop App',
+    desc: 'Tauri 2.0 native app',
+    icon: Monitor,
+    assets: [],
+  }
+  const cli: DownloadItem = {
+    label: 'CLI',
+    desc: 'Command-line binary',
+    icon: Terminal,
+    assets: [],
+  }
+
+  // Desktop patterns
+  const desktopPatterns = [
+    { pattern: /x64\.dmg$/, name: 'macOS (Intel) .dmg' },
+    { pattern: /aarch64\.dmg$/, name: 'macOS (Apple Silicon) .dmg' },
+    { pattern: /x64-setup\.exe$/, name: 'Windows (x64) .exe' },
+    { pattern: /arm64-setup\.exe$/, name: 'Windows (ARM) .exe' },
+    { pattern: /amd64\.AppImage$/, name: 'Linux (x64) .AppImage' },
+    { pattern: /amd64\.deb$/, name: 'Linux (x64) .deb' },
+    { pattern: /x86_64\.rpm$/, name: 'Linux (x64) .rpm' },
+  ]
+
+  // CLI patterns
+  const cliPatterns = [
+    { pattern: /x86_64-apple-darwin\.tar\.gz$/, name: 'macOS (Intel)' },
+    { pattern: /aarch64-apple-darwin\.tar\.gz$/, name: 'macOS (Apple Silicon)' },
+    { pattern: /x86_64-unknown-linux-gnu\.tar\.gz$/, name: 'Linux (x64 glibc)' },
+    { pattern: /x86_64-unknown-linux-musl\.tar\.gz$/, name: 'Linux (x64 musl)' },
+    { pattern: /aarch64-unknown-linux-gnu\.tar\.gz$/, name: 'Linux (ARM64)' },
+    { pattern: /x86_64-pc-windows-msvc\.zip$/, name: 'Windows (x64)' },
+    { pattern: /aarch64-pc-windows-msvc\.zip$/, name: 'Windows (ARM)' },
+    { pattern: /aarch64-linux-android\.tar\.gz$/, name: 'Android (Termux)' },
+  ]
+
+  for (const asset of assets) {
+    if (asset.name.endsWith('.sha256')) continue
+    for (const p of desktopPatterns) {
+      if (p.pattern.test(asset.name)) {
+        desktop.assets.push({ name: p.name, url: asset.browser_download_url, size: formatSize(asset.size) })
+        break
+      }
+    }
+    for (const p of cliPatterns) {
+      if (p.pattern.test(asset.name)) {
+        cli.assets.push({ name: p.name, url: asset.browser_download_url, size: formatSize(asset.size) })
+        break
+      }
+    }
+  }
+
+  return [desktop, cli]
+}
+
+// Need to import Monitor at the top - it's used in Downloads
+// Adding it via the LucideIcon type already imported
+
+function Downloads(_props: SectionProps) {
+  const lang = useAppStore((s) => s.lang)
+  const { data: release, isLoading } = useQuery({
+    queryKey: ['latestRelease'],
+    queryFn: async () => {
+      const res = await fetch('https://api.github.com/repos/librefang/librefang/releases/latest', {
+        headers: { Accept: 'application/vnd.github.v3+json' },
+      })
+      if (!res.ok) throw new Error('Failed')
+      return res.json() as Promise<{ tag_name: string; assets: ReleaseAsset[]; html_url: string }>
+    },
+    staleTime: 1000 * 60 * 60,
+    retry: 2,
+  })
+
+  const categories = release ? categorizeAssets(release.assets) : []
+  const version = release?.tag_name ?? ''
+
+  const labels: Record<string, Record<string, string>> = {
+    title: { en: 'Downloads', zh: '下载', 'zh-TW': '下載', ja: 'ダウンロード', ko: '다운로드', de: 'Downloads', es: 'Descargas' },
+    desc: {
+      en: 'Desktop app, CLI binaries, and deployment options.',
+      zh: '桌面应用、CLI 二进制文件和部署选项。',
+      'zh-TW': '桌面應用、CLI 二進位檔和部署選項。',
+      ja: 'デスクトップアプリ、CLIバイナリ、デプロイオプション。',
+      ko: '데스크톱 앱, CLI 바이너리, 배포 옵션.',
+      de: 'Desktop-App, CLI-Binaries und Deployment-Optionen.',
+      es: 'App de escritorio, binarios CLI y opciones de despliegue.',
+    },
+    onlineDeply: { en: 'One-Click Deploy', zh: '一键部署', 'zh-TW': '一鍵部署', ja: 'ワンクリックデプロイ', ko: '원클릭 배포', de: 'Ein-Klick-Deploy', es: 'Despliegue en un clic' },
+    allReleases: { en: 'All Releases', zh: '所有版本', 'zh-TW': '所有版本', ja: '全リリース', ko: '모든 릴리스', de: 'Alle Releases', es: 'Todas las versiones' },
+    sdk: { en: 'SDK & Packages', zh: 'SDK 和包', 'zh-TW': 'SDK 和套件', ja: 'SDK & パッケージ', ko: 'SDK & 패키지', de: 'SDK & Pakete', es: 'SDK y paquetes' },
+  }
+
+  const l = (key: string) => labels[key]?.[lang] ?? labels[key]?.['en'] ?? key
+
+  return (
+    <section id="downloads" className="py-28 px-6 scroll-mt-20">
+      <div className="max-w-6xl mx-auto">
+        <FadeIn>
+          <div className="text-xs font-mono text-cyan-500 uppercase tracking-widest mb-3">
+            {version && <span className="text-gray-600 mr-2">{version}</span>}
+            {l('title')}
+          </div>
+          <h2 className="text-3xl md:text-5xl font-black text-white tracking-tight mb-4">{l('title')}</h2>
+          <p className="text-gray-400 text-lg max-w-2xl mb-16">{l('desc')}</p>
+        </FadeIn>
+
+        {/* Desktop & CLI */}
+        {isLoading ? (
+          <div className="text-gray-600 text-center py-12">Loading releases...</div>
+        ) : (
+          <div className="grid md:grid-cols-2 gap-6 mb-8">
+            {categories.map((cat) => (
+              <FadeIn key={cat.label}>
+                <div className="bg-surface-100 border border-white/5 p-6">
+                  <div className="flex items-center gap-3 mb-4">
+                    <cat.icon className="w-5 h-5 text-cyan-500" />
+                    <div>
+                      <h3 className="text-base font-bold text-white">{cat.label}</h3>
+                      <span className="text-xs text-gray-500">{cat.desc}</span>
+                    </div>
+                  </div>
+                  <div className="space-y-1.5">
+                    {cat.assets.map((a) => (
+                      <a
+                        key={a.name}
+                        href={a.url}
+                        className="flex items-center justify-between px-3 py-2 hover:bg-surface-200 transition-colors group"
+                      >
+                        <span className="text-sm text-gray-300 group-hover:text-cyan-400 transition-colors">{a.name}</span>
+                        <span className="text-xs text-gray-600 font-mono">{a.size}</span>
+                      </a>
+                    ))}
+                  </div>
+                </div>
+              </FadeIn>
+            ))}
+          </div>
+        )}
+
+        {/* SDK, Deploy, All Releases */}
+        <FadeIn delay={200}>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <a href="https://deploy.librefang.ai/" target="_blank" rel="noopener noreferrer" className="flex items-center gap-3 bg-surface-100 border border-white/5 hover:border-cyan-500/20 px-5 py-4 transition-all group">
+              <Globe className="w-5 h-5 text-cyan-500/60 group-hover:text-cyan-400 shrink-0" />
+              <div>
+                <div className="text-sm font-bold text-white">{l('onlineDeply')}</div>
+                <div className="text-xs text-gray-500">deploy.librefang.ai</div>
+              </div>
+            </a>
+            <a href="https://github.com/librefang/librefang/releases" target="_blank" rel="noopener noreferrer" className="flex items-center gap-3 bg-surface-100 border border-white/5 hover:border-cyan-500/20 px-5 py-4 transition-all group">
+              <Github className="w-5 h-5 text-cyan-500/60 group-hover:text-cyan-400 shrink-0" />
+              <div>
+                <div className="text-sm font-bold text-white">{l('allReleases')}</div>
+                <div className="text-xs text-gray-500">GitHub Releases</div>
+              </div>
+            </a>
+            <a href="https://docs.librefang.ai/sdk" target="_blank" rel="noopener noreferrer" className="flex items-center gap-3 bg-surface-100 border border-white/5 hover:border-cyan-500/20 px-5 py-4 transition-all group">
+              <Box className="w-5 h-5 text-cyan-500/60 group-hover:text-cyan-400 shrink-0" />
+              <div>
+                <div className="text-sm font-bold text-white">{l('sdk')}</div>
+                <div className="text-xs text-gray-500">Python / Node.js / Rust</div>
+              </div>
+            </a>
+          </div>
+        </FadeIn>
       </div>
     </section>
   )
@@ -985,6 +1177,7 @@ export default function App() {
       <Performance t={t} />
       <div className="glow-line" />
       <Install t={t} />
+      <Downloads t={t} />
       <Docs t={t} />
       <FAQ t={t} />
       <GitHubStats t={t} />

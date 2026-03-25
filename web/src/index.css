@@ -101,6 +101,12 @@
   background: #06b6d4;
 }
 
+/* Touch scrolling */
+.touch-pan-x {
+  touch-action: pan-x;
+  -webkit-overflow-scrolling: touch;
+}
+
 :focus-visible {
   outline: 1px solid #06b6d4;
   outline-offset: 2px;
