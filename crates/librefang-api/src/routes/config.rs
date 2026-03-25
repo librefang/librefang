@@ -940,13 +940,16 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
         },
     );
 
-    set!("budget", {
-        "max_hourly_usd": config.budget.max_hourly_usd,
-        "max_daily_usd": config.budget.max_daily_usd,
-        "max_monthly_usd": config.budget.max_monthly_usd,
-        "alert_threshold": config.budget.alert_threshold,
-        "default_max_llm_tokens_per_hour": config.budget.default_max_llm_tokens_per_hour,
-    });
+    {
+        let budget = state.kernel.budget_config();
+        set!("budget", {
+            "max_hourly_usd": budget.max_hourly_usd,
+            "max_daily_usd": budget.max_daily_usd,
+            "max_monthly_usd": budget.max_monthly_usd,
+            "alert_threshold": budget.alert_threshold,
+            "default_max_llm_tokens_per_hour": budget.default_max_llm_tokens_per_hour,
+        });
+    }
 
     set!("provider_urls", config.provider_urls);
     set!("provider_api_keys", provider_api_keys);

@@ -238,13 +238,29 @@ fn git_clone_fallback(registry_cache: &Path) -> Result<(), Box<dyn std::error::E
 /// auto-sync should run.
 /// Resolve the default home directory (for tests and standalone usage).
 pub fn resolve_home_dir_for_tests() -> std::path::PathBuf {
-    std::env::var("LIBREFANG_HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            // Use process-unique dir to avoid git lock conflicts
-            // when nextest runs tests in parallel processes.
-            std::env::temp_dir().join(format!("librefang-test-{}", std::process::id()))
-        })
+    // OnceLock ensures the registry sync runs exactly once per process,
+    // preventing concurrent git clone races when tests run in parallel threads.
+    use std::sync::OnceLock;
+    static HOME: OnceLock<std::path::PathBuf> = OnceLock::new();
+    HOME.get_or_init(|| {
+        let home = std::env::var("LIBREFANG_HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| {
+                // Use process-unique dir to avoid git lock conflicts
+                // when nextest runs tests in parallel processes.
+                std::env::temp_dir().join(format!("librefang-test-{}", std::process::id()))
+            });
+        // Auto-sync if the providers dir is empty (fresh CI environment)
+        if !home.join("providers").exists()
+            || std::fs::read_dir(home.join("providers"))
+                .map(|d| d.count() == 0)
+                .unwrap_or(true)
+        {
+            sync_registry(&home);
+        }
+        home
+    })
+    .clone()
 }
 
 pub fn needs_sync(home_dir: &Path) -> bool {
