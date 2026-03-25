@@ -1177,18 +1177,12 @@ function GitHubStats({ t }: SectionProps) {
           </div>
         </FadeIn>
 
-        {/* Star History & Contributors */}
+        {/* Contributors */}
         <FadeIn delay={300}>
-          <div className="grid md:grid-cols-2 gap-4 mb-12">
-            <a href="https://star-history.com/#librefang/librefang&Date" target="_blank" rel="noopener noreferrer" className="block bg-surface-100 border border-black/10 dark:border-white/5 hover:border-cyan-500/20 p-4 transition-all">
-              <div className="text-xs font-mono text-gray-500 uppercase tracking-widest mb-3">{gs.starHistory}</div>
-              <img src="https://api.star-history.com/svg?repos=librefang/librefang&type=Date&theme=dark" alt="Star History" className="w-full h-auto rounded" loading="lazy" />
-            </a>
-            <a href="https://github.com/librefang/librefang/graphs/contributors" target="_blank" rel="noopener noreferrer" className="block bg-surface-100 border border-black/10 dark:border-white/5 hover:border-cyan-500/20 p-4 transition-all">
-              <div className="text-xs font-mono text-gray-500 uppercase tracking-widest mb-3">Contributors</div>
-              <img src="https://contrib.rocks/image?repo=librefang/librefang&anon=0" alt="Contributors" className="w-full h-auto rounded" loading="lazy" />
-            </a>
-          </div>
+          <a href="https://github.com/librefang/librefang/graphs/contributors" target="_blank" rel="noopener noreferrer" className="block bg-surface-100 border border-black/10 dark:border-white/5 hover:border-cyan-500/20 p-4 mb-12 transition-all">
+            <div className="text-xs font-mono text-gray-500 uppercase tracking-widest mb-3">Contributors</div>
+            <img src="https://contrib.rocks/image?repo=librefang/librefang&anon=0" alt="Contributors" className="w-full h-auto rounded" loading="lazy" />
+          </a>
         </FadeIn>
 
         <FadeIn delay={400}>
