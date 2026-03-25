@@ -1209,17 +1209,7 @@ mod tests {
         use std::sync::Once;
         static SYNC_ONCE: Once = Once::new();
         SYNC_ONCE.call_once(|| {
-            // Sync registry from remote (same mechanism as hands tests).
-            // Each nextest process gets its own Once, so we use a
-            // process-unique temp dir to avoid parallel write conflicts.
-            let test_home =
-                std::env::temp_dir().join(format!("librefang-router-test-{}", std::process::id()));
-            let _ = std::fs::create_dir_all(&test_home);
-
-            if librefang_runtime::registry_sync::needs_sync(&test_home) {
-                librefang_runtime::registry_sync::sync_registry(&test_home);
-            }
-
+            let test_home = librefang_runtime::registry_sync::resolve_home_dir_for_tests();
             set_hand_route_home_dir(&test_home);
             invalidate_hand_route_cache();
         });
