@@ -730,6 +730,7 @@ impl WorkflowEngine {
 
         let mut current_input = input;
         let mut all_outputs: Vec<String> = Vec::new();
+        let mut all_output_meta: Vec<(String, String)> = Vec::new(); // (step_name, agent_name)
         let mut variables: HashMap<String, String> = HashMap::new();
         let mut i = 0;
 
@@ -775,6 +776,7 @@ impl WorkflowEngine {
 
                     match result {
                         Ok(Some((output, input_tokens, output_tokens))) => {
+                            let agent_name_clone = agent_name.clone();
                             let step_result = StepResult {
                                 step_name: step.name.clone(),
                                 agent_id: agent_id.to_string(),
@@ -792,6 +794,7 @@ impl WorkflowEngine {
                                 variables.insert(var.clone(), output.clone());
                             }
 
+                            all_output_meta.push((step.name.clone(), agent_name_clone));
                             all_outputs.push(output.clone());
                             current_input = output;
                             info!(step = i + 1, name = %step.name, duration_ms, "Step completed");
@@ -889,6 +892,7 @@ impl WorkflowEngine {
                                 if let Some(ref var) = fan_step.output_var {
                                     variables.insert(var.clone(), output.clone());
                                 }
+                                all_output_meta.push((step_name.clone(), agent_name.clone()));
                                 all_outputs.push(output.clone());
                                 current_input = output;
                             }
@@ -930,8 +934,25 @@ impl WorkflowEngine {
                 }
 
                 StepMode::Collect => {
-                    current_input = all_outputs.join("\n\n---\n\n");
+                    let collected = serde_json::json!({
+                        "fan_out_results": all_outputs.iter().enumerate().map(|(idx, o)| {
+                            let (ref sname, ref aname) = if idx < all_output_meta.len() {
+                                &all_output_meta[idx]
+                            } else {
+                                &(String::new(), String::new())
+                            };
+                            serde_json::json!({
+                                "step_index": idx,
+                                "step_name": sname,
+                                "agent": aname,
+                                "output": o,
+                            })
+                        }).collect::<Vec<_>>()
+                    });
+                    current_input = serde_json::to_string_pretty(&collected)
+                        .unwrap_or_else(|_| all_outputs.join("\n\n---\n\n"));
                     all_outputs.clear();
+                    all_output_meta.clear();
                     all_outputs.push(current_input.clone());
                     if let Some(ref var) = step.output_var {
                         variables.insert(var.clone(), current_input.clone());
@@ -983,6 +1004,7 @@ impl WorkflowEngine {
 
                     match result {
                         Ok(Some((output, input_tokens, output_tokens))) => {
+                            let agent_name_clone = agent_name.clone();
                             let step_result = StepResult {
                                 step_name: step.name.clone(),
                                 agent_id: agent_id.to_string(),
@@ -998,6 +1020,7 @@ impl WorkflowEngine {
                             if let Some(ref var) = step.output_var {
                                 variables.insert(var.clone(), output.clone());
                             }
+                            all_output_meta.push((step.name.clone(), agent_name_clone));
                             all_outputs.push(output.clone());
                             current_input = output;
                         }
@@ -1105,6 +1128,7 @@ impl WorkflowEngine {
                     if let Some(ref var) = step.output_var {
                         variables.insert(var.clone(), current_input.clone());
                     }
+                    all_output_meta.push((step.name.clone(), agent_name));
                     all_outputs.push(current_input.clone());
                 }
             }
@@ -2354,10 +2378,18 @@ mod tests {
         assert!(result.is_ok());
 
         let output = result.unwrap();
-        // Collect step joins all outputs
+        // Collect step produces structured JSON
+        assert!(output.contains("fan_out_results"));
         assert!(output.contains("Done: Task A"));
         assert!(output.contains("Done: Task B"));
-        assert!(output.contains("---"));
+        let parsed: serde_json::Value =
+            serde_json::from_str(&output).expect("collect output should be valid JSON");
+        let results = parsed["fan_out_results"]
+            .as_array()
+            .expect("should have fan_out_results array");
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0]["step_index"], 0);
+        assert_eq!(results[1]["step_index"], 1);
     }
 
     #[tokio::test]
