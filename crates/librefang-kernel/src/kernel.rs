@@ -1866,6 +1866,7 @@ impl LibreFangKernel {
             Some(engine)
         };
 
+        let workflow_home_dir = config.home_dir.clone();
         let kernel = Self {
             config,
             registry: AgentRegistry::new(),
@@ -1876,7 +1877,7 @@ impl LibreFangKernel {
             proactive_memory: OnceLock::new(),
             prompt_store: OnceLock::new(),
             supervisor,
-            workflows: WorkflowEngine::new(),
+            workflows: WorkflowEngine::new_with_persistence(&workflow_home_dir),
             template_registry: WorkflowTemplateRegistry::new(),
             triggers: TriggerEngine::new(),
             background,
@@ -2208,6 +2209,19 @@ system_prompt = "You are a helpful assistant."
                     "Auto-registered {loaded} workflow(s) from {}",
                     workflows_dir.display()
                 );
+            }
+        }
+
+        // Load persisted workflow runs (completed/failed) from disk.
+        {
+            match tokio::task::block_in_place(|| kernel.workflows.load_runs()) {
+                Ok(count) if count > 0 => {
+                    info!("Loaded {count} persisted workflow run(s) from disk");
+                }
+                Err(e) => {
+                    warn!("Failed to load persisted workflow runs: {e}");
+                }
+                _ => {}
             }
         }
 
@@ -6093,14 +6107,149 @@ system_prompt = "You are a helpful assistant."
                         pm.update_config(new_config.proactive_memory.clone());
                     }
                 }
-                _ => {
-                    // Other hot actions (channels, web, browser, extensions, etc.)
-                    // are logged but not applied here — they require subsystem-specific
-                    // reinitialization that should be added as those systems mature.
+                HotAction::ReloadChannels => {
+                    // Channel adapters are registered at bridge startup. Clear
+                    // existing adapters so they are re-created with the new config
+                    // on the next bridge cycle.
                     info!(
-                        "Hot-reload: action {:?} noted but not yet auto-applied",
-                        action
+                        "Hot-reload: channel config updated — clearing {} adapter(s), \
+                         will reinitialize on next bridge cycle",
+                        self.channel_adapters.len()
                     );
+                    self.channel_adapters.clear();
+                }
+                HotAction::ReloadSkills => {
+                    info!("Hot-reload: reloading skill registry");
+                    let mut reg = self
+                        .skill_registry
+                        .write()
+                        .unwrap_or_else(|e| e.into_inner());
+                    match reg.load_all() {
+                        Ok(n) => {
+                            info!("Hot-reload: reloaded {n} skill(s)");
+                        }
+                        Err(e) => {
+                            warn!("Hot-reload: failed to reload skills: {e}");
+                        }
+                    }
+                    // Bump skill generation so tool list caches are invalidated
+                    self.skill_generation
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                HotAction::UpdateUsageFooter => {
+                    info!(
+                        "Hot-reload: usage footer mode updated to {:?} \
+                         (takes effect on next response)",
+                        new_config.usage_footer
+                    );
+                }
+                HotAction::ReloadWebConfig => {
+                    info!(
+                        "Hot-reload: web config updated (search_provider={:?}, \
+                         cache_ttl={}min) — takes effect on next web tool invocation",
+                        new_config.web.search_provider,
+                        new_config.web.cache_ttl_minutes
+                    );
+                }
+                HotAction::ReloadBrowserConfig => {
+                    info!(
+                        "Hot-reload: browser config updated (headless={}) \
+                         — new sessions will use updated config",
+                        new_config.browser.headless
+                    );
+                }
+                HotAction::UpdateWebhookConfig => {
+                    let enabled = new_config
+                        .webhook_triggers
+                        .as_ref()
+                        .map(|w| w.enabled)
+                        .unwrap_or(false);
+                    info!(
+                        "Hot-reload: webhook trigger config updated (enabled={enabled})"
+                    );
+                }
+                HotAction::ReloadExtensions => {
+                    info!("Hot-reload: reloading extension registry");
+                    let mut reg = self
+                        .extension_registry
+                        .write()
+                        .unwrap_or_else(|e| e.into_inner());
+                    // Re-scan installed integrations from disk
+                    match reg.load_installed() {
+                        Ok(n) => {
+                            info!("Hot-reload: reloaded {n} installed extension(s)");
+                        }
+                        Err(e) => {
+                            warn!("Hot-reload: failed to reload extensions: {e}");
+                        }
+                    }
+                    // Rebuild effective MCP server list: manual config + extension-sourced
+                    let ext_mcp_configs = reg.to_mcp_configs();
+                    drop(reg); // release extension_registry lock before acquiring effective_mcp_servers
+                    let mut all_mcp = new_config.mcp_servers.clone();
+                    for ext_cfg in ext_mcp_configs {
+                        // Avoid duplicates — don't add if a manual config already has same name
+                        if !all_mcp.iter().any(|s| s.name == ext_cfg.name) {
+                            all_mcp.push(ext_cfg);
+                        }
+                    }
+                    let mut effective = self
+                        .effective_mcp_servers
+                        .write()
+                        .unwrap_or_else(|e| e.into_inner());
+                    *effective = all_mcp;
+                    info!(
+                        "Hot-reload: effective MCP server list updated ({} total)",
+                        effective.len()
+                    );
+                    // Bump MCP generation so tool list caches are invalidated
+                    self.mcp_generation
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                HotAction::ReloadMcpServers => {
+                    info!("Hot-reload: MCP server config updated");
+                    // Rebuild effective MCP servers: new manual config + extension-sourced
+                    let ext_mcp_configs = {
+                        let reg = self
+                            .extension_registry
+                            .read()
+                            .unwrap_or_else(|e| e.into_inner());
+                        reg.to_mcp_configs()
+                    };
+                    let mut all_mcp = new_config.mcp_servers.clone();
+                    for ext_cfg in ext_mcp_configs {
+                        if !all_mcp.iter().any(|s| s.name == ext_cfg.name) {
+                            all_mcp.push(ext_cfg);
+                        }
+                    }
+                    let mut effective = self
+                        .effective_mcp_servers
+                        .write()
+                        .unwrap_or_else(|e| e.into_inner());
+                    let count = all_mcp.len();
+                    *effective = all_mcp;
+                    info!(
+                        "Hot-reload: effective MCP server list rebuilt ({count} total, \
+                         connections will be re-established on next agent message)"
+                    );
+                    // Bump MCP generation so tool list caches are invalidated
+                    self.mcp_generation
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                HotAction::ReloadA2aConfig => {
+                    info!(
+                        "Hot-reload: A2A config updated — takes effect on next \
+                         discovery/send operation"
+                    );
+                }
+                HotAction::ReloadFallbackProviders => {
+                    let count = new_config.fallback_providers.len();
+                    info!(
+                        "Hot-reload: fallback provider chain updated ({count} provider(s))"
+                    );
+                    // Invalidate cached LLM drivers so the new fallback chain
+                    // is used when drivers are next constructed.
+                    self.driver_cache.clear();
                 }
             }
         }
