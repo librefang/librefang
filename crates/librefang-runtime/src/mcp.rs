@@ -179,6 +179,19 @@ const SAFE_ENV_VARS: &[&str] = &[
     "NPM_CONFIG_PREFIX",
     "NVM_DIR",
     "FNM_DIR",
+    // Python (venvs, conda)
+    "PYTHONPATH",
+    "VIRTUAL_ENV",
+    "CONDA_PREFIX",
+    // Rust
+    "CARGO_HOME",
+    "RUSTUP_HOME",
+    // Ruby
+    "GEM_HOME",
+    "GEM_PATH",
+    // Go
+    "GOPATH",
+    "GOROOT",
 ];
 
 // ---------------------------------------------------------------------------
@@ -254,6 +267,36 @@ impl McpConnection {
         // Validate command path (no path traversal)
         if command.contains("..") {
             return Err("MCP command path contains '..': rejected".to_string());
+        }
+
+        // Block shell interpreters — MCP servers must use a specific runtime.
+        const BLOCKED_SHELLS: &[&str] = &[
+            "bash",
+            "sh",
+            "zsh",
+            "fish",
+            "csh",
+            "tcsh",
+            "ksh",
+            "dash",
+            "cmd",
+            "cmd.exe",
+            "powershell",
+            "powershell.exe",
+            "pwsh",
+        ];
+        let cmd_basename = std::path::Path::new(command)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(command);
+        if BLOCKED_SHELLS
+            .iter()
+            .any(|&s| s.eq_ignore_ascii_case(cmd_basename))
+        {
+            return Err(format!(
+                "MCP server command '{}' is a shell interpreter — use a specific runtime (npx, node, python) instead",
+                command
+            ));
         }
 
         // On Windows, npm/npx install as .cmd batch wrappers. Detect and adapt.
