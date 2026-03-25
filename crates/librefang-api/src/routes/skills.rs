@@ -1246,15 +1246,19 @@ pub async fn get_hand(
                         req_json
                     }).collect::<Vec<_>>(),
                     "server_platform": server_platform(),
-                    "agent": {
-                        "name": def.agent().name,
-                        "description": def.agent().description,
-                        "provider": if def.agent().model.provider == "default" {
-                            &state.kernel.config_ref().default_model.provider
-                        } else { &def.agent().model.provider },
-                        "model": if def.agent().model.model == "default" {
-                            &state.kernel.config_ref().default_model.model
-                        } else { &def.agent().model.model },
+                    "agent": if let Some(agent_manifest) = def.agent() {
+                        serde_json::json!({
+                            "name": agent_manifest.name,
+                            "description": agent_manifest.description,
+                            "provider": if agent_manifest.model.provider == "default" {
+                                &state.kernel.config_ref().default_model.provider
+                            } else { &agent_manifest.model.provider },
+                            "model": if agent_manifest.model.model == "default" {
+                                &state.kernel.config_ref().default_model.model
+                            } else { &agent_manifest.model.model },
+                        })
+                    } else {
+                        serde_json::json!(null)
                     },
                     "agents": def.agents.iter().map(|(role, a)| {
                         let dm = &state.kernel.config_ref().default_model;

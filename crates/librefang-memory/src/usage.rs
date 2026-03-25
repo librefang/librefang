@@ -3,7 +3,7 @@
 use chrono::Utc;
 use librefang_types::agent::AgentId;
 use librefang_types::error::{LibreFangError, LibreFangResult};
-use rusqlite::Connection;
+use rusqlite::{Connection, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 
@@ -112,6 +112,12 @@ impl UsageStore {
             .conn
             .lock()
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        Self::insert_record(&conn, record)
+    }
+
+    /// Insert a usage record into the database (helper used by both `record`
+    /// and the atomic `check_quota_and_record`).
+    fn insert_record(conn: &Connection, record: &UsageRecord) -> LibreFangResult<()> {
         let id = uuid::Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
         conn.execute(
@@ -130,6 +136,314 @@ impl UsageStore {
             ],
         )
         .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Atomically check per-agent quotas and record usage in a single SQLite
+    /// transaction.  This prevents the TOCTOU race where two concurrent
+    /// requests both pass the quota check before either records its usage.
+    ///
+    /// Returns `Ok(())` if the record was inserted within quota, or
+    /// `QuotaExceeded` if inserting would breach any of the supplied limits
+    /// (in which case nothing is written).
+    pub fn check_quota_and_record(
+        &self,
+        record: &UsageRecord,
+        max_hourly: f64,
+        max_daily: f64,
+        max_monthly: f64,
+    ) -> LibreFangResult<()> {
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+
+        // IMMEDIATE transaction acquires a reserved lock up-front, ensuring no
+        // other writer can interleave between our SELECT and INSERT.  The RAII
+        // guard auto-rolls back on drop if we return early (error or quota
+        // exceeded), so every error path is safe.
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+
+        let agent_str = record.agent_id.0.to_string();
+
+        // Check hourly quota
+        if max_hourly > 0.0 {
+            let cost: f64 = tx
+                .query_row(
+                    "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
+                     WHERE agent_id = ?1 AND timestamp > datetime('now', '-1 hour')",
+                    rusqlite::params![&agent_str],
+                    |row| row.get(0),
+                )
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            if cost + record.cost_usd >= max_hourly {
+                return Err(LibreFangError::QuotaExceeded(format!(
+                    "Agent {} exceeded hourly cost quota: ${:.4} + ${:.4} / ${:.4}",
+                    record.agent_id, cost, record.cost_usd, max_hourly
+                )));
+            }
+        }
+
+        // Check daily quota
+        if max_daily > 0.0 {
+            let cost: f64 = tx
+                .query_row(
+                    "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
+                     WHERE agent_id = ?1 AND timestamp > datetime('now', 'start of day')",
+                    rusqlite::params![&agent_str],
+                    |row| row.get(0),
+                )
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            if cost + record.cost_usd >= max_daily {
+                return Err(LibreFangError::QuotaExceeded(format!(
+                    "Agent {} exceeded daily cost quota: ${:.4} + ${:.4} / ${:.4}",
+                    record.agent_id, cost, record.cost_usd, max_daily
+                )));
+            }
+        }
+
+        // Check monthly quota
+        if max_monthly > 0.0 {
+            let cost: f64 = tx
+                .query_row(
+                    "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
+                     WHERE agent_id = ?1 AND timestamp > datetime('now', 'start of month')",
+                    rusqlite::params![&agent_str],
+                    |row| row.get(0),
+                )
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            if cost + record.cost_usd >= max_monthly {
+                return Err(LibreFangError::QuotaExceeded(format!(
+                    "Agent {} exceeded monthly cost quota: ${:.4} + ${:.4} / ${:.4}",
+                    record.agent_id, cost, record.cost_usd, max_monthly
+                )));
+            }
+        }
+
+        // All checks passed — insert the record within the same transaction
+        Self::insert_record(&tx, record)?;
+
+        tx.commit()
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Atomically check global budget limits and record usage in a single
+    /// SQLite transaction.  Similar to `check_quota_and_record` but checks
+    /// aggregate spend across *all* agents.
+    pub fn check_global_budget_and_record(
+        &self,
+        record: &UsageRecord,
+        max_hourly: f64,
+        max_daily: f64,
+        max_monthly: f64,
+    ) -> LibreFangResult<()> {
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+
+        // Check global hourly budget
+        if max_hourly > 0.0 {
+            let cost: f64 = tx
+                .query_row(
+                    "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
+                     WHERE timestamp > datetime('now', '-1 hour')",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            if cost + record.cost_usd >= max_hourly {
+                return Err(LibreFangError::QuotaExceeded(format!(
+                    "Global hourly budget exceeded: ${:.4} + ${:.4} / ${:.4}",
+                    cost, record.cost_usd, max_hourly
+                )));
+            }
+        }
+
+        // Check global daily budget
+        if max_daily > 0.0 {
+            let cost: f64 = tx
+                .query_row(
+                    "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
+                     WHERE timestamp > datetime('now', 'start of day')",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            if cost + record.cost_usd >= max_daily {
+                return Err(LibreFangError::QuotaExceeded(format!(
+                    "Global daily budget exceeded: ${:.4} + ${:.4} / ${:.4}",
+                    cost, record.cost_usd, max_daily
+                )));
+            }
+        }
+
+        // Check global monthly budget
+        if max_monthly > 0.0 {
+            let cost: f64 = tx
+                .query_row(
+                    "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
+                     WHERE timestamp > datetime('now', 'start of month')",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            if cost + record.cost_usd >= max_monthly {
+                return Err(LibreFangError::QuotaExceeded(format!(
+                    "Global monthly budget exceeded: ${:.4} + ${:.4} / ${:.4}",
+                    cost, record.cost_usd, max_monthly
+                )));
+            }
+        }
+
+        // All checks passed — insert the record
+        Self::insert_record(&tx, record)?;
+
+        tx.commit()
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Atomically check both per-agent quotas and global budget limits, then
+    /// record the usage event — all within a single SQLite transaction.
+    #[allow(clippy::too_many_arguments)]
+    pub fn check_all_and_record(
+        &self,
+        record: &UsageRecord,
+        agent_max_hourly: f64,
+        agent_max_daily: f64,
+        agent_max_monthly: f64,
+        global_max_hourly: f64,
+        global_max_daily: f64,
+        global_max_monthly: f64,
+    ) -> LibreFangResult<()> {
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+
+        let agent_str = record.agent_id.0.to_string();
+
+        // ── Per-agent quota checks ──────────────────────────────────
+        if agent_max_hourly > 0.0 {
+            let cost: f64 = tx
+                .query_row(
+                    "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
+                     WHERE agent_id = ?1 AND timestamp > datetime('now', '-1 hour')",
+                    rusqlite::params![&agent_str],
+                    |row| row.get(0),
+                )
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            if cost + record.cost_usd >= agent_max_hourly {
+                return Err(LibreFangError::QuotaExceeded(format!(
+                    "Agent {} exceeded hourly cost quota: ${:.4} + ${:.4} / ${:.4}",
+                    record.agent_id, cost, record.cost_usd, agent_max_hourly
+                )));
+            }
+        }
+
+        if agent_max_daily > 0.0 {
+            let cost: f64 = tx
+                .query_row(
+                    "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
+                     WHERE agent_id = ?1 AND timestamp > datetime('now', 'start of day')",
+                    rusqlite::params![&agent_str],
+                    |row| row.get(0),
+                )
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            if cost + record.cost_usd >= agent_max_daily {
+                return Err(LibreFangError::QuotaExceeded(format!(
+                    "Agent {} exceeded daily cost quota: ${:.4} + ${:.4} / ${:.4}",
+                    record.agent_id, cost, record.cost_usd, agent_max_daily
+                )));
+            }
+        }
+
+        if agent_max_monthly > 0.0 {
+            let cost: f64 = tx
+                .query_row(
+                    "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
+                     WHERE agent_id = ?1 AND timestamp > datetime('now', 'start of month')",
+                    rusqlite::params![&agent_str],
+                    |row| row.get(0),
+                )
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            if cost + record.cost_usd >= agent_max_monthly {
+                return Err(LibreFangError::QuotaExceeded(format!(
+                    "Agent {} exceeded monthly cost quota: ${:.4} + ${:.4} / ${:.4}",
+                    record.agent_id, cost, record.cost_usd, agent_max_monthly
+                )));
+            }
+        }
+
+        // ── Global budget checks ────────────────────────────────────
+        if global_max_hourly > 0.0 {
+            let cost: f64 = tx
+                .query_row(
+                    "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
+                     WHERE timestamp > datetime('now', '-1 hour')",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            if cost + record.cost_usd >= global_max_hourly {
+                return Err(LibreFangError::QuotaExceeded(format!(
+                    "Global hourly budget exceeded: ${:.4} + ${:.4} / ${:.4}",
+                    cost, record.cost_usd, global_max_hourly
+                )));
+            }
+        }
+
+        if global_max_daily > 0.0 {
+            let cost: f64 = tx
+                .query_row(
+                    "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
+                     WHERE timestamp > datetime('now', 'start of day')",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            if cost + record.cost_usd >= global_max_daily {
+                return Err(LibreFangError::QuotaExceeded(format!(
+                    "Global daily budget exceeded: ${:.4} + ${:.4} / ${:.4}",
+                    cost, record.cost_usd, global_max_daily
+                )));
+            }
+        }
+
+        if global_max_monthly > 0.0 {
+            let cost: f64 = tx
+                .query_row(
+                    "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
+                     WHERE timestamp > datetime('now', 'start of month')",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            if cost + record.cost_usd >= global_max_monthly {
+                return Err(LibreFangError::QuotaExceeded(format!(
+                    "Global monthly budget exceeded: ${:.4} + ${:.4} / ${:.4}",
+                    cost, record.cost_usd, global_max_monthly
+                )));
+            }
+        }
+
+        // All checks passed — insert the record
+        Self::insert_record(&tx, record)?;
+
+        tx.commit()
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(())
     }
 
@@ -679,5 +993,119 @@ mod tests {
         assert!((haiku.avg_latency_ms - 200.0).abs() < 0.1);
         assert_eq!(haiku.min_latency_ms, 100);
         assert_eq!(haiku.max_latency_ms, 300);
+    }
+
+    #[test]
+    fn test_check_quota_and_record_under_limit() {
+        let store = setup();
+        let agent_id = AgentId::new();
+
+        let result = store.check_quota_and_record(
+            &UsageRecord {
+                agent_id,
+                model: "haiku".to_string(),
+                input_tokens: 100,
+                output_tokens: 50,
+                cost_usd: 0.001,
+                tool_calls: 0,
+                latency_ms: 100,
+            },
+            1.0,   // hourly
+            10.0,  // daily
+            100.0, // monthly
+        );
+        assert!(result.is_ok());
+
+        // Verify the record was actually inserted
+        let summary = store.query_summary(Some(agent_id)).unwrap();
+        assert_eq!(summary.call_count, 1);
+    }
+
+    #[test]
+    fn test_check_quota_and_record_exceeds_hourly() {
+        let store = setup();
+        let agent_id = AgentId::new();
+
+        // First record: use up most of the budget
+        store
+            .record(&UsageRecord {
+                agent_id,
+                model: "haiku".to_string(),
+                input_tokens: 100,
+                output_tokens: 50,
+                cost_usd: 0.009,
+                tool_calls: 0,
+                latency_ms: 100,
+            })
+            .unwrap();
+
+        // Second record: should be rejected atomically
+        let result = store.check_quota_and_record(
+            &UsageRecord {
+                agent_id,
+                model: "haiku".to_string(),
+                input_tokens: 100,
+                output_tokens: 50,
+                cost_usd: 0.002,
+                tool_calls: 0,
+                latency_ms: 100,
+            },
+            0.01, // hourly limit
+            10.0,
+            100.0,
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("hourly cost quota"));
+
+        // Verify the second record was NOT inserted
+        let summary = store.query_summary(Some(agent_id)).unwrap();
+        assert_eq!(summary.call_count, 1);
+    }
+
+    #[test]
+    fn test_check_all_and_record_global_budget() {
+        let store = setup();
+        let agent_a = AgentId::new();
+        let agent_b = AgentId::new();
+
+        // Agent A uses some budget
+        store
+            .record(&UsageRecord {
+                agent_id: agent_a,
+                model: "haiku".to_string(),
+                input_tokens: 100,
+                output_tokens: 50,
+                cost_usd: 0.008,
+                tool_calls: 0,
+                latency_ms: 100,
+            })
+            .unwrap();
+
+        // Agent B tries to record — per-agent quota is fine but global is exceeded
+        let result = store.check_all_and_record(
+            &UsageRecord {
+                agent_id: agent_b,
+                model: "haiku".to_string(),
+                input_tokens: 100,
+                output_tokens: 50,
+                cost_usd: 0.005,
+                tool_calls: 0,
+                latency_ms: 100,
+            },
+            1.0,   // agent hourly (fine)
+            10.0,  // agent daily (fine)
+            100.0, // agent monthly (fine)
+            0.01,  // global hourly (exceeded: 0.008 + 0.005 >= 0.01)
+            10.0,  // global daily
+            100.0, // global monthly
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Global hourly budget exceeded"));
+
+        // Agent B's record was NOT inserted
+        let summary = store.query_summary(Some(agent_b)).unwrap();
+        assert_eq!(summary.call_count, 0);
     }
 }

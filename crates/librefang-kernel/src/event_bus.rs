@@ -143,7 +143,7 @@ mod tests {
             EventPayload::System(SystemEvent::HealthCheck { status }) => {
                 assert_eq!(status, "ok");
             }
-            _ => panic!("Wrong payload"),
+            other => panic!("Expected HealthCheck payload, got {:?}", other),
         }
     }
 }

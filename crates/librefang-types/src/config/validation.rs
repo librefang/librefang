@@ -72,6 +72,14 @@ impl KernelConfig {
             "dashboard_pass_hash",
             "log_dir",
             "inbox",
+            "azure_openai",
+            "heartbeat",
+            "privacy",
+            "prompt_intelligence",
+            "qwen_code_path",
+            "sanitize",
+            "telemetry",
+            "update_channel",
         ]
     }
 
