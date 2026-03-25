@@ -301,19 +301,7 @@ mod tests {
     use crate::registry::IntegrationRegistry;
 
     fn ensure_registry() {
-        use std::sync::Once;
-        static SYNC_ONCE: Once = Once::new();
-        let home = librefang_runtime::registry_sync::resolve_home_dir_for_tests();
-        SYNC_ONCE.call_once(|| {
-            let _ = std::fs::create_dir_all(&home);
-            if !home.join("integrations").exists()
-                || std::fs::read_dir(home.join("integrations"))
-                    .map(|d| d.count() == 0)
-                    .unwrap_or(true)
-            {
-                librefang_runtime::registry_sync::sync_registry(&home);
-            }
-        });
+        let _ = librefang_runtime::registry_sync::resolve_home_dir_for_tests();
     }
 
     #[test]

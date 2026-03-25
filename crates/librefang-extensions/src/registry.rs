@@ -228,16 +228,9 @@ mod tests {
     use super::*;
 
     /// Ensure registry content is available for tests.
-    /// If ~/.librefang/integrations/ is empty (CI), auto-syncs from the registry.
+    /// resolve_home_dir_for_tests() handles sync internally via OnceLock.
     fn ensure_registry() {
-        let home = librefang_runtime::registry_sync::resolve_home_dir_for_tests();
-        if !home.join("integrations").exists()
-            || std::fs::read_dir(home.join("integrations"))
-                .map(|d| d.count() == 0)
-                .unwrap_or(true)
-        {
-            librefang_runtime::registry_sync::sync_registry(&home);
-        }
+        let _ = librefang_runtime::registry_sync::resolve_home_dir_for_tests();
     }
 
     #[test]
