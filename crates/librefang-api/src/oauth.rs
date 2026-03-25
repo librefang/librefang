@@ -316,6 +316,95 @@ struct TokenResponse {
     refresh_token: Option<String>,
 }
 
+// ── Token Store ─────────────────────────────────────────────────────────
+
+/// Stored token entry for a user session, keyed by user subject (`sub`).
+#[derive(Debug, Clone)]
+struct StoredTokens {
+    /// The OAuth2 access token (stored for future introspection/revocation).
+    #[allow(dead_code)]
+    access_token: String,
+    /// Optional refresh token for obtaining new access tokens.
+    refresh_token: Option<String>,
+    /// When the access token expires (absolute time).
+    #[allow(dead_code)]
+    expires_at: Option<std::time::Instant>,
+    /// Provider ID that issued these tokens.
+    provider_id: String,
+    /// When this entry was stored (for TTL eviction).
+    stored_at: std::time::Instant,
+}
+
+/// Token store entries older than 24 hours are evicted on access.
+const TOKEN_STORE_TTL: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
+
+/// In-memory token store. Maps user `sub` to their stored tokens.
+#[derive(Default)]
+pub struct TokenStore {
+    inner: RwLock<HashMap<String, StoredTokens>>,
+}
+
+/// Global token store instance.
+static TOKEN_STORE: std::sync::LazyLock<TokenStore> = std::sync::LazyLock::new(TokenStore::default);
+
+impl TokenStore {
+    /// Store tokens for a user.
+    async fn store(&self, sub: &str, tokens: StoredTokens) {
+        let mut write = self.inner.write().await;
+        write.insert(sub.to_string(), tokens);
+    }
+
+    /// Retrieve stored tokens for a user, evicting if older than TTL.
+    #[allow(dead_code)]
+    async fn get(&self, sub: &str) -> Option<StoredTokens> {
+        let mut write = self.inner.write().await;
+        if let Some(entry) = write.get(sub) {
+            if entry.stored_at.elapsed() > TOKEN_STORE_TTL {
+                debug!(sub = %sub, "Evicting expired token store entry (>24h)");
+                write.remove(sub);
+                return None;
+            }
+            return Some(entry.clone());
+        }
+        None
+    }
+
+    /// Remove stored tokens for a user (e.g., on logout).
+    #[allow(dead_code)]
+    async fn remove(&self, sub: &str) {
+        let mut write = self.inner.write().await;
+        write.remove(sub);
+    }
+
+    /// Find a stored entry by provider ID, evicting expired entries along the way.
+    async fn find_by_provider(&self, provider_id: &str) -> Option<(String, StoredTokens)> {
+        let mut write = self.inner.write().await;
+        let now = std::time::Instant::now();
+
+        // Evict expired entries.
+        write.retain(|_sub, entry| now.duration_since(entry.stored_at) <= TOKEN_STORE_TTL);
+
+        write
+            .iter()
+            .find(|(_sub, entry)| entry.provider_id == provider_id)
+            .map(|(sub, entry)| (sub.clone(), entry.clone()))
+    }
+
+    /// Find any stored entry with a refresh token, evicting expired entries.
+    async fn find_any_with_refresh(&self) -> Option<(String, StoredTokens)> {
+        let mut write = self.inner.write().await;
+        let now = std::time::Instant::now();
+
+        // Evict expired entries.
+        write.retain(|_sub, entry| now.duration_since(entry.stored_at) <= TOKEN_STORE_TTL);
+
+        write
+            .iter()
+            .find(|(_sub, entry)| entry.refresh_token.is_some())
+            .map(|(sub, entry)| (sub.clone(), entry.clone()))
+    }
+}
+
 // ── Route: GET /api/auth/providers ──────────────────────────────────────
 
 /// GET /api/auth/providers — List available authentication providers.
@@ -776,6 +865,21 @@ async fn handle_code_exchange(
 
     let expires_in = token_resp.expires_in.unwrap_or(ext_auth.session_ttl_secs);
 
+    // Store tokens so we can refresh later when the access token expires.
+    let expires_at = Some(std::time::Instant::now() + std::time::Duration::from_secs(expires_in));
+    TOKEN_STORE
+        .store(
+            &claims.sub,
+            StoredTokens {
+                access_token: token_resp.access_token.clone(),
+                refresh_token: token_resp.refresh_token.clone(),
+                expires_at,
+                provider_id: provider.id.clone(),
+                stored_at: std::time::Instant::now(),
+            },
+        )
+        .await;
+
     (
         StatusCode::OK,
         Json(CallbackResponse {
@@ -951,7 +1055,9 @@ pub async fn auth_introspect(
 #[derive(Deserialize, utoipa::ToSchema)]
 pub struct RefreshRequest {
     /// The refresh token obtained from the initial login callback.
-    pub refresh_token: String,
+    /// If omitted, the server looks up a stored refresh token from the token store.
+    #[serde(default)]
+    pub refresh_token: Option<String>,
     /// Optional provider hint (if the user logged in with a specific provider).
     #[serde(default)]
     pub provider: Option<String>,
@@ -975,12 +1081,8 @@ struct RefreshResponse {
 ///
 /// When the access token expires, clients can call this endpoint with the
 /// refresh token received during login instead of forcing a full re-authorization.
-///
-/// SECURITY: In the local agent model, this endpoint is only accessible from the
-/// loopback interface (127.0.0.1) and protected by API key middleware. The client
-/// (local dashboard or CLI) holds the refresh token and submits it directly — there
-/// is no server-side token store. This is the appropriate design for a single-user
-/// local agent that doesn't need cross-session token persistence.
+/// If the request body omits `refresh_token`, the server looks up the token store
+/// for a previously stored refresh token (from the OAuth callback).
 #[utoipa::path(post, path = "/api/auth/refresh", tag = "auth", request_body = RefreshRequest, responses((status = 200, description = "New access token", body = serde_json::Value), (status = 400, description = "Missing or invalid refresh token"), (status = 502, description = "Token refresh failed")))]
 pub async fn auth_refresh(
     State(state): State<Arc<AppState>>,
@@ -997,14 +1099,66 @@ pub async fn auth_refresh(
 
     let providers = resolve_providers(ext_auth).await;
 
-    // Find the provider to use for the refresh.
-    let provider = if let Some(ref pid) = req.provider {
-        providers.iter().find(|p| p.id == *pid)
-    } else if providers.len() == 1 {
-        providers.first()
+    // Resolve the refresh token: prefer the request body, fall back to TOKEN_STORE.
+    let (refresh_token, stored_sub, provider) = if let Some(ref rt) = req.refresh_token {
+        // Client supplied a refresh token explicitly.
+        let provider = if let Some(ref pid) = req.provider {
+            providers.iter().find(|p| p.id == *pid)
+        } else if providers.len() == 1 {
+            providers.first()
+        } else {
+            None
+        };
+        (rt.clone(), None::<String>, provider.cloned())
+    } else if let Some(ref pid) = req.provider {
+        // No refresh token in request, but provider given — look up from store.
+        match TOKEN_STORE.find_by_provider(pid).await {
+            Some((sub, entry)) => match entry.refresh_token {
+                Some(rt) => {
+                    let provider = providers.iter().find(|p| p.id == *pid).cloned();
+                    (rt, Some(sub), provider)
+                }
+                None => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({
+                            "error": "No refresh token stored for this provider"
+                        })),
+                    )
+                        .into_response();
+                }
+            },
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": "No stored session found for this provider"
+                    })),
+                )
+                    .into_response();
+            }
+        }
     } else {
-        // Multiple providers and no hint — we cannot determine which provider issued the token.
-        None
+        // Neither refresh token nor provider — try to find any stored refresh token.
+        match TOKEN_STORE.find_any_with_refresh().await {
+            Some((sub, entry)) => {
+                let provider = providers
+                    .iter()
+                    .find(|p| p.id == entry.provider_id)
+                    .cloned();
+                // refresh_token is guaranteed Some by find_any_with_refresh
+                (entry.refresh_token.unwrap(), Some(sub), provider)
+            }
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": "No refresh token provided and none found in token store"
+                    })),
+                )
+                    .into_response();
+            }
+        }
     };
 
     let Some(provider) = provider else {
@@ -1035,7 +1189,7 @@ pub async fn auth_refresh(
     // Exchange the refresh token for new tokens.
     let token_resp = match exchange_refresh_token(
         &provider.token_url,
-        &req.refresh_token,
+        &refresh_token,
         &provider.client_id,
         &client_secret,
     )
@@ -1053,6 +1207,24 @@ pub async fn auth_refresh(
     };
 
     let expires_in = token_resp.expires_in.unwrap_or(ext_auth.session_ttl_secs);
+
+    // Update TOKEN_STORE with new tokens so subsequent refreshes work.
+    if let Some(ref sub) = stored_sub {
+        let expires_at =
+            Some(std::time::Instant::now() + std::time::Duration::from_secs(expires_in));
+        TOKEN_STORE
+            .store(
+                sub,
+                StoredTokens {
+                    access_token: token_resp.access_token.clone(),
+                    refresh_token: token_resp.refresh_token.clone(),
+                    expires_at,
+                    provider_id: provider.id.clone(),
+                    stored_at: std::time::Instant::now(),
+                },
+            )
+            .await;
+    }
 
     info!(provider = %provider.id, "Token refresh successful");
 
