@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 // ---------------------------------------------------------------------------
 // Configuration types
@@ -419,6 +419,13 @@ impl McpConnection {
                 let response: JsonRpcResponse = serde_json::from_str(line.trim())
                     .map_err(|e| format!("Invalid MCP JSON-RPC response: {e}"))?;
 
+                if response.id != Some(id) {
+                    return Err(format!(
+                        "MCP response ID mismatch: expected {id}, got {:?}",
+                        response.id
+                    ));
+                }
+
                 if let Some(err) = response.error {
                     return Err(format!("{err}"));
                 }
@@ -445,6 +452,13 @@ impl McpConnection {
 
                 let rpc_response: JsonRpcResponse = serde_json::from_str(&body)
                     .map_err(|e| format!("Invalid MCP SSE JSON-RPC response: {e}"))?;
+
+                if rpc_response.id != Some(id) {
+                    return Err(format!(
+                        "MCP SSE response ID mismatch: expected {id}, got {:?}",
+                        rpc_response.id
+                    ));
+                }
 
                 if let Some(err) = rpc_response.error {
                     return Err(format!("{err}"));
@@ -1229,7 +1243,7 @@ mod tests {
             transport: McpTransportHandle::HttpCompat {
                 client: crate::http_client::proxied_client(),
             },
-            next_id: 1,
+            next_id: AtomicU64::new(1),
         };
 
         conn.register_http_compat_tools(&[
