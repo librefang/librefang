@@ -15,9 +15,7 @@ import {
   getHandStats,
   getHandDetail,
   getHandSettings,
-  listAgents,
   setHandSecret,
-  type AgentItem,
   type HandDefinitionItem,
   type HandInstanceItem,
   type HandStatsResponse,
@@ -365,14 +363,6 @@ function HandDetailPanel({
   const { t } = useTranslation();
   const isPaused = instance?.status === "paused";
 
-  const detailQuery = useQuery({
-    queryKey: ["hands", "detail", hand.id],
-    queryFn: () => getHandDetail(hand.id),
-    enabled: !!hand.id,
-  });
-  const detail = detailQuery.data as Record<string, unknown> | undefined;
-  const agent = detail?.agent as { name?: string; model?: string; provider?: string; description?: string } | undefined;
-
   const settingsQuery = useQuery({
     queryKey: ["hands", "settings", hand.id],
     queryFn: () => getHandSettings(hand.id),
@@ -549,16 +539,14 @@ function DetailTabs({ hand, instance, isActive, settings, settingsQuery, stats, 
   const hasMetrics = isActive && !statsQuery.isLoading && stats.metrics &&
     Object.entries(stats.metrics).some(([, m]) => m.value != null && String(m.value) !== "-" && String(m.value) !== "");
 
-  // Fetch workspace agents belonging to this hand
-  const agentsQuery = useQuery({ queryKey: ["agents", "list", "hands"], queryFn: listAgents, staleTime: 30000 });
-  const handPrefix = (hand.name || hand.id).replace(/ Hand$/i, "").toLowerCase().replace(/\s+/g, "-");
-  const workspaceAgents = useMemo(() =>
-    (agentsQuery.data ?? []).filter(a => {
-      const n = a.name.toLowerCase();
-      return n.startsWith(handPrefix + ":") || n === handPrefix + "-hand";
-    }),
-    [agentsQuery.data, handPrefix]
-  );
+  // Fetch hand detail with agents list
+  const detailQuery = useQuery({
+    queryKey: ["hands", "detail", hand.id],
+    queryFn: () => getHandDetail(hand.id),
+    enabled: !!hand.id,
+  });
+  const detail = detailQuery.data as Record<string, unknown> | undefined;
+  const workspaceAgents = (detail?.agents as { role: string; name: string; description?: string; coordinator?: boolean; provider: string; model: string }[] | undefined) ?? [];
 
   type Tab = "agents" | "settings" | "requirements" | "tools" | "metrics";
   const tabs: { id: Tab; label: string; count?: number; show: boolean }[] = [
@@ -604,23 +592,23 @@ function DetailTabs({ hand, instance, isActive, settings, settingsQuery, stats, 
 
         {activeTab === "agents" && (
           <div className="space-y-2">
-            {workspaceAgents.map((a) => {
-              const subName = a.name.includes(":") ? a.name.split(":")[1] : a.name;
-              return (
-                <div key={a.id} className="flex items-center gap-3 p-2.5 rounded-lg border border-border-subtle bg-main/30">
-                  <div className={`w-7 h-7 rounded-lg flex items-center justify-center text-[11px] font-bold ${
-                    (a.state || "").toLowerCase() === "running" ? "bg-success/10 text-success" : "bg-main text-text-dim/40"
-                  }`}>
-                    {subName.charAt(0).toUpperCase()}
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <p className="text-[11px] font-semibold truncate">{subName}</p>
-                    <p className="text-[10px] text-text-dim/50 truncate">{a.model_name}</p>
-                  </div>
-                  <Badge variant="info">{a.model_provider}</Badge>
+            {workspaceAgents.map((a) => (
+              <div key={a.role} className="flex items-center gap-3 p-2.5 rounded-lg border border-border-subtle bg-main/30">
+                <div className={`w-7 h-7 rounded-lg flex items-center justify-center text-[11px] font-bold ${
+                  a.coordinator ? "bg-brand/10 text-brand" : "bg-main text-text-dim/50"
+                }`}>
+                  {a.role.charAt(0).toUpperCase()}
                 </div>
-              );
-            })}
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-1.5">
+                    <p className="text-[11px] font-semibold truncate">{a.role}</p>
+                    {a.coordinator && <Badge variant="brand">coordinator</Badge>}
+                  </div>
+                  <p className="text-[10px] text-text-dim/50 truncate">{a.model}</p>
+                </div>
+                <Badge variant="info">{a.provider}</Badge>
+              </div>
+            ))}
           </div>
         )}
 

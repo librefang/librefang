@@ -1256,6 +1256,17 @@ pub async fn get_hand(
                             &state.kernel.config_ref().default_model.model
                         } else { &def.agent().model.model },
                     },
+                    "agents": def.agents.iter().map(|(role, a)| {
+                        let dm = &state.kernel.config_ref().default_model;
+                        serde_json::json!({
+                            "role": role,
+                            "name": a.manifest.name,
+                            "description": a.manifest.description,
+                            "coordinator": a.coordinator,
+                            "provider": if a.manifest.model.provider == "default" { &dm.provider } else { &a.manifest.model.provider },
+                            "model": if a.manifest.model.model == "default" { &dm.model } else { &a.manifest.model.model },
+                        })
+                    }).collect::<Vec<_>>(),
                     "dashboard": def.dashboard.metrics.iter().map(|m| serde_json::json!({
                         "label": m.label,
                         "memory_key": m.memory_key,
