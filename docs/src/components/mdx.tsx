@@ -5,7 +5,21 @@ import { Feedback } from "@/components/Feedback";
 import { Heading } from "@/components/Heading";
 import { Prose } from "@/components/Prose";
 
-export const a = Link;
+export function a({
+	href = "",
+	children,
+	...props
+}: React.AnchorHTMLAttributes<HTMLAnchorElement> & { href?: string; children?: React.ReactNode }) {
+	const isExternal = href.startsWith("http://") || href.startsWith("https://");
+	if (isExternal) {
+		return (
+			<a href={href} target="_blank" rel="noopener noreferrer" {...props}>
+				{children}
+			</a>
+		);
+	}
+	return <Link href={href} {...props}>{children}</Link>;
+}
 export { Button } from "@/components/Button";
 export { Code as code, CodeGroup, Pre as pre } from "@/components/Code";
 
