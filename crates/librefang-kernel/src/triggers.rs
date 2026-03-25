@@ -379,12 +379,28 @@ impl TriggerEngine {
             }
 
             if matches_pattern(&trigger.pattern, event, &event_description) {
-                // Enforce per-event trigger budget
+                // Enforce per-event trigger budget (storm prevention).
+                //
+                // We intentionally `break` here rather than `continue` — once the
+                // budget is exhausted we stop evaluating entirely. Because
+                // `DashMap` iteration order is non-deterministic, the set of
+                // triggers that "win" the budget on any given event is effectively
+                // random. This is acceptable for storm prevention: the goal is to
+                // cap the blast radius of a single event, not to guarantee
+                // deterministic priority. If deterministic priority is needed in
+                // the future, triggers should be collected and sorted by an
+                // explicit priority field before evaluation.
+                //
+                // The warning log includes the total number of registered
+                // triggers so operators can compare it against the budget and
+                // tune `max_triggers_per_event` accordingly.
                 if matches.len() >= self.max_triggers_per_event {
                     warn!(
                         trigger_id = %trigger.id,
                         budget = self.max_triggers_per_event,
-                        "Per-event trigger budget exhausted, skipping remaining matches"
+                        total_registered = self.triggers.len(),
+                        "Per-event trigger budget exhausted, skipping remaining matches — \
+                         consider increasing max_triggers_per_event if too many triggers are starved"
                     );
                     break;
                 }

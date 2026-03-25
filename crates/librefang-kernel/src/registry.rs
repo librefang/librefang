@@ -309,14 +309,11 @@ impl AgentRegistry {
                 vacant.insert(id);
             }
         }
-        let mut entry = self
-            .agents
-            .get_mut(&id)
-            .ok_or_else(|| {
-                // Roll back the name index insertion if agent not found.
-                self.name_index.remove(&new_name);
-                LibreFangError::AgentNotFound(id.to_string())
-            })?;
+        let mut entry = self.agents.get_mut(&id).ok_or_else(|| {
+            // Roll back the name index insertion if agent not found.
+            self.name_index.remove(&new_name);
+            LibreFangError::AgentNotFound(id.to_string())
+        })?;
         let old_name = entry.name.clone();
         entry.name = new_name.clone();
         entry.manifest.name = new_name;

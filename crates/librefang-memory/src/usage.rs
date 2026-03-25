@@ -1010,8 +1010,8 @@ mod tests {
                 tool_calls: 0,
                 latency_ms: 100,
             },
-            1.0,  // hourly
-            10.0, // daily
+            1.0,   // hourly
+            10.0,  // daily
             100.0, // monthly
         );
         assert!(result.is_ok());
