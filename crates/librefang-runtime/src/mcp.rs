@@ -13,7 +13,7 @@ use librefang_types::config::{
 use librefang_types::tool::ToolDefinition;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 // ---------------------------------------------------------------------------
 // Configuration types
