@@ -24,7 +24,10 @@ impl WebFetchEngine {
         Self { config, cache }
     }
 
-    /// Build a per-request client with DNS pinned to the SSRF-validated IPs.
+    /// Build a per-request reqwest client pinned to the SSRF-validated IPs.
+    ///
+    /// Uses the resolved addresses from [`check_ssrf`] to configure DNS
+    /// pinning on the builder, preventing DNS-rebinding TOCTOU attacks.
     fn pinned_client(&self, resolution: SsrfResolution) -> reqwest::Client {
         let builder = crate::http_client::proxied_client_builder()
             .timeout(std::time::Duration::from_secs(self.config.timeout_secs))
