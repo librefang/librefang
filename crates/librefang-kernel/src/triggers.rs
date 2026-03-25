@@ -119,12 +119,14 @@ impl TriggerEngine {
     }
 
     /// Create a new trigger engine with a custom per-event trigger budget.
+    ///
+    /// `max` is clamped to a minimum of 1; passing 0 would cause the budget
+    /// check (`matches.len() >= max`) to be true immediately, preventing any
+    /// trigger from ever firing.
     pub fn with_max_triggers_per_event(max: usize) -> Self {
         Self {
-            triggers: DashMap::new(),
-            agent_triggers: DashMap::new(),
-            last_fired: DashMap::new(),
-            max_triggers_per_event: max,
+            max_triggers_per_event: max.max(1),
+            ..Self::new()
         }
     }
 
