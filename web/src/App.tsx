@@ -860,10 +860,11 @@ function Downloads(_props: SectionProps) {
                 </div>
                 <div className="space-y-1.5">
                   {[
-                    { name: 'Fly.io', url: 'https://fly.io/docs/hands-on/install-flyctl/', icon: Zap },
-                    { name: 'Railway', url: 'https://railway.app/new', icon: ArrowRight },
-                    { name: 'Render', url: 'https://render.com/deploy', icon: Layers },
-                    { name: 'GCP Cloud Run', url: 'https://cloud.google.com/run', icon: Network },
+                    { name: 'Fly.io', url: 'https://flyio.librefang.ai', icon: Zap },
+                    { name: 'Railway', url: 'https://railway.com/template/d7ebcd2f-8107-4b3f-8860-4693bc72d018', icon: ArrowRight },
+                    { name: 'Render', url: 'https://render.librefang.ai', icon: Layers },
+                    { name: 'GCP', url: 'https://github.com/librefang/librefang/tree/main/deploy/gcp', icon: Network },
+                    { name: 'Docker', url: 'https://github.com/librefang/librefang/blob/main/deploy/docker-compose.yml', icon: Box },
                   ].map((p) => (
                     <a key={p.name} href={p.url} target="_blank" rel="noopener noreferrer" className="flex items-center gap-3 px-3 py-2 hover:bg-surface-200 transition-colors group">
                       <p.icon className="w-4 h-4 text-gray-400 dark:text-gray-600 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors shrink-0" />
