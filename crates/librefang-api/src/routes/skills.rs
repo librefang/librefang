@@ -1258,6 +1258,18 @@ pub async fn get_hand(
                     },
                     "agents": def.agents.iter().map(|(role, a)| {
                         let dm = &state.kernel.config_ref().default_model;
+                        // Extract Phase/Step headings from system_prompt
+                        let steps: Vec<&str> = a.manifest.model.system_prompt
+                            .lines()
+                            .filter(|line| {
+                                let trimmed = line.trim();
+                                trimmed.starts_with("### Phase")
+                                    || trimmed.starts_with("### Step")
+                                    || trimmed.starts_with("## Phase")
+                                    || trimmed.starts_with("## Step")
+                            })
+                            .map(|line| line.trim().trim_start_matches('#').trim())
+                            .collect();
                         serde_json::json!({
                             "role": role,
                             "name": a.manifest.name,
@@ -1265,6 +1277,7 @@ pub async fn get_hand(
                             "coordinator": a.coordinator,
                             "provider": if a.manifest.model.provider == "default" { &dm.provider } else { &a.manifest.model.provider },
                             "model": if a.manifest.model.model == "default" { &dm.model } else { &a.manifest.model.model },
+                            "steps": steps,
                         })
                     }).collect::<Vec<_>>(),
                     "dashboard": def.dashboard.metrics.iter().map(|m| serde_json::json!({

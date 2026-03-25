@@ -546,7 +546,7 @@ function DetailTabs({ hand, instance, isActive, settings, settingsQuery, stats, 
     enabled: !!hand.id,
   });
   const detail = detailQuery.data as Record<string, unknown> | undefined;
-  const workspaceAgents = (detail?.agents as { role: string; name: string; description?: string; coordinator?: boolean; provider: string; model: string }[] | undefined) ?? [];
+  const workspaceAgents = (detail?.agents as { role: string; name: string; description?: string; coordinator?: boolean; provider: string; model: string; steps?: string[] }[] | undefined) ?? [];
 
   type Tab = "agents" | "settings" | "requirements" | "tools" | "metrics";
   const tabs: { id: Tab; label: string; count?: number; show: boolean }[] = [
@@ -591,22 +591,34 @@ function DetailTabs({ hand, instance, isActive, settings, settingsQuery, stats, 
         )}
 
         {activeTab === "agents" && (
-          <div className="space-y-2">
+          <div className="space-y-3">
             {workspaceAgents.map((a) => (
-              <div key={a.role} className="flex items-center gap-3 p-2.5 rounded-lg border border-border-subtle bg-main/30">
-                <div className={`w-7 h-7 rounded-lg flex items-center justify-center text-[11px] font-bold ${
-                  a.coordinator ? "bg-brand/10 text-brand" : "bg-main text-text-dim/50"
-                }`}>
-                  {a.role.charAt(0).toUpperCase()}
-                </div>
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-1.5">
-                    <p className="text-[11px] font-semibold truncate">{a.role}</p>
-                    {a.coordinator && <Badge variant="brand">coordinator</Badge>}
+              <div key={a.role} className="rounded-lg border border-border-subtle bg-main/30 overflow-hidden">
+                <div className="flex items-center gap-3 p-2.5">
+                  <div className={`w-7 h-7 rounded-lg flex items-center justify-center text-[11px] font-bold shrink-0 ${
+                    a.coordinator ? "bg-brand/10 text-brand" : "bg-main text-text-dim/50"
+                  }`}>
+                    {a.role.charAt(0).toUpperCase()}
                   </div>
-                  <p className="text-[10px] text-text-dim/50 truncate">{a.model}</p>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-1.5">
+                      <p className="text-[11px] font-semibold truncate">{a.role}</p>
+                      {a.coordinator && <Badge variant="brand">coordinator</Badge>}
+                    </div>
+                    <p className="text-[10px] text-text-dim/50 truncate">{a.model}</p>
+                  </div>
+                  <Badge variant="info">{a.provider}</Badge>
                 </div>
-                <Badge variant="info">{a.provider}</Badge>
+                {a.description && (
+                  <p className="px-2.5 pb-2 text-[10px] text-text-dim/60 leading-relaxed line-clamp-2">{a.description}</p>
+                )}
+                {a.steps && a.steps.length > 0 && (
+                  <div className="px-2.5 pb-2.5 flex flex-wrap gap-1">
+                    {a.steps.map((s, i) => (
+                      <span key={i} className="text-[9px] px-1.5 py-0.5 rounded bg-brand/5 text-brand/70 font-medium">{s}</span>
+                    ))}
+                  </div>
+                )}
               </div>
             ))}
           </div>
