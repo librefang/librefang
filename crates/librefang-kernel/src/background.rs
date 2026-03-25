@@ -430,7 +430,10 @@ mod tests {
             Some(TriggerPattern::MemoryKeyPattern { key_pattern }) => {
                 assert_eq!(key_pattern, "agent.*.status");
             }
-            other => panic!("Expected MemoryKeyPattern, got {:?}", other),
+            other => panic!(
+                "Expected MemoryKeyPattern from parse_condition, got {:?}",
+                other
+            ),
         }
     }
 

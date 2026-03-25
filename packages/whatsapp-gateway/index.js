@@ -4,6 +4,7 @@
 const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
+const os = require('node:os');
 const { randomUUID } = require('node:crypto');
 const toml = require('toml');
 
@@ -165,7 +166,7 @@ function dbUpdateLastSeen(jid, timestamp) {
 // ---------------------------------------------------------------------------
 // Read config.toml — the gateway reads its own config directly
 // ---------------------------------------------------------------------------
-const CONFIG_PATH = process.env.LIBREFANG_CONFIG || '/data/config.toml';
+const CONFIG_PATH = process.env.LIBREFANG_CONFIG || path.join(os.homedir(), '.librefang', 'config.toml');
 
 function readWhatsAppConfig(configPath) {
   const defaults = { default_agent: 'assistant', owner_numbers: [], conversation_ttl_hours: 24 };
