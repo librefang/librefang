@@ -36,6 +36,19 @@ impl WebFetchEngine {
         }
     }
 
+    /// Build a per-request client with DNS pinned to the SSRF-validated IPs.
+    fn pinned_client(&self, resolution: SsrfResolution) -> reqwest::Client {
+        let builder = crate::http_client::proxied_client_builder()
+            .timeout(std::time::Duration::from_secs(self.config.timeout_secs))
+            .gzip(true)
+            .deflate(true)
+            .brotli(true);
+        resolution
+            .pin_dns(builder)
+            .build()
+            .expect("HTTP client build")
+    }
+
     /// Fetch a URL with full security pipeline (GET only, for backwards compat).
     pub async fn fetch(&self, url: &str) -> Result<String, String> {
         self.fetch_with_options(url, "GET", None, None).await
@@ -51,8 +64,8 @@ impl WebFetchEngine {
     ) -> Result<String, String> {
         let method_upper = method.to_uppercase();
 
-        // Step 1: SSRF protection — BEFORE any network I/O
-        check_ssrf(url)?;
+        // Step 1: SSRF protection — resolve DNS once and validate IPs
+        let resolution = check_ssrf(url)?;
 
         // Step 2: Cache lookup (only for GET)
         let cache_key = format!("fetch:{}:{}", method_upper, url);
@@ -63,13 +76,16 @@ impl WebFetchEngine {
             }
         }
 
-        // Step 3: Build request with configured method
+        // Step 3: Build request using a DNS-pinned client to prevent
+        // TOCTOU / DNS-rebinding attacks (the resolved IPs from step 1
+        // are the only ones the HTTP stack will connect to).
+        let pinned_client = self.pinned_client(resolution);
         let mut req = match method_upper.as_str() {
-            "POST" => self.client.post(url),
-            "PUT" => self.client.put(url),
-            "PATCH" => self.client.patch(url),
-            "DELETE" => self.client.delete(url),
-            _ => self.client.get(url),
+            "POST" => pinned_client.post(url),
+            "PUT" => pinned_client.put(url),
+            "PATCH" => pinned_client.patch(url),
+            "DELETE" => pinned_client.delete(url),
+            _ => pinned_client.get(url),
         };
         req = req.header(
             "User-Agent",
@@ -181,10 +197,35 @@ fn is_html(content_type: &str, body: &str) -> bool {
 // SSRF Protection (replicates host_functions.rs logic for builtin tools)
 // ---------------------------------------------------------------------------
 
+/// Result of a successful SSRF check: the hostname and its resolved socket
+/// addresses.  Callers should use [`SsrfResolution::pin_dns`] to build an
+/// HTTP client that connects to the *already-validated* IPs, preventing
+/// DNS-rebinding TOCTOU attacks.
+pub struct SsrfResolution {
+    /// The hostname extracted from the URL (without port).
+    pub hostname: String,
+    /// All resolved socket addresses (guaranteed to be non-private).
+    pub resolved: Vec<std::net::SocketAddr>,
+}
+
+impl SsrfResolution {
+    /// Apply the pinned DNS resolution to a [`reqwest::ClientBuilder`] so
+    /// the actual HTTP request connects to the IPs we already validated.
+    pub fn pin_dns(self, mut builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
+        for addr in &self.resolved {
+            builder = builder.resolve(&self.hostname, *addr);
+        }
+        builder
+    }
+}
+
 /// Check if a URL targets a private/internal network resource.
 /// Blocks localhost, metadata endpoints, and private IPs.
 /// Must run BEFORE any network I/O.
-pub(crate) fn check_ssrf(url: &str) -> Result<(), String> {
+///
+/// Returns the resolved addresses on success so that callers can pin DNS
+/// and avoid TOCTOU / DNS-rebinding attacks.
+pub(crate) fn check_ssrf(url: &str) -> Result<SsrfResolution, String> {
     // Only allow http:// and https:// schemes
     if !url.starts_with("http://") && !url.starts_with("https://") {
         return Err("Only http:// and https:// URLs are allowed".to_string());
@@ -219,18 +260,35 @@ pub(crate) fn check_ssrf(url: &str) -> Result<(), String> {
     // Resolve DNS and check every returned IP
     let port = if url.starts_with("https") { 443 } else { 80 };
     let socket_addr = format!("{hostname}:{port}");
-    if let Ok(addrs) = socket_addr.to_socket_addrs() {
-        for addr in addrs {
-            let ip = addr.ip();
-            if ip.is_loopback() || ip.is_unspecified() || is_private_ip(&ip) {
-                return Err(format!(
-                    "SSRF blocked: {hostname} resolves to private IP {ip}"
-                ));
+    let mut resolved = Vec::new();
+    match socket_addr.to_socket_addrs() {
+        Ok(addrs) => {
+            for addr in addrs {
+                let ip = addr.ip();
+                if ip.is_loopback() || ip.is_unspecified() || is_private_ip(&ip) {
+                    return Err(format!(
+                        "SSRF blocked: {hostname} resolves to private IP {ip}"
+                    ));
+                }
+                resolved.push(addr);
             }
         }
+        Err(e) => {
+            return Err(format!(
+                "SSRF blocked: DNS resolution failed for {hostname}: {e}"
+            ));
+        }
+    }
+    if resolved.is_empty() {
+        return Err(format!(
+            "SSRF blocked: DNS resolution returned no addresses for {hostname}"
+        ));
     }
 
-    Ok(())
+    Ok(SsrfResolution {
+        hostname: hostname.to_string(),
+        resolved,
+    })
 }
 
 /// Check if an IP address is in a private range.
