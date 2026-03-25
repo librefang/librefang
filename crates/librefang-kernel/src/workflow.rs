@@ -870,7 +870,7 @@ impl WorkflowEngine {
         run_id: WorkflowRunId,
         workflow: &Workflow,
         input: &str,
-        agent_resolver: &(impl Fn(&StepAgent) -> Option<(AgentId, String, bool)>),
+        agent_resolver: &impl Fn(&StepAgent) -> Option<(AgentId, String, bool)>,
         send_message: &F,
     ) -> Result<String, String>
     where
