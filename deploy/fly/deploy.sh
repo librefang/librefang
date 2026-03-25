@@ -18,7 +18,7 @@ if ! command -v flyctl &>/dev/null; then
   curl -sL https://fly.io/install.sh | sh
   export PATH="$HOME/.fly/bin:$PATH"
 fi
-ok "flyctl $(flyctl version --short 2>/dev/null || echo 'installed')"
+ok "flyctl $(flyctl version 2>&1 | head -1 || echo 'installed')"
 
 # --- 2. Auth (opens browser) ---
 if ! flyctl auth whoami &>/dev/null; then
@@ -49,20 +49,102 @@ flyctl volumes create librefang_data \
   --yes
 
 # --- 6. Set secrets (optional) ---
-echo ""
-info "Optional: Set your LLM API key (press Enter to skip)"
-read -rp "  GROQ_API_KEY: " GROQ_KEY < /dev/tty
-if [ -n "$GROQ_KEY" ]; then
-  flyctl secrets set GROQ_API_KEY="$GROQ_KEY" --app "$APP_NAME"
-fi
-read -rp "  OPENAI_API_KEY: " OPENAI_KEY < /dev/tty
-if [ -n "$OPENAI_KEY" ]; then
-  flyctl secrets set OPENAI_API_KEY="$OPENAI_KEY" --app "$APP_NAME"
-fi
-read -rp "  ANTHROPIC_API_KEY: " ANTHROPIC_KEY < /dev/tty
-if [ -n "$ANTHROPIC_KEY" ]; then
-  flyctl secrets set ANTHROPIC_API_KEY="$ANTHROPIC_KEY" --app "$APP_NAME"
-fi
+PROVIDER_NAMES=(
+  "OpenAI"
+  "Anthropic"
+  "Google Gemini"
+  "Groq"
+  "DeepSeek"
+  "OpenRouter"
+  "Mistral"
+  "xAI / Grok"
+)
+PROVIDER_KEYS=(
+  "OPENAI_API_KEY"
+  "ANTHROPIC_API_KEY"
+  "GEMINI_API_KEY"
+  "GROQ_API_KEY"
+  "DEEPSEEK_API_KEY"
+  "OPENROUTER_API_KEY"
+  "MISTRAL_API_KEY"
+  "XAI_API_KEY"
+)
+
+# TUI multi-select: arrow keys to move, space to toggle, enter to confirm
+tui_multiselect() {
+  local count=${#PROVIDER_NAMES[@]}
+  local cursor=0
+  local selected=()
+  for ((i = 0; i < count; i++)); do selected+=(0); done
+
+  # Hide cursor
+  printf "\033[?25l" > /dev/tty
+  trap 'printf "\033[?25h" > /dev/tty' RETURN
+
+  draw_menu() {
+    for ((i = 0; i < count; i++)); do
+      local marker="  "
+      if [ "${selected[$i]}" -eq 1 ]; then marker="✓ "; fi
+
+      if [ "$i" -eq "$cursor" ]; then
+        printf "\033[K  \033[30;47m %s %-16s  %-24s \033[0m\n" "$marker" "${PROVIDER_NAMES[$i]}" "${PROVIDER_KEYS[$i]}" > /dev/tty
+      else
+        printf "\033[K   %s %-16s  \033[2m%s\033[0m\n" "$marker" "${PROVIDER_NAMES[$i]}" "${PROVIDER_KEYS[$i]}" > /dev/tty
+      fi
+    done
+  }
+
+  echo "" > /dev/tty
+  info "Select LLM providers to configure (press Enter to skip):" > /dev/tty
+  printf "\033[2m  ↑/↓ move  ·  space toggle  ·  enter confirm\033[0m\n" > /dev/tty
+  echo "" > /dev/tty
+  draw_menu
+
+  while true; do
+    IFS= read -rsn1 key < /dev/tty
+
+    if [[ "$key" == $'\x1b' ]]; then
+      read -rsn1 -t 0.01 k2 < /dev/tty
+      read -rsn1 -t 0.01 k3 < /dev/tty
+      key="${key}${k2}${k3}"
+    fi
+
+    case "$key" in
+      $'\x1b[A' | k)  ((cursor > 0)) && ((cursor--)) ;;
+      $'\x1b[B' | j)  ((cursor < count - 1)) && ((cursor++)) ;;
+      " ")
+        if [ "${selected[$cursor]}" -eq 0 ]; then
+          selected[$cursor]=1
+        else
+          selected[$cursor]=0
+        fi
+        ;;
+      "")  break ;;
+    esac
+
+    printf "\033[%dA" "$count" > /dev/tty
+    draw_menu
+  done
+  echo "" > /dev/tty
+
+  SELECTED_INDICES=()
+  for ((i = 0; i < count; i++)); do
+    if [ "${selected[$i]}" -eq 1 ]; then
+      SELECTED_INDICES+=("$i")
+    fi
+  done
+}
+
+tui_multiselect
+
+for idx in "${SELECTED_INDICES[@]}"; do
+  name="${PROVIDER_NAMES[$idx]}"
+  env_var="${PROVIDER_KEYS[$idx]}"
+  read -rp "  $name ($env_var): " KEY_VAL < /dev/tty
+  if [ -n "$KEY_VAL" ]; then
+    flyctl secrets set "$env_var=$KEY_VAL" --app "$APP_NAME"
+  fi
+done
 
 # --- 7. Deploy ---
 echo ""
@@ -78,8 +160,8 @@ echo "  Dashboard:  $APP_URL"
 echo "  API:        $APP_URL/api/health"
 echo "  Manage:     flyctl dashboard --app $APP_NAME"
 echo ""
-echo "  To add more API keys later:"
-echo "    flyctl secrets set GROQ_API_KEY=your-key --app $APP_NAME"
+echo "  To add or change API keys later:"
+echo "    flyctl secrets set <PROVIDER>_API_KEY=your-key --app $APP_NAME"
 echo ""
 
 # Cleanup
