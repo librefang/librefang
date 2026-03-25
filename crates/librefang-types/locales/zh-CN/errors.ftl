@@ -25,6 +25,7 @@ api-error-manifest-signature-failed = 清单签名验证失败
 # Auth errors
 api-error-auth-invalid-key = 无效的 API 密钥
 api-error-auth-missing-header = 缺少 Authorization: Bearer <api_key> 请求头
+api-error-auth-missing = 该供应商的 API Key 未配置
 
 # Session errors
 api-error-session-load-failed = 加载会话失败

@@ -433,12 +433,25 @@ pub async fn run_agent_loop(
 
     // Check for running A/B experiment and select variant
     let mut experiment_context: Option<ExperimentContext> = None;
+    let mut running_experiment: Option<librefang_types::agent::PromptExperiment> = None;
     if let Some(kernel) = kernel.as_ref() {
         let agent_id = session.agent_id.to_string();
         if let Ok(Some(exp)) = kernel.get_running_experiment(&agent_id) {
+            running_experiment = Some(exp.clone());
             if !exp.variants.is_empty() {
-                // Use session ID hash for consistent variant assignment across requests
-                let variant_index = (session.id.0.as_u128() as usize) % exp.variants.len();
+                // Use traffic_split for weighted variant selection, consistent per session
+                let hash_val = (session.id.0.as_u128() % 100) as u8;
+                let mut cumulative = 0u8;
+                let mut variant_index = 0;
+                for (i, &weight) in exp.traffic_split.iter().enumerate() {
+                    cumulative = cumulative.saturating_add(weight);
+                    if hash_val < cumulative {
+                        variant_index = i;
+                        break;
+                    }
+                }
+                // Clamp to valid range
+                variant_index = variant_index.min(exp.variants.len() - 1);
                 let variant = &exp.variants[variant_index];
                 info!(
                     agent = %manifest.name,
@@ -584,6 +597,34 @@ pub async fn run_agent_loop(
     // In stable_prefix_mode, memories are injected as a context message instead
     // (see below) to keep the system prompt prefix stable for caching.
     let mut system_prompt = manifest.model.system_prompt.clone();
+
+    // Auto-track the agent's BASE prompt version (before experiment replacement)
+    if let Some(kernel) = kernel.as_ref() {
+        let _ = kernel.auto_track_prompt_version(session.agent_id, &system_prompt);
+    }
+
+    // If running an A/B experiment, use the variant's system prompt instead
+    if let Some(ref ctx) = experiment_context {
+        if let Some(ref exp) = running_experiment {
+            if let Some(kernel) = kernel.as_ref() {
+                if let Some(variant) = exp.variants.iter().find(|v| v.id == ctx.variant_id) {
+                    if let Ok(Some(prompt_version)) =
+                        kernel.get_prompt_version(&variant.prompt_version_id.to_string())
+                    {
+                        debug!(
+                            agent = %manifest.name,
+                            experiment = %exp.name,
+                            variant = %variant.name,
+                            version = prompt_version.version,
+                            "Using experiment variant prompt version"
+                        );
+                        system_prompt = prompt_version.system_prompt.clone();
+                    }
+                }
+            }
+        }
+    }
+
     let memory_context_msg = if !memories.is_empty() {
         let mem_pairs: Vec<(String, String)> = memories
             .iter()
@@ -1858,8 +1899,19 @@ pub async fn run_agent_loop_streaming(
         if let Ok(Some(exp)) = kernel.get_running_experiment(&agent_id) {
             running_experiment = Some(exp.clone());
             if !exp.variants.is_empty() {
-                // Use session ID hash for consistent variant assignment across requests
-                let variant_index = (session.id.0.as_u128() as usize) % exp.variants.len();
+                // Use traffic_split for weighted variant selection, consistent per session
+                let hash_val = (session.id.0.as_u128() % 100) as u8;
+                let mut cumulative = 0u8;
+                let mut variant_index = 0;
+                for (i, &weight) in exp.traffic_split.iter().enumerate() {
+                    cumulative = cumulative.saturating_add(weight);
+                    if hash_val < cumulative {
+                        variant_index = i;
+                        break;
+                    }
+                }
+                // Clamp to valid range
+                variant_index = variant_index.min(exp.variants.len() - 1);
                 let variant = &exp.variants[variant_index];
                 info!(
                     agent = %manifest.name,
@@ -2008,6 +2060,11 @@ pub async fn run_agent_loop_streaming(
     // In stable_prefix_mode, memories are injected as a context message instead
     // (see below) to keep the system prompt prefix stable for caching.
     let mut system_prompt = manifest.model.system_prompt.clone();
+
+    // Auto-track the agent's BASE prompt version (before experiment replacement)
+    if let Some(kernel) = kernel.as_ref() {
+        let _ = kernel.auto_track_prompt_version(session.agent_id, &system_prompt);
+    }
 
     // If running an A/B experiment, use the variant's system prompt instead
     if let Some(ref ctx) = experiment_context {

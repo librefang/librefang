@@ -20,9 +20,80 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+  # ── Detect changed files to skip unnecessary jobs ──────────────────────────────────
+  changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+      docs: ${{ steps.filter.outputs.docs }}
+      ci: ${{ steps.filter.outputs.ci }}
+      crates: ${{ steps.crates.outputs.crates }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            rust:
+              - 'crates/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'xtask/**'
+            docs:
+              - 'docs/**'
+              - '*.md'
+            ci:
+              - '.github/workflows/**'
+      - name: Detect affected crates
+        id: crates
+        if: steps.filter.outputs.rust == 'true'
+        run: |
+          BASE_REF="${{ github.event.pull_request.base.sha || 'HEAD~1' }}"
+          CHANGED=$(git diff --name-only "$BASE_REF" HEAD -- crates/ | sed 's|crates/\([^/]*\)/.*|\1|' | sort -u)
+          # Map directory names to crate names (replace - with -)
+          ALL_CRATES="librefang-types librefang-wire librefang-telemetry librefang-memory librefang-channels librefang-skills librefang-hands librefang-extensions librefang-kernel librefang-api librefang-runtime librefang-migrate librefang-testing librefang-cli librefang-desktop"
+          # If Cargo.toml/lock changed or CI changed, test everything
+          if git diff --name-only "$BASE_REF" HEAD | grep -qE '^(Cargo\.(toml|lock)|xtask/)'; then
+            echo "crates=$ALL_CRATES" >> "$GITHUB_OUTPUT"
+          elif [ -z "$CHANGED" ]; then
+            echo "crates=$ALL_CRATES" >> "$GITHUB_OUTPUT"
+          else
+            # Include changed crates + their reverse dependencies
+            AFFECTED=""
+            for dir in $CHANGED; do
+              AFFECTED="$AFFECTED $dir"
+            done
+            # Always include downstream crates when upstream changes
+            # Dependency order: types -> memory -> runtime -> kernel -> api -> cli
+            if echo "$AFFECTED" | grep -q "librefang-types"; then
+              AFFECTED="$ALL_CRATES"
+            elif echo "$AFFECTED" | grep -q "librefang-memory"; then
+              AFFECTED="$AFFECTED librefang-runtime librefang-kernel librefang-api librefang-cli librefang-testing"
+            elif echo "$AFFECTED" | grep -q "librefang-runtime"; then
+              AFFECTED="$AFFECTED librefang-kernel librefang-api librefang-cli librefang-testing"
+            elif echo "$AFFECTED" | grep -q "librefang-kernel"; then
+              AFFECTED="$AFFECTED librefang-api librefang-cli librefang-testing"
+            fi
+            # Deduplicate and filter to valid crate names
+            AFFECTED=$(echo "$AFFECTED" | tr ' ' '\n' | sort -u | tr '\n' ' ')
+            VALID=""
+            for crate in $AFFECTED; do
+              if echo "$ALL_CRATES" | grep -qw "$crate"; then
+                VALID="$VALID $crate"
+              fi
+            done
+            echo "crates=${VALID:-$ALL_CRATES}" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Affected crates: $(cat "$GITHUB_OUTPUT" | grep crates)"
+
   # ── Code quality checks (fast, run in parallel) ─────────────────────────────────────
   quality:
     name: Quality
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -115,6 +186,8 @@ jobs:
   # ── Tests ─────────────────────────────────────
   test-windows:
     name: Test / Windows
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v6
@@ -122,13 +195,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: test-windows-${{ hashFiles('**/Cargo.lock') }}
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
       - name: Ensure dashboard build dir exists
         run: mkdir -p crates/librefang-api/static/react
         shell: bash
-      - run: cargo test --workspace
+      - name: Run tests
+        run: cargo nextest run --workspace --no-fail-fast
 
   test-macos:
     name: Test / macOS
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v6
@@ -136,12 +214,17 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: test-macos-${{ hashFiles('**/Cargo.lock') }}
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
       - name: Ensure dashboard build dir exists
         run: mkdir -p crates/librefang-api/static/react
-      - run: cargo test --workspace
+      - name: Run tests
+        run: cargo nextest run --workspace --no-fail-fast
 
   test-ubuntu:
     name: Test / Ubuntu
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -149,6 +232,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: test-ubuntu-${{ hashFiles('**/Cargo.lock') }}
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
       - name: Ensure dashboard build dir exists
         run: mkdir -p crates/librefang-api/static/react
       - name: Install Tauri system deps
@@ -160,28 +245,20 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev \
             patchelf
-      - name: Build tests
-        run: cargo test --workspace --no-run
-      - name: Run tests per crate
+      - name: Build tests (throttled to reduce peak memory)
+        run: cargo nextest run --workspace --no-run -j 2
+      - name: Run affected crate tests
         env:
-          RUST_TEST_THREADS: "1"
+          RUST_TEST_THREADS: "2"
         run: |
-          for crate in \
-            librefang-types \
-            librefang-wire \
-            librefang-telemetry \
-            librefang-memory \
-            librefang-channels \
-            librefang-skills \
-            librefang-hands \
-            librefang-extensions \
-            librefang-kernel \
-            librefang-api \
-            librefang-runtime \
-            librefang-migrate \
-            librefang-testing \
-            xtask; do
-            echo "::group::Testing $crate"
-            cargo test -p "$crate" && echo "✓ $crate" || exit 1
-            echo "::endgroup::"
-          done
+          CRATES="${{ needs.changes.outputs.crates }}"
+          if [ -z "$CRATES" ]; then
+            echo "No affected crates detected, running all"
+            cargo nextest run --workspace --no-fail-fast
+          else
+            for crate in $CRATES; do
+              echo "::group::Testing $crate"
+              cargo nextest run -p "$crate" --no-fail-fast && echo "✓ $crate" || exit 1
+              echo "::endgroup::"
+            done
+          fi

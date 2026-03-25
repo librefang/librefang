@@ -1209,38 +1209,15 @@ mod tests {
         use std::sync::Once;
         static SYNC_ONCE: Once = Once::new();
         SYNC_ONCE.call_once(|| {
-            // Use bundled HAND.toml files from the source tree so tests
-            // work on CI without network/git.  disk_hands() expects
-            // home_dir/hands/*/HAND.toml, so we copy the bundled files
-            // into a temp directory with that layout.
-            let bundled = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .unwrap()
-                .join("librefang-hands")
-                .join("bundled");
+            // Sync registry from remote (same mechanism as hands tests).
+            // Each nextest process gets its own Once, so we use a
+            // process-unique temp dir to avoid parallel write conflicts.
+            let test_home =
+                std::env::temp_dir().join(format!("librefang-router-test-{}", std::process::id()));
+            let _ = std::fs::create_dir_all(&test_home);
 
-            let test_home = std::env::temp_dir().join("librefang-kernel-router-tests");
-            let hands_dir = test_home.join("registry").join("hands");
-            let _ = std::fs::create_dir_all(&hands_dir);
-
-            if let Ok(entries) = std::fs::read_dir(&bundled) {
-                for entry in entries.flatten() {
-                    let src = entry.path();
-                    if !src.is_dir() {
-                        continue;
-                    }
-                    let name = src.file_name().unwrap();
-                    let dest = hands_dir.join(name);
-                    let _ = std::fs::create_dir_all(&dest);
-                    let src_toml = src.join("HAND.toml");
-                    if src_toml.exists() {
-                        let _ = std::fs::copy(&src_toml, dest.join("HAND.toml"));
-                    }
-                    let src_skill = src.join("SKILL.md");
-                    if src_skill.exists() {
-                        let _ = std::fs::copy(&src_skill, dest.join("SKILL.md"));
-                    }
-                }
+            if librefang_runtime::registry_sync::needs_sync(&test_home) {
+                librefang_runtime::registry_sync::sync_registry(&test_home);
             }
 
             set_hand_route_home_dir(&test_home);

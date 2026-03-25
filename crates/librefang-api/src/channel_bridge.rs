@@ -623,8 +623,10 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         for p in catalog.list_providers() {
             let status = match p.auth_status {
                 librefang_types::model_catalog::AuthStatus::Configured => "configured",
+                librefang_types::model_catalog::AuthStatus::ConfiguredCli => "configured (via CLI)",
                 librefang_types::model_catalog::AuthStatus::Missing => "not configured",
                 librefang_types::model_catalog::AuthStatus::NotRequired => "local (no key needed)",
+                librefang_types::model_catalog::AuthStatus::CliNotInstalled => "CLI not installed",
             };
             msg.push_str(&format!(
                 "  {} — {} [{}, {} model(s)]\n",

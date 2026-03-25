@@ -110,7 +110,7 @@ impl ModelCatalog {
                 provider.auth_status = if crate::drivers::cli_provider_available(&provider.id) {
                     AuthStatus::Configured
                 } else {
-                    AuthStatus::Missing
+                    AuthStatus::CliNotInstalled
                 };
                 continue;
             }
@@ -123,21 +123,42 @@ impl ModelCatalog {
             // Primary: check the provider's declared env var
             let has_key = std::env::var(&provider.api_key_env).is_ok();
 
-            // Secondary: provider-specific fallback auth
-            let has_fallback = match provider.id.as_str() {
+            // Secondary: provider-specific fallback keys (still API-key-based auth)
+            let has_key_fallback = match provider.id.as_str() {
                 "gemini" => std::env::var("GOOGLE_API_KEY").is_ok(),
-                "codex" => {
+                "openai" | "codex" => {
                     std::env::var("OPENAI_API_KEY").is_ok() || read_codex_credential().is_some()
                 }
-                // claude-code is handled above (before key_required check)
                 _ => false,
             };
 
-            provider.auth_status = if has_key || has_fallback {
+            // Tertiary: CLI tools that can serve as fallback for API providers
+            let aider_ok = || crate::drivers::cli_provider_available("aider");
+            let has_cli_fallback = match provider.id.as_str() {
+                "anthropic" => crate::drivers::cli_provider_available("claude-code") || aider_ok(),
+                "gemini" => crate::drivers::cli_provider_available("gemini-cli") || aider_ok(),
+                "openai" | "codex" => {
+                    crate::drivers::cli_provider_available("codex-cli") || aider_ok()
+                }
+                "qwen" => crate::drivers::cli_provider_available("qwen-code") || aider_ok(),
+                _ => false,
+            };
+
+            provider.auth_status = if has_key || has_key_fallback {
                 AuthStatus::Configured
+            } else if has_cli_fallback {
+                AuthStatus::ConfiguredCli
             } else {
                 AuthStatus::Missing
             };
+            tracing::debug!(
+                provider = %provider.id,
+                has_key,
+                has_key_fallback,
+                has_cli_fallback,
+                auth_status = %provider.auth_status,
+                "detect_auth result"
+            );
         }
     }
 
@@ -225,7 +246,7 @@ impl ModelCatalog {
         let configured: Vec<&str> = self
             .providers
             .iter()
-            .filter(|p| p.auth_status != AuthStatus::Missing)
+            .filter(|p| p.auth_status.is_available())
             .map(|p| p.id.as_str())
             .collect();
         self.models

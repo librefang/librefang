@@ -93,7 +93,12 @@
     "available": "Available Hands", "instances": "Active Instances", "activate": "Activate", "deactivate": "Deactivate",
     "orchestration": "Capability Orchestration", "active_label": "active", "total_label": "total",
     "search_placeholder": "Search hands...", "ready": "Ready", "missing_req": "Missing Requirements",
-    "instance": "Instance",
+    "instance": "Instance", "agent": "Agent", "activated_at": "Activated",
+    "paused": "Paused", "pause": "Pause", "resume": "Resume", "inactive_label": "Inactive",
+    "metrics": "Metrics", "metrics_no_data": "No metrics data yet.",
+    "settings": "Settings", "settings_empty": "No settings available.",
+    "requirements": "Requirements", "tools": "Tools",
+    "cat_content": "Content", "cat_productivity": "Productivity", "cat_data": "Data", "cat_development": "Development", "cat_communication": "Communication",
     "help": "Manage autonomous capability packages. Activate, deactivate, pause, and resume Hands to extend agent functionality."
   },
   "analytics": {
@@ -300,7 +305,8 @@
     "end_history": "End of history", "welcome_system": "Neural bridge established.", "input_placeholder_with_agent": "Transmit command to {{name}}...",
     "generating": "Generating...", "clear_chat": "Clear Chat", "send_hint": "Enter to send, Cmd+Enter for newline",
     "you": "You", "bot": "Bot",
-    "ws_connected": "WS", "ws_streaming": "Streaming"
+    "ws_connected": "WS", "ws_streaming": "Streaming",
+    "auth_missing": "API key for provider \"{{provider}}\" is not configured. Please set it in Settings > Providers before chatting."
   },
   "goals": {
     "title": "Goals", "subtitle": "Strategic planning and task tracking.", "total": "Total", "pending": "Pending", "in_progress": "In Progress", "completed": "Completed",

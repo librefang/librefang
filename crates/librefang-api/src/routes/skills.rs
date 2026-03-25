@@ -63,6 +63,10 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
             axum::routing::post(install_hand_deps),
         )
         .route(
+            "/hands/{hand_id}/secret",
+            axum::routing::post(set_hand_secret),
+        )
+        .route(
             "/hands/{hand_id}/settings",
             axum::routing::get(get_hand_settings).put(update_hand_settings),
         )
@@ -1107,12 +1111,20 @@ pub async fn list_hands(
                 "requirements_met": requirements_met,
                 "active": active,
                 "degraded": degraded,
-                "requirements": reqs.iter().map(|(r, ok)| serde_json::json!({
-                    "key": r.key,
-                    "label": r.label,
-                    "satisfied": ok,
-                    "optional": r.optional,
-                })).collect::<Vec<_>>(),
+                "requirements": reqs.iter().map(|(r, ok)| {
+                    let mut req = serde_json::json!({
+                        "key": r.check_value,
+                        "label": r.label,
+                        "satisfied": ok,
+                        "optional": r.optional,
+                    });
+                    if *ok {
+                        if let Ok(val) = std::env::var(&r.check_value) {
+                            req["current_value"] = serde_json::json!(val);
+                        }
+                    }
+                    req
+                }).collect::<Vec<_>>(),
                 "dashboard_metrics": d.dashboard.metrics.len(),
                 "has_settings": !d.settings.is_empty(),
                 "settings_count": d.settings.len(),
@@ -1244,6 +1256,37 @@ pub async fn get_hand(
                             &state.kernel.config_ref().default_model.model
                         } else { &def.agent().model.model },
                     },
+                    "agents": def.agents.iter().map(|(role, a)| {
+                        let dm = &state.kernel.config_ref().default_model;
+                        let agent_i18n = i18n_entry.and_then(|l| l.agents.get(role.as_str()));
+                        let resolved_agent_name = agent_i18n
+                            .and_then(|ai| ai.name.as_deref())
+                            .unwrap_or(&a.manifest.name);
+                        let resolved_agent_desc = agent_i18n
+                            .and_then(|ai| ai.description.as_deref())
+                            .unwrap_or(&a.manifest.description);
+                        // Extract Phase/Step headings from system_prompt
+                        let steps: Vec<&str> = a.manifest.model.system_prompt
+                            .lines()
+                            .filter(|line| {
+                                let trimmed = line.trim();
+                                trimmed.starts_with("### Phase")
+                                    || trimmed.starts_with("### Step")
+                                    || trimmed.starts_with("## Phase")
+                                    || trimmed.starts_with("## Step")
+                            })
+                            .map(|line| line.trim().trim_start_matches('#').trim())
+                            .collect();
+                        serde_json::json!({
+                            "role": role,
+                            "name": resolved_agent_name,
+                            "description": resolved_agent_desc,
+                            "coordinator": a.coordinator,
+                            "provider": if a.manifest.model.provider == "default" { &dm.provider } else { &a.manifest.model.provider },
+                            "model": if a.manifest.model.model == "default" { &dm.model } else { &a.manifest.model.model },
+                            "steps": steps,
+                        })
+                    }).collect::<Vec<_>>(),
                     "dashboard": def.dashboard.metrics.iter().map(|m| serde_json::json!({
                         "label": m.label,
                         "memory_key": m.memory_key,
@@ -1767,6 +1810,82 @@ pub async fn deactivate_hand(
             Json(serde_json::json!({"error": format!("{e}")})),
         ),
     }
+}
+
+/// POST /api/hands/{hand_id}/secret — Set an environment variable (secret) for a hand requirement.
+#[utoipa::path(
+    post,
+    path = "/api/hands/{hand_id}/secret",
+    tag = "hands",
+    params(("hand_id" = String, Path, description = "Hand ID")),
+    request_body = serde_json::Value,
+    responses((status = 200, description = "Secret saved", body = serde_json::Value))
+)]
+pub async fn set_hand_secret(
+    State(state): State<Arc<AppState>>,
+    Path(hand_id): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let env_key = match body["key"].as_str() {
+        Some(k) if !k.trim().is_empty() => k.trim().to_string(),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Missing 'key' field (env var name)"})),
+            );
+        }
+    };
+    let value = match body["value"].as_str() {
+        Some(v) if !v.trim().is_empty() => v.trim().to_string(),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Missing or empty 'value' field"})),
+            );
+        }
+    };
+
+    // Verify this key belongs to a requirement of the specified hand
+    let valid = {
+        let defs = state.kernel.hands().list_definitions();
+        defs.iter()
+            .find(|d| d.id == hand_id)
+            .map(|def| {
+                def.requires
+                    .iter()
+                    .any(|r| r.check_value == env_key || r.key == env_key)
+            })
+            .unwrap_or(false)
+    };
+
+    if !valid {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(
+                serde_json::json!({"error": format!("'{}' is not a requirement of hand '{}'", env_key, hand_id)}),
+            ),
+        );
+    }
+
+    // Write to secrets.env
+    let secrets_path = state.kernel.home_dir().join("secrets.env");
+    if let Err(e) = write_secret_env(&secrets_path, &env_key, &value) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("Failed to write secret: {e}")})),
+        );
+    }
+
+    // Set in current process
+    // SAFETY: single-threaded secret writes during user-initiated config
+    unsafe {
+        std::env::set_var(&env_key, &value);
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({"ok": true, "key": env_key})),
+    )
 }
 
 /// GET /api/hands/{hand_id}/settings — Get settings schema and current values for a hand.
