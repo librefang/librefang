@@ -678,107 +678,57 @@ function HandCard({
 
   return (
     <div
-      className="group p-4 rounded-2xl border border-border-subtle hover:border-brand/30 bg-surface hover:bg-surface/80 transition-colors cursor-pointer"
+      className={`group relative flex items-center gap-3 p-3 rounded-xl border cursor-pointer transition-colors ${
+        isActive
+          ? isPaused
+            ? "border-l-4 border-l-warning border-warning/20 bg-warning/5 hover:border-warning/40"
+            : "border-l-4 border-l-success border-success/20 bg-success/5 hover:border-success/40"
+          : "border-border-subtle hover:border-brand/30 bg-surface"
+      }`}
       onClick={() => onDetail(hand)}
       role="button"
       tabIndex={0}
-      onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          onDetail(hand);
-        }
-      }}
+      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onDetail(hand); } }}
     >
-      {/* Top: icon + status */}
-      <div className="flex items-start justify-between mb-3">
-        <div
-          className={`w-11 h-11 rounded-2xl flex items-center justify-center ${
-            isActive
-              ? isPaused
-                ? "bg-warning/15 text-warning"
-                : "bg-success/15 text-success"
-              : "bg-brand/8 text-brand/60 group-hover:bg-brand/12 group-hover:text-brand"
-          } transition-colors`}
-        >
-          <Hand className="w-5 h-5" />
-        </div>
-        <div
-          className="flex items-center gap-1"
-          onClick={(e) => e.stopPropagation()}
-        >
-          {isActive && instance && !isPaused && (
-            <button
-              onClick={() => onChat(instance.instance_id, hand.name || hand.id)}
-              className="p-1.5 rounded-lg text-brand/60 hover:text-brand hover:bg-brand/10 opacity-0 group-hover:opacity-100 transition-[colors,opacity]"
-              title={t("chat.title")}
-            >
-              <MessageCircle className="w-4 h-4" />
-            </button>
-          )}
-          {isActive && instance ? (
-            <button
-              onClick={() => onDeactivate(instance.instance_id)}
-              disabled={isPending}
-              className="p-1.5 rounded-lg text-text-dim/40 hover:text-error hover:bg-error/10 opacity-0 group-hover:opacity-100 transition-[colors,opacity] disabled:opacity-40"
-              title={t("hands.deactivate")}
-            >
-              {isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <PowerOff className="w-4 h-4" />}
-            </button>
-          ) : (
-            <button
-              onClick={() => onActivate(hand.id)}
-              disabled={isPending || !hand.requirements_met}
-              className="p-1.5 rounded-lg text-text-dim/40 hover:text-brand hover:bg-brand/10 opacity-0 group-hover:opacity-100 transition-[colors,opacity] disabled:opacity-40 disabled:cursor-not-allowed"
-              title={t("hands.activate")}
-            >
-              {isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Power className="w-4 h-4" />}
-            </button>
-          )}
-        </div>
+      <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${
+        isActive ? isPaused ? "bg-warning/15 text-warning" : "bg-success/15 text-success" : "bg-brand/8 text-brand/60"
+      }`}>
+        <Hand className="w-4 h-4" />
       </div>
-
-      {/* Name + category */}
-      <h3 className="text-sm font-bold truncate mb-1">{hand.name || hand.id}</h3>
-      <div className="flex items-center gap-1.5 mb-2 flex-wrap">
-        {isActive && (
-          isPaused ? (
-            <Badge variant="warning" dot>{t("hands.paused")}</Badge>
-          ) : (
-            <Badge variant="success" dot>{t("hands.active_label")}</Badge>
-          )
-        )}
-        {!isActive && !hand.requirements_met && (
-          <Badge variant="warning">{t("hands.missing_req")}</Badge>
-        )}
-        {hand.category && (
-          <span className="text-[10px] text-text-dim/50">
-            {t(`hands.cat_${hand.category}`, { defaultValue: hand.category })}
-          </span>
-        )}
-      </div>
-
-      {/* Description */}
-      <p className="text-[11px] text-text-dim leading-relaxed line-clamp-2 min-h-[2.5em]">
-        {hand.description || "-"}
-      </p>
-
-      {/* Tools count + metrics */}
-      <div className="flex items-center justify-between mt-3 pt-3 border-t border-border-subtle/50">
-        <div className="flex items-center gap-3">
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2">
+          <h3 className="text-sm font-bold truncate">{hand.name || hand.id}</h3>
+          {isActive ? (
+            isPaused ? <Badge variant="warning" dot>{t("hands.paused")}</Badge> : <Badge variant="success" dot>{t("hands.active_label")}</Badge>
+          ) : !hand.requirements_met ? (
+            <Badge variant="warning">{t("hands.missing_req")}</Badge>
+          ) : null}
+        </div>
+        <div className="flex items-center gap-2 mt-0.5">
+          {hand.category && <span className="text-[10px] text-text-dim/50">{t(`hands.cat_${hand.category}`, { defaultValue: hand.category })}</span>}
           {hand.tools && hand.tools.length > 0 && (
-            <span className="text-[10px] text-text-dim/50 flex items-center gap-1">
-              <Wrench className="w-3 h-3" />
-              {hand.tools.length}
-            </span>
-          )}
-          {hand.requirements && hand.requirements.length > 0 && (
-            <span className="text-[10px] text-text-dim/50 flex items-center gap-1">
-              <CheckCircle2 className="w-3 h-3" />
-              {hand.requirements.filter((r) => r.satisfied).length}/{hand.requirements.length}
-            </span>
+            <span className="text-[10px] text-text-dim/40 flex items-center gap-0.5"><Wrench className="w-2.5 h-2.5" />{hand.tools.length}</span>
           )}
         </div>
-        <ChevronRight className="w-3.5 h-3.5 text-text-dim/30 group-hover:text-brand/50 transition-colors" />
+      </div>
+      <div className="flex items-center gap-1 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity" onClick={(e) => e.stopPropagation()}>
+        {isActive && instance && !isPaused && (
+          <button onClick={() => onChat(instance.instance_id, hand.name || hand.id)}
+            className="p-1.5 rounded-lg text-brand/60 hover:text-brand hover:bg-brand/10 transition-colors" title={t("chat.title")}>
+            <MessageCircle className="w-3.5 h-3.5" />
+          </button>
+        )}
+        {isActive && instance ? (
+          <button onClick={() => onDeactivate(instance.instance_id)} disabled={isPending}
+            className="p-1.5 rounded-lg text-text-dim/40 hover:text-error hover:bg-error/10 transition-colors disabled:opacity-40" title={t("hands.deactivate")}>
+            {isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <PowerOff className="w-3.5 h-3.5" />}
+          </button>
+        ) : (
+          <button onClick={() => onActivate(hand.id)} disabled={isPending || !hand.requirements_met}
+            className="p-1.5 rounded-lg text-text-dim/40 hover:text-brand hover:bg-brand/10 transition-colors disabled:opacity-40 disabled:cursor-not-allowed" title={t("hands.activate")}>
+            {isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Power className="w-3.5 h-3.5" />}
+          </button>
+        )}
       </div>
     </div>
   );
@@ -793,6 +743,7 @@ export function HandsPage() {
   const [pendingId, setPendingId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [selectedCategory, setSelectedCategory] = useState<string>("all");
+  const [statusFilter, setStatusFilter] = useState<"all" | "active" | "inactive">("all");
   const [detailHand, setDetailHand] = useState<HandDefinitionItem | null>(null);
   const navigate = useNavigate();
 
@@ -877,6 +828,9 @@ export function HandsPage() {
   const filtered = useMemo(() => {
     return hands
       .filter((h) => {
+        // Status filter
+        if (statusFilter === "active" && !activeHandIds.has(h.id)) return false;
+        if (statusFilter === "inactive" && activeHandIds.has(h.id)) return false;
         // Category filter
         if (selectedCategory !== "all" && h.category !== selectedCategory) return false;
         // Search filter
@@ -896,7 +850,7 @@ export function HandsPage() {
         if (aActive !== bActive) return aActive - bActive;
         return (a.name || a.id).localeCompare(b.name || b.id);
       });
-  }, [hands, search, selectedCategory, activeHandIds]);
+  }, [hands, search, selectedCategory, statusFilter, activeHandIds]);
 
   async function handleActivate(id: string) {
     setPendingId(id);
@@ -987,11 +941,26 @@ export function HandsPage() {
         }
       />
 
-      {/* Category filter + Search */}
+      {/* Filters */}
       {hands.length > 0 && (
         <div className="flex flex-col sm:flex-row gap-3">
-          {/* Category pills */}
+          {/* Status + Category pills */}
           <div className="flex items-center gap-1.5 overflow-x-auto scrollbar-thin pb-1 shrink-0">
+            {(["all", "active", "inactive"] as const).map((s) => {
+              const label = s === "all" ? t("providers.filter_all") : s === "active" ? t("hands.active_label") : t("hands.inactive_label");
+              const count = s === "all" ? hands.length : s === "active" ? activeCount : hands.length - activeCount;
+              return (
+                <button key={s} onClick={() => setStatusFilter(s)}
+                  className={`px-3 py-1.5 rounded-xl text-[11px] font-bold whitespace-nowrap transition-colors ${
+                    statusFilter === s
+                      ? "bg-brand text-white shadow-sm shadow-brand/20"
+                      : "bg-main text-text-dim hover:text-text hover:bg-main/80 border border-border-subtle"
+                  }`}>
+                  {label} ({count})
+                </button>
+              );
+            })}
+            <div className="w-px h-5 bg-border-subtle mx-1" />
             <button
               onClick={() => setSelectedCategory("all")}
               className={`px-3 py-1.5 rounded-xl text-[11px] font-bold whitespace-nowrap transition-colors ${
@@ -1050,7 +1019,7 @@ export function HandsPage() {
           </p>
         </div>
       ) : (
-        <div className="grid gap-3 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 stagger-children">
+        <div className="grid gap-2 grid-cols-1 sm:grid-cols-2 stagger-children">
           {filtered.map((h) => {
             const isActive = activeHandIds.has(h.id);
             const instance = instances.find((i) => i.hand_id === h.id);
