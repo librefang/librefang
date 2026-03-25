@@ -217,10 +217,23 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
             // Default to stable
             base_version
         } else {
-            // Find max existing rc/beta number for this day and increment
+            // Find max existing rc/beta number for this day and increment.
+            // Also consider the current workspace version (tag may have been
+            // deleted by a previous failed release attempt).
+            let current_beta_num = Regex::new(r"-beta(\d+)$")
+                .unwrap()
+                .captures(&current)
+                .and_then(|c| c.get(1)?.as_str().parse::<u64>().ok())
+                .unwrap_or(0);
+            let current_rc_num = Regex::new(r"-rc(\d+)$")
+                .unwrap()
+                .captures(&current)
+                .and_then(|c| c.get(1)?.as_str().parse::<u64>().ok())
+                .unwrap_or(0);
+
             let beta_re =
                 Regex::new(&format!(r"^v{}-beta(\d+)$", regex::escape(&base_version))).unwrap();
-            let next_beta = Command::new("git")
+            let max_beta_tag = Command::new("git")
                 .args(["tag", "-l", &format!("v{}-beta*", base_version)])
                 .current_dir(&root)
                 .output()
@@ -232,11 +245,12 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
                         .max()
                         .unwrap_or(0)
                 })
-                .unwrap_or(0)
-                + 1;
+                .unwrap_or(0);
+            let next_beta = max_beta_tag.max(current_beta_num) + 1;
+
             let rc_re =
                 Regex::new(&format!(r"^v{}-rc(\d+)$", regex::escape(&base_version))).unwrap();
-            let next_rc = Command::new("git")
+            let max_rc_tag = Command::new("git")
                 .args(["tag", "-l", &format!("v{}-rc*", base_version)])
                 .current_dir(&root)
                 .output()
@@ -248,8 +262,8 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
                         .max()
                         .unwrap_or(0)
                 })
-                .unwrap_or(0)
-                + 1;
+                .unwrap_or(0);
+            let next_rc = max_rc_tag.max(current_rc_num) + 1;
 
             // Compute LTS: YYYY.M.PATCH-lts
             let lts_base = {
