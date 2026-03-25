@@ -962,30 +962,49 @@ function Install({ t }: SectionProps) {
               </button>
             </div>
             <div className="p-6 font-mono text-sm md:text-base space-y-4">
-              <div className="flex gap-3">
-                <span className="text-cyan-600 dark:text-cyan-500 select-none">$</span>
-                <span className="text-gray-800 dark:text-gray-200">curl -fsSL https://librefang.sh/install | sh</span>
-              </div>
-              <div className="flex gap-3">
-                <span className="text-cyan-600 dark:text-cyan-500 select-none">$</span>
-                <span className="text-gray-800 dark:text-gray-200">librefang init</span>
-              </div>
-              <div className="flex gap-3">
-                <span className="text-cyan-600 dark:text-cyan-500 select-none">$</span>
-                <span className="text-gray-800 dark:text-gray-200">librefang start</span>
-              </div>
+              {os === 'windows' ? (
+                <>
+                  <div className="flex gap-3">
+                    <span className="text-cyan-600 dark:text-cyan-500 select-none">&gt;</span>
+                    <span className="text-gray-800 dark:text-gray-200">irm https://librefang.sh/install.ps1 | iex</span>
+                  </div>
+                  <div className="flex gap-3">
+                    <span className="text-cyan-600 dark:text-cyan-500 select-none">&gt;</span>
+                    <span className="text-gray-800 dark:text-gray-200">librefang init</span>
+                  </div>
+                  <div className="flex gap-3">
+                    <span className="text-cyan-600 dark:text-cyan-500 select-none">&gt;</span>
+                    <span className="text-gray-800 dark:text-gray-200">librefang start</span>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="flex gap-3">
+                    <span className="text-cyan-600 dark:text-cyan-500 select-none">$</span>
+                    <span className="text-gray-800 dark:text-gray-200">curl -fsSL https://librefang.sh/install | sh</span>
+                  </div>
+                  <div className="flex gap-3">
+                    <span className="text-cyan-600 dark:text-cyan-500 select-none">$</span>
+                    <span className="text-gray-800 dark:text-gray-200">librefang init</span>
+                  </div>
+                  <div className="flex gap-3">
+                    <span className="text-cyan-600 dark:text-cyan-500 select-none">$</span>
+                    <span className="text-gray-800 dark:text-gray-200">librefang start</span>
+                  </div>
+                </>
+              )}
               <div className="text-gray-600 text-xs mt-2">
                 <span className="text-amber-500/60">#</span> {t.install.comment}
               </div>
               <div className="flex gap-2 mt-3 pt-3 border-t border-black/10 dark:border-white/5">
                 {(['mac', 'windows', 'linux'] as const).map(p => (
-                  <span key={p} className={cn(
-                    'text-[10px] font-mono px-2 py-0.5 rounded',
-                    os === p ? 'bg-cyan-500/20 text-cyan-600 dark:text-cyan-400' : 'text-gray-600'
+                  <button key={p} onClick={() => setOs(p)} className={cn(
+                    'text-[10px] font-mono px-2 py-0.5 rounded transition-colors',
+                    os === p ? 'bg-cyan-500/20 text-cyan-600 dark:text-cyan-400' : 'text-gray-600 hover:text-gray-400'
                   )}>
                     {p === 'mac' ? 'macOS' : p === 'windows' ? 'Windows' : 'Linux'}
                     {os === p && ' \u2713'}
-                  </span>
+                  </button>
                 ))}
               </div>
             </div>
