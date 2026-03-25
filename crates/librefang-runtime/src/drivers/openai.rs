@@ -753,7 +753,7 @@ impl LlmDriver for OpenAIDriver {
                                     error = %e,
                                     "Malformed tool call arguments from LLM, using empty object"
                                 );
-                                serde_json::Value::Object(Default::default())
+                                ensure_object(serde_json::Value::Null)
                             }
                         };
                     content.push(ContentBlock::ToolUse {
@@ -1452,7 +1452,7 @@ impl LlmDriver for OpenAIDriver {
                                 error = %e,
                                 "Malformed tool call arguments from LLM stream, using empty object"
                             );
-                            serde_json::Value::Object(Default::default())
+                            ensure_object(serde_json::Value::Null)
                         }
                     };
                 content.push(ContentBlock::ToolUse {
@@ -1675,7 +1675,7 @@ fn parse_groq_failed_tool_call(body: &str) -> Option<CompletionResponse> {
                     error = %e,
                     "Malformed tool call arguments from Groq recovery, using empty object"
                 );
-                serde_json::Value::Object(Default::default())
+                ensure_object(serde_json::Value::Null)
             }
         };
 

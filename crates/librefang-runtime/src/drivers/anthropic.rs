@@ -570,7 +570,7 @@ impl LlmDriver for AnthropicDriver {
                                             error = %e,
                                             "Malformed tool call arguments from Anthropic stream, using empty object"
                                         );
-                                        serde_json::Value::Object(Default::default())
+                                        ensure_object(serde_json::Value::Null)
                                     }
                                 };
                                 let _ = tx
@@ -634,7 +634,7 @@ impl LlmDriver for AnthropicDriver {
                                     error = %e,
                                     "Malformed tool call arguments from Anthropic, using empty object"
                                 );
-                                serde_json::Value::Object(Default::default())
+                                ensure_object(serde_json::Value::Null)
                             }
                         };
                         content.push(ContentBlock::ToolUse {
