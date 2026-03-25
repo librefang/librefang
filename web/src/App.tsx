@@ -826,7 +826,7 @@ function Downloads(_props: SectionProps) {
         {isLoading ? (
           <div className="text-gray-400 dark:text-gray-600 text-center py-12">Loading releases...</div>
         ) : (
-          <div className="grid md:grid-cols-3 gap-6 mb-8">
+          <div className="grid md:grid-cols-2 gap-6 mb-6">
             {categories.map((cat) => (
               <FadeIn key={cat.label}>
                 <div className="bg-surface-100 border border-black/10 dark:border-white/5 p-6 hover:-translate-y-0.5 transition-transform h-full">
@@ -852,34 +852,34 @@ function Downloads(_props: SectionProps) {
                 </div>
               </FadeIn>
             ))}
-            <FadeIn>
-              <div className="bg-surface-100 border border-black/10 dark:border-white/5 p-6 hover:-translate-y-0.5 transition-transform h-full">
-                <div className="flex items-center gap-3 mb-4">
-                  <Box className="w-5 h-5 text-cyan-600 dark:text-cyan-500" />
-                  <div>
-                    <h3 className="text-base font-bold text-slate-900 dark:text-white">{l('sdk')}</h3>
-                    <span className="text-xs text-gray-500">Python / Node.js / Rust</span>
-                  </div>
-                </div>
-                <div className="space-y-1.5">
-                  {[
-                    { name: 'pip install librefang', label: 'Python SDK' },
-                    { name: 'npm i @librefang/sdk', label: 'Node.js SDK' },
-                    { name: 'cargo install librefang', label: 'Rust SDK' },
-                    { name: 'go get github.com/librefang/librefang/sdk/go', label: 'Go SDK' },
-                  ].map((pkg) => (
-                    <div key={pkg.label} className="flex items-center justify-between gap-2 px-3 py-2 hover:bg-surface-200 transition-colors group">
-                      <code className="text-xs text-gray-700 dark:text-gray-300 font-mono truncate min-w-0">{pkg.name}</code>
-                      <span className="text-xs text-gray-400 dark:text-gray-600 shrink-0">{pkg.label}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </FadeIn>
           </div>
+
         )}
 
-        {/* SDK, Deploy, All Releases */}
+        {/* SDK */}
+        <FadeIn>
+          <div className="bg-surface-100 border border-black/10 dark:border-white/5 p-5 mb-6">
+            <div className="flex items-center gap-3 mb-4">
+              <Box className="w-5 h-5 text-cyan-600 dark:text-cyan-500" />
+              <h3 className="text-base font-bold text-slate-900 dark:text-white">{l('sdk')}</h3>
+            </div>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              {[
+                { name: 'pip install librefang', label: 'Python' },
+                { name: 'npm i @librefang/sdk', label: 'Node.js' },
+                { name: 'cargo install librefang', label: 'Rust' },
+                { name: 'go get .../librefang/sdk/go', label: 'Go' },
+              ].map((pkg) => (
+                <div key={pkg.label} className="bg-surface-200 px-3 py-2.5">
+                  <div className="text-xs text-gray-500 mb-1">{pkg.label}</div>
+                  <code className="text-xs text-gray-700 dark:text-gray-300 font-mono">{pkg.name}</code>
+                </div>
+              ))}
+            </div>
+          </div>
+        </FadeIn>
+
+        {/* Deploy, All Releases */}
         <FadeIn delay={200}>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <a href="https://deploy.librefang.ai/" target="_blank" rel="noopener noreferrer" className="flex items-center gap-3 bg-surface-100 border border-black/10 dark:border-white/5 hover:border-cyan-500/20 px-5 py-4 transition-all group">
