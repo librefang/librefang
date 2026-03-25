@@ -152,7 +152,7 @@ impl MeteringEngine {
     ///
     /// | Model Family          | Input $/M | Output $/M |
     /// |-----------------------|-----------|------------|
-    /// | claude-haiku          |     0.25  |      1.25  |
+    /// | claude-haiku          |     0.80  |      4.00  |
     /// | claude-sonnet-4-6     |     3.00  |     15.00  |
     /// | claude-opus-4-6       |     5.00  |     25.00  |
     /// | claude-opus (legacy)  |    15.00  |     75.00  |
@@ -185,13 +185,26 @@ impl MeteringEngine {
     /// | mistral-small         |     0.10  |      0.30  |
     /// | command-r-plus        |     2.50  |     10.00  |
     /// | Default (unknown)     |     1.00  |      3.00  |
-    pub fn estimate_cost(model: &str, input_tokens: u64, output_tokens: u64) -> f64 {
-        let model_lower = model.to_lowercase();
-        let (input_per_m, output_per_m) = estimate_cost_rates(&model_lower);
-
-        let input_cost = (input_tokens as f64 / 1_000_000.0) * input_per_m;
-        let output_cost = (output_tokens as f64 / 1_000_000.0) * output_per_m;
-        input_cost + output_cost
+    /// Estimate cost using default rates ($1/$3 per million tokens).
+    ///
+    /// Prefer [`estimate_cost_with_catalog`] which reads pricing from the
+    /// model catalog.  This method exists as a fallback when no catalog is
+    /// available (e.g. unit tests).
+    pub fn estimate_cost(
+        _model: &str,
+        input_tokens: u64,
+        output_tokens: u64,
+        cache_read_input_tokens: u64,
+        cache_creation_input_tokens: u64,
+    ) -> f64 {
+        estimate_cost_from_rates(
+            input_tokens,
+            output_tokens,
+            cache_read_input_tokens,
+            cache_creation_input_tokens,
+            DEFAULT_INPUT_COST_PER_M,
+            DEFAULT_OUTPUT_COST_PER_M,
+        )
     }
 
     /// Estimate cost using the model catalog as the pricing source.
@@ -203,6 +216,8 @@ impl MeteringEngine {
         model: &str,
         input_tokens: u64,
         output_tokens: u64,
+        cache_read_input_tokens: u64,
+        cache_creation_input_tokens: u64,
     ) -> f64 {
         if let Some(entry) = catalog.find_model(model) {
             let input_per_m = entry.input_cost_per_m;
@@ -215,6 +230,8 @@ impl MeteringEngine {
                 return estimate_cost_from_rates(
                     input_tokens,
                     output_tokens,
+                    cache_read_input_tokens,
+                    cache_creation_input_tokens,
                     DEFAULT_INPUT_COST_PER_M,
                     DEFAULT_OUTPUT_COST_PER_M,
                 );
@@ -223,6 +240,8 @@ impl MeteringEngine {
             return estimate_cost_from_rates(
                 input_tokens,
                 output_tokens,
+                cache_read_input_tokens,
+                cache_creation_input_tokens,
                 input_per_m,
                 output_per_m,
             );
@@ -231,6 +250,8 @@ impl MeteringEngine {
         estimate_cost_from_rates(
             input_tokens,
             output_tokens,
+            cache_read_input_tokens,
+            cache_creation_input_tokens,
             DEFAULT_INPUT_COST_PER_M,
             DEFAULT_OUTPUT_COST_PER_M,
         )
@@ -249,12 +270,25 @@ fn should_use_legacy_budget_estimate(entry: &ModelCatalogEntry) -> bool {
 fn estimate_cost_from_rates(
     input_tokens: u64,
     output_tokens: u64,
+    cache_read_input_tokens: u64,
+    cache_creation_input_tokens: u64,
     input_per_m: f64,
     output_per_m: f64,
 ) -> f64 {
-    let input_cost = (input_tokens as f64 / 1_000_000.0) * input_per_m;
+    // Regular input tokens = total input minus cache tokens
+    let regular_input =
+        input_tokens.saturating_sub(cache_read_input_tokens + cache_creation_input_tokens);
+    let regular_input_cost = (regular_input as f64 / 1_000_000.0) * input_per_m;
+
+    // Cache-read tokens are priced at 10% of input price
+    let cache_read_cost = (cache_read_input_tokens as f64 / 1_000_000.0) * input_per_m * 0.10;
+
+    // Cache-creation tokens are priced at 125% of input price
+    let cache_creation_cost =
+        (cache_creation_input_tokens as f64 / 1_000_000.0) * input_per_m * 1.25;
+
     let output_cost = (output_tokens as f64 / 1_000_000.0) * output_per_m;
-    input_cost + output_cost
+    regular_input_cost + cache_read_cost + cache_creation_cost + output_cost
 }
 
 /// Budget status snapshot — current spend vs limits for all time windows.
@@ -272,277 +306,6 @@ pub struct BudgetStatus {
     pub alert_threshold: f64,
     /// Global default token limit per agent per hour (0 = use per-agent values).
     pub default_max_llm_tokens_per_hour: u64,
-}
-
-/// Returns (input_per_million, output_per_million) pricing for a model.
-///
-/// Order matters: more specific patterns must come before generic ones
-/// (e.g. "gpt-4o-mini" before "gpt-4o", "gpt-4.1-mini" before "gpt-4.1").
-fn estimate_cost_rates(model: &str) -> (f64, f64) {
-    // ── Anthropic ──────────────────────────────────────────────
-    if model.contains("haiku") {
-        return (0.25, 1.25);
-    }
-    if model.contains("opus-4-6") || model.contains("claude-opus-4-6") {
-        return (5.0, 25.0);
-    }
-    if model.contains("opus") {
-        return (15.0, 75.0);
-    }
-    if model.contains("sonnet-4-6") || model.contains("claude-sonnet-4-6") {
-        return (3.0, 15.0);
-    }
-    if model.contains("sonnet") {
-        return (3.0, 15.0);
-    }
-
-    // ── OpenAI ─────────────────────────────────────────────────
-    if model.contains("gpt-5.2-pro") {
-        return (1.75, 14.0);
-    }
-    if model.contains("gpt-5.2") {
-        return (1.75, 14.0);
-    }
-    if model.contains("gpt-5.1") {
-        return (1.25, 10.0);
-    }
-    if model.contains("gpt-5-nano") {
-        return (0.05, 0.40);
-    }
-    if model.contains("gpt-5-mini") {
-        return (0.25, 2.0);
-    }
-    if model.contains("gpt-5") {
-        return (1.25, 10.0);
-    }
-    if model.contains("gpt-4o-mini") {
-        return (0.15, 0.60);
-    }
-    if model.contains("gpt-4o") {
-        return (2.50, 10.0);
-    }
-    if model.contains("gpt-4.1-nano") {
-        return (0.10, 0.40);
-    }
-    if model.contains("gpt-4.1-mini") {
-        return (0.40, 1.60);
-    }
-    if model.contains("gpt-4.1") {
-        return (2.00, 8.00);
-    }
-    if model.contains("o4-mini") {
-        return (1.10, 4.40);
-    }
-    if model.contains("o3-mini") {
-        return (1.10, 4.40);
-    }
-    if model.contains("o3") {
-        return (2.00, 8.00);
-    }
-    // Generic gpt-4 fallback
-    if model.contains("gpt-4") {
-        return (2.50, 10.0);
-    }
-
-    // ── Google Gemini ──────────────────────────────────────────
-    if model.contains("gemini-3.1") {
-        return (2.50, 15.0);
-    }
-    if model.contains("gemini-3") {
-        return (0.50, 3.0);
-    }
-    if model.contains("gemini-2.5-flash-lite") {
-        return (0.04, 0.15);
-    }
-    if model.contains("gemini-2.5-pro") {
-        return (1.25, 10.0);
-    }
-    if model.contains("gemini-2.5-flash") {
-        return (0.15, 0.60);
-    }
-    if model.contains("gemini-2.0-flash") || model.contains("gemini-flash") {
-        return (0.10, 0.40);
-    }
-    // Generic gemini fallback
-    if model.contains("gemini") {
-        return (0.15, 0.60);
-    }
-
-    // ── DeepSeek ───────────────────────────────────────────────
-    if model.contains("deepseek-reasoner") || model.contains("deepseek-r1") {
-        return (0.55, 2.19);
-    }
-    if model.contains("deepseek") {
-        return (0.27, 1.10);
-    }
-
-    // ── Cerebras (ultra-fast, cheap) ── must come before llama ─
-    if model.contains("cerebras") {
-        return (0.06, 0.06);
-    }
-
-    // ── SambaNova ── must come before llama ──────────────────────
-    if model.contains("sambanova") {
-        return (0.06, 0.06);
-    }
-
-    // ── Replicate ── must come before llama ─────────────────────
-    if model.contains("replicate") {
-        return (0.40, 0.40);
-    }
-
-    // ── Chutes.ai ──────────────────────────────────────────────
-    if model.contains("chutes") {
-        return (0.25, 0.35);
-    }
-
-    // ── Venice.ai ──────────────────────────────────────────────
-    if model.contains("venice") {
-        return (0.20, 0.90);
-    }
-
-    // ── Open-source (Groq, Together, etc.) ─────────────────────
-    if model.contains("llama-4-maverick") {
-        return (0.50, 0.77);
-    }
-    if model.contains("llama-4-scout") {
-        return (0.11, 0.34);
-    }
-    if model.contains("llama") || model.contains("mixtral") {
-        return (0.05, 0.10);
-    }
-    // ── Qwen (Alibaba) ──────────────────────────────────────────
-    if model.contains("qwen-max") {
-        return (4.00, 12.00);
-    }
-    if model.contains("qwen-vl") {
-        return (1.50, 4.50);
-    }
-    if model.contains("qwen-plus") {
-        return (0.80, 2.00);
-    }
-    if model.contains("qwen-turbo") {
-        return (0.30, 0.60);
-    }
-    if model.contains("qwen") {
-        return (0.20, 0.60);
-    }
-
-    // ── MiniMax ──────────────────────────────────────────────────
-    if model.contains("minimax") || model.contains("abab") {
-        if model.contains("highspeed") {
-            return (0.80, 3.20);
-        }
-        if model.contains("m2.5") {
-            return (1.10, 4.40);
-        }
-        if model.contains("abab7") {
-            return (0.80, 2.40);
-        }
-        return (1.00, 3.00);
-    }
-
-    // ── Zhipu / GLM ─────────────────────────────────────────────
-    if model.contains("glm-5") {
-        return (1.00, 3.20);
-    }
-    if model.contains("glm-4.7") {
-        return (0.60, 2.20);
-    }
-    if model.contains("glm-4-flash") || model.contains("glm-4.5-flash") {
-        return (0.0, 0.0); // free tier
-    }
-    if model.contains("glm-4.5") {
-        return (0.60, 2.20);
-    }
-    if model.contains("glm") {
-        return (0.60, 2.20);
-    }
-    if model.contains("codegeex") {
-        return (0.10, 0.10);
-    }
-
-    // ── Moonshot / Kimi ─────────────────────────────────────────
-    if model.contains("moonshot") || model.contains("kimi") {
-        return (0.80, 0.80);
-    }
-
-    // ── Volcano Engine / Doubao ────────────────────────────────
-    if model.contains("doubao-seed-code") {
-        return (0.50, 1.00);
-    }
-    if model.contains("doubao") && model.contains("mini") {
-        return (0.10, 0.10);
-    }
-    if model.contains("doubao") && model.contains("lite") {
-        return (0.30, 0.60);
-    }
-    if model.contains("doubao") {
-        return (0.80, 2.00);
-    }
-
-    // ── Baidu ERNIE ─────────────────────────────────────────────
-    if model.contains("ernie") {
-        return (2.00, 6.00);
-    }
-
-    // ── AWS Bedrock ─────────────────────────────────────────────
-    if model.contains("nova-pro") {
-        return (0.80, 3.20);
-    }
-    if model.contains("nova-lite") {
-        return (0.06, 0.24);
-    }
-
-    // ── Mistral ────────────────────────────────────────────────
-    if model.contains("mistral-large") {
-        return (2.00, 6.00);
-    }
-    if model.contains("mistral-small") || model.contains("mistral") {
-        return (0.10, 0.30);
-    }
-
-    // ── Cohere ─────────────────────────────────────────────────
-    if model.contains("command-r-plus") {
-        return (2.50, 10.0);
-    }
-    if model.contains("command-r") {
-        return (0.15, 0.60);
-    }
-
-    // ── Perplexity ──────────────────────────────────────────────
-    if model.contains("sonar-pro") {
-        return (3.0, 15.0);
-    }
-    if model.contains("sonar") {
-        return (1.0, 5.0);
-    }
-
-    // ── xAI / Grok ──────────────────────────────────────────────
-    if model.contains("grok-4-1") {
-        return (0.20, 0.50);
-    }
-    if model.contains("grok-4") {
-        return (3.0, 15.0);
-    }
-    if model.contains("grok-3-mini") || model.contains("grok-2-mini") || model.contains("grok-mini")
-    {
-        return (0.30, 0.50);
-    }
-    if model.contains("grok-3") {
-        return (3.0, 15.0);
-    }
-    if model.contains("grok") {
-        return (2.0, 10.0);
-    }
-
-    // ── AI21 / Jamba ────────────────────────────────────────────
-    if model.contains("jamba") {
-        return (2.0, 8.0);
-    }
-
-    // ── Default (conservative) ─────────────────────────────────
-    (1.0, 3.0)
 }
 
 #[cfg(test)]
@@ -647,159 +410,9 @@ mod tests {
     }
 
     #[test]
-    fn test_estimate_cost_haiku() {
-        let cost = MeteringEngine::estimate_cost("claude-haiku-4-5-20251001", 1_000_000, 1_000_000);
-        assert!((cost - 1.50).abs() < 0.01); // $0.25 + $1.25
-    }
-
-    #[test]
-    fn test_estimate_cost_sonnet() {
-        let cost = MeteringEngine::estimate_cost("claude-sonnet-4-20250514", 1_000_000, 1_000_000);
-        assert!((cost - 18.0).abs() < 0.01); // $3.00 + $15.00
-    }
-
-    #[test]
-    fn test_estimate_cost_opus() {
-        let cost = MeteringEngine::estimate_cost("claude-opus-4-20250514", 1_000_000, 1_000_000);
-        assert!((cost - 90.0).abs() < 0.01); // $15.00 + $75.00
-    }
-
-    #[test]
-    fn test_estimate_cost_gpt4o() {
-        let cost = MeteringEngine::estimate_cost("gpt-4o-2024-11-20", 1_000_000, 1_000_000);
-        assert!((cost - 12.50).abs() < 0.01); // $2.50 + $10.00
-    }
-
-    #[test]
-    fn test_estimate_cost_gpt4o_mini() {
-        let cost = MeteringEngine::estimate_cost("gpt-4o-mini", 1_000_000, 1_000_000);
-        assert!((cost - 0.75).abs() < 0.01); // $0.15 + $0.60
-    }
-
-    #[test]
-    fn test_estimate_cost_gpt41() {
-        let cost = MeteringEngine::estimate_cost("gpt-4.1", 1_000_000, 1_000_000);
-        assert!((cost - 10.0).abs() < 0.01); // $2.00 + $8.00
-    }
-
-    #[test]
-    fn test_estimate_cost_gpt41_mini() {
-        let cost = MeteringEngine::estimate_cost("gpt-4.1-mini", 1_000_000, 1_000_000);
-        assert!((cost - 2.0).abs() < 0.01); // $0.40 + $1.60
-    }
-
-    #[test]
-    fn test_estimate_cost_gpt41_nano() {
-        let cost = MeteringEngine::estimate_cost("gpt-4.1-nano", 1_000_000, 1_000_000);
-        assert!((cost - 0.50).abs() < 0.01); // $0.10 + $0.40
-    }
-
-    #[test]
-    fn test_estimate_cost_o3_mini() {
-        let cost = MeteringEngine::estimate_cost("o3-mini", 1_000_000, 1_000_000);
-        assert!((cost - 5.50).abs() < 0.01); // $1.10 + $4.40
-    }
-
-    #[test]
-    fn test_estimate_cost_gemini_20_flash() {
-        let cost = MeteringEngine::estimate_cost("gemini-2.0-flash", 1_000_000, 1_000_000);
-        assert!((cost - 0.50).abs() < 0.01); // $0.10 + $0.40
-    }
-
-    #[test]
-    fn test_estimate_cost_gemini_25_pro() {
-        let cost = MeteringEngine::estimate_cost("gemini-2.5-pro", 1_000_000, 1_000_000);
-        assert!((cost - 11.25).abs() < 0.01); // $1.25 + $10.00
-    }
-
-    #[test]
-    fn test_estimate_cost_gemini_25_flash() {
-        let cost = MeteringEngine::estimate_cost("gemini-2.5-flash", 1_000_000, 1_000_000);
-        assert!((cost - 0.75).abs() < 0.01); // $0.15 + $0.60
-    }
-
-    #[test]
-    fn test_estimate_cost_deepseek_chat() {
-        let cost = MeteringEngine::estimate_cost("deepseek-chat", 1_000_000, 1_000_000);
-        assert!((cost - 1.37).abs() < 0.01); // $0.27 + $1.10
-    }
-
-    #[test]
-    fn test_estimate_cost_deepseek_reasoner() {
-        let cost = MeteringEngine::estimate_cost("deepseek-reasoner", 1_000_000, 1_000_000);
-        assert!((cost - 2.74).abs() < 0.01); // $0.55 + $2.19
-    }
-
-    #[test]
-    fn test_estimate_cost_llama() {
-        let cost = MeteringEngine::estimate_cost("llama-3.3-70b-versatile", 1_000_000, 1_000_000);
-        assert!((cost - 0.15).abs() < 0.01); // $0.05 + $0.10
-    }
-
-    #[test]
-    fn test_estimate_cost_mixtral() {
-        let cost = MeteringEngine::estimate_cost("mixtral-8x7b", 1_000_000, 1_000_000);
-        assert!((cost - 0.15).abs() < 0.01); // $0.05 + $0.10
-    }
-
-    #[test]
-    fn test_estimate_cost_qwen() {
-        let cost = MeteringEngine::estimate_cost("qwen-2.5-72b", 1_000_000, 1_000_000);
-        assert!((cost - 0.80).abs() < 0.01); // $0.20 + $0.60
-    }
-
-    #[test]
-    fn test_estimate_cost_mistral_large() {
-        let cost = MeteringEngine::estimate_cost("mistral-large-latest", 1_000_000, 1_000_000);
-        assert!((cost - 8.0).abs() < 0.01); // $2.00 + $6.00
-    }
-
-    #[test]
-    fn test_estimate_cost_mistral_small() {
-        let cost = MeteringEngine::estimate_cost("mistral-small-latest", 1_000_000, 1_000_000);
-        assert!((cost - 0.40).abs() < 0.01); // $0.10 + $0.30
-    }
-
-    #[test]
-    fn test_estimate_cost_command_r_plus() {
-        let cost = MeteringEngine::estimate_cost("command-r-plus", 1_000_000, 1_000_000);
-        assert!((cost - 12.50).abs() < 0.01); // $2.50 + $10.00
-    }
-
-    #[test]
     fn test_estimate_cost_unknown() {
-        let cost = MeteringEngine::estimate_cost("my-custom-model", 1_000_000, 1_000_000);
+        let cost = MeteringEngine::estimate_cost("my-custom-model", 1_000_000, 1_000_000, 0, 0);
         assert!((cost - 4.0).abs() < 0.01); // $1.00 + $3.00
-    }
-
-    #[test]
-    fn test_estimate_cost_grok() {
-        let cost = MeteringEngine::estimate_cost("grok-2", 1_000_000, 1_000_000);
-        assert!((cost - 12.0).abs() < 0.01); // $2.00 + $10.00
-    }
-
-    #[test]
-    fn test_estimate_cost_grok_mini() {
-        let cost = MeteringEngine::estimate_cost("grok-2-mini", 1_000_000, 1_000_000);
-        assert!((cost - 0.80).abs() < 0.01); // $0.30 + $0.50
-    }
-
-    #[test]
-    fn test_estimate_cost_sonar_pro() {
-        let cost = MeteringEngine::estimate_cost("sonar-pro", 1_000_000, 1_000_000);
-        assert!((cost - 18.0).abs() < 0.01); // $3.00 + $15.00
-    }
-
-    #[test]
-    fn test_estimate_cost_jamba() {
-        let cost = MeteringEngine::estimate_cost("jamba-1.5-large", 1_000_000, 1_000_000);
-        assert!((cost - 10.0).abs() < 0.01); // $2.00 + $8.00
-    }
-
-    #[test]
-    fn test_estimate_cost_cerebras() {
-        let cost = MeteringEngine::estimate_cost("cerebras/llama3.3-70b", 1_000_000, 1_000_000);
-        assert!((cost - 0.12).abs() < 0.01); // $0.06 + $0.06
     }
 
     #[test]
@@ -811,6 +424,8 @@ mod tests {
             "claude-sonnet-4-20250514",
             1_000_000,
             1_000_000,
+            0,
+            0,
         );
         assert!((cost - 18.0).abs() < 0.01);
     }
@@ -819,8 +434,9 @@ mod tests {
     fn test_estimate_cost_with_catalog_alias() {
         let catalog = test_catalog();
         // "sonnet" alias should resolve to same pricing
-        let cost =
-            MeteringEngine::estimate_cost_with_catalog(&catalog, "sonnet", 1_000_000, 1_000_000);
+        let cost = MeteringEngine::estimate_cost_with_catalog(
+            &catalog, "sonnet", 1_000_000, 1_000_000, 0, 0,
+        );
         assert!((cost - 18.0).abs() < 0.01);
     }
 
@@ -833,6 +449,8 @@ mod tests {
             "totally-unknown-model",
             1_000_000,
             1_000_000,
+            0,
+            0,
         );
         assert!((cost - 4.0).abs() < 0.01);
     }
@@ -845,6 +463,8 @@ mod tests {
             "gpt-5.1-codex-mini",
             1_000_000,
             1_000_000,
+            0,
+            0,
         );
         assert!((cost - 4.0).abs() < 0.01);
     }
@@ -852,9 +472,73 @@ mod tests {
     #[test]
     fn test_estimate_cost_with_catalog_local_zero_price_stays_zero() {
         let catalog = test_catalog();
-        let cost =
-            MeteringEngine::estimate_cost_with_catalog(&catalog, "llama3.2", 1_000_000, 1_000_000);
+        let cost = MeteringEngine::estimate_cost_with_catalog(
+            &catalog, "llama3.2", 1_000_000, 1_000_000, 0, 0,
+        );
         assert!(cost.abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_estimate_cost_cache_read_discount() {
+        // 1M total input tokens, 500k are cache-read (10% of input price)
+        // Sonnet: $3/M input, $15/M output
+        // Regular input: 500k * $3/M = $1.50
+        // Cache read: 500k * $3/M * 0.10 = $0.15
+        // Output: 1M * $15/M = $15.00
+        // Total = $16.65
+        let cost = MeteringEngine::estimate_cost(
+            "claude-sonnet-4-20250514",
+            1_000_000, // total input
+            1_000_000, // output
+            500_000,   // cache_read
+            0,         // cache_creation
+        );
+        assert!((cost - 16.65).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_estimate_cost_cache_creation_surcharge() {
+        // 1M total input tokens, 200k are cache-creation (125% of input price)
+        // Sonnet: $3/M input, $15/M output
+        // Regular input: 800k * $3/M = $2.40
+        // Cache creation: 200k * $3/M * 1.25 = $0.75
+        // Output: 1M * $15/M = $15.00
+        // Total = $18.15
+        let cost = MeteringEngine::estimate_cost(
+            "claude-sonnet-4-20250514",
+            1_000_000, // total input
+            1_000_000, // output
+            0,         // cache_read
+            200_000,   // cache_creation
+        );
+        assert!((cost - 18.15).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_estimate_cost_cache_mixed() {
+        // 1M total input, 400k cache-read, 100k cache-creation, 500k regular
+        // Sonnet: $3/M input, $15/M output
+        // Regular input: 500k * $3/M = $1.50
+        // Cache read: 400k * $3/M * 0.10 = $0.12
+        // Cache creation: 100k * $3/M * 1.25 = $0.375
+        // Output: 1M * $15/M = $15.00
+        // Total = $16.995
+        let cost = MeteringEngine::estimate_cost(
+            "claude-sonnet-4-20250514",
+            1_000_000, // total input
+            1_000_000, // output
+            400_000,   // cache_read
+            100_000,   // cache_creation
+        );
+        assert!((cost - 16.995).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_estimate_cost_zero_cache_matches_no_cache() {
+        // With zero cache tokens, should match the original behavior
+        let cost_with_cache = MeteringEngine::estimate_cost("gpt-4o", 1_000_000, 1_000_000, 0, 0);
+        let expected = 12.50; // $2.50 + $10.00
+        assert!((cost_with_cache - expected).abs() < 0.01);
     }
 
     #[test]

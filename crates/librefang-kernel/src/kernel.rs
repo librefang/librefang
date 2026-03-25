@@ -2689,6 +2689,8 @@ system_prompt = "You are a helpful assistant."
             model,
             result.total_usage.input_tokens,
             result.total_usage.output_tokens,
+            result.total_usage.cache_read_input_tokens,
+            result.total_usage.cache_creation_input_tokens,
         );
         let _ = self.metering.record(&librefang_memory::usage::UsageRecord {
             agent_id,
@@ -3336,6 +3338,8 @@ system_prompt = "You are a helpful assistant."
                         model,
                         result.total_usage.input_tokens,
                         result.total_usage.output_tokens,
+                        result.total_usage.cache_read_input_tokens,
+                        result.total_usage.cache_creation_input_tokens,
                     );
                     let _ = kernel_clone
                         .metering
@@ -4278,6 +4282,8 @@ system_prompt = "You are a helpful assistant."
             model,
             result.total_usage.input_tokens,
             result.total_usage.output_tokens,
+            result.total_usage.cache_read_input_tokens,
+            result.total_usage.cache_creation_input_tokens,
         );
         let _ = self.metering.record(&librefang_memory::usage::UsageRecord {
             agent_id,
@@ -5096,6 +5102,8 @@ system_prompt = "You are a helpful assistant."
             model,
             input_tokens,
             output_tokens,
+            0, // no cache token breakdown available from session history
+            0,
         );
 
         Ok((input_tokens, output_tokens, cost))
