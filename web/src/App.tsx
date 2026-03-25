@@ -156,13 +156,13 @@ function Nav({ t, lang, onSwitchLang }: NavProps) {
   ]
 
   return (
-    <nav className={cn('fixed top-0 left-0 right-0 z-50 transition-all duration-300', scrolled && 'bg-surface/90 backdrop-blur-md border-b border-white/5')}>
+    <nav className={cn('fixed top-0 left-0 right-0 z-50 transition-all duration-300', scrolled && 'bg-surface/90 backdrop-blur-md border-b border-black/10 dark:border-white/5')}>
       <div className="max-w-6xl mx-auto px-6 h-16 flex items-center justify-between">
         <a href="/" className="flex items-center gap-2.5">
           <div className="w-8 h-8 rounded bg-cyan-500/10 border border-cyan-500/20 flex items-center justify-center">
             <Terminal className="w-4 h-4 text-cyan-400" />
           </div>
-          <span className="font-bold text-white tracking-tight">LibreFang</span>
+          <span className="font-bold text-slate-900 dark:text-white tracking-tight">LibreFang</span>
         </a>
 
         <div className="hidden md:flex items-center gap-1">
@@ -172,9 +172,10 @@ function Nav({ t, lang, onSwitchLang }: NavProps) {
               href={link.href}
               target={link.external ? '_blank' : undefined}
               rel={link.external ? 'noopener noreferrer' : undefined}
+              aria-current={activeSection === link.href.replace('#', '') ? 'page' : undefined}
               className={cn(
                 'px-3 py-1.5 text-sm transition-colors font-medium flex items-center gap-1',
-                activeSection === link.href.replace('#', '') ? 'text-cyan-400' : 'text-gray-400 hover:text-cyan-400'
+                activeSection === link.href.replace('#', '') ? 'text-cyan-400' : 'text-gray-600 dark:text-gray-400 hover:text-cyan-400'
               )}
             >
               {link.label}
@@ -185,7 +186,7 @@ function Nav({ t, lang, onSwitchLang }: NavProps) {
           {/* Language switcher */}
           <div className="relative ml-2" data-lang-menu>
             <button
-              className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-gray-400 hover:text-cyan-400 transition-colors font-medium"
+              className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-gray-600 dark:text-gray-400 hover:text-cyan-400 transition-colors font-medium"
               onClick={() => setLangOpen(!langOpen)}
               aria-label="Switch language"
               aria-expanded={langOpen}
@@ -195,12 +196,12 @@ function Nav({ t, lang, onSwitchLang }: NavProps) {
               <ChevronDown className={cn('w-3 h-3 transition-transform', langOpen && 'rotate-180')} />
             </button>
             {langOpen && (
-              <div className="absolute right-0 mt-2 w-36 bg-surface-200 border border-white/10 rounded shadow-xl z-50">
+              <div className="absolute right-0 mt-2 w-36 bg-surface-200 border border-black/10 dark:border-white/10 rounded shadow-xl z-50">
                 {languages.map(l => (
                   <button
                     key={l.code}
                     onClick={() => { onSwitchLang(l.code); setLangOpen(false) }}
-                    className={cn('block w-full text-left px-4 py-2.5 text-sm transition-colors', l.code === lang ? 'text-cyan-400 bg-cyan-500/5' : 'text-gray-400 hover:text-white hover:bg-white/5')}
+                    className={cn('block w-full text-left px-4 py-2.5 text-sm transition-colors', l.code === lang ? 'text-cyan-400 bg-cyan-500/5' : 'text-gray-600 dark:text-gray-400 hover:text-slate-900 dark:text-white hover:bg-black/5 dark:hover:bg-white/5')}
                   >
                     {l.name}
                   </button>
@@ -211,7 +212,7 @@ function Nav({ t, lang, onSwitchLang }: NavProps) {
 
           <button
             onClick={toggleTheme}
-            className="p-2 text-gray-400 hover:text-cyan-400 transition-colors"
+            className="p-2 text-gray-600 dark:text-gray-400 hover:text-cyan-400 transition-colors"
             aria-label="Toggle theme"
           >
             {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
@@ -227,29 +228,47 @@ function Nav({ t, lang, onSwitchLang }: NavProps) {
           </a>
         </div>
 
-        <button className="md:hidden text-gray-400" onClick={() => setOpen(!open)} aria-label="Toggle menu">
-          {open ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
-        </button>
+        <div className="flex md:hidden items-center gap-1">
+          <button onClick={toggleTheme} className="p-2 text-gray-600 dark:text-gray-400 hover:text-cyan-400 transition-colors" aria-label="Toggle theme">
+            {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+          </button>
+          <div className="relative" data-lang-menu>
+            <button className="p-2 text-gray-600 dark:text-gray-400 hover:text-cyan-400 transition-colors" onClick={() => setLangOpen(!langOpen)} aria-label="Switch language">
+              <Globe className="w-4 h-4" />
+            </button>
+            {langOpen && (
+              <div className="absolute right-0 mt-2 w-36 bg-surface-200 border border-black/10 dark:border-white/10 rounded shadow-xl z-50">
+                {languages.map(l => (
+                  <button key={l.code} onClick={() => { onSwitchLang(l.code); setLangOpen(false) }} className={cn('block w-full text-left px-4 py-2.5 text-sm transition-colors', l.code === lang ? 'text-cyan-400 bg-cyan-500/5' : 'text-gray-600 dark:text-gray-400 hover:text-white hover:bg-white/5')}>{l.name}</button>
+                ))}
+              </div>
+            )}
+          </div>
+          <button className="p-2 text-gray-600 dark:text-gray-400" onClick={() => setOpen(!open)} aria-label="Toggle menu">
+            {open ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
+          </button>
+        </div>
       </div>
 
       {open && (
-        <div className="md:hidden bg-surface-100 border-t border-white/5 px-6 py-4 space-y-1">
+        <div className="md:hidden bg-surface-100 border-t border-black/10 dark:border-white/5 px-6 py-4 space-y-1">
           {links.map(link => (
             <a
               key={link.label}
               href={link.href}
               onClick={() => setOpen(false)}
-              className="block py-2.5 text-sm text-gray-400 hover:text-cyan-400 transition-colors font-medium"
+              aria-current={activeSection === link.href.replace('#', '') ? 'page' : undefined}
+              className="block py-2.5 text-sm text-gray-600 dark:text-gray-400 hover:text-cyan-400 transition-colors font-medium"
             >
               {link.label}
             </a>
           ))}
-          <div className="pt-2 border-t border-white/5 mt-2 flex flex-wrap gap-2">
+          <div className="pt-2 border-t border-black/10 dark:border-white/5 mt-2 flex flex-wrap gap-2">
             {languages.map(l => (
               <button
                 key={l.code}
                 onClick={() => { onSwitchLang(l.code); setOpen(false) }}
-                className={cn('px-3 py-1.5 text-xs rounded', l.code === lang ? 'text-cyan-400 bg-cyan-500/10' : 'text-gray-500 hover:text-white')}
+                className={cn('px-3 py-1.5 text-xs rounded', l.code === lang ? 'text-cyan-400 bg-cyan-500/10' : 'text-gray-500 hover:text-slate-900 dark:text-white')}
               >
                 {l.name}
               </button>
@@ -286,7 +305,7 @@ function Hero({ t, registry }: SectionProps & { registry?: import('./useRegistry
 
             <FadeIn delay={100}>
               <h1 className="text-5xl md:text-6xl lg:text-7xl font-black tracking-tight leading-[0.95] mb-6">
-                <span className="text-white">{t.hero.title1}</span>
+                <span className="text-slate-900 dark:text-white">{t.hero.title1}</span>
                 <br />
                 <span className="text-cyan-400">{t.hero.title2}</span>
               </h1>
@@ -295,13 +314,13 @@ function Hero({ t, registry }: SectionProps & { registry?: import('./useRegistry
             <FadeIn delay={200}>
               <div className="flex items-center gap-2 text-base md:text-lg text-gray-500 font-mono mb-8 h-7">
                 <span className="text-cyan-500">$</span>
-                <span className="text-gray-300">{typed}</span>
+                <span className="text-gray-700 dark:text-gray-300">{typed}</span>
                 <span className="w-2 h-4 bg-cyan-400 cursor-blink" />
               </div>
             </FadeIn>
 
             <FadeIn delay={300}>
-              <p className="text-gray-400 text-base leading-relaxed mb-8">{t.hero.desc}</p>
+              <p className="text-gray-600 dark:text-gray-400 text-base leading-relaxed mb-8">{t.hero.desc}</p>
             </FadeIn>
 
             <FadeIn delay={400}>
@@ -310,7 +329,7 @@ function Hero({ t, registry }: SectionProps & { registry?: import('./useRegistry
                   {t.hero.getStarted}
                   <ArrowRight className="w-4 h-4" />
                 </a>
-                <a href="https://github.com/librefang/librefang" target="_blank" rel="noopener noreferrer" onClick={() => trackEvent('click', 'hero_github')} className="inline-flex items-center justify-center gap-2 px-6 py-3 border border-white/10 hover:border-white/20 text-gray-300 font-semibold rounded transition-all hover:bg-white/5">
+                <a href="https://github.com/librefang/librefang" target="_blank" rel="noopener noreferrer" onClick={() => trackEvent('click', 'hero_github')} className="inline-flex items-center justify-center gap-2 px-6 py-3 border border-black/10 dark:border-white/10 hover:border-black/20 dark:hover:border-white/20 text-gray-700 dark:text-gray-300 font-semibold rounded transition-all hover:bg-black/5 dark:hover:bg-white/5">
                   <Github className="w-4 h-4" />
                   {t.hero.viewGithub}
                 </a>
@@ -321,8 +340,8 @@ function Hero({ t, registry }: SectionProps & { registry?: import('./useRegistry
           {/* Right: system preview terminal */}
           <FadeIn delay={300}>
             <div className="hidden lg:block">
-              <div className="border border-white/10 bg-surface-100 overflow-hidden glow-cyan">
-                <div className="flex items-center gap-2 px-4 py-2.5 bg-surface-200 border-b border-white/5">
+              <div className="border border-black/10 dark:border-white/10 bg-surface-100 overflow-hidden glow-cyan">
+                <div className="flex items-center gap-2 px-4 py-2.5 bg-surface-200 border-b border-black/10 dark:border-white/5">
                   <div className="flex gap-1.5">
                     <div className="w-2 h-2 rounded-full bg-red-500/40" />
                     <div className="w-2 h-2 rounded-full bg-yellow-500/40" />
@@ -333,23 +352,23 @@ function Hero({ t, registry }: SectionProps & { registry?: import('./useRegistry
                 <div className="p-5 font-mono text-xs leading-relaxed space-y-3">
                   <div className="text-gray-500">$ librefang status</div>
                   <div className="space-y-1.5">
-                    <div className="flex justify-between"><span className="text-gray-400">runtime</span><span className="text-cyan-400">running</span></div>
-                    <div className="flex justify-between"><span className="text-gray-400">uptime</span><span className="text-white">14d 7h 23m</span></div>
-                    <div className="flex justify-between"><span className="text-gray-400">memory</span><span className="text-white">38MB</span></div>
-                    <div className="flex justify-between"><span className="text-gray-400">agents</span><span className="text-white">4 active</span></div>
+                    <div className="flex justify-between"><span className="text-gray-600 dark:text-gray-400">runtime</span><span className="text-cyan-400">running</span></div>
+                    <div className="flex justify-between"><span className="text-gray-600 dark:text-gray-400">uptime</span><span className="text-slate-900 dark:text-white">14d 7h 23m</span></div>
+                    <div className="flex justify-between"><span className="text-gray-600 dark:text-gray-400">memory</span><span className="text-slate-900 dark:text-white">38MB</span></div>
+                    <div className="flex justify-between"><span className="text-gray-600 dark:text-gray-400">agents</span><span className="text-slate-900 dark:text-white">4 active</span></div>
                   </div>
-                  <div className="border-t border-white/5 pt-3 space-y-1.5">
+                  <div className="border-t border-black/10 dark:border-white/5 pt-3 space-y-1.5">
                     <div className="text-amber-400/70">AGENTS</div>
-                    <div className="flex justify-between"><span className="text-gray-400">clip</span><span className="text-cyan-400">● idle</span></div>
-                    <div className="flex justify-between"><span className="text-gray-400">lead</span><span className="text-green-400">● running</span></div>
-                    <div className="flex justify-between"><span className="text-gray-400">collector</span><span className="text-cyan-400">● idle</span></div>
-                    <div className="flex justify-between"><span className="text-gray-400">researcher</span><span className="text-green-400">● running</span></div>
+                    <div className="flex justify-between"><span className="text-gray-600 dark:text-gray-400">clip</span><span className="text-cyan-400">● idle</span></div>
+                    <div className="flex justify-between"><span className="text-gray-600 dark:text-gray-400">lead</span><span className="text-green-400">● running</span></div>
+                    <div className="flex justify-between"><span className="text-gray-600 dark:text-gray-400">collector</span><span className="text-cyan-400">● idle</span></div>
+                    <div className="flex justify-between"><span className="text-gray-600 dark:text-gray-400">researcher</span><span className="text-green-400">● running</span></div>
                   </div>
-                  <div className="border-t border-white/5 pt-3 space-y-1.5">
+                  <div className="border-t border-black/10 dark:border-white/5 pt-3 space-y-1.5">
                     <div className="text-amber-400/70">CHANNELS</div>
-                    <div className="flex justify-between"><span className="text-gray-400">telegram</span><span className="text-green-400">connected</span></div>
-                    <div className="flex justify-between"><span className="text-gray-400">slack</span><span className="text-green-400">connected</span></div>
-                    <div className="flex justify-between"><span className="text-gray-400">discord</span><span className="text-gray-600">standby</span></div>
+                    <div className="flex justify-between"><span className="text-gray-600 dark:text-gray-400">telegram</span><span className="text-green-400">connected</span></div>
+                    <div className="flex justify-between"><span className="text-gray-600 dark:text-gray-400">slack</span><span className="text-green-400">connected</span></div>
+                    <div className="flex justify-between"><span className="text-gray-600 dark:text-gray-400">discord</span><span className="text-gray-600">standby</span></div>
                   </div>
                 </div>
               </div>
@@ -359,7 +378,7 @@ function Hero({ t, registry }: SectionProps & { registry?: import('./useRegistry
 
         {/* Stats bar - full width below */}
         <FadeIn delay={500}>
-          <div className="mt-16 grid grid-cols-2 md:grid-cols-4 gap-px bg-white/5 rounded overflow-hidden">
+          <div className="mt-16 grid grid-cols-2 md:grid-cols-4 gap-px bg-black/5 dark:bg-white/5 rounded overflow-hidden">
             {([
               { value: '180ms', label: t.stats.coldStart, icon: Zap },
               { value: '40MB', label: t.stats.memory, icon: Cpu },
@@ -369,7 +388,7 @@ function Hero({ t, registry }: SectionProps & { registry?: import('./useRegistry
               <div key={i} className="bg-surface-100 px-6 py-5 flex items-center gap-4">
                 <stat.icon className="w-5 h-5 text-cyan-500/60 shrink-0" />
                 <div>
-                  <div className="text-2xl font-black text-white font-mono">{stat.value}</div>
+                  <div className="text-2xl font-black text-slate-900 dark:text-white font-mono">{stat.value}</div>
                   <div className="text-xs text-gray-500 font-medium uppercase tracking-wider">{stat.label}</div>
                 </div>
               </div>
@@ -396,8 +415,8 @@ function DetailGrid({ titles, descs }: { titles: string[]; descs: string[] }) {
   return (
     <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
       {titles.map((title, i) => (
-        <div key={title} className="px-3 py-2 bg-surface-200 border border-white/5">
-          <div className="text-sm text-white font-semibold">{title}</div>
+        <div key={title} className="px-3 py-2 bg-surface-200 border border-black/10 dark:border-white/5">
+          <div className="text-sm text-slate-900 dark:text-white font-semibold">{title}</div>
           <div className="text-xs text-gray-500 mt-0.5">{descs[i] ?? ''}</div>
         </div>
       ))}
@@ -414,8 +433,8 @@ function Architecture({ t }: SectionProps) {
       <div className="max-w-6xl mx-auto">
         <FadeIn>
           <div className="text-xs font-mono text-cyan-500 uppercase tracking-widest mb-3">{t.architecture.label}</div>
-          <h2 className="text-3xl md:text-5xl font-black text-white tracking-tight mb-4">{t.architecture.title}</h2>
-          <p className="text-gray-400 text-lg max-w-2xl mb-16">{t.architecture.desc}</p>
+          <h2 className="text-3xl md:text-5xl font-black text-slate-900 dark:text-white tracking-tight mb-4">{t.architecture.title}</h2>
+          <p className="text-gray-600 dark:text-gray-400 text-lg max-w-2xl mb-16">{t.architecture.desc}</p>
         </FadeIn>
 
         <div className="space-y-px">
@@ -424,7 +443,7 @@ function Architecture({ t }: SectionProps) {
             const isOpen = openLayer === i
             return (
               <FadeIn key={i} delay={i * 80}>
-                <div className="border border-white/5 bg-surface-100 transition-all">
+                <div className="border border-black/10 dark:border-white/5 bg-surface-100 transition-all">
                   <button
                     onClick={() => setOpenLayer(isOpen ? null : i)}
                     className="w-full flex items-center gap-6 hover:bg-surface-200 px-6 md:px-8 py-6 transition-all text-left"
@@ -434,7 +453,7 @@ function Architecture({ t }: SectionProps) {
                       <Icon className="w-5 h-5" />
                     </div>
                     <div className="flex-1 min-w-0">
-                      <div className="font-bold text-white text-lg">{layer.label}</div>
+                      <div className="font-bold text-slate-900 dark:text-white text-lg">{layer.label}</div>
                       <div className="text-gray-500 text-sm mt-0.5">{layer.desc}</div>
                     </div>
                     <ChevronRight className={cn('w-4 h-4 text-gray-700 transition-transform shrink-0', isOpen && 'rotate-90 text-cyan-500')} />
@@ -445,7 +464,7 @@ function Architecture({ t }: SectionProps) {
                       animate={{ height: 'auto', opacity: 1 }}
                       exit={{ height: 0, opacity: 0 }}
                       transition={{ duration: 0.3, ease: 'easeOut' }}
-                      className="px-6 md:px-8 pb-6 border-t border-white/5"
+                      className="px-6 md:px-8 pb-6 border-t border-black/10 dark:border-white/5"
                     >
                       <div className="pt-4">
                         {i === 0 && (
@@ -455,7 +474,7 @@ function Architecture({ t }: SectionProps) {
                             ).map(ch => (
                               <div key={ch.id} className={cn(
                                 'px-2 py-1.5 border text-xs font-mono text-center truncate',
-                                isPopular(ch) ? 'bg-amber-500/10 border-amber-500/30 text-amber-300' : 'bg-surface-200 border-white/5 text-gray-400'
+                                isPopular(ch) ? 'bg-amber-500/10 border-amber-500/30 text-amber-300' : 'bg-surface-200 border-black/10 dark:border-white/5 text-gray-600 dark:text-gray-400'
                               )}>
                                 {ch.name}{isPopular(ch) && ' 🔥'}
                               </div>
@@ -469,9 +488,9 @@ function Architecture({ t }: SectionProps) {
                             ).map(h => (
                               <div key={h.id} className={cn(
                                 'px-3 py-2 border',
-                                isPopular(h) ? 'bg-amber-500/10 border-amber-500/30' : 'bg-surface-200 border-white/5'
+                                isPopular(h) ? 'bg-amber-500/10 border-amber-500/30' : 'bg-surface-200 border-black/10 dark:border-white/5'
                               )}>
-                                <div className="text-sm text-white font-semibold">
+                                <div className="text-sm text-slate-900 dark:text-white font-semibold">
                                   {h.name}{isPopular(h) && ' 🔥'}
                                 </div>
                                 <div className="text-[10px] text-gray-600 font-mono uppercase">{h.category}</div>
@@ -530,8 +549,8 @@ function Hands({ t }: SectionProps) {
       <div className="max-w-6xl mx-auto px-6">
         <FadeIn>
           <div className="text-xs font-mono text-cyan-500 uppercase tracking-widest mb-3">{t.hands.label}</div>
-          <h2 className="text-3xl md:text-5xl font-black text-white tracking-tight mb-4">{t.hands.title}</h2>
-          <p className="text-gray-400 text-lg max-w-2xl mb-16">{t.hands.desc}</p>
+          <h2 className="text-3xl md:text-5xl font-black text-slate-900 dark:text-white tracking-tight mb-4">{t.hands.title}</h2>
+          <p className="text-gray-600 dark:text-gray-400 text-lg max-w-2xl mb-16">{t.hands.desc}</p>
         </FadeIn>
       </div>
 
@@ -543,20 +562,23 @@ function Hands({ t }: SectionProps) {
           >
             <div className="grid grid-rows-2 grid-flow-col gap-3 w-max">
               {hands.map((hand) => {
-                const colorClass = categoryColors[hand.category] ?? 'text-gray-400/60'
+                const colorClass = categoryColors[hand.category] ?? 'text-gray-600 dark:text-gray-400/60'
                 return (
-                  <div
+                  <a
                     key={hand.id}
-                    className="group w-56 bg-surface-100 border border-white/5 hover:border-cyan-500/20 px-4 py-3 transition-all hover:bg-surface-200"
+                    href={`https://docs.librefang.ai/hands#${hand.id}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="group w-56 bg-surface-100 border border-black/10 dark:border-white/5 hover:border-cyan-500/20 px-4 py-3 transition-all hover:bg-surface-200"
                   >
                     <div className="flex items-center gap-2 mb-1.5">
-                      <h3 className="text-sm font-bold text-white truncate">{hand.name.replace(' Hand', '')}</h3>
+                      <h3 className="text-sm font-bold text-slate-900 dark:text-white truncate">{hand.name.replace(' Hand', '')}</h3>
                       <span className={cn('text-[10px] uppercase tracking-wide shrink-0', colorClass)}>
                         {hand.category}
                       </span>
                     </div>
                     <p className="text-xs text-gray-500 leading-relaxed line-clamp-2">{getLocalizedDesc(hand, lang)}</p>
-                  </div>
+                  </a>
                 )
               })}
             </div>
@@ -574,25 +596,25 @@ function Performance({ t }: SectionProps) {
       <div className="max-w-6xl mx-auto">
         <FadeIn>
           <div className="text-xs font-mono text-cyan-500 uppercase tracking-widest mb-3">{t.performance.label}</div>
-          <h2 className="text-3xl md:text-5xl font-black text-white tracking-tight mb-4">{t.performance.title}</h2>
-          <p className="text-gray-400 text-lg max-w-2xl mb-16">{t.performance.desc}</p>
+          <h2 className="text-3xl md:text-5xl font-black text-slate-900 dark:text-white tracking-tight mb-4">{t.performance.title}</h2>
+          <p className="text-gray-600 dark:text-gray-400 text-lg max-w-2xl mb-16">{t.performance.desc}</p>
         </FadeIn>
 
         <FadeIn delay={100}>
-          <div className="hidden md:block border border-white/5 overflow-hidden">
+          <div className="hidden md:block border border-black/10 dark:border-white/5 overflow-hidden">
             <table className="w-full text-left">
               <thead>
                 <tr className="bg-surface-200 text-xs uppercase tracking-widest">
                   <th className="px-6 py-4 font-semibold text-gray-500">{t.performance.metric}</th>
-                  <th className="px-6 py-4 font-semibold text-gray-500 text-center border-l border-white/5">{t.performance.others}</th>
+                  <th className="px-6 py-4 font-semibold text-gray-500 text-center border-l border-black/10 dark:border-white/5">{t.performance.others}</th>
                   <th className="px-6 py-4 font-semibold text-cyan-500 text-center border-l border-cyan-500/10 bg-cyan-500/5">LibreFang</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-white/5">
+              <tbody className="divide-y divide-black/10 dark:divide-white/5">
                 {t.performance.rows.map((row, i) => (
-                  <tr key={i} className="hover:bg-white/[0.02] transition-colors">
-                    <td className="px-6 py-4 text-sm font-medium text-gray-300">{row.metric}</td>
-                    <td className="px-6 py-4 text-sm text-center text-gray-500 font-mono border-l border-white/5">{row.others}</td>
+                  <tr key={i} className="hover:bg-black/[0.02] dark:hover:bg-white/[0.02] transition-colors">
+                    <td className="px-6 py-4 text-sm font-medium text-gray-700 dark:text-gray-300">{row.metric}</td>
+                    <td className="px-6 py-4 text-sm text-center text-gray-500 font-mono border-l border-black/10 dark:border-white/5">{row.others}</td>
                     <td className="px-6 py-4 text-sm text-center text-cyan-400 font-mono font-bold border-l border-cyan-500/10 bg-cyan-500/5">{row.librefang}</td>
                   </tr>
                 ))}
@@ -602,7 +624,7 @@ function Performance({ t }: SectionProps) {
 
           <div className="md:hidden space-y-3">
             {t.performance.rows.map((row, i) => (
-              <div key={i} className="bg-surface-100 border border-white/5 p-4">
+              <div key={i} className="bg-surface-100 border border-black/10 dark:border-white/5 p-4">
                 <div className="text-xs text-gray-500 uppercase tracking-widest mb-3">{row.metric}</div>
                 <div className="flex justify-between items-baseline">
                   <div className="text-sm text-gray-500">{t.performance.others}: <span className="font-mono">{row.others}</span></div>
@@ -627,8 +649,8 @@ function Workflows({ t }: SectionProps) {
       <div className="max-w-6xl mx-auto">
         <FadeIn>
           <div className="text-xs font-mono text-cyan-500 uppercase tracking-widest mb-3">{t.workflows.label}</div>
-          <h2 className="text-3xl md:text-5xl font-black text-white tracking-tight mb-4">{t.workflows.title}</h2>
-          <p className="text-gray-400 text-lg max-w-2xl mb-16">{t.workflows.desc}</p>
+          <h2 className="text-3xl md:text-5xl font-black text-slate-900 dark:text-white tracking-tight mb-4">{t.workflows.title}</h2>
+          <p className="text-gray-600 dark:text-gray-400 text-lg max-w-2xl mb-16">{t.workflows.desc}</p>
         </FadeIn>
 
         <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -636,9 +658,9 @@ function Workflows({ t }: SectionProps) {
             const Icon = workflowIcons[i] || Box
             return (
               <FadeIn key={i} delay={i * 60}>
-                <div className="group bg-surface-100 border border-white/5 hover:border-cyan-500/20 p-6 transition-all hover:bg-surface-200">
+                <div className="group bg-surface-100 border border-black/10 dark:border-white/5 hover:border-cyan-500/20 p-6 transition-all hover:bg-surface-200">
                   <Icon className="w-5 h-5 text-amber-400/60 group-hover:text-amber-400 transition-colors mb-4" />
-                  <h3 className="text-lg font-bold text-white mb-2">{item.title}</h3>
+                  <h3 className="text-lg font-bold text-slate-900 dark:text-white mb-2">{item.title}</h3>
                   <p className="text-sm text-gray-500 leading-relaxed">{item.desc}</p>
                 </div>
               </FadeIn>
@@ -773,8 +795,8 @@ function Downloads(_props: SectionProps) {
             {version && <span className="text-gray-600 mr-2">{version}</span>}
             {l('title')}
           </div>
-          <h2 className="text-3xl md:text-5xl font-black text-white tracking-tight mb-4">{l('title')}</h2>
-          <p className="text-gray-400 text-lg max-w-2xl mb-16">{l('desc')}</p>
+          <h2 className="text-3xl md:text-5xl font-black text-slate-900 dark:text-white tracking-tight mb-4">{l('title')}</h2>
+          <p className="text-gray-600 dark:text-gray-400 text-lg max-w-2xl mb-16">{l('desc')}</p>
         </FadeIn>
 
         {/* Desktop & CLI */}
@@ -784,11 +806,11 @@ function Downloads(_props: SectionProps) {
           <div className="grid md:grid-cols-2 gap-6 mb-8">
             {categories.map((cat) => (
               <FadeIn key={cat.label}>
-                <div className="bg-surface-100 border border-white/5 p-6">
+                <div className="bg-surface-100 border border-black/10 dark:border-white/5 p-6">
                   <div className="flex items-center gap-3 mb-4">
                     <cat.icon className="w-5 h-5 text-cyan-500" />
                     <div>
-                      <h3 className="text-base font-bold text-white">{cat.label}</h3>
+                      <h3 className="text-base font-bold text-slate-900 dark:text-white">{cat.label}</h3>
                       <span className="text-xs text-gray-500">{cat.desc}</span>
                     </div>
                   </div>
@@ -799,7 +821,7 @@ function Downloads(_props: SectionProps) {
                         href={a.url}
                         className="flex items-center justify-between px-3 py-2 hover:bg-surface-200 transition-colors group"
                       >
-                        <span className="text-sm text-gray-300 group-hover:text-cyan-400 transition-colors">{a.name}</span>
+                        <span className="text-sm text-gray-700 dark:text-gray-300 group-hover:text-cyan-400 transition-colors">{a.name}</span>
                         <span className="text-xs text-gray-600 font-mono">{a.size}</span>
                       </a>
                     ))}
@@ -813,24 +835,24 @@ function Downloads(_props: SectionProps) {
         {/* SDK, Deploy, All Releases */}
         <FadeIn delay={200}>
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-            <a href="https://deploy.librefang.ai/" target="_blank" rel="noopener noreferrer" className="flex items-center gap-3 bg-surface-100 border border-white/5 hover:border-cyan-500/20 px-5 py-4 transition-all group">
+            <a href="https://deploy.librefang.ai/" target="_blank" rel="noopener noreferrer" className="flex items-center gap-3 bg-surface-100 border border-black/10 dark:border-white/5 hover:border-cyan-500/20 px-5 py-4 transition-all group">
               <Globe className="w-5 h-5 text-cyan-500/60 group-hover:text-cyan-400 shrink-0" />
               <div>
-                <div className="text-sm font-bold text-white">{l('onlineDeply')}</div>
+                <div className="text-sm font-bold text-slate-900 dark:text-white">{l('onlineDeply')}</div>
                 <div className="text-xs text-gray-500">deploy.librefang.ai</div>
               </div>
             </a>
-            <a href="https://github.com/librefang/librefang/releases" target="_blank" rel="noopener noreferrer" className="flex items-center gap-3 bg-surface-100 border border-white/5 hover:border-cyan-500/20 px-5 py-4 transition-all group">
+            <a href="https://github.com/librefang/librefang/releases" target="_blank" rel="noopener noreferrer" className="flex items-center gap-3 bg-surface-100 border border-black/10 dark:border-white/5 hover:border-cyan-500/20 px-5 py-4 transition-all group">
               <Github className="w-5 h-5 text-cyan-500/60 group-hover:text-cyan-400 shrink-0" />
               <div>
-                <div className="text-sm font-bold text-white">{l('allReleases')}</div>
+                <div className="text-sm font-bold text-slate-900 dark:text-white">{l('allReleases')}</div>
                 <div className="text-xs text-gray-500">GitHub Releases</div>
               </div>
             </a>
-            <a href="https://docs.librefang.ai/sdk" target="_blank" rel="noopener noreferrer" className="flex items-center gap-3 bg-surface-100 border border-white/5 hover:border-cyan-500/20 px-5 py-4 transition-all group">
+            <a href="https://docs.librefang.ai/sdk" target="_blank" rel="noopener noreferrer" className="flex items-center gap-3 bg-surface-100 border border-black/10 dark:border-white/5 hover:border-cyan-500/20 px-5 py-4 transition-all group">
               <Box className="w-5 h-5 text-cyan-500/60 group-hover:text-cyan-400 shrink-0" />
               <div>
-                <div className="text-sm font-bold text-white">{l('sdk')}</div>
+                <div className="text-sm font-bold text-slate-900 dark:text-white">{l('sdk')}</div>
                 <div className="text-xs text-gray-500">Python / Node.js / Rust</div>
               </div>
             </a>
@@ -844,7 +866,15 @@ function Downloads(_props: SectionProps) {
 // ─── Install ───
 function Install({ t }: SectionProps) {
   const [copied, setCopied] = useState(false)
+  const [os, setOs] = useState<'mac' | 'windows' | 'linux' | 'unknown'>('unknown')
   const cmd = 'curl -fsSL https://librefang.sh/install | sh'
+
+  useEffect(() => {
+    const ua = navigator.userAgent.toLowerCase()
+    if (ua.includes('mac')) setOs('mac')
+    else if (ua.includes('win')) setOs('windows')
+    else if (ua.includes('linux')) setOs('linux')
+  }, [])
 
   const copy = () => {
     navigator.clipboard.writeText(cmd)
@@ -857,17 +887,17 @@ function Install({ t }: SectionProps) {
       <div className="max-w-3xl mx-auto">
         <FadeIn>
           <div className="text-xs font-mono text-cyan-500 uppercase tracking-widest mb-3">{t.install.label}</div>
-          <h2 className="text-3xl md:text-5xl font-black text-white tracking-tight mb-4">{t.install.title}</h2>
-          <p className="text-gray-400 text-lg mb-12">{t.install.desc}</p>
+          <h2 className="text-3xl md:text-5xl font-black text-slate-900 dark:text-white tracking-tight mb-4">{t.install.title}</h2>
+          <p className="text-gray-600 dark:text-gray-400 text-lg mb-12">{t.install.desc}</p>
         </FadeIn>
 
         <FadeIn delay={100}>
-          <div className="border border-white/10 bg-surface-100 overflow-hidden glow-cyan">
-            <div className="flex items-center justify-between px-4 py-2.5 bg-surface-200 border-b border-white/5">
+          <div className="border border-black/10 dark:border-white/10 bg-surface-100 overflow-hidden glow-cyan">
+            <div className="flex items-center justify-between px-4 py-2.5 bg-surface-200 border-b border-black/10 dark:border-white/5">
               <div className="flex gap-1.5">
-                <div className="w-2.5 h-2.5 rounded-full bg-white/10" />
-                <div className="w-2.5 h-2.5 rounded-full bg-white/10" />
-                <div className="w-2.5 h-2.5 rounded-full bg-white/10" />
+                <div className="w-2.5 h-2.5 rounded-full bg-black/10 dark:bg-white/10" />
+                <div className="w-2.5 h-2.5 rounded-full bg-black/10 dark:bg-white/10" />
+                <div className="w-2.5 h-2.5 rounded-full bg-black/10 dark:bg-white/10" />
               </div>
               <span className="text-[10px] font-mono text-gray-600 uppercase tracking-widest">{t.install.terminal}</span>
               <button onClick={() => { copy(); trackEvent('click', 'install_copy') }} className="text-gray-500 hover:text-cyan-400 transition-colors p-1" aria-label="Copy">
@@ -877,28 +907,39 @@ function Install({ t }: SectionProps) {
             <div className="p-6 font-mono text-sm md:text-base space-y-4">
               <div className="flex gap-3">
                 <span className="text-cyan-500 select-none">$</span>
-                <span className="text-gray-200">curl -fsSL https://librefang.sh/install | sh</span>
+                <span className="text-gray-800 dark:text-gray-200">curl -fsSL https://librefang.sh/install | sh</span>
               </div>
               <div className="flex gap-3">
                 <span className="text-cyan-500 select-none">$</span>
-                <span className="text-gray-200">librefang init</span>
+                <span className="text-gray-800 dark:text-gray-200">librefang init</span>
               </div>
               <div className="flex gap-3">
                 <span className="text-cyan-500 select-none">$</span>
-                <span className="text-gray-200">librefang start</span>
+                <span className="text-gray-800 dark:text-gray-200">librefang start</span>
               </div>
               <div className="text-gray-600 text-xs mt-2">
                 <span className="text-amber-500/60">#</span> {t.install.comment}
+              </div>
+              <div className="flex gap-2 mt-3 pt-3 border-t border-black/10 dark:border-white/5">
+                {(['mac', 'windows', 'linux'] as const).map(p => (
+                  <span key={p} className={cn(
+                    'text-[10px] font-mono px-2 py-0.5 rounded',
+                    os === p ? 'bg-cyan-500/20 text-cyan-400' : 'text-gray-600'
+                  )}>
+                    {p === 'mac' ? 'macOS' : p === 'windows' ? 'Windows' : 'Linux'}
+                    {os === p && ' \u2713'}
+                  </span>
+                ))}
               </div>
             </div>
           </div>
         </FadeIn>
 
         <FadeIn delay={200}>
-          <div className="grid sm:grid-cols-2 gap-px mt-6 bg-white/5 overflow-hidden">
+          <div className="grid sm:grid-cols-2 gap-px mt-6 bg-black/5 dark:bg-white/5 overflow-hidden">
             <div className="bg-surface-100 p-5">
               <div className="text-xs font-mono text-gray-500 uppercase tracking-widest mb-3">{t.install.requires}</div>
-              <ul className="space-y-2 text-sm text-gray-400">
+              <ul className="space-y-2 text-sm text-gray-600 dark:text-gray-400">
                 {t.install.reqItems.map((item, i) => (
                   <li key={i} className="flex items-center gap-2"><span className="w-1 h-1 bg-cyan-500 rounded-full" /> {item}</li>
                 ))}
@@ -906,7 +947,7 @@ function Install({ t }: SectionProps) {
             </div>
             <div className="bg-surface-100 p-5">
               <div className="text-xs font-mono text-gray-500 uppercase tracking-widest mb-3">{t.install.includes}</div>
-              <ul className="space-y-2 text-sm text-gray-400">
+              <ul className="space-y-2 text-sm text-gray-600 dark:text-gray-400">
                 {t.install.incItems.map((item, i) => (
                   <li key={i} className="flex items-center gap-2"><span className="w-1 h-1 bg-amber-400 rounded-full" /> {item}</li>
                 ))}
@@ -926,18 +967,18 @@ function FAQ({ t }: SectionProps) {
       <div className="max-w-6xl mx-auto">
         <FadeIn>
           <div className="text-xs font-mono text-cyan-500 uppercase tracking-widest mb-3">{t.faq.label}</div>
-          <h2 className="text-3xl md:text-5xl font-black text-white tracking-tight mb-12">{t.faq.title}</h2>
+          <h2 className="text-3xl md:text-5xl font-black text-slate-900 dark:text-white tracking-tight mb-12">{t.faq.title}</h2>
         </FadeIn>
 
         <div className="space-y-px">
           {t.faq.items.map((item, i) => (
             <FadeIn key={i} delay={i * 60}>
-              <details className="group border border-white/5 bg-surface-100 hover:bg-surface-200 transition-colors" open={i === 0}>
+              <details className="group border border-black/10 dark:border-white/5 bg-surface-100 hover:bg-surface-200 transition-colors" open={i === 0}>
                 <summary className="flex items-center justify-between px-6 py-5 cursor-pointer select-none list-none">
-                  <span className="font-semibold text-white text-sm pr-4">{item.q}</span>
+                  <span className="font-semibold text-slate-900 dark:text-white text-sm pr-4">{item.q}</span>
                   <ChevronRight className="w-4 h-4 text-gray-600 group-open:rotate-90 transition-transform shrink-0" />
                 </summary>
-                <div className="px-6 pb-5 text-sm text-gray-400 leading-relaxed border-t border-white/5 pt-4">
+                <div className="px-6 pb-5 text-sm text-gray-600 dark:text-gray-400 leading-relaxed border-t border-black/10 dark:border-white/5 pt-4">
                   {item.a}
                 </div>
               </details>
@@ -959,12 +1000,12 @@ const communityIcons: LucideIcon[] = [GitPullRequest, CircleDot, MessageSquare]
 
 function Community({ t }: SectionProps) {
   return (
-    <section className="py-28 px-6 border-t border-white/5">
+    <section className="py-28 px-6 border-t border-black/10 dark:border-white/5">
       <div className="max-w-6xl mx-auto">
         <FadeIn>
           <div className="text-xs font-mono text-cyan-500 uppercase tracking-widest mb-3">{t.community.label}</div>
-          <h2 className="text-3xl md:text-5xl font-black text-white tracking-tight mb-4">{t.community.title}</h2>
-          <p className="text-gray-400 text-lg max-w-2xl mb-16">{t.community.desc}</p>
+          <h2 className="text-3xl md:text-5xl font-black text-slate-900 dark:text-white tracking-tight mb-4">{t.community.title}</h2>
+          <p className="text-gray-600 dark:text-gray-400 text-lg max-w-2xl mb-16">{t.community.desc}</p>
         </FadeIn>
 
         <div className="grid md:grid-cols-3 gap-4">
@@ -976,10 +1017,10 @@ function Community({ t }: SectionProps) {
                   href={communityHrefs[i]}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="group block bg-surface-100 border border-white/5 hover:border-cyan-500/20 p-6 transition-all"
+                  className="group block bg-surface-100 border border-black/10 dark:border-white/5 hover:border-cyan-500/20 p-6 transition-all"
                 >
                   <Icon className="w-5 h-5 text-cyan-500/60 group-hover:text-cyan-400 transition-colors mb-4" />
-                  <h3 className="font-bold text-white mb-1">{item.label}</h3>
+                  <h3 className="font-bold text-slate-900 dark:text-white mb-1">{item.label}</h3>
                   <p className="text-sm text-gray-500">{item.desc}</p>
                   <div className="mt-4 text-cyan-500 text-sm font-semibold flex items-center gap-1 group-hover:gap-2 transition-all">
                     {t.community.open} <ArrowRight className="w-3.5 h-3.5" />
@@ -1044,16 +1085,16 @@ function GitHubStats({ t }: SectionProps) {
   const chartMax = Math.max(...chartData, 1)
 
   return (
-    <section className="py-28 px-6 border-t border-white/5" id="github-stats">
+    <section className="py-28 px-6 border-t border-black/10 dark:border-white/5" id="github-stats">
       <div className="max-w-6xl mx-auto">
         <FadeIn>
           <div className="text-xs font-mono text-cyan-500 uppercase tracking-widest mb-3">{gs.label}</div>
-          <h2 className="text-3xl md:text-5xl font-black text-white tracking-tight mb-4">{gs.title}</h2>
-          <p className="text-gray-400 text-lg max-w-2xl mb-16">{gs.desc}</p>
+          <h2 className="text-3xl md:text-5xl font-black text-slate-900 dark:text-white tracking-tight mb-4">{gs.title}</h2>
+          <p className="text-gray-600 dark:text-gray-400 text-lg max-w-2xl mb-16">{gs.desc}</p>
         </FadeIn>
 
         <FadeIn delay={100}>
-          <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-px bg-white/5 rounded overflow-hidden mb-8">
+          <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-px bg-black/5 dark:bg-white/5 rounded overflow-hidden mb-8">
             {[
               { icon: <Star className="w-4 h-4" />, value: formatNumber(stars), label: gs.stars },
               { icon: <GitFork className="w-4 h-4" />, value: formatNumber(forks), label: gs.forks },
@@ -1065,7 +1106,7 @@ function GitHubStats({ t }: SectionProps) {
             ].map((stat, i) => (
               <div key={i} className="bg-surface-100 p-4 text-center">
                 <div className="flex justify-center mb-1.5 text-cyan-500/50">{stat.icon}</div>
-                <div className="text-xl font-black text-white font-mono">
+                <div className="text-xl font-black text-slate-900 dark:text-white font-mono">
                   {loading ? <span className="inline-block w-10 h-5 bg-gray-700/50 rounded animate-pulse" /> : stat.value}
                 </div>
                 <div className="text-[10px] text-gray-500 uppercase tracking-widest mt-1">{stat.label}</div>
@@ -1076,9 +1117,9 @@ function GitHubStats({ t }: SectionProps) {
 
         {/* Star History Chart */}
         <FadeIn delay={200}>
-          <div className="bg-surface-100 border border-white/5 p-6 mb-8">
+          <div className="bg-surface-100 border border-black/10 dark:border-white/5 p-6 mb-8">
             <div className="flex items-center justify-between mb-4">
-              <span className="text-sm font-bold text-white">{gs.starHistory}</span>
+              <span className="text-sm font-bold text-slate-900 dark:text-white">{gs.starHistory}</span>
               <a href="https://star-history.com/#librefang/librefang" target="_blank" rel="noopener noreferrer" className="text-xs text-gray-600 hover:text-cyan-400 transition-colors">View Full</a>
             </div>
             <div className="h-36 flex items-end gap-0.5">
@@ -1101,11 +1142,11 @@ function GitHubStats({ t }: SectionProps) {
         {/* Star History & Contributors */}
         <FadeIn delay={300}>
           <div className="grid md:grid-cols-2 gap-4 mb-12">
-            <a href="https://star-history.com/#librefang/librefang&Date" target="_blank" rel="noopener noreferrer" className="block bg-surface-100 border border-white/5 hover:border-cyan-500/20 p-4 transition-all">
+            <a href="https://star-history.com/#librefang/librefang&Date" target="_blank" rel="noopener noreferrer" className="block bg-surface-100 border border-black/10 dark:border-white/5 hover:border-cyan-500/20 p-4 transition-all">
               <div className="text-xs font-mono text-gray-500 uppercase tracking-widest mb-3">{gs.starHistory}</div>
               <img src="https://api.star-history.com/svg?repos=librefang/librefang&type=Date&theme=dark" alt="Star History" className="w-full h-auto rounded" loading="lazy" />
             </a>
-            <a href="https://github.com/librefang/librefang/graphs/contributors" target="_blank" rel="noopener noreferrer" className="block bg-surface-100 border border-white/5 hover:border-cyan-500/20 p-4 transition-all">
+            <a href="https://github.com/librefang/librefang/graphs/contributors" target="_blank" rel="noopener noreferrer" className="block bg-surface-100 border border-black/10 dark:border-white/5 hover:border-cyan-500/20 p-4 transition-all">
               <div className="text-xs font-mono text-gray-500 uppercase tracking-widest mb-3">Contributors</div>
               <img src="https://contrib.rocks/image?repo=librefang/librefang&anon=0" alt="Contributors" className="w-full h-auto rounded" loading="lazy" />
             </a>
@@ -1114,11 +1155,11 @@ function GitHubStats({ t }: SectionProps) {
 
         <FadeIn delay={400}>
           <div className="flex flex-col sm:flex-row justify-center gap-3">
-            <a href="https://github.com/librefang/librefang" target="_blank" rel="noopener noreferrer" className="inline-flex items-center justify-center gap-2 px-6 py-3 border border-white/10 hover:border-cyan-500/30 hover:bg-cyan-500/10 text-white font-semibold rounded transition-all">
+            <a href="https://github.com/librefang/librefang" target="_blank" rel="noopener noreferrer" className="inline-flex items-center justify-center gap-2 px-6 py-3 border border-black/10 dark:border-white/10 hover:border-cyan-500/30 hover:bg-cyan-500/10 text-slate-900 dark:text-white font-semibold rounded transition-all">
               <Star className="w-4 h-4" />
               {gs.starUs}
             </a>
-            <a href="https://github.com/librefang/librefang/discussions" target="_blank" rel="noopener noreferrer" className="inline-flex items-center justify-center gap-2 px-6 py-3 border border-white/10 hover:border-white/20 text-gray-300 font-semibold rounded transition-all hover:bg-white/5">
+            <a href="https://github.com/librefang/librefang/discussions" target="_blank" rel="noopener noreferrer" className="inline-flex items-center justify-center gap-2 px-6 py-3 border border-black/10 dark:border-white/10 hover:border-black/20 dark:hover:border-white/20 text-gray-700 dark:text-gray-300 font-semibold rounded transition-all hover:bg-black/5 dark:hover:bg-white/5">
               <MessageSquare className="w-4 h-4" />
               {gs.discuss}
             </a>
@@ -1137,15 +1178,15 @@ function Docs({ t }: SectionProps) {
       <div className="max-w-6xl mx-auto">
         <FadeIn>
           <div className="text-xs font-mono text-cyan-500 uppercase tracking-widest mb-3">{t.docs.label}</div>
-          <h2 className="text-3xl md:text-5xl font-black text-white tracking-tight mb-4">{t.docs.title}</h2>
-          <p className="text-gray-400 text-lg max-w-2xl mb-16">{t.docs.desc}</p>
+          <h2 className="text-3xl md:text-5xl font-black text-slate-900 dark:text-white tracking-tight mb-4">{t.docs.title}</h2>
+          <p className="text-gray-600 dark:text-gray-400 text-lg max-w-2xl mb-16">{t.docs.desc}</p>
         </FadeIn>
 
         <div className="grid md:grid-cols-3 gap-4 mb-8">
           {t.docs.categories.map((cat, i) => (
             <FadeIn key={i} delay={i * 80}>
-              <div className="bg-surface-100 border border-white/5 hover:border-cyan-500/20 p-6 transition-all">
-                <h3 className="font-bold text-white mb-2">{cat.title}</h3>
+              <div className="bg-surface-100 border border-black/10 dark:border-white/5 hover:border-cyan-500/20 p-6 transition-all">
+                <h3 className="font-bold text-slate-900 dark:text-white mb-2">{cat.title}</h3>
                 <p className="text-sm text-gray-500">{cat.desc}</p>
               </div>
             </FadeIn>
@@ -1167,13 +1208,13 @@ function Docs({ t }: SectionProps) {
 // ─── Footer ───
 function Footer({ t }: SectionProps) {
   return (
-    <footer className="border-t border-white/5 py-12 px-6">
+    <footer className="border-t border-black/10 dark:border-white/5 py-12 px-6">
       <div className="max-w-6xl mx-auto flex flex-col md:flex-row items-center justify-between gap-6">
         <div className="flex items-center gap-2.5">
           <div className="w-6 h-6 rounded bg-cyan-500/10 border border-cyan-500/20 flex items-center justify-center">
             <Terminal className="w-3 h-3 text-cyan-400" />
           </div>
-          <span className="text-sm font-semibold text-gray-400">LibreFang</span>
+          <span className="text-sm font-semibold text-gray-600 dark:text-gray-400">LibreFang</span>
           <span className="text-xs text-gray-600 font-mono">Agent OS</span>
         </div>
         <div className="flex items-center gap-6 text-xs text-gray-600 font-medium">
@@ -1208,7 +1249,7 @@ function BackToTop() {
   return (
     <button
       onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
-      className="fixed bottom-6 right-6 z-40 p-3 bg-surface-200 border border-white/10 hover:border-cyan-500/30 hover:bg-cyan-500/10 text-gray-400 hover:text-cyan-400 transition-all rounded"
+      className="fixed bottom-6 right-6 z-40 p-3 bg-surface-200 border border-black/10 dark:border-white/10 hover:border-cyan-500/30 hover:bg-cyan-500/10 text-gray-600 dark:text-gray-400 hover:text-cyan-400 transition-all rounded"
       aria-label="Back to top"
     >
       <ArrowRight className="w-4 h-4 -rotate-90" />
@@ -1248,7 +1289,10 @@ export default function App() {
   }, [lang, t])
 
   return (
-    <div className="min-h-screen">
+    <main className="min-h-screen">
+      <a href="#architecture" className="sr-only focus:not-sr-only focus:absolute focus:top-4 focus:left-4 focus:z-[60] focus:px-4 focus:py-2 focus:bg-cyan-500 focus:text-surface focus:font-bold focus:rounded">
+        Skip to content
+      </a>
       <Nav t={t} lang={lang} onSwitchLang={switchLang} />
       <Hero t={t} registry={registry} />
       <div className="glow-line" />
@@ -1266,6 +1310,6 @@ export default function App() {
       <Community t={t} />
       <Footer t={t} />
       <BackToTop />
-    </div>
+    </main>
   )
 }

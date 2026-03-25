@@ -18,10 +18,10 @@ export default {
           500: '#f59e0b',
         },
         surface: {
-          DEFAULT: '#070b14',
-          100: '#0c1222',
-          200: '#111827',
-          300: '#1a2235',
+          DEFAULT: 'var(--bg-surface)',
+          100: 'var(--bg-surface-100)',
+          200: 'var(--bg-surface-200)',
+          300: 'var(--bg-surface-300)',
         },
       },
       fontFamily: {
