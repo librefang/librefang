@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { motion } from 'framer-motion'
+import { motion, AnimatePresence } from 'framer-motion'
 import {
   Terminal, Cpu, Shield, Zap, Network, ChevronRight, ChevronDown, ExternalLink,
   Copy, Check, Menu, X, Box, Layers, Radio, Eye,
@@ -14,6 +14,8 @@ import type { Translation } from './i18n'
 import { useRegistry, getLocalizedDesc } from './useRegistry'
 import { useAppStore } from './store'
 import { cn } from './lib/utils'
+import DeployPage from './pages/DeployPage'
+import ChangelogPage from './pages/ChangelogPage'
 
 
 // ─── Language detection ───
@@ -826,10 +828,10 @@ function Downloads(_props: SectionProps) {
         {isLoading ? (
           <div className="text-gray-400 dark:text-gray-600 text-center py-12">Loading releases...</div>
         ) : (
-          <div className="grid md:grid-cols-2 gap-6 mb-8">
+          <div className="grid md:grid-cols-3 gap-6 mb-6">
             {categories.map((cat) => (
               <FadeIn key={cat.label}>
-                <div className="bg-surface-100 border border-black/10 dark:border-white/5 p-6 hover:-translate-y-0.5 transition-transform">
+                <div className="bg-surface-100 border border-black/10 dark:border-white/5 p-6 hover:-translate-y-0.5 transition-transform h-full">
                   <div className="flex items-center gap-3 mb-4">
                     <cat.icon className="w-5 h-5 text-cyan-600 dark:text-cyan-500" />
                     <div>
@@ -839,11 +841,7 @@ function Downloads(_props: SectionProps) {
                   </div>
                   <div className="space-y-1.5">
                     {cat.assets.map((a) => (
-                      <a
-                        key={a.name}
-                        href={a.url}
-                        className="flex items-center justify-between px-3 py-2 hover:bg-surface-200 transition-colors group"
-                      >
+                      <a key={a.name} href={a.url} className="flex items-center justify-between px-3 py-2 hover:bg-surface-200 transition-colors group">
                         <span className="text-sm text-gray-700 dark:text-gray-300 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors">{a.name}</span>
                         <span className="text-xs text-gray-400 dark:text-gray-600 font-mono">{a.size}</span>
                       </a>
@@ -852,32 +850,68 @@ function Downloads(_props: SectionProps) {
                 </div>
               </FadeIn>
             ))}
+            {/* Deploy - 3rd column */}
+            <FadeIn>
+              <div className="bg-surface-100 border border-black/10 dark:border-white/5 p-6 hover:-translate-y-0.5 transition-transform h-full">
+                <div className="flex items-center gap-3 mb-4">
+                  <Globe className="w-5 h-5 text-cyan-600 dark:text-cyan-500" />
+                  <div>
+                    <h3 className="text-base font-bold text-slate-900 dark:text-white">{l('onlineDeply')}</h3>
+                    <span className="text-xs text-gray-500">deploy.librefang.ai</span>
+                  </div>
+                </div>
+                <div className="space-y-1.5">
+                  {[
+                    { name: 'Fly.io', url: '/deploy?platform=flyio', icon: Zap, external: false },
+                    { name: 'Railway', url: 'https://railway.com/deploy/Bb7HnN', icon: ArrowRight, external: true },
+                    { name: 'Render', url: 'https://dashboard.render.com/blueprint/new?repo=https://github.com/librefang/librefang', icon: Layers, external: true },
+                    { name: 'GCP', url: 'https://github.com/librefang/librefang/tree/main/deploy/gcp', icon: Network, external: true },
+                    { name: 'Docker', url: 'https://github.com/librefang/librefang/blob/main/deploy/docker-compose.yml', icon: Box, external: true },
+                  ].map((p) => (
+                    <a key={p.name} href={p.url} target={p.external ? '_blank' : undefined} rel={p.external ? 'noopener noreferrer' : undefined} className="flex items-center gap-3 px-3 py-2 hover:bg-surface-200 transition-colors group">
+                      <p.icon className="w-4 h-4 text-gray-400 dark:text-gray-600 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors shrink-0" />
+                      <span className="text-sm text-gray-700 dark:text-gray-300 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors">{p.name}</span>
+                    </a>
+                  ))}
+                </div>
+              </div>
+            </FadeIn>
           </div>
+
         )}
 
-        {/* SDK, Deploy, All Releases */}
-        <FadeIn delay={200}>
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-            <a href="https://deploy.librefang.ai/" target="_blank" rel="noopener noreferrer" className="flex items-center gap-3 bg-surface-100 border border-black/10 dark:border-white/5 hover:border-cyan-500/20 px-5 py-4 transition-all group">
-              <Globe className="w-5 h-5 text-cyan-500/60 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 shrink-0" />
-              <div>
-                <div className="text-sm font-bold text-slate-900 dark:text-white">{l('onlineDeply')}</div>
-                <div className="text-xs text-gray-500">deploy.librefang.ai</div>
+        {/* SDK + All Releases */}
+        <FadeIn>
+          <div className="grid md:grid-cols-2 gap-6 mb-6">
+            <div className="bg-surface-100 border border-black/10 dark:border-white/5 p-5">
+              <div className="flex items-center gap-3 mb-4">
+                <Box className="w-5 h-5 text-cyan-600 dark:text-cyan-500" />
+                <h3 className="text-base font-bold text-slate-900 dark:text-white">{l('sdk')}</h3>
               </div>
-            </a>
-            <a href="https://github.com/librefang/librefang/releases" target="_blank" rel="noopener noreferrer" className="flex items-center gap-3 bg-surface-100 border border-black/10 dark:border-white/5 hover:border-cyan-500/20 px-5 py-4 transition-all group">
-              <Github className="w-5 h-5 text-cyan-500/60 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 shrink-0" />
-              <div>
-                <div className="text-sm font-bold text-slate-900 dark:text-white">{l('allReleases')}</div>
-                <div className="text-xs text-gray-500">GitHub Releases</div>
+              <div className="grid grid-cols-2 gap-3">
+                {[
+                  { cmd: 'pip install librefang', copy: 'pip install librefang', label: 'Python' },
+                  { cmd: 'npm i @librefang/sdk', copy: 'npm i @librefang/sdk', label: 'Node.js' },
+                  { cmd: 'cargo add librefang', copy: 'cargo add librefang', label: 'Rust' },
+                  { cmd: 'go get librefang/sdk', copy: 'go get github.com/librefang/librefang/sdk/go', label: 'Go' },
+                ].map((pkg) => (
+                  <button key={pkg.label} className="bg-surface-200 px-3 py-2.5 text-left hover:bg-surface-300 transition-colors relative group" onClick={(e) => {
+                    navigator.clipboard.writeText(pkg.copy)
+                    const el = e.currentTarget.querySelector('.copy-tip') as HTMLElement
+                    if (el) { el.classList.remove('opacity-0'); setTimeout(() => el.classList.add('opacity-0'), 1500) }
+                  }}>
+                    <div className="text-xs text-gray-500 mb-1">{pkg.label}</div>
+                    <code className="text-[11px] text-gray-700 dark:text-gray-300 font-mono">{pkg.cmd}</code>
+                    <Copy className="absolute top-2 right-2 w-3 h-3 text-gray-400 dark:text-gray-600 opacity-0 group-hover:opacity-100 transition-opacity" />
+                    <span className="copy-tip absolute top-1 right-1 text-[9px] text-cyan-600 dark:text-cyan-400 opacity-0 transition-opacity">Copied!</span>
+                  </button>
+                ))}
               </div>
-            </a>
-            <a href="https://docs.librefang.ai/sdk" target="_blank" rel="noopener noreferrer" className="flex items-center gap-3 bg-surface-100 border border-black/10 dark:border-white/5 hover:border-cyan-500/20 px-5 py-4 transition-all group">
-              <Box className="w-5 h-5 text-cyan-500/60 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 shrink-0" />
-              <div>
-                <div className="text-sm font-bold text-slate-900 dark:text-white">{l('sdk')}</div>
-                <div className="text-xs text-gray-500">Python / Node.js / Rust</div>
-              </div>
+            </div>
+            <a href="https://github.com/librefang/librefang/releases" target="_blank" rel="noopener noreferrer" className="flex flex-col items-center justify-center bg-surface-100 border border-black/10 dark:border-white/5 hover:border-cyan-500/20 p-6 transition-all group">
+              <Github className="w-8 h-8 text-gray-400 dark:text-gray-600 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors mb-3" />
+              <span className="text-sm font-semibold text-gray-700 dark:text-gray-300 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors">{l('allReleases')}</span>
+              <span className="text-xs text-gray-500 mt-1">{version}</span>
             </a>
           </div>
         </FadeIn>
@@ -928,30 +962,49 @@ function Install({ t }: SectionProps) {
               </button>
             </div>
             <div className="p-6 font-mono text-sm md:text-base space-y-4">
-              <div className="flex gap-3">
-                <span className="text-cyan-600 dark:text-cyan-500 select-none">$</span>
-                <span className="text-gray-800 dark:text-gray-200">curl -fsSL https://librefang.sh/install | sh</span>
-              </div>
-              <div className="flex gap-3">
-                <span className="text-cyan-600 dark:text-cyan-500 select-none">$</span>
-                <span className="text-gray-800 dark:text-gray-200">librefang init</span>
-              </div>
-              <div className="flex gap-3">
-                <span className="text-cyan-600 dark:text-cyan-500 select-none">$</span>
-                <span className="text-gray-800 dark:text-gray-200">librefang start</span>
-              </div>
+              {os === 'windows' ? (
+                <>
+                  <div className="flex gap-3">
+                    <span className="text-cyan-600 dark:text-cyan-500 select-none">&gt;</span>
+                    <span className="text-gray-800 dark:text-gray-200">irm https://librefang.sh/install.ps1 | iex</span>
+                  </div>
+                  <div className="flex gap-3">
+                    <span className="text-cyan-600 dark:text-cyan-500 select-none">&gt;</span>
+                    <span className="text-gray-800 dark:text-gray-200">librefang init</span>
+                  </div>
+                  <div className="flex gap-3">
+                    <span className="text-cyan-600 dark:text-cyan-500 select-none">&gt;</span>
+                    <span className="text-gray-800 dark:text-gray-200">librefang start</span>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="flex gap-3">
+                    <span className="text-cyan-600 dark:text-cyan-500 select-none">$</span>
+                    <span className="text-gray-800 dark:text-gray-200">curl -fsSL https://librefang.sh/install | sh</span>
+                  </div>
+                  <div className="flex gap-3">
+                    <span className="text-cyan-600 dark:text-cyan-500 select-none">$</span>
+                    <span className="text-gray-800 dark:text-gray-200">librefang init</span>
+                  </div>
+                  <div className="flex gap-3">
+                    <span className="text-cyan-600 dark:text-cyan-500 select-none">$</span>
+                    <span className="text-gray-800 dark:text-gray-200">librefang start</span>
+                  </div>
+                </>
+              )}
               <div className="text-gray-600 text-xs mt-2">
                 <span className="text-amber-500/60">#</span> {t.install.comment}
               </div>
               <div className="flex gap-2 mt-3 pt-3 border-t border-black/10 dark:border-white/5">
                 {(['mac', 'windows', 'linux'] as const).map(p => (
-                  <span key={p} className={cn(
-                    'text-[10px] font-mono px-2 py-0.5 rounded',
-                    os === p ? 'bg-cyan-500/20 text-cyan-600 dark:text-cyan-400' : 'text-gray-600'
+                  <button key={p} onClick={() => setOs(p)} className={cn(
+                    'text-[10px] font-mono px-2 py-0.5 rounded transition-colors',
+                    os === p ? 'bg-cyan-500/20 text-cyan-600 dark:text-cyan-400' : 'text-gray-600 hover:text-gray-400'
                   )}>
                     {p === 'mac' ? 'macOS' : p === 'windows' ? 'Windows' : 'Linux'}
                     {os === p && ' \u2713'}
-                  </span>
+                  </button>
                 ))}
               </div>
             </div>
@@ -1006,18 +1059,22 @@ function FAQ({ t }: SectionProps) {
                   <span className="font-semibold text-slate-900 dark:text-white text-sm pr-4">{item.q}</span>
                   <ChevronRight className={cn('w-4 h-4 text-gray-300 dark:text-gray-600 transition-transform shrink-0', openIndex === i && 'rotate-90 text-cyan-600 dark:text-cyan-500')} />
                 </button>
-                {openIndex === i && (
-                  <motion.div
-                    initial={{ height: 0, opacity: 0 }}
-                    animate={{ height: 'auto', opacity: 1 }}
-                    transition={{ duration: 0.3, ease: 'easeOut' }}
-                    className="overflow-hidden"
-                  >
-                    <div className="px-6 pb-5 text-sm text-gray-500 dark:text-gray-400 leading-relaxed border-t border-black/10 dark:border-white/5 pt-4">
-                      {item.a}
-                    </div>
-                  </motion.div>
-                )}
+                <AnimatePresence>
+                  {openIndex === i && (
+                    <motion.div
+                      key={`faq-${i}`}
+                      initial={{ height: 0, opacity: 0 }}
+                      animate={{ height: 'auto', opacity: 1 }}
+                      exit={{ height: 0, opacity: 0 }}
+                      transition={{ duration: 0.25, ease: 'easeInOut' }}
+                      className="overflow-hidden"
+                    >
+                      <div className="px-6 pb-5 text-sm text-gray-500 dark:text-gray-400 leading-relaxed border-t border-black/10 dark:border-white/5 pt-4">
+                        {item.a}
+                      </div>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
               </div>
             </FadeIn>
           ))}
@@ -1032,7 +1089,7 @@ const communityHrefs: string[] = [
   'https://github.com/librefang/librefang/pulls',
   'https://github.com/librefang/librefang/issues',
   'https://github.com/librefang/librefang/discussions',
-  'https://discord.gg/librefang',
+  'https://discord.gg/DzTYqAZZmc',
 ]
 const communityIcons: LucideIcon[] = [GitPullRequest, CircleDot, MessageSquare, MessageSquare]
 
@@ -1055,11 +1112,11 @@ function Community({ t }: SectionProps) {
                   href={communityHrefs[i]}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="group block bg-surface-100 border border-black/10 dark:border-white/5 hover:border-cyan-500/20 p-6 transition-all hover:-translate-y-1"
+                  className="group flex flex-col bg-surface-100 border border-black/10 dark:border-white/5 hover:border-cyan-500/20 p-6 transition-all hover:-translate-y-1 h-full"
                 >
                   <Icon className="w-5 h-5 text-cyan-500/60 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors mb-4" />
                   <h3 className="font-bold text-slate-900 dark:text-white mb-1">{item.label}</h3>
-                  <p className="text-sm text-gray-500">{item.desc}</p>
+                  <p className="text-sm text-gray-500 line-clamp-1">{item.desc}</p>
                   <div className="mt-4 text-cyan-600 dark:text-cyan-500 text-sm font-semibold flex items-center gap-1 group-hover:gap-2 transition-all">
                     {t.community.open} <ArrowRight className="w-3.5 h-3.5" />
                   </div>
@@ -1153,38 +1210,30 @@ function GitHubStats({ t }: SectionProps) {
           </div>
         </FadeIn>
 
-        {/* Star History Chart */}
+        {/* Star History + Contributors - side by side */}
         <FadeIn delay={200}>
-          <div className="bg-surface-100 border border-black/10 dark:border-white/5 p-6 mb-8">
-            <div className="flex items-center justify-between mb-4">
-              <span className="text-sm font-bold text-slate-900 dark:text-white">{gs.starHistory}</span>
-              <a href="https://star-history.com/#librefang/librefang" target="_blank" rel="noopener noreferrer" className="text-xs text-gray-400 dark:text-gray-600 hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors">View Full</a>
-            </div>
-            <div className="h-36 flex items-end gap-0.5">
-              {starHistory.length >= 3 ? (
-                Array.from({ length: Math.min(30, chartData.length) }, (_, i) => {
-                  const idx = Math.floor((i / Math.min(30, chartData.length)) * chartData.length)
-                  const value = chartData[idx] || 0
-                  return <div key={i} className="flex-1 bg-cyan-500/30 hover:bg-cyan-500 transition-colors rounded-t min-w-0.5" style={{ height: `${Math.max(4, (value / chartMax) * 100)}%` }} />
-                })
-              ) : (
-                <div className="w-full h-full flex flex-col items-center justify-center text-gray-500">
-                  <span className="text-3xl font-black text-cyan-600 dark:text-cyan-400 font-mono">{stars}</span>
-                  <span className="text-xs mt-1">{gs.stars}</span>
-                </div>
-              )}
-            </div>
-          </div>
-        </FadeIn>
-
-        {/* Star History & Contributors */}
-        <FadeIn delay={300}>
           <div className="grid md:grid-cols-2 gap-4 mb-12">
-            <a href="https://star-history.com/#librefang/librefang&Date" target="_blank" rel="noopener noreferrer" className="block bg-surface-100 border border-black/10 dark:border-white/5 hover:border-cyan-500/20 p-4 transition-all">
-              <div className="text-xs font-mono text-gray-500 uppercase tracking-widest mb-3">{gs.starHistory}</div>
-              <img src="https://api.star-history.com/svg?repos=librefang/librefang&type=Date&theme=dark" alt="Star History" className="w-full h-auto rounded" loading="lazy" />
-            </a>
-            <a href="https://github.com/librefang/librefang/graphs/contributors" target="_blank" rel="noopener noreferrer" className="block bg-surface-100 border border-black/10 dark:border-white/5 hover:border-cyan-500/20 p-4 transition-all">
+            <div className="bg-surface-100 border border-black/10 dark:border-white/5 p-5">
+              <div className="flex items-center justify-between mb-4">
+                <span className="text-sm font-bold text-slate-900 dark:text-white">{gs.starHistory}</span>
+                <a href="https://star-history.com/#librefang/librefang" target="_blank" rel="noopener noreferrer" className="text-xs text-gray-400 dark:text-gray-600 hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors">View Full</a>
+              </div>
+              <div className="h-32 flex items-end gap-0.5">
+                {starHistory.length >= 3 ? (
+                  Array.from({ length: Math.min(30, chartData.length) }, (_, i) => {
+                    const idx = Math.floor((i / Math.min(30, chartData.length)) * chartData.length)
+                    const value = chartData[idx] || 0
+                    return <div key={i} className="flex-1 bg-cyan-500/30 hover:bg-cyan-500 transition-colors rounded-t min-w-0.5" style={{ height: `${Math.max(4, (value / chartMax) * 100)}%` }} />
+                  })
+                ) : (
+                  <div className="w-full h-full flex flex-col items-center justify-center text-gray-500">
+                    <span className="text-3xl font-black text-cyan-600 dark:text-cyan-400 font-mono">{stars}</span>
+                    <span className="text-xs mt-1">{gs.stars}</span>
+                  </div>
+                )}
+              </div>
+            </div>
+            <a href="https://github.com/librefang/librefang/graphs/contributors" target="_blank" rel="noopener noreferrer" className="block bg-surface-100 border border-black/10 dark:border-white/5 hover:border-cyan-500/20 p-5 transition-all">
               <div className="text-xs font-mono text-gray-500 uppercase tracking-widest mb-3">Contributors</div>
               <img src="https://contrib.rocks/image?repo=librefang/librefang&anon=0" alt="Contributors" className="w-full h-auto rounded" loading="lazy" />
             </a>
@@ -1297,6 +1346,8 @@ function BackToTop() {
 export default function App() {
   const lang = useAppStore((s) => s.lang)
   const switchLang = useAppStore((s) => s.switchLang)
+  const [isDeployPage] = useState(() => window.location.pathname.startsWith('/deploy'))
+  const [isChangelogPage] = useState(() => window.location.pathname.startsWith('/changelog'))
 
   useEffect(() => {
     document.documentElement.lang = lang
@@ -1313,6 +1364,14 @@ export default function App() {
 
   // Update meta tags on language change
   useEffect(() => {
+    if (isDeployPage) {
+      document.title = 'Deploy LibreFang'
+      return
+    }
+    if (isChangelogPage) {
+      document.title = 'Changelog | LibreFang'
+      return
+    }
     if (t.meta) {
       document.title = t.meta.title
       const descMeta = document.querySelector('meta[name="description"]')
@@ -1322,7 +1381,15 @@ export default function App() {
       const ogDesc = document.querySelector('meta[property="og:description"]')
       if (ogDesc) ogDesc.setAttribute('content', t.meta.description)
     }
-  }, [lang, t])
+  }, [lang, t, isDeployPage, isChangelogPage])
+
+  if (isDeployPage) {
+    return <DeployPage />
+  }
+
+  if (isChangelogPage) {
+    return <ChangelogPage />
+  }
 
   return (
     <main className="min-h-screen">

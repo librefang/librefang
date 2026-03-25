@@ -158,6 +158,10 @@ function handleFetch(request, env) {
     return handleRegistry(env, cors, forceRefresh)
   }
 
+  if (path === '/api/releases' && request.method === 'GET') {
+    return handleReleases(env, cors)
+  }
+
   return new Response('Not Found', { status: 404 })
 }
 
@@ -276,6 +280,54 @@ async function handleGitHubStats(env, cors, forceRefresh = false) {
     return new Response(JSON.stringify({ error: e.message }), {
       status: 500,
       headers: { 'Content-Type': 'application/json', ...cors }
+    })
+  }
+}
+
+// ─── Releases proxy with KV cache (30 min) ───
+async function handleReleases(env, cors) {
+  const cacheKey = 'releases_data'
+  const cacheTimeKey = 'releases_data_time'
+  const cacheDuration = 1000 * 60 * 30
+
+  try {
+    const [cached, cacheTime] = await Promise.all([
+      env.KV.get(cacheKey),
+      env.KV.get(cacheTimeKey),
+    ])
+    if (cached && cacheTime && (Date.now() - parseInt(cacheTime, 10) < cacheDuration)) {
+      return new Response(cached, {
+        headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=300', ...cors }
+      })
+    }
+
+    const headers = {
+      'Accept': 'application/vnd.github.v3+json',
+      'User-Agent': 'LibrefangStats/1.0',
+    }
+    if (env.GITHUB_TOKEN) headers['Authorization'] = `token ${env.GITHUB_TOKEN}`
+
+    const res = await fetch('https://api.github.com/repos/librefang/librefang/releases?per_page=20', { headers })
+    if (!res.ok) throw new Error(`GitHub API returned ${res.status}`)
+
+    const json = await res.text()
+    await Promise.all([
+      env.KV.put(cacheKey, json),
+      env.KV.put(cacheTimeKey, String(Date.now())),
+    ])
+
+    return new Response(json, {
+      headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=300', ...cors }
+    })
+  } catch (e) {
+    const stale = await env.KV.get(cacheKey)
+    if (stale) {
+      return new Response(stale, {
+        headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=60', ...cors }
+      })
+    }
+    return new Response(JSON.stringify({ error: e.message }), {
+      status: 500, headers: { 'Content-Type': 'application/json', ...cors }
     })
   }
 }
