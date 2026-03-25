@@ -388,4 +388,17 @@ pub trait KernelHandle: Send + Sync {
     ) -> Result<(), String> {
         Ok(())
     }
+
+    /// Store a value in the goals-specific shared memory namespace.
+    /// This uses a dedicated agent ID separate from general shared memory.
+    fn goals_store(&self, key: &str, value: serde_json::Value) -> Result<(), String> {
+        // Default: delegate to general shared memory (override in kernel for correctness)
+        self.memory_store(key, value)
+    }
+
+    /// Recall a value from the goals-specific shared memory namespace.
+    fn goals_recall(&self, key: &str) -> Result<Option<serde_json::Value>, String> {
+        // Default: delegate to general shared memory (override in kernel for correctness)
+        self.memory_recall(key)
+    }
 }

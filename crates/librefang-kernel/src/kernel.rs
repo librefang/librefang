@@ -370,6 +370,8 @@ pub struct LibreFangKernel {
     /// Cache for workspace context, identity files, and skill metadata to avoid
     /// redundant filesystem I/O and registry scans on every message.
     prompt_metadata_cache: PromptMetadataCache,
+    /// Cached goals list with TTL (30 s) to avoid full JSON scans on every message.
+    goals_cache: std::sync::Mutex<Option<(std::time::Instant, Vec<serde_json::Value>)>>,
     /// Lazy-loading driver cache — avoids recreating HTTP clients for the same
     /// provider/key/url combination on every agent message.
     driver_cache: librefang_runtime::drivers::DriverCache,
@@ -1867,6 +1869,7 @@ impl LibreFangKernel {
             self_handle: OnceLock::new(),
             provider_unconfigured_logged: std::sync::atomic::AtomicBool::new(false),
             prompt_metadata_cache: PromptMetadataCache::new(),
+            goals_cache: std::sync::Mutex::new(None),
             driver_cache: librefang_runtime::drivers::DriverCache::new(),
         };
 
@@ -2617,6 +2620,7 @@ system_prompt = "You are a helpful assistant."
                         .format("%A, %B %d, %Y (%Y-%m-%d %H:%M %Z)")
                         .to_string(),
                 ),
+                active_goals: self.load_active_goals_for_agent(agent_id),
             };
             manifest.model.system_prompt =
                 librefang_runtime::prompt_builder::build_system_prompt(&prompt_ctx);
@@ -3137,6 +3141,7 @@ system_prompt = "You are a helpful assistant."
                         .format("%A, %B %d, %Y (%Y-%m-%d %H:%M %Z)")
                         .to_string(),
                 ),
+                active_goals: self.load_active_goals_for_agent(agent_id),
             };
             manifest.model.system_prompt =
                 librefang_runtime::prompt_builder::build_system_prompt(&prompt_ctx);
@@ -4050,6 +4055,7 @@ system_prompt = "You are a helpful assistant."
                         .format("%A, %B %d, %Y (%Y-%m-%d %H:%M %Z)")
                         .to_string(),
                 ),
+                active_goals: self.load_active_goals_for_agent(agent_id),
             };
             manifest.model.system_prompt =
                 librefang_runtime::prompt_builder::build_system_prompt(&prompt_ctx);
@@ -7880,6 +7886,125 @@ system_prompt = "You are a helpful assistant."
         Some(engine)
     }
 
+    /// Deterministic UUID v5 for the goals shared-memory namespace.
+    fn goals_agent_id() -> AgentId {
+        AgentId(uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_OID,
+            b"librefang-goals",
+        ))
+    }
+
+    /// Load active goals assigned to a specific agent from the goals store.
+    ///
+    /// Returns a flat list of `ActiveGoal` structs with children nested.
+    /// Only goals with status "pending" or "in_progress" are included.
+    ///
+    /// Uses a short-lived cache (30 s) to avoid full JSON scans on every message.
+    fn load_active_goals_for_agent(
+        &self,
+        agent_id: AgentId,
+    ) -> Vec<librefang_runtime::prompt_builder::ActiveGoal> {
+        // --- Cached goal loading with 30s TTL ---
+        let all_goals: Vec<serde_json::Value> = {
+            let mut cache = self.goals_cache.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some((ts, ref cached)) = *cache {
+                if ts.elapsed() < std::time::Duration::from_secs(30) {
+                    cached.clone()
+                } else {
+                    // Expired — reload
+                    let loaded = self.load_goals_from_storage();
+                    *cache = Some((std::time::Instant::now(), loaded.clone()));
+                    loaded
+                }
+            } else {
+                let loaded = self.load_goals_from_storage();
+                *cache = Some((std::time::Instant::now(), loaded.clone()));
+                loaded
+            }
+        };
+
+        if all_goals.is_empty() {
+            return vec![];
+        }
+
+        let agent_id_str = agent_id.to_string();
+
+        // Filter to goals assigned to this agent with active statuses
+        let active: Vec<&serde_json::Value> = all_goals
+            .iter()
+            .filter(|g| {
+                let assigned = g["agent_id"].as_str() == Some(&agent_id_str);
+                let status = g["status"].as_str().unwrap_or("pending");
+                assigned && (status == "pending" || status == "in_progress")
+            })
+            .collect();
+
+        if active.is_empty() {
+            return vec![];
+        }
+
+        // Build ActiveGoal structs — collect children for each goal
+        let active_ids: std::collections::HashSet<String> = active
+            .iter()
+            .filter_map(|g| g["id"].as_str().map(|s| s.to_string()))
+            .collect();
+
+        // Also include active children (any status) whose parent is in our active set
+        let children_of_active: Vec<&serde_json::Value> = all_goals
+            .iter()
+            .filter(|g| {
+                if let Some(pid) = g["parent_id"].as_str() {
+                    active_ids.contains(pid) && !active_ids.contains(g["id"].as_str().unwrap_or(""))
+                } else {
+                    false
+                }
+            })
+            .collect();
+
+        fn to_active_goal(
+            g: &serde_json::Value,
+            children: &[&serde_json::Value],
+        ) -> librefang_runtime::prompt_builder::ActiveGoal {
+            let id = g["id"].as_str().unwrap_or("").to_string();
+            let child_goals: Vec<librefang_runtime::prompt_builder::ActiveGoal> = children
+                .iter()
+                .filter(|c| c["parent_id"].as_str() == Some(&id))
+                .map(|c| librefang_runtime::prompt_builder::ActiveGoal {
+                    id: c["id"].as_str().unwrap_or("").to_string(),
+                    title: c["title"].as_str().unwrap_or("").to_string(),
+                    description: c["description"].as_str().unwrap_or("").to_string(),
+                    status: c["status"].as_str().unwrap_or("pending").to_string(),
+                    progress: c["progress"].as_u64().unwrap_or(0) as u8,
+                    children: vec![],
+                })
+                .collect();
+            librefang_runtime::prompt_builder::ActiveGoal {
+                id,
+                title: g["title"].as_str().unwrap_or("").to_string(),
+                description: g["description"].as_str().unwrap_or("").to_string(),
+                status: g["status"].as_str().unwrap_or("pending").to_string(),
+                progress: g["progress"].as_u64().unwrap_or(0) as u8,
+                children: child_goals,
+            }
+        }
+
+        active
+            .iter()
+            .map(|g| to_active_goal(g, &children_of_active))
+            .collect()
+    }
+
+    /// Raw load from structured storage — used by the cache.
+    fn load_goals_from_storage(&self) -> Vec<serde_json::Value> {
+        match self
+            .memory
+            .structured_get(Self::goals_agent_id(), "__librefang_goals")
+        {
+            Ok(Some(serde_json::Value::Array(arr))) => arr,
+            _ => vec![],
+        }
+    }
+
     /// Get cached workspace metadata (workspace context + identity files) for
     /// an agent's workspace, rebuilding if the cache entry has expired.
     ///
@@ -8520,6 +8645,24 @@ impl KernelHandle for LibreFangKernel {
         self.memory
             .list_keys(agent_id)
             .map_err(|e| format!("Memory list failed: {e}"))
+    }
+
+    fn goals_store(&self, key: &str, value: serde_json::Value) -> Result<(), String> {
+        let agent_id = Self::goals_agent_id();
+        // Invalidate goals cache on write
+        if let Ok(mut cache) = self.goals_cache.lock() {
+            *cache = None;
+        }
+        self.memory
+            .structured_set(agent_id, key, value)
+            .map_err(|e| format!("Goals store failed: {e}"))
+    }
+
+    fn goals_recall(&self, key: &str) -> Result<Option<serde_json::Value>, String> {
+        let agent_id = Self::goals_agent_id();
+        self.memory
+            .structured_get(agent_id, key)
+            .map_err(|e| format!("Goals recall failed: {e}"))
     }
 
     fn find_agents(&self, query: &str) -> Vec<kernel_handle::AgentInfo> {

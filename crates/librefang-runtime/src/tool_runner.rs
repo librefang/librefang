@@ -474,6 +474,9 @@ pub async fn execute_tool(
         // Canvas / A2UI tool
         "canvas_present" => tool_canvas_present(input, workspace_root).await,
 
+        // Goal tracking tool
+        "goal_update" => tool_goal_update(input, kernel).await,
+
         other => {
             // Fallback 1: MCP tools (mcp_{server}_{tool} prefix)
             if mcp::is_mcp_tool(other) {
@@ -1347,6 +1350,20 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                 "required": ["html"]
             }),
         },
+        // --- Goal tracking ---
+        ToolDefinition {
+            name: "goal_update".to_string(),
+            description: "Update the status and/or progress of an assigned goal. Use this to report progress on your active goals.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "goal_id": { "type": "string", "description": "The UUID of the goal to update" },
+                    "status": { "type": "string", "enum": ["pending", "in_progress", "completed", "cancelled"], "description": "New status for the goal (optional)" },
+                    "progress": { "type": "integer", "minimum": 0, "maximum": 100, "description": "New progress percentage 0-100 (optional)" }
+                },
+                "required": ["goal_id"]
+            }),
+        },
     ]
 }
 
@@ -1845,6 +1862,81 @@ fn tool_memory_list(kernel: Option<&Arc<dyn KernelHandle>>) -> Result<String, St
         return Ok("No entries found in shared memory.".to_string());
     }
     Ok(serde_json::to_string_pretty(&keys).unwrap_or_else(|_| format!("{:?}", keys)))
+}
+
+// ---------------------------------------------------------------------------
+// Goal tracking tools
+// ---------------------------------------------------------------------------
+
+/// The well-known shared-memory key for goals storage (mirrors goals.rs).
+const GOALS_KEY: &str = "__librefang_goals";
+
+/// Update goal status and/or progress via the kernel's shared memory.
+async fn tool_goal_update(
+    input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+) -> Result<String, String> {
+    let kh = require_kernel(kernel)?;
+    let goal_id = input["goal_id"]
+        .as_str()
+        .ok_or("Missing 'goal_id' parameter")?;
+    let new_status = input["status"].as_str();
+    let new_progress = input["progress"].as_u64();
+
+    if new_status.is_none() && new_progress.is_none() {
+        return Err("Must provide at least one of 'status' or 'progress'".to_string());
+    }
+
+    if let Some(status) = new_status {
+        if !["pending", "in_progress", "completed", "cancelled"].contains(&status) {
+            return Err(format!(
+                "Invalid status '{status}'. Must be: pending, in_progress, completed, or cancelled"
+            ));
+        }
+    }
+    if let Some(progress) = new_progress {
+        if progress > 100 {
+            return Err("Progress must be 0-100".to_string());
+        }
+    }
+
+    // Load current goals from goals-specific shared memory
+    let mut goals: Vec<serde_json::Value> = match kh.goals_recall(GOALS_KEY)? {
+        Some(serde_json::Value::Array(arr)) => arr,
+        _ => return Err(format!("Goal '{goal_id}' not found (no goals exist)")),
+    };
+
+    // Find and update the goal
+    let mut found = false;
+    for g in goals.iter_mut() {
+        if g["id"].as_str() == Some(goal_id) {
+            found = true;
+            if let Some(status) = new_status {
+                g["status"] = serde_json::Value::String(status.to_string());
+            }
+            if let Some(progress) = new_progress {
+                g["progress"] = serde_json::json!(progress);
+            }
+            g["updated_at"] = serde_json::Value::String(chrono::Utc::now().to_rfc3339());
+            break;
+        }
+    }
+
+    if !found {
+        return Err(format!("Goal '{goal_id}' not found"));
+    }
+
+    // Write back to goals-specific shared memory
+    kh.goals_store(GOALS_KEY, serde_json::Value::Array(goals))?;
+
+    let mut parts = vec![format!("Goal '{goal_id}' updated:")];
+    if let Some(s) = new_status {
+        parts.push(format!("status={s}"));
+    }
+    if let Some(p) = new_progress {
+        parts.push(format!("progress={p}%"));
+    }
+    Ok(parts.join(" "))
 }
 
 // ---------------------------------------------------------------------------

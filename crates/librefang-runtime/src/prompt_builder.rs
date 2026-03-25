@@ -59,6 +59,25 @@ pub struct PromptContext {
     pub peer_agents: Vec<(String, String, String)>,
     /// Current date/time string for temporal awareness.
     pub current_date: Option<String>,
+    /// Active goals assigned to this agent (rendered into system prompt).
+    pub active_goals: Vec<ActiveGoal>,
+}
+
+/// Lightweight goal representation for prompt injection.
+#[derive(Debug, Clone, Default)]
+pub struct ActiveGoal {
+    /// Goal ID (UUID string).
+    pub id: String,
+    /// Short title.
+    pub title: String,
+    /// Longer description.
+    pub description: String,
+    /// Status: pending, in_progress, completed, cancelled.
+    pub status: String,
+    /// Progress percentage (0-100).
+    pub progress: u8,
+    /// Direct children of this goal.
+    pub children: Vec<ActiveGoal>,
 }
 
 /// Build the complete system prompt from a `PromptContext`.
@@ -138,6 +157,11 @@ pub fn build_system_prompt(ctx: &PromptContext) -> String {
                 ));
             }
         }
+    }
+
+    // Section 7.7 — Active Goals (skip for subagents)
+    if !ctx.is_subagent && !ctx.active_goals.is_empty() {
+        sections.push(build_goals_section(&ctx.active_goals));
     }
 
     // Section 8 — User Personalization (skip for subagents)
@@ -488,6 +512,40 @@ fn build_peer_agents_section(self_name: &str, peers: &[(String, String, String)]
          Delegate tasks to specialized agents when appropriate.",
     );
     out
+}
+
+/// Build the "Active Goals" section for the system prompt.
+fn build_goals_section(goals: &[ActiveGoal]) -> String {
+    let mut out = String::from(
+        "## Active Goals\n\
+         You have been assigned the following goals. Work toward completing them.\n\
+         Use the `goal_update` tool to update status and progress as you make progress.\n\n",
+    );
+    for goal in goals {
+        render_goal(&mut out, goal, 0);
+    }
+    out
+}
+
+/// Recursively render a goal tree with indentation.
+fn render_goal(out: &mut String, goal: &ActiveGoal, depth: usize) {
+    let indent = "  ".repeat(depth);
+    let status_tag = match goal.status.as_str() {
+        "in_progress" => "In Progress",
+        "completed" => "Completed",
+        "cancelled" => "Cancelled",
+        _ => "Pending",
+    };
+    out.push_str(&format!(
+        "{indent}- [{status_tag}] {} (id: {}, progress: {}%)\n",
+        goal.title, goal.id, goal.progress,
+    ));
+    if !goal.description.is_empty() {
+        out.push_str(&format!("{indent}  {}\n", goal.description));
+    }
+    for child in &goal.children {
+        render_goal(out, child, depth + 1);
+    }
 }
 
 /// Static safety section.

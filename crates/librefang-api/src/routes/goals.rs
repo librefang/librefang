@@ -33,12 +33,12 @@ use std::sync::Arc;
 /// The well-known shared-memory key for goals storage.
 const GOALS_KEY: &str = "__librefang_goals";
 
-/// Shared agent ID for goals KV storage.
+/// Shared agent ID for goals KV storage (deterministic UUID v5).
 fn goals_shared_agent_id() -> AgentId {
-    AgentId(uuid::Uuid::from_bytes([
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x01,
-    ]))
+    AgentId(uuid::Uuid::new_v5(
+        &uuid::Uuid::NAMESPACE_OID,
+        b"librefang-goals",
+    ))
 }
 
 /// GET /api/goals — List all goals.
