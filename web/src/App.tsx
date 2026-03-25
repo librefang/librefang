@@ -865,13 +865,13 @@ function Downloads(_props: SectionProps) {
             </div>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
               {[
-                { cmd: 'pip install librefang', label: 'Python' },
-                { cmd: 'npm i @librefang/sdk', label: 'Node.js' },
-                { cmd: 'cargo add librefang', label: 'Rust' },
-                { cmd: 'go get librefang/sdk', label: 'Go' },
+                { cmd: 'pip install librefang', copy: 'pip install librefang', label: 'Python' },
+                { cmd: 'npm i @librefang/sdk', copy: 'npm i @librefang/sdk', label: 'Node.js' },
+                { cmd: 'cargo add librefang', copy: 'cargo add librefang', label: 'Rust' },
+                { cmd: 'go get librefang/sdk', copy: 'go get github.com/librefang/librefang/sdk/go', label: 'Go' },
               ].map((pkg) => (
                 <button key={pkg.label} className="bg-surface-200 px-3 py-2.5 text-left hover:bg-surface-300 transition-colors relative group" onClick={(e) => {
-                  navigator.clipboard.writeText(pkg.cmd)
+                  navigator.clipboard.writeText(pkg.copy)
                   const el = e.currentTarget.querySelector('.copy-tip') as HTMLElement
                   if (el) { el.classList.remove('opacity-0'); setTimeout(() => el.classList.add('opacity-0'), 1500) }
                 }}>
