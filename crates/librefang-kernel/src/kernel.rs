@@ -2777,7 +2777,7 @@ system_prompt = "You are a helpful assistant."
             input_tokens: result.total_usage.input_tokens,
             output_tokens: result.total_usage.output_tokens,
             cost_usd: cost,
-            tool_calls: result.iterations.saturating_sub(1),
+            tool_calls: result.decision_traces.len() as u32,
             latency_ms,
         };
         if let Err(e) = self.metering.check_all_and_record(
@@ -2891,7 +2891,7 @@ system_prompt = "You are a helpful assistant."
                 // Record token usage for quota tracking
                 self.scheduler.record_usage(agent_id, &result.total_usage);
                 // Record tool calls for rate limiting
-                let tool_count = result.iterations.saturating_sub(1);
+                let tool_count = result.decision_traces.len() as u32;
                 self.scheduler.record_tool_calls(agent_id, tool_count);
 
                 // Update last active time
@@ -3438,7 +3438,7 @@ system_prompt = "You are a helpful assistant."
                         .scheduler
                         .record_usage(agent_id, &result.total_usage);
                     // Record tool calls for rate limiting
-                    let tool_count = result.iterations.saturating_sub(1);
+                    let tool_count = result.decision_traces.len() as u32;
                     kernel_clone
                         .scheduler
                         .record_tool_calls(agent_id, tool_count);
@@ -3461,7 +3461,7 @@ system_prompt = "You are a helpful assistant."
                         input_tokens: result.total_usage.input_tokens,
                         output_tokens: result.total_usage.output_tokens,
                         cost_usd: cost,
-                        tool_calls: result.iterations.saturating_sub(1),
+                        tool_calls: result.decision_traces.len() as u32,
                         latency_ms,
                     };
                     if let Err(e) = kernel_clone.metering.check_all_and_record(
@@ -4415,7 +4415,7 @@ system_prompt = "You are a helpful assistant."
             input_tokens: result.total_usage.input_tokens,
             output_tokens: result.total_usage.output_tokens,
             cost_usd: cost,
-            tool_calls: result.iterations.saturating_sub(1),
+            tool_calls: result.decision_traces.len() as u32,
             latency_ms,
         };
         if let Err(e) = self.metering.check_all_and_record(
