@@ -73,8 +73,8 @@ pub enum McpTransport {
 
 /// Dynamic rmcp client type (type-erased for heterogeneous storage).
 type DynRmcpClient = rmcp::service::RunningService<
-    rmcp::model::RoleClient,
-    Box<dyn rmcp::service::DynService<rmcp::model::RoleClient>>,
+    rmcp::service::RoleClient,
+    Box<dyn rmcp::service::DynService<rmcp::service::RoleClient>>,
 >;
 
 /// An active connection to an MCP server.
@@ -215,13 +215,8 @@ impl McpConnection {
                 // Tools already discovered during connect (rmcp handles this)
                 for tool in tools {
                     let description = tool.description.as_deref().unwrap_or("");
-                    let input_schema = tool
-                        .input_schema
-                        .as_ref()
-                        .map(|s| {
-                            serde_json::to_value(s).unwrap_or(serde_json::json!({"type": "object"}))
-                        })
-                        .unwrap_or(serde_json::json!({"type": "object"}));
+                    let input_schema =
+                        serde_json::Value::Object(tool.input_schema.as_ref().clone());
                     conn.register_tool(&tool.name, description, input_schema);
                 }
             }
@@ -310,8 +305,6 @@ impl McpConnection {
                         }
                     }
                 }
-
-                cmd
             }),
         )
         .map_err(|e| format!("Failed to spawn MCP server '{resolved_command}': {e}"))?;
@@ -590,8 +583,8 @@ impl McpConnection {
                 let texts: Vec<String> = result
                     .content
                     .iter()
-                    .filter_map(|item| match item {
-                        rmcp::model::Content::Text(text) => Some(text.text.clone()),
+                    .filter_map(|item| match &item.raw {
+                        rmcp::model::RawContent::Text(text) => Some(text.text.clone()),
                         _ => None,
                     })
                     .collect();
