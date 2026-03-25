@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Changelog | LibreFang</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;900&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    body { font-family: 'Inter', system-ui, sans-serif; background: #070b14; color: #e2e8f0; margin: 0; padding: 0; -webkit-font-smoothing: antialiased; }
+    .container { max-width: 720px; margin: 0 auto; padding: 4rem 1.5rem; }
+    a { color: #22d3ee; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .back { display: inline-block; margin-bottom: 2rem; color: #22d3ee; font-size: 0.875rem; font-weight: 600; }
+    h1 { font-size: 2.5rem; font-weight: 900; color: #fff; margin-bottom: 0.5rem; }
+    .subtitle { color: #6b7280; font-size: 0.875rem; margin-bottom: 3rem; }
+
+    /* Loading state */
+    .loading { color: #6b7280; font-size: 0.9375rem; padding: 2rem 0; }
+    .loading-dot { display: inline-block; animation: pulse 1.4s infinite ease-in-out; }
+    .loading-dot:nth-child(2) { animation-delay: 0.2s; }
+    .loading-dot:nth-child(3) { animation-delay: 0.4s; }
+    @keyframes pulse { 0%, 80%, 100% { opacity: 0.3; } 40% { opacity: 1; } }
+
+    /* Error state */
+    .error { color: #f87171; font-size: 0.9375rem; padding: 2rem 0; }
+
+    /* Release card */
+    .release { border-bottom: 1px solid rgba(255, 255, 255, 0.05); padding: 2rem 0; }
+    .release:last-child { border-bottom: none; }
+    .release-header { display: flex; align-items: baseline; gap: 0.75rem; flex-wrap: wrap; margin-bottom: 1rem; }
+    .release-tag { font-size: 1.25rem; font-weight: 700; color: #22d3ee; font-family: 'JetBrains Mono', monospace; }
+    .release-date { font-size: 0.8125rem; color: #6b7280; }
+    .release-link { font-size: 0.8125rem; color: #6b7280; margin-left: auto; }
+    .release-link:hover { color: #22d3ee; }
+    .release-name { font-size: 1rem; font-weight: 600; color: #cbd5e1; margin-bottom: 0.75rem; }
+
+    /* Markdown body */
+    .release-body { color: #94a3b8; line-height: 1.8; font-size: 0.9375rem; }
+    .release-body h1 { font-size: 1.5rem; font-weight: 700; color: #fff; margin-top: 1.5rem; margin-bottom: 0.5rem; }
+    .release-body h2 { font-size: 1.25rem; font-weight: 700; color: #fff; margin-top: 1.5rem; margin-bottom: 0.5rem; }
+    .release-body h3 { font-size: 1.1rem; font-weight: 600; color: #e2e8f0; margin-top: 1.25rem; margin-bottom: 0.5rem; }
+    .release-body p { margin: 0.5rem 0; }
+    .release-body ul, .release-body ol { padding-left: 1.25rem; margin: 0.5rem 0; }
+    .release-body li { margin-bottom: 0.35rem; }
+    .release-body strong { color: #e2e8f0; font-weight: 600; }
+    .release-body code { font-family: 'JetBrains Mono', monospace; font-size: 0.85em; background: rgba(255, 255, 255, 0.06); padding: 0.15em 0.4em; border-radius: 4px; }
+    .release-body pre { background: rgba(255, 255, 255, 0.06); border-radius: 8px; padding: 1rem 1.25rem; overflow-x: auto; margin: 0.75rem 0; }
+    .release-body pre code { background: none; padding: 0; font-size: 0.85rem; line-height: 1.6; }
+    .release-body a { color: #22d3ee; }
+    .release-body a:hover { text-decoration: underline; }
+    .release-body blockquote { border-left: 3px solid rgba(255, 255, 255, 0.1); margin: 0.75rem 0; padding-left: 1rem; color: #6b7280; }
+    .release-body hr { border: none; border-top: 1px solid rgba(255, 255, 255, 0.05); margin: 1.5rem 0; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <a href="/" class="back">&larr; Back to Home</a>
+    <h1>Changelog</h1>
+    <p class="subtitle">Release history from GitHub</p>
+
+    <div id="releases">
+      <div class="loading">
+        Loading releases<span class="loading-dot">.</span><span class="loading-dot">.</span><span class="loading-dot">.</span>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // Simple markdown-to-HTML converter
+    function renderMarkdown(md) {
+      if (!md) return '';
+
+      var html = md;
+
+      // Normalize line endings
+      html = html.replace(/\r\n/g, '\n');
+
+      // Fenced code blocks (```lang ... ```)
+      html = html.replace(/```(\w*)\n([\s\S]*?)```/g, function(_, lang, code) {
+        var escaped = code.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        return '<pre><code>' + escaped + '</code></pre>';
+      });
+
+      // Horizontal rules
+      html = html.replace(/^---+$/gm, '<hr>');
+
+      // Headers (must come before bold since # lines shouldn't be treated as paragraphs)
+      html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>');
+      html = html.replace(/^## (.+)$/gm, '<h2>$1</h2>');
+      html = html.replace(/^# (.+)$/gm, '<h1>$1</h1>');
+
+      // Bold and italic
+      html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+      html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
+
+      // Inline code (but not inside <pre> blocks)
+      html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+
+      // Links
+      html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+
+      // Blockquotes
+      html = html.replace(/^> (.+)$/gm, '<blockquote>$1</blockquote>');
+
+      // Unordered lists: collect consecutive lines starting with - or *
+      html = html.replace(/((?:^[*-] .+\n?)+)/gm, function(block) {
+        var items = block.trim().split('\n').map(function(line) {
+          return '<li>' + line.replace(/^[*-] /, '') + '</li>';
+        }).join('\n');
+        return '<ul>' + items + '</ul>\n';
+      });
+
+      // Wrap remaining plain-text lines in <p> tags
+      // Split by double newlines for paragraph separation
+      var parts = html.split(/\n\n+/);
+      html = parts.map(function(part) {
+        var trimmed = part.trim();
+        if (!trimmed) return '';
+        // Don't wrap block-level elements
+        if (/^<(h[1-6]|ul|ol|pre|blockquote|hr|li|div)/.test(trimmed)) return trimmed;
+        // Don't wrap if it already looks like it's fully wrapped
+        if (/^<[a-z]/.test(trimmed) && /<\/[a-z]+>$/.test(trimmed)) return trimmed;
+        return '<p>' + trimmed.replace(/\n/g, '<br>') + '</p>';
+      }).join('\n');
+
+      return html;
+    }
+
+    function formatDate(dateString) {
+      var d = new Date(dateString);
+      return d.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+    }
+
+    function renderReleases(releases) {
+      var container = document.getElementById('releases');
+
+      if (!releases || releases.length === 0) {
+        container.innerHTML = '<p class="loading">No releases found.</p>';
+        return;
+      }
+
+      var html = '';
+      for (var i = 0; i < releases.length; i++) {
+        var r = releases[i];
+        var tag = r.tag_name || '';
+        var date = r.published_at ? formatDate(r.published_at) : '';
+        var name = r.name || '';
+        var body = renderMarkdown(r.body || '');
+        var url = r.html_url || '';
+
+        html += '<div class="release">';
+        html += '<div class="release-header">';
+        html += '<span class="release-tag">' + tag + '</span>';
+        html += '<span class="release-date">' + date + '</span>';
+        if (url) {
+          html += '<a href="' + url + '" target="_blank" rel="noopener noreferrer" class="release-link">View on GitHub &rarr;</a>';
+        }
+        html += '</div>';
+        if (name && name !== tag) {
+          html += '<div class="release-name">' + name + '</div>';
+        }
+        if (body) {
+          html += '<div class="release-body">' + body + '</div>';
+        }
+        html += '</div>';
+      }
+
+      container.innerHTML = html;
+    }
+
+    function fetchReleases() {
+      fetch('https://api.github.com/repos/librefang/librefang/releases?per_page=20')
+        .then(function(res) {
+          if (!res.ok) throw new Error('GitHub API returned ' + res.status);
+          return res.json();
+        })
+        .then(function(data) {
+          renderReleases(data);
+        })
+        .catch(function(err) {
+          document.getElementById('releases').innerHTML =
+            '<div class="error">Failed to load releases: ' + err.message + '</div>';
+        });
+    }
+
+    fetchReleases();
+  </script>
+</body>
+</html>
