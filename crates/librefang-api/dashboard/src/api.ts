@@ -749,7 +749,7 @@ export async function generateImage(req: { prompt: string; provider?: string; mo
 export async function synthesizeSpeech(req: { text: string; provider?: string; model?: string; voice?: string; format?: string }): Promise<Blob> {
   const resp = await fetch("/api/media/speech", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeader() },
     body: JSON.stringify(req),
   });
   if (!resp.ok) throw new Error(`TTS failed: ${resp.status}`);
@@ -767,7 +767,7 @@ export async function pollVideo(taskId: string): Promise<MediaVideoStatus> {
 export async function generateMusic(req: { prompt?: string; lyrics?: string; provider?: string; model?: string; instrumental?: boolean }): Promise<Blob> {
   const resp = await fetch("/api/media/music", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeader() },
     body: JSON.stringify(req),
   });
   if (!resp.ok) throw new Error(`Music generation failed: ${resp.status}`);
