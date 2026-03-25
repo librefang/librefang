@@ -865,15 +865,15 @@ function Downloads(_props: SectionProps) {
             </div>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
               {[
-                { name: 'pip install librefang', label: 'Python' },
-                { name: 'npm i @librefang/sdk', label: 'Node.js' },
-                { name: 'cargo install librefang', label: 'Rust' },
-                { name: 'go get .../librefang/sdk/go', label: 'Go' },
+                { cmd: 'pip install librefang', label: 'Python' },
+                { cmd: 'npm i @librefang/sdk', label: 'Node.js' },
+                { cmd: 'cargo add librefang', label: 'Rust' },
+                { cmd: 'go get librefang/sdk', label: 'Go' },
               ].map((pkg) => (
-                <div key={pkg.label} className="bg-surface-200 px-3 py-2.5 overflow-hidden">
+                <button key={pkg.label} className="bg-surface-200 px-3 py-2.5 text-left hover:bg-surface-300 transition-colors" onClick={() => navigator.clipboard.writeText(pkg.cmd)}>
                   <div className="text-xs text-gray-500 mb-1">{pkg.label}</div>
-                  <code className="text-[11px] text-gray-700 dark:text-gray-300 font-mono break-all leading-relaxed">{pkg.name}</code>
-                </div>
+                  <code className="text-[11px] text-gray-700 dark:text-gray-300 font-mono">{pkg.cmd}</code>
+                </button>
               ))}
             </div>
           </div>
