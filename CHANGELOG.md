@@ -11,11 +11,19 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
 - TUI multi-select provider menu in deploy script (#1618) (@houko)
 - Add publish links to SDK release job summary (#1623) (@houko)
+- Limit-the-degrees-of-freedom-of-agent_spawn (#1624) (@aimlyo)
 
 ### Fixed
 
 - Read from /dev/tty in deploy script for curl-pipe compatibility (#1616) (@houko)
+- TUI arrow key navigation crashes due to set -e (#1620) (@houko)
 - Add -- to grep patterns in release workflows (#1622) (@houko)
+- Use isolated test dir for model_catalog tests (#1627) (@houko)
+- Resolve DMG asset name mismatch in Homebrew Cask sync (#1628) (@houko)
+
+### Maintenance
+
+- Stop marking beta/rc as GitHub prerelease (#1626) (@houko)
 
 
 ## [2026.3.24] - 2026-03-24
