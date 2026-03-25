@@ -8,9 +8,10 @@
 use axum::extract::rejection::JsonRejection;
 use axum::extract::FromRequest;
 use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::de::DeserializeOwned;
+
+use crate::types::ApiErrorResponse;
 
 /// Maximum allowed request body size (1 MB).
 ///
@@ -29,19 +30,25 @@ pub const MAX_JSON_DEPTH: usize = 20;
 // ── Error type ──────────────────────────────────────────────────────
 
 /// A validation error returned as a consistent JSON body.
+///
+/// This is a thin wrapper around [`ApiErrorResponse`] that always includes
+/// `code: "validation_error"` for backward compatibility.
 #[derive(Debug)]
 pub struct ValidationError {
     pub status: StatusCode,
     pub message: String,
 }
 
-impl IntoResponse for ValidationError {
-    fn into_response(self) -> Response {
-        let body = serde_json::json!({
-            "error": self.message,
-            "type": "validation_error",
-        });
-        (self.status, Json(body)).into_response()
+impl axum::response::IntoResponse for ValidationError {
+    fn into_response(self) -> axum::response::Response {
+        ApiErrorResponse {
+            error: self.message,
+            code: Some("validation_error".to_string()),
+            r#type: Some("validation_error".to_string()),
+            details: None,
+            status: self.status,
+        }
+        .into_response()
     }
 }
 
