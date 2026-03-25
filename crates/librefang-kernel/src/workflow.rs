@@ -15,7 +15,7 @@ use librefang_types::agent::AgentId;
 use librefang_types::subagent::SubagentContext;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
@@ -217,20 +217,108 @@ pub struct StepResult {
 }
 
 /// The workflow engine — manages definitions and executes pipeline runs.
+#[derive(Clone)]
 pub struct WorkflowEngine {
     /// Registered workflow definitions.
     workflows: Arc<RwLock<HashMap<WorkflowId, Workflow>>>,
     /// Active and completed workflow runs.
     runs: Arc<RwLock<HashMap<WorkflowRunId, WorkflowRun>>>,
+    /// Optional path to persist completed/failed runs (`~/.librefang/workflow_runs.json`).
+    persist_path: Option<PathBuf>,
 }
 
 impl WorkflowEngine {
-    /// Create a new workflow engine.
+    /// Create a new workflow engine (no persistence).
     pub fn new() -> Self {
         Self {
             workflows: Arc::new(RwLock::new(HashMap::new())),
             runs: Arc::new(RwLock::new(HashMap::new())),
+            persist_path: None,
         }
+    }
+
+    /// Create a new workflow engine with run persistence.
+    ///
+    /// Completed and failed runs are persisted to `<home_dir>/workflow_runs.json`.
+    pub fn new_with_persistence(home_dir: &Path) -> Self {
+        Self {
+            workflows: Arc::new(RwLock::new(HashMap::new())),
+            runs: Arc::new(RwLock::new(HashMap::new())),
+            persist_path: Some(home_dir.join("workflow_runs.json")),
+        }
+    }
+
+    // -- Run Persistence ------------------------------------------------------
+
+    /// Load persisted runs from disk into memory.
+    ///
+    /// Returns the number of runs loaded. If the file does not exist,
+    /// returns `Ok(0)` without error.
+    pub fn load_runs(&self) -> Result<usize, String> {
+        let path = match &self.persist_path {
+            Some(p) => p,
+            None => return Ok(0),
+        };
+        if !path.exists() {
+            return Ok(0);
+        }
+        let data = std::fs::read_to_string(path)
+            .map_err(|e| format!("Failed to read workflow runs: {e}"))?;
+        let runs: Vec<WorkflowRun> = serde_json::from_str(&data)
+            .map_err(|e| format!("Failed to parse workflow runs: {e}"))?;
+        let count = runs.len();
+        let mut map = self.runs.blocking_write();
+        for run in runs {
+            map.insert(run.id, run);
+        }
+        debug!(count, "Loaded persisted workflow runs from disk");
+        Ok(count)
+    }
+
+    /// Persist completed/failed runs to disk via atomic write.
+    fn persist_runs(&self) {
+        let path = match &self.persist_path {
+            Some(p) => p,
+            None => return,
+        };
+        // Acquire a blocking read — called from async context after state update.
+        let runs = self.runs.blocking_read();
+        let terminal: Vec<&WorkflowRun> = runs
+            .values()
+            .filter(|r| {
+                matches!(
+                    r.state,
+                    WorkflowRunState::Completed | WorkflowRunState::Failed
+                )
+            })
+            .collect();
+        let data = match serde_json::to_string_pretty(&terminal) {
+            Ok(d) => d,
+            Err(e) => {
+                warn!("Failed to serialize workflow runs: {e}");
+                return;
+            }
+        };
+        drop(runs);
+        let tmp_path = path.with_extension("json.tmp");
+        if let Err(e) = std::fs::write(&tmp_path, data.as_bytes()) {
+            warn!("Failed to write workflow runs temp file: {e}");
+            return;
+        }
+        if let Err(e) = std::fs::rename(&tmp_path, path) {
+            warn!("Failed to rename workflow runs file: {e}");
+            return;
+        }
+        debug!("Persisted workflow runs to disk");
+    }
+
+    /// Async wrapper for `persist_runs` — delegates to a blocking task.
+    async fn persist_runs_async(&self) {
+        if self.persist_path.is_none() {
+            return;
+        }
+        let engine = self.clone();
+        let _ = tokio::task::spawn_blocking(move || engine.persist_runs()).await;
     }
 
     /// Register a new workflow definition.
@@ -723,12 +811,34 @@ impl WorkflowEngine {
         // Check if any step has non-empty depends_on — if so, use DAG execution
         let has_dag_deps = workflow.steps.iter().any(|s| !s.depends_on.is_empty());
         if has_dag_deps {
-            return self
+            let result = self
                 .execute_run_dag(run_id, &workflow, &input, &agent_resolver, &send_message)
                 .await;
+            self.persist_runs_async().await;
+            return result;
         }
 
-        let mut current_input = input;
+        let result = self
+            .execute_run_sequential(run_id, &workflow, &input, &agent_resolver, &send_message)
+            .await;
+        self.persist_runs_async().await;
+        result
+    }
+
+    /// Sequential workflow execution (extracted for persistence wrapping).
+    async fn execute_run_sequential<F, Fut>(
+        &self,
+        run_id: WorkflowRunId,
+        workflow: &Workflow,
+        input: &str,
+        agent_resolver: &(impl Fn(&StepAgent) -> Option<(AgentId, String, bool)>),
+        send_message: &F,
+    ) -> Result<String, String>
+    where
+        F: Fn(AgentId, String) -> Fut + Sync,
+        Fut: std::future::Future<Output = Result<(String, u64, u64), String>> + Send,
+    {
+        let mut current_input = input.to_string();
         let mut all_outputs: Vec<String> = Vec::new();
         let mut variables: HashMap<String, String> = HashMap::new();
         let mut i = 0;
@@ -3246,5 +3356,132 @@ id = "{id}"
         assert!(matches!(run.state, WorkflowRunState::Failed));
         // A failed, B was never attempted
         assert_eq!(run.step_results.len(), 0);
+    }
+
+    // -- Persistence tests ---------------------------------------------------
+
+    /// Helper: build a WorkflowRun in a terminal state for persistence tests.
+    fn make_terminal_run(state: WorkflowRunState) -> WorkflowRun {
+        WorkflowRun {
+            id: WorkflowRunId::new(),
+            workflow_id: WorkflowId::new(),
+            workflow_name: "persist-test".to_string(),
+            input: "hello".to_string(),
+            state,
+            step_results: vec![StepResult {
+                step_name: "step-1".to_string(),
+                agent_id: "agent-abc".to_string(),
+                agent_name: "test-agent".to_string(),
+                output: "done".to_string(),
+                input_tokens: 10,
+                output_tokens: 20,
+                duration_ms: 100,
+            }],
+            output: Some("final output".to_string()),
+            error: None,
+            started_at: Utc::now(),
+            completed_at: Some(Utc::now()),
+        }
+    }
+
+    #[test]
+    fn test_persist_and_load_runs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run_completed = make_terminal_run(WorkflowRunState::Completed);
+        let run_failed = {
+            let mut r = make_terminal_run(WorkflowRunState::Failed);
+            r.error = Some("something went wrong".to_string());
+            r.output = None;
+            r
+        };
+        let completed_id = run_completed.id;
+        let failed_id = run_failed.id;
+
+        // Persist runs from one engine instance.
+        {
+            let engine = WorkflowEngine::new_with_persistence(tmp.path());
+            {
+                let mut runs = engine.runs.blocking_write();
+                runs.insert(run_completed.id, run_completed);
+                runs.insert(run_failed.id, run_failed);
+            }
+            engine.persist_runs();
+        }
+
+        // Load into a fresh engine and verify.
+        {
+            let engine = WorkflowEngine::new_with_persistence(tmp.path());
+            let count = engine.load_runs().unwrap();
+            assert_eq!(count, 2);
+
+            let runs = engine.runs.blocking_read();
+            let c = runs.get(&completed_id).expect("completed run missing");
+            assert!(matches!(c.state, WorkflowRunState::Completed));
+            assert_eq!(c.workflow_name, "persist-test");
+            assert_eq!(c.output.as_deref(), Some("final output"));
+            assert_eq!(c.step_results.len(), 1);
+            assert_eq!(c.step_results[0].step_name, "step-1");
+
+            let f = runs.get(&failed_id).expect("failed run missing");
+            assert!(matches!(f.state, WorkflowRunState::Failed));
+            assert_eq!(f.error.as_deref(), Some("something went wrong"));
+        }
+    }
+
+    #[test]
+    fn test_persist_skips_running_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let completed = make_terminal_run(WorkflowRunState::Completed);
+        let completed_id = completed.id;
+        let running = WorkflowRun {
+            id: WorkflowRunId::new(),
+            workflow_id: WorkflowId::new(),
+            workflow_name: "in-progress".to_string(),
+            input: "data".to_string(),
+            state: WorkflowRunState::Running,
+            step_results: vec![],
+            output: None,
+            error: None,
+            started_at: Utc::now(),
+            completed_at: None,
+        };
+        let running_id = running.id;
+
+        // Persist — should only write the completed run, not the running one.
+        {
+            let engine = WorkflowEngine::new_with_persistence(tmp.path());
+            {
+                let mut runs = engine.runs.blocking_write();
+                runs.insert(completed.id, completed);
+                runs.insert(running.id, running);
+            }
+            engine.persist_runs();
+        }
+
+        // Load and verify only 1 run came back.
+        {
+            let engine = WorkflowEngine::new_with_persistence(tmp.path());
+            let count = engine.load_runs().unwrap();
+            assert_eq!(count, 1);
+
+            let runs = engine.runs.blocking_read();
+            assert!(runs.contains_key(&completed_id));
+            assert!(!runs.contains_key(&running_id));
+        }
+    }
+
+    #[test]
+    fn test_load_runs_no_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let engine = WorkflowEngine::new_with_persistence(tmp.path());
+        let count = engine.load_runs().unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn test_load_runs_no_persistence_path() {
+        let engine = WorkflowEngine::new();
+        let count = engine.load_runs().unwrap();
+        assert_eq!(count, 0);
     }
 }
