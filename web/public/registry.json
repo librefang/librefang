@@ -1,0 +1,1577 @@
+{
+  "hands": [
+    {
+      "id": "analytics",
+      "name": "Analytics Hand",
+      "description": "Autonomous data analytics agent — data collection, analysis, visualization, dashboards, and automated reporting",
+      "category": "data",
+      "icon": "📈",
+      "i18n": {
+        "zh": {
+          "description": "自主数据分析——数据采集、分析、可视化、仪表盘与自动报告"
+        },
+        "zh-TW": {
+          "description": "自主資料分析——資料採集、分析、視覺化、儀表板與自動報告"
+        },
+        "ja": {
+          "description": "自律型データ分析エージェント——データ収集、分析、可視化、ダッシュボードと自動レポート"
+        },
+        "es": {
+          "description": "Agente autónomo de análisis de datos — recopilación, análisis, visualización, dashboards e informes automatizados"
+        },
+        "fr": {
+          "description": "Agent autonome d'analyse de données — collecte, analyse, visualisation, tableaux de bord et rapports automatisés"
+        },
+        "de": {
+          "description": "Autonomer Datenanalyse-Agent — Datenerfassung, Analyse, Visualisierung, Dashboards und automatisierte Berichte"
+        },
+        "ko": {
+          "description": "자율 데이터 분석 에이전트 — 데이터 수집, 분석, 시각화, 대시보드 및 자동 보고"
+        }
+      }
+    },
+    {
+      "id": "apitester",
+      "name": "API Tester Hand",
+      "description": "Autonomous API testing agent — endpoint discovery, request validation, load testing, and regression detection",
+      "category": "development",
+      "icon": "🔌",
+      "i18n": {
+        "zh": {
+          "description": "自主 API 测试——端点发现、请求验证、压力测试与回归检测"
+        },
+        "zh-TW": {
+          "description": "自主 API 測試——端點發現、請求驗證、壓力測試與回歸偵測"
+        },
+        "ja": {
+          "description": "自律型APIテストエージェント——エンドポイント発見、リクエスト検証、負荷テスト、回帰検出"
+        },
+        "es": {
+          "description": "Agente autónomo de pruebas API — descubrimiento de endpoints, validación de solicitudes, pruebas de carga y detección de regresiones"
+        },
+        "fr": {
+          "description": "Agent autonome de test d'API — découverte de points de terminaison, validation de requêtes, tests de charge et détection de régression"
+        },
+        "de": {
+          "description": "Autonomer API-Test-Agent — Endpoint-Erkennung, Request-Validierung, Lasttests und Regressionserkennung"
+        },
+        "ko": {
+          "description": "자율 API 테스트 에이전트 — 엔드포인트 발견, 요청 검증, 부하 테스트, 회귀 감지"
+        }
+      }
+    },
+    {
+      "id": "browser",
+      "name": "Browser Hand",
+      "description": "Autonomous web browser — navigates sites, fills forms, clicks buttons, and completes multi-step web tasks with user approval for purchases",
+      "category": "productivity",
+      "icon": "🌐",
+      "tags": [
+        "popular"
+      ],
+      "i18n": {
+        "zh-TW": {
+          "description": "自主瀏覽器——導航網站、填寫表單、點擊按鈕，購買需用戶審批"
+        }
+      }
+    },
+    {
+      "id": "clip",
+      "name": "Clip Hand",
+      "description": "Turns long-form video into viral short clips with captions and thumbnails",
+      "category": "content",
+      "icon": "\\U0001F3AC",
+      "tags": [
+        "popular"
+      ],
+      "i18n": {
+        "zh-TW": {
+          "description": "將長影片自動轉為帶字幕和封面的直式短影音"
+        }
+      }
+    },
+    {
+      "id": "collector",
+      "name": "Collector Hand",
+      "description": "Autonomous intelligence collector — monitors any target continuously with change detection and knowledge graphs",
+      "category": "data",
+      "icon": "🔍",
+      "tags": [
+        "popular"
+      ],
+      "i18n": {
+        "zh-TW": {
+          "description": "自主情報收集器——持續監控目標，變化偵測與知識圖譜"
+        }
+      }
+    },
+    {
+      "id": "creator",
+      "name": "Creator Hand",
+      "description": "AI media studio — generates images, videos, music, and speech from text prompts",
+      "category": "content",
+      "icon": "\\U0001F3A8",
+      "i18n": {
+        "zh": {
+          "description": "AI 媒体工作室——根据文本提示生成图片、视频、音乐和语音"
+        },
+        "zh-TW": {
+          "description": "AI 媒體工作室——根據文字提示生成圖片、影片、音樂和語音"
+        },
+        "ja": {
+          "description": "AIメディアスタジオ——テキストから画像、動画、音楽、音声を生成"
+        },
+        "ko": {
+          "description": "AI 미디어 스튜디오 — 텍스트 프롬프트로 이미지, 비디오, 음악, 음성 생성"
+        },
+        "es": {
+          "description": "Estudio de medios IA — genera imágenes, videos, música y voz a partir de texto"
+        },
+        "fr": {
+          "description": "Studio m\\u00e9dia IA — g\\u00e9n\\u00e8re images, vid\\u00e9os, musique et voix \\u00e0 partir de texte"
+        },
+        "de": {
+          "description": "AI-Medienstudio — erzeugt Bilder, Videos, Musik und Sprache aus Textprompts"
+        }
+      }
+    },
+    {
+      "id": "devops",
+      "name": "DevOps Hand",
+      "description": "Autonomous DevOps engineer — CI/CD management, infrastructure monitoring, deployment automation, and incident response",
+      "category": "development",
+      "icon": "👷",
+      "i18n": {
+        "zh": {
+          "description": "自主 DevOps 工程师——CI/CD 管理、基础设施监控、部署自动化与事件响应"
+        },
+        "zh-TW": {
+          "description": "自主 DevOps 工程師——CI/CD 管理、基礎設施監控、部署自動化與事件回應"
+        },
+        "ja": {
+          "description": "自律型DevOpsエンジニア——CI/CD管理、インフラ監視、デプロイ自動化、インシデント対応"
+        },
+        "es": {
+          "description": "Ingeniero DevOps autónomo — gestión CI/CD, monitoreo de infraestructura, automatización de despliegue y respuesta a incidentes"
+        },
+        "fr": {
+          "description": "Ingénieur DevOps autonome — gestion CI/CD, surveillance d'infrastructure, automatisation des déploiements et réponse aux incidents"
+        },
+        "de": {
+          "description": "Autonomer DevOps-Ingenieur — CI/CD-Management, Infrastrukturüberwachung, Deployment-Automatisierung und Incident Response"
+        },
+        "ko": {
+          "description": "자율 DevOps 엔지니어 — CI/CD 관리, 인프라 모니터링, 배포 자동화, 인시던트 대응"
+        }
+      }
+    },
+    {
+      "id": "lead",
+      "name": "Lead Hand",
+      "description": "Autonomous lead generation — discovers, enriches, and delivers qualified leads on a schedule",
+      "category": "data",
+      "icon": "📊",
+      "tags": [
+        "popular"
+      ],
+      "i18n": {
+        "zh-TW": {
+          "description": "自主獲客——按排程發現、充實並交付合格線索"
+        }
+      }
+    },
+    {
+      "id": "linkedin",
+      "name": "LinkedIn Hand",
+      "description": "Autonomous LinkedIn manager — profile optimization, content creation, networking, and professional engagement",
+      "category": "communication",
+      "icon": "\\U0001F4BC",
+      "i18n": {
+        "zh": {
+          "description": "自主 LinkedIn 管理——个人资料优化、内容创作、社交与职业互动"
+        },
+        "zh-TW": {
+          "description": "自主 LinkedIn 管理——個人資料優化、內容創作、社交與職業互動"
+        },
+        "ja": {
+          "description": "自律型LinkedInマネージャー——プロフィール最適化、コンテンツ作成、ネットワーキングとプロフェッショナルエンゲージメント"
+        },
+        "es": {
+          "description": "Gestor autónomo de LinkedIn — optimización de perfil, creación de contenido, networking y engagement profesional"
+        },
+        "fr": {
+          "description": "Gestionnaire LinkedIn autonome — optimisation de profil, création de contenu, réseautage et engagement professionnel"
+        },
+        "de": {
+          "description": "Autonomer LinkedIn-Manager — Profiloptimierung, Inhaltserstellung, Networking und professionelles Engagement"
+        },
+        "ko": {
+          "description": "자율 LinkedIn 관리자 — 프로필 최적화, 콘텐츠 제작, 네트워킹 및 전문 참여"
+        }
+      }
+    },
+    {
+      "id": "predictor",
+      "name": "Predictor Hand",
+      "description": "Autonomous future predictor — collects signals, builds reasoning chains, makes calibrated predictions, and tracks accuracy",
+      "category": "data",
+      "icon": "🔮",
+      "i18n": {
+        "zh": {
+          "description": "自主预测器——收集信号、构建推理链、做出校准预测并追踪准确率"
+        },
+        "zh-TW": {
+          "description": "自主預測器——收集訊號、建構推理鏈、做出校準預測並追蹤準確率"
+        },
+        "ja": {
+          "description": "自律型予測エンジン——シグナル収集、推論チェーン構築、校正済み予測と精度追跡"
+        },
+        "es": {
+          "description": "Predictor autónomo — recopila señales, construye cadenas de razonamiento, hace predicciones calibradas y rastrea la precisión"
+        },
+        "fr": {
+          "description": "Prédicteur autonome — collecte de signaux, construction de chaînes de raisonnement, prédictions calibrées et suivi de la précision"
+        },
+        "de": {
+          "description": "Autonomer Zukunftsprädiktor — sammelt Signale, baut Argumentationsketten, erstellt kalibrierte Vorhersagen und verfolgt die Genauigkeit"
+        },
+        "ko": {
+          "description": "자율 예측기 — 신호 수집, 추론 체인 구축, 보정된 예측 및 정확도 추적"
+        }
+      }
+    },
+    {
+      "id": "reddit",
+      "name": "Reddit Hand",
+      "description": "Autonomous Reddit manager — monitors subreddits, posts content, replies to threads, and tracks karma and engagement",
+      "category": "communication",
+      "icon": "\\U0001F4E2",
+      "i18n": {
+        "zh": {
+          "description": "自主 Reddit 管理——监控子版、发布内容、回复帖子、追踪 Karma 与互动"
+        },
+        "zh-TW": {
+          "description": "自主 Reddit 管理——監控子版、發布內容、回覆貼文、追蹤 Karma 與互動"
+        },
+        "es": {
+          "description": "Gestor autónomo de Reddit — monitorea subreddits, publica contenido, responde hilos y rastrea karma y engagement"
+        },
+        "ja": {
+          "description": "自律型Redditマネージャー——サブレディット監視、投稿、返信、カルマとエンゲージメント追跡"
+        },
+        "fr": {
+          "description": "Gestionnaire Reddit autonome — surveille les subreddits, publie du contenu, répond dans les fils et suit le karma et l'engagement"
+        },
+        "de": {
+          "description": "Autonomer Reddit-Manager — überwacht Subreddits, postet Inhalte, antwortet auf Threads, verfolgt Karma und Engagement"
+        },
+        "ko": {
+          "description": "자율 Reddit 관리자 — 서브레딧 모니터링, 콘텐츠 게시, 스레드 답글, 카르마 및 참여 추적"
+        }
+      }
+    },
+    {
+      "id": "researcher",
+      "name": "Researcher Hand",
+      "description": "Autonomous deep researcher — exhaustive investigation, cross-referencing, fact-checking, and structured reports",
+      "category": "productivity",
+      "icon": "🧪",
+      "tags": [
+        "popular"
+      ],
+      "i18n": {
+        "zh-TW": {
+          "description": "自主深度研究員——詳盡調查、交叉引用、事實查核與結構化報告"
+        }
+      }
+    },
+    {
+      "id": "strategist",
+      "name": "Strategist Hand",
+      "description": "Autonomous strategy analyst — market research, competitive analysis, business planning, and strategic recommendations",
+      "category": "productivity",
+      "icon": "🎯",
+      "i18n": {
+        "zh": {
+          "description": "自主战略分析——市场调研、竞品分析、商业规划与战略建议"
+        },
+        "zh-TW": {
+          "description": "自主策略分析——市場調研、競品分析、商業規劃與策略建議"
+        },
+        "es": {
+          "description": "Analista estratégico autónomo — investigación de mercado, análisis competitivo, planificación empresarial y recomendaciones estratégicas"
+        },
+        "ja": {
+          "description": "自律型ストラテジーアナリスト——市場調査、競合分析、事業計画、戦略提案"
+        },
+        "fr": {
+          "description": "Analyste stratégique autonome — étude de marché, analyse concurrentielle, planification d'entreprise et recommandations stratégiques"
+        },
+        "de": {
+          "description": "Autonomer Strategieanalyst — Marktforschung, Wettbewerbsanalyse, Geschäftsplanung und strategische Empfehlungen"
+        },
+        "ko": {
+          "description": "자율 전략 분석가 — 시장 조사, 경쟁 분석, 사업 계획, 전략 권고"
+        }
+      }
+    },
+    {
+      "id": "trader",
+      "name": "Trading Hand",
+      "description": "Autonomous market intelligence and trading engine — multi-signal analysis, adversarial bull/bear reasoning, calibrated confidence scoring, strict risk management, and portfolio-level analytics",
+      "category": "data",
+      "icon": "📈",
+      "tags": [
+        "popular"
+      ],
+      "i18n": {
+        "zh-TW": {
+          "description": "自主市場情報與交易引擎——多訊號分析、多空對抗推理、校準置信度、嚴格風控與投組分析"
+        }
+      }
+    },
+    {
+      "id": "twitter",
+      "name": "Twitter Hand",
+      "description": "Autonomous Twitter/X manager — content creation, scheduled posting, engagement, and performance tracking",
+      "category": "communication",
+      "icon": "\\U0001D54F",
+      "tags": [
+        "popular"
+      ],
+      "i18n": {
+        "zh-TW": {
+          "description": "自主 Twitter/X 管理——內容創作、排程發布、互動與效果追蹤"
+        }
+      }
+    }
+  ],
+  "channels": [
+    {
+      "id": "bluesky",
+      "name": "Bluesky",
+      "description": "Bluesky AT Protocol adapter for posting and reading from the decentralized social network",
+      "category": "social",
+      "icon": "🦋",
+      "i18n": {
+        "zh": {
+          "description": "Bluesky AT 协议适配器，在去中心化社交网络上发布和阅读内容"
+        },
+        "zh-TW": {
+          "description": "Bluesky AT 協議適配器，在去中心化社群網路上發布和閱讀內容"
+        },
+        "ja": {
+          "description": "Bluesky ATプロトコルアダプター、分散型ソーシャルネットワークへの投稿と閲覧"
+        },
+        "ko": {
+          "description": "Bluesky AT 프로토콜 어댑터, 탈중앙화 소셜 네트워크에서 게시 및 읽기"
+        },
+        "de": {
+          "description": "Bluesky AT-Protokoll-Adapter zum Posten und Lesen im dezentralen sozialen Netzwerk"
+        },
+        "es": {
+          "description": "Adaptador del protocolo AT de Bluesky para publicar y leer en la red social descentralizada"
+        }
+      }
+    },
+    {
+      "id": "dingtalk",
+      "name": "DingTalk",
+      "description": "DingTalk bot adapter for sending messages to DingTalk groups and conversations",
+      "category": "enterprise",
+      "icon": "🔔",
+      "tags": [
+        "popular"
+      ],
+      "i18n": {
+        "zh": {
+          "description": "钉钉机器人适配器，向钉钉群组和会话发送消息"
+        },
+        "zh-TW": {
+          "description": "釘釘機器人適配器，向釘釘群組和會話發送訊息"
+        },
+        "ja": {
+          "description": "DingTalkボットアダプター、DingTalkグループと会話へのメッセージ送信"
+        },
+        "ko": {
+          "description": "DingTalk 봇 어댑터, DingTalk 그룹 및 대화에 메시지 전송"
+        },
+        "de": {
+          "description": "DingTalk-Bot-Adapter zum Senden von Nachrichten an DingTalk-Gruppen und -Konversationen"
+        },
+        "es": {
+          "description": "Adaptador de bot DingTalk para enviar mensajes a grupos y conversaciones de DingTalk"
+        }
+      }
+    },
+    {
+      "id": "discord",
+      "name": "Discord",
+      "description": "Discord bot adapter for sending and receiving messages in Discord servers and channels",
+      "category": "messaging",
+      "icon": "🎮",
+      "tags": [
+        "popular"
+      ],
+      "i18n": {
+        "zh": {
+          "description": "Discord 机器人适配器，在 Discord 服务器和频道中收发消息"
+        },
+        "zh-TW": {
+          "description": "Discord 機器人適配器，在 Discord 伺服器和頻道中收發訊息"
+        },
+        "ja": {
+          "description": "Discordボットアダプター、Discordサーバーとチャンネルでのメッセージ送受信"
+        },
+        "ko": {
+          "description": "Discord 봇 어댑터, Discord 서버와 채널에서 메시지 송수신"
+        },
+        "de": {
+          "description": "Discord-Bot-Adapter zum Senden und Empfangen von Nachrichten in Discord-Servern und -Kanälen"
+        },
+        "es": {
+          "description": "Adaptador de bot Discord para enviar y recibir mensajes en servidores y canales de Discord"
+        }
+      }
+    },
+    {
+      "id": "discourse",
+      "name": "Discourse",
+      "description": "Discourse forum adapter for posting topics and replies via the Discourse API",
+      "category": "developer",
+      "icon": "💬",
+      "i18n": {
+        "zh": {
+          "description": "Discourse 论坛适配器，通过 Discourse API 发布主题和回复"
+        },
+        "zh-TW": {
+          "description": "Discourse 論壇適配器，透過 Discourse API 發布主題和回覆"
+        },
+        "ja": {
+          "description": "Discourseフォーラムアダプター、Discourse APIを介したトピックと返信の投稿"
+        },
+        "ko": {
+          "description": "Discourse 포럼 어댑터, Discourse API를 통한 주제 및 답글 게시"
+        },
+        "de": {
+          "description": "Discourse-Forum-Adapter zum Posten von Themen und Antworten über die Discourse-API"
+        },
+        "es": {
+          "description": "Adaptador de foro Discourse para publicar temas y respuestas a través de la API de Discourse"
+        }
+      }
+    },
+    {
+      "id": "email",
+      "name": "Email",
+      "description": "Email adapter for sending and receiving messages via SMTP and IMAP protocols",
+      "category": "email",
+      "icon": "📧",
+      "i18n": {
+        "zh": {
+          "description": "电子邮件适配器，通过 SMTP 和 IMAP 协议收发邮件"
+        },
+        "zh-TW": {
+          "description": "電子郵件適配器，透過 SMTP 和 IMAP 協議收發郵件"
+        },
+        "ja": {
+          "description": "メールアダプター、SMTPとIMAPプロトコルによるメッセージの送受信"
+        },
+        "ko": {
+          "description": "이메일 어댑터, SMTP 및 IMAP 프로토콜을 통한 메시지 송수신"
+        },
+        "de": {
+          "description": "E-Mail-Adapter zum Senden und Empfangen von Nachrichten über SMTP- und IMAP-Protokolle"
+        },
+        "es": {
+          "description": "Adaptador de correo electrónico para enviar y recibir mensajes mediante protocolos SMTP e IMAP"
+        }
+      }
+    },
+    {
+      "id": "feishu",
+      "name": "Feishu",
+      "description": "Feishu (Lark) bot adapter for messaging within the Feishu collaboration platform",
+      "category": "enterprise",
+      "icon": "🐦",
+      "tags": [
+        "popular"
+      ],
+      "i18n": {
+        "zh": {
+          "description": "飞书机器人适配器，在飞书协作平台中收发消息"
+        },
+        "zh-TW": {
+          "description": "飛書機器人適配器，在飛書協作平台中收發訊息"
+        },
+        "ja": {
+          "description": "Feishu（Lark）ボットアダプター、Feishuコラボレーションプラットフォームでのメッセージング"
+        },
+        "ko": {
+          "description": "Feishu(Lark) 봇 어댑터, Feishu 협업 플랫폼에서 메시지 송수신"
+        },
+        "de": {
+          "description": "Feishu (Lark) Bot-Adapter für Nachrichten in der Feishu-Kollaborationsplattform"
+        },
+        "es": {
+          "description": "Adaptador de bot Feishu (Lark) para mensajería en la plataforma de colaboración Feishu"
+        }
+      }
+    },
+    {
+      "id": "flock",
+      "name": "Flock",
+      "description": "Flock bot adapter for team messaging and notifications in Flock workspaces",
+      "category": "enterprise",
+      "icon": "🐥",
+      "i18n": {
+        "zh": {
+          "description": "Flock 机器人适配器，在 Flock 工作区中发送团队消息和通知"
+        },
+        "zh-TW": {
+          "description": "Flock 機器人適配器，在 Flock 工作區中發送團隊訊息和通知"
+        },
+        "ja": {
+          "description": "Flockボットアダプター、Flockワークスペースでのチームメッセージングと通知"
+        },
+        "ko": {
+          "description": "Flock 봇 어댑터, Flock 워크스페이스에서 팀 메시지 및 알림 전송"
+        },
+        "de": {
+          "description": "Flock-Bot-Adapter für Team-Messaging und Benachrichtigungen in Flock-Workspaces"
+        },
+        "es": {
+          "description": "Adaptador de bot Flock para mensajería de equipo y notificaciones en espacios de trabajo Flock"
+        }
+      }
+    },
+    {
+      "id": "gitter",
+      "name": "Gitter",
+      "description": "Gitter adapter for developer chat rooms linked to GitHub repositories",
+      "category": "developer",
+      "icon": "💻",
+      "i18n": {
+        "zh": {
+          "description": "Gitter 适配器，连接 GitHub 仓库的开发者聊天室"
+        },
+        "zh-TW": {
+          "description": "Gitter 適配器，連接 GitHub 儲存庫的開發者聊天室"
+        },
+        "ja": {
+          "description": "Gitterアダプター、GitHubリポジトリに連携した開発者チャットルーム"
+        },
+        "ko": {
+          "description": "Gitter 어댑터, GitHub 저장소에 연결된 개발자 채팅방"
+        },
+        "de": {
+          "description": "Gitter-Adapter für Entwickler-Chatrooms, die mit GitHub-Repositories verknüpft sind"
+        },
+        "es": {
+          "description": "Adaptador de Gitter para salas de chat de desarrolladores vinculadas a repositorios de GitHub"
+        }
+      }
+    },
+    {
+      "id": "google_chat",
+      "name": "Google Chat",
+      "description": "Google Chat adapter for sending messages and cards to Google Workspace conversations",
+      "category": "enterprise",
+      "icon": "💚",
+      "i18n": {
+        "zh": {
+          "description": "Google Chat 适配器，向 Google Workspace 会话发送消息和卡片"
+        },
+        "zh-TW": {
+          "description": "Google Chat 適配器，向 Google Workspace 會話發送訊息和卡片"
+        },
+        "ja": {
+          "description": "Google Chatアダプター、Google Workspaceの会話にメッセージとカードを送信"
+        },
+        "ko": {
+          "description": "Google Chat 어댑터, Google Workspace 대화에 메시지 및 카드 전송"
+        },
+        "de": {
+          "description": "Google Chat-Adapter zum Senden von Nachrichten und Karten an Google Workspace-Konversationen"
+        },
+        "es": {
+          "description": "Adaptador de Google Chat para enviar mensajes y tarjetas a conversaciones de Google Workspace"
+        }
+      }
+    },
+    {
+      "id": "gotify",
+      "name": "Gotify",
+      "description": "Gotify adapter for sending push notifications to a self-hosted Gotify server",
+      "category": "iot",
+      "icon": "🔊",
+      "i18n": {
+        "zh": {
+          "description": "Gotify 适配器，向自托管 Gotify 服务器发送推送通知"
+        },
+        "zh-TW": {
+          "description": "Gotify 適配器，向自架 Gotify 伺服器發送推播通知"
+        },
+        "ja": {
+          "description": "Gotifyアダプター、セルフホストGotifyサーバーへのプッシュ通知送信"
+        },
+        "ko": {
+          "description": "Gotify 어댑터, 자체 호스팅 Gotify 서버에 푸시 알림 전송"
+        },
+        "de": {
+          "description": "Gotify-Adapter zum Senden von Push-Benachrichtigungen an einen selbstgehosteten Gotify-Server"
+        },
+        "es": {
+          "description": "Adaptador de Gotify para enviar notificaciones push a un servidor Gotify autoalojado"
+        }
+      }
+    },
+    {
+      "id": "guilded",
+      "name": "Guilded",
+      "description": "Guilded bot adapter for messaging in Guilded servers and channels",
+      "category": "enterprise",
+      "icon": "🏰",
+      "i18n": {
+        "zh": {
+          "description": "Guilded 机器人适配器，在 Guilded 服务器和频道中收发消息"
+        },
+        "zh-TW": {
+          "description": "Guilded 機器人適配器，在 Guilded 伺服器和頻道中收發訊息"
+        },
+        "ja": {
+          "description": "Guildedボットアダプター、Guildedサーバーとチャンネルでのメッセージング"
+        },
+        "ko": {
+          "description": "Guilded 봇 어댑터, Guilded 서버와 채널에서 메시지 송수신"
+        },
+        "de": {
+          "description": "Guilded-Bot-Adapter für Nachrichten in Guilded-Servern und -Kanälen"
+        },
+        "es": {
+          "description": "Adaptador de bot Guilded para mensajería en servidores y canales de Guilded"
+        }
+      }
+    },
+    {
+      "id": "irc",
+      "name": "IRC",
+      "description": "IRC adapter for connecting to Internet Relay Chat networks and channels",
+      "category": "messaging",
+      "icon": "📡",
+      "i18n": {
+        "zh": {
+          "description": "IRC 适配器，连接 Internet Relay Chat 网络和频道"
+        },
+        "zh-TW": {
+          "description": "IRC 適配器，連接 Internet Relay Chat 網路和頻道"
+        },
+        "ja": {
+          "description": "IRCアダプター、Internet Relay Chatネットワークとチャンネルへの接続"
+        },
+        "ko": {
+          "description": "IRC 어댑터, Internet Relay Chat 네트워크와 채널에 연결"
+        },
+        "de": {
+          "description": "IRC-Adapter zur Verbindung mit Internet Relay Chat-Netzwerken und -Kanälen"
+        },
+        "es": {
+          "description": "Adaptador IRC para conectar a redes y canales de Internet Relay Chat"
+        }
+      }
+    },
+    {
+      "id": "keybase",
+      "name": "Keybase",
+      "description": "Keybase adapter for encrypted messaging via the Keybase chat API",
+      "category": "messaging",
+      "icon": "🔐",
+      "i18n": {
+        "zh": {
+          "description": "Keybase 适配器，通过 Keybase 聊天 API 进行加密通信"
+        },
+        "zh-TW": {
+          "description": "Keybase 適配器，透過 Keybase 聊天 API 進行加密通訊"
+        },
+        "ja": {
+          "description": "Keybaseアダプター、Keybaseチャット APIによる暗号化メッセージング"
+        },
+        "ko": {
+          "description": "Keybase 어댑터, Keybase 채팅 API를 통한 암호화 메시지 송수신"
+        },
+        "de": {
+          "description": "Keybase-Adapter für verschlüsseltes Messaging über die Keybase-Chat-API"
+        },
+        "es": {
+          "description": "Adaptador de Keybase para mensajería cifrada a través de la API de chat de Keybase"
+        }
+      }
+    },
+    {
+      "id": "line",
+      "name": "LINE",
+      "description": "LINE Messaging API adapter for sending and receiving messages on the LINE platform",
+      "category": "messaging",
+      "icon": "🟢",
+      "i18n": {
+        "zh": {
+          "description": "LINE Messaging API 适配器，在 LINE 平台上收发消息"
+        },
+        "zh-TW": {
+          "description": "LINE Messaging API 適配器，在 LINE 平台上收發訊息"
+        },
+        "ja": {
+          "description": "LINE Messaging APIアダプター、LINEプラットフォームでのメッセージ送受信"
+        },
+        "ko": {
+          "description": "LINE Messaging API 어댑터, LINE 플랫폼에서 메시지 송수신"
+        },
+        "de": {
+          "description": "LINE Messaging API-Adapter zum Senden und Empfangen von Nachrichten auf der LINE-Plattform"
+        },
+        "es": {
+          "description": "Adaptador de LINE Messaging API para enviar y recibir mensajes en la plataforma LINE"
+        }
+      }
+    },
+    {
+      "id": "linkedin",
+      "name": "LinkedIn",
+      "description": "LinkedIn adapter for posting updates and messages via the LinkedIn API",
+      "category": "social",
+      "icon": "💼",
+      "i18n": {
+        "zh": {
+          "description": "LinkedIn 适配器，通过 LinkedIn API 发布动态和消息"
+        },
+        "zh-TW": {
+          "description": "LinkedIn 適配器，透過 LinkedIn API 發布動態和訊息"
+        },
+        "ja": {
+          "description": "LinkedInアダプター、LinkedIn APIを介した投稿とメッセージの送信"
+        },
+        "ko": {
+          "description": "LinkedIn 어댑터, LinkedIn API를 통한 게시물 및 메시지 전송"
+        },
+        "de": {
+          "description": "LinkedIn-Adapter zum Posten von Updates und Nachrichten über die LinkedIn-API"
+        },
+        "es": {
+          "description": "Adaptador de LinkedIn para publicar actualizaciones y mensajes a través de la API de LinkedIn"
+        }
+      }
+    },
+    {
+      "id": "mastodon",
+      "name": "Mastodon",
+      "description": "Mastodon adapter for posting toots and reading timelines on Mastodon instances",
+      "category": "social",
+      "icon": "🐘",
+      "i18n": {
+        "zh": {
+          "description": "Mastodon 适配器，在 Mastodon 实例上发布嘟文和阅读时间线"
+        },
+        "zh-TW": {
+          "description": "Mastodon 適配器，在 Mastodon 實例上發布嘟文和閱讀時間線"
+        },
+        "ja": {
+          "description": "Mastodonアダプター、Mastodonインスタンスでのトゥート投稿とタイムライン閲覧"
+        },
+        "ko": {
+          "description": "Mastodon 어댑터, Mastodon 인스턴스에서 글 게시 및 타임라인 읽기"
+        },
+        "de": {
+          "description": "Mastodon-Adapter zum Posten von Toots und Lesen von Timelines auf Mastodon-Instanzen"
+        },
+        "es": {
+          "description": "Adaptador de Mastodon para publicar toots y leer líneas de tiempo en instancias de Mastodon"
+        }
+      }
+    },
+    {
+      "id": "matrix",
+      "name": "Matrix",
+      "description": "Matrix adapter for decentralized messaging via the Matrix client-server API",
+      "category": "messaging",
+      "icon": "🟩",
+      "tags": [
+        "popular"
+      ],
+      "i18n": {
+        "zh": {
+          "description": "Matrix 适配器，通过 Matrix 客户端-服务器 API 进行去中心化通信"
+        },
+        "zh-TW": {
+          "description": "Matrix 適配器，透過 Matrix 用戶端-伺服器 API 進行去中心化通訊"
+        },
+        "ja": {
+          "description": "Matrixアダプター、Matrixクライアント-サーバーAPIによる分散型メッセージング"
+        },
+        "ko": {
+          "description": "Matrix 어댑터, Matrix 클라이언트-서버 API를 통한 탈중앙화 메시지 송수신"
+        },
+        "de": {
+          "description": "Matrix-Adapter für dezentrales Messaging über die Matrix Client-Server-API"
+        },
+        "es": {
+          "description": "Adaptador de Matrix para mensajería descentralizada a través de la API cliente-servidor de Matrix"
+        }
+      }
+    },
+    {
+      "id": "mattermost",
+      "name": "Mattermost",
+      "description": "Mattermost adapter for team messaging and notifications in Mattermost workspaces",
+      "category": "enterprise",
+      "icon": "🔵",
+      "i18n": {
+        "zh": {
+          "description": "Mattermost 适配器，在 Mattermost 工作区中发送团队消息和通知"
+        },
+        "zh-TW": {
+          "description": "Mattermost 適配器，在 Mattermost 工作區中發送團隊訊息和通知"
+        },
+        "ja": {
+          "description": "Mattermostアダプター、Mattermostワークスペースでのチームメッセージングと通知"
+        },
+        "ko": {
+          "description": "Mattermost 어댑터, Mattermost 워크스페이스에서 팀 메시지 및 알림 전송"
+        },
+        "de": {
+          "description": "Mattermost-Adapter für Team-Messaging und Benachrichtigungen in Mattermost-Workspaces"
+        },
+        "es": {
+          "description": "Adaptador de Mattermost para mensajería de equipo y notificaciones en espacios de trabajo Mattermost"
+        }
+      }
+    },
+    {
+      "id": "messenger",
+      "name": "Messenger",
+      "description": "Facebook Messenger adapter for sending and receiving messages via the Messenger Platform",
+      "category": "messaging",
+      "icon": "💬",
+      "i18n": {
+        "zh": {
+          "description": "Facebook Messenger 适配器，通过 Messenger 平台收发消息"
+        },
+        "zh-TW": {
+          "description": "Facebook Messenger 適配器，透過 Messenger 平台收發訊息"
+        },
+        "ja": {
+          "description": "Facebook Messengerアダプター、Messengerプラットフォームを介したメッセージの送受信"
+        },
+        "ko": {
+          "description": "Facebook Messenger 어댑터, Messenger 플랫폼을 통한 메시지 송수신"
+        },
+        "de": {
+          "description": "Facebook Messenger-Adapter zum Senden und Empfangen von Nachrichten über die Messenger-Plattform"
+        },
+        "es": {
+          "description": "Adaptador de Facebook Messenger para enviar y recibir mensajes a través de la plataforma Messenger"
+        }
+      }
+    },
+    {
+      "id": "mqtt",
+      "name": "MQTT",
+      "description": "MQTT adapter for publishing and subscribing to messages on MQTT brokers",
+      "category": "iot",
+      "icon": "📶",
+      "i18n": {
+        "zh": {
+          "description": "MQTT 适配器，在 MQTT 代理上发布和订阅消息"
+        },
+        "zh-TW": {
+          "description": "MQTT 適配器，在 MQTT 代理上發布和訂閱訊息"
+        },
+        "ja": {
+          "description": "MQTTアダプター、MQTTブローカーでのメッセージのパブリッシュとサブスクライブ"
+        },
+        "ko": {
+          "description": "MQTT 어댑터, MQTT 브로커에서 메시지 발행 및 구독"
+        },
+        "de": {
+          "description": "MQTT-Adapter zum Veröffentlichen und Abonnieren von Nachrichten auf MQTT-Brokern"
+        },
+        "es": {
+          "description": "Adaptador MQTT para publicar y suscribirse a mensajes en brokers MQTT"
+        }
+      }
+    },
+    {
+      "id": "mumble",
+      "name": "Mumble",
+      "description": "Mumble adapter for text messaging in Mumble voice communication servers",
+      "category": "iot",
+      "icon": "🎙️",
+      "i18n": {
+        "zh": {
+          "description": "Mumble 适配器，在 Mumble 语音通信服务器中发送文字消息"
+        },
+        "zh-TW": {
+          "description": "Mumble 適配器，在 Mumble 語音通訊伺服器中發送文字訊息"
+        },
+        "ja": {
+          "description": "Mumbleアダプター、Mumble音声通信サーバーでのテキストメッセージング"
+        },
+        "ko": {
+          "description": "Mumble 어댑터, Mumble 음성 통신 서버에서 텍스트 메시지 전송"
+        },
+        "de": {
+          "description": "Mumble-Adapter für Textnachrichten in Mumble-Sprachkommunikationsservern"
+        },
+        "es": {
+          "description": "Adaptador de Mumble para mensajería de texto en servidores de comunicación por voz Mumble"
+        }
+      }
+    },
+    {
+      "id": "nextcloud",
+      "name": "Nextcloud",
+      "description": "Nextcloud Talk adapter for messaging within self-hosted Nextcloud instances",
+      "category": "iot",
+      "icon": "☁️",
+      "i18n": {
+        "zh": {
+          "description": "Nextcloud Talk 适配器，在自托管 Nextcloud 实例中收发消息"
+        },
+        "zh-TW": {
+          "description": "Nextcloud Talk 適配器，在自架 Nextcloud 實例中收發訊息"
+        },
+        "ja": {
+          "description": "Nextcloud Talkアダプター、セルフホストNextcloudインスタンスでのメッセージング"
+        },
+        "ko": {
+          "description": "Nextcloud Talk 어댑터, 자체 호스팅 Nextcloud 인스턴스에서 메시지 송수신"
+        },
+        "de": {
+          "description": "Nextcloud Talk-Adapter für Nachrichten in selbstgehosteten Nextcloud-Instanzen"
+        },
+        "es": {
+          "description": "Adaptador de Nextcloud Talk para mensajería en instancias de Nextcloud autoalojadas"
+        }
+      }
+    },
+    {
+      "id": "nostr",
+      "name": "Nostr",
+      "description": "Nostr adapter for publishing and reading events on the Nostr decentralized protocol",
+      "category": "messaging",
+      "icon": "🟣",
+      "i18n": {
+        "zh": {
+          "description": "Nostr 适配器，在 Nostr 去中心化协议上发布和读取事件"
+        },
+        "zh-TW": {
+          "description": "Nostr 適配器，在 Nostr 去中心化協議上發布和讀取事件"
+        },
+        "ja": {
+          "description": "Nostrアダプター、Nostr分散型プロトコルでのイベントの公開と読み取り"
+        },
+        "ko": {
+          "description": "Nostr 어댑터, Nostr 탈중앙화 프로토콜에서 이벤트 발행 및 읽기"
+        },
+        "de": {
+          "description": "Nostr-Adapter zum Veröffentlichen und Lesen von Ereignissen im dezentralen Nostr-Protokoll"
+        },
+        "es": {
+          "description": "Adaptador de Nostr para publicar y leer eventos en el protocolo descentralizado Nostr"
+        }
+      }
+    },
+    {
+      "id": "ntfy",
+      "name": "ntfy",
+      "description": "ntfy adapter for sending push notifications via the ntfy pub-sub service",
+      "category": "iot",
+      "icon": "🔔",
+      "i18n": {
+        "zh": {
+          "description": "ntfy 适配器，通过 ntfy 发布-订阅服务发送推送通知"
+        },
+        "zh-TW": {
+          "description": "ntfy 適配器，透過 ntfy 發布-訂閱服務發送推播通知"
+        },
+        "ja": {
+          "description": "ntfyアダプター、ntfyパブサブサービスによるプッシュ通知送信"
+        },
+        "ko": {
+          "description": "ntfy 어댑터, ntfy 발행-구독 서비스를 통한 푸시 알림 전송"
+        },
+        "de": {
+          "description": "ntfy-Adapter zum Senden von Push-Benachrichtigungen über den ntfy Pub-Sub-Dienst"
+        },
+        "es": {
+          "description": "Adaptador de ntfy para enviar notificaciones push a través del servicio pub-sub ntfy"
+        }
+      }
+    },
+    {
+      "id": "pumble",
+      "name": "Pumble",
+      "description": "Pumble adapter for team messaging and notifications in Pumble workspaces",
+      "category": "enterprise",
+      "icon": "🐝",
+      "i18n": {
+        "zh": {
+          "description": "Pumble 适配器，在 Pumble 工作区中发送团队消息和通知"
+        },
+        "zh-TW": {
+          "description": "Pumble 適配器，在 Pumble 工作區中發送團隊訊息和通知"
+        },
+        "ja": {
+          "description": "Pumbleアダプター、Pumbleワークスペースでのチームメッセージングと通知"
+        },
+        "ko": {
+          "description": "Pumble 어댑터, Pumble 워크스페이스에서 팀 메시지 및 알림 전송"
+        },
+        "de": {
+          "description": "Pumble-Adapter für Team-Messaging und Benachrichtigungen in Pumble-Workspaces"
+        },
+        "es": {
+          "description": "Adaptador de Pumble para mensajería de equipo y notificaciones en espacios de trabajo Pumble"
+        }
+      }
+    },
+    {
+      "id": "qq",
+      "name": "QQ",
+      "description": "QQ bot adapter for messaging within Tencent QQ groups and channels",
+      "category": "messaging",
+      "icon": "🐧",
+      "i18n": {
+        "zh": {
+          "description": "QQ 机器人适配器，在腾讯 QQ 群组和频道中收发消息"
+        },
+        "zh-TW": {
+          "description": "QQ 機器人適配器，在騰訊 QQ 群組和頻道中收發訊息"
+        },
+        "ja": {
+          "description": "QQボットアダプター、Tencent QQグループとチャンネルでのメッセージング"
+        },
+        "ko": {
+          "description": "QQ 봇 어댑터, Tencent QQ 그룹 및 채널에서 메시지 송수신"
+        },
+        "de": {
+          "description": "QQ-Bot-Adapter für Nachrichten in Tencent QQ-Gruppen und -Kanälen"
+        },
+        "es": {
+          "description": "Adaptador de bot QQ para mensajería en grupos y canales de Tencent QQ"
+        }
+      }
+    },
+    {
+      "id": "reddit",
+      "name": "Reddit",
+      "description": "Reddit adapter for posting and reading content via the Reddit API",
+      "category": "social",
+      "icon": "🤖",
+      "i18n": {
+        "zh": {
+          "description": "Reddit 适配器，通过 Reddit API 发布和阅读内容"
+        },
+        "zh-TW": {
+          "description": "Reddit 適配器，透過 Reddit API 發布和閱讀內容"
+        },
+        "ja": {
+          "description": "Redditアダプター、Reddit APIを介したコンテンツの投稿と閲覧"
+        },
+        "ko": {
+          "description": "Reddit 어댑터, Reddit API를 통한 콘텐츠 게시 및 읽기"
+        },
+        "de": {
+          "description": "Reddit-Adapter zum Posten und Lesen von Inhalten über die Reddit-API"
+        },
+        "es": {
+          "description": "Adaptador de Reddit para publicar y leer contenido a través de la API de Reddit"
+        }
+      }
+    },
+    {
+      "id": "revolt",
+      "name": "Revolt",
+      "description": "Revolt adapter for messaging in the open-source Revolt chat platform",
+      "category": "developer",
+      "icon": "🔴",
+      "i18n": {
+        "zh": {
+          "description": "Revolt 适配器，在开源 Revolt 聊天平台中收发消息"
+        },
+        "zh-TW": {
+          "description": "Revolt 適配器，在開源 Revolt 聊天平台中收發訊息"
+        },
+        "ja": {
+          "description": "Revoltアダプター、オープンソースRevoltチャットプラットフォームでのメッセージング"
+        },
+        "ko": {
+          "description": "Revolt 어댑터, 오픈소스 Revolt 채팅 플랫폼에서 메시지 송수신"
+        },
+        "de": {
+          "description": "Revolt-Adapter für Nachrichten in der Open-Source-Revolt-Chat-Plattform"
+        },
+        "es": {
+          "description": "Adaptador de Revolt para mensajería en la plataforma de chat de código abierto Revolt"
+        }
+      }
+    },
+    {
+      "id": "rocketchat",
+      "name": "Rocket.Chat",
+      "description": "Rocket.Chat adapter for messaging in self-hosted Rocket.Chat instances",
+      "category": "enterprise",
+      "icon": "🚀",
+      "i18n": {
+        "zh": {
+          "description": "Rocket.Chat 适配器，在自托管 Rocket.Chat 实例中收发消息"
+        },
+        "zh-TW": {
+          "description": "Rocket.Chat 適配器，在自架 Rocket.Chat 實例中收發訊息"
+        },
+        "ja": {
+          "description": "Rocket.Chatアダプター、セルフホストRocket.Chatインスタンスでのメッセージング"
+        },
+        "ko": {
+          "description": "Rocket.Chat 어댑터, 자체 호스팅 Rocket.Chat 인스턴스에서 메시지 송수신"
+        },
+        "de": {
+          "description": "Rocket.Chat-Adapter für Nachrichten in selbstgehosteten Rocket.Chat-Instanzen"
+        },
+        "es": {
+          "description": "Adaptador de Rocket.Chat para mensajería en instancias autoalojadas de Rocket.Chat"
+        }
+      }
+    },
+    {
+      "id": "signal",
+      "name": "Signal",
+      "description": "Signal adapter for secure end-to-end encrypted messaging via Signal CLI",
+      "category": "messaging",
+      "icon": "🔒",
+      "tags": [
+        "popular"
+      ],
+      "i18n": {
+        "zh": {
+          "description": "Signal 适配器，通过 Signal CLI 进行端到端加密安全通信"
+        },
+        "zh-TW": {
+          "description": "Signal 適配器，透過 Signal CLI 進行端對端加密安全通訊"
+        },
+        "ja": {
+          "description": "Signalアダプター、Signal CLIによるエンドツーエンド暗号化メッセージング"
+        },
+        "ko": {
+          "description": "Signal 어댑터, Signal CLI를 통한 종단간 암호화 보안 메시지 송수신"
+        },
+        "de": {
+          "description": "Signal-Adapter für sichere Ende-zu-Ende-verschlüsselte Nachrichten über Signal CLI"
+        },
+        "es": {
+          "description": "Adaptador de Signal para mensajería segura con cifrado de extremo a extremo a través de Signal CLI"
+        }
+      }
+    },
+    {
+      "id": "slack",
+      "name": "Slack",
+      "description": "Slack bot adapter for sending and receiving messages in Slack workspaces",
+      "category": "enterprise",
+      "icon": "💜",
+      "tags": [
+        "popular"
+      ],
+      "i18n": {
+        "zh": {
+          "description": "Slack 机器人适配器，在 Slack 工作区中收发消息"
+        },
+        "zh-TW": {
+          "description": "Slack 機器人適配器，在 Slack 工作區中收發訊息"
+        },
+        "ja": {
+          "description": "Slackボットアダプター、Slackワークスペースでのメッセージ送受信"
+        },
+        "ko": {
+          "description": "Slack 봇 어댑터, Slack 워크스페이스에서 메시지 송수신"
+        },
+        "de": {
+          "description": "Slack-Bot-Adapter zum Senden und Empfangen von Nachrichten in Slack-Workspaces"
+        },
+        "es": {
+          "description": "Adaptador de bot Slack para enviar y recibir mensajes en espacios de trabajo Slack"
+        }
+      }
+    },
+    {
+      "id": "teams",
+      "name": "Microsoft Teams",
+      "description": "Microsoft Teams adapter for messaging and notifications in Teams channels",
+      "category": "enterprise",
+      "icon": "🟦",
+      "tags": [
+        "popular"
+      ],
+      "i18n": {
+        "zh": {
+          "description": "Microsoft Teams 适配器，在 Teams 频道中收发消息和通知"
+        },
+        "zh-TW": {
+          "description": "Microsoft Teams 適配器，在 Teams 頻道中收發訊息和通知"
+        },
+        "ja": {
+          "description": "Microsoft Teamsアダプター、Teamsチャンネルでのメッセージングと通知"
+        },
+        "ko": {
+          "description": "Microsoft Teams 어댑터, Teams 채널에서 메시지 및 알림 송수신"
+        },
+        "de": {
+          "description": "Microsoft Teams-Adapter für Nachrichten und Benachrichtigungen in Teams-Kanälen"
+        },
+        "es": {
+          "description": "Adaptador de Microsoft Teams para mensajería y notificaciones en canales de Teams"
+        }
+      }
+    },
+    {
+      "id": "telegram",
+      "name": "Telegram",
+      "description": "Telegram Bot API adapter for sending and receiving messages",
+      "category": "messaging",
+      "icon": "📱",
+      "tags": [
+        "popular"
+      ],
+      "i18n": {
+        "zh": {
+          "description": "Telegram Bot API 适配器，收发消息"
+        },
+        "zh-TW": {
+          "description": "Telegram Bot API 適配器，收發訊息"
+        },
+        "ja": {
+          "description": "Telegram Bot APIアダプター、メッセージの送受信"
+        },
+        "ko": {
+          "description": "Telegram Bot API 어댑터, 메시지 송수신"
+        },
+        "de": {
+          "description": "Telegram Bot API-Adapter zum Senden und Empfangen von Nachrichten"
+        },
+        "es": {
+          "description": "Adaptador de Telegram Bot API para enviar y recibir mensajes"
+        }
+      }
+    },
+    {
+      "id": "threema",
+      "name": "Threema",
+      "description": "Threema Gateway adapter for secure messaging via the Threema platform",
+      "category": "messaging",
+      "icon": "🔏",
+      "i18n": {
+        "zh": {
+          "description": "Threema Gateway 适配器，通过 Threema 平台进行安全通信"
+        },
+        "zh-TW": {
+          "description": "Threema Gateway 適配器，透過 Threema 平台進行安全通訊"
+        },
+        "ja": {
+          "description": "Threema Gatewayアダプター、Threemaプラットフォームによるセキュアメッセージング"
+        },
+        "ko": {
+          "description": "Threema Gateway 어댑터, Threema 플랫폼을 통한 보안 메시지 송수신"
+        },
+        "de": {
+          "description": "Threema Gateway-Adapter für sichere Nachrichten über die Threema-Plattform"
+        },
+        "es": {
+          "description": "Adaptador de Threema Gateway para mensajería segura a través de la plataforma Threema"
+        }
+      }
+    },
+    {
+      "id": "twist",
+      "name": "Twist",
+      "description": "Twist adapter for async team communication in Twist workspaces",
+      "category": "enterprise",
+      "icon": "🔀",
+      "i18n": {
+        "zh": {
+          "description": "Twist 适配器，在 Twist 工作区中进行异步团队沟通"
+        },
+        "zh-TW": {
+          "description": "Twist 適配器，在 Twist 工作區中進行非同步團隊溝通"
+        },
+        "ja": {
+          "description": "Twistアダプター、Twistワークスペースでの非同期チームコミュニケーション"
+        },
+        "ko": {
+          "description": "Twist 어댑터, Twist 워크스페이스에서 비동기 팀 커뮤니케이션"
+        },
+        "de": {
+          "description": "Twist-Adapter für asynchrone Teamkommunikation in Twist-Workspaces"
+        },
+        "es": {
+          "description": "Adaptador de Twist para comunicación asíncrona de equipo en espacios de trabajo Twist"
+        }
+      }
+    },
+    {
+      "id": "twitch",
+      "name": "Twitch",
+      "description": "Twitch adapter for reading and sending messages in Twitch stream chats",
+      "category": "social",
+      "icon": "🎮",
+      "i18n": {
+        "zh": {
+          "description": "Twitch 适配器，在 Twitch 直播聊天中收发消息"
+        },
+        "zh-TW": {
+          "description": "Twitch 適配器，在 Twitch 直播聊天中收發訊息"
+        },
+        "ja": {
+          "description": "Twitchアダプター、Twitch配信チャットでのメッセージの読み取りと送信"
+        },
+        "ko": {
+          "description": "Twitch 어댑터, Twitch 스트림 채팅에서 메시지 읽기 및 전송"
+        },
+        "de": {
+          "description": "Twitch-Adapter zum Lesen und Senden von Nachrichten in Twitch-Stream-Chats"
+        },
+        "es": {
+          "description": "Adaptador de Twitch para leer y enviar mensajes en chats de transmisiones de Twitch"
+        }
+      }
+    },
+    {
+      "id": "viber",
+      "name": "Viber",
+      "description": "Viber bot adapter for sending and receiving messages via the Viber Bot API",
+      "category": "messaging",
+      "icon": "💜",
+      "i18n": {
+        "zh": {
+          "description": "Viber 机器人适配器，通过 Viber Bot API 收发消息"
+        },
+        "zh-TW": {
+          "description": "Viber 機器人適配器，透過 Viber Bot API 收發訊息"
+        },
+        "ja": {
+          "description": "Viberボットアダプター、Viber Bot APIを介したメッセージの送受信"
+        },
+        "ko": {
+          "description": "Viber 봇 어댑터, Viber Bot API를 통한 메시지 송수신"
+        },
+        "de": {
+          "description": "Viber-Bot-Adapter zum Senden und Empfangen von Nachrichten über die Viber Bot API"
+        },
+        "es": {
+          "description": "Adaptador de bot Viber para enviar y recibir mensajes a través de la API de bot Viber"
+        }
+      }
+    },
+    {
+      "id": "webex",
+      "name": "Webex",
+      "description": "Cisco Webex adapter for messaging and notifications in Webex spaces",
+      "category": "enterprise",
+      "icon": "🌐",
+      "i18n": {
+        "zh": {
+          "description": "Cisco Webex 适配器，在 Webex 空间中收发消息和通知"
+        },
+        "zh-TW": {
+          "description": "Cisco Webex 適配器，在 Webex 空間中收發訊息和通知"
+        },
+        "ja": {
+          "description": "Cisco Webexアダプター、Webexスペースでのメッセージングと通知"
+        },
+        "ko": {
+          "description": "Cisco Webex 어댑터, Webex 공간에서 메시지 및 알림 송수신"
+        },
+        "de": {
+          "description": "Cisco Webex-Adapter für Nachrichten und Benachrichtigungen in Webex-Spaces"
+        },
+        "es": {
+          "description": "Adaptador de Cisco Webex para mensajería y notificaciones en espacios de Webex"
+        }
+      }
+    },
+    {
+      "id": "webhook",
+      "name": "Webhook",
+      "description": "Generic webhook adapter for sending and receiving messages via HTTP callbacks",
+      "category": "developer",
+      "icon": "🔗",
+      "i18n": {
+        "zh": {
+          "description": "通用 Webhook 适配器，通过 HTTP 回调收发消息"
+        },
+        "zh-TW": {
+          "description": "通用 Webhook 適配器，透過 HTTP 回呼收發訊息"
+        },
+        "ja": {
+          "description": "汎用Webhookアダプター、HTTPコールバックによるメッセージの送受信"
+        },
+        "ko": {
+          "description": "범용 Webhook 어댑터, HTTP 콜백을 통한 메시지 송수신"
+        },
+        "de": {
+          "description": "Generischer Webhook-Adapter zum Senden und Empfangen von Nachrichten über HTTP-Callbacks"
+        },
+        "es": {
+          "description": "Adaptador de webhook genérico para enviar y recibir mensajes mediante callbacks HTTP"
+        }
+      }
+    },
+    {
+      "id": "wechat",
+      "name": "WeChat",
+      "description": "WeChat Official Account adapter for messaging on the WeChat platform",
+      "category": "messaging",
+      "icon": "💚",
+      "tags": [
+        "popular"
+      ],
+      "i18n": {
+        "zh": {
+          "description": "微信公众号适配器，在微信平台上收发消息"
+        },
+        "zh-TW": {
+          "description": "微信公眾號適配器，在微信平台上收發訊息"
+        },
+        "ja": {
+          "description": "WeChat公式アカウントアダプター、WeChatプラットフォームでのメッセージング"
+        },
+        "ko": {
+          "description": "WeChat 공식 계정 어댑터, WeChat 플랫폼에서 메시지 송수신"
+        },
+        "de": {
+          "description": "WeChat Official Account-Adapter für Nachrichten auf der WeChat-Plattform"
+        },
+        "es": {
+          "description": "Adaptador de cuenta oficial de WeChat para mensajería en la plataforma WeChat"
+        }
+      }
+    },
+    {
+      "id": "wecom",
+      "name": "WeCom",
+      "description": "WeCom (WeChat Work) adapter for enterprise messaging within WeCom organizations",
+      "category": "enterprise",
+      "icon": "🏢",
+      "i18n": {
+        "zh": {
+          "description": "企业微信适配器，在企业微信组织中收发企业消息"
+        },
+        "zh-TW": {
+          "description": "企業微信適配器，在企業微信組織中收發企業訊息"
+        },
+        "ja": {
+          "description": "WeCom（WeChat Work）アダプター、WeCom組織内でのエンタープライズメッセージング"
+        },
+        "ko": {
+          "description": "WeCom(WeChat Work) 어댑터, WeCom 조직 내 기업 메시지 송수신"
+        },
+        "de": {
+          "description": "WeCom (WeChat Work)-Adapter für Unternehmensnachrichten in WeCom-Organisationen"
+        },
+        "es": {
+          "description": "Adaptador de WeCom (WeChat Work) para mensajería empresarial en organizaciones WeCom"
+        }
+      }
+    },
+    {
+      "id": "whatsapp",
+      "name": "WhatsApp",
+      "description": "WhatsApp Business API adapter for sending and receiving messages on WhatsApp",
+      "category": "messaging",
+      "icon": "📱",
+      "tags": [
+        "popular"
+      ],
+      "i18n": {
+        "zh": {
+          "description": "WhatsApp Business API 适配器，在 WhatsApp 上收发消息"
+        },
+        "zh-TW": {
+          "description": "WhatsApp Business API 適配器，在 WhatsApp 上收發訊息"
+        },
+        "ja": {
+          "description": "WhatsApp Business APIアダプター、WhatsAppでのメッセージ送受信"
+        },
+        "ko": {
+          "description": "WhatsApp Business API 어댑터, WhatsApp에서 메시지 송수신"
+        },
+        "de": {
+          "description": "WhatsApp Business API-Adapter zum Senden und Empfangen von Nachrichten auf WhatsApp"
+        },
+        "es": {
+          "description": "Adaptador de WhatsApp Business API para enviar y recibir mensajes en WhatsApp"
+        }
+      }
+    },
+    {
+      "id": "xmpp",
+      "name": "XMPP",
+      "description": "XMPP adapter for messaging via the Extensible Messaging and Presence Protocol",
+      "category": "messaging",
+      "icon": "📨",
+      "i18n": {
+        "zh": {
+          "description": "XMPP 适配器，通过可扩展消息和出席协议收发消息"
+        },
+        "zh-TW": {
+          "description": "XMPP 適配器，透過可擴展訊息和出席協議收發訊息"
+        },
+        "ja": {
+          "description": "XMPPアダプター、XMPPプロトコルによるメッセージング"
+        },
+        "ko": {
+          "description": "XMPP 어댑터, XMPP 프로토콜을 통한 메시지 송수신"
+        },
+        "de": {
+          "description": "XMPP-Adapter für Nachrichten über das Extensible Messaging and Presence Protocol"
+        },
+        "es": {
+          "description": "Adaptador XMPP para mensajería a través del protocolo extensible de mensajería y presencia"
+        }
+      }
+    },
+    {
+      "id": "zulip",
+      "name": "Zulip",
+      "description": "Zulip adapter for topic-based team messaging in Zulip organizations",
+      "category": "enterprise",
+      "icon": "💧",
+      "i18n": {
+        "zh": {
+          "description": "Zulip 适配器，在 Zulip 组织中进行基于主题的团队消息通信"
+        },
+        "zh-TW": {
+          "description": "Zulip 適配器，在 Zulip 組織中進行基於主題的團隊訊息通訊"
+        },
+        "ja": {
+          "description": "Zulipアダプター、Zulip組織でのトピックベースのチームメッセージング"
+        },
+        "ko": {
+          "description": "Zulip 어댑터, Zulip 조직에서 주제 기반 팀 메시지 송수신"
+        },
+        "de": {
+          "description": "Zulip-Adapter für themenbasiertes Team-Messaging in Zulip-Organisationen"
+        },
+        "es": {
+          "description": "Adaptador de Zulip para mensajería de equipo basada en temas en organizaciones Zulip"
+        }
+      }
+    }
+  ],
+  "handsCount": 15,
+  "channelsCount": 44,
+  "providersCount": 49,
+  "integrationsCount": 25,
+  "workflowsCount": 9,
+  "agentsCount": 32,
+  "pluginsCount": 10,
+  "fetchedAt": "2026-03-25T04:36:30.905Z"
+}
