@@ -231,7 +231,6 @@ fn build_state_token(provider_id: &str) -> String {
 
 /// Verify and decode a state token. Returns the payload if valid.
 fn verify_state_token(state: &str) -> Result<OAuthStatePayload, String> {
-    use base64::Engine;
     let parts: Vec<&str> = state.splitn(2, '.').collect();
     if parts.len() != 2 {
         return Err("Invalid state format".to_string());
@@ -309,6 +308,7 @@ struct TokenResponse {
     #[serde(default)]
     id_token: Option<String>,
     #[serde(default)]
+    #[allow(dead_code)]
     token_type: Option<String>,
     #[serde(default)]
     expires_in: Option<u64>,
@@ -322,12 +322,15 @@ struct TokenResponse {
 #[derive(Debug, Clone)]
 struct StoredTokens {
     /// The OAuth2 access token.
+    #[allow(dead_code)]
     access_token: String,
     /// Optional refresh token for obtaining new access tokens.
     refresh_token: Option<String>,
     /// When the access token expires (absolute time).
+    #[allow(dead_code)]
     expires_at: Option<std::time::Instant>,
     /// Provider ID that issued these tokens.
+    #[allow(dead_code)]
     provider_id: String,
 }
 
@@ -348,12 +351,14 @@ impl TokenStore {
     }
 
     /// Retrieve stored tokens for a user.
+    #[allow(dead_code)]
     async fn get(&self, sub: &str) -> Option<StoredTokens> {
         let read = self.inner.read().await;
         read.get(sub).cloned()
     }
 
     /// Remove stored tokens for a user (e.g., on logout).
+    #[allow(dead_code)]
     async fn remove(&self, sub: &str) {
         let mut write = self.inner.write().await;
         write.remove(sub);
