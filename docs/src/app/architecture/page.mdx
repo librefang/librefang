@@ -4,6 +4,9 @@ This document describes the internal architecture of LibreFang, the open-source 
 
 ## Table of Contents
 
+- [High-Level Architecture](#high-level-architecture)
+- [Repository Structure](#repository-structure)
+- [User Data Directory](#user-data-directory)
 - [Crate Structure](#crate-structure)
 - [Kernel Boot Sequence](#kernel-boot-sequence)
 - [Agent Lifecycle](#agent-lifecycle)
@@ -19,6 +22,138 @@ This document describes the internal architecture of LibreFang, the open-source 
 - [Wire Protocol (OFP)](#wire-protocol-ofp)
 - [Desktop Application](#desktop-application)
 - [Subsystem Diagram](#subsystem-diagram)
+
+---
+
+## High-Level Architecture
+
+```
+                              ┌─────────────────────┐
+                              │     User / Client    │
+                              └──────────┬──────────┘
+                       ┌─────────────────┼─────────────────┐
+                       │                 │                 │
+                  ┌────▼────┐     ┌──────▼──────┐   ┌─────▼─────┐
+                  │   CLI   │     │  REST API   │   │  Desktop  │
+                  │  (TUI)  │     │  (Axum)     │   │  (Tauri)  │
+                  └────┬────┘     └──────┬──────┘   └─────┬─────┘
+                       └─────────────────┼─────────────────┘
+                                         │
+                              ┌──────────▼──────────┐
+                              │       Kernel        │
+                              │  AgentRegistry      │
+                              │  WorkflowEngine     │
+                              │  TriggerEngine      │
+                              │  ModelCatalog       │
+                              │  CapabilityManager  │
+                              │  MeteringEngine     │
+                              └──────────┬──────────┘
+                 ┌───────────┬───────────┼───────────┬───────────┐
+                 │           │           │           │           │
+          ┌──────▼──────┐ ┌──▼───┐ ┌─────▼─────┐ ┌──▼───┐ ┌────▼────┐
+          │   Runtime   │ │Memory│ │  Channels  │ │Skills│ │  Hands  │
+          │ LLM Drivers │ │SQLite│ │ 44 Adapters│ │  60  │ │   15    │
+          │ 60 Tools    │ │Vector│ │ Formatter  │ │Bundled│ │Registry │
+          │ WASM Sandbox│ │Search│ │ RateLimiter│ │      │ │         │
+          └──────┬──────┘ └──────┘ └────────────┘ └──────┘ └─────────┘
+                 │
+    ┌────────────┼────────────┐
+    │            │            │
+┌───▼───┐  ┌────▼────┐  ┌────▼────┐
+│  LLM  │  │   MCP   │  │   A2A   │
+│49 Drv │  │ Servers │  │  (OFP)  │
+└───────┘  └─────────┘  └─────────┘
+```
+
+---
+
+## Repository Structure
+
+```
+librefang/
+├── crates/                    # Rust workspace (15 crates)
+│   ├── librefang-types/       #   Shared types, config, errors
+│   ├── librefang-memory/      #   SQLite memory, vector search
+│   ├── librefang-runtime/     #   Agent loop, LLM drivers, tools
+│   ├── librefang-kernel/      #   Kernel orchestrator
+│   ├── librefang-api/         #   REST/WS API server + dashboard
+│   ├── librefang-cli/         #   CLI + TUI
+│   ├── librefang-channels/    #   44 channel adapters
+│   ├── librefang-skills/      #   Skill system + FangHub
+│   ├── librefang-hands/       #   Autonomous Hands
+│   ├── librefang-wire/        #   OFP P2P protocol
+│   ├── librefang-extensions/  #   OAuth, credential vault, MCP setup
+│   ├── librefang-migrate/     #   Migration engine
+│   ├── librefang-desktop/     #   Tauri desktop app
+│   ├── librefang-telemetry/   #   OpenTelemetry metrics & traces
+│   └── librefang-testing/     #   Test utilities
+├── agents/                    # Pipeline runner agent templates
+├── sdk/                       # Client SDKs
+│   ├── javascript/            #   @librefang/sdk (npm)
+│   ├── python/                #   librefang-sdk (PyPI)
+│   ├── rust/                  #   librefang (crates.io)
+│   └── go/                    #   go module
+├── packages/                  # Distribution packages
+│   └── cli-npm/               #   @librefang/cli (npm wrapper)
+├── deploy/                    # Deployment configs
+│   ├── Dockerfile             #   Docker image
+│   ├── docker-compose.yml     #   Docker Compose
+│   ├── fly/                   #   Fly.io (fly.toml + deploy.sh)
+│   ├── railway/               #   Railway (railway.json)
+│   ├── render.yaml            #   Render
+│   ├── gcp/                   #   GCP Terraform
+│   ├── librefang.service      #   systemd unit
+│   ├── grafana/               #   Grafana dashboards
+│   └── prometheus/            #   Prometheus config
+├── docs/                      # Documentation site (Next.js)
+├── web/                       # Marketing website
+│   └── public/
+│       ├── install.sh          #  Linux/macOS installer
+│       └── install.ps1         #  Windows installer
+├── i18n/                      # Fluent translation files
+├── examples/                  # Usage examples
+├── scripts/                   # Build & CI scripts
+├── xtask/                     # cargo-xtask build tasks
+├── Cargo.toml                 # Workspace root
+└── CLAUDE.md                  # Agent instructions
+```
+
+---
+
+## User Data Directory
+
+After running `librefang init`, the user data directory is created at `~/.librefang/` (configurable via `LIBREFANG_HOME`):
+
+```
+~/.librefang/
+├── config.toml                # Main configuration file
+├── aliases.toml               # Model & command aliases
+├── data/
+│   ├── librefang.db           #   SQLite database (memory, sessions, knowledge graph)
+│   └── state.db               #   Daemon state persistence
+├── registry/                  # Synced from librefang-registry
+│   ├── agents/                #   32 agent templates (agent.toml each)
+│   ├── hands/                 #   15 hand definitions (HAND.toml + SKILL.md)
+│   ├── providers/             #   49 provider configs (*.toml)
+│   ├── skills/                #   Skill definitions
+│   ├── workflows/             #   Workflow templates
+│   ├── plugins/               #   Plugin definitions
+│   └── integrations/          #   Integration configs
+├── workspaces/
+│   ├── agents/                #   Active agent working directories
+│   └── hands/                 #   Active hand working directories
+├── skills/                    # User-installed skills
+├── plugins/                   # User-installed plugins
+├── integrations.toml          # Configured integrations
+├── vault.enc                  # Encrypted credential vault
+├── cron_jobs.json             # Scheduled cron jobs
+├── webhooks.json              # Webhook configurations
+├── hand_state.json            # Hand activation state
+├── custom_models.json         # User-defined model entries
+├── logs/                      # Application logs
+├── cache/                     # Temporary cache
+└── bin/                       # CLI binary (if installed via script)
+```
 
 ---
 

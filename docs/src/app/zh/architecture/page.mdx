@@ -4,6 +4,9 @@
 
 ## 目录
 
+- [高层架构](#高层架构)
+- [源码目录结构](#源码目录结构)
+- [用户数据目录](#用户数据目录)
 - [Crate 结构](#crate-结构)
 - [内核启动序列](#内核启动序列)
 - [Agent 生命周期](#agent-生命周期)
@@ -19,6 +22,138 @@
 - [Wire 协议 (OFP)](#wire-协议-ofp)
 - [桌面应用](#桌面应用)
 - [子系统架构图](#子系统架构图)
+
+---
+
+## 高层架构
+
+```
+                              ┌─────────────────────┐
+                              │     用户 / 客户端     │
+                              └──────────┬──────────┘
+                       ┌─────────────────┼─────────────────┐
+                       │                 │                 │
+                  ┌────▼────┐     ┌──────▼──────┐   ┌─────▼─────┐
+                  │   CLI   │     │  REST API   │   │   桌面应用  │
+                  │  (TUI)  │     │  (Axum)     │   │  (Tauri)  │
+                  └────┬────┘     └──────┬──────┘   └─────┬─────┘
+                       └─────────────────┼─────────────────┘
+                                         │
+                              ┌──────────▼──────────┐
+                              │       Kernel        │
+                              │  AgentRegistry      │
+                              │  WorkflowEngine     │
+                              │  TriggerEngine      │
+                              │  ModelCatalog       │
+                              │  CapabilityManager  │
+                              │  MeteringEngine     │
+                              └──────────┬──────────┘
+                 ┌───────────┬───────────┼───────────┬───────────┐
+                 │           │           │           │           │
+          ┌──────▼──────┐ ┌──▼───┐ ┌─────▼─────┐ ┌──▼───┐ ┌────▼────┐
+          │   Runtime   │ │Memory│ │  Channels  │ │Skills│ │  Hands  │
+          │ LLM Drivers │ │SQLite│ │ 44 适配器   │ │  60  │ │   15    │
+          │ 60 Tools    │ │向量   │ │ Formatter  │ │内置   │ │Registry │
+          │ WASM Sandbox│ │搜索   │ │ RateLimiter│ │      │ │         │
+          └──────┬──────┘ └──────┘ └────────────┘ └──────┘ └─────────┘
+                 │
+    ┌────────────┼────────────┐
+    │            │            │
+┌───▼───┐  ┌────▼────┐  ┌────▼────┐
+│  LLM  │  │   MCP   │  │   A2A   │
+│49 驱动 │  │ Servers │  │  (OFP)  │
+└───────┘  └─────────┘  └─────────┘
+```
+
+---
+
+## 源码目录结构
+
+```
+librefang/
+├── crates/                    # Rust 工作空间（15 个 crate）
+│   ├── librefang-types/       #   共享类型、配置、错误定义
+│   ├── librefang-memory/      #   SQLite 内存、向量搜索
+│   ├── librefang-runtime/     #   Agent 循环、LLM 驱动、工具
+│   ├── librefang-kernel/      #   内核编排器
+│   ├── librefang-api/         #   REST/WS API 服务 + 仪表板
+│   ├── librefang-cli/         #   CLI + TUI
+│   ├── librefang-channels/    #   44 个通道适配器
+│   ├── librefang-skills/      #   技能系统 + FangHub
+│   ├── librefang-hands/       #   自主 Hands
+│   ├── librefang-wire/        #   OFP P2P 协议
+│   ├── librefang-extensions/  #   OAuth、凭证金库、MCP 设置
+│   ├── librefang-migrate/     #   迁移引擎
+│   ├── librefang-desktop/     #   Tauri 桌面应用
+│   ├── librefang-telemetry/   #   OpenTelemetry 指标和追踪
+│   └── librefang-testing/     #   测试工具
+├── agents/                    # Pipeline runner Agent 模板
+├── sdk/                       # 客户端 SDK
+│   ├── javascript/            #   @librefang/sdk (npm)
+│   ├── python/                #   librefang-sdk (PyPI)
+│   ├── rust/                  #   librefang (crates.io)
+│   └── go/                    #   Go module
+├── packages/                  # 分发包
+│   └── cli-npm/               #   @librefang/cli (npm 包装器)
+├── deploy/                    # 部署配置
+│   ├── Dockerfile             #   Docker 镜像
+│   ├── docker-compose.yml     #   Docker Compose
+│   ├── fly/                   #   Fly.io (fly.toml + deploy.sh)
+│   ├── railway/               #   Railway (railway.json)
+│   ├── render.yaml            #   Render
+│   ├── gcp/                   #   GCP Terraform
+│   ├── librefang.service      #   systemd 服务单元
+│   ├── grafana/               #   Grafana 仪表板
+│   └── prometheus/            #   Prometheus 配置
+├── docs/                      # 文档站（Next.js）
+├── web/                       # 官网
+│   └── public/
+│       ├── install.sh          #  Linux/macOS 安装脚本
+│       └── install.ps1         #  Windows 安装脚本
+├── i18n/                      # Fluent 翻译文件
+├── examples/                  # 使用示例
+├── scripts/                   # 构建和 CI 脚本
+├── xtask/                     # cargo-xtask 构建任务
+├── Cargo.toml                 # 工作空间根配置
+└── CLAUDE.md                  # Agent 指令
+```
+
+---
+
+## 用户数据目录
+
+运行 `librefang init` 后，用户数据目录创建在 `~/.librefang/`（可通过 `LIBREFANG_HOME` 环境变量自定义）：
+
+```
+~/.librefang/
+├── config.toml                # 主配置文件
+├── aliases.toml               # 模型和命令别名
+├── data/
+│   ├── librefang.db           #   SQLite 数据库（内存、会话、知识图谱）
+│   └── state.db               #   守护进程状态持久化
+├── registry/                  # 从 librefang-registry 同步
+│   ├── agents/                #   32 个 Agent 模板（每个含 agent.toml）
+│   ├── hands/                 #   15 个 Hand 定义（HAND.toml + SKILL.md）
+│   ├── providers/             #   49 个提供商配置（*.toml）
+│   ├── skills/                #   技能定义
+│   ├── workflows/             #   工作流模板
+│   ├── plugins/               #   插件定义
+│   └── integrations/          #   集成配置
+├── workspaces/
+│   ├── agents/                #   活跃 Agent 工作目录
+│   └── hands/                 #   活跃 Hand 工作目录
+├── skills/                    # 用户安装的技能
+├── plugins/                   # 用户安装的插件
+├── integrations.toml          # 已配置的集成
+├── vault.enc                  # 加密凭证金库
+├── cron_jobs.json             # 定时任务配置
+├── webhooks.json              # Webhook 配置
+├── hand_state.json            # Hand 激活状态
+├── custom_models.json         # 用户自定义模型
+├── logs/                      # 应用日志
+├── cache/                     # 临时缓存
+└── bin/                       # CLI 二进制（脚本安装时）
+```
 
 ---
 
