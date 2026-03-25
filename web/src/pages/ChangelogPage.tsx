@@ -92,12 +92,9 @@ function formatDate(dateString: string): string {
 // ---- Fetch releases ----
 
 async function fetchReleases(): Promise<GitHubRelease[]> {
-  const res = await fetch(
-    'https://api.github.com/repos/librefang/librefang/releases?per_page=20',
-    { headers: { Accept: 'application/vnd.github.v3+json' } }
-  )
+  const res = await fetch('https://stats.librefang.ai/api/releases')
   if (!res.ok) {
-    throw new Error('GitHub API returned ' + res.status)
+    throw new Error('Failed to load releases: ' + res.status)
   }
   return res.json() as Promise<GitHubRelease[]>
 }
