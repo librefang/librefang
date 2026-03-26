@@ -1577,6 +1577,9 @@ pub struct KernelConfig {
     /// Controls which releases `librefang update` considers.
     #[serde(default)]
     pub update_channel: UpdateChannel,
+    /// Router scoring weights for agent/template/hand routing.
+    #[serde(default)]
+    pub routing: RoutingConfig,
 }
 
 /// Input sanitization mode for channel messages.
@@ -2168,6 +2171,77 @@ pub struct PluginsConfig {
     pub plugin_registries: Vec<String>,
 }
 
+/// Router scoring weights for agent/template/hand routing.
+///
+/// These control how keyword and semantic matches are weighted when the
+/// router decides which agent or hand should handle a user message.
+///
+/// ```toml
+/// [routing]
+/// explicit_alias_weight = 6
+/// generated_phrase_weight = 2
+/// weak_phrase_weight = 1
+/// min_hand_score = 2
+/// max_semantic_bonus = 5.0
+/// semantic_only_threshold = 0.55
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoutingConfig {
+    /// Weight for explicit (hand-curated) alias matches.
+    #[serde(default = "default_explicit_alias_weight")]
+    pub explicit_alias_weight: usize,
+    /// Weight for auto-generated phrase matches (from name/description/tags).
+    #[serde(default = "default_generated_phrase_weight")]
+    pub generated_phrase_weight: usize,
+    /// Weight for weak alias matches.
+    #[serde(default = "default_weak_phrase_weight")]
+    pub weak_phrase_weight: usize,
+    /// Minimum score for a hand match to be considered. A single weak hit
+    /// (score 1) is too noisy -- require at least this score.
+    #[serde(default = "default_min_hand_score")]
+    pub min_hand_score: usize,
+    /// Maximum bonus points from semantic (embedding) similarity, scaled
+    /// from 0.0--1.0 similarity range.
+    #[serde(default = "default_max_semantic_bonus")]
+    pub max_semantic_bonus: f32,
+    /// Minimum semantic similarity to consider a semantic-only match
+    /// (when no keyword hits exist).
+    #[serde(default = "default_semantic_only_threshold")]
+    pub semantic_only_threshold: f32,
+}
+
+impl Default for RoutingConfig {
+    fn default() -> Self {
+        Self {
+            explicit_alias_weight: default_explicit_alias_weight(),
+            generated_phrase_weight: default_generated_phrase_weight(),
+            weak_phrase_weight: default_weak_phrase_weight(),
+            min_hand_score: default_min_hand_score(),
+            max_semantic_bonus: default_max_semantic_bonus(),
+            semantic_only_threshold: default_semantic_only_threshold(),
+        }
+    }
+}
+
+fn default_explicit_alias_weight() -> usize {
+    6
+}
+fn default_generated_phrase_weight() -> usize {
+    2
+}
+fn default_weak_phrase_weight() -> usize {
+    1
+}
+fn default_min_hand_score() -> usize {
+    2
+}
+fn default_max_semantic_bonus() -> f32 {
+    5.0
+}
+fn default_semantic_only_threshold() -> f32 {
+    0.55
+}
+
 fn default_prompt_caching() -> bool {
     true
 }
@@ -2400,6 +2474,7 @@ impl Default for KernelConfig {
             telemetry: TelemetryConfig::default(),
             prompt_intelligence: PromptIntelligenceConfig::default(),
             update_channel: UpdateChannel::default(),
+            routing: RoutingConfig::default(),
         }
     }
 }

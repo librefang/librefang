@@ -3900,11 +3900,12 @@ system_prompt = "You are a helpful assistant."
     }
 
     fn route_assistant_by_metadata(&self, message: &str) -> Option<AssistantRouteTarget> {
-        let hand_selection = router::auto_select_hand(message, None);
+        let hand_selection = router::auto_select_hand(message, None, &self.config.routing);
         let template_selection = router::auto_select_template(
             message,
             &self.config.home_dir.join("workspaces").join("agents"),
             None,
+            &self.config.routing,
         );
 
         let hand_candidate = hand_selection

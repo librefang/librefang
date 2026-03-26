@@ -1,4 +1,5 @@
 use librefang_types::agent::AgentManifest;
+use librefang_types::config::RoutingConfig;
 use regex_lite::Regex;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -91,14 +92,7 @@ struct ManifestRouteCandidate {
     weak_phrases: Vec<String>,
 }
 
-/// Scoring weights for manifest routing.
-const EXPLICIT_ALIAS_WEIGHT: usize = 6;
-const GENERATED_PHRASE_WEIGHT: usize = 2;
-const WEAK_PHRASE_WEIGHT: usize = 1;
-/// Maximum semantic bonus points (scaled from 0.0–1.0 similarity).
-const MAX_SEMANTIC_BONUS: f32 = 5.0;
-/// Minimum semantic similarity to consider a semantic-only match.
-const SEMANTIC_ONLY_THRESHOLD: f32 = 0.55;
+// Scoring weights are configured via `RoutingConfig` (see `config::types`).
 
 // ── Hand routing: data-driven from HAND.toml ────────────────────────────
 
@@ -565,11 +559,6 @@ const TEMPLATE_RULES: &[RouteRule] = &[
     },
 ];
 
-/// Minimum score required for a hand match to be considered. A single weak
-/// keyword hit (score 1) is too noisy — require at least one strong hit (3)
-/// or two weak hits (2) to route to a hand.
-const MIN_HAND_SCORE: usize = 2;
-
 /// Select the best hand for a message using keyword matching.
 ///
 /// Keywords are loaded from HAND.toml `[routing]` sections (English-only)
@@ -579,6 +568,7 @@ const MIN_HAND_SCORE: usize = 2;
 pub fn auto_select_hand(
     message: &str,
     semantic_scores: Option<&HashMap<String, f32>>,
+    routing: &RoutingConfig,
 ) -> HandSelection {
     let mut scored: Vec<(usize, String, Vec<String>)> = Vec::new();
 
@@ -595,18 +585,18 @@ pub fn auto_select_hand(
             .filter(|phrase| phrase_matches(message, phrase))
             .cloned()
             .collect();
-        let mut score =
-            strong_hits.len() * EXPLICIT_ALIAS_WEIGHT + weak_hits.len() * WEAK_PHRASE_WEIGHT;
+        let mut score = strong_hits.len() * routing.explicit_alias_weight
+            + weak_hits.len() * routing.weak_phrase_weight;
 
         // Blend semantic similarity when available
         if let Some(scores) = semantic_scores {
             if let Some(&sim) = scores.get(&candidate.hand_id) {
-                let bonus = (sim * MAX_SEMANTIC_BONUS).round() as usize;
+                let bonus = (sim * routing.max_semantic_bonus).round() as usize;
                 score += bonus;
             }
         }
 
-        if score >= MIN_HAND_SCORE {
+        if score >= routing.min_hand_score {
             let mut hits = strong_hits;
             hits.extend(weak_hits);
             scored.push((score, candidate.hand_id.clone(), hits));
@@ -635,22 +625,24 @@ pub fn auto_select_template(
     message: &str,
     agents_dir: &Path,
     semantic_scores: Option<&HashMap<String, f32>>,
+    routing: &RoutingConfig,
 ) -> TemplateSelection {
     let normalized = message.to_lowercase();
-    let metadata_match = auto_select_template_from_metadata(message, agents_dir, semantic_scores);
+    let metadata_match =
+        auto_select_template_from_metadata(message, agents_dir, semantic_scores, routing);
     let mut scored: Vec<(usize, &'static str, Vec<&'static str>)> = Vec::new();
 
     for rule in TEMPLATE_RULES {
         let strong_hits = matched_labels(message, rule.strong);
         let weak_hits = matched_labels(message, rule.weak);
         // TEMPLATE_RULES are hand-curated (equivalent to explicit aliases)
-        let mut score =
-            strong_hits.len() * EXPLICIT_ALIAS_WEIGHT + weak_hits.len() * WEAK_PHRASE_WEIGHT;
+        let mut score = strong_hits.len() * routing.explicit_alias_weight
+            + weak_hits.len() * routing.weak_phrase_weight;
 
         // Blend semantic similarity when available
         if let Some(scores) = semantic_scores {
             if let Some(&sim) = scores.get(rule.target) {
-                let bonus = (sim * MAX_SEMANTIC_BONUS).round() as usize;
+                let bonus = (sim * routing.max_semantic_bonus).round() as usize;
                 score += bonus;
             }
         }
@@ -667,8 +659,8 @@ pub fn auto_select_template(
         if let Some(scores) = semantic_scores {
             for rule in TEMPLATE_RULES {
                 if let Some(&sim) = scores.get(rule.target) {
-                    if sim >= SEMANTIC_ONLY_THRESHOLD {
-                        let bonus = (sim * MAX_SEMANTIC_BONUS).round() as usize;
+                    if sim >= routing.semantic_only_threshold {
+                        let bonus = (sim * routing.max_semantic_bonus).round() as usize;
                         scored.push((bonus, rule.target, vec![]));
                     }
                 }
@@ -732,6 +724,7 @@ fn auto_select_template_from_metadata(
     message: &str,
     agents_dir: &Path,
     semantic_scores: Option<&HashMap<String, f32>>,
+    routing: &RoutingConfig,
 ) -> Option<TemplateSelection> {
     let mut scored: Vec<(usize, String, Vec<String>)> = Vec::new();
 
@@ -754,14 +747,14 @@ fn auto_select_template_from_metadata(
             .filter(|phrase| phrase_matches(message, phrase))
             .cloned()
             .collect();
-        let mut score = explicit_hits.len() * EXPLICIT_ALIAS_WEIGHT
-            + generated_hits.len() * GENERATED_PHRASE_WEIGHT
-            + weak_hits.len() * WEAK_PHRASE_WEIGHT;
+        let mut score = explicit_hits.len() * routing.explicit_alias_weight
+            + generated_hits.len() * routing.generated_phrase_weight
+            + weak_hits.len() * routing.weak_phrase_weight;
 
         // Blend semantic similarity when available
         if let Some(scores) = semantic_scores {
             if let Some(&sim) = scores.get(candidate.template.as_str()) {
-                let bonus = (sim * MAX_SEMANTIC_BONUS).round() as usize;
+                let bonus = (sim * routing.max_semantic_bonus).round() as usize;
                 score += bonus;
             }
         }
@@ -779,8 +772,8 @@ fn auto_select_template_from_metadata(
         if let Some(scores) = semantic_scores {
             for candidate in manifest_route_candidates(agents_dir) {
                 if let Some(&sim) = scores.get(candidate.template.as_str()) {
-                    if sim >= SEMANTIC_ONLY_THRESHOLD {
-                        let bonus = (sim * MAX_SEMANTIC_BONUS).round() as usize;
+                    if sim >= routing.semantic_only_threshold {
+                        let bonus = (sim * routing.max_semantic_bonus).round() as usize;
                         scored.push((bonus, candidate.template.clone(), vec![]));
                     }
                 }
@@ -1215,10 +1208,14 @@ mod tests {
         });
     }
 
+    fn default_routing() -> RoutingConfig {
+        RoutingConfig::default()
+    }
+
     /// Helper: call auto_select_hand without semantic scores.
     fn hand(msg: &str) -> HandSelection {
         ensure_registry();
-        auto_select_hand(msg, None)
+        auto_select_hand(msg, None, &default_routing())
     }
 
     fn write_test_hand(home_dir: &Path, hand_id: &str, aliases: &[&str], weak_aliases: &[&str]) {
@@ -1273,6 +1270,7 @@ system_prompt = "Test prompt"
             "请实现一个新的 Rust API 并补丁修复它",
             Path::new("/tmp/does-not-exist"),
             None,
+            &default_routing(),
         );
         assert_eq!(selection.template, "coder");
         assert!(selection.score > 0);
@@ -1311,6 +1309,7 @@ weak_aliases = ["changelog"]
             "Please draft release notes for version 1.2.3",
             &agents_dir,
             None,
+            &default_routing(),
         );
         assert_eq!(selection.template, "release-notes");
         assert!(selection.score > 0);
@@ -1325,6 +1324,7 @@ weak_aliases = ["changelog"]
             "请同时写代码并做深度调研，然后协作输出方案",
             Path::new("/tmp/does-not-exist"),
             None,
+            &default_routing(),
         );
         assert_eq!(selection.template, "orchestrator");
         assert!(selection.score > 0);
@@ -1383,7 +1383,12 @@ weak_aliases = ["changelog"]
         ];
 
         for (message, expected) in cases {
-            let selection = auto_select_template(message, Path::new("/tmp/does-not-exist"), None);
+            let selection = auto_select_template(
+                message,
+                Path::new("/tmp/does-not-exist"),
+                None,
+                &default_routing(),
+            );
             assert_eq!(selection.template, expected, "message: {message}");
             assert!(selection.score > 0, "message: {message}");
         }
@@ -1543,9 +1548,13 @@ weak_aliases = ["changelog"]
         // With semantic: simulated high similarity to "collector"
         let mut scores = HashMap::new();
         scores.insert("collector".to_string(), 0.9);
-        let with = auto_select_hand("please help me with this task", Some(&scores));
+        let with = auto_select_hand(
+            "please help me with this task",
+            Some(&scores),
+            &default_routing(),
+        );
         assert_eq!(with.hand_id, Some("collector".to_string()));
-        assert!(with.score >= MIN_HAND_SCORE);
+        assert!(with.score >= default_routing().min_hand_score);
     }
 
     #[test]
@@ -1564,7 +1573,7 @@ weak_aliases = ["changelog"]
         let mut scores = HashMap::new();
         scores.insert("collector".to_string(), 0.85);
         scores.insert("browser".to_string(), 0.3);
-        let with = auto_select_hand("帮我监控这个网站的变更", Some(&scores));
+        let with = auto_select_hand("帮我监控这个网站的变更", Some(&scores), &default_routing());
         assert_eq!(with.hand_id, Some("collector".to_string()));
     }
 
@@ -1578,7 +1587,11 @@ weak_aliases = ["changelog"]
         let mut scores = HashMap::new();
         scores.insert("trader".to_string(), 0.82);
         scores.insert("analytics".to_string(), 0.25);
-        let with = auto_select_hand("株式取引のポートフォリオを確認して", Some(&scores));
+        let with = auto_select_hand(
+            "株式取引のポートフォリオを確認して",
+            Some(&scores),
+            &default_routing(),
+        );
         assert_eq!(with.hand_id, Some("trader".to_string()));
     }
 
@@ -1588,7 +1601,11 @@ weak_aliases = ["changelog"]
         // Korean: "이 주제에 대해 심층 연구를 해주세요" (do deep research on this topic)
         let mut scores = HashMap::new();
         scores.insert("researcher".to_string(), 0.88);
-        let with = auto_select_hand("이 주제에 대해 심층 연구를 해주세요", Some(&scores));
+        let with = auto_select_hand(
+            "이 주제에 대해 심층 연구를 해주세요",
+            Some(&scores),
+            &default_routing(),
+        );
         assert_eq!(with.hand_id, Some("researcher".to_string()));
     }
 
@@ -1600,7 +1617,7 @@ weak_aliases = ["changelog"]
         scores.insert("collector".to_string(), 0.2);
         scores.insert("browser".to_string(), 0.15);
         scores.insert("trader".to_string(), 0.1);
-        let sel = auto_select_hand("一些随便的话", Some(&scores));
+        let sel = auto_select_hand("一些随便的话", Some(&scores), &default_routing());
         // 0.2 * 3 = 0.6, rounds to 1 — below MIN_HAND_SCORE(2)
         assert_eq!(sel.hand_id, None, "low similarity should not match");
     }
@@ -1617,7 +1634,11 @@ weak_aliases = ["changelog"]
         // With semantic boost: devops similarity adds bonus points
         let mut scores = HashMap::new();
         scores.insert("devops".to_string(), 0.75);
-        let combined = auto_select_hand("help me deploy the service", Some(&scores));
+        let combined = auto_select_hand(
+            "help me deploy the service",
+            Some(&scores),
+            &default_routing(),
+        );
         assert!(
             combined.score > keyword_score,
             "semantic should boost keyword score"
@@ -1630,7 +1651,7 @@ weak_aliases = ["changelog"]
         ensure_registry();
         // When semantic_scores is None, only keyword matching is used.
         // Non-English input simply gets no match (graceful, not error).
-        let sel = auto_select_hand("请帮我做数据分析", None);
+        let sel = auto_select_hand("请帮我做数据分析", None, &default_routing());
         assert_eq!(sel.hand_id, None, "should gracefully return no match");
         assert_eq!(sel.score, 0);
     }
@@ -1643,7 +1664,11 @@ weak_aliases = ["changelog"]
         let mut scores = HashMap::new();
         scores.insert("trader".to_string(), 0.9); // semantic favors trader
                                                   // But message strongly matches browser via keywords
-        let sel = auto_select_hand("open website and navigate to the login page", Some(&scores));
+        let sel = auto_select_hand(
+            "open website and navigate to the login page",
+            Some(&scores),
+            &default_routing(),
+        );
         // Browser should win because keyword score (3+) > trader semantic (2-3)
         assert_eq!(sel.hand_id, Some("browser".to_string()));
     }

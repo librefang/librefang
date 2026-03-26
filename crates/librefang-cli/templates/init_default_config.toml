@@ -153,6 +153,15 @@ debounce_ms = 500
 # poll_interval_secs = 5
 # default_agent = "assistant"         # Agent to use when no agent: directive
 
+# ── Router Scoring Weights ──────────────────────────────────
+# [routing]
+# explicit_alias_weight = 6      # Weight for hand-curated alias matches
+# generated_phrase_weight = 2    # Weight for auto-generated phrase matches
+# weak_phrase_weight = 1         # Weight for weak alias matches
+# min_hand_score = 2             # Minimum score for a hand match
+# max_semantic_bonus = 5.0       # Max bonus from embedding similarity
+# semantic_only_threshold = 0.55 # Min similarity for semantic-only match
+
 # ── Network (P2P Federation) ─────────────────────────────────
 # network_enabled = false
 # [network]
