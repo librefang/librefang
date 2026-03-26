@@ -820,55 +820,59 @@ pub fn create_driver(config: &DriverConfig) -> Result<Arc<dyn LlmDriver>, LlmErr
 /// Returns `(provider, model, api_key_env)` for the first provider that has a
 /// configured API key, checked in a user-friendly priority order.
 pub fn detect_available_provider() -> Option<(&'static str, &'static str, &'static str)> {
-    // Priority: popular cloud providers first, then niche, then local
-    const PROBE_ORDER: &[(&str, &str, &str)] = &[
-        ("openai", "gpt-4o", "OPENAI_API_KEY"),
-        ("anthropic", "claude-sonnet-4-20250514", "ANTHROPIC_API_KEY"),
-        ("gemini", "gemini-2.5-flash", "GEMINI_API_KEY"),
-        ("groq", "llama-3.3-70b-versatile", "GROQ_API_KEY"),
-        ("deepseek", "deepseek-chat", "DEEPSEEK_API_KEY"),
-        (
-            "openrouter",
-            "openrouter/google/gemini-2.5-flash",
-            "OPENROUTER_API_KEY",
-        ),
-        ("mistral", "mistral-large-latest", "MISTRAL_API_KEY"),
-        (
-            "together",
-            "meta-llama/Llama-3-70b-chat-hf",
-            "TOGETHER_API_KEY",
-        ),
-        (
-            "fireworks",
-            "accounts/fireworks/models/llama-v3p1-70b-instruct",
-            "FIREWORKS_API_KEY",
-        ),
-        ("xai", "grok-2", "XAI_API_KEY"),
-        (
-            "perplexity",
-            "llama-3.1-sonar-large-128k-online",
-            "PERPLEXITY_API_KEY",
-        ),
-        ("cohere", "command-r-plus", "COHERE_API_KEY"),
-        ("azure-openai", "gpt-4o", "AZURE_OPENAI_API_KEY"),
+    // Priority order: popular cloud providers are checked first so that
+    // users with multiple keys get the most common one by default.
+    const PRIORITY: &[&str] = &[
+        "openai",
+        "anthropic",
+        "gemini",
+        "groq",
+        "deepseek",
+        "openrouter",
+        "mistral",
+        "together",
+        "fireworks",
+        "xai",
+        "perplexity",
+        "cohere",
+        "azure-openai",
     ];
-    for &(provider, model, env_var) in PROBE_ORDER {
-        if std::env::var(env_var)
-            .ok()
-            .filter(|v| !v.is_empty())
-            .is_some()
-        {
-            return Some((provider, model, env_var));
+
+    let env_set =
+        |var: &str| -> bool { std::env::var(var).ok().filter(|v| !v.is_empty()).is_some() };
+
+    // Phase 1: check priority providers in order
+    for &name in PRIORITY {
+        if let Some(p) = PROVIDER_REGISTRY.iter().find(|p| p.name == name) {
+            if p.key_required && env_set(p.api_key_env) {
+                return Some((p.name, "", p.api_key_env));
+            }
+            if let Some(alt) = p.alt_api_key_env {
+                if env_set(alt) {
+                    return Some((p.name, "", alt));
+                }
+            }
         }
     }
-    // Also check GOOGLE_API_KEY as alias for Gemini
-    if std::env::var("GOOGLE_API_KEY")
-        .ok()
-        .filter(|v| !v.is_empty())
-        .is_some()
-    {
-        return Some(("gemini", "gemini-2.5-flash", "GOOGLE_API_KEY"));
+
+    // Phase 2: check remaining registry providers not in priority list
+    for p in PROVIDER_REGISTRY {
+        if p.hidden || !p.key_required {
+            continue;
+        }
+        if PRIORITY.contains(&p.name) {
+            continue;
+        }
+        if env_set(p.api_key_env) {
+            return Some((p.name, "", p.api_key_env));
+        }
+        if let Some(alt) = p.alt_api_key_env {
+            if env_set(alt) {
+                return Some((p.name, "", alt));
+            }
+        }
     }
+
     None
 }
 

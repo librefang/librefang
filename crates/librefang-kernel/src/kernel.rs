@@ -1310,7 +1310,16 @@ impl LibreFangKernel {
 
         // Resolve "auto" provider: scan environment for the first available API key.
         if config.default_model.provider == "auto" || config.default_model.provider.is_empty() {
-            if let Some((provider, model, env_var)) = drivers::detect_available_provider() {
+            if let Some((provider, model_hint, env_var)) = drivers::detect_available_provider() {
+                // model_hint may be empty if detected from the registry fallback;
+                // resolve a sensible default from the model catalog.
+                let model = if model_hint.is_empty() {
+                    librefang_runtime::model_catalog::ModelCatalog::default()
+                        .default_model_for_provider(provider)
+                        .unwrap_or_else(|| "default".to_string())
+                } else {
+                    model_hint.to_string()
+                };
                 info!(
                     provider = %provider,
                     model = %model,
@@ -1318,7 +1327,7 @@ impl LibreFangKernel {
                     "Auto-detected default provider from environment"
                 );
                 config.default_model.provider = provider.to_string();
-                config.default_model.model = model.to_string();
+                config.default_model.model = model;
                 config.default_model.api_key_env = env_var.to_string();
             } else {
                 warn!("No API keys detected in environment — defaulting to ollama (local)");
@@ -1432,7 +1441,16 @@ impl LibreFangKernel {
                         "Primary LLM driver init failed — trying auto-detect"
                     );
                     // Auto-detect: scan env for any configured provider key
-                    if let Some((provider, model, env_var)) = drivers::detect_available_provider() {
+                    if let Some((provider, model_hint, env_var)) =
+                        drivers::detect_available_provider()
+                    {
+                        let model = if model_hint.is_empty() {
+                            librefang_runtime::model_catalog::ModelCatalog::default()
+                                .default_model_for_provider(provider)
+                                .unwrap_or_else(|| "default".to_string())
+                        } else {
+                            model_hint.to_string()
+                        };
                         let auto_config = DriverConfig {
                             provider: provider.to_string(),
                             api_key: std::env::var(env_var).ok(),
@@ -1452,7 +1470,7 @@ impl LibreFangKernel {
                                 driver_chain.push(d);
                                 // Update the running config so agents get the right model
                                 config.default_model.provider = provider.to_string();
-                                config.default_model.model = model.to_string();
+                                config.default_model.model = model;
                                 config.default_model.api_key_env = env_var.to_string();
                             }
                             Err(e2) => {
