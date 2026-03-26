@@ -4413,6 +4413,7 @@ mod tests {
         );
         assert!(
             result.content.contains("Failed to read")
+                || result.content.contains("Failed to resolve")
                 || result.content.contains("not found")
                 || result.content.contains("No such file")
                 || result.content.contains("does not exist"),
