@@ -10,7 +10,7 @@
 use chrono::Utc;
 use librefang_types::agent::AgentId;
 use librefang_types::error::{LibreFangError, LibreFangResult};
-use librefang_types::memory::{MemoryFilter, MemoryFragment, MemoryId, MemorySource};
+use librefang_types::memory::{MemoryFilter, MemoryFragment, MemoryId, MemoryModality, MemorySource};
 use rusqlite::Connection;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -42,10 +42,11 @@ impl SemanticStore {
         scope: &str,
         metadata: HashMap<String, serde_json::Value>,
     ) -> LibreFangResult<MemoryId> {
-        self.remember_with_embedding(agent_id, content, source, scope, metadata, None)
+        self.remember_with_embedding(agent_id, content, source, scope, metadata, None, None, None, MemoryModality::Text)
     }
 
-    /// Store a new memory fragment with an optional embedding vector.
+    /// Store a new memory fragment with an optional embedding vector and multimodal fields.
+    #[allow(clippy::too_many_arguments)]
     pub fn remember_with_embedding(
         &self,
         agent_id: AgentId,
@@ -54,6 +55,9 @@ impl SemanticStore {
         scope: &str,
         metadata: HashMap<String, serde_json::Value>,
         embedding: Option<&[f32]>,
+        image_url: Option<&str>,
+        image_embedding: Option<&[f32]>,
+        modality: MemoryModality,
     ) -> LibreFangResult<MemoryId> {
         let conn = self
             .conn
@@ -66,10 +70,15 @@ impl SemanticStore {
         let meta_str = serde_json::to_string(&metadata)
             .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
         let embedding_bytes: Option<Vec<u8>> = embedding.map(embedding_to_bytes);
+        let image_embedding_bytes: Option<Vec<u8>> = image_embedding.map(embedding_to_bytes);
+        let modality_str = serde_json::to_string(&modality)
+            .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
+        // Strip the surrounding quotes from the JSON string (e.g. "\"text\"" -> "text")
+        let modality_str = modality_str.trim_matches('"');
 
         conn.execute(
-            "INSERT INTO memories (id, agent_id, content, source, scope, confidence, metadata, created_at, accessed_at, access_count, deleted, embedding)
-             VALUES (?1, ?2, ?3, ?4, ?5, 1.0, ?6, ?7, ?7, 0, 0, ?8)",
+            "INSERT INTO memories (id, agent_id, content, source, scope, confidence, metadata, created_at, accessed_at, access_count, deleted, embedding, image_url, image_embedding, modality)
+             VALUES (?1, ?2, ?3, ?4, ?5, 1.0, ?6, ?7, ?7, 0, 0, ?8, ?9, ?10, ?11)",
             rusqlite::params![
                 id.0.to_string(),
                 agent_id.0.to_string(),
@@ -79,6 +88,9 @@ impl SemanticStore {
                 meta_str,
                 now,
                 embedding_bytes,
+                image_url,
+                image_embedding_bytes,
+                modality_str,
             ],
         )
         .map_err(|e| LibreFangError::Memory(e.to_string()))?;
@@ -118,7 +130,7 @@ impl SemanticStore {
         };
 
         let mut sql = String::from(
-            "SELECT id, agent_id, content, source, scope, confidence, metadata, created_at, accessed_at, access_count, embedding
+            "SELECT id, agent_id, content, source, scope, confidence, metadata, created_at, accessed_at, access_count, embedding, image_url, image_embedding, modality
              FROM memories WHERE deleted = 0",
         );
         let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
@@ -204,6 +216,9 @@ impl SemanticStore {
                 let accessed_str: String = row.get(8)?;
                 let access_count: i64 = row.get(9)?;
                 let embedding_bytes: Option<Vec<u8>> = row.get(10)?;
+                let image_url: Option<String> = row.get(11)?;
+                let image_embedding_bytes: Option<Vec<u8>> = row.get(12)?;
+                let modality_str: Option<String> = row.get(13)?;
                 Ok((
                     id_str,
                     agent_str,
@@ -216,6 +231,9 @@ impl SemanticStore {
                     accessed_str,
                     access_count,
                     embedding_bytes,
+                    image_url,
+                    image_embedding_bytes,
+                    modality_str,
                 ))
             })
             .map_err(|e| LibreFangError::Memory(e.to_string()))?;
@@ -234,6 +252,9 @@ impl SemanticStore {
                 accessed_str,
                 access_count,
                 embedding_bytes,
+                image_url,
+                image_embedding_bytes,
+                modality_str,
             ) = row_result.map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
             let id = uuid::Uuid::parse_str(&id_str)
@@ -254,6 +275,11 @@ impl SemanticStore {
                 .unwrap_or_else(|_| Utc::now());
 
             let embedding = embedding_bytes.as_deref().map(embedding_from_bytes);
+            let image_embedding = image_embedding_bytes.as_deref().map(embedding_from_bytes);
+            let modality: MemoryModality = modality_str
+                .as_deref()
+                .and_then(|s| serde_json::from_str(&format!("\"{s}\"")).ok())
+                .unwrap_or_default();
 
             fragments.push(MemoryFragment {
                 id,
@@ -267,6 +293,9 @@ impl SemanticStore {
                 accessed_at,
                 access_count: access_count as u64,
                 scope,
+                image_url,
+                image_embedding,
+                modality,
             });
         }
 
@@ -323,7 +352,7 @@ impl SemanticStore {
             " AND deleted = 0"
         };
         let sql = format!(
-            "SELECT id, agent_id, content, source, scope, confidence, metadata, created_at, accessed_at, access_count, embedding
+            "SELECT id, agent_id, content, source, scope, confidence, metadata, created_at, accessed_at, access_count, embedding, image_url, image_embedding, modality
              FROM memories WHERE id = ?1{deleted_clause}",
         );
 
@@ -343,6 +372,9 @@ impl SemanticStore {
             let accessed_str: String = row.get(8)?;
             let access_count: i64 = row.get(9)?;
             let embedding_bytes: Option<Vec<u8>> = row.get(10)?;
+            let image_url: Option<String> = row.get(11)?;
+            let image_embedding_bytes: Option<Vec<u8>> = row.get(12)?;
+            let modality_str: Option<String> = row.get(13)?;
             Ok((
                 id_str,
                 agent_str,
@@ -355,6 +387,9 @@ impl SemanticStore {
                 accessed_str,
                 access_count,
                 embedding_bytes,
+                image_url,
+                image_embedding_bytes,
+                modality_str,
             ))
         });
 
@@ -371,6 +406,9 @@ impl SemanticStore {
                 accessed_str,
                 access_count,
                 embedding_bytes,
+                image_url,
+                image_embedding_bytes,
+                modality_str,
             )) => {
                 let id = uuid::Uuid::parse_str(&id_str)
                     .map(MemoryId)
@@ -389,6 +427,11 @@ impl SemanticStore {
                     .map(|dt| dt.with_timezone(&Utc))
                     .unwrap_or_else(|_| Utc::now());
                 let embedding = embedding_bytes.as_deref().map(embedding_from_bytes);
+                let image_embedding = image_embedding_bytes.as_deref().map(embedding_from_bytes);
+                let modality: MemoryModality = modality_str
+                    .as_deref()
+                    .and_then(|s| serde_json::from_str(&format!("\"{s}\"")).ok())
+                    .unwrap_or_default();
 
                 Ok(Some(MemoryFragment {
                     id,
@@ -402,6 +445,9 @@ impl SemanticStore {
                     accessed_at,
                     access_count: access_count as u64,
                     scope,
+                    image_url,
+                    image_embedding,
+                    modality,
                 }))
             }
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -1015,6 +1061,9 @@ mod tests {
                 "episodic",
                 HashMap::new(),
                 Some(&embedding),
+                None,
+                None,
+                Default::default(),
             )
             .unwrap();
         assert_ne!(id.0.to_string(), "");
@@ -1038,6 +1087,9 @@ mod tests {
                 "episodic",
                 HashMap::new(),
                 Some(&emb_rust),
+                None,
+                None,
+                Default::default(),
             )
             .unwrap();
         store
@@ -1048,6 +1100,9 @@ mod tests {
                 "episodic",
                 HashMap::new(),
                 Some(&emb_python),
+                None,
+                None,
+                Default::default(),
             )
             .unwrap();
         store
@@ -1058,6 +1113,9 @@ mod tests {
                 "episodic",
                 HashMap::new(),
                 Some(&emb_mixed),
+                None,
+                None,
+                Default::default(),
             )
             .unwrap();
 
@@ -1116,6 +1174,9 @@ mod tests {
                 "episodic",
                 HashMap::new(),
                 Some(&[1.0, 0.0]),
+                None,
+                None,
+                Default::default(),
             )
             .unwrap();
         store

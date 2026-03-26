@@ -576,6 +576,9 @@ impl ProactiveMemoryStore {
                 scope,
                 metadata,
                 embedding.as_deref(),
+                None,
+                None,
+                Default::default(),
             )?;
 
             // Also store in KV for consistency
@@ -758,6 +761,9 @@ impl ProactiveMemoryStore {
                     item.level.scope_str(),
                     metadata,
                     query_embedding.as_deref(),
+                    None,
+                    None,
+                    Default::default(),
                 )?;
                 // Also store in KV using the semantic store's ID for consistency
                 let mut kv_item = item.clone();

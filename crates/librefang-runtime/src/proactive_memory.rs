@@ -688,6 +688,9 @@ mod tests {
             accessed_at: chrono::Utc::now(),
             access_count: 0,
             scope: "user_memory".to_string(),
+            image_url: None,
+            image_embedding: None,
+            modality: Default::default(),
         }];
         let json = format!(r#"{{"action": "UPDATE", "existing_id": "{}"}}"#, mem_id);
         let result = parse_decision_response(&json, &fragments).unwrap();
