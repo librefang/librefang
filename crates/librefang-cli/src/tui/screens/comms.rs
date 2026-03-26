@@ -519,7 +519,7 @@ fn draw_send_modal(f: &mut Frame, area: Rect, state: &CommsState) {
         .title(Span::styled(" Send Message ", theme::title_style()))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::ACCENT))
-        .padding(Padding::uniform(1));
+        .padding(Padding::horizontal(1));
     let inner = block.inner(modal);
     f.render_widget(block, modal);
 
@@ -578,10 +578,7 @@ fn draw_send_modal(f: &mut Frame, area: Rect, state: &CommsState) {
         rows[5],
     );
     f.render_widget(
-        Paragraph::new(Span::styled(
-            "[Tab] field  [Enter] send  [Esc] cancel",
-            theme::hint_style(),
-        )),
+        widgets::hint_bar("[Tab] field  [Enter] send  [Esc] cancel"),
         rows[6],
     );
 }
@@ -594,7 +591,7 @@ fn draw_task_modal(f: &mut Frame, area: Rect, state: &CommsState) {
         .title(Span::styled(" Post Task ", theme::title_style()))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::ACCENT))
-        .padding(Padding::uniform(1));
+        .padding(Padding::horizontal(1));
     let inner = block.inner(modal);
     f.render_widget(block, modal);
 
@@ -656,10 +653,7 @@ fn draw_task_modal(f: &mut Frame, area: Rect, state: &CommsState) {
         rows[5],
     );
     f.render_widget(
-        Paragraph::new(Span::styled(
-            "[Tab] field  [Enter] post  [Esc] cancel",
-            theme::hint_style(),
-        )),
+        widgets::hint_bar("[Tab] field  [Enter] post  [Esc] cancel"),
         rows[6],
     );
 }

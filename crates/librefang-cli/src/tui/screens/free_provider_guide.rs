@@ -330,10 +330,7 @@ fn draw(f: &mut Frame, area: Rect, state: &State) {
         Phase::PasteKey => i18n::t("guide-help-paste"),
         Phase::Testing | Phase::Done => i18n::t("guide-help-wait"),
     };
-    f.render_widget(
-        Paragraph::new(Line::from(Span::styled(hint, theme::hint_style()))),
-        chunks[4],
-    );
+    f.render_widget(widgets::hint_bar(&hint), chunks[4]);
 }
 
 fn draw_select(f: &mut Frame, area: Rect, state: &State) {
