@@ -2420,13 +2420,23 @@ fn detect_best_provider() -> (String, String, String) {
             default_model_for_provider("ollama"),
         );
     }
+
+    // No API key found — launch TUI guide to pick a free provider
+    if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        if let Some(result) = guide_free_provider_setup() {
+            return result;
+        }
+    }
+
+    // Non-interactive fallback: just print hints
     ui::hint(&i18n::t("hint-no-api-keys"));
     ui::hint(&i18n::t("hint-groq-free"));
-    ui::hint(&i18n::t("hint-ollama-local"));
+    ui::hint(&i18n::t("hint-gemini-free"));
+    ui::hint(&i18n::t("hint-deepseek-free"));
     (
-        "openrouter".to_string(),
-        "OPENROUTER_API_KEY".to_string(),
-        default_model_for_provider("openrouter"),
+        "groq".to_string(),
+        "GROQ_API_KEY".to_string(),
+        default_model_for_provider("groq"),
     )
 }
 
@@ -2440,6 +2450,21 @@ fn provider_list() -> Vec<(&'static str, &'static str, &'static str)> {
         ("openai", "OPENAI_API_KEY", "OpenAI"),
         ("openrouter", "OPENROUTER_API_KEY", "OpenRouter"),
     ]
+}
+
+/// Interactive TUI guide: help user pick a free LLM provider and set up an API key.
+/// Returns `Some((provider, env_var, model))` on success, `None` if user cancels.
+fn guide_free_provider_setup() -> Option<(String, String, String)> {
+    use tui::screens::free_provider_guide::{self, GuideResult};
+
+    match free_provider_guide::run() {
+        GuideResult::Completed { provider, env_var } => {
+            ui::success(&i18n::t_args("config-saved-key", &[("env_var", &env_var)]));
+            let model = default_model_for_provider(&provider);
+            Some((provider, env_var, model))
+        }
+        GuideResult::Skipped => None,
+    }
 }
 
 /// Quick probe to check if Ollama is running on localhost.
