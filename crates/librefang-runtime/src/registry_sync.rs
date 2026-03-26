@@ -114,12 +114,27 @@ pub fn sync_registry(home_dir: &Path, cache_ttl_secs: u64) {
         }
     }
 
-    // Sync root-level files (aliases.toml, schema.toml)
-    for name in &["aliases.toml", "schema.toml"] {
-        let src = registry_cache.join(name);
-        let dest = home_dir.join(name);
-        if src.exists() && !dest.exists() {
-            let _ = std::fs::copy(&src, &dest);
+    // Sync aliases (only on first run — user may customize)
+    let aliases_src = registry_cache.join("aliases.toml");
+    let aliases_dest = home_dir.join("aliases.toml");
+    if aliases_src.exists() && !aliases_dest.exists() {
+        let _ = std::fs::copy(&aliases_src, &aliases_dest);
+    }
+
+    // Sync schema — only overwrite when source is machine-parseable.
+    // The registry may still ship the old comment-based format; copying that
+    // would replace a valid schema the user (or a prior release) placed manually.
+    let schema_src = registry_cache.join("schema.toml");
+    let schema_dest = home_dir.join("schema.toml");
+    if schema_src.exists() {
+        let src_parseable = std::fs::read_to_string(&schema_src)
+            .ok()
+            .and_then(|c| {
+                toml::from_str::<librefang_types::registry_schema::RegistrySchema>(&c).ok()
+            })
+            .is_some_and(|s| !s.content_types.is_empty());
+        if src_parseable {
+            let _ = std::fs::copy(&schema_src, &schema_dest);
         }
     }
 

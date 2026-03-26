@@ -2,8 +2,9 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { formatTime, formatDateTime } from "../lib/datetime";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { listProviders, testProvider, setProviderKey, deleteProviderKey, setProviderUrl } from "../api";
+import { listProviders, testProvider, setProviderKey, deleteProviderKey, setProviderUrl, createRegistryContent } from "../api";
 import { isProviderAvailable } from "../lib/status";
+import { SchemaForm } from "../components/SchemaForm";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -16,7 +17,7 @@ import { useUIStore } from "../lib/store";
 import {
   Server, Zap, Clock, Key, Globe, CheckCircle2, XCircle, Loader2, AlertCircle, Search,
   SortAsc, SortDesc, CheckSquare, Square, ChevronRight, X, Grid3X3, List, Filter,
-  ExternalLink, Activity, Cpu, Cloud, Bot, Globe2, Sparkles
+  ExternalLink, Activity, Cpu, Cloud, Bot, Globe2, Sparkles, Plus
 } from "lucide-react";
 
 const REFRESH_MS = 30000;
@@ -474,6 +475,7 @@ export function ProvidersPage() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [detailsProvider, setDetailsProvider] = useState<Provider | null>(null);
   const [configProvider, setConfigProvider] = useState<Provider | null>(null);
+  const [showCreateForm, setShowCreateForm] = useState(false);
   const [keyInput, setKeyInput] = useState("");
   const [urlInput, setUrlInput] = useState("");
   const [keySaving, setKeySaving] = useState(false);
@@ -648,8 +650,13 @@ export function ProvidersPage() {
         icon={<Server className="h-4 w-4" />}
         helpText={t("providers.help")}
         actions={
-          <div className="hidden rounded-full border border-border-subtle bg-surface px-3 py-1.5 text-[10px] font-bold uppercase text-text-dim sm:block">
-            {t("providers.configured_count", { configured: configuredCount, total: providers.length })}
+          <div className="flex items-center gap-2">
+            <Button variant="primary" size="sm" onClick={() => setShowCreateForm(true)} leftIcon={<Plus className="w-3.5 h-3.5" />}>
+              {t("providers.add")}
+            </Button>
+            <div className="hidden rounded-full border border-border-subtle bg-surface px-3 py-1.5 text-[10px] font-bold uppercase text-text-dim sm:block">
+              {t("providers.configured_count", { configured: configuredCount, total: providers.length })}
+            </div>
           </div>
         }
       />
@@ -880,6 +887,25 @@ export function ProvidersPage() {
                 )}
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Create Provider Modal */}
+      {showCreateForm && (
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/30 backdrop-blur-sm" onClick={() => setShowCreateForm(false)}>
+          <div className="bg-surface rounded-2xl shadow-2xl border border-border-subtle w-[540px] max-w-[90vw] max-h-[85vh] overflow-y-auto animate-fade-in-scale" onClick={e => e.stopPropagation()}>
+            <SchemaForm
+              contentType="provider"
+              title={t("providers.add")}
+              submitLabel={t("common.create")}
+              onSubmit={async (values) => {
+                await createRegistryContent("provider", values);
+                setShowCreateForm(false);
+                void providersQuery.refetch();
+              }}
+              onCancel={() => setShowCreateForm(false)}
+            />
           </div>
         </div>
       )}

@@ -1884,3 +1884,56 @@ export async function completeExperiment(experimentId: string): Promise<ApiActio
 export async function getExperimentMetrics(experimentId: string): Promise<ExperimentVariantMetrics[]> {
   return get<ExperimentVariantMetrics[]>(`/api/prompts/experiments/${encodeURIComponent(experimentId)}/metrics`);
 }
+
+// ---------------------------------------------------------------------------
+// Registry Schema
+// ---------------------------------------------------------------------------
+
+export interface RegistrySchemaField {
+  type: string;
+  required?: boolean;
+  description?: string;
+  example?: unknown;
+  default?: unknown;
+  options?: string[];
+  item_type?: string;
+}
+
+export interface RegistrySchemaSection {
+  description?: string;
+  repeatable?: boolean;
+  fields?: Record<string, RegistrySchemaField>;
+  sections?: Record<string, RegistrySchemaSection>;
+}
+
+export interface RegistrySchema {
+  description?: string;
+  file_pattern?: string;
+  fields?: Record<string, RegistrySchemaField>;
+  sections?: Record<string, RegistrySchemaSection>;
+}
+
+export async function fetchAllRegistrySchemas(): Promise<Record<string, RegistrySchema>> {
+  return get<Record<string, RegistrySchema>>("/api/registry/schema");
+}
+
+export async function fetchRegistrySchema(contentType: string): Promise<RegistrySchema> {
+  return get<RegistrySchema>(`/api/registry/schema/${encodeURIComponent(contentType)}`);
+}
+
+export interface CreateRegistryContentResponse {
+  ok: boolean;
+  content_type: string;
+  identifier: string;
+  path: string;
+}
+
+export async function createRegistryContent(
+  contentType: string,
+  values: Record<string, unknown>,
+): Promise<CreateRegistryContentResponse> {
+  return post<CreateRegistryContentResponse>(
+    `/api/registry/content/${encodeURIComponent(contentType)}`,
+    values,
+  );
+}
