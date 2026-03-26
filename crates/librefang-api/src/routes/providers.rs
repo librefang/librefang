@@ -203,7 +203,8 @@ pub async fn create_alias(
         .unwrap_or_else(|e| e.into_inner());
 
     if !catalog.add_alias(&alias, &model_id) {
-        return ApiErrorResponse::conflict(format!("Alias '{}' already exists", alias)).into_json_tuple();
+        return ApiErrorResponse::conflict(format!("Alias '{}' already exists", alias))
+            .into_json_tuple();
     }
 
     (
@@ -229,7 +230,8 @@ pub async fn delete_alias(
         .unwrap_or_else(|e| e.into_inner());
 
     if !catalog.remove_alias(&alias) {
-        return ApiErrorResponse::not_found(format!("Alias '{}' not found", alias)).into_json_tuple();
+        return ApiErrorResponse::not_found(format!("Alias '{}' not found", alias))
+            .into_json_tuple();
     }
 
     (
@@ -457,7 +459,8 @@ pub async fn get_provider(
                 (p.clone(), models)
             }
             None => {
-                return ApiErrorResponse::not_found(format!("Provider '{}' not found", name)).into_json_tuple();
+                return ApiErrorResponse::not_found(format!("Provider '{}' not found", name))
+                    .into_json_tuple();
             }
         }
     };
@@ -573,7 +576,11 @@ pub async fn add_custom_model(
         .unwrap_or_else(|e| e.into_inner());
 
     if !catalog.add_custom_model(entry) {
-        return ApiErrorResponse::conflict(format!("Model '{}' already exists for provider '{}'", id, provider)).into_json_tuple();
+        return ApiErrorResponse::conflict(format!(
+            "Model '{}' already exists for provider '{}'",
+            id, provider
+        ))
+        .into_json_tuple();
     }
 
     // Persist to disk
@@ -605,7 +612,8 @@ pub async fn remove_custom_model(
         .unwrap_or_else(|e| e.into_inner());
 
     if !catalog.remove_custom_model(&model_id) {
-        return ApiErrorResponse::not_found(format!("Custom model '{}' not found", model_id)).into_json_tuple();
+        return ApiErrorResponse::not_found(format!("Custom model '{}' not found", model_id))
+            .into_json_tuple();
     }
 
     let custom_path = state.kernel.home_dir().join("custom_models.json");
@@ -654,7 +662,8 @@ pub async fn set_provider_key(
     // Write to secrets.env file
     let secrets_path = state.kernel.home_dir().join("secrets.env");
     if let Err(e) = write_secret_env(&secrets_path, &env_var, &key) {
-        return ApiErrorResponse::internal(format!("Failed to write secrets.env: {e}")).into_json_tuple();
+        return ApiErrorResponse::internal(format!("Failed to write secrets.env: {e}"))
+            .into_json_tuple();
     }
 
     // Set env var in current process so detect_auth picks it up
@@ -824,13 +833,15 @@ pub async fn delete_provider_key(
     };
 
     if env_var.is_empty() {
-        return ApiErrorResponse::bad_request("Provider does not require an API key").into_json_tuple();
+        return ApiErrorResponse::bad_request("Provider does not require an API key")
+            .into_json_tuple();
     }
 
     // Remove from secrets.env
     let secrets_path = state.kernel.home_dir().join("secrets.env");
     if let Err(e) = remove_secret_env(&secrets_path, &env_var) {
-        return ApiErrorResponse::internal(format!("Failed to update secrets.env: {e}")).into_json_tuple();
+        return ApiErrorResponse::internal(format!("Failed to update secrets.env: {e}"))
+            .into_json_tuple();
     }
 
     // Remove from process environment
@@ -865,7 +876,8 @@ pub async fn test_provider(
         match catalog.get_provider(&name) {
             Some(p) => (p.api_key_env.clone(), p.base_url.clone(), p.key_required),
             None => {
-                return ApiErrorResponse::not_found(format!("Unknown provider '{}'", name)).into_json_tuple();
+                return ApiErrorResponse::not_found(format!("Unknown provider '{}'", name))
+                    .into_json_tuple();
             }
         }
     };
@@ -1037,13 +1049,15 @@ pub async fn set_provider_url(
     let base_url = match body["base_url"].as_str() {
         Some(u) if !u.trim().is_empty() => u.trim().to_string(),
         _ => {
-            return ApiErrorResponse::bad_request("Missing or empty 'base_url' field").into_json_tuple();
+            return ApiErrorResponse::bad_request("Missing or empty 'base_url' field")
+                .into_json_tuple();
         }
     };
 
     // Validate URL scheme
     if !base_url.starts_with("http://") && !base_url.starts_with("https://") {
-        return ApiErrorResponse::bad_request("base_url must start with http:// or https://").into_json_tuple();
+        return ApiErrorResponse::bad_request("base_url must start with http:// or https://")
+            .into_json_tuple();
     }
 
     // Update catalog in memory

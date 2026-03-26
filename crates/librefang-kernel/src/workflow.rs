@@ -227,6 +227,108 @@ pub struct WorkflowEngine {
     persist_path: Option<PathBuf>,
 }
 
+/// Evaluate a conditional expression against the previous step output.
+///
+/// Supports:
+/// - Simple substring match: `"keyword"` — true if `input` contains `keyword`
+/// - Negation: `"!keyword"` — true if `input` does NOT contain `keyword`
+/// - AND: `"a && b"` — true if both `a` and `b` are found
+/// - OR: `"a || b"` — true if either `a` or `b` is found
+///
+/// AND binds tighter than OR (standard precedence). All matching is
+/// case-insensitive (caller should pass lowercased input).
+fn evaluate_condition(input: &str, condition: &str) -> bool {
+    let condition = condition.trim();
+
+    // OR: split on `||` first (lower precedence), but only outside quotes.
+    if let Some(parts) = split_outside_quotes(condition, "||") {
+        // Filter out empty parts to prevent `"a || || b"` from being always-true
+        let parts: Vec<_> = parts
+            .iter()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if parts.len() > 1 {
+            return parts.iter().any(|branch| evaluate_condition(input, branch));
+        }
+    }
+
+    // AND: split on `&&`, only outside quotes.
+    if let Some(parts) = split_outside_quotes(condition, "&&") {
+        let parts: Vec<_> = parts
+            .iter()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if parts.len() > 1 {
+            return parts.iter().all(|part| evaluate_condition(input, part));
+        }
+    }
+
+    // Negation
+    if let Some(inner) = condition.strip_prefix('!') {
+        let inner = inner.trim();
+        let cond_lower = inner.to_lowercase();
+        return !input.contains(&cond_lower);
+    }
+
+    // Simple substring match
+    let cond_lower = condition.to_lowercase();
+    input.contains(&cond_lower)
+}
+
+/// Split `s` on `delimiter` only when the delimiter occurs outside of quoted
+/// strings (both single and double quotes). Returns `None` if the string
+/// contains no occurrence of `delimiter` outside quotes, otherwise returns the
+/// parts.
+fn split_outside_quotes(s: &str, delimiter: &str) -> Option<Vec<String>> {
+    let delim_bytes = delimiter.as_bytes();
+    let delim_len = delim_bytes.len();
+    let bytes = s.as_bytes();
+
+    let mut parts = Vec::new();
+    let mut current_start = 0;
+    let mut in_quote: Option<u8> = None; // tracks the quote character we're inside
+    let mut i = 0;
+
+    while i < bytes.len() {
+        let ch = bytes[i];
+
+        // Toggle quote state on unescaped quote characters
+        if ch == b'"' || ch == b'\'' {
+            match in_quote {
+                Some(q) if q == ch => in_quote = None,
+                None => in_quote = Some(ch),
+                _ => {} // inside a different quote type, ignore
+            }
+            i += 1;
+            continue;
+        }
+
+        // Check for delimiter match only when outside quotes
+        if in_quote.is_none()
+            && i + delim_len <= bytes.len()
+            && &bytes[i..i + delim_len] == delim_bytes
+        {
+            parts.push(s[current_start..i].to_string());
+            i += delim_len;
+            current_start = i;
+            continue;
+        }
+
+        i += 1;
+    }
+
+    // Push the remaining segment
+    parts.push(s[current_start..].to_string());
+
+    if parts.len() > 1 {
+        Some(parts)
+    } else {
+        None
+    }
+}
+
 impl WorkflowEngine {
     /// Create a new workflow engine (no persistence).
     pub fn new() -> Self {
@@ -831,7 +933,7 @@ impl WorkflowEngine {
         run_id: WorkflowRunId,
         workflow: &Workflow,
         input: &str,
-        agent_resolver: &(impl Fn(&StepAgent) -> Option<(AgentId, String, bool)>),
+        agent_resolver: &impl Fn(&StepAgent) -> Option<(AgentId, String, bool)>,
         send_message: &F,
     ) -> Result<String, String>
     where
@@ -1040,7 +1142,38 @@ impl WorkflowEngine {
                 }
 
                 StepMode::Collect => {
-                    current_input = all_outputs.join("\n\n---\n\n");
+                    // Build structured JSON from step results accumulated so far.
+                    // NOTE: This intentionally outputs JSON (not plain text with `---` separators)
+                    // so downstream steps can parse individual fan-out results programmatically.
+                    let step_results: Vec<StepResult> = self
+                        .runs
+                        .read()
+                        .await
+                        .get(&run_id)
+                        .map(|r| r.step_results.clone())
+                        .unwrap_or_default();
+
+                    // Collect results that correspond to the current all_outputs batch.
+                    // Take the last N step results where N = all_outputs.len().
+                    let n = all_outputs.len();
+                    let relevant = if step_results.len() >= n {
+                        &step_results[step_results.len() - n..]
+                    } else {
+                        &step_results[..]
+                    };
+
+                    let results_json: Vec<serde_json::Value> = relevant
+                        .iter()
+                        .map(|sr| {
+                            serde_json::json!({
+                                "agent": sr.agent_name,
+                                "output": sr.output,
+                            })
+                        })
+                        .collect();
+
+                    let merged = serde_json::json!({ "results": results_json });
+                    current_input = serde_json::to_string(&merged).unwrap_or_default();
                     all_outputs.clear();
                     all_outputs.push(current_input.clone());
                     if let Some(ref var) = step.output_var {
@@ -1050,9 +1183,10 @@ impl WorkflowEngine {
 
                 StepMode::Conditional { condition } => {
                     let prev_lower = current_input.to_lowercase();
-                    let cond_lower = condition.to_lowercase();
 
-                    if !prev_lower.contains(&cond_lower) {
+                    let condition_met = evaluate_condition(&prev_lower, condition);
+
+                    if !condition_met {
                         info!(
                             step = i + 1,
                             name = %step.name,
@@ -3483,5 +3617,87 @@ id = "{id}"
         let engine = WorkflowEngine::new();
         let count = engine.load_runs().unwrap();
         assert_eq!(count, 0);
+    }
+
+    // --- evaluate_condition tests ----------------------------------------
+
+    #[test]
+    fn test_evaluate_condition_simple_contains() {
+        assert!(evaluate_condition("hello world", "hello"));
+        assert!(!evaluate_condition("hello world", "goodbye"));
+    }
+
+    #[test]
+    fn test_evaluate_condition_negation() {
+        assert!(evaluate_condition("hello world", "!goodbye"));
+        assert!(!evaluate_condition("hello world", "!hello"));
+    }
+
+    #[test]
+    fn test_evaluate_condition_and() {
+        assert!(evaluate_condition("hello world", "hello && world"));
+        assert!(!evaluate_condition("hello world", "hello && goodbye"));
+    }
+
+    #[test]
+    fn test_evaluate_condition_or() {
+        assert!(evaluate_condition("hello world", "hello || goodbye"));
+        assert!(evaluate_condition("hello world", "goodbye || hello"));
+        assert!(!evaluate_condition("hello world", "goodbye || missing"));
+    }
+
+    #[test]
+    fn test_evaluate_condition_combined_and_or() {
+        // OR has lower precedence: parsed as (a && b) || c
+        assert!(evaluate_condition(
+            "hello world",
+            "hello && world || goodbye"
+        ));
+        // First AND branch fails, but OR branch succeeds
+        assert!(evaluate_condition(
+            "hello world",
+            "hello && goodbye || world"
+        ));
+        // Both branches fail
+        assert!(!evaluate_condition(
+            "hello world",
+            "missing && goodbye || absent"
+        ));
+    }
+
+    #[test]
+    fn test_evaluate_condition_negation_and() {
+        // !missing is true, hello is true => true
+        assert!(evaluate_condition("hello world", "!missing && hello"));
+        // !hello is false, world is true => false (AND requires both)
+        assert!(!evaluate_condition("hello world", "!hello && world"));
+    }
+
+    #[test]
+    fn test_evaluate_condition_negation_or() {
+        // !hello is false, world is true => true
+        assert!(evaluate_condition("hello world", "!hello || world"));
+        // !hello is false, missing is false => false
+        assert!(!evaluate_condition("hello world", "!hello || !world"));
+    }
+
+    #[test]
+    fn test_evaluate_condition_case_insensitivity() {
+        // The condition is lowercased internally, so uppercase conditions
+        // should still match lowercase input.
+        assert!(evaluate_condition("hello world", "HELLO"));
+        assert!(evaluate_condition("hello world", "Hello && World"));
+        assert!(evaluate_condition("hello world", "!GOODBYE"));
+    }
+
+    #[test]
+    fn test_evaluate_condition_empty_and_whitespace() {
+        // Empty condition => empty string is always contained in any string
+        assert!(evaluate_condition("hello world", ""));
+        assert!(evaluate_condition("hello world", "  "));
+        // Empty input with non-empty condition
+        assert!(!evaluate_condition("", "hello"));
+        // Both empty
+        assert!(evaluate_condition("", ""));
     }
 }

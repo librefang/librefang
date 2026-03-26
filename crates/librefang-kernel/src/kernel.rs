@@ -2770,6 +2770,8 @@ system_prompt = "You are a helpful assistant."
             model,
             result.total_usage.input_tokens,
             result.total_usage.output_tokens,
+            result.total_usage.cache_read_input_tokens,
+            result.total_usage.cache_creation_input_tokens,
         );
         let usage_record = librefang_memory::usage::UsageRecord {
             agent_id,
@@ -2777,7 +2779,7 @@ system_prompt = "You are a helpful assistant."
             input_tokens: result.total_usage.input_tokens,
             output_tokens: result.total_usage.output_tokens,
             cost_usd: cost,
-            tool_calls: result.iterations.saturating_sub(1),
+            tool_calls: result.decision_traces.len() as u32,
             latency_ms,
         };
         if let Err(e) = self.metering.check_all_and_record(
@@ -2890,6 +2892,9 @@ system_prompt = "You are a helpful assistant."
             Ok(result) => {
                 // Record token usage for quota tracking
                 self.scheduler.record_usage(agent_id, &result.total_usage);
+                // Record tool calls for rate limiting
+                let tool_count = result.decision_traces.len() as u32;
+                self.scheduler.record_tool_calls(agent_id, tool_count);
 
                 // Update last active time
                 let _ = self.registry.set_state(agent_id, AgentState::Running);
@@ -3007,10 +3012,9 @@ system_prompt = "You are a helpful assistant."
         tokio::sync::mpsc::Receiver<StreamEvent>,
         tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
     )> {
-        // Acquire a shared read lock on the config reload barrier so we
-        // snapshot a fully-consistent configuration before spawning the
-        // streaming task. The guard is dropped before `tokio::spawn`.
-        let _config_guard = self.config_reload_lock.blocking_read();
+        // Try to acquire config reload barrier (non-blocking — this is a sync fn).
+        // If a reload is in progress we proceed without the guard.
+        let _config_guard = self.config_reload_lock.try_read();
 
         // Enforce quota before spawning the streaming task
         self.scheduler
@@ -3433,6 +3437,11 @@ system_prompt = "You are a helpful assistant."
                     kernel_clone
                         .scheduler
                         .record_usage(agent_id, &result.total_usage);
+                    // Record tool calls for rate limiting
+                    let tool_count = result.decision_traces.len() as u32;
+                    kernel_clone
+                        .scheduler
+                        .record_tool_calls(agent_id, tool_count);
 
                     // Atomically check quotas and persist usage to SQLite
                     // (mirrors non-streaming path — prevents TOCTOU race)
@@ -3445,6 +3454,8 @@ system_prompt = "You are a helpful assistant."
                         model,
                         result.total_usage.input_tokens,
                         result.total_usage.output_tokens,
+                        result.total_usage.cache_read_input_tokens,
+                        result.total_usage.cache_creation_input_tokens,
                     );
                     let usage_record = librefang_memory::usage::UsageRecord {
                         agent_id,
@@ -3452,7 +3463,7 @@ system_prompt = "You are a helpful assistant."
                         input_tokens: result.total_usage.input_tokens,
                         output_tokens: result.total_usage.output_tokens,
                         cost_usd: cost,
-                        tool_calls: result.iterations.saturating_sub(1),
+                        tool_calls: result.decision_traces.len() as u32,
                         latency_ms,
                     };
                     if let Err(e) = kernel_clone.metering.check_all_and_record(
@@ -4399,6 +4410,8 @@ system_prompt = "You are a helpful assistant."
             model,
             result.total_usage.input_tokens,
             result.total_usage.output_tokens,
+            result.total_usage.cache_read_input_tokens,
+            result.total_usage.cache_creation_input_tokens,
         );
         let usage_record = librefang_memory::usage::UsageRecord {
             agent_id,
@@ -4406,7 +4419,7 @@ system_prompt = "You are a helpful assistant."
             input_tokens: result.total_usage.input_tokens,
             output_tokens: result.total_usage.output_tokens,
             cost_usd: cost,
-            tool_calls: result.iterations.saturating_sub(1),
+            tool_calls: result.decision_traces.len() as u32,
             latency_ms,
         };
         if let Err(e) = self.metering.check_all_and_record(
@@ -5241,6 +5254,8 @@ system_prompt = "You are a helpful assistant."
             model,
             input_tokens,
             output_tokens,
+            0, // no cache token breakdown available from session history
+            0,
         );
 
         Ok((input_tokens, output_tokens, cost))
@@ -5642,8 +5657,7 @@ system_prompt = "You are a helpful assistant."
                 // Pass `instance_id` (the caller's parameter) so that
                 // `activate_hand()` (None) preserves legacy IDs while
                 // `activate_hand_with_id(_, _, Some(uuid))` uses the new format.
-                let new_id =
-                    AgentId::from_hand_agent(hand_id, &old_role, instance_id);
+                let new_id = AgentId::from_hand_agent(hand_id, &old_role, instance_id);
                 let migrated = self.cron_scheduler.reassign_agent_jobs(old_id, new_id);
                 if migrated > 0 {
                     let _ = self.cron_scheduler.persist();
@@ -5802,8 +5816,7 @@ system_prompt = "You are a helpful assistant."
             // uses the legacy format so existing hands keep their original IDs.
             // When `instance_id` is Some (multi-instance or restart recovery),
             // uses the new format with instance UUID for uniqueness.
-            let deterministic_id =
-                AgentId::from_hand_agent(hand_id, role, instance_id);
+            let deterministic_id = AgentId::from_hand_agent(hand_id, role, instance_id);
             let agent_id = self.spawn_agent_inner(
                 manifest,
                 None,
@@ -6152,8 +6165,7 @@ system_prompt = "You are a helpful assistant."
                     info!(
                         "Hot-reload: web config updated (search_provider={:?}, \
                          cache_ttl={}min) — takes effect on next web tool invocation",
-                        new_config.web.search_provider,
-                        new_config.web.cache_ttl_minutes
+                        new_config.web.search_provider, new_config.web.cache_ttl_minutes
                     );
                 }
                 HotAction::ReloadBrowserConfig => {
@@ -6169,9 +6181,7 @@ system_prompt = "You are a helpful assistant."
                         .as_ref()
                         .map(|w| w.enabled)
                         .unwrap_or(false);
-                    info!(
-                        "Hot-reload: webhook trigger config updated (enabled={enabled})"
-                    );
+                    info!("Hot-reload: webhook trigger config updated (enabled={enabled})");
                 }
                 HotAction::ReloadExtensions => {
                     info!("Hot-reload: reloading extension registry");
@@ -6249,9 +6259,7 @@ system_prompt = "You are a helpful assistant."
                 }
                 HotAction::ReloadFallbackProviders => {
                     let count = new_config.fallback_providers.len();
-                    info!(
-                        "Hot-reload: fallback provider chain updated ({count} provider(s))"
-                    );
+                    info!("Hot-reload: fallback provider chain updated ({count} provider(s))");
                     // Invalidate cached LLM drivers so the new fallback chain
                     // is used when drivers are next constructed.
                     self.driver_cache.clear();

@@ -394,23 +394,57 @@ pub fn validate_bind_mount(path: &str, blocked: &[String]) -> Result<(), String>
         }
     }
 
-    // Check for symlink escape (best-effort — canonicalize if path exists)
-    if p.exists() {
-        match p.canonicalize() {
-            Ok(canonical) => {
-                let canonical_str = canonical.to_string_lossy();
-                for blocked_path in BLOCKED_MOUNT_PATHS {
-                    if canonical_str.starts_with(blocked_path) {
-                        return Err(format!(
-                            "Bind mount resolves to blocked path via symlink: {} → {}",
-                            path, canonical_str
-                        ));
-                    }
+    // Symlink escape check: canonicalize path and verify resolved target.
+    // If the path does not exist, we walk up to find the closest existing
+    // ancestor, canonicalize *that*, and verify the would-be child is still
+    // outside blocked paths.  This prevents an attacker from creating a
+    // symlink at a non-existent path that later resolves into /etc, /proc, etc.
+    let canonical = if p.exists() {
+        p.canonicalize()
+            .map_err(|e| format!("Cannot canonicalize bind mount path '{path}': {e}"))?
+    } else {
+        // Walk ancestors until we find one that exists.
+        let mut ancestor = p.to_path_buf();
+        let mut suffix_parts: Vec<std::ffi::OsString> = Vec::new();
+        loop {
+            if let Some(parent) = ancestor.parent() {
+                if let Some(file_name) = ancestor.file_name() {
+                    suffix_parts.push(file_name.to_os_string());
                 }
+                ancestor = parent.to_path_buf();
+                if ancestor.exists() {
+                    break;
+                }
+            } else {
+                // Reached filesystem root without finding an existing dir — reject.
+                return Err(format!("Bind mount path has no existing ancestor: {path}"));
             }
-            Err(_) => {
-                // Can't canonicalize — path doesn't exist yet, allow it
-            }
+        }
+        let mut resolved = ancestor.canonicalize().map_err(|e| {
+            format!("Cannot canonicalize ancestor of bind mount path '{path}': {e}")
+        })?;
+        for part in suffix_parts.into_iter().rev() {
+            resolved.push(part);
+        }
+        resolved
+    };
+
+    let canonical_str = canonical.to_string_lossy();
+    for blocked_path in BLOCKED_MOUNT_PATHS {
+        if canonical_str.starts_with(blocked_path) {
+            return Err(format!(
+                "Bind mount resolves to blocked path via symlink: {} → {}",
+                path, canonical_str
+            ));
+        }
+    }
+    // Also check user-configured blocked paths against resolved path
+    for bp in blocked {
+        if canonical_str.starts_with(bp.as_str()) {
+            return Err(format!(
+                "Bind mount resolves to blocked path via symlink: {} → {}",
+                path, canonical_str
+            ));
         }
     }
 
