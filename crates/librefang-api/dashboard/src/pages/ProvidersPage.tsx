@@ -49,6 +49,12 @@ function getLatencyColor(ms?: number) {
   return "text-error";
 }
 
+/** Check if a provider auth_status indicates the provider is usable.
+ *  Mirrors the Rust AuthStatus::is_available() variants. */
+function isProviderAvailable(status?: string): boolean {
+  return status === "configured" || status === "not_required" || status === "configured_cli";
+}
+
 type SortField = "name" | "models" | "latency";
 type SortOrder = "asc" | "desc";
 type ViewMode = "grid" | "list";
@@ -83,7 +89,7 @@ interface ProviderCardProps {
 }
 
 function ProviderCard({ provider: p, isSelected, pendingId, viewMode, onSelect, onTest, onViewDetails, onQuickConfig, t }: ProviderCardProps) {
-  const isConfigured = p.auth_status === "configured";
+  const isConfigured = isProviderAvailable(p.auth_status);
 
   if (viewMode === "list") {
     return (
@@ -309,7 +315,7 @@ function DetailsModal({ provider, onClose, onTest, pendingId, t }: {
   pendingId: string | null;
   t: (key: string) => string
 }) {
-  const isConfigured = provider.auth_status === "configured";
+  const isConfigured = isProviderAvailable(provider.auth_status);
 
   return (
     <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-black/50 backdrop-blur-sm" onClick={onClose}>
@@ -482,14 +488,14 @@ export function ProvidersPage() {
   const testMutation = useMutation({ mutationFn: testProvider });
 
   const providers = providersQuery.data ?? [];
-  const configuredCount = useMemo(() => providers.filter(p => p.auth_status === "configured").length, [providers]);
-  const unconfiguredCount = useMemo(() => providers.filter(p => p.auth_status !== "configured").length, [providers]);
+  const configuredCount = useMemo(() => providers.filter(p => isProviderAvailable(p.auth_status)).length, [providers]);
+  const unconfiguredCount = useMemo(() => providers.filter(p => !isProviderAvailable(p.auth_status)).length, [providers]);
 
   // Filter, search, and sort
   const filteredProviders = useMemo(
     () => [...providers]
       .filter(p => {
-        const tabMatch = activeTab === "configured" ? p.auth_status === "configured" : p.auth_status !== "configured";
+        const tabMatch = activeTab === "configured" ? isProviderAvailable(p.auth_status) : !isProviderAvailable(p.auth_status);
         const searchMatch = !search || (p.display_name || p.id).toLowerCase().includes(search.toLowerCase()) || p.id.toLowerCase().includes(search.toLowerCase());
 
         let statusMatch = true;
@@ -839,7 +845,7 @@ export function ProvidersPage() {
                   <p className="text-sm font-bold">{configProvider.display_name || configProvider.id}</p>
                   <p className="text-[10px] text-text-dim font-mono">{configProvider.id}</p>
                 </div>
-                <Badge variant={configProvider.auth_status === "configured" ? "success" : "error"} className="ml-auto">
+                <Badge variant={isProviderAvailable(configProvider.auth_status) ? "success" : "error"} className="ml-auto">
                   {configProvider.auth_status}
                 </Badge>
               </div>
@@ -847,7 +853,7 @@ export function ProvidersPage() {
               <div>
                 <label className="text-[10px] font-bold text-text-dim uppercase">API Key</label>
                 <input type="password" value={keyInput} onChange={e => setKeyInput(e.target.value)}
-                  placeholder={configProvider.auth_status === "configured" ? t("providers.key_placeholder_existing") : t("providers.key_placeholder")}
+                  placeholder={isProviderAvailable(configProvider.auth_status) ? t("providers.key_placeholder_existing") : t("providers.key_placeholder")}
                   className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono outline-none focus:border-brand focus:ring-1 focus:ring-brand/20" />
               </div>
 

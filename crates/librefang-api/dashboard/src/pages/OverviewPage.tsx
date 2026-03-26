@@ -33,7 +33,7 @@ export function OverviewPage() {
 
   const agentsActive = snapshot?.status?.active_agent_count ?? 0;
   const agentsTotal = snapshot?.status?.agent_count ?? 0;
-  const providersReady = snapshot?.providers?.filter(p => p.auth_status === "configured").length ?? 0;
+  const providersReady = snapshot?.providers?.filter(p => p.auth_status === "configured" || p.auth_status === "not_required" || p.auth_status === "configured_cli").length ?? 0;
   const providersTotal = snapshot?.providers?.length ?? 0;
   const channelsReady = snapshot?.channels?.filter(c => c.configured).length ?? 0;
   const skillsCount = snapshot?.skillCount ?? 0;

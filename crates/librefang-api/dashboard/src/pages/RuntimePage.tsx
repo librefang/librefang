@@ -609,7 +609,7 @@ export function RuntimePage() {
               </div>
               <div className="grid grid-cols-2 gap-4">
                 {[
-                  { label: t("runtime.providers"), value: snapshot?.providers?.length ?? 0, sub: `${snapshot?.providers?.filter(p => p.auth_status === "configured").length ?? 0} ${t("status.configured").toLowerCase()}`, color: "text-brand" },
+                  { label: t("runtime.providers"), value: snapshot?.providers?.length ?? 0, sub: `${snapshot?.providers?.filter(p => p.auth_status === "configured" || p.auth_status === "not_required" || p.auth_status === "configured_cli").length ?? 0} ${t("status.configured").toLowerCase()}`, color: "text-brand" },
                   { label: t("runtime.channels"), value: snapshot?.channels?.length ?? 0, sub: `${snapshot?.channels?.filter(c => c.configured).length ?? 0} ${t("status.configured").toLowerCase()}`, color: "text-purple-500" },
                   { label: t("runtime.skills"), value: snapshot?.skillCount ?? 0, sub: t("status.active").toLowerCase(), color: "text-success" },
                   { label: t("runtime.workflows"), value: snapshot?.workflowCount ?? 0, sub: t("common.config").toLowerCase(), color: "text-warning" },
