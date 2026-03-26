@@ -18,7 +18,7 @@ use crate::web_search::WebToolsContext;
 use librefang_memory::session::Session;
 use librefang_memory::{MemorySubstrate, ProactiveMemoryHooks};
 use librefang_skills::registry::SkillRegistry;
-use librefang_types::agent::AgentManifest;
+use librefang_types::agent::{AgentManifest, STABLE_PREFIX_MODE_METADATA_KEY};
 use librefang_types::error::{LibreFangError, LibreFangResult};
 use librefang_types::memory::{Memory, MemoryFilter, MemorySource};
 use librefang_types::memory::{MemoryFragment, MemoryId};
@@ -52,8 +52,6 @@ const MAX_CONTINUATIONS: u32 = 5;
 
 /// Maximum message history size before auto-trimming to prevent context overflow.
 const MAX_HISTORY_MESSAGES: usize = 20;
-
-const STABLE_PREFIX_MODE_METADATA_KEY: &str = "stable_prefix_mode";
 
 /// Safely trim message history to `MAX_HISTORY_MESSAGES`, cutting at
 /// conversation-turn boundaries so ToolUse/ToolResult pairs are never split.

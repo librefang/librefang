@@ -19,6 +19,10 @@ const DEFAULT_COOLDOWN_SECS: u64 = 5;
 /// Default maximum number of triggers that can fire from a single event.
 const DEFAULT_MAX_TRIGGERS_PER_EVENT: usize = 10;
 
+// Re-export defaults so tests can use TriggerEngine::new() without config.
+// The constants above are kept as fallbacks; production code threads values
+// from TriggersConfig via `TriggerEngine::with_config`.
+
 /// Unique identifier for a trigger.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TriggerId(pub Uuid);
@@ -105,6 +109,8 @@ pub struct TriggerEngine {
     last_fired: DashMap<TriggerId, Instant>,
     /// Maximum number of triggers that can fire from a single event.
     max_triggers_per_event: usize,
+    /// Default cooldown duration (seconds) applied when a trigger has no override.
+    default_cooldown_secs: u64,
 }
 
 impl TriggerEngine {
@@ -115,6 +121,18 @@ impl TriggerEngine {
             agent_triggers: DashMap::new(),
             last_fired: DashMap::new(),
             max_triggers_per_event: DEFAULT_MAX_TRIGGERS_PER_EVENT,
+            default_cooldown_secs: DEFAULT_COOLDOWN_SECS,
+        }
+    }
+
+    /// Create a trigger engine configured from a `TriggersConfig`.
+    pub fn with_config(config: &librefang_types::config::TriggersConfig) -> Self {
+        Self {
+            triggers: DashMap::new(),
+            agent_triggers: DashMap::new(),
+            last_fired: DashMap::new(),
+            max_triggers_per_event: config.max_per_event.max(1),
+            default_cooldown_secs: config.cooldown_secs,
         }
     }
 
@@ -367,7 +385,7 @@ impl TriggerEngine {
 
             // Check per-trigger cooldown
             let cooldown =
-                Duration::from_secs(trigger.cooldown_secs.unwrap_or(DEFAULT_COOLDOWN_SECS));
+                Duration::from_secs(trigger.cooldown_secs.unwrap_or(self.default_cooldown_secs));
             if !cooldown.is_zero() {
                 if let Some(last) = self.last_fired.get(&trigger.id) {
                     if now.duration_since(*last) < cooldown {

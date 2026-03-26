@@ -8,10 +8,6 @@
 
 use async_trait::async_trait;
 use hmac::{Hmac, Mac};
-use librefang_types::model_catalog::{
-    FIREWORKS_BASE_URL, GROQ_BASE_URL, LMSTUDIO_BASE_URL, MISTRAL_BASE_URL, OLLAMA_BASE_URL,
-    OPENAI_BASE_URL, TOGETHER_BASE_URL, VLLM_BASE_URL,
-};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::{debug, warn};
@@ -480,14 +476,14 @@ pub fn create_embedding_driver(
             }
         })
         .unwrap_or_else(|| match provider {
-            "openai" => OPENAI_BASE_URL.to_string(),
-            "groq" => GROQ_BASE_URL.to_string(),
-            "together" => TOGETHER_BASE_URL.to_string(),
-            "fireworks" => FIREWORKS_BASE_URL.to_string(),
-            "mistral" => MISTRAL_BASE_URL.to_string(),
-            "ollama" => OLLAMA_BASE_URL.to_string(),
-            "vllm" => VLLM_BASE_URL.to_string(),
-            "lmstudio" => LMSTUDIO_BASE_URL.to_string(),
+            "openai" => "https://api.openai.com/v1".to_string(),
+            "groq" => "https://api.groq.com/openai/v1".to_string(),
+            "together" => "https://api.together.xyz/v1".to_string(),
+            "fireworks" => "https://api.fireworks.ai/inference/v1".to_string(),
+            "mistral" => "https://api.mistral.ai/v1".to_string(),
+            "ollama" => "http://localhost:11434/v1".to_string(),
+            "vllm" => "http://localhost:8000/v1".to_string(),
+            "lmstudio" => "http://localhost:1234/v1".to_string(),
             other => {
                 warn!("Unknown embedding provider '{other}', using OpenAI-compatible format");
                 format!("https://{other}/v1")

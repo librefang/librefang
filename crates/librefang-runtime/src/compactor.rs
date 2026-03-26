@@ -64,6 +64,22 @@ impl Default for CompactionConfig {
     }
 }
 
+impl CompactionConfig {
+    /// Build a `CompactionConfig` from the user-facing TOML config, keeping
+    /// internal algorithmic constants at their defaults.
+    pub fn from_toml(toml: &librefang_types::config::CompactionTomlConfig) -> Self {
+        Self {
+            threshold: toml.threshold_messages,
+            keep_recent: toml.keep_recent,
+            max_summary_tokens: toml.max_summary_tokens as u32,
+            max_chunk_chars: toml.max_chunk_chars,
+            max_retries: toml.max_retries,
+            token_threshold_ratio: toml.token_threshold_ratio,
+            ..Self::default()
+        }
+    }
+}
+
 /// Result of a compaction operation.
 #[derive(Debug)]
 pub struct CompactionResult {

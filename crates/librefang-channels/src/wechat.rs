@@ -22,10 +22,7 @@ use zeroize::Zeroizing;
 /// iLink API base URL.
 const ILINK_BASE: &str = "https://ilinkai.weixin.qq.com";
 
-/// Maximum backoff on API failures.
-const MAX_BACKOFF: Duration = Duration::from_secs(60);
-/// Initial backoff on failures.
-const INITIAL_BACKOFF: Duration = Duration::from_secs(2);
+// Backoff durations are now configurable via WeChatConfig.
 /// Maximum message length for WeChat text messages.
 const MAX_MESSAGE_LEN: usize = 4096;
 /// Channel version sent in base_info.
@@ -55,6 +52,10 @@ pub struct WeChatAdapter {
     allowed_users: Vec<String>,
     /// Optional account identifier for multi-bot routing.
     account_id: Option<String>,
+    /// Initial backoff on API failures.
+    initial_backoff: Duration,
+    /// Maximum backoff on API failures.
+    max_backoff: Duration,
     /// Cursor for long-polling getupdates.
     updates_cursor: Arc<RwLock<String>>,
     /// Typing ticket from getconfig.
@@ -107,6 +108,8 @@ impl WeChatAdapter {
                 .expect("failed to build HTTP client"),
             allowed_users,
             account_id: None,
+            initial_backoff: Duration::from_secs(2),
+            max_backoff: Duration::from_secs(60),
             updates_cursor: Arc::new(RwLock::new(String::new())),
             typing_ticket: Arc::new(RwLock::new(None)),
             user_context_tokens: Arc::new(RwLock::new(HashMap::new())),
@@ -124,6 +127,13 @@ impl WeChatAdapter {
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
     pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
         self.account_id = account_id;
+        self
+    }
+
+    /// Set backoff configuration. Returns self for builder chaining.
+    pub fn with_backoff(mut self, initial_backoff_secs: u64, max_backoff_secs: u64) -> Self {
+        self.initial_backoff = Duration::from_secs(initial_backoff_secs);
+        self.max_backoff = Duration::from_secs(max_backoff_secs);
         self
     }
 
@@ -169,7 +179,7 @@ impl WeChatAdapter {
         debug!("WeChat: qrcode={}", qrcode);
 
         // Step 2: Poll for confirmation (with overall timeout)
-        let mut backoff = INITIAL_BACKOFF;
+        let mut backoff = self.initial_backoff;
         let deadline = tokio::time::Instant::now() + QR_LOGIN_TIMEOUT;
         let mut shutdown_rx = self.shutdown_rx.clone();
         let encoded_qr: String = url::form_urlencoded::byte_serialize(qrcode.as_bytes()).collect();
@@ -548,6 +558,8 @@ impl ChannelAdapter for WeChatAdapter {
         let account_id = self.account_id.clone();
         let mut shutdown_rx = self.shutdown_rx.clone();
         let wechat_uin = self.wechat_uin.clone();
+        let initial_backoff = self.initial_backoff;
+        let max_backoff = self.max_backoff;
 
         *self.started_at.write().await = Some(chrono::Utc::now());
         self.connected.store(true, Ordering::Relaxed);
@@ -555,7 +567,7 @@ impl ChannelAdapter for WeChatAdapter {
         info!("WeChat: starting message polling loop");
 
         tokio::spawn(async move {
-            let mut backoff = INITIAL_BACKOFF;
+            let mut backoff = initial_backoff;
 
             loop {
                 // Check for shutdown
@@ -591,7 +603,7 @@ impl ChannelAdapter for WeChatAdapter {
 
                 match poll_result {
                     Ok(data) => {
-                        backoff = INITIAL_BACKOFF;
+                        backoff = initial_backoff;
                         connected.store(true, Ordering::Relaxed);
 
                         // Update cursor for next poll
@@ -670,7 +682,7 @@ impl ChannelAdapter for WeChatAdapter {
                             _ = tokio::time::sleep(backoff) => {}
                             _ = shutdown_rx.changed() => { break; }
                         }
-                        backoff = (backoff * 2).min(MAX_BACKOFF);
+                        backoff = (backoff * 2).min(max_backoff);
                     }
                 }
             }

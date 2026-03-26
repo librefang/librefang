@@ -29,8 +29,7 @@ const MAX_MESSAGE_LEN: usize = 510;
 /// `:nick!user@host PRIVMSG #channel :` prefix overhead (~80 chars conservative).
 const MAX_PRIVMSG_PAYLOAD: usize = 400;
 
-const MAX_BACKOFF: Duration = Duration::from_secs(60);
-const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
+// Backoff durations are now configurable via IrcConfig.
 
 /// IRC channel adapter using raw TCP and the IRC text protocol.
 ///
@@ -52,6 +51,10 @@ pub struct IrcAdapter {
     use_tls: bool,
     /// Optional account identifier for multi-bot routing.
     account_id: Option<String>,
+    /// Initial backoff on connection failures.
+    initial_backoff: Duration,
+    /// Maximum backoff on connection failures.
+    max_backoff: Duration,
     /// Shutdown signal.
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
@@ -86,6 +89,8 @@ impl IrcAdapter {
             channels,
             use_tls,
             account_id: None,
+            initial_backoff: Duration::from_secs(1),
+            max_backoff: Duration::from_secs(60),
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
             write_tx: Arc::new(RwLock::new(None)),
@@ -94,6 +99,13 @@ impl IrcAdapter {
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
     pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
         self.account_id = account_id;
+        self
+    }
+
+    /// Set backoff configuration. Returns self for builder chaining.
+    pub fn with_backoff(mut self, initial_backoff_secs: u64, max_backoff_secs: u64) -> Self {
+        self.initial_backoff = Duration::from_secs(initial_backoff_secs);
+        self.max_backoff = Duration::from_secs(max_backoff_secs);
         self
     }
 
@@ -253,9 +265,11 @@ impl ChannelAdapter for IrcAdapter {
         let channels = self.channels.clone();
         let mut shutdown_rx = self.shutdown_rx.clone();
         let account_id = self.account_id.clone();
+        let initial_backoff = self.initial_backoff;
+        let max_backoff = self.max_backoff;
 
         tokio::spawn(async move {
-            let mut backoff = INITIAL_BACKOFF;
+            let mut backoff = initial_backoff;
 
             loop {
                 if *shutdown_rx.borrow() {
@@ -269,12 +283,12 @@ impl ChannelAdapter for IrcAdapter {
                     Err(e) => {
                         warn!("IRC connection failed: {e}, retrying in {backoff:?}");
                         tokio::time::sleep(backoff).await;
-                        backoff = (backoff * 2).min(MAX_BACKOFF);
+                        backoff = (backoff * 2).min(max_backoff);
                         continue;
                     }
                 };
 
-                backoff = INITIAL_BACKOFF;
+                backoff = initial_backoff;
                 info!("IRC connected to {addr}");
 
                 let (reader, mut writer) = stream.into_split();
@@ -291,7 +305,7 @@ impl ChannelAdapter for IrcAdapter {
                 if let Err(e) = writer.write_all(registration.as_bytes()).await {
                     warn!("IRC registration send failed: {e}");
                     tokio::time::sleep(backoff).await;
-                    backoff = (backoff * 2).min(MAX_BACKOFF);
+                    backoff = (backoff * 2).min(max_backoff);
                     continue;
                 }
 
@@ -421,7 +435,7 @@ impl ChannelAdapter for IrcAdapter {
 
                 warn!("IRC: reconnecting in {backoff:?}");
                 tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(MAX_BACKOFF);
+                backoff = (backoff * 2).min(max_backoff);
             }
 
             info!("IRC connection loop stopped");

@@ -89,6 +89,33 @@ debounce_ms = 500
 # model = "gpt-4o"
 # api_key_env = "OPENAI_API_KEY"
 
+# ── Rate Limiting ────────────────────────────────────────────
+# [rate_limit]
+# api_requests_per_minute = 500   # GCRA token budget per IP
+# retry_after_secs = 60           # Retry-After header value (429 responses)
+# max_ws_per_ip = 5               # Max concurrent WebSocket connections per IP
+# ws_messages_per_minute = 10     # Max WebSocket messages per minute per connection
+# ws_idle_timeout_secs = 1800     # Close idle WebSocket after 30 min
+# ws_debounce_ms = 100            # Text delta debounce interval
+# ws_debounce_chars = 200         # Flush text buffer at this character count
+# ── Registry Sync ────────────────────────────────────────────
+# [registry]
+# cache_ttl_secs = 86400          # Re-download interval (default: 24 hours)
+# ── Session Compaction (LLM-based history summarization) ─────
+# [compaction]
+# threshold_messages = 30       # Compact when message count exceeds this
+# keep_recent = 10              # Recent messages preserved verbatim
+# max_summary_tokens = 1024     # Max tokens for the LLM summary
+# token_threshold_ratio = 0.7   # Trigger at this fraction of context window
+# max_chunk_chars = 80000       # Max chars per summarization chunk
+# max_retries = 3               # Max LLM summarization retries
+# ── Event Triggers ───────────────────────────────────────────
+# [triggers]
+# cooldown_secs = 5             # Default cooldown between trigger firings
+# max_per_event = 10            # Max triggers that can fire per event
+# max_depth = 5                 # Max trigger recursion depth
+# max_workflow_secs = 3600      # Max workflow execution time (1 hour)
+
 # ── Budget & Cost Control ────────────────────────────────────
 # [budget]
 # max_hourly_usd = 0.0         # 0 = unlimited
