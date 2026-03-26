@@ -150,8 +150,6 @@ impl PromptMetadataCache {
     }
 }
 
-const STABLE_PREFIX_MODE_METADATA_KEY: &str = "stable_prefix_mode";
-
 /// The main LibreFang kernel — coordinates all subsystems.
 /// Stub LLM driver used when no providers are configured.
 /// Returns a helpful error so the dashboard still boots and users can configure providers.

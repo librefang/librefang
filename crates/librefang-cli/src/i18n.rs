@@ -8,7 +8,7 @@ const EN_FTL: &str = include_str!("../locales/en/main.ftl");
 const ZH_CN_FTL: &str = include_str!("../locales/zh-CN/main.ftl");
 
 pub const SUPPORTED_LANGUAGES: &[&str] = &["en", "zh-CN"];
-pub const DEFAULT_LANGUAGE: &str = "en";
+pub use librefang_types::i18n::DEFAULT_LANGUAGE;
 
 thread_local! {
     static I18N: RefCell<Option<I18n>> = const { RefCell::new(None) };
