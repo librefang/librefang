@@ -549,12 +549,12 @@ mod tests {
 
     #[test]
     fn test_estimate_cost_cache_read_discount() {
+        // estimate_cost uses default rates: $1/M input, $3/M output
         // 1M total input tokens, 500k are cache-read (10% of input price)
-        // Sonnet: $3/M input, $15/M output
-        // Regular input: 500k * $3/M = $1.50
-        // Cache read: 500k * $3/M * 0.10 = $0.15
-        // Output: 1M * $15/M = $15.00
-        // Total = $16.65
+        // Regular input: 500k * $1/M = $0.50
+        // Cache read: 500k * $1/M * 0.10 = $0.05
+        // Output: 1M * $3/M = $3.00
+        // Total = $3.55
         let cost = MeteringEngine::estimate_cost(
             "claude-sonnet-4-20250514",
             1_000_000, // total input
@@ -562,17 +562,17 @@ mod tests {
             500_000,   // cache_read
             0,         // cache_creation
         );
-        assert!((cost - 16.65).abs() < 0.01);
+        assert!((cost - 3.55).abs() < 0.01);
     }
 
     #[test]
     fn test_estimate_cost_cache_creation_surcharge() {
+        // estimate_cost uses default rates: $1/M input, $3/M output
         // 1M total input tokens, 200k are cache-creation (125% of input price)
-        // Sonnet: $3/M input, $15/M output
-        // Regular input: 800k * $3/M = $2.40
-        // Cache creation: 200k * $3/M * 1.25 = $0.75
-        // Output: 1M * $15/M = $15.00
-        // Total = $18.15
+        // Regular input: 800k * $1/M = $0.80
+        // Cache creation: 200k * $1/M * 1.25 = $0.25
+        // Output: 1M * $3/M = $3.00
+        // Total = $4.05
         let cost = MeteringEngine::estimate_cost(
             "claude-sonnet-4-20250514",
             1_000_000, // total input
@@ -580,18 +580,18 @@ mod tests {
             0,         // cache_read
             200_000,   // cache_creation
         );
-        assert!((cost - 18.15).abs() < 0.01);
+        assert!((cost - 4.05).abs() < 0.01);
     }
 
     #[test]
     fn test_estimate_cost_cache_mixed() {
+        // estimate_cost uses default rates: $1/M input, $3/M output
         // 1M total input, 400k cache-read, 100k cache-creation, 500k regular
-        // Sonnet: $3/M input, $15/M output
-        // Regular input: 500k * $3/M = $1.50
-        // Cache read: 400k * $3/M * 0.10 = $0.12
-        // Cache creation: 100k * $3/M * 1.25 = $0.375
-        // Output: 1M * $15/M = $15.00
-        // Total = $16.995
+        // Regular input: 500k * $1/M = $0.50
+        // Cache read: 400k * $1/M * 0.10 = $0.04
+        // Cache creation: 100k * $1/M * 1.25 = $0.125
+        // Output: 1M * $3/M = $3.00
+        // Total = $3.665
         let cost = MeteringEngine::estimate_cost(
             "claude-sonnet-4-20250514",
             1_000_000, // total input
@@ -599,14 +599,15 @@ mod tests {
             400_000,   // cache_read
             100_000,   // cache_creation
         );
-        assert!((cost - 16.995).abs() < 0.01);
+        assert!((cost - 3.665).abs() < 0.01);
     }
 
     #[test]
     fn test_estimate_cost_zero_cache_matches_no_cache() {
+        // estimate_cost uses default rates: $1/M input, $3/M output
         // With zero cache tokens, should match the original behavior
         let cost_with_cache = MeteringEngine::estimate_cost("gpt-4o", 1_000_000, 1_000_000, 0, 0);
-        let expected = 12.50; // $2.50 + $10.00
+        let expected = 4.00; // $1.00 + $3.00
         assert!((cost_with_cache - expected).abs() < 0.01);
     }
 
