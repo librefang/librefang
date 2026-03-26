@@ -2256,7 +2256,9 @@ system_prompt = "You are a helpful assistant."
         // Load workflow templates (sync handled by registry_sync)
         {
             let user_dir = kernel.config.home_dir.join("workflows").join("templates");
-            let loaded = kernel.template_registry.load_templates_from_dir(&user_dir);
+            let loaded = tokio::task::block_in_place(|| {
+                kernel.template_registry.load_templates_from_dir(&user_dir)
+            });
             if loaded > 0 {
                 info!("Loaded {loaded} workflow template(s)");
             }
