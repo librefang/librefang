@@ -7,29 +7,29 @@
 
 use ratatui::style::{Color, Modifier, Style};
 
-// ── Core Palette (dark mode for terminal) ───────────────────────────────────
+// ── Core Palette (dark mode — matches docs site zinc + emerald design) ───────
 
-pub const ACCENT: Color = Color::Rgb(255, 106, 20); // #FF6A14 — LibreFang orange (warmer)
-pub const ACCENT_DIM: Color = Color::Rgb(204, 85, 16); // #CC5510
+pub const ACCENT: Color = Color::Rgb(52, 211, 153); // #34D399 — emerald-400 (site primary)
+pub const ACCENT_DIM: Color = Color::Rgb(16, 185, 129); // #10B981 — emerald-500
 
-pub const BG_PRIMARY: Color = Color::Rgb(18, 18, 22); // #121216 — dark background (cooler)
-pub const BG_CARD: Color = Color::Rgb(28, 28, 34); // #1C1C22 — dark surface
-pub const BG_HOVER: Color = Color::Rgb(40, 40, 50); // #282832 — selection bg (more visible)
-pub const BG_CODE: Color = Color::Rgb(22, 22, 28); // #16161C — dark code block
+pub const BG_PRIMARY: Color = Color::Rgb(24, 24, 27); // #18181B — zinc-900
+pub const BG_CARD: Color = Color::Rgb(39, 39, 42); // #27272A — zinc-800
+pub const BG_HOVER: Color = Color::Rgb(52, 52, 56); // #343438 — zinc-700/800
+pub const BG_CODE: Color = Color::Rgb(30, 30, 33); // #1E1E21 — code block
 
-pub const TEXT_PRIMARY: Color = Color::Rgb(230, 230, 235); // #E6E6EB — light text
-pub const TEXT_SECONDARY: Color = Color::Rgb(148, 148, 160); // #9494A0 — muted text (cooler)
-pub const TEXT_TERTIARY: Color = Color::Rgb(100, 100, 115); // #646473 — dim text
+pub const TEXT_PRIMARY: Color = Color::Rgb(244, 244, 245); // #F4F4F5 — zinc-100
+pub const TEXT_SECONDARY: Color = Color::Rgb(161, 161, 170); // #A1A1AA — zinc-400
+pub const TEXT_TERTIARY: Color = Color::Rgb(113, 113, 122); // #71717A — zinc-500
 
-pub const BORDER: Color = Color::Rgb(55, 55, 68); // #373744 — border (subtle blue tint)
+pub const BORDER: Color = Color::Rgb(63, 63, 70); // #3F3F46 — zinc-700
 
-// ── Semantic Colors (brighter variants for dark background contrast) ────────
+// ── Semantic Colors ─────────────────────────────────────────────────────────
 
-pub const GREEN: Color = Color::Rgb(52, 211, 120); // #34D378 — success (brighter)
-pub const BLUE: Color = Color::Rgb(96, 165, 250); // #60A5FA — info (brighter)
-pub const YELLOW: Color = Color::Rgb(250, 200, 50); // #FAC832 — warning (more visible)
-pub const RED: Color = Color::Rgb(248, 85, 85); // #F85555 — error (brighter)
-pub const PURPLE: Color = Color::Rgb(180, 120, 255); // #B478FF — decorators (brighter)
+pub const GREEN: Color = Color::Rgb(52, 211, 153); // #34D399 — emerald-400
+pub const BLUE: Color = Color::Rgb(96, 165, 250); // #60A5FA — blue-400
+pub const YELLOW: Color = Color::Rgb(250, 204, 21); // #FACC15 — yellow-400
+pub const RED: Color = Color::Rgb(248, 113, 113); // #F87171 — red-400
+pub const PURPLE: Color = Color::Rgb(192, 132, 252); // #C084FC — purple-400
 
 // ── Backward-compat aliases ─────────────────────────────────────────────────
 
@@ -69,6 +69,10 @@ pub fn tab_active() -> Style {
         .fg(BG_PRIMARY)
         .bg(ACCENT)
         .add_modifier(Modifier::BOLD)
+}
+
+pub fn tab_separator() -> Style {
+    Style::default().fg(BORDER)
 }
 
 pub fn tab_inactive() -> Style {

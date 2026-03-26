@@ -400,6 +400,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut ChatState) {
             theme::dim_style(),
         )]))
         .borders(Borders::ALL)
+        .border_set(ratatui::symbols::border::ROUNDED)
         .border_style(Style::default().fg(theme::BORDER))
         .padding(Padding::horizontal(1));
 
@@ -492,6 +493,7 @@ fn draw_model_picker(f: &mut Frame, area: Rect, state: &ChatState) {
             theme::title_style(),
         )]))
         .borders(Borders::ALL)
+        .border_set(ratatui::symbols::border::ROUNDED)
         .border_style(Style::default().fg(theme::ACCENT))
         .padding(Padding::horizontal(1));
 
@@ -660,11 +662,11 @@ fn draw_messages(f: &mut Frame, area: Rect, state: &ChatState) {
                     };
                     let icon_color = if is_err { theme::RED } else { theme::GREEN };
 
-                    // Header: ┌─ ✔ tool_name ────────
+                    // Header: ╭─ ✔ tool_name ────────
                     let header_rest = width.saturating_sub(6 + info.name.len());
                     let fill = "\u{2500}".repeat(header_rest);
                     lines.push(Line::from(vec![
-                        Span::styled("  \u{250c}\u{2500} ", Style::default().fg(border_color)),
+                        Span::styled("  \u{256d}\u{2500} ", Style::default().fg(border_color)),
                         Span::styled(format!("{icon} "), Style::default().fg(icon_color)),
                         Span::styled(
                             info.name.clone(),
@@ -712,10 +714,10 @@ fn draw_messages(f: &mut Frame, area: Rect, state: &ChatState) {
                         ]));
                     }
 
-                    // Footer: └───────────
+                    // Footer: ╰───────────
                     let footer_fill = "\u{2500}".repeat(width.saturating_sub(4));
                     lines.push(Line::from(vec![Span::styled(
-                        format!("  \u{2514}{footer_fill}"),
+                        format!("  \u{2570}{footer_fill}"),
                         Style::default().fg(border_color),
                     )]));
                 } else {
