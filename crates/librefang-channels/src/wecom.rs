@@ -1,358 +1,162 @@
-//! WeCom (WeChat Work) channel adapter.
+//! WeCom intelligent bot adapter (WebSocket long-connection).
 //!
-//! Uses the WeCom Work API for sending messages and a webhook HTTP server for
-//! receiving inbound events. Authentication is performed via an access token
-//! obtained from `https://qyapi.weixin.qq.com/cgi-bin/gettoken`.
-//! The token is cached and refreshed automatically.
+//! Connects to `wss://openws.work.weixin.qq.com` using Bot ID and Secret.
+//! Receives messages via `aibot_msg_callback` frames and replies via
+//! `aibot_respond_msg` / `aibot_send_msg` frames.
 
 use crate::types::{
     split_message, ChannelAdapter, ChannelContent, ChannelMessage, ChannelType, ChannelUser,
 };
 use async_trait::async_trait;
-use axum::response::IntoResponse;
 use chrono::Utc;
-use futures::Stream;
-use sha1::{Digest, Sha1};
+use futures::{SinkExt, Stream, StreamExt};
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::{mpsc, watch, RwLock};
-use tracing::{info, warn};
+use tokio_tungstenite::tungstenite::Message as WsMessage;
+use tracing::{debug, info, warn};
 use zeroize::Zeroizing;
 
-/// WeCom token endpoint.
-const WECOM_TOKEN_URL: &str = "https://qyapi.weixin.qq.com/cgi-bin/gettoken";
+/// WeCom intelligent bot WebSocket endpoint.
+const WECOM_WS_URL: &str = "wss://openws.work.weixin.qq.com";
 
-/// WeCom send message endpoint.
-const WECOM_SEND_URL: &str = "https://qyapi.weixin.qq.com/cgi-bin/message/send";
+/// Maximum text length per reply frame.
+const MAX_MESSAGE_LEN: usize = 4096;
 
-/// Maximum WeCom message text length (characters).
-const MAX_MESSAGE_LEN: usize = 2048;
+/// Heartbeat interval.
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 
-/// Token refresh buffer — refresh 5 minutes before actual expiry.
-const TOKEN_REFRESH_BUFFER_SECS: u64 = 300;
+/// Initial reconnect backoff.
+const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
+/// Maximum reconnect backoff.
+const MAX_BACKOFF: Duration = Duration::from_secs(30);
 
-fn decrypt_aes_cbc(key: &[u8], encrypted_base64: &str) -> Result<Vec<u8>, String> {
-    use base64::Engine;
-    use cbc::cipher::{BlockDecryptMut, KeyIvInit};
-
-    // Decode base64
-    let mut encrypted = base64::engine::general_purpose::STANDARD
-        .decode(encrypted_base64)
-        .map_err(|e| format!("base64 decode error: {}", e))?;
-
-    if key.len() != 32 {
-        return Err(format!(
-            "invalid WeCom AES key length: expected 32 bytes, got {}",
-            key.len()
-        ));
-    }
-
-    // IV is first 16 bytes of key
-    type Aes256CbcDecrypt = cbc::Decryptor<aes::Aes256>;
-    let iv = &key[..16];
-    let cipher = Aes256CbcDecrypt::new(key.into(), iv.into());
-
-    let decrypted = cipher
-        .decrypt_padded_mut::<aes::cipher::block_padding::NoPadding>(&mut encrypted)
-        .map_err(|e| format!("decrypt error: {}", e))?;
-
-    let decrypted = decrypted.to_vec();
-    let pad = decrypted
-        .last()
-        .copied()
-        .ok_or_else(|| "decrypted payload is empty".to_string())? as usize;
-
-    if pad == 0 || pad > 32 || decrypted.len() < pad {
-        return Err(format!("invalid WeCom PKCS7 padding length: {pad}"));
-    }
-    if !decrypted[decrypted.len() - pad..]
-        .iter()
-        .all(|byte| *byte as usize == pad)
-    {
-        return Err("invalid WeCom PKCS7 padding bytes".to_string());
-    }
-
-    Ok(decrypted[..decrypted.len() - pad].to_vec())
-}
-
-fn is_valid_wecom_signature(
-    token: &str,
-    timestamp: &str,
-    nonce: &str,
-    encrypted_payload: &str,
-    msg_signature: &str,
-) -> bool {
-    let mut parts = [token, timestamp, nonce, encrypted_payload];
-    parts.sort_unstable();
-
-    let mut hasher = Sha1::new();
-    hasher.update(parts.concat().as_bytes());
-    hex::encode(hasher.finalize()) == msg_signature
-}
-
-fn decode_wecom_payload(encoding_aes_key: &str, encrypted_payload: &str) -> Result<String, String> {
-    use base64::{
-        alphabet,
-        engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig},
-        Engine,
-    };
-
-    let aes_key_engine = GeneralPurpose::new(
-        &alphabet::STANDARD,
-        GeneralPurposeConfig::new()
-            .with_decode_padding_mode(DecodePaddingMode::RequireNone)
-            .with_decode_allow_trailing_bits(true),
-    );
-
-    let aes_key = aes_key_engine
-        .decode(encoding_aes_key)
-        .map_err(|e| format!("aes key decode error: {e}"))?;
-    let decrypted = decrypt_aes_cbc(&aes_key, encrypted_payload)?;
-
-    if decrypted.len() < 20 {
-        return Err("decrypted payload too short".to_string());
-    }
-
-    let msg_len =
-        u32::from_be_bytes([decrypted[16], decrypted[17], decrypted[18], decrypted[19]]) as usize;
-    if decrypted.len() < 20 + msg_len {
-        return Err("decrypted payload shorter than declared echostr".to_string());
-    }
-
-    String::from_utf8(decrypted[20..20 + msg_len].to_vec())
-        .map_err(|e| format!("echostr is not valid utf-8: {e}"))
-}
-
-fn parse_wecom_xml_fields(xml: &str) -> Result<HashMap<String, String>, String> {
-    let doc = roxmltree::Document::parse(xml).map_err(|e| format!("invalid xml: {e}"))?;
-    let root = doc.root_element();
-    if root.tag_name().name() != "xml" {
-        return Err("root element is not <xml>".to_string());
-    }
-
-    let mut fields = HashMap::new();
-    for child in root.children().filter(|node| node.is_element()) {
-        let value = child
-            .children()
-            .filter_map(|node| node.text())
-            .collect::<String>()
-            .trim()
-            .to_string();
-        fields.insert(child.tag_name().name().to_string(), value);
-    }
-
-    Ok(fields)
-}
-
-fn decode_wecom_post_body(
-    body: &str,
-    params: &HashMap<String, String>,
-    token: Option<&str>,
-    encoding_aes_key: Option<&str>,
-) -> Result<HashMap<String, String>, String> {
-    let parsed = parse_wecom_xml_fields(body)?;
-
-    if let Some(token) = token {
-        let timestamp = params
-            .get("timestamp")
-            .ok_or_else(|| "missing timestamp".to_string())?;
-        let nonce = params
-            .get("nonce")
-            .ok_or_else(|| "missing nonce".to_string())?;
-        let msg_signature = params
-            .get("msg_signature")
-            .ok_or_else(|| "missing msg_signature".to_string())?;
-        let signed_payload = parsed
-            .get("Encrypt")
-            .map(String::as_str)
-            .unwrap_or(body.trim());
-
-        if !is_valid_wecom_signature(token, timestamp, nonce, signed_payload, msg_signature) {
-            return Err("invalid WeCom callback signature".to_string());
-        }
-    }
-
-    if let Some(encrypted_payload) = parsed.get("Encrypt") {
-        let aes_key = encoding_aes_key
-            .filter(|key| !key.is_empty())
-            .ok_or_else(|| "missing WeCom encoding_aes_key".to_string())?;
-        let decrypted_xml = decode_wecom_payload(aes_key, encrypted_payload)?;
-        parse_wecom_xml_fields(&decrypted_xml)
-    } else {
-        Ok(parsed)
-    }
-}
-
-fn wecom_success_response() -> axum::response::Response {
-    (
-        axum::http::StatusCode::OK,
-        [(
-            axum::http::header::CONTENT_TYPE,
-            "text/plain; charset=utf-8",
-        )],
-        "success",
-    )
-        .into_response()
-}
-
-/// WeCom adapter.
+/// WeCom intelligent bot adapter.
 pub struct WeComAdapter {
-    /// WeCom corp ID.
-    corp_id: String,
-    /// WeCom application agent ID.
-    agent_id: String,
-    /// WeCom application secret, zeroized on drop.
+    bot_id: String,
     secret: Zeroizing<String>,
-    /// Encoding AES key for callback verification (optional).
-    encoding_aes_key: Option<String>,
-    /// Token for callback verification (optional).
-    token: Option<String>,
-    /// Port on which the inbound webhook HTTP server listens.
-    webhook_port: u16,
-    /// HTTP client for API calls.
-    client: reqwest::Client,
-    /// Optional account identifier for multi-bot routing.
     account_id: Option<String>,
-    /// Shutdown signal.
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
-    /// Cached access token and its expiry instant.
-    cached_token: Arc<RwLock<Option<(String, Instant)>>>,
+    /// Shared WebSocket sender for outbound frames.
+    ws_tx: Arc<RwLock<Option<mpsc::UnboundedSender<String>>>>,
 }
 
 impl WeComAdapter {
-    /// Create a new WeCom adapter.
-    pub fn new(corp_id: String, agent_id: String, secret: String, webhook_port: u16) -> Self {
+    pub fn new(bot_id: String, secret: String) -> Self {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         Self {
-            corp_id,
-            agent_id,
+            bot_id,
             secret: Zeroizing::new(secret),
-            encoding_aes_key: None,
-            token: None,
-            webhook_port,
-            client: crate::http_client::new_client(),
             account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
-            cached_token: Arc::new(RwLock::new(None)),
+            ws_tx: Arc::new(RwLock::new(None)),
         }
     }
-    /// Set the account_id for multi-bot routing. Returns self for builder chaining.
+
     pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
         self.account_id = account_id;
         self
     }
 
-    /// Create a new WeCom adapter with callback verification.
-    pub fn with_verification(
-        corp_id: String,
-        agent_id: String,
-        secret: String,
-        webhook_port: u16,
-        encoding_aes_key: Option<String>,
-        token: Option<String>,
-    ) -> Self {
-        let mut adapter = Self::new(corp_id, agent_id, secret, webhook_port);
-        adapter.encoding_aes_key = encoding_aes_key;
-        adapter.token = token;
-        adapter
+    /// Build a `aibot_respond_msg` reply frame.
+    /// Used when replying to a specific incoming message via its req_id.
+    #[allow(dead_code)]
+    fn build_reply_frame(req_id: &str, text: &str) -> String {
+        serde_json::json!({
+            "action": "aibot_respond_msg",
+            "data": {
+                "req_id": req_id,
+                "msgtype": "text",
+                "text": {
+                    "content": text,
+                }
+            }
+        })
+        .to_string()
     }
 
-    /// Obtain a valid access token, refreshing if expired or missing.
-    async fn get_token(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        let mut cached = self.cached_token.write().await;
-
-        // Check if we have a valid cached token
-        if let Some((token, expiry)) = cached.as_ref() {
-            let now = Instant::now();
-            let buffer = Duration::from_secs(TOKEN_REFRESH_BUFFER_SECS);
-            if now + buffer < *expiry {
-                return Ok(token.clone());
+    /// Build a `aibot_send_msg` proactive message frame.
+    fn build_send_frame(user_id: &str, text: &str) -> String {
+        serde_json::json!({
+            "action": "aibot_send_msg",
+            "data": {
+                "receiver": {
+                    "user_id": user_id,
+                },
+                "msgtype": "text",
+                "text": {
+                    "content": text,
+                }
             }
+        })
+        .to_string()
+    }
+}
+
+/// Parse an incoming WebSocket text frame as JSON.
+fn parse_ws_frame(text: &str) -> Option<serde_json::Value> {
+    serde_json::from_str(text).ok()
+}
+
+/// Extract a message callback from a parsed frame.
+/// Returns (req_id, from_user_id, content, is_group).
+fn extract_msg_callback(frame: &serde_json::Value) -> Option<(String, String, String, bool)> {
+    let action = frame.get("action")?.as_str()?;
+    if action != "aibot_msg_callback" {
+        return None;
+    }
+    let data = frame.get("data")?;
+    let req_id = data.get("req_id")?.as_str()?.to_string();
+    let from_user = data
+        .get("from")
+        .and_then(|f| f.get("user_id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let msgtype = data.get("msgtype").and_then(|v| v.as_str()).unwrap_or("");
+    let content = match msgtype {
+        "text" => data
+            .get("text")
+            .and_then(|t| t.get("content"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        _ => {
+            debug!(msgtype, "Unsupported WeCom bot message type, skipping");
+            return None;
         }
+    };
 
-        // Fetch new token
-        let url = format!(
-            "{}?corpid={}&corpsecret={}",
-            WECOM_TOKEN_URL,
-            self.corp_id,
-            self.secret.as_str()
-        );
-
-        let response = self.client.get(&url).send().await?;
-        let json: serde_json::Value = response.json().await?;
-
-        if let Some(errcode) = json.get("errcode").and_then(|v| v.as_i64()) {
-            if errcode != 0 {
-                return Err(format!(
-                    "WeCom API error: {} - {}",
-                    errcode,
-                    json.get("errmsg").and_then(|v| v.as_str()).unwrap_or("")
-                )
-                .into());
-            }
-        }
-
-        let token = json["access_token"]
-            .as_str()
-            .ok_or("Missing access_token in response")?
-            .to_string();
-
-        let expires_in = json["expires_in"].as_i64().unwrap_or(7200) as u64;
-
-        let expiry = Instant::now() + Duration::from_secs(expires_in);
-        *cached = Some((token.clone(), expiry));
-
-        info!("WeCom access token refreshed, expires in {}s", expires_in);
-        Ok(token)
+    if from_user.is_empty() || content.is_empty() {
+        return None;
     }
 
-    /// Send a text message to a user.
-    async fn send_text(
-        &self,
-        user_id: &str,
-        content: &str,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let token = self.get_token().await?;
+    let is_group = data
+        .get("chat_type")
+        .and_then(|v| v.as_str())
+        .map(|t| t == "group")
+        .unwrap_or(false);
 
-        let url = format!("{}?access_token={}", WECOM_SEND_URL, token);
+    Some((req_id, from_user, content, is_group))
+}
 
-        let payload = serde_json::json!({
-            "touser": user_id,
-            "msgtype": "text",
-            "agentid": self.agent_id,
-            "text": {
-                "content": content
-            }
-        });
+/// Check if a frame is a subscribe success acknowledgement.
+fn is_subscribe_success(frame: &serde_json::Value) -> bool {
+    let action = frame.get("action").and_then(|v| v.as_str());
+    let errcode = frame.get("errcode").and_then(|v| v.as_i64());
+    let data_errcode = frame
+        .get("data")
+        .and_then(|d| d.get("errcode"))
+        .and_then(|v| v.as_i64());
 
-        let response = self.client.post(&url).json(&payload).send().await?;
-
-        let json: serde_json::Value = response.json().await?;
-
-        if let Some(errcode) = json.get("errcode").and_then(|v| v.as_i64()) {
-            if errcode != 0 {
-                return Err(format!(
-                    "WeCom send error: {} - {}",
-                    errcode,
-                    json.get("errmsg").and_then(|v| v.as_str()).unwrap_or("")
-                )
-                .into());
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Validate credentials by getting the token.
-    async fn validate(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        let _token = self.get_token().await?;
-        // Token obtained successfully means credentials are valid
-        Ok(format!("corp_id={}", self.corp_id))
-    }
+    matches!(action, Some("aibot_subscribe"))
+        && (errcode == Some(0) || errcode.is_none())
+        && (data_errcode == Some(0) || data_errcode.is_none())
 }
 
 #[async_trait]
@@ -371,217 +175,190 @@ impl ChannelAdapter for WeComAdapter {
         Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
         Box<dyn std::error::Error + Send + Sync>,
     > {
-        // Validate credentials
-        let _ = self.validate().await?;
-        info!("WeCom adapter initialized");
-
-        let (tx, rx) = mpsc::channel::<ChannelMessage>(256);
-        let port = self.webhook_port;
-        let token = self.token.clone();
-        let encoding_aes_key = self.encoding_aes_key.clone();
-        let mut shutdown_rx = self.shutdown_rx.clone();
-        let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
+        let (msg_tx, msg_rx) = mpsc::channel::<ChannelMessage>(256);
+        let bot_id = self.bot_id.clone();
+        let secret = self.secret.clone();
         let account_id = Arc::new(self.account_id.clone());
-        let listener = tokio::net::TcpListener::bind(addr)
-            .await
-            .map_err(|e| format!("failed to bind WeCom webhook listener on {addr}: {e}"))?;
+        let mut shutdown_rx = self.shutdown_rx.clone();
+        let ws_tx_shared = Arc::clone(&self.ws_tx);
+
+        info!(bot_id = %bot_id, "Starting WeCom bot adapter (WebSocket)");
 
         tokio::spawn(async move {
-            let token = Arc::new(token);
-            let encoding_aes_key = Arc::new(encoding_aes_key);
-            let tx = Arc::new(tx);
+            let mut backoff = INITIAL_BACKOFF;
 
-            let app = axum::Router::new().route(
-                "/wecom/webhook",
-                axum::routing::get({
-                    let encoding_aes_key = Arc::clone(&encoding_aes_key);
-                    let token = Arc::clone(&token);
-                    move |axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>| {
-                        let encoding_aes_key = Arc::clone(&encoding_aes_key);
-                        let token = Arc::clone(&token);
-                        async move {
-                            // Handle callback verification (URL validation GET request)
-                            // WeChat Work sends GET with msg_signature, timestamp, nonce, echostr
-                            if let (Some(echostr_encoded), Some(msg_sig), Some(timestamp), Some(nonce)) = (
-                                params.get("echostr"),
-                                params.get("msg_signature"),
-                                params.get("timestamp"),
-                                params.get("nonce"),
-                            ) {
-                                let Some(token_str) = token.as_deref() else {
-                                    return (
-                                        axum::http::StatusCode::BAD_REQUEST,
-                                        "missing WeCom callback token",
-                                    )
-                                        .into_response();
-                                };
+            'outer: loop {
+                if *shutdown_rx.borrow() {
+                    break;
+                }
 
-                                if !is_valid_wecom_signature(
-                                    token_str,
-                                    timestamp,
-                                    nonce,
-                                    echostr_encoded,
-                                    msg_sig,
-                                ) {
-                                    return (
-                                        axum::http::StatusCode::FORBIDDEN,
-                                        "invalid WeCom callback signature",
-                                    )
-                                        .into_response();
-                                }
+                let ws_result = tokio_tungstenite::connect_async(WECOM_WS_URL).await;
 
-                                let body = match encoding_aes_key.as_deref() {
-                                    Some(aes_key) if !aes_key.is_empty() => {
-                                        match decode_wecom_payload(aes_key, echostr_encoded) {
-                                            Ok(echostr_plain) => echostr_plain,
-                                            Err(err) => {
-                                                warn!(error = %err, "Failed to decrypt WeCom echostr");
-                                                return (
-                                                    axum::http::StatusCode::BAD_REQUEST,
-                                                    "invalid WeCom echostr",
-                                                )
-                                                    .into_response();
-                                            }
-                                        }
+                let ws_stream = match ws_result {
+                    Ok((stream, _)) => stream,
+                    Err(e) => {
+                        warn!(
+                            "WeCom bot WebSocket connection failed: {e}, retrying in {backoff:?}"
+                        );
+                        tokio::time::sleep(backoff).await;
+                        backoff = (backoff * 2).min(MAX_BACKOFF);
+                        continue;
+                    }
+                };
+
+                backoff = INITIAL_BACKOFF;
+                info!("WeCom bot WebSocket connected");
+
+                let (mut ws_sink, mut ws_stream_rx) = ws_stream.split();
+
+                // Channel for outbound frames from the send() method
+                let (frame_tx, mut frame_rx) = mpsc::unbounded_channel::<String>();
+                {
+                    let mut guard = ws_tx_shared.write().await;
+                    *guard = Some(frame_tx);
+                }
+
+                // Send subscribe frame
+                let subscribe_frame = serde_json::json!({
+                    "action": "aibot_subscribe",
+                    "data": {
+                        "bot_id": bot_id,
+                        "secret": secret.as_str(),
+                    }
+                })
+                .to_string();
+
+                if let Err(e) = ws_sink.send(WsMessage::Text(subscribe_frame.into())).await {
+                    warn!("Failed to send subscribe frame: {e}");
+                    continue 'outer;
+                }
+
+                let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL);
+                heartbeat.tick().await; // consume immediate first tick
+
+                let should_reconnect = 'inner: loop {
+                    tokio::select! {
+                        _ = shutdown_rx.changed() => {
+                            info!("WeCom bot adapter shutting down");
+                            break 'inner false;
+                        }
+                        _ = heartbeat.tick() => {
+                            let ping = serde_json::json!({"action": "ping"}).to_string();
+                            if let Err(e) = ws_sink.send(WsMessage::Text(ping.into())).await {
+                                warn!("WeCom bot heartbeat failed: {e}");
+                                break 'inner true;
+                            }
+                        }
+                        Some(frame_text) = frame_rx.recv() => {
+                            if let Err(e) = ws_sink.send(WsMessage::Text(frame_text.into())).await {
+                                warn!("WeCom bot send failed: {e}");
+                                break 'inner true;
+                            }
+                        }
+                        ws_msg = ws_stream_rx.next() => {
+                            match ws_msg {
+                                Some(Ok(WsMessage::Text(text))) => {
+                                    let text_str: &str = &text;
+                                    let Some(frame) = parse_ws_frame(text_str) else {
+                                        debug!("WeCom bot: unparseable frame");
+                                        continue 'inner;
+                                    };
+
+                                    if is_subscribe_success(&frame) {
+                                        info!("WeCom bot subscribed successfully");
+                                        continue 'inner;
                                     }
-                                    _ => echostr_encoded.clone(),
-                                };
 
-                                return (
-                                    axum::http::StatusCode::OK,
-                                    [(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-                                    body,
-                                )
-                                    .into_response();
+                                    // Handle event callbacks
+                                    if frame.get("action").and_then(|v| v.as_str())
+                                        == Some("aibot_event_callback")
+                                    {
+                                        debug!(event = ?frame.get("data"), "WeCom bot event");
+                                        continue 'inner;
+                                    }
+
+                                    // Handle pong
+                                    if frame.get("action").and_then(|v| v.as_str())
+                                        == Some("pong")
+                                    {
+                                        continue 'inner;
+                                    }
+
+                                    if let Some((req_id, from_user, content, is_group)) =
+                                        extract_msg_callback(&frame)
+                                    {
+                                        let mut msg = ChannelMessage {
+                                            channel: ChannelType::Custom("wecom".to_string()),
+                                            platform_message_id: req_id.clone(),
+                                            sender: ChannelUser {
+                                                platform_id: from_user.clone(),
+                                                display_name: from_user.clone(),
+                                                librefang_user: None,
+                                            },
+                                            content: ChannelContent::Text(content),
+                                            target_agent: None,
+                                            timestamp: Utc::now(),
+                                            is_group,
+                                            thread_id: None,
+                                            metadata: HashMap::new(),
+                                        };
+
+                                        // Store req_id so the bridge can use aibot_respond_msg
+                                        msg.metadata.insert(
+                                            "wecom_req_id".to_string(),
+                                            serde_json::json!(req_id),
+                                        );
+
+                                        if let Some(ref aid) = *account_id {
+                                            msg.metadata.insert(
+                                                "account_id".to_string(),
+                                                serde_json::json!(aid),
+                                            );
+                                        }
+
+                                        let _ = msg_tx.send(msg).await;
+                                    }
+                                }
+                                Some(Ok(WsMessage::Ping(data))) => {
+                                    let _ = ws_sink.send(WsMessage::Pong(data)).await;
+                                }
+                                Some(Ok(WsMessage::Close(_))) => {
+                                    info!("WeCom bot WebSocket closed by server");
+                                    break 'inner true;
+                                }
+                                Some(Err(e)) => {
+                                    warn!("WeCom bot WebSocket error: {e}");
+                                    break 'inner true;
+                                }
+                                None => {
+                                    info!("WeCom bot WebSocket stream ended");
+                                    break 'inner true;
+                                }
+                                _ => {}
                             }
-                            (
-                                axum::http::StatusCode::BAD_REQUEST,
-                                "missing WeCom verification parameters",
-                            )
-                                .into_response()
                         }
                     }
-                }).post({
-                    let token = Arc::clone(&token);
-                    let encoding_aes_key = Arc::clone(&encoding_aes_key);
-                    let tx = Arc::clone(&tx);
-                    move |axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>, body: String| {
-                        let token = Arc::clone(&token);
-                        let encoding_aes_key = Arc::clone(&encoding_aes_key);
-                        let tx = Arc::clone(&tx);
-                        async move {
-                            let fields = match decode_wecom_post_body(
-                                &body,
-                                &params,
-                                token.as_deref(),
-                                encoding_aes_key.as_deref(),
-                            ) {
-                                Ok(fields) => fields,
-                                Err(err) => {
-                                    warn!(error = %err, "Failed to parse WeCom callback body");
-                                    return (
-                                        axum::http::StatusCode::BAD_REQUEST,
-                                        [(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-                                        "invalid WeCom callback body",
-                                    )
-                                        .into_response();
-                                }
-                            };
+                };
 
-                            let msg_type = fields.get("MsgType").map(String::as_str).unwrap_or("");
-                            let user_id = fields
-                                .get("FromUserName")
-                                .cloned()
-                                .unwrap_or_default();
-                            let event = fields.get("Event").map(String::as_str).unwrap_or("");
-
-                            info!(
-                                msg_type = msg_type,
-                                event = event,
-                                from_user = %user_id,
-                                "Received WeCom callback"
-                            );
-
-                            if msg_type == "event" {
-                                if (event == "subscribe" || event == "enter_agent")
-                                    && !user_id.is_empty()
-                                {
-                                    let mut msg = ChannelMessage {
-                                        channel: ChannelType::Custom("wecom".to_string()),
-                                        platform_message_id: String::new(),
-                                        sender: ChannelUser {
-                                            platform_id: user_id.clone(),
-                                            display_name: user_id.clone(),
-                                            librefang_user: None,
-                                        },
-                                        content: ChannelContent::Text(String::new()),
-                                        target_agent: None,
-                                        timestamp: Utc::now(),
-                                        is_group: false,
-                                        thread_id: None,
-                                        metadata: HashMap::new(),
-                                    };
-                                    // Inject account_id for multi-bot routing
-                                if let Some(ref aid) = *account_id {
-                                    msg.metadata.insert("account_id".to_string(), serde_json::json!(aid));
-                                }
-                                let _ = tx.send(msg).await;
-                                }
-
-                                return wecom_success_response();
-                            }
-
-                            if msg_type == "text" {
-                                let content = fields.get("Content").cloned().unwrap_or_default();
-                                let msg_id = fields.get("MsgId").cloned().unwrap_or_default();
-
-                                if !user_id.is_empty() && !content.is_empty() {
-                                    let mut msg = ChannelMessage {
-                                        channel: ChannelType::Custom("wecom".to_string()),
-                                        platform_message_id: msg_id,
-                                        sender: ChannelUser {
-                                            platform_id: user_id.clone(),
-                                            display_name: user_id.clone(),
-                                            librefang_user: None,
-                                        },
-                                        content: ChannelContent::Text(content),
-                                        target_agent: None,
-                                        timestamp: Utc::now(),
-                                        is_group: false,
-                                        thread_id: None,
-                                        metadata: HashMap::new(),
-                                    };
-                                    // Inject account_id for multi-bot routing
-                                if let Some(ref aid) = *account_id {
-                                    msg.metadata.insert("account_id".to_string(), serde_json::json!(aid));
-                                }
-                                let _ = tx.send(msg).await;
-                                }
-                            }
-
-                            wecom_success_response()
-                        }
-                    }
-                }),
-            );
-
-            info!("WeCom webhook server listening on http://0.0.0.0:{}", port);
-
-            let server = axum::serve(listener, app);
-
-            tokio::select! {
-                result = server => {
-                    if let Err(e) = result {
-                        warn!("WeCom webhook server error: {}", e);
-                    }
+                // Clear the shared sender on disconnect
+                {
+                    let mut guard = ws_tx_shared.write().await;
+                    *guard = None;
                 }
-                _ = shutdown_rx.changed() => {
-                    info!("WeCom adapter shutting down");
+
+                if !should_reconnect {
+                    break 'outer;
                 }
+
+                warn!("WeCom bot reconnecting in {backoff:?}");
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(MAX_BACKOFF);
             }
         });
 
-        Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
+        Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(
+            msg_rx,
+        )))
     }
 
     async fn send(
@@ -589,21 +366,24 @@ impl ChannelAdapter for WeComAdapter {
         user: &ChannelUser,
         content: ChannelContent,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let user_id = &user.platform_id;
+        let guard = self.ws_tx.read().await;
+        let frame_tx = guard.as_ref().ok_or("WeCom bot WebSocket not connected")?;
 
         match content {
             ChannelContent::Text(text) => {
-                // Split long messages
+                let user_id = &user.platform_id;
                 for chunk in split_message(&text, MAX_MESSAGE_LEN) {
-                    self.send_text(user_id, chunk).await?;
+                    let frame = Self::build_send_frame(user_id, chunk);
+                    frame_tx
+                        .send(frame)
+                        .map_err(|e| format!("WeCom bot send failed: {e}"))?;
                 }
             }
-            ChannelContent::Command { name: _, args: _ } => {
-                // WeCom doesn't support commands natively
-                warn!("WeCom: commands not supported");
+            ChannelContent::Command { .. } => {
+                warn!("WeCom bot: commands not supported");
             }
             _ => {
-                warn!("WeCom: unsupported content type");
+                warn!("WeCom bot: unsupported content type");
             }
         }
 
@@ -622,23 +402,13 @@ mod tests {
 
     #[test]
     fn test_adapter_name() {
-        let adapter = WeComAdapter::new(
-            "corp_id".to_string(),
-            "agent_id".to_string(),
-            "secret".to_string(),
-            8080,
-        );
+        let adapter = WeComAdapter::new("bot_id".to_string(), "secret".to_string());
         assert_eq!(adapter.name(), "wecom");
     }
 
     #[test]
     fn test_adapter_channel_type() {
-        let adapter = WeComAdapter::new(
-            "corp_id".to_string(),
-            "agent_id".to_string(),
-            "secret".to_string(),
-            8080,
-        );
+        let adapter = WeComAdapter::new("bot_id".to_string(), "secret".to_string());
         assert_eq!(
             adapter.channel_type(),
             ChannelType::Custom("wecom".to_string())
@@ -646,106 +416,102 @@ mod tests {
     }
 
     #[test]
-    fn test_adapter_with_verification() {
-        let adapter = WeComAdapter::with_verification(
-            "corp_id".to_string(),
-            "agent_id".to_string(),
-            "secret".to_string(),
-            8080,
-            Some("encoding_aes_key".to_string()),
-            Some("token".to_string()),
-        );
-        assert_eq!(adapter.name(), "wecom");
+    fn test_build_reply_frame() {
+        let frame = WeComAdapter::build_reply_frame("req123", "hello");
+        let parsed: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        assert_eq!(parsed["action"], "aibot_respond_msg");
+        assert_eq!(parsed["data"]["req_id"], "req123");
+        assert_eq!(parsed["data"]["text"]["content"], "hello");
+    }
+
+    #[test]
+    fn test_build_send_frame() {
+        let frame = WeComAdapter::build_send_frame("user1", "hi");
+        let parsed: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        assert_eq!(parsed["action"], "aibot_send_msg");
+        assert_eq!(parsed["data"]["receiver"]["user_id"], "user1");
+        assert_eq!(parsed["data"]["text"]["content"], "hi");
+    }
+
+    #[test]
+    fn test_extract_msg_callback() {
+        let frame = serde_json::json!({
+            "action": "aibot_msg_callback",
+            "data": {
+                "req_id": "req123",
+                "from": { "user_id": "user1" },
+                "msgtype": "text",
+                "text": { "content": "hello bot" },
+                "chat_type": "single",
+            }
+        });
+        let (req_id, user, content, is_group) = extract_msg_callback(&frame).unwrap();
+        assert_eq!(req_id, "req123");
+        assert_eq!(user, "user1");
+        assert_eq!(content, "hello bot");
+        assert!(!is_group);
+    }
+
+    #[test]
+    fn test_extract_msg_callback_group() {
+        let frame = serde_json::json!({
+            "action": "aibot_msg_callback",
+            "data": {
+                "req_id": "req456",
+                "from": { "user_id": "user2" },
+                "msgtype": "text",
+                "text": { "content": "group msg" },
+                "chat_type": "group",
+            }
+        });
+        let (_, _, _, is_group) = extract_msg_callback(&frame).unwrap();
+        assert!(is_group);
+    }
+
+    #[test]
+    fn test_extract_msg_callback_ignores_non_text() {
+        let frame = serde_json::json!({
+            "action": "aibot_msg_callback",
+            "data": {
+                "req_id": "req789",
+                "from": { "user_id": "user3" },
+                "msgtype": "image",
+            }
+        });
+        assert!(extract_msg_callback(&frame).is_none());
+    }
+
+    #[test]
+    fn test_extract_msg_callback_ignores_other_actions() {
+        let frame = serde_json::json!({
+            "action": "aibot_event_callback",
+            "data": { "event": "enter_chat" }
+        });
+        assert!(extract_msg_callback(&frame).is_none());
+    }
+
+    #[test]
+    fn test_is_subscribe_success() {
+        let frame = serde_json::json!({
+            "action": "aibot_subscribe",
+            "errcode": 0,
+            "errmsg": "ok"
+        });
+        assert!(is_subscribe_success(&frame));
+    }
+
+    #[test]
+    fn test_is_subscribe_failure() {
+        let frame = serde_json::json!({
+            "action": "aibot_subscribe",
+            "errcode": 40001,
+            "errmsg": "invalid secret"
+        });
+        assert!(!is_subscribe_success(&frame));
     }
 
     #[test]
     fn test_max_message_length() {
-        // MAX_MESSAGE_LEN should be 2048 for WeCom
-        assert_eq!(MAX_MESSAGE_LEN, 2048);
-    }
-
-    #[test]
-    fn test_token_refresh_buffer() {
-        // Token refresh buffer should be 5 minutes
-        assert_eq!(TOKEN_REFRESH_BUFFER_SECS, 300);
-    }
-
-    #[test]
-    fn test_wecom_signature_validation() {
-        assert!(is_valid_wecom_signature(
-            "token",
-            "1710000000",
-            "nonce",
-            "echostr",
-            "bf56bf867459f80e3ceb854596f39f02a5ac5e13",
-        ));
-        assert!(!is_valid_wecom_signature(
-            "token",
-            "1710000000",
-            "nonce",
-            "echostr",
-            "bad-signature",
-        ));
-    }
-
-    #[test]
-    fn test_decode_wecom_payload() {
-        let plain = decode_wecom_payload(
-            "ShlNaJ0PrdXQAuCDVqMki7c2JLNnY6mebvQodTv9qoV",
-            "/gKbXNFpvlyYNTCneTag1rGm1P4Q5fExE3OPzdYlEyUVDgi55PHVIbo+mHMXWatdW8H8RTQJCly0HBNrWry2Uw==",
-        )
-        .expect("echostr should decrypt");
-
-        assert_eq!(plain, "openfang-wecom-check");
-    }
-
-    #[test]
-    fn test_decode_wecom_payload_rejects_invalid_aes_key_length() {
-        let err = decode_wecom_payload("abcd", "Zm9v").expect_err("invalid key should error");
-        assert!(err.contains("invalid WeCom AES key length"));
-    }
-
-    #[test]
-    fn test_parse_wecom_xml_fields() {
-        let fields = parse_wecom_xml_fields(
-            r#"<xml>
-<ToUserName><![CDATA[wwcorp]]></ToUserName>
-<FromUserName><![CDATA[user123]]></FromUserName>
-<MsgType><![CDATA[text]]></MsgType>
-<Content><![CDATA[hello]]></Content>
-<MsgId>123456</MsgId>
-</xml>"#,
-        )
-        .expect("xml should parse");
-
-        assert_eq!(
-            fields.get("FromUserName").map(String::as_str),
-            Some("user123")
-        );
-        assert_eq!(fields.get("MsgType").map(String::as_str), Some("text"));
-        assert_eq!(fields.get("Content").map(String::as_str), Some("hello"));
-        assert_eq!(fields.get("MsgId").map(String::as_str), Some("123456"));
-    }
-
-    #[test]
-    fn test_plaintext_wecom_callback_requires_valid_signature_when_token_configured() {
-        let body = r#"<xml><FromUserName><![CDATA[user123]]></FromUserName><MsgType><![CDATA[text]]></MsgType><Content><![CDATA[hello]]></Content></xml>"#;
-        let mut params = HashMap::new();
-        params.insert("timestamp".to_string(), "1710000000".to_string());
-        params.insert("nonce".to_string(), "nonce".to_string());
-        params.insert("msg_signature".to_string(), {
-            let mut parts = ["token", "1710000000", "nonce", body];
-            parts.sort_unstable();
-            let mut hasher = Sha1::new();
-            hasher.update(parts.concat().as_bytes());
-            hex::encode(hasher.finalize())
-        });
-
-        let fields = decode_wecom_post_body(body, &params, Some("token"), None)
-            .expect("signed plaintext callback should verify");
-        assert_eq!(fields.get("Content").map(String::as_str), Some("hello"));
-
-        params.insert("msg_signature".to_string(), "bad-signature".to_string());
-        assert!(decode_wecom_post_body(body, &params, Some("token"), None).is_err());
+        assert_eq!(MAX_MESSAGE_LEN, 4096);
     }
 }

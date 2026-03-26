@@ -2144,26 +2144,13 @@ pub async fn start_channel_bridge_with_config(
         ));
     }
 
-    // WeCom/WeChat Work
+    // WeCom intelligent bot (WebSocket long-connection)
     #[cfg(feature = "channel-wecom")]
     for wc_config in config.wecom.iter() {
-        if let Some(secret) = read_token(&wc_config.secret_env, "WeCom") {
+        if let Some(secret) = read_token(&wc_config.secret_env, "WeCom Bot") {
             let adapter = Arc::new(
-                WeComAdapter::with_verification(
-                    wc_config.corp_id.clone(),
-                    wc_config.agent_id.clone(),
-                    secret,
-                    wc_config.webhook_port,
-                    wc_config
-                        .encoding_aes_key_env
-                        .as_ref()
-                        .and_then(|e| std::env::var(e).ok()),
-                    wc_config
-                        .token_env
-                        .as_ref()
-                        .and_then(|e| std::env::var(e).ok()),
-                )
-                .with_account_id(wc_config.account_id.clone()),
+                WeComAdapter::new(wc_config.bot_id.clone(), secret)
+                    .with_account_id(wc_config.account_id.clone()),
             );
             adapters.push((
                 adapter,

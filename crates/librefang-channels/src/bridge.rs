@@ -767,11 +767,7 @@ async fn send_response(
         text_len = text.len(),
         "Sending response to channel"
     );
-    let formatted = if adapter.name() == "wecom" {
-        formatter::format_for_wecom(&text, output_format)
-    } else {
-        formatter::format_for_channel(&text, output_format)
-    };
+    let formatted = formatter::format_for_channel(&text, output_format);
     let content = ChannelContent::Text(formatted);
 
     let result = if let Some(tid) = thread_id {
@@ -789,7 +785,7 @@ fn default_output_format_for_channel(channel_type: &str) -> OutputFormat {
     match channel_type {
         "telegram" => OutputFormat::TelegramHtml,
         "slack" => OutputFormat::SlackMrkdwn,
-        "wecom" => OutputFormat::PlainText,
+        "wecom" => OutputFormat::Markdown,
         _ => OutputFormat::Markdown,
     }
 }
@@ -2474,7 +2470,7 @@ mod tests {
         );
         assert_eq!(
             default_output_format_for_channel("wecom"),
-            OutputFormat::PlainText
+            OutputFormat::Markdown
         );
         assert_eq!(
             default_output_format_for_channel("discord"),

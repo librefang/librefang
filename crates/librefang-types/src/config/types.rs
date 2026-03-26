@@ -4090,22 +4090,14 @@ impl Default for FeishuConfig {
     }
 }
 
-/// WeCom/WeChat Work channel adapter configuration.
+/// WeCom intelligent bot (WebSocket long-connection) adapter configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WeComConfig {
-    /// WeCom corp ID.
-    pub corp_id: String,
-    /// WeCom application agent ID.
-    pub agent_id: String,
-    /// Env var name holding the application secret.
+    /// Bot ID obtained from the WeCom admin console.
+    pub bot_id: String,
+    /// Env var name holding the bot secret.
     pub secret_env: String,
-    /// Port for the incoming webhook.
-    pub webhook_port: u16,
-    /// Env var name holding the callback verification token (optional).
-    pub token_env: Option<String>,
-    /// Env var name holding the encoding AES key (optional).
-    pub encoding_aes_key_env: Option<String>,
     /// Unique identifier for this bot instance (used for multi-bot routing).
     #[serde(default)]
     pub account_id: Option<String>,
@@ -4119,12 +4111,8 @@ pub struct WeComConfig {
 impl Default for WeComConfig {
     fn default() -> Self {
         Self {
-            corp_id: String::new(),
-            agent_id: String::new(),
-            secret_env: "WECOM_SECRET".to_string(),
-            webhook_port: 8454,
-            token_env: None,
-            encoding_aes_key_env: None,
+            bot_id: String::new(),
+            secret_env: "WECOM_BOT_SECRET".to_string(),
             account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
