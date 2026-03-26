@@ -5,6 +5,7 @@
 
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
+use ratatui::symbols::border;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Padding, Paragraph};
 use ratatui::Frame;
@@ -13,7 +14,7 @@ use super::theme;
 
 // ── Screen frame ──────────────────────────────────────────────────────────
 
-/// Standard bordered screen block with accent-colored border and title.
+/// Standard bordered screen block with rounded corners and accent title.
 /// Used as the outer frame for almost every tab screen.
 pub fn screen_block(title: &str) -> Block<'_> {
     Block::default()
@@ -22,11 +23,12 @@ pub fn screen_block(title: &str) -> Block<'_> {
             theme::title_style(),
         )]))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::ACCENT))
+        .border_set(border::ROUNDED)
+        .border_style(Style::default().fg(theme::BORDER))
         .padding(Padding::horizontal(1))
 }
 
-/// Inner card block with dimmed border — for dashboard stat cards and similar.
+/// Inner card block with rounded corners — for dashboard stat cards and similar.
 pub fn card_block(title: &str) -> Block<'_> {
     Block::default()
         .title(Span::styled(
@@ -34,7 +36,8 @@ pub fn card_block(title: &str) -> Block<'_> {
             Style::default().fg(theme::CYAN),
         ))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::DIM))
+        .border_set(border::ROUNDED)
+        .border_style(Style::default().fg(theme::BORDER))
 }
 
 /// Render a screen_block, return the inner area.
@@ -68,11 +71,16 @@ pub fn layout_hch(inner: Rect, header_h: u16) -> (Rect, Rect, Rect) {
 
 // ── Spinner ───────────────────────────────────────────────────────────────
 
-/// Loading spinner with message: `  ⣷ Loading…`
+/// Loading spinner with message: `  ◜ Loading…`
 pub fn spinner(tick: usize, message: &str) -> Paragraph<'_> {
     let frame = theme::SPINNER_FRAMES[tick % theme::SPINNER_FRAMES.len()];
     Paragraph::new(Line::from(vec![
-        Span::styled(format!("  {frame} "), Style::default().fg(theme::CYAN)),
+        Span::styled(
+            format!("  {frame} "),
+            Style::default()
+                .fg(theme::ACCENT)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(message, theme::dim_style()),
     ]))
 }
@@ -115,18 +123,22 @@ pub fn status_or_hint<'a>(status_msg: &'a str, hint_text: &'a str) -> Paragraph<
 
 // ── Empty state ───────────────────────────────────────────────────────────
 
-/// "No X found." placeholder for empty lists.
+/// "No X found." placeholder for empty lists — centered with dimmed icon.
 pub fn empty_state(message: &str) -> Paragraph<'_> {
-    Paragraph::new(Span::styled(format!("  {message}"), theme::dim_style()))
+    Paragraph::new(Line::from(vec![
+        Span::styled("  \u{2500}\u{2500} ", Style::default().fg(theme::BORDER)),
+        Span::styled(message, theme::dim_style()),
+        Span::styled(" \u{2500}\u{2500}", Style::default().fg(theme::BORDER)),
+    ]))
 }
 
 // ── Themed list ───────────────────────────────────────────────────────────
 
-/// Standard highlighted list with `> ` selection marker.
+/// Standard highlighted list with `▸ ` selection marker.
 pub fn themed_list(items: Vec<ListItem<'_>>) -> List<'_> {
     List::new(items)
         .highlight_style(theme::selected_style())
-        .highlight_symbol("> ")
+        .highlight_symbol("\u{25b8} ")
 }
 
 // ── Search input ──────────────────────────────────────────────────────────
