@@ -755,7 +755,7 @@ export async function synthesizeSpeech(req: { text: string; provider?: string; m
     headers: { "Content-Type": "application/json", ...authHeader() },
     body: JSON.stringify(req),
   });
-  if (!resp.ok) throw new Error(`TTS failed: ${resp.status}`);
+  if (!resp.ok) throw await parseError(resp);
   return resp.blob();
 }
 
@@ -773,7 +773,7 @@ export async function generateMusic(req: { prompt?: string; lyrics?: string; pro
     headers: { "Content-Type": "application/json", ...authHeader() },
     body: JSON.stringify(req),
   });
-  if (!resp.ok) throw new Error(`Music generation failed: ${resp.status}`);
+  if (!resp.ok) throw await parseError(resp);
   return resp.blob();
 }
 
@@ -1669,10 +1669,12 @@ export async function checkAuthRequired(): Promise<boolean> {
     try {
       const mode = await checkDashboardAuthMode();
       if (mode === "none") return false;
-      // Auth is configured — if we already hold a stored key/token,
-      // assume it is valid; a 401 on a real request will trigger the
-      // global onUnauthorized handler and re-show the login dialog.
-      return !hasApiKey();
+      // Auth is configured — if we hold a stored key/token, verify it
+      // is actually valid by probing an auth-protected endpoint.
+      if (hasApiKey()) {
+        return !(await verifyStoredKey());
+      }
+      return true;
     } catch {
       // Network error — daemon may not be up yet, wait and retry
       await new Promise((r) => setTimeout(r, 1000));
@@ -1681,8 +1683,24 @@ export async function checkAuthRequired(): Promise<boolean> {
   return false;
 }
 
+/** Probe an auth-protected endpoint to confirm the stored key is valid. */
+async function verifyStoredKey(): Promise<boolean> {
+  try {
+    const resp = await fetch("/api/peers", {
+      headers: { ...authHeader() },
+    });
+    return resp.ok || resp.status !== 401;
+  } catch {
+    // Network error — treat as valid to avoid blocking the UI.
+    return true;
+  }
+}
+
 export function setApiKey(key: string) {
   localStorage.setItem("librefang-api-key", key);
+  // Reset the 401-fired guard so future unauthorized responses
+  // (e.g. after token expiry) can re-trigger the login dialog.
+  _unauthorizedFired = false;
 }
 
 export function clearApiKey() {
