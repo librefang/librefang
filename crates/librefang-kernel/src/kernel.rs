@@ -1502,7 +1502,10 @@ impl LibreFangKernel {
         // Auto-sync registry content on first boot or after upgrade when
         // Sync registry: downloads if cache is stale, pre-installs providers/agents/integrations.
         // Skips download if cache is fresh; skips copy if files already exist.
-        librefang_runtime::registry_sync::sync_registry(&config.home_dir);
+        librefang_runtime::registry_sync::sync_registry(
+            &config.home_dir,
+            config.registry.cache_ttl_secs,
+        );
 
         // Initialize model catalog, detect provider auth, and apply URL overrides
         let mut model_catalog =

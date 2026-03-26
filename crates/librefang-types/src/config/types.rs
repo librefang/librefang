@@ -1607,6 +1607,9 @@ pub struct KernelConfig {
     /// Plugin registry configuration.
     #[serde(default)]
     pub plugins: PluginsConfig,
+    /// Registry sync configuration (cache TTL, etc.).
+    #[serde(default)]
+    pub registry: RegistryConfig,
     /// PII privacy controls for LLM context filtering.
     #[serde(default)]
     pub privacy: PrivacyConfig,
@@ -2222,6 +2225,34 @@ impl Default for HeartbeatTomlConfig {
     }
 }
 
+/// Registry sync configuration.
+///
+/// Configure in config.toml:
+/// ```toml
+/// [registry]
+/// cache_ttl_secs = 86400
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RegistryConfig {
+    /// Cache TTL for registry sync in seconds (default: 86400 = 24 hours).
+    /// The registry is re-downloaded when the local cache is older than this.
+    #[serde(default = "default_registry_cache_ttl_secs")]
+    pub cache_ttl_secs: u64,
+}
+
+fn default_registry_cache_ttl_secs() -> u64 {
+    86400
+}
+
+impl Default for RegistryConfig {
+    fn default() -> Self {
+        Self {
+            cache_ttl_secs: default_registry_cache_ttl_secs(),
+        }
+    }
+}
+
 /// Plugin registry configuration.
 ///
 /// Configure in config.toml:
@@ -2487,6 +2518,7 @@ impl Default for KernelConfig {
             health_check: HealthCheckConfig::default(),
             heartbeat: HeartbeatTomlConfig::default(),
             plugins: PluginsConfig::default(),
+            registry: RegistryConfig::default(),
             cors_origin: Vec::new(),
             privacy: PrivacyConfig::default(),
             strict_config: false,

@@ -1903,7 +1903,10 @@ fn cmd_init(quick: bool) {
     }
 
     // Sync registry content (downloads to registry/, pre-installs providers/integrations/assistant)
-    librefang_runtime::registry_sync::sync_registry(&librefang_dir);
+    librefang_runtime::registry_sync::sync_registry(
+        &librefang_dir,
+        librefang_runtime::registry_sync::DEFAULT_CACHE_TTL_SECS,
+    );
 
     // Initialize vault if not already initialized
     init_vault_if_missing(&librefang_dir);

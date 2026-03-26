@@ -98,6 +98,9 @@ debounce_ms = 500
 # ws_idle_timeout_secs = 1800     # Close idle WebSocket after 30 min
 # ws_debounce_ms = 100            # Text delta debounce interval
 # ws_debounce_chars = 200         # Flush text buffer at this character count
+# ── Registry Sync ────────────────────────────────────────────
+# [registry]
+# cache_ttl_secs = 86400          # Re-download interval (default: 24 hours)
 
 # ── Budget & Cost Control ────────────────────────────────────
 # [budget]
