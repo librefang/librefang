@@ -80,6 +80,7 @@ struct State {
     key_ok: Option<bool>,
     status_msg: String,
     save_warn: Option<String>,
+    test_started: Option<Instant>,
     done_at: Option<Instant>,
 }
 
@@ -95,6 +96,7 @@ impl State {
             key_ok: None,
             status_msg: String::new(),
             save_warn: None,
+            test_started: None,
             done_at: None,
         }
     }
@@ -111,9 +113,19 @@ pub fn run() -> GuideResult {
 
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        let _ = ratatui::crossterm::execute!(
+            std::io::stdout(),
+            ratatui::crossterm::event::DisableBracketedPaste
+        );
         ratatui::restore();
         original_hook(info);
     }));
+
+    // Enable bracketed paste so terminal paste events arrive as Event::Paste
+    let _ = ratatui::crossterm::execute!(
+        std::io::stdout(),
+        ratatui::crossterm::event::EnableBracketedPaste
+    );
 
     let mut terminal = ratatui::init();
     let mut state = State::new();
@@ -137,6 +149,15 @@ pub fn run() -> GuideResult {
                 state.phase = Phase::Done;
                 state.done_at = Some(Instant::now());
             }
+            // Timeout: if test_api_key takes >15s, treat as unverified
+            if let Some(done_at) = state.test_started {
+                if done_at.elapsed() >= Duration::from_secs(15) && state.phase == Phase::Testing {
+                    state.key_ok = Some(false);
+                    state.status_msg = i18n::t("guide-test-key-unverified");
+                    state.phase = Phase::Done;
+                    state.done_at = Some(Instant::now());
+                }
+            }
         }
 
         // Auto-advance from Done after 800ms
@@ -153,93 +174,111 @@ pub fn run() -> GuideResult {
         }
 
         if event::poll(Duration::from_millis(50)).unwrap_or(false) {
-            if let Ok(CtEvent::Key(key)) = event::read() {
-                if key.kind != KeyEventKind::Press {
-                    continue;
-                }
-
-                // Ctrl+C always quits
-                if key.code == KeyCode::Char('c')
-                    && key
-                        .modifiers
-                        .contains(ratatui::crossterm::event::KeyModifiers::CONTROL)
-                {
-                    break GuideResult::Skipped;
-                }
-
-                match state.phase {
-                    Phase::Select => match key.code {
-                        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('s') => {
-                            break GuideResult::Skipped;
-                        }
-                        KeyCode::Up | KeyCode::Char('k') => {
-                            let i = state.list.selected().unwrap_or(0);
-                            let next = if i == 0 {
-                                FREE_PROVIDERS.len() - 1
-                            } else {
-                                i - 1
-                            };
-                            state.list.select(Some(next));
-                            state.selected = next;
-                        }
-                        KeyCode::Down | KeyCode::Char('j') => {
-                            let i = state.list.selected().unwrap_or(0);
-                            let next = (i + 1) % FREE_PROVIDERS.len();
-                            state.list.select(Some(next));
-                            state.selected = next;
-                        }
-                        KeyCode::Enter => {
-                            let p = &FREE_PROVIDERS[state.selected];
-                            crate::open_in_browser(p.register_url);
-                            state.phase = Phase::PasteKey;
-                        }
-                        _ => {}
-                    },
-
-                    Phase::PasteKey => match key.code {
-                        KeyCode::Esc => {
-                            state.key_input.clear();
-                            state.phase = Phase::Select;
-                        }
-                        KeyCode::Enter => {
-                            if !state.key_input.is_empty() {
-                                // Save key to .env and set in process
-                                let p = &FREE_PROVIDERS[state.selected];
-                                let save_warn =
-                                    crate::dotenv::save_env_key(p.env_var, &state.key_input).err();
-                                std::env::set_var(p.env_var, &state.key_input);
-                                state.save_warn = save_warn.map(|e| e.to_string());
-                                state.status_msg = i18n::t("guide-testing-key");
-                                state.phase = Phase::Testing;
-
-                                let provider_name = p.name.to_string();
-                                let env_var = p.env_var.to_string();
-                                let tx = test_tx.clone();
-                                std::thread::spawn(move || {
-                                    let ok = crate::test_api_key(&provider_name, &env_var);
-                                    let _ = tx.send(ok);
-                                });
-                            }
-                        }
-                        KeyCode::Char(c) => {
-                            state.key_input.push(c);
-                        }
-                        KeyCode::Backspace => {
-                            state.key_input.pop();
-                        }
-                        _ => {}
-                    },
-
-                    Phase::Testing | Phase::Done => {
-                        // Ignore input while testing/done
+            match event::read() {
+                // Handle bracketed paste (terminal paste event)
+                Ok(CtEvent::Paste(text)) => {
+                    if state.phase == Phase::PasteKey {
+                        // Trim whitespace/newlines that terminals often include
+                        state.key_input.push_str(text.trim());
                     }
                 }
+                Ok(CtEvent::Key(key)) => {
+                    if key.kind != KeyEventKind::Press {
+                        continue;
+                    }
+
+                    // Ctrl+C always quits
+                    if key.code == KeyCode::Char('c')
+                        && key
+                            .modifiers
+                            .contains(ratatui::crossterm::event::KeyModifiers::CONTROL)
+                    {
+                        break GuideResult::Skipped;
+                    }
+
+                    match state.phase {
+                        Phase::Select => match key.code {
+                            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('s') => {
+                                break GuideResult::Skipped;
+                            }
+                            KeyCode::Up | KeyCode::Char('k') => {
+                                let i = state.list.selected().unwrap_or(0);
+                                let next = if i == 0 {
+                                    FREE_PROVIDERS.len() - 1
+                                } else {
+                                    i - 1
+                                };
+                                state.list.select(Some(next));
+                                state.selected = next;
+                            }
+                            KeyCode::Down | KeyCode::Char('j') => {
+                                let i = state.list.selected().unwrap_or(0);
+                                let next = (i + 1) % FREE_PROVIDERS.len();
+                                state.list.select(Some(next));
+                                state.selected = next;
+                            }
+                            KeyCode::Enter => {
+                                let p = &FREE_PROVIDERS[state.selected];
+                                crate::open_in_browser(p.register_url);
+                                state.phase = Phase::PasteKey;
+                            }
+                            _ => {}
+                        },
+
+                        Phase::PasteKey => match key.code {
+                            KeyCode::Esc => {
+                                state.key_input.clear();
+                                state.phase = Phase::Select;
+                            }
+                            KeyCode::Enter => {
+                                if !state.key_input.is_empty() {
+                                    submit_key(&mut state, &test_tx);
+                                }
+                            }
+                            KeyCode::Char(c) => {
+                                state.key_input.push(c);
+                            }
+                            KeyCode::Backspace => {
+                                state.key_input.pop();
+                            }
+                            _ => {}
+                        },
+
+                        Phase::Testing | Phase::Done => {
+                            // Ignore input while testing/done
+                        }
+                    }
+                }
+                _ => {}
             }
         }
     };
 
+    let _ = ratatui::crossterm::execute!(
+        std::io::stdout(),
+        ratatui::crossterm::event::DisableBracketedPaste
+    );
     ratatui::restore();
     result
+}
+
+/// Save the API key and kick off a background verification.
+fn submit_key(state: &mut State, test_tx: &std::sync::mpsc::Sender<bool>) {
+    let p = &FREE_PROVIDERS[state.selected];
+    let save_warn = crate::dotenv::save_env_key(p.env_var, &state.key_input).err();
+    std::env::set_var(p.env_var, &state.key_input);
+    state.save_warn = save_warn.map(|e| e.to_string());
+    state.status_msg = i18n::t("guide-testing-key");
+    state.phase = Phase::Testing;
+    state.test_started = Some(Instant::now());
+
+    let provider_name = p.name.to_string();
+    let env_var = p.env_var.to_string();
+    let tx = test_tx.clone();
+    std::thread::spawn(move || {
+        let ok = crate::test_api_key(&provider_name, &env_var);
+        let _ = tx.send(ok);
+    });
 }
 
 // ── Drawing ────────────────────────────────────────────────────────────────
@@ -419,7 +458,7 @@ fn draw_testing(f: &mut Frame, area: Rect, state: &State) {
 
     let chunks = Layout::vertical([
         Constraint::Length(2), // top padding
-        Constraint::Length(5), // status
+        Constraint::Length(6), // status (4 lines + possible warn line)
         Constraint::Min(0),    // rest
     ])
     .split(area);
