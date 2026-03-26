@@ -2004,7 +2004,7 @@ fn cmd_init_upgrade() {
         }
     };
 
-    let mut existing: toml::Value = match existing_raw.parse() {
+    let existing: toml::Value = match existing_raw.parse() {
         Ok(v) => v,
         Err(e) => {
             ui::error(&format!("Failed to parse config.toml: {e}"));
