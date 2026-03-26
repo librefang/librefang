@@ -344,21 +344,28 @@ struct SenderBuffer {
     messages: Vec<PendingMessage>,
     first_arrived: Instant,
     timer_handle: Option<tokio::task::JoinHandle<()>>,
+    max_timer_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 struct MessageDebouncer {
     debounce_ms: u64,
     debounce_max_ms: u64,
+    max_buffer: usize,
     flush_tx: mpsc::UnboundedSender<String>,
 }
 
 impl MessageDebouncer {
-    fn new(debounce_ms: u64, debounce_max_ms: u64) -> (Self, mpsc::UnboundedReceiver<String>) {
+    fn new(
+        debounce_ms: u64,
+        debounce_max_ms: u64,
+        max_buffer: usize,
+    ) -> (Self, mpsc::UnboundedReceiver<String>) {
         let (flush_tx, flush_rx) = mpsc::unbounded_channel();
         (
             Self {
                 debounce_ms,
                 debounce_max_ms,
+                max_buffer,
                 flush_tx,
             },
             flush_rx,
@@ -375,13 +382,21 @@ impl MessageDebouncer {
         let debounce_dur = Duration::from_millis(self.debounce_ms);
         let max_dur = Duration::from_millis(self.debounce_max_ms);
 
-        let buf = buffers
-            .entry(key.to_string())
-            .or_insert_with(|| SenderBuffer {
+        let buf = buffers.entry(key.to_string()).or_insert_with(|| {
+            let flush_tx = self.flush_tx.clone();
+            let flush_key = key.to_string();
+            let max_dur = max_dur;
+            let max_timer_handle = Some(tokio::spawn(async move {
+                tokio::time::sleep(max_dur).await;
+                let _ = flush_tx.send(flush_key);
+            }));
+            SenderBuffer {
                 messages: Vec::new(),
                 first_arrived: Instant::now(),
                 timer_handle: None,
-            });
+                max_timer_handle,
+            }
+        });
         buf.messages.push(pending);
 
         if let Some(handle) = buf.timer_handle.take() {
@@ -389,7 +404,7 @@ impl MessageDebouncer {
         }
 
         let elapsed = buf.first_arrived.elapsed();
-        if elapsed >= max_dur {
+        if elapsed >= max_dur || buf.messages.len() >= self.max_buffer {
             let _ = self.flush_tx.send(key.to_string());
             return;
         }
@@ -441,6 +456,10 @@ impl MessageDebouncer {
         let buf = buffers.remove(key)?;
         if buf.messages.is_empty() {
             return None;
+        }
+
+        if let Some(handle) = buf.max_timer_handle {
+            handle.abort();
         }
 
         let mut messages = buf.messages;
@@ -531,9 +550,9 @@ fn flush_debounced(
     rate_limiter: &ChannelRateLimiter,
     sanitizer: &Arc<InputSanitizer>,
     semaphore: &Arc<tokio::sync::Semaphore>,
-) {
+) -> Option<tokio::task::JoinHandle<()>> {
     let Some((merged_msg, blocks)) = debouncer.drain(key, buffers) else {
-        return;
+        return None;
     };
 
     let handle = handle.clone();
@@ -606,6 +625,7 @@ fn flush_debounced(
             .await;
         }
     });
+    Some(handle)
 }
 
 /// Owns all running channel adapters and dispatches messages to agents.
@@ -679,11 +699,18 @@ impl BridgeManager {
 
         let ct_str = channel_type_str(&adapter.channel_type()).to_string();
         let overrides = handle.channel_overrides(&ct_str, None).await;
-        let debounce_ms = overrides.as_ref().map(|o| o.debounce_ms).unwrap_or(0);
+        let debounce_ms = overrides
+            .as_ref()
+            .map(|o| o.message_debounce_ms)
+            .unwrap_or(0);
         let debounce_max_ms = overrides
             .as_ref()
-            .map(|o| o.debounce_max_ms)
+            .map(|o| o.message_debounce_max_ms)
             .unwrap_or(30000);
+        let max_buffer = overrides
+            .as_ref()
+            .map(|o| o.message_debounce_max_buffer)
+            .unwrap_or(64);
 
         let semaphore = Arc::new(tokio::sync::Semaphore::new(32));
 
@@ -735,7 +762,8 @@ impl BridgeManager {
             self.tasks.push(task);
         } else {
             // Debounce path
-            let (debouncer, mut flush_rx) = MessageDebouncer::new(debounce_ms, debounce_max_ms);
+            let (debouncer, mut flush_rx) =
+                MessageDebouncer::new(debounce_ms, debounce_max_ms, max_buffer);
             let mut buffers: HashMap<String, SenderBuffer> = HashMap::new();
 
             let mut typing_rx = adapter_clone.typing_events();
@@ -787,13 +815,19 @@ impl BridgeManager {
                             debouncer.on_typing(&sender_key, event.is_typing, &mut buffers);
                         }
                         Some(key) = flush_rx.recv() => {
-                            flush_debounced(&debouncer, &key, &mut buffers, &handle, &router, &adapter_clone, &rate_limiter, &sanitizer, &semaphore);
+                            let _ = flush_debounced(&debouncer, &key, &mut buffers, &handle, &router, &adapter_clone, &rate_limiter, &sanitizer, &semaphore);
                         }
                         _ = shutdown.changed() => {
                             if *shutdown.borrow() {
                                 let keys: Vec<String> = buffers.keys().cloned().collect();
+                                let mut handles = Vec::new();
                                 for key in keys {
-                                    flush_debounced(&debouncer, &key, &mut buffers, &handle, &router, &adapter_clone, &rate_limiter, &sanitizer, &semaphore);
+                                    if let Some(handle) = flush_debounced(&debouncer, &key, &mut buffers, &handle, &router, &adapter_clone, &rate_limiter, &sanitizer, &semaphore) {
+                                        handles.push(handle);
+                                    }
+                                }
+                                for handle in handles {
+                                    let _ = handle.await;
                                 }
                                 info!("Shutting down channel adapter {}", adapter_clone.name());
                                 break;

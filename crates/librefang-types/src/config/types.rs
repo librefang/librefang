@@ -80,14 +80,21 @@ pub struct ChannelOverrides {
     pub typing_mode: Option<TypingMode>,
     /// Message debounce window in milliseconds. Default: 0 (disabled).
     #[serde(default)]
-    pub debounce_ms: u64,
+    pub message_debounce_ms: u64,
     /// Maximum time to buffer messages before forcing a dispatch. Default: 30000ms.
-    #[serde(default = "default_debounce_max_ms")]
-    pub debounce_max_ms: u64,
+    #[serde(default = "default_message_debounce_max_ms")]
+    pub message_debounce_max_ms: u64,
+    /// Maximum number of messages to buffer per sender before forcing dispatch. Default: 64.
+    #[serde(default = "default_message_debounce_max_buffer")]
+    pub message_debounce_max_buffer: usize,
 }
 
-fn default_debounce_max_ms() -> u64 {
+fn default_message_debounce_max_ms() -> u64 {
     30000
+}
+
+fn default_message_debounce_max_buffer() -> usize {
+    64
 }
 
 /// Controls what usage info appears in response footers.
