@@ -3,6 +3,7 @@ import { formatTime, formatDateTime } from "../lib/datetime";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { listProviders, testProvider, setProviderKey, deleteProviderKey, setProviderUrl } from "../api";
+import { isProviderAvailable } from "../lib/status";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -49,11 +50,6 @@ function getLatencyColor(ms?: number) {
   return "text-error";
 }
 
-/** Check if a provider auth_status indicates the provider is usable.
- *  Mirrors the Rust AuthStatus::is_available() variants. */
-function isProviderAvailable(status?: string): boolean {
-  return status === "configured" || status === "not_required" || status === "configured_cli";
-}
 
 type SortField = "name" | "models" | "latency";
 type SortOrder = "asc" | "desc";
