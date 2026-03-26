@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::tui::theme;
+use crate::tui::widgets;
 use librefang_runtime::model_catalog::ModelCatalog;
 use librefang_types::model_catalog::ModelTier;
 
@@ -1254,12 +1255,7 @@ fn draw(f: &mut Frame, area: Rect, state: &mut State) {
     f.render_widget(Paragraph::new(header), chunks[1]);
 
     // Separator
-    let sep_w = content.width.min(60) as usize;
-    let sep = Line::from(vec![Span::styled(
-        "\u{2500}".repeat(sep_w),
-        Style::default().fg(theme::BORDER),
-    )]);
-    f.render_widget(Paragraph::new(sep), chunks[2]);
+    f.render_widget(widgets::separator(content.width.min(60)), chunks[2]);
 
     // Step content (full remaining area)
     match state.step {
@@ -1310,11 +1306,7 @@ fn draw_welcome(f: &mut Frame, area: Rect) {
     .alignment(Alignment::Center);
     f.render_widget(tagline, chunks[2]);
 
-    let sep = Paragraph::new(Line::from(vec![Span::styled(
-        "\u{2500}".repeat(area.width.saturating_sub(2) as usize),
-        Style::default().fg(theme::BORDER),
-    )]));
-    f.render_widget(sep, chunks[3]);
+    f.render_widget(widgets::separator(area.width.saturating_sub(2)), chunks[3]);
 
     let sec1 = Paragraph::new(Line::from(vec![
         Span::styled("  \u{1f6e1} ", Style::default().fg(theme::GREEN)),
@@ -1340,11 +1332,7 @@ fn draw_welcome(f: &mut Frame, area: Rect) {
     ]));
     f.render_widget(sec4, chunks[8]);
 
-    let sep2 = Paragraph::new(Line::from(vec![Span::styled(
-        "\u{2500}".repeat(area.width.saturating_sub(2) as usize),
-        Style::default().fg(theme::BORDER),
-    )]));
-    f.render_widget(sep2, chunks[10]);
+    f.render_widget(widgets::separator(area.width.saturating_sub(2)), chunks[10]);
 
     let resp1 = Paragraph::new(Line::from(vec![Span::styled(
         "  Agents can execute code, access the network, and act",
@@ -1364,11 +1352,10 @@ fn draw_welcome(f: &mut Frame, area: Rect) {
     ]));
     f.render_widget(resp2, chunks[13]);
 
-    let hints = Paragraph::new(Line::from(vec![Span::styled(
-        "  [Enter] I understand    [Esc] Cancel",
-        theme::hint_style(),
-    )]));
-    f.render_widget(hints, chunks[15]);
+    f.render_widget(
+        widgets::hint_bar("  [Enter] I understand    [Esc] Cancel"),
+        chunks[15],
+    );
 }
 
 fn draw_migration(f: &mut Frame, area: Rect, state: &mut State) {
@@ -1587,10 +1574,7 @@ fn draw_migration_offer(f: &mut Frame, area: Rect, state: &mut State) {
     }
 
     f.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(
-            "  [\u{2191}\u{2193}] Navigate  [Enter] Select  [Esc] Skip",
-            theme::hint_style(),
-        )])),
+        widgets::hint_bar("  [\u{2191}\u{2193}] Navigate  [Enter] Select  [Esc] Skip"),
         chunks[9],
     );
 }
@@ -1818,11 +1802,10 @@ fn draw_provider(f: &mut Frame, area: Rect, state: &mut State) {
         .highlight_symbol("\u{25b8} ");
     f.render_stateful_widget(list, chunks[1], &mut state.provider_list);
 
-    let hints = Paragraph::new(Line::from(vec![Span::styled(
-        "  [\u{2191}\u{2193}/jk] Navigate  [Enter] Select  [Esc] Cancel",
-        theme::hint_style(),
-    )]));
-    f.render_widget(hints, chunks[2]);
+    f.render_widget(
+        widgets::hint_bar("  [\u{2191}\u{2193}/jk] Navigate  [Enter] Select  [Esc] Cancel"),
+        chunks[2],
+    );
 }
 
 fn draw_api_key(f: &mut Frame, area: Rect, state: &mut State) {
@@ -1911,10 +1894,7 @@ fn draw_api_key(f: &mut Frame, area: Rect, state: &mut State) {
     }
 
     f.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(
-            "  [Enter] Confirm  [Esc] Back",
-            theme::hint_style(),
-        )])),
+        widgets::hint_bar("  [Enter] Confirm  [Esc] Back"),
         chunks[5],
     );
 }
@@ -1948,10 +1928,9 @@ fn draw_model(f: &mut Frame, area: Rect, state: &mut State) {
     f.render_stateful_widget(list, chunks[1], &mut state.model_list);
 
     f.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(
+        widgets::hint_bar(
             "  [\u{2191}\u{2193}/jk] Navigate  [Enter] Select  [Esc] Back    * = default",
-            theme::hint_style(),
-        )])),
+        ),
         chunks[2],
     );
 }
@@ -2013,13 +1992,7 @@ fn draw_routing_choice(f: &mut Frame, area: Rect, state: &mut State) {
         chunks[3],
     );
 
-    f.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(
-            "\u{2500}".repeat(area.width.saturating_sub(2) as usize),
-            Style::default().fg(theme::BORDER),
-        )])),
-        chunks[5],
-    );
+    f.render_widget(widgets::separator(area.width.saturating_sub(2)), chunks[5]);
 
     let options = [
         ("Yes", "pick 3 models (fast / balanced / frontier)"),
@@ -2051,10 +2024,7 @@ fn draw_routing_choice(f: &mut Frame, area: Rect, state: &mut State) {
     }
 
     f.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(
-            "  [\u{2191}\u{2193}] Navigate  [Enter] Select  [Esc] Back",
-            theme::hint_style(),
-        )])),
+        widgets::hint_bar("  [\u{2191}\u{2193}] Navigate  [Enter] Select  [Esc] Back"),
         chunks[10],
     );
 }
@@ -2137,10 +2107,7 @@ fn draw_routing_pick(f: &mut Frame, area: Rect, state: &mut State, tier: usize) 
     f.render_stateful_widget(list, chunks[3], &mut state.routing_tier_list);
 
     f.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(
-            "  [\u{2191}\u{2193}/jk] Navigate  [Enter] Select  [Esc] Back",
-            theme::hint_style(),
-        )])),
+        widgets::hint_bar("  [\u{2191}\u{2193}/jk] Navigate  [Enter] Select  [Esc] Back"),
         chunks[4],
     );
 }
@@ -2400,10 +2367,7 @@ fn draw_complete(f: &mut Frame, area: Rect, state: &mut State) {
 
     // ── Bottom hints ──
     f.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(
-            "  [\u{2191}\u{2193}/jk] Navigate  [Enter] Launch  [1/2/3] Quick select",
-            theme::hint_style(),
-        )])),
+        widgets::hint_bar("  [\u{2191}\u{2193}/jk] Navigate  [Enter] Launch  [1/2/3] Quick select"),
         chunks[15],
     );
 }

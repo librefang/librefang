@@ -158,7 +158,6 @@ pub fn separator(width: u16) -> Paragraph<'static> {
 // ── Toast ─────────────────────────────────────────────────────────────────
 
 /// Centered bottom toast notification.
-#[allow(dead_code)]
 pub fn render_toast(f: &mut Frame, area: Rect, msg: &str, color: ratatui::style::Color) {
     let w = (msg.len() as u16 + 4).min(area.width);
     let x = area.width.saturating_sub(w) / 2;

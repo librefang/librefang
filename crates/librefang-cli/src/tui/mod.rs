@@ -2214,11 +2214,11 @@ impl App {
                     let spinner =
                         theme::SPINNER_FRAMES[self.welcome.tick % theme::SPINNER_FRAMES.len()];
                     let msg = format!(" {spinner} Booting kernel\u{2026}");
-                    render_toast(frame, area, &msg, theme::YELLOW);
+                    widgets::render_toast(frame, area, &msg, theme::YELLOW);
                 }
                 if let Some(ref err) = self.kernel_boot_error {
                     let msg = format!(" \u{2718} {err}");
-                    render_toast(frame, area, &msg, theme::RED);
+                    widgets::render_toast(frame, area, &msg, theme::RED);
                 }
             }
             Phase::Boot(BootScreen::Wizard) => wizard::draw(frame, area, &mut self.wizard),
@@ -2373,19 +2373,6 @@ impl App {
         let bar = Paragraph::new(Line::from(spans)).style(Style::default().bg(theme::BG_CARD));
         frame.render_widget(bar, area);
     }
-}
-
-/// Draw a one-line toast at the bottom of the screen.
-fn render_toast(frame: &mut ratatui::Frame, area: Rect, msg: &str, color: ratatui::style::Color) {
-    let w = (msg.len() as u16 + 4).min(area.width);
-    let x = area.width.saturating_sub(w) / 2;
-    let y = area.height.saturating_sub(2);
-    let toast_area = Rect::new(x, y, w, 1);
-    let para = Paragraph::new(Line::from(vec![Span::styled(
-        msg,
-        Style::default().fg(color),
-    )]));
-    frame.render_widget(para, toast_area);
 }
 
 // ─── Entry point ─────────────────────────────────────────────────────────────

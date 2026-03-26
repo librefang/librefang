@@ -9,6 +9,7 @@ use ratatui::Frame;
 use std::path::PathBuf;
 
 use crate::tui::theme;
+use crate::tui::widgets;
 
 /// Provider metadata for the setup wizard.
 struct ProviderInfo {
@@ -555,11 +556,10 @@ fn draw_provider(f: &mut Frame, area: Rect, state: &mut WizardState) {
 
     f.render_stateful_widget(list, chunks[1], &mut state.provider_list);
 
-    let hints = Paragraph::new(Line::from(vec![Span::styled(
-        "    [\u{2191}\u{2193}] Navigate  [Enter] Select  [Esc] Cancel",
-        theme::hint_style(),
-    )]));
-    f.render_widget(hints, chunks[2]);
+    f.render_widget(
+        widgets::hint_bar("    [\u{2191}\u{2193}] Navigate  [Enter] Select  [Esc] Cancel"),
+        chunks[2],
+    );
 }
 
 fn draw_api_key(f: &mut Frame, area: Rect, state: &mut WizardState) {
@@ -603,11 +603,10 @@ fn draw_api_key(f: &mut Frame, area: Rect, state: &mut WizardState) {
     )]));
     f.render_widget(env_hint, chunks[2]);
 
-    let hints = Paragraph::new(Line::from(vec![Span::styled(
-        "    [Enter] Confirm  [Esc] Back",
-        theme::hint_style(),
-    )]));
-    f.render_widget(hints, chunks[4]);
+    f.render_widget(
+        widgets::hint_bar("    [Enter] Confirm  [Esc] Back"),
+        chunks[4],
+    );
 }
 
 fn draw_model(f: &mut Frame, area: Rect, state: &mut WizardState) {
@@ -651,11 +650,10 @@ fn draw_model(f: &mut Frame, area: Rect, state: &mut WizardState) {
     )]));
     f.render_widget(default_hint, chunks[2]);
 
-    let hints = Paragraph::new(Line::from(vec![Span::styled(
-        "    [Enter] Confirm  [Esc] Back",
-        theme::hint_style(),
-    )]));
-    f.render_widget(hints, chunks[4]);
+    f.render_widget(
+        widgets::hint_bar("    [Enter] Confirm  [Esc] Back"),
+        chunks[4],
+    );
 }
 
 fn draw_done(f: &mut Frame, area: Rect, state: &WizardState) {
