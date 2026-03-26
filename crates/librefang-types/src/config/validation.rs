@@ -80,6 +80,7 @@ impl KernelConfig {
             "sanitize",
             "telemetry",
             "update_channel",
+            "internal_limits",
         ]
     }
 

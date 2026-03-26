@@ -15,8 +15,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{debug, warn};
 
-/// Maximum inter-agent call depth to prevent infinite recursion (A->B->C->...).
-const MAX_AGENT_CALL_DEPTH: u32 = 5;
+/// Default maximum inter-agent call depth to prevent infinite recursion (A->B->C->...).
+const DEFAULT_MAX_AGENT_CALL_DEPTH: u32 = 5;
 
 /// Check if a shell command should be blocked by taint tracking.
 ///
@@ -79,6 +79,8 @@ tokio::task_local! {
     static AGENT_CALL_DEPTH: std::cell::Cell<u32>;
     /// Canvas max HTML size in bytes (set from kernel config at loop start).
     pub static CANVAS_MAX_BYTES: usize;
+    /// Max inter-agent call depth (set from kernel config, default 5).
+    pub static MAX_AGENT_CALL_DEPTH: u32;
 }
 
 /// Get the current inter-agent call depth from the task-local context.
@@ -1724,11 +1726,14 @@ async fn tool_agent_send(
 
     // Check + increment inter-agent call depth
     let current_depth = AGENT_CALL_DEPTH.try_with(|d| d.get()).unwrap_or(0);
-    if current_depth >= MAX_AGENT_CALL_DEPTH {
+    let max_depth = MAX_AGENT_CALL_DEPTH
+        .try_with(|v| *v)
+        .unwrap_or(DEFAULT_MAX_AGENT_CALL_DEPTH);
+    if current_depth >= max_depth {
         return Err(format!(
             "Inter-agent call depth exceeded (max {}). \
              A->B->C chain is too deep. Use the task queue instead.",
-            MAX_AGENT_CALL_DEPTH
+            max_depth
         ));
     }
 
@@ -4688,14 +4693,14 @@ mod tests {
 
     #[test]
     fn test_depth_limit_constant() {
-        assert_eq!(MAX_AGENT_CALL_DEPTH, 5);
+        assert_eq!(DEFAULT_MAX_AGENT_CALL_DEPTH, 5);
     }
 
     #[test]
     fn test_depth_limit_first_call_succeeds() {
-        // Default depth is 0, which is < MAX_AGENT_CALL_DEPTH
+        // Default depth is 0, which is < DEFAULT_MAX_AGENT_CALL_DEPTH
         let default_depth = AGENT_CALL_DEPTH.try_with(|d| d.get()).unwrap_or(0);
-        assert!(default_depth < MAX_AGENT_CALL_DEPTH);
+        assert!(default_depth < DEFAULT_MAX_AGENT_CALL_DEPTH);
     }
 
     #[test]

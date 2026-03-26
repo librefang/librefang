@@ -1577,6 +1577,9 @@ pub struct KernelConfig {
     /// Controls which releases `librefang update` considers.
     #[serde(default)]
     pub update_channel: UpdateChannel,
+    /// Internal resource and capacity limits.
+    #[serde(default)]
+    pub internal_limits: InternalLimitsConfig,
 }
 
 /// Input sanitization mode for channel messages.
@@ -2323,6 +2326,81 @@ fn default_true() -> bool {
     true
 }
 
+// ---------------------------------------------------------------------------
+// InternalLimitsConfig — tuneable resource/capacity limits
+// ---------------------------------------------------------------------------
+
+fn default_max_receipts() -> usize {
+    10_000
+}
+fn default_max_receipts_per_agent() -> usize {
+    500
+}
+fn default_event_history_size() -> usize {
+    1000
+}
+fn default_max_concurrent_bg_llm() -> usize {
+    5
+}
+fn default_max_consecutive_cron_errors() -> u32 {
+    5
+}
+fn default_max_pending_approvals_per_agent() -> usize {
+    5
+}
+fn default_max_recent_approvals() -> usize {
+    100
+}
+fn default_max_agent_call_depth() -> u32 {
+    5
+}
+
+/// Internal resource and capacity limits that control bounded data structures
+/// and concurrency ceilings throughout the kernel.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct InternalLimitsConfig {
+    /// Maximum total message receipts stored (default: 10000).
+    #[serde(default = "default_max_receipts")]
+    pub max_receipts: usize,
+    /// Maximum receipts per agent (default: 500).
+    #[serde(default = "default_max_receipts_per_agent")]
+    pub max_receipts_per_agent: usize,
+    /// Event bus history buffer size (default: 1000).
+    #[serde(default = "default_event_history_size")]
+    pub event_history_size: usize,
+    /// Maximum concurrent background LLM calls (default: 5).
+    #[serde(default = "default_max_concurrent_bg_llm")]
+    pub max_concurrent_bg_llm: usize,
+    /// Consecutive cron errors before auto-disable (default: 5).
+    #[serde(default = "default_max_consecutive_cron_errors")]
+    pub max_consecutive_cron_errors: u32,
+    /// Maximum pending approval requests per agent (default: 5).
+    #[serde(default = "default_max_pending_approvals_per_agent")]
+    pub max_pending_approvals_per_agent: usize,
+    /// Maximum recent approval records to keep (default: 100).
+    #[serde(default = "default_max_recent_approvals")]
+    pub max_recent_approvals: usize,
+    /// Maximum nested agent call depth (default: 5).
+    #[serde(default = "default_max_agent_call_depth")]
+    pub max_agent_call_depth: u32,
+}
+
+impl Default for InternalLimitsConfig {
+    fn default() -> Self {
+        Self {
+            max_receipts: default_max_receipts(),
+            max_receipts_per_agent: default_max_receipts_per_agent(),
+            event_history_size: default_event_history_size(),
+            max_concurrent_bg_llm: default_max_concurrent_bg_llm(),
+            max_consecutive_cron_errors: default_max_consecutive_cron_errors(),
+            max_pending_approvals_per_agent: default_max_pending_approvals_per_agent(),
+            max_recent_approvals: default_max_recent_approvals(),
+            max_agent_call_depth: default_max_agent_call_depth(),
+        }
+    }
+}
+
 impl Default for KernelConfig {
     fn default() -> Self {
         let home_dir = librefang_home_dir();
@@ -2400,6 +2478,7 @@ impl Default for KernelConfig {
             telemetry: TelemetryConfig::default(),
             prompt_intelligence: PromptIntelligenceConfig::default(),
             update_channel: UpdateChannel::default(),
+            internal_limits: InternalLimitsConfig::default(),
         }
     }
 }

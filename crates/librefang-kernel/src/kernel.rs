@@ -418,25 +418,27 @@ pub struct LibreFangKernel {
 }
 
 /// Bounded in-memory delivery receipt tracker.
-/// Stores up to `MAX_RECEIPTS` most recent delivery receipts per agent.
 pub struct DeliveryTracker {
     receipts: dashmap::DashMap<AgentId, Vec<librefang_channels::types::DeliveryReceipt>>,
+    /// Maximum total receipts across all agents.
+    max_receipts: usize,
+    /// Maximum receipts per individual agent.
+    max_per_agent: usize,
 }
 
 impl Default for DeliveryTracker {
     fn default() -> Self {
-        Self::new()
+        Self::new(10_000, 500)
     }
 }
 
 impl DeliveryTracker {
-    const MAX_RECEIPTS: usize = 10_000;
-    const MAX_PER_AGENT: usize = 500;
-
-    /// Create a new empty delivery tracker.
-    pub fn new() -> Self {
+    /// Create a new empty delivery tracker with the given capacity limits.
+    pub fn new(max_receipts: usize, max_per_agent: usize) -> Self {
         Self {
             receipts: dashmap::DashMap::new(),
+            max_receipts,
+            max_per_agent,
         }
     }
 
@@ -445,17 +447,17 @@ impl DeliveryTracker {
         let mut entry = self.receipts.entry(agent_id).or_default();
         entry.push(receipt);
         // Per-agent cap
-        if entry.len() > Self::MAX_PER_AGENT {
-            let drain = entry.len() - Self::MAX_PER_AGENT;
+        if entry.len() > self.max_per_agent {
+            let drain = entry.len() - self.max_per_agent;
             entry.drain(..drain);
         }
         // Global cap: evict oldest agents' receipts if total exceeds limit
         drop(entry);
         let total: usize = self.receipts.iter().map(|e| e.value().len()).sum();
-        if total > Self::MAX_RECEIPTS {
+        if total > self.max_receipts {
             // Simple eviction: remove oldest entries from first agent found
             if let Some(mut oldest) = self.receipts.iter_mut().next() {
-                let to_remove = total - Self::MAX_RECEIPTS;
+                let to_remove = total - self.max_receipts;
                 let drain = to_remove.min(oldest.value().len());
                 oldest.value_mut().drain(..drain);
             }
@@ -1486,7 +1488,10 @@ impl LibreFangKernel {
             .map_err(|e| KernelError::BootFailed(format!("Prompt store init failed: {e}")))?;
 
         let supervisor = Supervisor::new();
-        let background = BackgroundExecutor::new(supervisor.subscribe());
+        let background = BackgroundExecutor::new(
+            supervisor.subscribe(),
+            config.internal_limits.max_concurrent_bg_llm,
+        );
 
         // Initialize WASM sandbox engine (shared across all WASM agents)
         let wasm_sandbox = WasmSandbox::new()
@@ -1818,8 +1823,11 @@ impl LibreFangKernel {
         }
 
         // Initialize cron scheduler
-        let cron_scheduler =
-            crate::cron::CronScheduler::new(&config.home_dir, config.max_cron_jobs);
+        let cron_scheduler = crate::cron::CronScheduler::new(
+            &config.home_dir,
+            config.max_cron_jobs,
+            config.internal_limits.max_consecutive_cron_errors,
+        );
         match cron_scheduler.load() {
             Ok(count) => {
                 if count > 0 {
@@ -1832,7 +1840,11 @@ impl LibreFangKernel {
         }
 
         // Initialize execution approval manager
-        let approval_manager = crate::approval::ApprovalManager::new(config.approval.clone());
+        let approval_manager = crate::approval::ApprovalManager::new(
+            config.approval.clone(),
+            config.internal_limits.max_pending_approvals_per_agent,
+            config.internal_limits.max_recent_approvals,
+        );
 
         // Initialize binding/broadcast/auto-reply from config
         let initial_bindings = config.bindings.clone();
@@ -1871,7 +1883,7 @@ impl LibreFangKernel {
             config,
             registry: AgentRegistry::new(),
             capabilities: CapabilityManager::new(),
-            event_bus: EventBus::new(),
+            event_bus: EventBus::new(config.internal_limits.event_history_size),
             scheduler: AgentScheduler::new(),
             memory: memory.clone(),
             proactive_memory: OnceLock::new(),
@@ -1904,7 +1916,10 @@ impl LibreFangKernel {
             extension_registry: std::sync::RwLock::new(extension_registry),
             extension_health,
             effective_mcp_servers: std::sync::RwLock::new(all_mcp_servers),
-            delivery_tracker: DeliveryTracker::new(),
+            delivery_tracker: DeliveryTracker::new(
+                config.internal_limits.max_receipts,
+                config.internal_limits.max_receipts_per_agent,
+            ),
             cron_scheduler,
             approval_manager,
             bindings: std::sync::Mutex::new(initial_bindings),

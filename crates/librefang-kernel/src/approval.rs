@@ -9,16 +9,15 @@ use std::collections::VecDeque;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-/// Max pending requests per agent.
-const MAX_PENDING_PER_AGENT: usize = 5;
-/// Max recent approval records to retain for history and UI visibility.
-const MAX_RECENT_APPROVALS: usize = 100;
-
 /// Manages approval requests with oneshot channels for blocking resolution.
 pub struct ApprovalManager {
     pending: DashMap<Uuid, PendingRequest>,
     recent: std::sync::Mutex<VecDeque<ApprovalRecord>>,
     policy: std::sync::RwLock<ApprovalPolicy>,
+    /// Max pending requests per agent.
+    max_pending_per_agent: usize,
+    /// Max recent approval records to retain.
+    max_recent_approvals: usize,
 }
 
 struct PendingRequest {
@@ -35,11 +34,17 @@ pub struct ApprovalRecord {
 }
 
 impl ApprovalManager {
-    pub fn new(policy: ApprovalPolicy) -> Self {
+    pub fn new(
+        policy: ApprovalPolicy,
+        max_pending_per_agent: usize,
+        max_recent_approvals: usize,
+    ) -> Self {
         Self {
             pending: DashMap::new(),
             recent: std::sync::Mutex::new(VecDeque::new()),
             policy: std::sync::RwLock::new(policy),
+            max_pending_per_agent,
+            max_recent_approvals,
         }
     }
 
@@ -131,7 +136,7 @@ impl ApprovalManager {
             .iter()
             .filter(|r| r.value().request.agent_id == req.agent_id)
             .count();
-        if agent_pending >= MAX_PENDING_PER_AGENT {
+        if agent_pending >= self.max_pending_per_agent {
             warn!(agent_id = %req.agent_id, "Approval request rejected: too many pending");
             return ApprovalDecision::Denied;
         }
@@ -260,7 +265,7 @@ impl ApprovalManager {
             decided_at,
             decided_by,
         });
-        while recent.len() > MAX_RECENT_APPROVALS {
+        while recent.len() > self.max_recent_approvals {
             recent.pop_back();
         }
     }
@@ -276,8 +281,15 @@ mod tests {
     use librefang_types::approval::ApprovalPolicy;
     use std::sync::Arc;
 
+    const TEST_MAX_PENDING_PER_AGENT: usize = 5;
+    const TEST_MAX_RECENT_APPROVALS: usize = 100;
+
     fn default_manager() -> ApprovalManager {
-        ApprovalManager::new(ApprovalPolicy::default())
+        ApprovalManager::new(
+            ApprovalPolicy::default(),
+            TEST_MAX_PENDING_PER_AGENT,
+            TEST_MAX_RECENT_APPROVALS,
+        )
     }
 
     fn make_request(agent_id: &str, tool_name: &str, timeout_secs: u64) -> ApprovalRequest {
@@ -316,7 +328,11 @@ mod tests {
             trusted_senders: Vec::new(),
             channel_rules: Vec::new(),
         };
-        let mgr = ApprovalManager::new(policy);
+        let mgr = ApprovalManager::new(
+            policy,
+            TEST_MAX_PENDING_PER_AGENT,
+            TEST_MAX_RECENT_APPROVALS,
+        );
         assert!(mgr.requires_approval("file_write"));
         assert!(mgr.requires_approval("file_delete"));
         assert!(!mgr.requires_approval("shell_exec"));
@@ -502,7 +518,7 @@ mod tests {
 
         // Fill up 5 pending requests for agent-1 (they will all be waiting)
         let mut ids = Vec::new();
-        for _ in 0..MAX_PENDING_PER_AGENT {
+        for _ in 0..TEST_MAX_PENDING_PER_AGENT {
             let req = make_request("agent-1", "shell_exec", 300);
             ids.push(req.id);
             let mgr_clone = Arc::clone(&mgr);
@@ -513,7 +529,7 @@ mod tests {
 
         // Give spawned tasks time to register
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        assert_eq!(mgr.pending_count(), MAX_PENDING_PER_AGENT);
+        assert_eq!(mgr.pending_count(), TEST_MAX_PENDING_PER_AGENT);
 
         // 6th request for the same agent should be immediately denied
         let req6 = make_request("agent-1", "shell_exec", 300);
@@ -528,7 +544,7 @@ mod tests {
             mgr2.request_approval(req_other).await;
         });
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        assert_eq!(mgr.pending_count(), MAX_PENDING_PER_AGENT + 1);
+        assert_eq!(mgr.pending_count(), TEST_MAX_PENDING_PER_AGENT + 1);
 
         // Cleanup: resolve all pending to avoid hanging tasks
         for id in &ids {
@@ -591,7 +607,11 @@ mod tests {
             trusted_senders: vec!["admin_123".to_string()],
             ..Default::default()
         };
-        let mgr = ApprovalManager::new(policy);
+        let mgr = ApprovalManager::new(
+            policy,
+            TEST_MAX_PENDING_PER_AGENT,
+            TEST_MAX_RECENT_APPROVALS,
+        );
 
         // Trusted sender should bypass even for shell_exec
         assert!(!mgr.requires_approval_with_context("shell_exec", Some("admin_123"), None));
@@ -614,7 +634,11 @@ mod tests {
             }],
             ..Default::default()
         };
-        let mgr = ApprovalManager::new(policy);
+        let mgr = ApprovalManager::new(
+            policy,
+            TEST_MAX_PENDING_PER_AGENT,
+            TEST_MAX_RECENT_APPROVALS,
+        );
 
         // file_write is not in require_approval, but telegram channel denies it
         assert!(mgr.is_tool_denied_with_context("file_write", None, Some("telegram")));
@@ -636,7 +660,11 @@ mod tests {
             }],
             ..Default::default()
         };
-        let mgr = ApprovalManager::new(policy);
+        let mgr = ApprovalManager::new(
+            policy,
+            TEST_MAX_PENDING_PER_AGENT,
+            TEST_MAX_RECENT_APPROVALS,
+        );
 
         // shell_exec from admin_cli channel is explicitly allowed — bypass approval
         assert!(!mgr.requires_approval_with_context("shell_exec", None, Some("admin_cli")));
@@ -657,7 +685,11 @@ mod tests {
             }],
             ..Default::default()
         };
-        let mgr = ApprovalManager::new(policy);
+        let mgr = ApprovalManager::new(
+            policy,
+            TEST_MAX_PENDING_PER_AGENT,
+            TEST_MAX_RECENT_APPROVALS,
+        );
 
         // Trusted sender bypasses even channel deny rules
         assert!(!mgr.is_tool_denied_with_context(

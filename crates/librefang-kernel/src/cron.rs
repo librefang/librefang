@@ -17,9 +17,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tracing::{debug, info, warn};
 
-/// Maximum consecutive errors before a job is auto-disabled.
-const MAX_CONSECUTIVE_ERRORS: u32 = 5;
-
 // ---------------------------------------------------------------------------
 // JobMeta — extra runtime state not stored in CronJob itself
 // ---------------------------------------------------------------------------
@@ -70,6 +67,8 @@ pub struct CronScheduler {
     persist_path: PathBuf,
     /// Global cap on total jobs across all agents (atomic for hot-reload).
     max_total_jobs: AtomicUsize,
+    /// Consecutive failures before auto-disabling a job.
+    max_consecutive_errors: u32,
 }
 
 impl CronScheduler {
@@ -78,11 +77,12 @@ impl CronScheduler {
     /// `home_dir` is the LibreFang data directory; jobs are persisted to
     /// `<home_dir>/cron_jobs.json`. `max_total_jobs` caps the total number
     /// of jobs across all agents.
-    pub fn new(home_dir: &Path, max_total_jobs: usize) -> Self {
+    pub fn new(home_dir: &Path, max_total_jobs: usize, max_consecutive_errors: u32) -> Self {
         Self {
             jobs: DashMap::new(),
             persist_path: home_dir.join("cron_jobs.json"),
             max_total_jobs: AtomicUsize::new(max_total_jobs),
+            max_consecutive_errors,
         }
     }
 
@@ -411,7 +411,7 @@ impl CronScheduler {
     /// Record a failed execution for a job.
     ///
     /// Increments the consecutive error counter. If it reaches
-    /// [`MAX_CONSECUTIVE_ERRORS`], the job is automatically disabled.
+    /// `max_consecutive_errors`, the job is automatically disabled.
     pub fn record_failure(&self, id: CronJobId, error_msg: &str) {
         if let Some(mut meta) = self.jobs.get_mut(&id) {
             meta.job.last_run = Some(Utc::now());
@@ -420,7 +420,7 @@ impl CronScheduler {
                 librefang_types::truncate_str(error_msg, 256)
             ));
             meta.consecutive_errors += 1;
-            if meta.consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+            if meta.consecutive_errors >= self.max_consecutive_errors {
                 warn!(
                     job_id = %id,
                     errors = meta.consecutive_errors,
@@ -546,9 +546,12 @@ mod tests {
     }
 
     /// Create a scheduler backed by a temp directory.
+    /// Default max consecutive errors for tests (matches original hardcoded value).
+    const TEST_MAX_CONSECUTIVE_ERRORS: u32 = 5;
+
     fn make_scheduler(max_total: usize) -> (CronScheduler, tempfile::TempDir) {
         let tmp = tempfile::tempdir().unwrap();
-        let sched = CronScheduler::new(tmp.path(), max_total);
+        let sched = CronScheduler::new(tmp.path(), max_total, TEST_MAX_CONSECUTIVE_ERRORS);
         (sched, tmp)
     }
 
@@ -690,8 +693,8 @@ mod tests {
         let job = make_job(agent);
         let id = sched.add_job(job, false).unwrap();
 
-        // Fail MAX_CONSECUTIVE_ERRORS - 1 times: should still be enabled
-        for i in 0..(MAX_CONSECUTIVE_ERRORS - 1) {
+        // Fail TEST_MAX_CONSECUTIVE_ERRORS - 1 times: should still be enabled
+        for i in 0..(TEST_MAX_CONSECUTIVE_ERRORS - 1) {
             sched.record_failure(id, &format!("error {i}"));
             let meta = sched.get_meta(id).unwrap();
             assert!(
@@ -707,9 +710,9 @@ mod tests {
         let meta = sched.get_meta(id).unwrap();
         assert!(
             !meta.job.enabled,
-            "Job should be auto-disabled after {MAX_CONSECUTIVE_ERRORS} failures"
+            "Job should be auto-disabled after {TEST_MAX_CONSECUTIVE_ERRORS} failures"
         );
-        assert_eq!(meta.consecutive_errors, MAX_CONSECUTIVE_ERRORS);
+        assert_eq!(meta.consecutive_errors, TEST_MAX_CONSECUTIVE_ERRORS);
         assert!(
             meta.last_status.as_ref().unwrap().starts_with("error:"),
             "last_status should record the error"
@@ -802,7 +805,7 @@ mod tests {
 
         // Create scheduler, add jobs, persist
         {
-            let sched = CronScheduler::new(tmp.path(), 100);
+            let sched = CronScheduler::new(tmp.path(), 100, TEST_MAX_CONSECUTIVE_ERRORS);
             let mut j1 = make_job(agent);
             j1.name = "persist-a".into();
             let mut j2 = make_job(agent);
@@ -816,7 +819,7 @@ mod tests {
 
         // Create a new scheduler and load from disk
         {
-            let sched = CronScheduler::new(tmp.path(), 100);
+            let sched = CronScheduler::new(tmp.path(), 100, TEST_MAX_CONSECUTIVE_ERRORS);
             let count = sched.load().unwrap();
             assert_eq!(count, 2);
             assert_eq!(sched.total_jobs(), 2);
@@ -838,7 +841,7 @@ mod tests {
     #[test]
     fn test_load_no_file_returns_zero() {
         let tmp = tempfile::tempdir().unwrap();
-        let sched = CronScheduler::new(tmp.path(), 100);
+        let sched = CronScheduler::new(tmp.path(), 100, TEST_MAX_CONSECUTIVE_ERRORS);
         assert_eq!(sched.load().unwrap(), 0);
     }
 
@@ -1166,7 +1169,7 @@ mod tests {
         let id = sched.add_job(job, false).unwrap();
 
         // Simulate enough failures to auto-disable (with "not found" message)
-        for _ in 0..MAX_CONSECUTIVE_ERRORS {
+        for _ in 0..TEST_MAX_CONSECUTIVE_ERRORS {
             sched.record_failure(id, "No such agent");
         }
         let meta = sched.get_meta(id).unwrap();
@@ -1192,7 +1195,7 @@ mod tests {
 
         // Create scheduler, add job, reassign, persist
         let id = {
-            let sched = CronScheduler::new(tmp.path(), 100);
+            let sched = CronScheduler::new(tmp.path(), 100, TEST_MAX_CONSECUTIVE_ERRORS);
             let job = make_job(old_agent);
             let id = sched.add_job(job, false).unwrap();
 
@@ -1203,7 +1206,7 @@ mod tests {
 
         // Load from disk and verify the agent_id was persisted
         {
-            let sched = CronScheduler::new(tmp.path(), 100);
+            let sched = CronScheduler::new(tmp.path(), 100, TEST_MAX_CONSECUTIVE_ERRORS);
             sched.load().unwrap();
 
             let job = sched.get_job(id).unwrap();
@@ -1265,7 +1268,7 @@ mod tests {
 
         // Add jobs for two agents, remove one agent's jobs, persist
         {
-            let sched = CronScheduler::new(tmp.path(), 100);
+            let sched = CronScheduler::new(tmp.path(), 100, TEST_MAX_CONSECUTIVE_ERRORS);
             let mut j1 = make_job(agent);
             j1.name = "doomed".into();
             let mut j2 = make_job(other);
@@ -1280,7 +1283,7 @@ mod tests {
 
         // Reload and verify
         {
-            let sched = CronScheduler::new(tmp.path(), 100);
+            let sched = CronScheduler::new(tmp.path(), 100, TEST_MAX_CONSECUTIVE_ERRORS);
             sched.load().unwrap();
             assert_eq!(sched.total_jobs(), 1);
             assert!(sched.list_jobs(agent).is_empty());

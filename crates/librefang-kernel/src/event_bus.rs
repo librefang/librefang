@@ -9,9 +9,6 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
 use tracing::{debug, warn};
 
-/// Maximum events retained in the history ring buffer.
-const HISTORY_SIZE: usize = 1000;
-
 /// The central event bus for inter-agent and system communication.
 pub struct EventBus {
     /// Broadcast channel for all events.
@@ -20,6 +17,8 @@ pub struct EventBus {
     agent_channels: DashMap<AgentId, broadcast::Sender<Event>>,
     /// Event history ring buffer.
     history: Arc<RwLock<VecDeque<Event>>>,
+    /// Maximum events retained in the history ring buffer.
+    history_size: usize,
     /// Count of events dropped due to full channels.
     dropped_count: AtomicU64,
     /// Timestamp of the last drop warning log (for rate-limiting).
@@ -27,13 +26,14 @@ pub struct EventBus {
 }
 
 impl EventBus {
-    /// Create a new event bus.
-    pub fn new() -> Self {
+    /// Create a new event bus with the given history buffer size.
+    pub fn new(history_size: usize) -> Self {
         let (sender, _) = broadcast::channel(1024);
         Self {
             sender,
             agent_channels: DashMap::new(),
-            history: Arc::new(RwLock::new(VecDeque::with_capacity(HISTORY_SIZE))),
+            history: Arc::new(RwLock::new(VecDeque::with_capacity(history_size))),
+            history_size,
             dropped_count: AtomicU64::new(0),
             last_drop_warn: std::sync::Mutex::new(std::time::Instant::now()),
         }
@@ -50,7 +50,7 @@ impl EventBus {
         // Store in history
         {
             let mut history = self.history.write().await;
-            if history.len() >= HISTORY_SIZE {
+            if history.len() >= self.history_size {
                 history.pop_front();
             }
             history.push_back(event.clone());
@@ -149,7 +149,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_publish_and_history() {
-        let bus = EventBus::new();
+        let bus = EventBus::new(1000);
         let agent_id = AgentId::new();
         let event = Event::new(
             agent_id,
@@ -163,7 +163,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_agent_subscribe() {
-        let bus = EventBus::new();
+        let bus = EventBus::new(1000);
         let agent_id = AgentId::new();
         let mut rx = bus.subscribe_agent(agent_id);
 

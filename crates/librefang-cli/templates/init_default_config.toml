@@ -153,6 +153,17 @@ debounce_ms = 500
 # poll_interval_secs = 5
 # default_agent = "assistant"         # Agent to use when no agent: directive
 
+# ── Internal Resource Limits ─────────────────────────────────
+# [internal_limits]
+# max_receipts = 10000              # Total message receipts stored
+# max_receipts_per_agent = 500      # Receipts per agent
+# event_history_size = 1000         # Event bus history buffer
+# max_concurrent_bg_llm = 5         # Concurrent background LLM calls
+# max_consecutive_cron_errors = 5   # Cron failures before auto-disable
+# max_pending_approvals_per_agent = 5  # Pending approval requests per agent
+# max_recent_approvals = 100        # Recent approval records kept
+# max_agent_call_depth = 5          # Nested agent call depth limit
+
 # ── Network (P2P Federation) ─────────────────────────────────
 # network_enabled = false
 # [network]

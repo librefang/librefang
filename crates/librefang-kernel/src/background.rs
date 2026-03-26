@@ -14,9 +14,6 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
-/// Maximum number of concurrent background LLM calls across all agents.
-const MAX_CONCURRENT_BG_LLM: usize = 5;
-
 /// RAII guard that clears the busy flag on drop, even if the task panics.
 struct BusyGuard {
     flag: Arc<AtomicBool>,
@@ -42,11 +39,11 @@ pub struct BackgroundExecutor {
 
 impl BackgroundExecutor {
     /// Create a new executor bound to the supervisor's shutdown signal.
-    pub fn new(shutdown_rx: watch::Receiver<bool>) -> Self {
+    pub fn new(shutdown_rx: watch::Receiver<bool>, max_concurrent_bg_llm: usize) -> Self {
         Self {
             tasks: DashMap::new(),
             shutdown_rx,
-            llm_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_BG_LLM)),
+            llm_semaphore: Arc::new(tokio::sync::Semaphore::new(max_concurrent_bg_llm)),
             pause_flags: DashMap::new(),
         }
     }
@@ -451,7 +448,7 @@ mod tests {
     #[tokio::test]
     async fn test_continuous_shutdown() {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let executor = BackgroundExecutor::new(shutdown_rx);
+        let executor = BackgroundExecutor::new(shutdown_rx, 5);
         let agent_id = AgentId::new();
 
         let tick_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -487,7 +484,7 @@ mod tests {
     #[tokio::test]
     async fn test_skip_if_busy() {
         let (_shutdown_tx, shutdown_rx) = watch::channel(false);
-        let executor = BackgroundExecutor::new(shutdown_rx);
+        let executor = BackgroundExecutor::new(shutdown_rx, 5);
         let agent_id = AgentId::new();
 
         let tick_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -518,7 +515,7 @@ mod tests {
     #[test]
     fn test_executor_active_count() {
         let (_tx, rx) = watch::channel(false);
-        let executor = BackgroundExecutor::new(rx);
+        let executor = BackgroundExecutor::new(rx, 5);
         assert_eq!(executor.active_count(), 0);
 
         // Reactive mode → no background task
