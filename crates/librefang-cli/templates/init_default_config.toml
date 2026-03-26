@@ -101,6 +101,14 @@ debounce_ms = 500
 # ── Registry Sync ────────────────────────────────────────────
 # [registry]
 # cache_ttl_secs = 86400          # Re-download interval (default: 24 hours)
+# ── Session Compaction (LLM-based history summarization) ─────
+# [compaction]
+# threshold_messages = 30       # Compact when message count exceeds this
+# keep_recent = 10              # Recent messages preserved verbatim
+# max_summary_tokens = 1024     # Max tokens for the LLM summary
+# token_threshold_ratio = 0.7   # Trigger at this fraction of context window
+# max_chunk_chars = 80000       # Max chars per summarization chunk
+# max_retries = 3               # Max LLM summarization retries
 
 # ── Budget & Cost Control ────────────────────────────────────
 # [budget]

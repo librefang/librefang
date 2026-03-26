@@ -1229,6 +1229,68 @@ impl Default for SessionConfig {
     }
 }
 
+/// Session compaction configuration (exposed in `[compaction]` TOML section).
+///
+/// Controls when and how the LLM-based history compaction runs.
+/// Internal algorithmic ratios (base_chunk_ratio, safety_margin, etc.) are kept
+/// as private constants inside the runtime compactor and are not exposed here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CompactionTomlConfig {
+    /// Number of messages that triggers compaction (default: 30).
+    #[serde(default = "default_compaction_threshold")]
+    pub threshold_messages: usize,
+    /// Number of recent messages to preserve verbatim (default: 10).
+    #[serde(default = "default_compaction_keep_recent")]
+    pub keep_recent: usize,
+    /// Maximum tokens for summary output (default: 1024).
+    #[serde(default = "default_compaction_max_summary_tokens")]
+    pub max_summary_tokens: usize,
+    /// Token threshold ratio to trigger compaction (default: 0.7).
+    /// Compaction fires when estimated session tokens exceed this fraction
+    /// of the model's context window.
+    #[serde(default = "default_compaction_token_threshold_ratio")]
+    pub token_threshold_ratio: f64,
+    /// Maximum characters per summarization chunk (default: 80000).
+    #[serde(default = "default_compaction_max_chunk_chars")]
+    pub max_chunk_chars: usize,
+    /// Maximum retries for LLM summarization (default: 3).
+    #[serde(default = "default_compaction_max_retries")]
+    pub max_retries: u32,
+}
+
+fn default_compaction_threshold() -> usize {
+    30
+}
+fn default_compaction_keep_recent() -> usize {
+    10
+}
+fn default_compaction_max_summary_tokens() -> usize {
+    1024
+}
+fn default_compaction_token_threshold_ratio() -> f64 {
+    0.7
+}
+fn default_compaction_max_chunk_chars() -> usize {
+    80_000
+}
+fn default_compaction_max_retries() -> u32 {
+    3
+}
+
+impl Default for CompactionTomlConfig {
+    fn default() -> Self {
+        Self {
+            threshold_messages: default_compaction_threshold(),
+            keep_recent: default_compaction_keep_recent(),
+            max_summary_tokens: default_compaction_max_summary_tokens(),
+            token_threshold_ratio: default_compaction_token_threshold_ratio(),
+            max_chunk_chars: default_compaction_max_chunk_chars(),
+            max_retries: default_compaction_max_retries(),
+        }
+    }
+}
+
 /// Where a context injection should be placed in the session message list.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1580,6 +1642,9 @@ pub struct KernelConfig {
     /// Session retention policy (automatic cleanup of old/excess sessions).
     #[serde(default)]
     pub session: SessionConfig,
+    /// Session compaction configuration (LLM-based history summarization).
+    #[serde(default)]
+    pub compaction: CompactionTomlConfig,
     /// Message queue configuration (depth limits, TTL, concurrency).
     #[serde(default)]
     pub queue: QueueConfig,
@@ -2509,6 +2574,7 @@ impl Default for KernelConfig {
             proxy: ProxyConfig::default(),
             prompt_caching: default_prompt_caching(),
             session: SessionConfig::default(),
+            compaction: CompactionTomlConfig::default(),
             queue: QueueConfig::default(),
             external_auth: ExternalAuthConfig::default(),
             tool_policy: crate::tool_policy::ToolPolicy::default(),

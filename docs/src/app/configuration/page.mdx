@@ -2775,15 +2775,28 @@ For **web search providers**, the validator checks:
 
 Some subsystems have their own configuration that is not part of `config.toml` but is worth noting:
 
-### Session Compaction (runtime)
+### Session Compaction
 
-Configured internally via `CompactionConfig` (not currently exposed in `config.toml`):
+Configured via the `[compaction]` section in `config.toml`:
+
+```toml
+[compaction]
+threshold_messages = 30       # Compact when message count exceeds this
+keep_recent = 10              # Recent messages preserved verbatim
+max_summary_tokens = 1024     # Max tokens for the LLM summary
+token_threshold_ratio = 0.7   # Trigger at this fraction of context window
+max_chunk_chars = 80000       # Max chars per summarization chunk
+max_retries = 3               # Max LLM summarization retries
+```
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `threshold` | `80` | Compact when session message count exceeds this. |
-| `keep_recent` | `20` | Number of recent messages preserved verbatim after compaction. |
+| `threshold_messages` | `30` | Compact when session message count exceeds this. |
+| `keep_recent` | `10` | Number of recent messages preserved verbatim after compaction. |
 | `max_summary_tokens` | `1024` | Maximum tokens for the LLM summary of compacted messages. |
+| `token_threshold_ratio` | `0.7` | Trigger compaction when estimated tokens exceed this fraction of the context window. |
+| `max_chunk_chars` | `80000` | Maximum characters per summarization chunk. |
+| `max_retries` | `3` | Maximum retries for LLM summarization. |
 
 ### WASM Sandbox (runtime)
 

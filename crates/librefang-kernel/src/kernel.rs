@@ -1853,6 +1853,7 @@ impl LibreFangKernel {
             context_window_tokens: 200_000, // default, overridden per-agent at call time
             stable_prefix_mode: config.stable_prefix_mode,
             max_recall_results: 5,
+            compaction: Some(config.compaction.clone()),
         };
         let context_engine: Option<Box<dyn librefang_runtime::context_engine::ContextEngine>> = {
             let emb_arc: Option<
@@ -3099,7 +3100,7 @@ system_prompt = "You are a helpful assistant."
                 estimate_token_count, needs_compaction as check_compact,
                 needs_compaction_by_tokens, CompactionConfig,
             };
-            let config = CompactionConfig::default();
+            let config = CompactionConfig::from_toml(&self.config.compaction);
             let by_messages = check_compact(&session, &config);
             let estimated = estimate_token_count(
                 &session.messages,
@@ -3504,7 +3505,7 @@ system_prompt = "You are a helpful assistant."
                         use librefang_runtime::compactor::{
                             estimate_token_count, needs_compaction_by_tokens, CompactionConfig,
                         };
-                        let config = CompactionConfig::default();
+                        let config = CompactionConfig::from_toml(&kernel_clone.config.compaction);
                         let estimated = estimate_token_count(&session.messages, None, None);
                         if needs_compaction_by_tokens(estimated, &config) {
                             let kc = kernel_clone.clone();
@@ -5374,7 +5375,7 @@ system_prompt = "You are a helpful assistant."
                 label: None,
             });
 
-        let config = CompactionConfig::default();
+        let config = CompactionConfig::from_toml(&self.config.compaction);
 
         if !needs_compaction(&session, &config) {
             return Ok(format!(
