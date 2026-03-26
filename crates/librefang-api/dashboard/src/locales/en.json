@@ -386,5 +386,13 @@
     "scaffold_title": "Create New Plugin", "scaffold_desc": "What does this plugin do?", "create": "Create",
     "deps": "Deps",
     "help": "Install and manage plugins to extend agent capabilities. Add plugins from registries, local paths, or Git repositories."
+  },
+  "schema_form": {
+    "select_option": "Select...",
+    "comma_separated": "Comma-separated values",
+    "add_item": "Add",
+    "load_error": "Failed to load form schema",
+    "required_missing": "Please fill in all required fields",
+    "from_schema": "From Schema"
   }
 }

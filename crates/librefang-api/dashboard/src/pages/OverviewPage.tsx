@@ -8,6 +8,7 @@ import { Badge } from "../components/ui/Badge";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { Home, RefreshCw, Users, Layers, Server, Network, Zap, MessageCircle, User, Clock, Shield, Sparkles, Calendar, HardDrive, Activity, Globe } from "lucide-react";
 import { truncateId } from "../lib/string";
+import { isProviderAvailable } from "../lib/status";
 import { getStatusVariant } from "../lib/status";
 
 const REFRESH_MS = 30000;
@@ -33,7 +34,7 @@ export function OverviewPage() {
 
   const agentsActive = snapshot?.status?.active_agent_count ?? 0;
   const agentsTotal = snapshot?.status?.agent_count ?? 0;
-  const providersReady = snapshot?.providers?.filter(p => p.auth_status === "configured").length ?? 0;
+  const providersReady = snapshot?.providers?.filter(p => isProviderAvailable(p.auth_status)).length ?? 0;
   const providersTotal = snapshot?.providers?.length ?? 0;
   const channelsReady = snapshot?.channels?.filter(c => c.configured).length ?? 0;
   const skillsCount = snapshot?.skillCount ?? 0;
