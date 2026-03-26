@@ -26,6 +26,7 @@ use librefang_types::agent::AgentId;
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use crate::types::ApiErrorResponse;
 // ---------------------------------------------------------------------------
 // Goals endpoints
 // ---------------------------------------------------------------------------
@@ -76,22 +77,13 @@ pub async fn get_goal(
             if let Some(goal) = arr.iter().find(|g| g["id"].as_str() == Some(&id)) {
                 (StatusCode::OK, Json(goal.clone()))
             } else {
-                (
-                    StatusCode::NOT_FOUND,
-                    Json(serde_json::json!({"error": format!("Goal '{}' not found", id)})),
-                )
+                ApiErrorResponse::not_found(format!("Goal '{}' not found", id)).into_json_tuple()
             }
         }
-        Ok(_) => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": format!("Goal '{}' not found", id)})),
-        ),
+        Ok(_) => ApiErrorResponse::not_found(format!("Goal '{}' not found", id)).into_json_tuple(),
         Err(e) => {
             tracing::warn!("Failed to load goals: {e}");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": format!("Failed to load goals: {e}")})),
-            )
+            ApiErrorResponse::internal(format!("Failed to load goals: {e}")).into_json_tuple()
         }
     }
 }
@@ -131,46 +123,34 @@ pub async fn create_goal(
     let title = match req["title"].as_str() {
         Some(t) if !t.is_empty() => t.to_string(),
         _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Missing or empty 'title' field"})),
-            );
+            return ApiErrorResponse::bad_request("Missing or empty 'title' field")
+                .into_json_tuple();
         }
     };
 
     if title.chars().count() > 256 {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Title too long (max 256 chars)"})),
-        );
+        return ApiErrorResponse::bad_request("Title too long (max 256 chars)").into_json_tuple();
     }
 
     let description = req["description"].as_str().unwrap_or("").to_string();
     if description.chars().count() > 4096 {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Description too long (max 4096 chars)"})),
-        );
+        return ApiErrorResponse::bad_request("Description too long (max 4096 chars)")
+            .into_json_tuple();
     }
 
     let parent_id = req["parent_id"].as_str().map(|s| s.to_string());
 
     let status = req["status"].as_str().unwrap_or("pending").to_string();
     if !["pending", "in_progress", "completed", "cancelled"].contains(&status.as_str()) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(
-                serde_json::json!({"error": "Invalid status. Must be: pending, in_progress, completed, or cancelled"}),
-            ),
-        );
+        return ApiErrorResponse::bad_request(
+            "Invalid status. Must be: pending, in_progress, completed, or cancelled",
+        )
+        .into_json_tuple();
     }
 
     let progress = req["progress"].as_u64().unwrap_or(0);
     if progress > 100 {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Progress must be 0-100"})),
-        );
+        return ApiErrorResponse::bad_request("Progress must be 0-100").into_json_tuple();
     }
 
     let agent_id_str = req["agent_id"].as_str().map(|s| s.to_string());
@@ -209,10 +189,8 @@ pub async fn create_goal(
     if let Some(ref pid) = parent_id {
         let parent_exists = goals.iter().any(|g| g["id"].as_str() == Some(pid.as_str()));
         if !parent_exists {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": format!("Parent goal '{}' not found", pid)})),
-            );
+            return ApiErrorResponse::not_found(format!("Parent goal '{}' not found", pid))
+                .into_json_tuple();
         }
     }
 
@@ -223,10 +201,7 @@ pub async fn create_goal(
         serde_json::Value::Array(goals),
     ) {
         tracing::warn!("Failed to save goal: {e}");
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("Failed to save goal: {e}")})),
-        );
+        return ApiErrorResponse::internal(format!("Failed to save goal: {e}")).into_json_tuple();
     }
 
     (StatusCode::CREATED, Json(entry))
@@ -252,43 +227,30 @@ pub async fn update_goal_by_id(
 
     if let Some(title) = req.get("title").and_then(|v| v.as_str()) {
         if title.is_empty() {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Title must not be empty"})),
-            );
+            return ApiErrorResponse::bad_request("Title must not be empty").into_json_tuple();
         }
         if title.chars().count() > 256 {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Title too long (max 256 chars)"})),
-            );
+            return ApiErrorResponse::bad_request("Title too long (max 256 chars)")
+                .into_json_tuple();
         }
     }
 
     if let Some(description) = req.get("description").and_then(|v| v.as_str()) {
         if description.chars().count() > 4096 {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Description too long (max 4096 chars)"})),
-            );
+            return ApiErrorResponse::bad_request("Description too long (max 4096 chars)")
+                .into_json_tuple();
         }
     }
 
     if let Some(status) = req.get("status").and_then(|v| v.as_str()) {
         if !["pending", "in_progress", "completed", "cancelled"].contains(&status) {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid status"})),
-            );
+            return ApiErrorResponse::bad_request("Invalid status").into_json_tuple();
         }
     }
 
     if let Some(progress) = req.get("progress").and_then(|v| v.as_u64()) {
         if progress > 100 {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Progress must be 0-100"})),
-            );
+            return ApiErrorResponse::bad_request("Progress must be 0-100").into_json_tuple();
         }
     }
 
@@ -297,19 +259,13 @@ pub async fn update_goal_by_id(
         if !parent_id.is_null() {
             if let Some(pid) = parent_id.as_str() {
                 if pid == id {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(serde_json::json!({"error": "A goal cannot be its own parent"})),
-                    );
+                    return ApiErrorResponse::bad_request("A goal cannot be its own parent")
+                        .into_json_tuple();
                 }
                 // Verify the target parent exists
                 if !goals.iter().any(|g| g["id"].as_str() == Some(pid)) {
-                    return (
-                        StatusCode::NOT_FOUND,
-                        Json(
-                            serde_json::json!({"error": format!("Parent goal '{}' not found", pid)}),
-                        ),
-                    );
+                    return ApiErrorResponse::not_found(format!("Parent goal '{}' not found", pid))
+                        .into_json_tuple();
                 }
                 // Detect indirect cycles: walk ancestor chain from `pid` upward.
                 // Use a seen set to guard against infinite loops on corrupted data.
@@ -329,12 +285,10 @@ pub async fn update_goal_by_id(
                     });
                     match anc_parent {
                         Some(ref ap) if ap == &id => {
-                            return (
-                                StatusCode::BAD_REQUEST,
-                                Json(
-                                    serde_json::json!({"error": "Circular parent reference detected"}),
-                                ),
-                            );
+                            return ApiErrorResponse::bad_request(
+                                "Circular parent reference detected",
+                            )
+                            .into_json_tuple();
                         }
                         Some(ap) => ancestor = Some(ap),
                         None => break,
@@ -382,10 +336,7 @@ pub async fn update_goal_by_id(
     }
 
     if !found {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Goal not found"})),
-        );
+        return ApiErrorResponse::not_found("Goal not found").into_json_tuple();
     }
 
     if let Err(e) = state.kernel.memory_substrate().structured_set(
@@ -393,10 +344,7 @@ pub async fn update_goal_by_id(
         GOALS_KEY,
         serde_json::Value::Array(goals),
     ) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("Failed to update goal: {e}")})),
-        );
+        return ApiErrorResponse::internal(format!("Failed to update goal: {e}")).into_json_tuple();
     }
 
     (
@@ -446,10 +394,7 @@ pub async fn delete_goal(
     });
 
     if goals.len() == before {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Goal not found"})),
-        );
+        return ApiErrorResponse::not_found("Goal not found").into_json_tuple();
     }
 
     let removed = before - goals.len();
@@ -459,10 +404,7 @@ pub async fn delete_goal(
         GOALS_KEY,
         serde_json::Value::Array(goals),
     ) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("Failed to delete goal: {e}")})),
-        );
+        return ApiErrorResponse::internal(format!("Failed to delete goal: {e}")).into_json_tuple();
     }
 
     (

@@ -27,6 +27,10 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
             "/channels/wechat/qr/status",
             axum::routing::get(wechat_qr_status),
         )
+        .route(
+            "/channels/registry",
+            axum::routing::get(list_channel_registry),
+        )
 }
 
 use super::skills::{
@@ -41,6 +45,7 @@ use axum::Json;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::types::ApiErrorResponse;
 // ---------------------------------------------------------------------------
 // Channel status endpoints — data-driven registry for all 40 adapters
 // ---------------------------------------------------------------------------
@@ -1135,10 +1140,8 @@ pub async fn get_channel(
     let meta = match find_channel_meta(&name) {
         Some(m) => m,
         None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": format!("Unknown channel: {name}")})),
-            )
+            return ApiErrorResponse::not_found(format!("Unknown channel: {name}"))
+                .into_json_tuple()
         }
     };
 
@@ -1205,22 +1208,12 @@ pub async fn configure_channel(
 ) -> impl IntoResponse {
     let meta = match find_channel_meta(&name) {
         Some(m) => m,
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "Unknown channel"})),
-            )
-        }
+        None => return ApiErrorResponse::not_found("Unknown channel").into_json_tuple(),
     };
 
     let fields = match body.get("fields").and_then(|v| v.as_object()) {
         Some(f) => f,
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Missing 'fields' object"})),
-            )
-        }
+        None => return ApiErrorResponse::bad_request("Missing 'fields' object").into_json_tuple(),
     };
 
     let home = librefang_kernel::config::librefang_home();
@@ -1240,17 +1233,12 @@ pub async fn configure_channel(
         if let Some(env_var) = field_def.env_var {
             // Validate env var name and value before writing
             if let Err(msg) = validate_env_var(env_var, value) {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({"error": msg})),
-                );
+                return ApiErrorResponse::bad_request(msg).into_json_tuple();
             }
             // Secret field — write to secrets.env and set in process
             if let Err(e) = write_secret_env(&secrets_path, env_var, value) {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({"error": format!("Failed to write secret: {e}")})),
-                );
+                return ApiErrorResponse::internal(format!("Failed to write secret: {e}"))
+                    .into_json_tuple();
             }
             // SAFETY: We are the only writer; this is a single-threaded config operation
             unsafe {
@@ -1273,10 +1261,8 @@ pub async fn configure_channel(
 
     // Write config.toml section
     if let Err(e) = upsert_channel_config(&config_path, &name, &config_fields) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("Failed to write config: {e}")})),
-        );
+        return ApiErrorResponse::internal(format!("Failed to write config: {e}"))
+            .into_json_tuple();
     }
 
     // Hot-reload: activate the channel immediately
@@ -1332,12 +1318,7 @@ pub async fn remove_channel(
 ) -> impl IntoResponse {
     let meta = match find_channel_meta(&name) {
         Some(m) => m,
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "Unknown channel"})),
-            )
-        }
+        None => return ApiErrorResponse::not_found("Unknown channel").into_json_tuple(),
     };
 
     let home = librefang_kernel::config::librefang_home();
@@ -1359,10 +1340,8 @@ pub async fn remove_channel(
 
     // Remove config section
     if let Err(e) = remove_channel_config(&config_path, &name) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("Failed to remove config: {e}")})),
-        );
+        return ApiErrorResponse::internal(format!("Failed to remove config: {e}"))
+            .into_json_tuple();
     }
 
     // Hot-reload: deactivate the channel immediately
@@ -1808,7 +1787,7 @@ const WECHAT_ILINK_BASE: &str = "https://ilinkai.weixin.qq.com";
 )]
 /// POST /api/channels/wechat/qr/start — Request a QR code from iLink for WeChat login.
 pub async fn wechat_qr_start() -> impl IntoResponse {
-    let client = match reqwest::Client::builder()
+    let client = match librefang_runtime::http_client::client_builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
     {
@@ -1887,7 +1866,7 @@ pub async fn wechat_qr_status(
     // iLink uses long-polling: the request hangs until the user scans or it
     // times out server-side (~30s). Use a generous timeout so we don't mistake
     // a normal long-poll wait for a network error.
-    let client = match reqwest::Client::builder()
+    let client = match librefang_runtime::http_client::client_builder()
         .timeout(std::time::Duration::from_secs(35))
         .build()
     {
@@ -1943,4 +1922,25 @@ pub async fn wechat_qr_status(
             "message": "Waiting for scan..."
         })),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Channel registry metadata — loaded from ~/.librefang/channels/*.toml
+// ---------------------------------------------------------------------------
+
+/// Return channel metadata from the registry (synced from librefang-registry).
+///
+/// `GET /api/channels/registry`
+#[utoipa::path(
+    get,
+    path = "/api/channels/registry",
+    tag = "channels",
+    responses(
+        (status = 200, description = "Channel metadata from registry", body = Vec<serde_json::Value>)
+    )
+)]
+pub async fn list_channel_registry(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let channels_dir = state.kernel.home_dir().join("channels");
+    let metadata = librefang_runtime::channel_registry::load_channel_metadata(&channels_dir);
+    Json(serde_json::to_value(&metadata).unwrap_or_default())
 }

@@ -142,6 +142,7 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
         )
 }
 use crate::middleware::RequestLanguage;
+use crate::types::ApiErrorResponse;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -219,12 +220,10 @@ pub async fn get_profile(
                 "tools": profile.tools(),
             })),
         ),
-        None => (
-            StatusCode::NOT_FOUND,
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-profile-not-found", &[("name", &name)])}),
-            ),
-        ),
+        None => {
+            ApiErrorResponse::not_found(t.t_args("api-error-profile-not-found", &[("name", &name)]))
+                .into_json_tuple()
+        }
     }
 }
 
@@ -286,10 +285,7 @@ pub async fn get_agent_template(
     let manifest_path = agents_dir.join(&name).join("agent.toml");
 
     if !manifest_path.exists() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": t.t("api-error-template-not-found")})),
-        );
+        return ApiErrorResponse::not_found(t.t("api-error-template-not-found")).into_json_tuple();
     }
 
     match std::fs::read_to_string(&manifest_path) {
@@ -317,18 +313,13 @@ pub async fn get_agent_template(
             ),
             Err(e) => {
                 tracing::warn!("Invalid template manifest for '{name}': {e}");
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({"error": t.t("api-error-template-invalid-manifest")})),
-                )
+                ApiErrorResponse::internal(t.t("api-error-template-invalid-manifest"))
+                    .into_json_tuple()
             }
         },
         Err(e) => {
             tracing::warn!("Failed to read template '{name}': {e}");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": t.t("api-error-template-read-failed")})),
-            )
+            ApiErrorResponse::internal(t.t("api-error-template-read-failed")).into_json_tuple()
         }
     }
 }
@@ -348,10 +339,8 @@ pub async fn get_agent_kv(
     let agent_id: AgentId = match id.parse() {
         Ok(aid) => aid,
         Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
-            );
+            return ApiErrorResponse::bad_request(t.t("api-error-agent-invalid-id"))
+                .into_json_tuple();
         }
     };
     match state.kernel.memory_substrate().list_kv(agent_id) {
@@ -364,10 +353,7 @@ pub async fn get_agent_kv(
         }
         Err(e) => {
             tracing::warn!("Memory list_kv failed: {e}");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": t.t("api-error-memory-operation-failed")})),
-            )
+            ApiErrorResponse::internal(t.t("api-error-memory-operation-failed")).into_json_tuple()
         }
     }
 }
@@ -383,10 +369,8 @@ pub async fn get_agent_kv_key(
     let agent_id: AgentId = match id.parse() {
         Ok(aid) => aid,
         Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
-            );
+            return ApiErrorResponse::bad_request(t.t("api-error-agent-invalid-id"))
+                .into_json_tuple();
         }
     };
     match state
@@ -398,16 +382,12 @@ pub async fn get_agent_kv_key(
             StatusCode::OK,
             Json(serde_json::json!({"key": key, "value": val})),
         ),
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": t.t("api-error-kv-key-not-found")})),
-        ),
+        Ok(None) => {
+            ApiErrorResponse::not_found(t.t("api-error-kv-key-not-found")).into_json_tuple()
+        }
         Err(e) => {
             tracing::warn!("Memory get failed for key '{key}': {e}");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": t.t("api-error-memory-operation-failed")})),
-            )
+            ApiErrorResponse::internal(t.t("api-error-memory-operation-failed")).into_json_tuple()
         }
     }
 }
@@ -424,10 +404,8 @@ pub async fn set_agent_kv_key(
     let agent_id: AgentId = match id.parse() {
         Ok(aid) => aid,
         Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
-            );
+            return ApiErrorResponse::bad_request(t.t("api-error-agent-invalid-id"))
+                .into_json_tuple();
         }
     };
     let value = body.get("value").cloned().unwrap_or(body);
@@ -443,10 +421,7 @@ pub async fn set_agent_kv_key(
         ),
         Err(e) => {
             tracing::warn!("Memory set failed for key '{key}': {e}");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": t.t("api-error-memory-operation-failed")})),
-            )
+            ApiErrorResponse::internal(t.t("api-error-memory-operation-failed")).into_json_tuple()
         }
     }
 }
@@ -462,10 +437,8 @@ pub async fn delete_agent_kv_key(
     let agent_id: AgentId = match id.parse() {
         Ok(aid) => aid,
         Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
-            );
+            return ApiErrorResponse::bad_request(t.t("api-error-agent-invalid-id"))
+                .into_json_tuple();
         }
     };
     match state
@@ -479,10 +452,7 @@ pub async fn delete_agent_kv_key(
         ),
         Err(e) => {
             tracing::warn!("Memory delete failed for key '{key}': {e}");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": t.t("api-error-memory-operation-failed")})),
-            )
+            ApiErrorResponse::internal(t.t("api-error-memory-operation-failed")).into_json_tuple()
         }
     }
 }
@@ -498,19 +468,14 @@ pub async fn export_agent_memory(
     let agent_id: AgentId = match id.parse() {
         Ok(aid) => aid,
         Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
-            );
+            return ApiErrorResponse::bad_request(t.t("api-error-agent-invalid-id"))
+                .into_json_tuple();
         }
     };
 
     // Verify agent exists
     if state.kernel.agent_registry().get(agent_id).is_none() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
-        );
+        return ApiErrorResponse::not_found(t.t("api-error-agent-not-found")).into_json_tuple();
     }
 
     match state.kernel.memory_substrate().list_kv(agent_id) {
@@ -527,10 +492,7 @@ pub async fn export_agent_memory(
         }
         Err(e) => {
             tracing::warn!("Memory export failed for agent {agent_id}: {e}");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": t.t("api-error-kv-export-failed")})),
-            )
+            ApiErrorResponse::internal(t.t("api-error-kv-export-failed")).into_json_tuple()
         }
     }
 }
@@ -550,28 +512,21 @@ pub async fn import_agent_memory(
     let agent_id: AgentId = match id.parse() {
         Ok(aid) => aid,
         Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
-            );
+            return ApiErrorResponse::bad_request(t.t("api-error-agent-invalid-id"))
+                .into_json_tuple();
         }
     };
 
     // Verify agent exists
     if state.kernel.agent_registry().get(agent_id).is_none() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
-        );
+        return ApiErrorResponse::not_found(t.t("api-error-agent-not-found")).into_json_tuple();
     }
 
     let kv = match body.get("kv").and_then(|v| v.as_object()) {
         Some(obj) => obj.clone(),
         None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": t.t("api-error-kv-missing-kv-object")})),
-            );
+            return ApiErrorResponse::bad_request(t.t("api-error-kv-missing-kv-object"))
+                .into_json_tuple();
         }
     };
 
@@ -596,10 +551,8 @@ pub async fn import_agent_memory(
             }
             Err(e) => {
                 tracing::warn!("Failed to list existing KV during import clear: {e}");
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({"error": t.t("api-error-kv-import-clear-failed")})),
-                );
+                return ApiErrorResponse::internal(t.t("api-error-kv-import-clear-failed"))
+                    .into_json_tuple();
             }
         }
     }
@@ -901,12 +854,8 @@ pub async fn get_tool(
         }
     }
 
-    (
-        StatusCode::NOT_FOUND,
-        Json(
-            serde_json::json!({"error": tr.t_args("api-error-tool-not-found", &[("name", &name)])}),
-        ),
-    )
+    ApiErrorResponse::not_found(tr.t_args("api-error-tool-not-found", &[("name", &name)]))
+        .into_json_tuple()
 }
 
 // ---------------------------------------------------------------------------
@@ -940,10 +889,8 @@ pub async fn get_session(
     let session_id = match id.parse::<uuid::Uuid>() {
         Ok(u) => librefang_types::agent::SessionId(u),
         Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": t.t("api-error-session-invalid-id")})),
-            );
+            return ApiErrorResponse::bad_request(t.t("api-error-session-invalid-id"))
+                .into_json_tuple();
         }
     };
 
@@ -964,16 +911,13 @@ pub async fn get_session(
                 "created_at": created_at,
             })),
         ),
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": t.t("api-error-session-not-found")})),
-        ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-            ),
-        ),
+        Ok(None) => {
+            ApiErrorResponse::not_found(t.t("api-error-session-not-found")).into_json_tuple()
+        }
+        Err(e) => {
+            ApiErrorResponse::internal(t.t_args("api-error-generic", &[("error", &e.to_string())]))
+                .into_json_tuple()
+        }
     }
 }
 
@@ -988,10 +932,8 @@ pub async fn delete_session(
     let session_id = match id.parse::<uuid::Uuid>() {
         Ok(u) => librefang_types::agent::SessionId(u),
         Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": t.t("api-error-session-invalid-id")})),
-            );
+            return ApiErrorResponse::bad_request(t.t("api-error-session-invalid-id"))
+                .into_json_tuple();
         }
     };
 
@@ -1000,12 +942,10 @@ pub async fn delete_session(
             StatusCode::OK,
             Json(serde_json::json!({"status": "deleted", "session_id": id})),
         ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-            ),
-        ),
+        Err(e) => {
+            ApiErrorResponse::internal(t.t_args("api-error-generic", &[("error", &e.to_string())]))
+                .into_json_tuple()
+        }
     }
 }
 
@@ -1021,10 +961,8 @@ pub async fn set_session_label(
     let session_id = match id.parse::<uuid::Uuid>() {
         Ok(u) => librefang_types::agent::SessionId(u),
         Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": t.t("api-error-session-invalid-id")})),
-            );
+            return ApiErrorResponse::bad_request(t.t("api-error-session-invalid-id"))
+                .into_json_tuple();
         }
     };
 
@@ -1033,12 +971,10 @@ pub async fn set_session_label(
     // Validate label if present
     if let Some(lbl) = label {
         if let Err(e) = librefang_types::agent::SessionLabel::new(lbl) {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(
-                    serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-                ),
-            );
+            return ApiErrorResponse::bad_request(
+                t.t_args("api-error-generic", &[("error", &e.to_string())]),
+            )
+            .into_json_tuple();
         }
     }
 
@@ -1055,12 +991,10 @@ pub async fn set_session_label(
                 "label": label,
             })),
         ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-            ),
-        ),
+        Err(e) => {
+            ApiErrorResponse::internal(t.t_args("api-error-generic", &[("error", &e.to_string())]))
+                .into_json_tuple()
+        }
     }
 }
 
@@ -1079,10 +1013,8 @@ pub async fn find_session_by_label(
             match state.kernel.agent_registry().find_by_name(&agent_id_str) {
                 Some(entry) => entry.id,
                 None => {
-                    return (
-                        StatusCode::NOT_FOUND,
-                        Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
-                    );
+                    return ApiErrorResponse::not_found(t.t("api-error-agent-not-found"))
+                        .into_json_tuple();
                 }
             }
         }
@@ -1102,16 +1034,13 @@ pub async fn find_session_by_label(
                 "message_count": session.messages.len(),
             })),
         ),
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": t.t("api-error-session-no-label")})),
-        ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-            ),
-        ),
+        Ok(None) => {
+            ApiErrorResponse::not_found(t.t("api-error-session-no-label")).into_json_tuple()
+        }
+        Err(e) => {
+            ApiErrorResponse::internal(t.t_args("api-error-generic", &[("error", &e.to_string())]))
+                .into_json_tuple()
+        }
     }
 }
 
@@ -1140,12 +1069,11 @@ pub async fn session_cleanup(
         {
             Ok(n) => total += n,
             Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(
-                        serde_json::json!({"error": t.t_args("api-error-session-cleanup-expired-failed", &[("error", &e.to_string())])}),
-                    ),
-                );
+                return ApiErrorResponse::internal(t.t_args(
+                    "api-error-session-cleanup-expired-failed",
+                    &[("error", &e.to_string())],
+                ))
+                .into_json_tuple();
             }
         }
     }
@@ -1158,12 +1086,11 @@ pub async fn session_cleanup(
         {
             Ok(n) => total += n,
             Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(
-                        serde_json::json!({"error": t.t_args("api-error-session-cleanup-excess-failed", &[("error", &e.to_string())])}),
-                    ),
-                );
+                return ApiErrorResponse::internal(t.t_args(
+                    "api-error-session-cleanup-excess-failed",
+                    &[("error", &e.to_string())],
+                ))
+                .into_json_tuple();
             }
         }
     }
@@ -1195,10 +1122,8 @@ pub async fn search_sessions(
     let query = match params.get("q") {
         Some(q) if !q.is_empty() => q.clone(),
         _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "missing or empty 'q' parameter"})),
-            );
+            return ApiErrorResponse::bad_request("missing or empty 'q' parameter")
+                .into_json_tuple();
         }
     };
 
@@ -1217,10 +1142,7 @@ pub async fn search_sessions(
             StatusCode::OK,
             Json(serde_json::json!({"results": results})),
         ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        ),
+        Err(e) => ApiErrorResponse::internal(e.to_string()).into_json_tuple(),
     }
 }
 
@@ -1329,10 +1251,8 @@ pub async fn get_approval(
     let uuid = match uuid::Uuid::parse_str(&id) {
         Ok(u) => u,
         Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": t.t("api-error-approval-invalid-id")})),
-            );
+            return ApiErrorResponse::bad_request(t.t("api-error-approval-invalid-id"))
+                .into_json_tuple();
         }
     };
 
@@ -1341,12 +1261,10 @@ pub async fn get_approval(
             let registry_agents = state.kernel.agent_registry().list();
             (StatusCode::OK, Json(approval_to_json(&a, &registry_agents)))
         }
-        None => (
-            StatusCode::NOT_FOUND,
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-approval-not-found", &[("id", &id)])}),
-            ),
-        ),
+        None => {
+            ApiErrorResponse::not_found(t.t_args("api-error-approval-not-found", &[("id", &id)]))
+                .into_json_tuple()
+        }
     }
 }
 
@@ -1418,10 +1336,8 @@ pub async fn approve_request(
     let uuid = match uuid::Uuid::parse_str(&id) {
         Ok(u) => u,
         Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": t.t("api-error-approval-invalid-id")})),
-            );
+            return ApiErrorResponse::bad_request(t.t("api-error-approval-invalid-id"))
+                .into_json_tuple();
         }
     };
 
@@ -1436,7 +1352,7 @@ pub async fn approve_request(
                 serde_json::json!({"id": id, "status": "approved", "decided_at": resp.decided_at.to_rfc3339()}),
             ),
         ),
-        Err(e) => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": e}))),
+        Err(e) => ApiErrorResponse::not_found(e).into_json_tuple(),
     }
 }
 
@@ -1451,10 +1367,8 @@ pub async fn reject_request(
     let uuid = match uuid::Uuid::parse_str(&id) {
         Ok(u) => u,
         Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": t.t("api-error-approval-invalid-id")})),
-            );
+            return ApiErrorResponse::bad_request(t.t("api-error-approval-invalid-id"))
+                .into_json_tuple();
         }
     };
 
@@ -1469,7 +1383,7 @@ pub async fn reject_request(
                 serde_json::json!({"id": id, "status": "rejected", "decided_at": resp.decided_at.to_rfc3339()}),
             ),
         ),
-        Err(e) => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": e}))),
+        Err(e) => ApiErrorResponse::not_found(e).into_json_tuple(),
     }
 }
 
@@ -1499,27 +1413,18 @@ pub async fn webhook_wake(
     let wh_config = match &state.kernel.config_ref().webhook_triggers {
         Some(c) if c.enabled => c,
         _ => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": err_webhook_not_enabled})),
-            );
+            return ApiErrorResponse::not_found(err_webhook_not_enabled).into_json_tuple();
         }
     };
 
     // Validate bearer token (constant-time comparison)
     if !validate_webhook_token(&headers, &wh_config.token_env) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error": err_invalid_token})),
-        );
+        return ApiErrorResponse::bad_request(err_invalid_token).into_json_tuple();
     }
 
     // Validate payload
     if let Err(e) = body.validate() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": e})),
-        );
+        return ApiErrorResponse::bad_request(e).into_json_tuple();
     }
 
     // Publish through the kernel's publish_event (KernelHandle trait), which
@@ -1540,10 +1445,7 @@ pub async fn webhook_wake(
                 &[("error", &e.to_string())],
             )
         };
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": err_msg})),
-        );
+        return ApiErrorResponse::internal(err_msg).into_json_tuple();
     }
 
     (
@@ -1575,27 +1477,18 @@ pub async fn webhook_agent(
     let wh_config = match &state.kernel.config_ref().webhook_triggers {
         Some(c) if c.enabled => c,
         _ => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": err_webhook_not_enabled})),
-            );
+            return ApiErrorResponse::not_found(err_webhook_not_enabled).into_json_tuple();
         }
     };
 
     // Validate bearer token
     if !validate_webhook_token(&headers, &wh_config.token_env) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error": err_invalid_token})),
-        );
+        return ApiErrorResponse::bad_request(err_invalid_token).into_json_tuple();
     }
 
     // Validate payload
     if let Err(e) = body.validate() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": e})),
-        );
+        return ApiErrorResponse::bad_request(e).into_json_tuple();
     }
 
     // Resolve the agent by name or ID (if not specified, use the first running agent)
@@ -1611,10 +1504,7 @@ pub async fn webhook_agent(
                             let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
                             t.t_args("api-error-webhook-agent-not-found", &[("id", agent_ref)])
                         };
-                        return (
-                            StatusCode::NOT_FOUND,
-                            Json(serde_json::json!({"error": err_msg})),
-                        );
+                        return ApiErrorResponse::not_found(err_msg).into_json_tuple();
                     }
                 }
             }
@@ -1624,10 +1514,7 @@ pub async fn webhook_agent(
             match state.kernel.agent_registry().list().first() {
                 Some(entry) => entry.id,
                 None => {
-                    return (
-                        StatusCode::NOT_FOUND,
-                        Json(serde_json::json!({"error": err_no_agents})),
-                    );
+                    return ApiErrorResponse::not_found(err_no_agents).into_json_tuple();
                 }
             }
         }
@@ -1653,10 +1540,7 @@ pub async fn webhook_agent(
                 "api-error-webhook-agent-exec-failed",
                 &[("error", &e.to_string())],
             );
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": msg})),
-            )
+            ApiErrorResponse::internal(msg).into_json_tuple()
         }
     }
 }
@@ -1724,10 +1608,8 @@ pub async fn pairing_request(
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     if !state.kernel.config_ref().pairing.enabled {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": t.t("api-error-pairing-not-enabled")})),
-        )
+        return ApiErrorResponse::not_found(t.t("api-error-pairing-not-enabled"))
+            .into_json_tuple()
             .into_response();
     }
     match state.kernel.pairing_ref().create_pairing_request() {
@@ -1740,10 +1622,8 @@ pub async fn pairing_request(
             }))
             .into_response()
         }
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": e})),
-        )
+        Err(e) => ApiErrorResponse::bad_request(e)
+            .into_json_tuple()
             .into_response(),
     }
 }
@@ -1757,10 +1637,8 @@ pub async fn pairing_complete(
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     if !state.kernel.config_ref().pairing.enabled {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": t.t("api-error-pairing-not-enabled")})),
-        )
+        return ApiErrorResponse::not_found(t.t("api-error-pairing-not-enabled"))
+            .into_json_tuple()
             .into_response();
     }
     let token = body.get("token").and_then(|v| v.as_str()).unwrap_or("");
@@ -1796,10 +1674,8 @@ pub async fn pairing_complete(
             "paired_at": device.paired_at.to_rfc3339(),
         }))
         .into_response(),
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": e})),
-        )
+        Err(e) => ApiErrorResponse::bad_request(e)
+            .into_json_tuple()
             .into_response(),
     }
 }
@@ -1812,10 +1688,8 @@ pub async fn pairing_devices(
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     if !state.kernel.config_ref().pairing.enabled {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": t.t("api-error-pairing-not-enabled")})),
-        )
+        return ApiErrorResponse::not_found(t.t("api-error-pairing-not-enabled"))
+            .into_json_tuple()
             .into_response();
     }
     let devices: Vec<_> = state
@@ -1845,15 +1719,15 @@ pub async fn pairing_remove_device(
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     if !state.kernel.config_ref().pairing.enabled {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": t.t("api-error-pairing-not-enabled")})),
-        )
+        return ApiErrorResponse::not_found(t.t("api-error-pairing-not-enabled"))
+            .into_json_tuple()
             .into_response();
     }
     match state.kernel.pairing_ref().remove_device(&device_id) {
         Ok(()) => Json(serde_json::json!({"ok": true})).into_response(),
-        Err(e) => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": e}))).into_response(),
+        Err(e) => ApiErrorResponse::not_found(e)
+            .into_json_tuple()
+            .into_response(),
     }
 }
 
@@ -1872,10 +1746,8 @@ pub async fn pairing_notify(
         )
     };
     if !state.kernel.config_ref().pairing.enabled {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": err_pairing_not_enabled})),
-        )
+        return ApiErrorResponse::not_found(err_pairing_not_enabled)
+            .into_json_tuple()
             .into_response();
     }
     let title = body
@@ -1884,10 +1756,8 @@ pub async fn pairing_notify(
         .unwrap_or("LibreFang");
     let message = body.get("message").and_then(|v| v.as_str()).unwrap_or("");
     if message.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": err_message_required})),
-        )
+        return ApiErrorResponse::bad_request(err_message_required)
+            .into_json_tuple()
             .into_response();
     }
     state
@@ -2003,12 +1873,8 @@ pub async fn get_command(
         }
     }
 
-    (
-        StatusCode::NOT_FOUND,
-        Json(
-            serde_json::json!({"error": t.t_args("api-error-command-not-found", &[("name", &lookup)])}),
-        ),
-    )
+    ApiErrorResponse::not_found(t.t_args("api-error-command-not-found", &[("name", &lookup)]))
+        .into_json_tuple()
 }
 
 // ---------------------------------------------------------------------------
@@ -2038,12 +1904,11 @@ pub async fn create_backup(
     let home_dir = &state.kernel.home_dir();
     let backups_dir = home_dir.join("backups");
     if let Err(e) = std::fs::create_dir_all(&backups_dir) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-backup-create-dir-failed", &[("error", &e.to_string())])}),
-            ),
-        );
+        return ApiErrorResponse::internal(t.t_args(
+            "api-error-backup-create-dir-failed",
+            &[("error", &e.to_string())],
+        ))
+        .into_json_tuple();
     }
 
     let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
@@ -2056,12 +1921,11 @@ pub async fn create_backup(
     let file = match std::fs::File::create(&backup_path) {
         Ok(f) => f,
         Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(
-                    serde_json::json!({"error": t.t_args("api-error-backup-create-file-failed", &[("error", &e.to_string())])}),
-                ),
-            );
+            return ApiErrorResponse::internal(t.t_args(
+                "api-error-backup-create-file-failed",
+                &[("error", &e.to_string())],
+            ))
+            .into_json_tuple();
         }
     };
     let mut zip = zip::ZipWriter::new(file);
@@ -2212,12 +2076,11 @@ pub async fn create_backup(
     }
 
     if let Err(e) = zip.finish() {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-backup-finalize-failed", &[("error", &e.to_string())])}),
-            ),
-        );
+        return ApiErrorResponse::internal(t.t_args(
+            "api-error-backup-finalize-failed",
+            &[("error", &e.to_string())],
+        ))
+        .into_json_tuple();
     }
 
     let size = std::fs::metadata(&backup_path)
@@ -2344,50 +2207,40 @@ pub async fn delete_backup(
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     // Sanitize filename to prevent path traversal
     if is_invalid_backup_filename(&filename) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": t.t("api-error-backup-invalid-filename")})),
-        );
+        return ApiErrorResponse::bad_request(t.t("api-error-backup-invalid-filename"))
+            .into_json_tuple();
     }
     if !filename.ends_with(".zip") {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": t.t("api-error-backup-must-be-zip")})),
-        );
+        return ApiErrorResponse::bad_request(t.t("api-error-backup-must-be-zip"))
+            .into_json_tuple();
     }
 
     let backups_dir = state.kernel.home_dir().join("backups");
     let backup_path = match find_backup_path(&backups_dir, &filename) {
         Ok(Some(path)) => path,
         Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": t.t("api-error-backup-not-found")})),
-            );
+            return ApiErrorResponse::not_found(t.t("api-error-backup-not-found"))
+                .into_json_tuple();
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": t.t("api-error-backup-not-found")})),
-            );
+            return ApiErrorResponse::not_found(t.t("api-error-backup-not-found"))
+                .into_json_tuple();
         }
         Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(
-                    serde_json::json!({"error": t.t_args("api-error-backup-delete-failed", &[("error", &e.to_string())])}),
-                ),
-            );
+            return ApiErrorResponse::internal(t.t_args(
+                "api-error-backup-delete-failed",
+                &[("error", &e.to_string())],
+            ))
+            .into_json_tuple();
         }
     };
 
     if let Err(e) = std::fs::remove_file(&backup_path) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-backup-delete-failed", &[("error", &e.to_string())])}),
-            ),
-        );
+        return ApiErrorResponse::internal(t.t_args(
+            "api-error-backup-delete-failed",
+            &[("error", &e.to_string())],
+        ))
+        .into_json_tuple();
     }
 
     tracing::info!("Backup deleted: {filename}");
@@ -2414,25 +2267,19 @@ pub async fn restore_backup(
     let filename = match req.get("filename").and_then(|v| v.as_str()) {
         Some(f) => f.to_string(),
         None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": t.t("api-error-backup-missing-filename")})),
-            );
+            return ApiErrorResponse::bad_request(t.t("api-error-backup-missing-filename"))
+                .into_json_tuple();
         }
     };
 
     // Sanitize
     if is_invalid_backup_filename(&filename) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": t.t("api-error-backup-invalid-filename")})),
-        );
+        return ApiErrorResponse::bad_request(t.t("api-error-backup-invalid-filename"))
+            .into_json_tuple();
     }
     if !filename.ends_with(".zip") {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": t.t("api-error-backup-must-be-zip")})),
-        );
+        return ApiErrorResponse::bad_request(t.t("api-error-backup-must-be-zip"))
+            .into_json_tuple();
     }
 
     let home_dir = &state.kernel.home_dir();
@@ -2440,24 +2287,18 @@ pub async fn restore_backup(
     let backup_path = match find_backup_path(&backups_dir, &filename) {
         Ok(Some(path)) => path,
         Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": t.t("api-error-backup-not-found")})),
-            );
+            return ApiErrorResponse::not_found(t.t("api-error-backup-not-found"))
+                .into_json_tuple();
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": t.t("api-error-backup-not-found")})),
-            );
+            return ApiErrorResponse::not_found(t.t("api-error-backup-not-found"))
+                .into_json_tuple();
         }
         Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(
-                    serde_json::json!({"error": t.t_args("api-error-backup-open-failed", &[("error", &e.to_string())])}),
-                ),
-            );
+            return ApiErrorResponse::internal(
+                t.t_args("api-error-backup-open-failed", &[("error", &e.to_string())]),
+            )
+            .into_json_tuple();
         }
     };
 
@@ -2465,23 +2306,20 @@ pub async fn restore_backup(
     let file = match std::fs::File::open(&backup_path) {
         Ok(f) => f,
         Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(
-                    serde_json::json!({"error": t.t_args("api-error-backup-open-failed", &[("error", &e.to_string())])}),
-                ),
-            );
+            return ApiErrorResponse::internal(
+                t.t_args("api-error-backup-open-failed", &[("error", &e.to_string())]),
+            )
+            .into_json_tuple();
         }
     };
     let mut archive = match zip::ZipArchive::new(file) {
         Ok(a) => a,
         Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(
-                    serde_json::json!({"error": t.t_args("api-error-backup-invalid-archive", &[("error", &e.to_string())])}),
-                ),
-            );
+            return ApiErrorResponse::bad_request(t.t_args(
+                "api-error-backup-invalid-archive",
+                &[("error", &e.to_string())],
+            ))
+            .into_json_tuple();
         }
     };
 
@@ -2501,10 +2339,8 @@ pub async fn restore_backup(
     };
 
     if manifest.is_none() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": t.t("api-error-backup-missing-manifest")})),
-        );
+        return ApiErrorResponse::bad_request(t.t("api-error-backup-missing-manifest"))
+            .into_json_tuple();
     }
 
     let mut restored: Vec<String> = Vec::new();
@@ -2740,18 +2576,17 @@ fn validate_event_types(
                 ));
             }
             None => {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({"error": t.t("api-error-webhook-event-not-string")})),
-                ));
+                return Err(ApiErrorResponse::bad_request(
+                    t.t("api-error-webhook-event-not-string"),
+                )
+                .into_json_tuple());
             }
         }
     }
     if event_list.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": t.t("api-error-webhook-events-empty")})),
-        ));
+        return Err(
+            ApiErrorResponse::bad_request(t.t("api-error-webhook-events-empty")).into_json_tuple(),
+        );
     }
     Ok(event_list)
 }
@@ -2792,18 +2627,12 @@ pub async fn create_event_webhook(
     let url = match req["url"].as_str() {
         Some(u) if !u.is_empty() => u.to_string(),
         _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": err_missing_url})),
-            );
+            return ApiErrorResponse::bad_request(err_missing_url).into_json_tuple();
         }
     };
 
     if url::Url::parse(&url).is_err() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": err_invalid_url})),
-        );
+        return ApiErrorResponse::bad_request(err_invalid_url).into_json_tuple();
     }
 
     let events = match req.get("events").and_then(|v| v.as_array()) {
@@ -2812,10 +2641,7 @@ pub async fn create_event_webhook(
             Err(e) => return e,
         },
         None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": err_missing_events})),
-            );
+            return ApiErrorResponse::bad_request(err_missing_events).into_json_tuple();
         }
     };
 
@@ -2857,10 +2683,7 @@ pub async fn update_event_webhook(
     let existing = match store.get(&id) {
         Some(w) => w.clone(),
         None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": err_webhook_not_found})),
-            );
+            return ApiErrorResponse::not_found(err_webhook_not_found).into_json_tuple();
         }
     };
 
@@ -2868,10 +2691,7 @@ pub async fn update_event_webhook(
 
     if let Some(url_val) = req.get("url").and_then(|v| v.as_str()) {
         if url::Url::parse(url_val).is_err() {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": err_invalid_url})),
-            );
+            return ApiErrorResponse::bad_request(err_invalid_url).into_json_tuple();
         }
         updated["url"] = serde_json::json!(url_val);
     }
@@ -2912,10 +2732,7 @@ pub async fn delete_event_webhook(
             Json(serde_json::json!({"status": "removed", "id": id})),
         )
     } else {
-        (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": err_webhook_not_found})),
-        )
+        ApiErrorResponse::not_found(err_webhook_not_found).into_json_tuple()
     }
 }
 
@@ -2948,10 +2765,8 @@ pub async fn get_webhook(
     let wh_id = match uuid::Uuid::parse_str(&id) {
         Ok(uuid) => crate::webhook_store::WebhookId(uuid),
         Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": t.t("api-error-webhook-invalid-id")})),
-            );
+            return ApiErrorResponse::bad_request(t.t("api-error-webhook-invalid-id"))
+                .into_json_tuple();
         }
     };
     match state.webhook_store.get(wh_id) {
@@ -2959,16 +2774,11 @@ pub async fn get_webhook(
             let redacted = crate::webhook_store::redact_webhook_secret(&wh);
             match serde_json::to_value(&redacted) {
                 Ok(v) => (StatusCode::OK, Json(v)),
-                Err(_) => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({"error": t.t("api-error-webhook-serialize-error")})),
-                ),
+                Err(_) => ApiErrorResponse::internal(t.t("api-error-webhook-serialize-error"))
+                    .into_json_tuple(),
             }
         }
-        None => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": t.t("api-error-webhook-not-found")})),
-        ),
+        None => ApiErrorResponse::not_found(t.t("api-error-webhook-not-found")).into_json_tuple(),
     }
 }
 
@@ -2984,16 +2794,11 @@ pub async fn create_webhook(
             let redacted = crate::webhook_store::redact_webhook_secret(&webhook);
             match serde_json::to_value(&redacted) {
                 Ok(v) => (StatusCode::CREATED, Json(v)),
-                Err(_) => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({"error": t.t("api-error-webhook-serialize-error")})),
-                ),
+                Err(_) => ApiErrorResponse::internal(t.t("api-error-webhook-serialize-error"))
+                    .into_json_tuple(),
             }
         }
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": e})),
-        ),
+        Err(e) => ApiErrorResponse::bad_request(e).into_json_tuple(),
     }
 }
 
@@ -3013,21 +2818,18 @@ pub async fn update_webhook(
                     let redacted = crate::webhook_store::redact_webhook_secret(&webhook);
                     match serde_json::to_value(&redacted) {
                         Ok(v) => (StatusCode::OK, Json(v)),
-                        Err(_) => (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(
-                                serde_json::json!({"error": t.t("api-error-webhook-serialize-error")}),
-                            ),
-                        ),
+                        Err(_) => {
+                            ApiErrorResponse::internal(t.t("api-error-webhook-serialize-error"))
+                                .into_json_tuple()
+                        }
                     }
                 }
-                Err(e) => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": e}))),
+                Err(e) => ApiErrorResponse::not_found(e).into_json_tuple(),
             }
         }
-        Err(_) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": t.t("api-error-webhook-invalid-id")})),
-        ),
+        Err(_) => {
+            ApiErrorResponse::bad_request(t.t("api-error-webhook-invalid-id")).into_json_tuple()
+        }
     }
 }
 
@@ -3047,16 +2849,12 @@ pub async fn delete_webhook(
                     Json(serde_json::json!({"status": "deleted"})),
                 )
             } else {
-                (
-                    StatusCode::NOT_FOUND,
-                    Json(serde_json::json!({"error": t.t("api-error-webhook-not-found")})),
-                )
+                ApiErrorResponse::not_found(t.t("api-error-webhook-not-found")).into_json_tuple()
             }
         }
-        Err(_) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": t.t("api-error-webhook-invalid-id")})),
-        ),
+        Err(_) => {
+            ApiErrorResponse::bad_request(t.t("api-error-webhook-invalid-id")).into_json_tuple()
+        }
     }
 }
 
@@ -3079,20 +2877,14 @@ pub async fn test_webhook(
     let wh_id = match uuid::Uuid::parse_str(&id) {
         Ok(uuid) => crate::webhook_store::WebhookId(uuid),
         Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": err_invalid_id})),
-            );
+            return ApiErrorResponse::bad_request(err_invalid_id).into_json_tuple();
         }
     };
 
     let webhook = match state.webhook_store.get(wh_id) {
         Some(w) => w,
         None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": err_not_found})),
-            );
+            return ApiErrorResponse::not_found(err_not_found).into_json_tuple();
         }
     };
 
@@ -3102,10 +2894,7 @@ pub async fn test_webhook(
             let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
             t.t_args("api-error-webhook-url-unsafe", &[("error", &e.to_string())])
         };
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": err_msg})),
-        );
+        return ApiErrorResponse::bad_request(err_msg).into_json_tuple();
     }
 
     let test_payload = serde_json::json!({
@@ -3199,10 +2988,7 @@ pub async fn task_queue_status(
                 })),
             )
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e})),
-        ),
+        Err(e) => ApiErrorResponse::internal(e).into_json_tuple(),
     }
 }
 
@@ -3221,10 +3007,7 @@ pub async fn task_queue_list(
                 Json(serde_json::json!({"tasks": tasks, "total": total})),
             )
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e})),
-        ),
+        Err(e) => ApiErrorResponse::internal(e).into_json_tuple(),
     }
 }
 
@@ -3243,14 +3026,8 @@ pub async fn task_queue_delete(
             StatusCode::OK,
             Json(serde_json::json!({"status": "deleted", "id": id})),
         ),
-        Ok(false) => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": err_task_not_found})),
-        ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e})),
-        ),
+        Ok(false) => ApiErrorResponse::not_found(err_task_not_found).into_json_tuple(),
+        Err(e) => ApiErrorResponse::internal(e).into_json_tuple(),
     }
 }
 
@@ -3277,10 +3054,7 @@ pub async fn task_queue_retry(
                 "error": err_task_not_retryable
             })),
         ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e})),
-        ),
+        Err(e) => ApiErrorResponse::internal(e).into_json_tuple(),
     }
 }
 

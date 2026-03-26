@@ -257,6 +257,61 @@ impl MeteringEngine {
         )
     }
 
+    /// Atomically check per-agent quotas and record usage in a single SQLite
+    /// transaction.  This closes the TOCTOU race between `check_quota` and
+    /// `record` — no other writer can sneak in between the check and the
+    /// insert.
+    pub fn check_quota_and_record(
+        &self,
+        record: &UsageRecord,
+        quota: &ResourceQuota,
+    ) -> LibreFangResult<()> {
+        self.store.check_quota_and_record(
+            record,
+            quota.max_cost_per_hour_usd,
+            quota.max_cost_per_day_usd,
+            quota.max_cost_per_month_usd,
+        )
+    }
+
+    /// Atomically check global budget limits and record usage in a single
+    /// SQLite transaction.
+    pub fn check_global_budget_and_record(
+        &self,
+        record: &UsageRecord,
+        budget: &librefang_types::config::BudgetConfig,
+    ) -> LibreFangResult<()> {
+        self.store.check_global_budget_and_record(
+            record,
+            budget.max_hourly_usd,
+            budget.max_daily_usd,
+            budget.max_monthly_usd,
+        )
+    }
+
+    /// Atomically check both per-agent quotas and global budget limits, then
+    /// record the usage event — all within a single SQLite transaction.
+    ///
+    /// This is the preferred method for recording usage after an LLM call,
+    /// as it prevents the race condition where concurrent requests both pass
+    /// the quota check before either records its usage.
+    pub fn check_all_and_record(
+        &self,
+        record: &UsageRecord,
+        quota: &ResourceQuota,
+        budget: &librefang_types::config::BudgetConfig,
+    ) -> LibreFangResult<()> {
+        self.store.check_all_and_record(
+            record,
+            quota.max_cost_per_hour_usd,
+            quota.max_cost_per_day_usd,
+            quota.max_cost_per_month_usd,
+            budget.max_hourly_usd,
+            budget.max_daily_usd,
+            budget.max_monthly_usd,
+        )
+    }
+
     /// Clean up old usage records.
     pub fn cleanup(&self, days: u32) -> LibreFangResult<usize> {
         self.store.cleanup_old(days)
@@ -320,16 +375,7 @@ mod tests {
     }
 
     fn test_catalog() -> librefang_runtime::model_catalog::ModelCatalog {
-        // Use process-unique temp dir to avoid conflicts with parallel nextest processes.
-        let home =
-            std::env::temp_dir().join(format!("librefang-metering-test-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&home);
-        let catalog = librefang_runtime::model_catalog::ModelCatalog::new(&home);
-        if !catalog.list_models().is_empty() {
-            return catalog;
-        }
-        // No providers on disk — sync from registry
-        librefang_runtime::registry_sync::sync_registry(&home);
+        let home = librefang_runtime::registry_sync::resolve_home_dir_for_tests();
         librefang_runtime::model_catalog::ModelCatalog::new(&home)
     }
 
@@ -457,7 +503,29 @@ mod tests {
 
     #[test]
     fn test_estimate_cost_with_catalog_chatgpt_zero_price_uses_legacy_budget_rate() {
-        let catalog = test_catalog();
+        // Build a synthetic catalog with a zero-priced chatgpt model so the test
+        // is independent of registry state (the live registry may carry real prices).
+        use librefang_types::model_catalog::{ModelCatalogEntry, ModelCatalogFile, ModelTier};
+        let mut catalog = librefang_runtime::model_catalog::ModelCatalog::new_from_dir(
+            &std::path::PathBuf::from("/nonexistent"),
+        );
+        catalog.merge_catalog_file(ModelCatalogFile {
+            provider: None,
+            models: vec![ModelCatalogEntry {
+                id: "gpt-5.1-codex-mini".to_string(),
+                display_name: "GPT-5.1 Codex Mini".to_string(),
+                provider: "chatgpt".to_string(),
+                tier: ModelTier::Balanced,
+                context_window: 32_000,
+                max_output_tokens: 4_096,
+                input_cost_per_m: 0.0,
+                output_cost_per_m: 0.0,
+                supports_tools: true,
+                supports_vision: false,
+                supports_streaming: true,
+                aliases: vec![],
+            }],
+        });
         let cost = MeteringEngine::estimate_cost_with_catalog(
             &catalog,
             "gpt-5.1-codex-mini",
@@ -466,6 +534,7 @@ mod tests {
             0,
             0,
         );
+        // Zero-priced chatgpt model falls back to legacy rates ($1/$3 per million).
         assert!((cost - 4.0).abs() < 0.01);
     }
 

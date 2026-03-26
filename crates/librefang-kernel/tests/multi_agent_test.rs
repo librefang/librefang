@@ -137,12 +137,13 @@ fn test_deterministic_agent_id() {
     install_hand(&kernel, HAND_A);
 
     let instance = kernel.activate_hand("test-clip", HashMap::new()).unwrap();
-    let expected = AgentId::from_hand_agent("test-clip", "main");
+    // `activate_hand` passes None for instance_id, so the legacy format is used
+    let expected = AgentId::from_hand_agent("test-clip", "main", None);
 
     assert_eq!(
         instance.agent_id().unwrap(),
         expected,
-        "Agent ID should be deterministic from hand_id + role"
+        "Agent ID should be deterministic from hand_id + role (legacy format)"
     );
 
     kernel.shutdown();
@@ -177,6 +178,13 @@ fn test_deterministic_id_stable_across_reactivation() {
     let inst1 = kernel.activate_hand("test-clip", HashMap::new()).unwrap();
     let id1 = inst1.agent_id().unwrap();
 
+    // Agent ID is deterministic within the same activation instance.
+    let expected1 = AgentId::from_hand_agent("test-clip", "main", None);
+    assert_eq!(
+        id1, expected1,
+        "Agent ID should use legacy format for single-instance activation"
+    );
+
     // Deactivate
     kernel.deactivate_hand(inst1.instance_id).unwrap();
 
@@ -184,11 +192,21 @@ fn test_deterministic_id_stable_across_reactivation() {
     // already be registered — wrap in allow-already-active)
     let _ = kernel.hands().install_from_content(HAND_A, "");
 
-    // Second activation
+    // Second activation gets a new instance_id and therefore a new unique agent ID.
     let inst2 = kernel.activate_hand("test-clip", HashMap::new()).unwrap();
     let id2 = inst2.agent_id().unwrap();
 
-    assert_eq!(id1, id2, "Agent ID should be stable across reactivations");
+    let expected2 = AgentId::from_hand_agent("test-clip", "main", None);
+    assert_eq!(
+        id2, expected2,
+        "Agent ID should use legacy format for single-instance activation"
+    );
+
+    // Single-instance activations use legacy format — same hand+role = same ID.
+    assert_eq!(
+        id1, id2,
+        "Single-instance reactivation preserves the same agent ID (legacy format)"
+    );
 
     kernel.shutdown();
 }
@@ -568,8 +586,15 @@ fn test_reactivation_restores_triggers_to_original_roles() {
         .get("planner")
         .expect("reactivated planner role agent id");
 
-    assert_eq!(reactivated_analyst_id, analyst_id);
-    assert_eq!(reactivated_planner_id, planner_id);
+    // Single-instance reactivation uses legacy format — same hand+role = same ID.
+    assert_eq!(
+        reactivated_analyst_id, analyst_id,
+        "Reactivated analyst keeps same agent ID (legacy format)"
+    );
+    assert_eq!(
+        reactivated_planner_id, planner_id,
+        "Reactivated planner keeps same agent ID (legacy format)"
+    );
     assert_eq!(
         kernel.list_triggers(Some(reactivated_analyst_id)).len(),
         1,

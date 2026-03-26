@@ -84,6 +84,7 @@ use axum::response::IntoResponse;
 use axum::Json;
 use librefang_types::memory::ProactiveMemory;
 
+use crate::types::ApiErrorResponse;
 // ---------------------------------------------------------------------------
 // Query / path helpers
 // ---------------------------------------------------------------------------
@@ -134,10 +135,7 @@ fn get_pm_store(
         .proactive_memory_store()
         .cloned()
         .ok_or_else(|| {
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({"error": "Proactive memory is not enabled"})),
-            )
+            ApiErrorResponse::internal("Proactive memory is not enabled").into_json_tuple()
         })
 }
 
@@ -148,10 +146,7 @@ fn default_user_id() -> String {
 /// Log the full error server-side but return a generic message to the client.
 fn internal_error(e: impl std::fmt::Display) -> (StatusCode, Json<serde_json::Value>) {
     tracing::error!("Memory operation failed: {e}");
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(serde_json::json!({"error": "Internal server error"})),
-    )
+    ApiErrorResponse::internal("Internal server error").into_json_tuple()
 }
 
 // ---------------------------------------------------------------------------
@@ -327,20 +322,14 @@ pub async fn memory_update(
     };
 
     if body.content.trim().is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Content must not be empty"})),
-        );
+        return ApiErrorResponse::bad_request("Content must not be empty").into_json_tuple();
     }
 
     // Look up the real agent_id that owns this memory so KV cleanup works correctly
     let real_agent_id = match store.find_agent_id_for_memory(&memory_id) {
         Ok(Some(aid)) => aid.0.to_string(),
         Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "Memory not found"})),
-            );
+            return ApiErrorResponse::not_found("Memory not found").into_json_tuple();
         }
         Err(e) => {
             return internal_error(e);
@@ -355,10 +344,7 @@ pub async fn memory_update(
             StatusCode::OK,
             Json(serde_json::json!({"updated": true, "memory_id": memory_id})),
         ),
-        Ok(false) => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Memory not found"})),
-        ),
+        Ok(false) => ApiErrorResponse::not_found("Memory not found").into_json_tuple(),
         Err(e) => internal_error(e),
     }
 }
@@ -388,10 +374,7 @@ pub async fn memory_delete(
     let real_agent_id = match store.find_agent_id_for_memory(&memory_id) {
         Ok(Some(aid)) => aid.0.to_string(),
         Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "Memory not found"})),
-            );
+            return ApiErrorResponse::not_found("Memory not found").into_json_tuple();
         }
         Err(e) => {
             return internal_error(e);
@@ -403,10 +386,7 @@ pub async fn memory_delete(
             StatusCode::OK,
             Json(serde_json::json!({"deleted": true, "memory_id": memory_id})),
         ),
-        Ok(false) => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Memory not found"})),
-        ),
+        Ok(false) => ApiErrorResponse::not_found("Memory not found").into_json_tuple(),
         Err(e) => internal_error(e),
     }
 }
@@ -438,10 +418,7 @@ pub async fn memory_bulk_delete(
             .filter_map(|v| v.as_str().map(String::from))
             .collect(),
         None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "missing 'ids' array"})),
-            );
+            return ApiErrorResponse::bad_request("missing 'ids' array").into_json_tuple();
         }
     };
 
@@ -1139,19 +1116,15 @@ pub async fn memory_config_patch(
     let content = match std::fs::read_to_string(&config_path) {
         Ok(c) => c,
         Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": format!("Failed to read config: {e}")})),
-            );
+            return ApiErrorResponse::internal(format!("Failed to read config: {e}"))
+                .into_json_tuple();
         }
     };
     let mut table: toml::Value = match toml::from_str(&content) {
         Ok(t) => t,
         Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": format!("Failed to parse config: {e}")})),
-            );
+            return ApiErrorResponse::internal(format!("Failed to parse config: {e}"))
+                .into_json_tuple();
         }
     };
 
@@ -1211,10 +1184,8 @@ pub async fn memory_config_patch(
 
     let new_content = toml::to_string_pretty(&table).unwrap_or_default();
     if let Err(e) = std::fs::write(&config_path, &new_content) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("Failed to write config: {e}")})),
-        );
+        return ApiErrorResponse::internal(format!("Failed to write config: {e}"))
+            .into_json_tuple();
     }
 
     tracing::info!("Memory config updated via API");

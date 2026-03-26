@@ -1,5 +1,6 @@
 //! Agent registry — tracks all agents, their state, and indexes.
 
+use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use librefang_types::agent::{AgentEntry, AgentId, AgentMode, AgentState};
 use librefang_types::error::{LibreFangError, LibreFangResult};
@@ -26,11 +27,16 @@ impl AgentRegistry {
 
     /// Register a new agent.
     pub fn register(&self, entry: AgentEntry) -> LibreFangResult<()> {
-        if self.name_index.contains_key(&entry.name) {
-            return Err(LibreFangError::AgentAlreadyExists(entry.name.clone()));
-        }
         let id = entry.id;
-        self.name_index.insert(entry.name.clone(), id);
+        // Use atomic entry() API to avoid TOCTOU race between contains_key and insert.
+        match self.name_index.entry(entry.name.clone()) {
+            Entry::Occupied(_) => {
+                return Err(LibreFangError::AgentAlreadyExists(entry.name));
+            }
+            Entry::Vacant(vacant) => {
+                vacant.insert(id);
+            }
+        }
         for tag in &entry.tags {
             self.tag_index.entry(tag.clone()).or_default().push(id);
         }
@@ -294,21 +300,26 @@ impl AgentRegistry {
 
     /// Update an agent's name (also updates the name index).
     pub fn update_name(&self, id: AgentId, new_name: String) -> LibreFangResult<()> {
-        if self.name_index.contains_key(&new_name) {
-            return Err(LibreFangError::AgentAlreadyExists(new_name));
+        // Use atomic entry() API to avoid TOCTOU race between contains_key and insert.
+        match self.name_index.entry(new_name.clone()) {
+            Entry::Occupied(_) => {
+                return Err(LibreFangError::AgentAlreadyExists(new_name));
+            }
+            Entry::Vacant(vacant) => {
+                vacant.insert(id);
+            }
         }
-        let mut entry = self
-            .agents
-            .get_mut(&id)
-            .ok_or_else(|| LibreFangError::AgentNotFound(id.to_string()))?;
+        let mut entry = self.agents.get_mut(&id).ok_or_else(|| {
+            // Roll back the name index insertion if agent not found.
+            self.name_index.remove(&new_name);
+            LibreFangError::AgentNotFound(id.to_string())
+        })?;
         let old_name = entry.name.clone();
         entry.name = new_name.clone();
-        entry.manifest.name = new_name.clone();
+        entry.manifest.name = new_name;
         entry.last_active = chrono::Utc::now();
-        // Update name index
         drop(entry);
         self.name_index.remove(&old_name);
-        self.name_index.insert(new_name, id);
         Ok(())
     }
 

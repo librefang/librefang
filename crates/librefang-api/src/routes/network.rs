@@ -61,6 +61,7 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
 
+use crate::types::ApiErrorResponse;
 // ---------------------------------------------------------------------------
 // Peer endpoints
 // ---------------------------------------------------------------------------
@@ -121,10 +122,7 @@ pub async fn get_peer(
     let registry = match state.peer_registry {
         Some(ref r) => r,
         None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "Peer networking is not enabled"})),
-            );
+            return ApiErrorResponse::not_found("Peer networking is not enabled").into_json_tuple();
         }
     };
 
@@ -144,10 +142,7 @@ pub async fn get_peer(
                 "protocol_version": p.protocol_version,
             })),
         ),
-        None => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Peer not found"})),
-        ),
+        None => ApiErrorResponse::not_found("Peer not found").into_json_tuple(),
     }
 }
 
@@ -302,10 +297,7 @@ pub async fn a2a_send_task(
     // Find target agent (use first available or specified)
     let agents = state.kernel.agent_registry().list();
     if agents.is_empty() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "No agents available"})),
-        );
+        return ApiErrorResponse::not_found("No agents available").into_json_tuple();
     }
 
     let agent = &agents[0];
@@ -345,10 +337,8 @@ pub async fn a2a_send_task(
                     StatusCode::OK,
                     Json(serde_json::to_value(&completed_task).unwrap_or_default()),
                 ),
-                None => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({"error": "Task disappeared after completion"})),
-                ),
+                None => ApiErrorResponse::internal("Task disappeared after completion")
+                    .into_json_tuple(),
             }
         }
         Err(e) => {
@@ -364,10 +354,7 @@ pub async fn a2a_send_task(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(serde_json::to_value(&failed_task).unwrap_or_default()),
                 ),
-                None => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({"error": format!("Agent error: {e}")})),
-                ),
+                None => ApiErrorResponse::internal(format!("Agent error: {e}")).into_json_tuple(),
             }
         }
     }
@@ -394,10 +381,9 @@ pub async fn a2a_get_task(
             StatusCode::OK,
             Json(serde_json::to_value(&task).unwrap_or_default()),
         ),
-        None => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": format!("Task '{}' not found", task_id)})),
-        ),
+        None => {
+            ApiErrorResponse::not_found(format!("Task '{}' not found", task_id)).into_json_tuple()
+        }
     }
 }
 
@@ -423,16 +409,12 @@ pub async fn a2a_cancel_task(
                 StatusCode::OK,
                 Json(serde_json::to_value(&task).unwrap_or_default()),
             ),
-            None => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": "Task disappeared after cancellation"})),
-            ),
+            None => {
+                ApiErrorResponse::internal("Task disappeared after cancellation").into_json_tuple()
+            }
         }
     } else {
-        (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": format!("Task '{}' not found", task_id)})),
-        )
+        ApiErrorResponse::not_found(format!("Task '{}' not found", task_id)).into_json_tuple()
     }
 }
 
@@ -584,10 +566,7 @@ pub async fn a2a_get_external_agent(
         return (StatusCode::OK, Json(make_response(entry)));
     }
 
-    (
-        StatusCode::NOT_FOUND,
-        Json(serde_json::json!({"error": format!("A2A agent '{}' not found", id)})),
-    )
+    ApiErrorResponse::not_found(format!("A2A agent '{}' not found", id)).into_json_tuple()
 }
 
 /// POST /api/a2a/discover — Discover a new external A2A agent by URL.
@@ -606,20 +585,12 @@ pub async fn a2a_discover_external(
 ) -> impl IntoResponse {
     let url = match body["url"].as_str() {
         Some(u) => u.to_string(),
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Missing 'url' field"})),
-            )
-        }
+        None => return ApiErrorResponse::bad_request("Missing 'url' field").into_json_tuple(),
     };
 
     // SSRF protection: validate URL before making any outbound request
     if let Err(reason) = is_url_safe_for_ssrf(&url) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": reason})),
-        );
+        return ApiErrorResponse::bad_request(reason).into_json_tuple();
     }
 
     let client = librefang_runtime::a2a::A2aClient::new();
@@ -671,21 +642,11 @@ pub async fn a2a_send_external(
 ) -> impl IntoResponse {
     let url = match body["url"].as_str() {
         Some(u) => u.to_string(),
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Missing 'url' field"})),
-            )
-        }
+        None => return ApiErrorResponse::bad_request("Missing 'url' field").into_json_tuple(),
     };
     let message = match body["message"].as_str() {
         Some(m) => m.to_string(),
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Missing 'message' field"})),
-            )
-        }
+        None => return ApiErrorResponse::bad_request("Missing 'message' field").into_json_tuple(),
     };
     let session_id = body["session_id"].as_str();
 
@@ -723,10 +684,7 @@ pub async fn a2a_external_task_status(
     let url = match params.get("url") {
         Some(u) => u.clone(),
         None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Missing 'url' query parameter"})),
-            )
+            return ApiErrorResponse::bad_request("Missing 'url' query parameter").into_json_tuple()
         }
     };
 
@@ -1215,35 +1173,19 @@ pub async fn comms_send(
     // Validate from agent exists
     let from_id: librefang_types::agent::AgentId = match req.from_agent_id.parse() {
         Ok(id) => id,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid from_agent_id"})),
-            )
-        }
+        Err(_) => return ApiErrorResponse::bad_request("Invalid from_agent_id").into_json_tuple(),
     };
     if state.kernel.agent_registry().get(from_id).is_none() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Source agent not found"})),
-        );
+        return ApiErrorResponse::not_found("Source agent not found").into_json_tuple();
     }
 
     // Validate to agent exists
     let to_id: librefang_types::agent::AgentId = match req.to_agent_id.parse() {
         Ok(id) => id,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid to_agent_id"})),
-            )
-        }
+        Err(_) => return ApiErrorResponse::bad_request("Invalid to_agent_id").into_json_tuple(),
     };
     if state.kernel.agent_registry().get(to_id).is_none() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Target agent not found"})),
-        );
+        return ApiErrorResponse::not_found("Target agent not found").into_json_tuple();
     }
 
     // SECURITY: Limit message size
@@ -1289,10 +1231,9 @@ pub async fn comms_send(
             }
             (StatusCode::OK, Json(resp))
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("Message delivery failed: {e}")})),
-        ),
+        Err(e) => {
+            ApiErrorResponse::internal(format!("Message delivery failed: {e}")).into_json_tuple()
+        }
     }
 }
 
@@ -1311,10 +1252,7 @@ pub async fn comms_task(
     Json(req): Json<librefang_types::comms::CommsTaskRequest>,
 ) -> impl IntoResponse {
     if req.title.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Title is required"})),
-        );
+        return ApiErrorResponse::bad_request("Title is required").into_json_tuple();
     }
 
     match state
@@ -1335,10 +1273,7 @@ pub async fn comms_task(
                 "task_id": task_id,
             })),
         ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("Failed to post task: {e}")})),
-        ),
+        Err(e) => ApiErrorResponse::internal(format!("Failed to post task: {e}")).into_json_tuple(),
     }
 }
 

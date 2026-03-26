@@ -417,15 +417,26 @@ fn decode_master_key(key_b64: &str) -> ExtensionResult<Zeroizing<[u8; 32]>> {
     Ok(key)
 }
 
-/// Store the master key in the OS keyring.
+/// On-disk format for the file-based keyring fallback (v2, AES-256-GCM wrapped).
+#[cfg(not(test))]
+#[derive(Serialize, Deserialize)]
+struct KeyringFile {
+    /// Format version (2 = AES-256-GCM wrapped).
+    version: u8,
+    /// Argon2id salt (base64).
+    salt: String,
+    /// AES-256-GCM nonce (base64).
+    nonce: String,
+    /// Encrypted master key (base64).
+    ciphertext: String,
+}
+
+/// Store the master key in the OS keyring (file-based fallback with AES-256-GCM).
 fn store_keyring_key(key_b64: &str) -> Result<(), String> {
-    // Use SHA-256 hash of the key as a verification token stored alongside.
-    // The actual keyring interaction uses platform APIs.
     #[cfg(not(test))]
     {
-        // In production, we'd use the `keyring` crate. Since it's an optional
-        // heavy dependency, we use a file-based fallback that's still better
-        // than plaintext env vars.
+        // File-based fallback — wraps the master key with AES-256-GCM using an
+        // Argon2id-derived wrapping key from the machine fingerprint.
         let keyring_path = dirs::data_local_dir()
             .unwrap_or_else(std::env::temp_dir)
             .join("librefang")
@@ -433,22 +444,42 @@ fn store_keyring_key(key_b64: &str) -> Result<(), String> {
         std::fs::create_dir_all(keyring_path.parent().unwrap())
             .map_err(|e| format!("mkdir: {e}"))?;
 
-        // Store encrypted with a machine-specific key
-        let machine_id = machine_fingerprint();
-        let mut hasher = Sha256::new();
-        hasher.update(&machine_id);
-        hasher.update(KEYRING_SERVICE.as_bytes());
-        let mask: Vec<u8> = hasher.finalize().to_vec();
+        warn!(
+            "OS keyring unavailable — falling back to file-based key storage at {:?}. \
+             This is less secure than a real OS keyring.",
+            keyring_path
+        );
 
-        let key_bytes = key_b64.as_bytes();
-        let obfuscated: Vec<u8> = key_bytes
-            .iter()
-            .enumerate()
-            .map(|(i, b)| b ^ mask[i % mask.len()])
-            .collect();
-        let encoded =
-            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &obfuscated);
-        std::fs::write(&keyring_path, encoded).map_err(|e| format!("write: {e}"))?;
+        // Derive a wrapping key from the machine fingerprint via Argon2id
+        let machine_id = machine_fingerprint();
+        let mut salt = [0u8; SALT_LEN];
+        OsRng.fill_bytes(&mut salt);
+
+        let wrapping_key =
+            derive_wrapping_key(&machine_id, &salt).map_err(|e| format!("kdf: {e}"))?;
+
+        // Encrypt the master key with AES-256-GCM
+        let cipher = Aes256Gcm::new_from_slice(wrapping_key.as_ref())
+            .map_err(|e| format!("cipher init: {e}"))?;
+        let mut nonce_bytes = [0u8; NONCE_LEN];
+        OsRng.fill_bytes(&mut nonce_bytes);
+        let nonce = Nonce::from_slice(&nonce_bytes);
+        let ciphertext = cipher
+            .encrypt(nonce, key_b64.as_bytes())
+            .map_err(|e| format!("encrypt: {e}"))?;
+
+        let keyring_file = KeyringFile {
+            version: 2,
+            salt: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, salt),
+            nonce: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, nonce_bytes),
+            ciphertext: base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                &ciphertext,
+            ),
+        };
+        let content =
+            serde_json::to_string_pretty(&keyring_file).map_err(|e| format!("json: {e}"))?;
+        std::fs::write(&keyring_path, content).map_err(|e| format!("write: {e}"))?;
         Ok(())
     }
     #[cfg(test)]
@@ -458,7 +489,7 @@ fn store_keyring_key(key_b64: &str) -> Result<(), String> {
     }
 }
 
-/// Load the master key from the OS keyring.
+/// Load the master key from the OS keyring (file-based fallback).
 fn load_keyring_key() -> Result<Zeroizing<String>, String> {
     #[cfg(not(test))]
     {
@@ -469,10 +500,56 @@ fn load_keyring_key() -> Result<Zeroizing<String>, String> {
         if !keyring_path.exists() {
             return Err("Keyring file not found".to_string());
         }
-        let encoded = std::fs::read_to_string(&keyring_path).map_err(|e| format!("read: {e}"))?;
+
+        let content = std::fs::read_to_string(&keyring_path).map_err(|e| format!("read: {e}"))?;
+
+        // Try v2 (JSON with AES-256-GCM wrapped key)
+        if let Ok(keyring_file) = serde_json::from_str::<KeyringFile>(content.trim()) {
+            if keyring_file.version != 2 {
+                return Err(format!(
+                    "Unsupported keyring file version: {}",
+                    keyring_file.version
+                ));
+            }
+
+            let salt = base64::Engine::decode(
+                &base64::engine::general_purpose::STANDARD,
+                &keyring_file.salt,
+            )
+            .map_err(|e| format!("salt decode: {e}"))?;
+            let nonce_bytes = base64::Engine::decode(
+                &base64::engine::general_purpose::STANDARD,
+                &keyring_file.nonce,
+            )
+            .map_err(|e| format!("nonce decode: {e}"))?;
+            let ciphertext = base64::Engine::decode(
+                &base64::engine::general_purpose::STANDARD,
+                &keyring_file.ciphertext,
+            )
+            .map_err(|e| format!("ciphertext decode: {e}"))?;
+
+            let machine_id = machine_fingerprint();
+            let wrapping_key =
+                derive_wrapping_key(&machine_id, &salt).map_err(|e| format!("kdf: {e}"))?;
+
+            let cipher = Aes256Gcm::new_from_slice(wrapping_key.as_ref())
+                .map_err(|e| format!("cipher init: {e}"))?;
+            let nonce = Nonce::from_slice(&nonce_bytes);
+            let plaintext = cipher
+                .decrypt(nonce, ciphertext.as_slice())
+                .map_err(|e| format!("decrypt: {e}"))?;
+            let key_str = String::from_utf8(plaintext).map_err(|e| format!("utf8: {e}"))?;
+            return Ok(Zeroizing::new(key_str));
+        }
+
+        // Legacy v1 fallback: XOR-obfuscated format (base64-encoded XOR blob).
+        // Migrate by re-storing with the new format after successful load.
+        warn!(
+            "Detected legacy XOR-obfuscated keyring file — migrating to AES-256-GCM wrapped format"
+        );
         let obfuscated =
-            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded.trim())
-                .map_err(|e| format!("decode: {e}"))?;
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, content.trim())
+                .map_err(|e| format!("legacy decode: {e}"))?;
 
         let machine_id = machine_fingerprint();
         let mut hasher = Sha256::new();
@@ -485,7 +562,15 @@ fn load_keyring_key() -> Result<Zeroizing<String>, String> {
             .enumerate()
             .map(|(i, b)| b ^ mask[i % mask.len()])
             .collect();
-        let key_str = String::from_utf8(key_bytes).map_err(|e| format!("utf8: {e}"))?;
+        let key_str = String::from_utf8(key_bytes).map_err(|e| format!("legacy utf8: {e}"))?;
+
+        // Re-store with proper encryption to auto-migrate
+        if let Err(e) = store_keyring_key(&key_str) {
+            warn!("Failed to migrate legacy keyring to v2 format: {e}");
+        } else {
+            info!("Successfully migrated keyring file to AES-256-GCM wrapped format");
+        }
+
         Ok(Zeroizing::new(key_str))
     }
     #[cfg(test)]
@@ -494,7 +579,7 @@ fn load_keyring_key() -> Result<Zeroizing<String>, String> {
     }
 }
 
-/// Generate a machine-specific fingerprint for keyring obfuscation.
+/// Generate a machine-specific fingerprint for keyring key wrapping.
 #[cfg(not(test))]
 fn machine_fingerprint() -> Vec<u8> {
     use sha2::Digest;
@@ -508,6 +593,16 @@ fn machine_fingerprint() -> Vec<u8> {
     }
     hasher.update(b"librefang-vault-v1");
     hasher.finalize().to_vec()
+}
+
+/// Derive a 256-bit wrapping key from a machine fingerprint + salt using Argon2id.
+#[cfg(not(test))]
+fn derive_wrapping_key(fingerprint: &[u8], salt: &[u8]) -> Result<Zeroizing<[u8; 32]>, String> {
+    let mut derived = Zeroizing::new([0u8; 32]);
+    Argon2::default()
+        .hash_password_into(fingerprint, salt, derived.as_mut())
+        .map_err(|e| format!("Argon2 key derivation failed: {e}"))?;
+    Ok(derived)
 }
 
 #[cfg(test)]

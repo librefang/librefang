@@ -266,6 +266,9 @@ pub async fn health_detail(State(state): State<Arc<AppState>>) -> impl IntoRespo
             "extraction_model": &state.kernel.config_ref().proactive_memory.extraction_model,
         },
         "config_warnings": config_warnings,
+        "event_bus": {
+            "dropped_events": state.kernel.event_bus_ref().dropped_count(),
+        },
     }))
 }
 
@@ -940,13 +943,16 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
         },
     );
 
-    set!("budget", {
-        "max_hourly_usd": config.budget.max_hourly_usd,
-        "max_daily_usd": config.budget.max_daily_usd,
-        "max_monthly_usd": config.budget.max_monthly_usd,
-        "alert_threshold": config.budget.alert_threshold,
-        "default_max_llm_tokens_per_hour": config.budget.default_max_llm_tokens_per_hour,
-    });
+    {
+        let budget = state.kernel.budget_config();
+        set!("budget", {
+            "max_hourly_usd": budget.max_hourly_usd,
+            "max_daily_usd": budget.max_daily_usd,
+            "max_monthly_usd": budget.max_monthly_usd,
+            "alert_threshold": budget.alert_threshold,
+            "default_max_llm_tokens_per_hour": budget.default_max_llm_tokens_per_hour,
+        });
+    }
 
     set!("provider_urls", config.provider_urls);
     set!("provider_api_keys", provider_api_keys);
@@ -1170,10 +1176,7 @@ pub async fn migrate_detect() -> impl IntoResponse {
 pub async fn migrate_scan(Json(req): Json<MigrateScanRequest>) -> impl IntoResponse {
     let path = std::path::PathBuf::from(&req.path);
     if !path.exists() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Directory not found"})),
-        );
+        return ApiErrorResponse::bad_request("Directory not found").into_json_tuple();
     }
     let scan = librefang_migrate::openclaw::scan_openclaw_workspace(&path);
     (StatusCode::OK, Json(serde_json::json!(scan)))
@@ -1198,12 +1201,10 @@ pub async fn run_migrate(
         "autogpt" => librefang_migrate::MigrateSource::AutoGpt,
         "openfang" => librefang_migrate::MigrateSource::OpenFang,
         other => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(
-                    serde_json::json!({"error": format!("Unknown source: {other}. Use 'openclaw', 'openfang', 'langchain', or 'autogpt'")}),
-                ),
-            );
+            return ApiErrorResponse::bad_request(format!(
+                "Unknown source: {other}. Use 'openclaw', 'openfang', 'langchain', or 'autogpt'"
+            ))
+            .into_json_tuple();
         }
     };
 
@@ -1260,10 +1261,7 @@ pub async fn run_migrate(
                 })),
             )
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("Migration failed: {e}")})),
-        ),
+        Err(e) => ApiErrorResponse::internal(format!("Migration failed: {e}")).into_json_tuple(),
     }
 }
 

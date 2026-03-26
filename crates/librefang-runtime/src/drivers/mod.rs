@@ -608,7 +608,7 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
     },
     ProviderEntry {
         name: "nvidia-nim",
-        aliases: &[],
+        aliases: &["nvidia", "nim"],
         base_url: NVIDIA_NIM_BASE_URL,
         api_key_env: "NVIDIA_API_KEY",
         key_required: true,
@@ -1105,11 +1105,15 @@ mod tests {
 
     #[test]
     fn test_custom_provider_key_no_url_helpful_error() {
-        // Custom provider with key set (via env) but no base_url should give helpful error.
-        let unique_key = "test-nvidia-key-67890";
-        std::env::set_var("NVIDIA_API_KEY", unique_key);
+        // Unknown custom provider with key set (via env) but no base_url should give helpful
+        // error. Use a synthetic provider name that is not in the registry so the test is
+        // not broken when well-known providers are added (e.g. "nvidia" is now a registry alias).
+        let provider_name = "my-custom-llm-provider";
+        let env_var = "MY_CUSTOM_LLM_PROVIDER_API_KEY";
+        let unique_key = "test-custom-key-67890";
+        std::env::set_var(env_var, unique_key);
         let config = DriverConfig {
-            provider: "nvidia".to_string(),
+            provider: provider_name.to_string(),
             api_key: None,
             base_url: None,
             vertex_ai: librefang_types::config::VertexAiConfig::default(),
@@ -1124,7 +1128,7 @@ mod tests {
             "Error should mention base_url: {}",
             err
         );
-        std::env::remove_var("NVIDIA_API_KEY");
+        std::env::remove_var(env_var);
     }
 
     #[test]

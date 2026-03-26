@@ -1,6 +1,120 @@
 //! Request/response types for the LibreFang API.
 
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use axum::Json;
 use serde::{Deserialize, Serialize};
+
+// ---------------------------------------------------------------------------
+// Unified API error response
+// ---------------------------------------------------------------------------
+
+/// A unified error response type for all API endpoints.
+///
+/// Every error returned by the API uses this shape, ensuring clients can rely
+/// on a single parsing strategy.  The `code` and `details` fields are optional
+/// and only serialized when present.
+#[derive(Debug, Serialize)]
+pub struct ApiErrorResponse {
+    pub error: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    /// Backward-compatible alias for `code`.
+    ///
+    /// Old clients may parse `"type"` instead of `"code"`.  When both are
+    /// set they carry the same value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub r#type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<serde_json::Value>,
+    /// HTTP status code — not serialized into the JSON body.
+    #[serde(skip)]
+    pub status: StatusCode,
+}
+
+impl IntoResponse for ApiErrorResponse {
+    fn into_response(self) -> Response {
+        // Build the JSON body (status is skipped by serde).
+        (self.status, Json(self)).into_response()
+    }
+}
+
+impl ApiErrorResponse {
+    /// 400 Bad Request.
+    pub fn bad_request(msg: impl Into<String>) -> Self {
+        Self {
+            error: msg.into(),
+            code: None,
+            r#type: None,
+            details: None,
+            status: StatusCode::BAD_REQUEST,
+        }
+    }
+
+    /// 404 Not Found.
+    pub fn not_found(msg: impl Into<String>) -> Self {
+        Self {
+            error: msg.into(),
+            code: None,
+            r#type: None,
+            details: None,
+            status: StatusCode::NOT_FOUND,
+        }
+    }
+
+    /// 409 Conflict.
+    pub fn conflict(msg: impl Into<String>) -> Self {
+        Self {
+            error: msg.into(),
+            code: None,
+            r#type: None,
+            details: None,
+            status: StatusCode::CONFLICT,
+        }
+    }
+
+    /// 500 Internal Server Error.
+    pub fn internal(msg: impl Into<String>) -> Self {
+        Self {
+            error: msg.into(),
+            code: None,
+            r#type: None,
+            details: None,
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+
+    /// Attach an error code (e.g. `"not_supported"`, `"rate_limited"`).
+    pub fn with_code(mut self, code: impl Into<String>) -> Self {
+        self.code = Some(code.into());
+        self
+    }
+
+    /// Attach arbitrary detail payload.
+    pub fn with_details(mut self, details: serde_json::Value) -> Self {
+        self.details = Some(details);
+        self
+    }
+
+    /// Build with a custom status code.
+    pub fn with_status(mut self, status: StatusCode) -> Self {
+        self.status = status;
+        self
+    }
+
+    /// Convert into a `(StatusCode, Json<Value>)` tuple that is type-compatible
+    /// with the success paths of existing handler functions.
+    ///
+    /// Prefer `into_response()` in new code; this helper exists for incremental
+    /// migration of handlers whose success path still returns a `(StatusCode, Json<Value>)`.
+    pub fn into_json_tuple(self) -> (StatusCode, Json<serde_json::Value>) {
+        // `StatusCode` is Copy so no move issue.
+        let status = self.status;
+        // `status` field is `#[serde(skip)]` so `to_value` won't include it.
+        let body = serde_json::to_value(&self).unwrap_or_default();
+        (status, Json(body))
+    }
+}
 
 /// Request to spawn an agent from a TOML manifest string or a template name.
 #[derive(Debug, Deserialize, utoipa::ToSchema)]

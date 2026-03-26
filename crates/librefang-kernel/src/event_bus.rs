@@ -4,9 +4,10 @@ use dashmap::DashMap;
 use librefang_types::agent::AgentId;
 use librefang_types::event::{Event, EventTarget};
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
-use tracing::debug;
+use tracing::{debug, warn};
 
 /// Maximum events retained in the history ring buffer.
 const HISTORY_SIZE: usize = 1000;
@@ -19,6 +20,10 @@ pub struct EventBus {
     agent_channels: DashMap<AgentId, broadcast::Sender<Event>>,
     /// Event history ring buffer.
     history: Arc<RwLock<VecDeque<Event>>>,
+    /// Count of events dropped due to full channels.
+    dropped_count: AtomicU64,
+    /// Timestamp of the last drop warning log (for rate-limiting).
+    last_drop_warn: std::sync::Mutex<std::time::Instant>,
 }
 
 impl EventBus {
@@ -29,6 +34,8 @@ impl EventBus {
             sender,
             agent_channels: DashMap::new(),
             history: Arc::new(RwLock::new(VecDeque::with_capacity(HISTORY_SIZE))),
+            dropped_count: AtomicU64::new(0),
+            last_drop_warn: std::sync::Mutex::new(std::time::Instant::now()),
         }
     }
 
@@ -50,24 +57,50 @@ impl EventBus {
         }
 
         // Route to target
+        let mut drops: u64 = 0;
         match &event.target {
             EventTarget::Agent(agent_id) => {
                 if let Some(sender) = self.agent_channels.get(agent_id) {
-                    let _ = sender.send(event.clone());
+                    if sender.send(event.clone()).is_err() {
+                        drops += 1;
+                    }
                 }
             }
             EventTarget::Broadcast => {
-                let _ = self.sender.send(event.clone());
+                if self.sender.send(event.clone()).is_err() {
+                    drops += 1;
+                }
                 for entry in self.agent_channels.iter() {
-                    let _ = entry.value().send(event.clone());
+                    if entry.value().send(event.clone()).is_err() {
+                        drops += 1;
+                    }
                 }
             }
             EventTarget::Pattern(_pattern) => {
                 // Phase 1: broadcast to all for pattern matching
-                let _ = self.sender.send(event.clone());
+                if self.sender.send(event.clone()).is_err() {
+                    drops += 1;
+                }
             }
             EventTarget::System => {
-                let _ = self.sender.send(event.clone());
+                if self.sender.send(event.clone()).is_err() {
+                    drops += 1;
+                }
+            }
+        }
+
+        if drops > 0 {
+            let total = self.dropped_count.fetch_add(drops, Ordering::Relaxed) + drops;
+            // Rate-limit warning logs to once per 10 seconds.
+            if let Ok(mut last) = self.last_drop_warn.lock() {
+                if last.elapsed() >= std::time::Duration::from_secs(10) {
+                    warn!(
+                        dropped = drops,
+                        total_dropped = total,
+                        "Event bus: channel full, events dropped"
+                    );
+                    *last = std::time::Instant::now();
+                }
             }
         }
     }
@@ -90,6 +123,11 @@ impl EventBus {
     pub async fn history(&self, limit: usize) -> Vec<Event> {
         let history = self.history.read().await;
         history.iter().rev().take(limit).cloned().collect()
+    }
+
+    /// Return the total number of events dropped due to full channels.
+    pub fn dropped_count(&self) -> u64 {
+        self.dropped_count.load(Ordering::Relaxed)
     }
 
     /// Remove an agent's channel when it's terminated.
@@ -143,7 +181,7 @@ mod tests {
             EventPayload::System(SystemEvent::HealthCheck { status }) => {
                 assert_eq!(status, "ok");
             }
-            _ => panic!("Wrong payload"),
+            other => panic!("Expected HealthCheck payload, got {:?}", other),
         }
     }
 }

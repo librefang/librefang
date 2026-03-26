@@ -21,6 +21,9 @@ pub struct HandStateEntry {
     pub old_agent_ids: BTreeMap<String, AgentId>,
     pub coordinator_role: Option<String>,
     pub status: HandStatus,
+    /// The original instance UUID, used to regenerate deterministic agent IDs
+    /// that match the pre-restart values.
+    pub instance_id: Option<Uuid>,
 }
 
 // ─── Settings availability types ────────────────────────────────────────────
@@ -87,6 +90,7 @@ impl HandRegistry {
             .map(|e| {
                 serde_json::json!({
                     "hand_id": e.hand_id,
+                    "instance_id": e.instance_id.to_string(),
                     "config": e.config,
                     "agent_ids": e.agent_ids,
                     "coordinator_role": e.coordinator_role,
@@ -188,12 +192,18 @@ impl HandRegistry {
                     e.get("coordinator_role").and_then(|v| v.as_str()),
                 );
 
+                let instance_id = e
+                    .get("instance_id")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| Uuid::parse_str(s).ok());
+
                 Some(HandStateEntry {
                     hand_id,
                     config,
                     old_agent_ids,
                     coordinator_role,
                     status,
+                    instance_id,
                 })
             })
             .collect()
@@ -339,10 +349,24 @@ impl HandRegistry {
     ///
     /// Uses a mutex to serialize the check-then-insert so two concurrent
     /// requests cannot both pass the "already active" check.
+    ///
+    /// If `instance_id` is `Some`, the instance is created with that UUID
+    /// (used to restore a persisted instance across daemon restarts so that
+    /// deterministic agent IDs remain stable).
     pub fn activate(
         &self,
         hand_id: &str,
         config: HashMap<String, serde_json::Value>,
+    ) -> HandResult<HandInstance> {
+        self.activate_with_id(hand_id, config, None)
+    }
+
+    /// Like [`activate`](Self::activate) but allows specifying an existing instance UUID.
+    pub fn activate_with_id(
+        &self,
+        hand_id: &str,
+        config: HashMap<String, serde_json::Value>,
+        instance_id: Option<Uuid>,
     ) -> HandResult<HandInstance> {
         if !self.definitions.contains_key(hand_id) {
             return Err(HandError::NotFound(hand_id.to_string()));
@@ -351,14 +375,19 @@ impl HandRegistry {
         // Hold the lock for the duration of check + insert to prevent races.
         let _guard = self.activate_lock.lock().unwrap_or_else(|e| e.into_inner());
 
-        // Check if already active
-        for entry in self.instances.iter() {
-            if entry.hand_id == hand_id && entry.status == HandStatus::Active {
-                return Err(HandError::AlreadyActive(hand_id.to_string()));
+        // Check if already active — only block when instance_id is None
+        // (single-instance mode). When Some(uuid) is passed, it's an explicit
+        // multi-instance request (e.g. daemon restart recovery) and should be
+        // allowed through.
+        if instance_id.is_none() {
+            for entry in self.instances.iter() {
+                if entry.hand_id == hand_id && entry.status == HandStatus::Active {
+                    return Err(HandError::AlreadyActive(hand_id.to_string()));
+                }
             }
         }
 
-        let instance = HandInstance::new(hand_id, config);
+        let instance = HandInstance::new(hand_id, config, instance_id);
         let id = instance.instance_id;
         self.instances.insert(id, instance.clone());
         info!(hand = %hand_id, instance = %id, "Hand activated");
@@ -744,12 +773,9 @@ mod tests {
     use super::*;
 
     /// Ensure the test home dir has synced registry content.
+    /// resolve_home_dir_for_tests() handles sync internally via OnceLock.
     fn ensure_test_home() -> std::path::PathBuf {
-        let home = librefang_runtime::registry_sync::resolve_home_dir_for_tests();
-        if librefang_runtime::registry_sync::needs_sync(&home) {
-            librefang_runtime::registry_sync::sync_registry(&home);
-        }
-        home
+        librefang_runtime::registry_sync::resolve_home_dir_for_tests()
     }
 
     #[test]
