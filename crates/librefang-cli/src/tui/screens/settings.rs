@@ -271,7 +271,7 @@ impl SettingsState {
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
 pub fn draw(f: &mut Frame, area: Rect, state: &mut SettingsState) {
-    let inner = widgets::render_screen_block(f, area, "Settings");
+    let inner = widgets::render_screen_block(f, area, "\u{2699} Settings");
 
     let chunks = Layout::vertical([
         Constraint::Length(1), // sub-tab bar
@@ -310,14 +310,24 @@ fn draw_sub_tabs(f: &mut Frame, area: Rect, active: SettingsSub) {
         (SettingsSub::Tools, "3 Tools"),
     ];
     let mut spans = vec![Span::raw("  ")];
-    for (sub, label) in &tabs {
-        let style = if *sub == active {
-            theme::tab_active()
+    for (i, (sub, label)) in tabs.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(
+                " \u{2502} ",
+                Style::default().fg(theme::BORDER),
+            ));
+        }
+        if *sub == active {
+            spans.push(Span::styled(
+                format!(" \u{25cf} {label} "),
+                theme::tab_active(),
+            ));
         } else {
-            theme::tab_inactive()
-        };
-        spans.push(Span::styled(format!(" {label} "), style));
-        spans.push(Span::raw(" "));
+            spans.push(Span::styled(
+                format!(" \u{25cb} {label} "),
+                theme::tab_inactive(),
+            ));
+        }
     }
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
@@ -344,7 +354,10 @@ fn draw_providers(f: &mut Frame, area: Rect, state: &mut SettingsState) {
             chunks[1],
         );
     } else if state.providers.is_empty() {
-        f.render_widget(widgets::empty_state("No providers available."), chunks[1]);
+        f.render_widget(
+            widgets::empty_state("No providers configured. Run `librefang init` to set up."),
+            chunks[1],
+        );
     } else {
         let items: Vec<ListItem> = state
             .providers
@@ -355,19 +368,19 @@ fn draw_providers(f: &mut Frame, area: Rect, state: &mut SettingsState) {
                         Some(true) => {
                             let ms = p.latency_ms.unwrap_or(0);
                             (
-                                format!("\u{2714} Online ({ms}ms)"),
+                                format!("\u{25cf} Online ({ms}ms)"),
                                 Style::default().fg(theme::GREEN),
                             )
                         }
                         Some(false) => (
-                            "\u{2718} Offline".to_string(),
+                            "\u{25cf} Offline".to_string(),
                             Style::default().fg(theme::RED),
                         ),
                         None => ("\u{25cb} Local".to_string(), theme::dim_style()),
                     }
                 } else if p.configured {
                     (
-                        "\u{2714} Configured".to_string(),
+                        "\u{25cf} Configured".to_string(),
                         Style::default().fg(theme::GREEN),
                     )
                 } else {
@@ -394,11 +407,11 @@ fn draw_providers(f: &mut Frame, area: Rect, state: &mut SettingsState) {
         f.render_widget(
             Paragraph::new(vec![
                 Line::from(vec![Span::styled(
-                    format!("  Enter API key for {provider_name}: "),
+                    format!("  \u{1f511} Enter API key for {provider_name}: "),
                     Style::default().fg(theme::YELLOW),
                 )]),
                 Line::from(vec![
-                    Span::raw("  > "),
+                    Span::raw("  \u{25b8} "),
                     Span::styled(
                         "\u{2022}".repeat(state.input_buf.len().min(40)),
                         theme::input_style(),
@@ -415,9 +428,9 @@ fn draw_providers(f: &mut Frame, area: Rect, state: &mut SettingsState) {
         );
     } else if let Some(result) = &state.test_result {
         let (icon, style) = if result.success {
-            ("\u{2714}", Style::default().fg(theme::GREEN))
+            ("\u{25cf}", Style::default().fg(theme::GREEN))
         } else {
-            ("\u{2718}", Style::default().fg(theme::RED))
+            ("\u{25cf}", Style::default().fg(theme::RED))
         };
         f.render_widget(
             Paragraph::new(vec![

@@ -323,10 +323,10 @@ impl CommsState {
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
 pub fn draw(f: &mut Frame, area: Rect, state: &mut CommsState) {
-    let inner = widgets::render_screen_block(f, area, "Comms");
+    let inner = widgets::render_screen_block(f, area, "\u{25ef} Comms");
 
     let chunks = Layout::vertical([
-        Constraint::Length(2),      // header
+        Constraint::Length(1),      // focus tabs
         Constraint::Length(1),      // separator
         Constraint::Percentage(35), // topology
         Constraint::Length(1),      // separator
@@ -335,21 +335,31 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut CommsState) {
     ])
     .split(inner);
 
-    // Header
+    // Focus tab indicator
+    let topo_style = if state.focus == CommsFocus::Topology {
+        theme::tab_active()
+    } else {
+        theme::tab_inactive()
+    };
+    let event_style = if state.focus == CommsFocus::EventList {
+        theme::tab_active()
+    } else {
+        theme::tab_inactive()
+    };
     f.render_widget(
-        Paragraph::new(vec![
-            Line::from(vec![Span::styled(
+        Paragraph::new(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
                 format!(
-                    "  Agent Topology  ({} agents, {} edges)",
+                    " Topology ({} agents, {} edges) ",
                     state.nodes.len(),
                     state.edges.len()
                 ),
-                Style::default()
-                    .fg(theme::CYAN)
-                    .add_modifier(Modifier::BOLD),
-            )]),
-            Line::from(""),
-        ]),
+                topo_style,
+            ),
+            Span::raw("  "),
+            Span::styled(format!(" Events ({}) ", state.events.len()), event_style),
+        ])),
         chunks[0],
     );
 
@@ -360,26 +370,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut CommsState) {
     draw_topology(f, chunks[2], state);
 
     // Separator
-    let event_label = if state.focus == CommsFocus::EventList {
-        "  \u{25b6} Live Event Feed"
-    } else {
-        "    Live Event Feed"
-    };
-    f.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                event_label,
-                Style::default()
-                    .fg(theme::CYAN)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("  ({} events)", state.events.len()),
-                theme::dim_style(),
-            ),
-        ])),
-        chunks[3],
-    );
+    f.render_widget(widgets::separator(inner.width), chunks[3]);
 
     // Event list
     draw_event_list(f, chunks[4], state);
@@ -414,7 +405,10 @@ fn draw_topology(f: &mut Frame, area: Rect, state: &CommsState) {
     }
 
     if state.nodes.is_empty() {
-        f.render_widget(widgets::empty_state("No agents running."), area);
+        f.render_widget(
+            widgets::empty_state("No agents running. Start agents to see communication."),
+            area,
+        );
         return;
     }
 
@@ -422,21 +416,22 @@ fn draw_topology(f: &mut Frame, area: Rect, state: &CommsState) {
     let mut lines = Vec::new();
 
     for root in state.root_nodes() {
-        let state_style = state_color(&root.state);
+        let (indicator, indicator_style) = state_indicator(&root.state);
         let mut spans = vec![
             Span::styled("  ", Style::default()),
-            Span::styled(format!("[{}]", &root.state), state_style),
+            Span::styled(format!("{indicator} "), indicator_style),
             Span::styled(
-                format!(" {} ", root.name),
+                format!("{} ", root.name),
                 Style::default()
                     .fg(if focus_highlight {
-                        theme::CYAN
+                        theme::ACCENT
                     } else {
-                        theme::TEXT
+                        theme::TEXT_PRIMARY
                     })
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(format!("({})", root.model), theme::dim_style()),
+            Span::styled(format!("({}) ", root.model), theme::dim_style()),
+            Span::styled(root.state.clone(), state_color(&root.state)),
         ];
         // Peer annotations
         for peer in state.peers_of(&root.id) {
@@ -455,15 +450,19 @@ fn draw_topology(f: &mut Frame, area: Rect, state: &CommsState) {
             } else {
                 "\u{2514}\u{2500}\u{2500} "
             };
+            let (child_ind, child_ind_style) = state_indicator(&child.state);
             lines.push(Line::from(vec![
                 Span::styled("    ", Style::default()),
-                Span::styled(branch, theme::dim_style()),
-                Span::styled(format!("[{}]", child.state), state_color(&child.state)),
+                Span::styled(branch, Style::default().fg(theme::BORDER)),
+                Span::styled(format!("{child_ind} "), child_ind_style),
                 Span::styled(
-                    format!(" {} ", child.name),
-                    Style::default().fg(theme::TEXT),
+                    format!("{} ", child.name),
+                    Style::default()
+                        .fg(theme::TEXT_PRIMARY)
+                        .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(format!("({})", child.model), theme::dim_style()),
+                Span::styled(format!("({}) ", child.model), theme::dim_style()),
+                Span::styled(child.state.clone(), state_color(&child.state)),
             ]));
         }
     }
@@ -473,7 +472,10 @@ fn draw_topology(f: &mut Frame, area: Rect, state: &CommsState) {
 
 fn draw_event_list(f: &mut Frame, area: Rect, state: &mut CommsState) {
     if state.events.is_empty() {
-        f.render_widget(widgets::empty_state("No inter-agent events yet."), area);
+        f.render_widget(
+            widgets::empty_state("No inter-agent events yet. Activity will appear here."),
+            area,
+        );
         return;
     }
 
@@ -483,6 +485,7 @@ fn draw_event_list(f: &mut Frame, area: Rect, state: &mut CommsState) {
         .map(|ev| {
             let kind_style = kind_color(&ev.kind);
             let kind_label = kind_short(&ev.kind);
+            let kind_indicator = kind_indicator(&ev.kind);
             let target_part = if ev.target_name.is_empty() {
                 String::new()
             } else {
@@ -492,13 +495,14 @@ fn draw_event_list(f: &mut Frame, area: Rect, state: &mut CommsState) {
             ListItem::new(Line::from(vec![
                 Span::styled(
                     format!("  {:<8}", short_time(&ev.timestamp)),
-                    theme::dim_style(),
+                    Style::default().fg(theme::TEXT_TERTIARY),
                 ),
+                Span::styled(format!(" {kind_indicator}"), kind_style),
                 Span::styled(format!(" {:<10}", kind_label), kind_style),
                 Span::styled(
-                    format!(" {}", ev.source_name),
+                    ev.source_name.to_string(),
                     Style::default()
-                        .fg(theme::CYAN)
+                        .fg(theme::TEXT_PRIMARY)
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(target_part, Style::default().fg(theme::PURPLE)),
@@ -671,6 +675,20 @@ fn state_color(state: &str) -> Style {
     }
 }
 
+fn state_indicator(state: &str) -> (&'static str, Style) {
+    match state {
+        "Running" => (
+            "\u{25cf}",
+            Style::default()
+                .fg(theme::GREEN)
+                .add_modifier(Modifier::BOLD),
+        ),
+        "Suspended" => ("\u{25cf}", Style::default().fg(theme::YELLOW)),
+        "Terminated" | "Crashed" => ("\u{25cb}", Style::default().fg(theme::RED)),
+        _ => ("\u{25cb}", theme::dim_style()),
+    }
+}
+
 fn kind_color(kind: &str) -> Style {
     match kind {
         "agent_message" => Style::default().fg(theme::CYAN),
@@ -692,6 +710,16 @@ fn kind_short(kind: &str) -> &str {
         "task_claimed" => "CLAIM",
         "task_completed" => "DONE",
         _ => kind,
+    }
+}
+
+fn kind_indicator(kind: &str) -> &'static str {
+    match kind {
+        "agent_spawned" | "task_completed" => "\u{25cf}", // filled green-ish
+        "agent_message" | "task_claimed" => "\u{25cf}",   // filled
+        "agent_terminated" => "\u{25cb}",                 // hollow
+        "task_posted" => "\u{25cf}",                      // filled yellow-ish
+        _ => "\u{25cb}",
     }
 }
 

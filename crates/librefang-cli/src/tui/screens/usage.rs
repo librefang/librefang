@@ -159,7 +159,7 @@ impl UsageState {
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
 pub fn draw(f: &mut Frame, area: Rect, state: &mut UsageState) {
-    let inner = widgets::render_screen_block(f, area, "Usage");
+    let inner = widgets::render_screen_block(f, area, "\u{25b4} Usage");
 
     let chunks = Layout::vertical([
         Constraint::Length(1), // sub-tab bar
@@ -193,14 +193,24 @@ fn draw_sub_tabs(f: &mut Frame, area: Rect, active: UsageSub) {
         (UsageSub::ByAgent, "3 By Agent"),
     ];
     let mut spans = vec![Span::raw("  ")];
-    for (sub, label) in &tabs {
-        let style = if *sub == active {
-            theme::tab_active()
+    for (i, (sub, label)) in tabs.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(
+                " \u{2502} ",
+                Style::default().fg(theme::BORDER),
+            ));
+        }
+        if *sub == active {
+            spans.push(Span::styled(
+                format!(" \u{25cf} {label} "),
+                theme::tab_active(),
+            ));
         } else {
-            theme::tab_inactive()
-        };
-        spans.push(Span::styled(format!(" {label} "), style));
-        spans.push(Span::raw(" "));
+            spans.push(Span::styled(
+                format!(" \u{25cb} {label} "),
+                theme::tab_inactive(),
+            ));
+        }
     }
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
@@ -260,21 +270,31 @@ fn draw_stat_card(
     color: ratatui::style::Color,
 ) {
     let card = Block::default()
-        .title(Span::styled(
-            format!(" {title} "),
-            Style::default().fg(color),
-        ))
         .borders(Borders::ALL)
         .border_set(ratatui::symbols::border::ROUNDED)
-        .border_style(Style::default().fg(theme::DIM));
+        .border_style(Style::default().fg(theme::BORDER));
     let card_inner = card.inner(area);
     f.render_widget(card, area);
+
+    let inner_chunks = Layout::vertical([
+        Constraint::Length(1), // label
+        Constraint::Min(1),    // value
+    ])
+    .split(card_inner);
+
+    f.render_widget(
+        Paragraph::new(Line::from(vec![Span::styled(
+            format!(" {title}"),
+            Style::default().fg(theme::TEXT_TERTIARY),
+        )])),
+        inner_chunks[0],
+    );
     f.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
             format!(" {value}"),
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         )])),
-        card_inner,
+        inner_chunks[1],
     );
 }
 
@@ -299,7 +319,10 @@ fn draw_by_model(f: &mut Frame, area: Rect, state: &mut UsageState) {
     if state.loading {
         f.render_widget(widgets::spinner(state.tick, "Loading\u{2026}"), chunks[1]);
     } else if state.by_model.is_empty() {
-        f.render_widget(widgets::empty_state("No usage data."), chunks[1]);
+        f.render_widget(
+            widgets::empty_state("No usage data. Send messages to see token stats."),
+            chunks[1],
+        );
     } else {
         let items: Vec<ListItem> = state
             .by_model
@@ -353,7 +376,10 @@ fn draw_by_agent(f: &mut Frame, area: Rect, state: &mut UsageState) {
     if state.loading {
         f.render_widget(widgets::spinner(state.tick, "Loading\u{2026}"), chunks[1]);
     } else if state.by_agent.is_empty() {
-        f.render_widget(widgets::empty_state("No usage data."), chunks[1]);
+        f.render_widget(
+            widgets::empty_state("No usage data. Send messages to see token stats."),
+            chunks[1],
+        );
     } else {
         let items: Vec<ListItem> = state
             .by_agent

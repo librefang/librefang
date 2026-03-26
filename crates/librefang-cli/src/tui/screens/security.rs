@@ -197,18 +197,52 @@ impl SecurityState {
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
 pub fn draw(f: &mut Frame, area: Rect, state: &mut SecurityState) {
-    let inner = widgets::render_screen_block(f, area, "Security");
+    let inner = widgets::render_screen_block(f, area, "\u{25c6} Security");
 
     let chunks = Layout::vertical([
+        Constraint::Length(2), // summary bar
         Constraint::Min(4),    // features
         Constraint::Length(2), // verify result
         Constraint::Length(1), // hints
     ])
     .split(inner);
 
+    // ── Summary bar ──
+    let active_count = state.features.iter().filter(|f| f.active).count();
+    let total_count = state.features.len();
+    f.render_widget(
+        Paragraph::new(vec![
+            Line::from(vec![
+                Span::styled(
+                    format!("  {active_count}/{total_count} features active"),
+                    Style::default()
+                        .fg(theme::GREEN)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "  \u{2502}  Core \u{00b7} Configurable \u{00b7} Monitoring",
+                    theme::dim_style(),
+                ),
+            ]),
+            Line::from(vec![Span::styled(
+                "  \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}",
+                Style::default().fg(theme::BORDER),
+            )]),
+        ]),
+        chunks[0],
+    );
+
     // ── Features list ──
     let mut lines: Vec<Line> = Vec::new();
     let mut current_section: Option<SecuritySection> = None;
+
+    let section_icon = |s: SecuritySection| -> &'static str {
+        match s {
+            SecuritySection::Core => "\u{25c9}",
+            SecuritySection::Configurable => "\u{25ce}",
+            SecuritySection::Monitoring => "\u{25c8}",
+        }
+    };
 
     for feat in &state.features {
         if current_section != Some(feat.section) {
@@ -216,29 +250,37 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut SecurityState) {
                 lines.push(Line::raw(""));
             }
             lines.push(Line::from(vec![Span::styled(
-                format!(
-                    "  \u{2501}\u{2501} {} \u{2501}\u{2501}",
-                    feat.section.label()
-                ),
+                format!("  {} {} ", section_icon(feat.section), feat.section.label()),
                 Style::default()
                     .fg(theme::ACCENT)
                     .add_modifier(Modifier::BOLD),
             )]));
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {:<30}", "Feature"), theme::table_header()),
+                Span::styled(format!(" {:<12}", "Status"), theme::table_header()),
+                Span::styled(" Description", theme::table_header()),
+            ]));
             current_section = Some(feat.section);
         }
 
         let (badge, badge_style) = if feat.active {
-            ("\u{2714} Active", Style::default().fg(theme::GREEN))
+            (
+                "\u{25cf} Active",
+                Style::default()
+                    .fg(theme::GREEN)
+                    .add_modifier(Modifier::BOLD),
+            )
         } else {
-            ("\u{25cb} Inactive", Style::default().fg(theme::RED))
+            (
+                "\u{25cb} Inactive",
+                Style::default().fg(theme::RED).add_modifier(Modifier::BOLD),
+            )
         };
 
         lines.push(Line::from(vec![
             Span::styled(
                 format!("  {:<30}", feat.name),
-                Style::default()
-                    .fg(theme::CYAN)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(theme::CYAN),
             ),
             Span::styled(format!(" {:<12}", badge), badge_style),
             Span::styled(format!(" {}", feat.description), theme::dim_style()),
@@ -246,11 +288,11 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut SecurityState) {
     }
 
     let total = lines.len() as u16;
-    let visible = chunks[0].height;
+    let visible = chunks[1].height;
     let max_scroll = total.saturating_sub(visible);
     let scroll = max_scroll.saturating_sub(state.scroll).min(max_scroll);
 
-    f.render_widget(Paragraph::new(lines).scroll((scroll, 0)), chunks[0]);
+    f.render_widget(Paragraph::new(lines).scroll((scroll, 0)), chunks[1]);
 
     // ── Verify result ──
     match state.chain_verified {
@@ -258,15 +300,15 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut SecurityState) {
             if state.loading {
                 f.render_widget(
                     widgets::spinner(state.tick, "Verifying audit chain\u{2026}"),
-                    chunks[1],
+                    chunks[2],
                 );
             } else {
                 f.render_widget(
                     Paragraph::new(Line::from(vec![Span::styled(
-                        "  Press [v] to verify audit chain integrity",
+                        "  \u{25cb} Press [v] to verify audit chain integrity",
                         theme::dim_style(),
                     )])),
-                    chunks[1],
+                    chunks[2],
                 );
             }
         }
@@ -275,14 +317,16 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut SecurityState) {
                 Paragraph::new(vec![
                     Line::from(vec![Span::styled(
                         "  \u{2714} Audit chain verified",
-                        Style::default().fg(theme::GREEN),
+                        Style::default()
+                            .fg(theme::GREEN)
+                            .add_modifier(Modifier::BOLD),
                     )]),
                     Line::from(vec![Span::styled(
                         format!("  {}", state.verify_result),
                         theme::dim_style(),
                     )]),
                 ]),
-                chunks[1],
+                chunks[2],
             );
         }
         Some(false) => {
@@ -290,14 +334,14 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut SecurityState) {
                 Paragraph::new(vec![
                     Line::from(vec![Span::styled(
                         "  \u{2718} Audit chain verification failed",
-                        Style::default().fg(theme::RED),
+                        Style::default().fg(theme::RED).add_modifier(Modifier::BOLD),
                     )]),
                     Line::from(vec![Span::styled(
                         format!("  {}", state.verify_result),
                         Style::default().fg(theme::RED),
                     )]),
                 ]),
-                chunks[1],
+                chunks[2],
             );
         }
     }
@@ -305,6 +349,6 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut SecurityState) {
     // ── Hints ──
     f.render_widget(
         widgets::hint_bar("  [\u{2191}\u{2193}] Scroll  [v] Verify Chain  [r] Refresh"),
-        chunks[2],
+        chunks[3],
     );
 }

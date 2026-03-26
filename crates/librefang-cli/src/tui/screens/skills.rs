@@ -282,7 +282,7 @@ impl SkillsState {
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
 pub fn draw(f: &mut Frame, area: Rect, state: &mut SkillsState) {
-    let inner = widgets::render_screen_block(f, area, "Skills");
+    let inner = widgets::render_screen_block(f, area, "\u{2605} Skills");
 
     let chunks = Layout::vertical([
         Constraint::Length(1), // sub-tab bar
@@ -333,7 +333,7 @@ fn draw_installed(f: &mut Frame, area: Rect, state: &mut SkillsState) {
     f.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
             format!(
-                "  {:<20} {:<8} {:<12} {}",
+                "  {:<22} {:<10} {:<12} {}",
                 "Name", "Runtime", "Source", "Description"
             ),
             theme::table_header(),
@@ -348,7 +348,7 @@ fn draw_installed(f: &mut Frame, area: Rect, state: &mut SkillsState) {
         );
     } else if state.installed.is_empty() {
         f.render_widget(
-            widgets::empty_state("No skills installed. Press [2] to browse ClawHub."),
+            widgets::empty_state("No skills installed. Browse ClawHub to find skills."),
             chunks[1],
         );
     } else {
@@ -369,18 +369,31 @@ fn draw_installed(f: &mut Frame, area: Rect, state: &mut SkillsState) {
                     "prompt" => "PROMPT",
                     _ => &s.runtime,
                 };
-                let source_style = match s.source.as_str() {
-                    "clawhub" => Style::default().fg(theme::ACCENT),
-                    "builtin" | "built-in" => Style::default().fg(theme::GREEN),
-                    _ => theme::dim_style(),
+                let (source_indicator, source_style) = match s.source.as_str() {
+                    "clawhub" => (
+                        "\u{25cf}",
+                        Style::default()
+                            .fg(theme::ACCENT)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    "builtin" | "built-in" => (
+                        "\u{25cf}",
+                        Style::default()
+                            .fg(theme::GREEN)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    _ => ("\u{25cb}", theme::dim_style()),
                 };
                 ListItem::new(Line::from(vec![
+                    Span::styled(format!("  {source_indicator} "), source_style),
                     Span::styled(
-                        format!("  {:<20}", widgets::truncate(&s.name, 19)),
-                        Style::default().fg(theme::CYAN),
+                        format!("{:<19}", widgets::truncate(&s.name, 18)),
+                        Style::default()
+                            .fg(theme::TEXT_PRIMARY)
+                            .add_modifier(Modifier::BOLD),
                     ),
-                    Span::styled(format!(" {:<8}", runtime_badge), runtime_style),
-                    Span::styled(format!(" {:<12}", &s.source), source_style),
+                    Span::styled(format!(" {:<10}", runtime_badge), runtime_style),
+                    Span::styled(format!("{:<12}", &s.source), source_style),
                     Span::styled(
                         format!(" {}", widgets::truncate(&s.description, 30)),
                         theme::dim_style(),
@@ -461,16 +474,21 @@ fn draw_clawhub(f: &mut Frame, area: Rect, state: &mut SkillsState) {
             .iter()
             .map(|r| {
                 let dl = format_count(r.downloads);
+                let runtime_style = match r.runtime.as_str() {
+                    "python" | "py" => Style::default().fg(theme::BLUE),
+                    "node" | "js" => Style::default().fg(theme::YELLOW),
+                    "wasm" => Style::default().fg(theme::PURPLE),
+                    _ => Style::default().fg(theme::GREEN),
+                };
                 ListItem::new(Line::from(vec![
                     Span::styled(
                         format!("  {:<24}", widgets::truncate(&r.name, 23)),
-                        Style::default().fg(theme::CYAN),
+                        Style::default()
+                            .fg(theme::TEXT_PRIMARY)
+                            .add_modifier(Modifier::BOLD),
                     ),
-                    Span::styled(format!(" {:<10}", dl), Style::default().fg(theme::GREEN)),
-                    Span::styled(
-                        format!(" {:<10}", &r.runtime),
-                        Style::default().fg(theme::BLUE),
-                    ),
+                    Span::styled(format!(" {:<10}", dl), Style::default().fg(theme::ACCENT)),
+                    Span::styled(format!(" {:<10}", &r.runtime), runtime_style),
                     Span::styled(
                         format!(" {}", widgets::truncate(&r.description, 30)),
                         theme::dim_style(),
@@ -501,7 +519,7 @@ fn draw_mcp(f: &mut Frame, area: Rect, state: &mut SkillsState) {
 
     f.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
-            format!("  {:<20} {:<14} {}", "Server", "Status", "Tools"),
+            format!("  {:<22} {:<16} {}", "Server", "Status", "Tools"),
             theme::table_header(),
         )])),
         chunks[0],
@@ -514,7 +532,7 @@ fn draw_mcp(f: &mut Frame, area: Rect, state: &mut SkillsState) {
         );
     } else if state.mcp_servers.is_empty() {
         f.render_widget(
-            widgets::empty_state("No MCP servers configured."),
+            widgets::empty_state("No MCP servers configured. Add servers in config.toml."),
             chunks[1],
         );
     } else {
@@ -522,18 +540,27 @@ fn draw_mcp(f: &mut Frame, area: Rect, state: &mut SkillsState) {
             .mcp_servers
             .iter()
             .map(|s| {
-                let (badge, style) = if s.connected {
-                    ("\u{2714} Connected", Style::default().fg(theme::GREEN))
+                let (indicator, label, style) = if s.connected {
+                    (
+                        "\u{25cf}",
+                        "Connected",
+                        Style::default()
+                            .fg(theme::GREEN)
+                            .add_modifier(Modifier::BOLD),
+                    )
                 } else {
-                    ("\u{2718} Disconnected", Style::default().fg(theme::RED))
+                    ("\u{25cb}", "Disconnected", Style::default().fg(theme::RED))
                 };
                 ListItem::new(Line::from(vec![
+                    Span::styled(format!("  {indicator} "), style),
                     Span::styled(
-                        format!("  {:<20}", widgets::truncate(&s.name, 19)),
-                        Style::default().fg(theme::CYAN),
+                        format!("{:<19}", widgets::truncate(&s.name, 18)),
+                        Style::default()
+                            .fg(theme::TEXT_PRIMARY)
+                            .add_modifier(Modifier::BOLD),
                     ),
-                    Span::styled(format!(" {:<14}", badge), style),
-                    Span::styled(format!(" {}", s.tool_count), theme::dim_style()),
+                    Span::styled(format!(" {:<16}", label), style),
+                    Span::styled(format!("{} tools", s.tool_count), theme::dim_style()),
                 ]))
             })
             .collect();

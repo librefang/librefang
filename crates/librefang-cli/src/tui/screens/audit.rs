@@ -194,38 +194,68 @@ impl AuditState {
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
 pub fn draw(f: &mut Frame, area: Rect, state: &mut AuditState) {
-    let inner = widgets::render_screen_block(f, area, "Audit Trail");
+    let inner = widgets::render_screen_block(f, area, "\u{25c8} Audit Trail");
 
     let chunks = Layout::vertical([
-        Constraint::Length(2), // header + filter
+        Constraint::Length(3), // filter + header separator + column headers
         Constraint::Min(3),    // list
         Constraint::Length(2), // chain status + hints
     ])
     .split(inner);
 
-    // ── Header + filter ──
+    // ── Filter bar + column headers ──
+    let filter_style = match state.action_filter {
+        AuditFilter::All => Style::default()
+            .fg(theme::ACCENT)
+            .add_modifier(Modifier::BOLD),
+        AuditFilter::AgentSpawn => Style::default()
+            .fg(theme::GREEN)
+            .add_modifier(Modifier::BOLD),
+        AuditFilter::AgentKill => Style::default().fg(theme::RED).add_modifier(Modifier::BOLD),
+        AuditFilter::ToolInvoke => Style::default()
+            .fg(theme::BLUE)
+            .add_modifier(Modifier::BOLD),
+        AuditFilter::NetworkAccess => Style::default()
+            .fg(theme::YELLOW)
+            .add_modifier(Modifier::BOLD),
+        AuditFilter::ShellExec => Style::default()
+            .fg(theme::PURPLE)
+            .add_modifier(Modifier::BOLD),
+    };
+
     f.render_widget(
         Paragraph::new(vec![
             Line::from(vec![
                 Span::styled("  Filter: ", theme::dim_style()),
+                Span::styled(format!("[{}]", state.action_filter.label()), filter_style),
                 Span::styled(
-                    format!("[{}]", state.action_filter.label()),
-                    Style::default()
-                        .fg(theme::ACCENT)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!("  ({} entries)", state.filtered.len()),
+                    format!("  \u{2502} {} entries", state.filtered.len()),
                     theme::dim_style(),
                 ),
             ]),
             Line::from(vec![Span::styled(
-                format!(
-                    "  {:<20} {:<16} {:<14} {:<10} {}",
-                    "Timestamp", "Action", "Agent", "Hash", "Detail"
-                ),
-                theme::table_header(),
+                "  \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}",
+                Style::default().fg(theme::BORDER),
             )]),
+            Line::from(vec![
+                Span::styled(
+                    format!("  {:<20}", "Timestamp"),
+                    theme::table_header(),
+                ),
+                Span::styled(
+                    format!(" {:<16}", "Action"),
+                    theme::table_header(),
+                ),
+                Span::styled(
+                    format!(" {:<14}", "Agent"),
+                    theme::table_header(),
+                ),
+                Span::styled(
+                    format!(" {:<10}", "Hash"),
+                    theme::table_header(),
+                ),
+                Span::styled(" Detail", theme::table_header()),
+            ]),
         ]),
         chunks[0],
     );
@@ -238,7 +268,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut AuditState) {
         );
     } else if state.filtered.is_empty() {
         f.render_widget(
-            widgets::empty_state("No audit entries match the current filter."),
+            widgets::empty_state("No audit entries yet. Agent actions will appear here."),
             chunks[1],
         );
     } else {
@@ -249,13 +279,25 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut AuditState) {
                 let e = &state.entries[idx];
                 let action_display = friendly_action(&e.action);
                 let action_style = if e.action.contains("Kill") || e.action.contains("Denied") {
-                    Style::default().fg(theme::RED)
+                    Style::default().fg(theme::RED).add_modifier(Modifier::BOLD)
                 } else if e.action.contains("Spawn") || e.action.contains("Create") {
                     Style::default().fg(theme::GREEN)
                 } else if e.action.contains("Tool") {
                     Style::default().fg(theme::BLUE)
-                } else {
+                } else if e.action.contains("Shell")
+                    || e.action.contains("Exec")
+                    || e.action.contains("Process")
+                {
+                    Style::default().fg(theme::PURPLE)
+                } else if e.action.contains("Net")
+                    || e.action.contains("Fetch")
+                    || e.action.contains("Http")
+                {
                     Style::default().fg(theme::YELLOW)
+                } else if e.action.contains("Config") {
+                    Style::default().fg(theme::ACCENT_DIM)
+                } else {
+                    Style::default().fg(theme::TEXT_SECONDARY)
                 };
                 let hash_short = if e.tip_hash.len() > 8 {
                     &e.tip_hash[..8]
@@ -294,16 +336,18 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut AuditState) {
     // ── Chain status + hints ──
     let chain_line = match state.chain_verified {
         None => Line::from(vec![Span::styled(
-            "  Chain: not verified",
+            "  \u{25cb} Chain: not verified",
             theme::dim_style(),
         )]),
         Some(true) => Line::from(vec![Span::styled(
-            "  Chain: \u{2714} Verified",
-            Style::default().fg(theme::GREEN),
+            "  \u{2714} Chain: Verified",
+            Style::default()
+                .fg(theme::GREEN)
+                .add_modifier(Modifier::BOLD),
         )]),
         Some(false) => Line::from(vec![Span::styled(
-            "  Chain: \u{2718} Verification failed",
-            Style::default().fg(theme::RED),
+            "  \u{2718} Chain: Verification failed",
+            Style::default().fg(theme::RED).add_modifier(Modifier::BOLD),
         )]),
     };
 

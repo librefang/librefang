@@ -36,6 +36,7 @@ impl LogLevel {
         }
     }
 
+    #[allow(dead_code)]
     fn style(self) -> Style {
         match self {
             Self::Error => Style::default().fg(theme::RED).add_modifier(Modifier::BOLD),
@@ -256,43 +257,69 @@ impl LogsState {
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
 pub fn draw(f: &mut Frame, area: Rect, state: &mut LogsState) {
-    let inner = widgets::render_screen_block(f, area, "Logs");
+    let inner = widgets::render_screen_block(f, area, "\u{25b9} Logs");
 
     let chunks = Layout::vertical([
-        Constraint::Length(2), // header: filter + search
+        Constraint::Length(3), // header: filter + separator + column headers
         Constraint::Min(3),    // log list
         Constraint::Length(1), // hints
     ])
     .split(inner);
 
     // ── Header ──
-    let table_header_text = format!(
-        "  {:<20} {:<6} {:<16} {:<14} {}",
-        "Timestamp", "Level", "Action", "Agent", "Detail"
-    );
-
     if state.search_mode {
-        let header_rows =
-            Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(chunks[0]);
+        let header_rows = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .split(chunks[0]);
         f.render_widget(widgets::search_input(&state.search_buf), header_rows[0]);
         f.render_widget(
             Paragraph::new(Line::from(vec![Span::styled(
-                &table_header_text,
-                theme::table_header(),
+                "  \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}",
+                Style::default().fg(theme::BORDER),
             )])),
             header_rows[1],
         );
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(format!("  {:<20}", "Timestamp"), theme::table_header()),
+                Span::styled(format!(" {:<6}", "Level"), theme::table_header()),
+                Span::styled(format!(" {:<16}", "Action"), theme::table_header()),
+                Span::styled(format!(" {:<14}", "Agent"), theme::table_header()),
+                Span::styled(" Detail", theme::table_header()),
+            ])),
+            header_rows[2],
+        );
     } else {
         let auto_badge = if state.auto_refresh {
-            Span::styled(" [auto-refresh ON]", Style::default().fg(theme::GREEN))
+            Span::styled(
+                " \u{25cf} auto",
+                Style::default()
+                    .fg(theme::GREEN)
+                    .add_modifier(Modifier::BOLD),
+            )
         } else {
-            Span::styled(" [auto-refresh OFF]", theme::dim_style())
+            Span::styled(" \u{25cb} paused", theme::dim_style())
+        };
+        let filter_style = match state.level_filter {
+            LevelFilter::All => Style::default()
+                .fg(theme::ACCENT)
+                .add_modifier(Modifier::BOLD),
+            LevelFilter::Error => Style::default().fg(theme::RED).add_modifier(Modifier::BOLD),
+            LevelFilter::Warn => Style::default()
+                .fg(theme::YELLOW)
+                .add_modifier(Modifier::BOLD),
+            LevelFilter::Info => Style::default()
+                .fg(theme::BLUE)
+                .add_modifier(Modifier::BOLD),
         };
         let search_hint = if state.search_buf.is_empty() {
             Span::raw("")
         } else {
             Span::styled(
-                format!("  filter: \"{}\"", state.search_buf),
+                format!("  \u{2502} filter: \"{}\"", state.search_buf),
                 Style::default().fg(theme::YELLOW),
             )
         };
@@ -300,23 +327,25 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut LogsState) {
             Paragraph::new(vec![
                 Line::from(vec![
                     Span::styled("  Level: ", theme::dim_style()),
+                    Span::styled(format!("[{}]", state.level_filter.label()), filter_style),
                     Span::styled(
-                        format!("[{}]", state.level_filter.label()),
-                        Style::default()
-                            .fg(theme::ACCENT)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        format!("  ({} entries)", state.filtered.len()),
+                        format!("  \u{2502} {} entries", state.filtered.len()),
                         theme::dim_style(),
                     ),
                     auto_badge,
                     search_hint,
                 ]),
                 Line::from(vec![Span::styled(
-                    &table_header_text,
-                    theme::table_header(),
+                    "  \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}",
+                    Style::default().fg(theme::BORDER),
                 )]),
+                Line::from(vec![
+                    Span::styled(format!("  {:<20}", "Timestamp"), theme::table_header()),
+                    Span::styled(format!(" {:<6}", "Level"), theme::table_header()),
+                    Span::styled(format!(" {:<16}", "Action"), theme::table_header()),
+                    Span::styled(format!(" {:<14}", "Agent"), theme::table_header()),
+                    Span::styled(" Detail", theme::table_header()),
+                ]),
             ]),
             chunks[0],
         );
@@ -330,7 +359,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut LogsState) {
         );
     } else if state.filtered.is_empty() {
         f.render_widget(
-            widgets::empty_state("No log entries match the current filter."),
+            widgets::empty_state("No log entries. Start the daemon to see logs."),
             chunks[1],
         );
     } else {
@@ -339,12 +368,17 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut LogsState) {
             .iter()
             .map(|&idx| {
                 let e = &state.entries[idx];
+                let level_style = match e.level {
+                    LogLevel::Error => Style::default().fg(theme::RED).add_modifier(Modifier::BOLD),
+                    LogLevel::Warn => Style::default().fg(theme::YELLOW),
+                    LogLevel::Info => Style::default().fg(theme::BLUE),
+                };
                 ListItem::new(Line::from(vec![
                     Span::styled(
                         format!("  {:<20}", widgets::truncate(&e.timestamp, 19)),
                         theme::dim_style(),
                     ),
-                    Span::styled(format!(" {:<6}", e.level.label()), e.level.style()),
+                    Span::styled(format!(" {:<6}", e.level.label()), level_style),
                     Span::styled(
                         format!(" {:<16}", widgets::truncate(&e.action, 15)),
                         Style::default().fg(theme::CYAN),
@@ -367,7 +401,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut LogsState) {
 
     // ── Hints ──
     f.render_widget(
-        widgets::hint_bar("  [\u{2191}\u{2193}] Navigate  [f] Filter Level  [/] Search  [a] Toggle Auto-refresh  [r] Refresh"),
+        widgets::hint_bar("  [\u{2191}\u{2193}] Navigate  [f] Filter Level  [/] Search  [a] Auto-refresh  [r] Refresh"),
         chunks[2],
     );
 }

@@ -280,7 +280,7 @@ impl WorkflowState {
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
 pub fn draw(f: &mut Frame, area: Rect, state: &mut WorkflowState) {
-    let inner = widgets::render_screen_block(f, area, "Workflows");
+    let inner = widgets::render_screen_block(f, area, "\u{25b7} Workflows");
 
     match state.sub {
         WorkflowSubScreen::List => draw_list(f, inner, state),
@@ -293,7 +293,8 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut WorkflowState) {
 
 fn draw_list(f: &mut Frame, area: Rect, state: &mut WorkflowState) {
     let chunks = Layout::vertical([
-        Constraint::Length(2), // header
+        Constraint::Length(1), // header
+        Constraint::Length(1), // separator
         Constraint::Min(3),    // list
         Constraint::Length(1), // hints
     ])
@@ -307,16 +308,24 @@ fn draw_list(f: &mut Frame, area: Rect, state: &mut WorkflowState) {
         chunks[0],
     );
 
+    f.render_widget(widgets::separator(chunks[1].width), chunks[1]);
+
     if state.loading {
         f.render_widget(
             widgets::spinner(state.tick, "Loading workflows\u{2026}"),
-            chunks[1],
+            chunks[2],
+        );
+    } else if state.workflows.is_empty() {
+        f.render_widget(
+            widgets::empty_state("No workflows defined. Create one with [n]."),
+            chunks[2],
         );
     } else {
         let mut items: Vec<ListItem> = state
             .workflows
             .iter()
             .map(|wf| {
+                let step_icon = if wf.steps > 0 { "\u{25cf}" } else { "\u{25cb}" };
                 ListItem::new(Line::from(vec![
                     Span::styled(
                         format!("  {:<12}", widgets::truncate(&wf.id, 11)),
@@ -327,10 +336,13 @@ fn draw_list(f: &mut Frame, area: Rect, state: &mut WorkflowState) {
                         Style::default().fg(theme::CYAN),
                     ),
                     Span::styled(
-                        format!(" {:<8}", wf.steps),
+                        format!(" {step_icon} {:<6}", wf.steps),
                         Style::default().fg(theme::YELLOW),
                     ),
-                    Span::styled(format!(" {}", wf.created), theme::dim_style()),
+                    Span::styled(
+                        format!(" {}", wf.created),
+                        Style::default().fg(theme::TEXT_SECONDARY),
+                    ),
                 ]))
             })
             .collect();
@@ -343,19 +355,22 @@ fn draw_list(f: &mut Frame, area: Rect, state: &mut WorkflowState) {
         )])));
 
         let list = widgets::themed_list(items);
-        f.render_stateful_widget(list, chunks[1], &mut state.list_state);
+        f.render_stateful_widget(list, chunks[2], &mut state.list_state);
     }
 
     f.render_widget(
-        widgets::hint_bar("  [\u{2191}\u{2193}] Navigate  [Enter] View runs  [x] Run  [r] Refresh"),
-        chunks[2],
+        widgets::hint_bar(
+            "  [\u{2191}\u{2193}] Navigate  [Enter] View runs  [x] Run  [n] New  [r] Refresh",
+        ),
+        chunks[3],
     );
 }
 
 fn draw_runs(f: &mut Frame, area: Rect, state: &mut WorkflowState) {
     let chunks = Layout::vertical([
         Constraint::Length(2), // title
-        Constraint::Length(2), // header
+        Constraint::Length(1), // header
+        Constraint::Length(1), // separator
         Constraint::Min(3),    // list
         Constraint::Length(1), // hints
     ])
@@ -368,12 +383,15 @@ fn draw_runs(f: &mut Frame, area: Rect, state: &mut WorkflowState) {
         .unwrap_or("?");
 
     f.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(
-            format!("  Runs for: {wf_name}"),
-            Style::default()
-                .fg(theme::CYAN)
-                .add_modifier(Modifier::BOLD),
-        )])),
+        Paragraph::new(Line::from(vec![
+            Span::styled("  \u{25b7} ", Style::default().fg(theme::ACCENT)),
+            Span::styled(
+                format!("Runs for: {wf_name}"),
+                Style::default()
+                    .fg(theme::TEXT_PRIMARY)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])),
         chunks[0],
     );
 
@@ -388,10 +406,12 @@ fn draw_runs(f: &mut Frame, area: Rect, state: &mut WorkflowState) {
         chunks[1],
     );
 
+    f.render_widget(widgets::separator(chunks[2].width), chunks[2]);
+
     if state.runs.is_empty() {
         f.render_widget(
             widgets::empty_state("No runs yet. Press [x] from the list to run."),
-            chunks[2],
+            chunks[3],
         );
     } else {
         let items: Vec<ListItem> = state
@@ -402,7 +422,7 @@ fn draw_runs(f: &mut Frame, area: Rect, state: &mut WorkflowState) {
                 ListItem::new(Line::from(vec![
                     Span::styled(
                         format!("  {:<12}", widgets::truncate(&run.id, 11)),
-                        theme::dim_style(),
+                        Style::default().fg(theme::TEXT_SECONDARY),
                     ),
                     Span::styled(format!(" {:<12}", badge), badge_style),
                     Span::styled(
@@ -411,19 +431,19 @@ fn draw_runs(f: &mut Frame, area: Rect, state: &mut WorkflowState) {
                     ),
                     Span::styled(
                         format!(" {}", widgets::truncate(&run.output_preview, 30)),
-                        theme::dim_style(),
+                        Style::default().fg(theme::TEXT_SECONDARY),
                     ),
                 ]))
             })
             .collect();
 
         let list = widgets::themed_list(items);
-        f.render_stateful_widget(list, chunks[2], &mut state.runs_list_state);
+        f.render_stateful_widget(list, chunks[3], &mut state.runs_list_state);
     }
 
     f.render_widget(
         widgets::hint_bar("  [\u{2191}\u{2193}] Navigate  [r] Refresh  [Esc] Back"),
-        chunks[3],
+        chunks[4],
     );
 }
 
@@ -431,25 +451,50 @@ fn draw_create(f: &mut Frame, area: Rect, state: &WorkflowState) {
     let chunks = Layout::vertical([
         Constraint::Length(2), // title
         Constraint::Length(1), // separator
-        Constraint::Length(2), // field label
+        Constraint::Length(1), // step progress
+        Constraint::Length(1), // spacer
+        Constraint::Length(1), // field label
+        Constraint::Length(1), // spacer
         Constraint::Length(1), // input
-        Constraint::Length(1), // step indicator
         Constraint::Min(0),
         Constraint::Length(1), // hints
     ])
     .split(area);
 
     f.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(
-            "  Create New Workflow",
-            Style::default()
-                .fg(theme::CYAN)
-                .add_modifier(Modifier::BOLD),
-        )])),
+        Paragraph::new(Line::from(vec![
+            Span::styled("  \u{25b7} ", Style::default().fg(theme::ACCENT)),
+            Span::styled(
+                "Create New Workflow",
+                Style::default()
+                    .fg(theme::TEXT_PRIMARY)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])),
         chunks[0],
     );
 
     f.render_widget(widgets::separator(chunks[1].width), chunks[1]);
+
+    // Step progress indicator with filled/hollow circles
+    let progress: Vec<Span> = (0..4)
+        .map(|i| {
+            if i < state.create_step {
+                Span::styled("\u{25cf} ", Style::default().fg(theme::GREEN))
+            } else if i == state.create_step {
+                Span::styled("\u{25cf} ", Style::default().fg(theme::ACCENT))
+            } else {
+                Span::styled("\u{25cb} ", Style::default().fg(theme::TEXT_TERTIARY))
+            }
+        })
+        .collect();
+    let mut step_line = vec![Span::raw("  ")];
+    step_line.extend(progress);
+    step_line.push(Span::styled(
+        format!("  Step {} of 4", state.create_step + 1),
+        Style::default().fg(theme::TEXT_SECONDARY),
+    ));
+    f.render_widget(Paragraph::new(Line::from(step_line)), chunks[2]);
 
     let (label, value, placeholder) = match state.create_step {
         0 => ("Workflow name:", &state.create_name, "my-workflow"),
@@ -471,8 +516,11 @@ fn draw_create(f: &mut Frame, area: Rect, state: &WorkflowState) {
     };
 
     f.render_widget(
-        Paragraph::new(Line::from(vec![Span::raw(format!("  {label}"))])),
-        chunks[2],
+        Paragraph::new(Line::from(vec![Span::styled(
+            format!("  {label}"),
+            Style::default().fg(theme::TEXT_PRIMARY),
+        )])),
+        chunks[4],
     );
 
     if state.create_step < 3 {
@@ -488,7 +536,7 @@ fn draw_create(f: &mut Frame, area: Rect, state: &WorkflowState) {
         };
         f.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::raw("  > "),
+                Span::styled("  \u{276f} ", Style::default().fg(theme::ACCENT)),
                 Span::styled(display, style),
                 Span::styled(
                     "\u{2588}",
@@ -497,46 +545,39 @@ fn draw_create(f: &mut Frame, area: Rect, state: &WorkflowState) {
                         .add_modifier(Modifier::SLOW_BLINK),
                 ),
             ])),
-            chunks[3],
+            chunks[6],
         );
     } else {
         // Review
         f.render_widget(
             Paragraph::new(vec![
                 Line::from(vec![
-                    Span::raw("  Name: "),
+                    Span::styled("  Name:  ", Style::default().fg(theme::TEXT_SECONDARY)),
                     Span::styled(&state.create_name, Style::default().fg(theme::CYAN)),
                 ]),
                 Line::from(vec![
-                    Span::raw("  Desc: "),
-                    Span::styled(&state.create_desc, theme::dim_style()),
+                    Span::styled("  Desc:  ", Style::default().fg(theme::TEXT_SECONDARY)),
+                    Span::styled(&state.create_desc, Style::default().fg(theme::TEXT_PRIMARY)),
                 ]),
             ]),
-            chunks[3],
+            chunks[6],
         );
     }
-
-    f.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(
-            format!("  Step {} of 4", state.create_step + 1),
-            theme::dim_style(),
-        )])),
-        chunks[4],
-    );
 
     let hint_text = if state.create_step == 3 {
         "  [Enter] Create  [Esc] Back"
     } else {
         "  [Enter] Next  [Esc] Back"
     };
-    f.render_widget(widgets::hint_bar(hint_text), chunks[6]);
+    f.render_widget(widgets::hint_bar(hint_text), chunks[8]);
 }
 
 fn draw_run_input(f: &mut Frame, area: Rect, state: &WorkflowState) {
     let chunks = Layout::vertical([
         Constraint::Length(2),
         Constraint::Length(1),
-        Constraint::Length(2),
+        Constraint::Length(1),
+        Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Min(0),
         Constraint::Length(1),
@@ -550,19 +591,25 @@ fn draw_run_input(f: &mut Frame, area: Rect, state: &WorkflowState) {
         .unwrap_or("?");
 
     f.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(
-            format!("  Run: {wf_name}"),
-            Style::default()
-                .fg(theme::CYAN)
-                .add_modifier(Modifier::BOLD),
-        )])),
+        Paragraph::new(Line::from(vec![
+            Span::styled("  \u{25b7} ", Style::default().fg(theme::ACCENT)),
+            Span::styled(
+                format!("Run: {wf_name}"),
+                Style::default()
+                    .fg(theme::TEXT_PRIMARY)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])),
         chunks[0],
     );
 
     f.render_widget(widgets::separator(chunks[1].width), chunks[1]);
 
     f.render_widget(
-        Paragraph::new(Line::from(vec![Span::raw("  Input (JSON or text):")])),
+        Paragraph::new(Line::from(vec![Span::styled(
+            "  Input (JSON or text):",
+            Style::default().fg(theme::TEXT_PRIMARY),
+        )])),
         chunks[2],
     );
 
@@ -578,7 +625,7 @@ fn draw_run_input(f: &mut Frame, area: Rect, state: &WorkflowState) {
     };
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::raw("  > "),
+            Span::styled("  \u{276f} ", Style::default().fg(theme::ACCENT)),
             Span::styled(display, style),
             Span::styled(
                 "\u{2588}",
@@ -587,53 +634,64 @@ fn draw_run_input(f: &mut Frame, area: Rect, state: &WorkflowState) {
                     .add_modifier(Modifier::SLOW_BLINK),
             ),
         ])),
-        chunks[3],
+        chunks[4],
     );
 
-    f.render_widget(widgets::hint_bar("  [Enter] Run  [Esc] Cancel"), chunks[5]);
+    f.render_widget(widgets::hint_bar("  [Enter] Run  [Esc] Cancel"), chunks[6]);
 }
 
 fn draw_run_result(f: &mut Frame, area: Rect, state: &WorkflowState) {
     let chunks = Layout::vertical([
         Constraint::Length(2),
+        Constraint::Length(1),
         Constraint::Min(3),
         Constraint::Length(1),
     ])
     .split(area);
 
     f.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(
-            "  Workflow Run Result",
-            Style::default()
-                .fg(theme::CYAN)
-                .add_modifier(Modifier::BOLD),
-        )])),
+        Paragraph::new(Line::from(vec![
+            Span::styled("  \u{25b7} ", Style::default().fg(theme::ACCENT)),
+            Span::styled(
+                "Workflow Run Result",
+                Style::default()
+                    .fg(theme::TEXT_PRIMARY)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])),
         chunks[0],
     );
+
+    f.render_widget(widgets::separator(chunks[1].width), chunks[1]);
 
     if state.loading {
         f.render_widget(
             widgets::spinner(state.tick, "Running workflow\u{2026}"),
-            chunks[1],
+            chunks[2],
         );
     } else if let Some(ref result) = state.run_result {
         f.render_widget(
             Paragraph::new(vec![
                 Line::from(vec![
-                    Span::styled("  \u{2714} ", Style::default().fg(theme::GREEN)),
-                    Span::raw("Complete"),
+                    Span::styled("  \u{25cf} ", Style::default().fg(theme::GREEN)),
+                    Span::styled(
+                        "Complete",
+                        Style::default()
+                            .fg(theme::GREEN)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                 ]),
                 Line::from(""),
                 Line::from(vec![Span::styled(
                     format!("  {result}"),
-                    Style::default().fg(theme::CYAN),
+                    Style::default().fg(theme::TEXT_PRIMARY),
                 )]),
             ]),
-            chunks[1],
+            chunks[2],
         );
     } else {
-        f.render_widget(widgets::empty_state("No result."), chunks[1]);
+        f.render_widget(widgets::empty_state("No result."), chunks[2]);
     }
 
-    f.render_widget(widgets::hint_bar("  [Enter/Esc] Back"), chunks[2]);
+    f.render_widget(widgets::hint_bar("  [Enter/Esc] Back"), chunks[3]);
 }

@@ -261,7 +261,7 @@ impl MemoryState {
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
 pub fn draw(f: &mut Frame, area: Rect, state: &mut MemoryState) {
-    let inner = widgets::render_screen_block(f, area, "Memory");
+    let inner = widgets::render_screen_block(f, area, "\u{25a1} Memory");
 
     match state.sub {
         MemorySub::AgentSelect => draw_agent_select(f, inner, state),
@@ -279,12 +279,20 @@ fn draw_agent_select(f: &mut Frame, area: Rect, state: &mut MemoryState) {
     .split(area);
 
     f.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(
-            "  Select an agent to browse its memory:",
-            Style::default()
-                .fg(theme::CYAN)
-                .add_modifier(Modifier::BOLD),
-        )])),
+        Paragraph::new(vec![
+            Line::from(vec![Span::styled(
+                "  Select an agent to browse its memory:",
+                Style::default()
+                    .fg(theme::CYAN)
+                    .add_modifier(Modifier::BOLD),
+            )]),
+            Line::from(vec![
+                Span::styled("  ", theme::table_header()),
+                Span::styled(format!("{:<20}", "Agent Name"), theme::table_header()),
+                Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
+                Span::styled("ID", theme::table_header()),
+            ]),
+        ]),
         chunks[0],
     );
 
@@ -294,7 +302,10 @@ fn draw_agent_select(f: &mut Frame, area: Rect, state: &mut MemoryState) {
             chunks[1],
         );
     } else if state.agents.is_empty() {
-        f.render_widget(widgets::empty_state("No agents available."), chunks[1]);
+        f.render_widget(
+            widgets::empty_state("No memory entries. Agents store data here automatically."),
+            chunks[1],
+        );
     } else {
         let items: Vec<ListItem> = state
             .agents
@@ -306,11 +317,13 @@ fn draw_agent_select(f: &mut Frame, area: Rect, state: &mut MemoryState) {
                     a.id.clone()
                 };
                 ListItem::new(Line::from(vec![
+                    Span::styled("  ", Style::default()),
                     Span::styled(
-                        format!("  {:<20}", a.name),
-                        Style::default().fg(theme::CYAN),
+                        format!("{:<20}", widgets::truncate(&a.name, 19)),
+                        Style::default().fg(theme::TEXT_PRIMARY),
                     ),
-                    Span::styled(format!(" ({id_short})"), theme::dim_style()),
+                    Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
+                    Span::styled(id_short, Style::default().fg(theme::TEXT_SECONDARY)),
                 ]))
             })
             .collect();
@@ -320,7 +333,7 @@ fn draw_agent_select(f: &mut Frame, area: Rect, state: &mut MemoryState) {
     }
 
     f.render_widget(
-        widgets::hint_bar("  [\u{2191}\u{2193}] Navigate  [Enter] Browse KV  [r] Refresh"),
+        widgets::hint_bar("  \u{2191}\u{2193} Navigate  Enter Browse KV  r Refresh"),
         chunks[2],
     );
 }
@@ -343,20 +356,22 @@ fn draw_kv_browser(f: &mut Frame, area: Rect, state: &mut MemoryState) {
         Paragraph::new(vec![
             Line::from(vec![
                 Span::styled(
-                    format!("  Memory: {agent_name}"),
+                    format!("  {agent_name}"),
                     Style::default()
                         .fg(theme::CYAN)
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
-                    format!("  ({} pairs)", state.kv_pairs.len()),
-                    theme::dim_style(),
+                    format!("  \u{2502} {} pairs", state.kv_pairs.len()),
+                    Style::default().fg(theme::TEXT_SECONDARY),
                 ),
             ]),
-            Line::from(vec![Span::styled(
-                format!("  {:<24} {}", "Key", "Value"),
-                theme::table_header(),
-            )]),
+            Line::from(vec![
+                Span::styled("  ", theme::table_header()),
+                Span::styled(format!("{:<24}", "Key"), theme::table_header()),
+                Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
+                Span::styled("Value", theme::table_header()),
+            ]),
         ]),
         chunks[0],
     );
@@ -365,7 +380,7 @@ fn draw_kv_browser(f: &mut Frame, area: Rect, state: &mut MemoryState) {
         f.render_widget(widgets::spinner(state.tick, "Loading\u{2026}"), chunks[1]);
     } else if state.kv_pairs.is_empty() {
         f.render_widget(
-            widgets::empty_state("No key-value pairs. Press [a] to add one."),
+            widgets::empty_state("No key-value pairs. Press a to add one."),
             chunks[1],
         );
     } else {
@@ -379,11 +394,13 @@ fn draw_kv_browser(f: &mut Frame, area: Rect, state: &mut MemoryState) {
                     kv.value.clone()
                 };
                 ListItem::new(Line::from(vec![
+                    Span::styled("  ", Style::default()),
                     Span::styled(
-                        format!("  {:<24}", widgets::truncate(&kv.key, 23)),
+                        format!("{:<24}", widgets::truncate(&kv.key, 23)),
                         Style::default().fg(theme::YELLOW),
                     ),
-                    Span::styled(format!(" {val_display}"), theme::dim_style()),
+                    Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
+                    Span::styled(val_display, Style::default().fg(theme::TEXT_SECONDARY)),
                 ]))
             })
             .collect();
@@ -397,7 +414,7 @@ fn draw_kv_browser(f: &mut Frame, area: Rect, state: &mut MemoryState) {
             state.confirm_delete,
             "  Delete this key? [y] Yes  [any] Cancel",
             &state.status_msg,
-            "  [\u{2191}\u{2193}] Navigate  [a] Add  [e] Edit  [d] Delete  [Esc] Back  [r] Refresh",
+            "  \u{2191}\u{2193} Navigate  a Add  e Edit  d Delete  Esc Back  r Refresh",
         ),
         chunks[2],
     );
@@ -416,9 +433,9 @@ fn draw_edit(f: &mut Frame, area: Rect, state: &MemoryState) {
     .split(area);
 
     let title = if state.sub == MemorySub::AddKey {
-        "Add Key-Value Pair"
+        "\u{253c} Add Key-Value Pair"
     } else {
-        "Edit Value"
+        "\u{270e} Edit Value"
     };
 
     f.render_widget(
@@ -438,8 +455,12 @@ fn draw_edit(f: &mut Frame, area: Rect, state: &MemoryState) {
     } else {
         theme::dim_style()
     };
+    let key_indicator = if key_active { "\u{25cf}" } else { "\u{25cb}" };
     f.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled("  Key: ", key_label_style)])),
+        Paragraph::new(Line::from(vec![
+            Span::styled(format!("  {key_indicator} "), key_label_style),
+            Span::styled("Key:", key_label_style),
+        ])),
         chunks[2],
     );
     let key_display = if state.key_buf.is_empty() {
@@ -452,7 +473,7 @@ fn draw_edit(f: &mut Frame, area: Rect, state: &MemoryState) {
     } else {
         theme::input_style()
     };
-    let mut key_spans = vec![Span::raw("  > "), Span::styled(key_display, key_style)];
+    let mut key_spans = vec![Span::raw("    "), Span::styled(key_display, key_style)];
     if key_active {
         key_spans.push(Span::styled(
             "\u{2588}",
@@ -470,8 +491,12 @@ fn draw_edit(f: &mut Frame, area: Rect, state: &MemoryState) {
     } else {
         theme::dim_style()
     };
+    let val_indicator = if val_active { "\u{25cf}" } else { "\u{25cb}" };
     f.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled("  Value: ", val_label_style)])),
+        Paragraph::new(Line::from(vec![
+            Span::styled(format!("  {val_indicator} "), val_label_style),
+            Span::styled("Value:", val_label_style),
+        ])),
         chunks[4],
     );
     let val_display = if state.value_buf.is_empty() {
@@ -484,7 +509,7 @@ fn draw_edit(f: &mut Frame, area: Rect, state: &MemoryState) {
     } else {
         theme::input_style()
     };
-    let mut val_spans = vec![Span::raw("  > "), Span::styled(val_display, val_style)];
+    let mut val_spans = vec![Span::raw("    "), Span::styled(val_display, val_style)];
     if val_active {
         val_spans.push(Span::styled(
             "\u{2588}",
@@ -496,7 +521,7 @@ fn draw_edit(f: &mut Frame, area: Rect, state: &MemoryState) {
     f.render_widget(Paragraph::new(Line::from(val_spans)), chunks[5]);
 
     f.render_widget(
-        widgets::hint_bar("  [Tab] Switch field  [Enter] Save  [Esc] Cancel"),
+        widgets::hint_bar("  Tab Switch field  Enter Save  Esc Cancel"),
         chunks[6],
     );
 }

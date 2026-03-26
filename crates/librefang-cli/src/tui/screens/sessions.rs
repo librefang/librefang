@@ -174,7 +174,7 @@ impl SessionsState {
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
 pub fn draw(f: &mut Frame, area: Rect, state: &mut SessionsState) {
-    let inner = widgets::render_screen_block(f, area, "Sessions");
+    let inner = widgets::render_screen_block(f, area, "\u{25c7} Sessions");
 
     let (header, content, hints) = widgets::layout_hch(inner, 2);
 
@@ -188,16 +188,25 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut SessionsState) {
             format!("  (filter: \"{}\")", state.search_buf)
         };
         f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(
-                    format!(
-                        "  {:<20} {:<16} {:<8} {}",
-                        "Agent", "Session ID", "Msgs", "Created"
+            Paragraph::new(vec![
+                Line::from(vec![
+                    Span::styled(
+                        format!("  {} sessions", state.filtered.len()),
+                        Style::default().fg(theme::TEXT_SECONDARY),
                     ),
-                    theme::table_header(),
-                ),
-                Span::styled(search_hint, theme::dim_style()),
-            ])),
+                    Span::styled(search_hint, theme::dim_style()),
+                ]),
+                Line::from(vec![
+                    Span::styled("  ", theme::table_header()),
+                    Span::styled(format!("{:<20}", "Agent"), theme::table_header()),
+                    Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
+                    Span::styled(format!("{:<14}", "Session ID"), theme::table_header()),
+                    Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
+                    Span::styled(format!("{:<6}", "Msgs"), theme::table_header()),
+                    Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
+                    Span::styled("Created", theme::table_header()),
+                ]),
+            ]),
             header,
         );
     }
@@ -209,7 +218,10 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut SessionsState) {
             content,
         );
     } else if state.filtered.is_empty() {
-        f.render_widget(widgets::empty_state("No sessions found."), content);
+        f.render_widget(
+            widgets::empty_state("No sessions yet. Start a chat to create one."),
+            content,
+        );
     } else {
         let items: Vec<ListItem> = state
             .filtered
@@ -221,17 +233,29 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut SessionsState) {
                 } else {
                     s.id.clone()
                 };
-                ListItem::new(Line::from(vec![
+                let msg_indicator = if s.message_count > 0 {
                     Span::styled(
-                        format!("  {:<20}", widgets::truncate(&s.agent_name, 19)),
+                        format!("{:<6}", s.message_count),
+                        Style::default().fg(theme::GREEN),
+                    )
+                } else {
+                    Span::styled(format!("{:<6}", s.message_count), theme::dim_style())
+                };
+                ListItem::new(Line::from(vec![
+                    Span::styled("  ", Style::default()),
+                    Span::styled(
+                        format!("{:<20}", widgets::truncate(&s.agent_name, 19)),
                         Style::default().fg(theme::CYAN),
                     ),
-                    Span::styled(format!(" {:<16}", id_short), theme::dim_style()),
+                    Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
                     Span::styled(
-                        format!(" {:<8}", s.message_count),
-                        Style::default().fg(theme::GREEN),
+                        format!("{:<14}", id_short),
+                        Style::default().fg(theme::TEXT_SECONDARY),
                     ),
-                    Span::styled(format!(" {}", s.created), theme::dim_style()),
+                    Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
+                    msg_indicator,
+                    Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
+                    Span::styled(s.created.clone(), Style::default().fg(theme::TEXT_TERTIARY)),
                 ]))
             })
             .collect();
@@ -246,7 +270,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut SessionsState) {
             state.confirm_delete,
             "  Delete this session? [y] Yes  [any] Cancel",
             &state.status_msg,
-            "  [\u{2191}\u{2193}] Navigate  [Enter] Open in Chat  [d] Delete  [/] Search  [r] Refresh",
+            "  \u{2191}\u{2193} Navigate  Enter Open  d Delete  / Search  r Refresh",
         ),
         hints,
     );

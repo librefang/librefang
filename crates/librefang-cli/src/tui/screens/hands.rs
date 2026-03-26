@@ -196,7 +196,7 @@ impl HandsState {
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
 pub fn draw(f: &mut Frame, area: Rect, state: &mut HandsState) {
-    let inner = widgets::render_screen_block(f, area, "Hands");
+    let inner = widgets::render_screen_block(f, area, "\u{270b} Hands");
 
     let chunks = Layout::vertical([
         Constraint::Length(1), // sub-tab bar
@@ -218,18 +218,18 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut HandsState) {
 
 fn draw_sub_tabs(f: &mut Frame, area: Rect, active: HandsSub) {
     let tabs = [
-        (HandsSub::Marketplace, "1 Marketplace"),
-        (HandsSub::Active, "2 Active"),
+        (HandsSub::Marketplace, "\u{25cf} Marketplace"),
+        (HandsSub::Active, "\u{25cf} Active"),
     ];
     let mut spans = vec![Span::raw("  ")];
-    for (sub, label) in &tabs {
+    for (i, (sub, label)) in tabs.iter().enumerate() {
         let style = if *sub == active {
             theme::tab_active()
         } else {
             theme::tab_inactive()
         };
-        spans.push(Span::styled(format!(" {label} "), style));
-        spans.push(Span::raw(" "));
+        spans.push(Span::styled(format!(" {} {label} ", i + 1), style));
+        spans.push(Span::raw("  "));
     }
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
@@ -237,6 +237,7 @@ fn draw_sub_tabs(f: &mut Frame, area: Rect, active: HandsSub) {
 fn draw_marketplace(f: &mut Frame, area: Rect, state: &mut HandsState) {
     let chunks = Layout::vertical([
         Constraint::Length(1), // header
+        Constraint::Length(1), // separator
         Constraint::Min(3),    // list
         Constraint::Length(1), // hints
     ])
@@ -245,30 +246,35 @@ fn draw_marketplace(f: &mut Frame, area: Rect, state: &mut HandsState) {
     f.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
             format!(
-                "  {:<4} {:<16} {:<14} {:<6} {}",
-                "", "Name", "Category", "Ready", "Description"
+                "  {:<4} {:<16} {:<14} {:<8} {}",
+                "", "Name", "Category", "Status", "Description"
             ),
             theme::table_header(),
         )])),
         chunks[0],
     );
 
+    f.render_widget(widgets::separator(chunks[1].width), chunks[1]);
+
     if state.loading {
         f.render_widget(
             widgets::spinner(state.tick, "Loading hands\u{2026}"),
-            chunks[1],
+            chunks[2],
         );
     } else if state.definitions.is_empty() {
-        f.render_widget(widgets::empty_state("No hands available."), chunks[1]);
+        f.render_widget(
+            widgets::empty_state("No hand definitions loaded."),
+            chunks[2],
+        );
     } else {
         let items: Vec<ListItem> = state
             .definitions
             .iter()
             .map(|h| {
                 let ready_badge = if h.requirements_met {
-                    Span::styled(" Ready ", Style::default().fg(theme::GREEN))
+                    Span::styled("\u{25cf} Ready ", Style::default().fg(theme::GREEN))
                 } else {
-                    Span::styled(" Setup ", Style::default().fg(theme::YELLOW))
+                    Span::styled("\u{25cb} Setup ", Style::default().fg(theme::YELLOW))
                 };
                 let category_style = match h.category.as_str() {
                     "Content" => Style::default().fg(theme::PURPLE),
@@ -290,14 +296,14 @@ fn draw_marketplace(f: &mut Frame, area: Rect, state: &mut HandsState) {
                     ready_badge,
                     Span::styled(
                         format!(" {}", widgets::truncate(&h.description, 40)),
-                        theme::dim_style(),
+                        Style::default().fg(theme::TEXT_SECONDARY),
                     ),
                 ]))
             })
             .collect();
 
         let list = widgets::themed_list(items);
-        f.render_stateful_widget(list, chunks[1], &mut state.marketplace_list);
+        f.render_stateful_widget(list, chunks[2], &mut state.marketplace_list);
     }
 
     f.render_widget(
@@ -305,13 +311,14 @@ fn draw_marketplace(f: &mut Frame, area: Rect, state: &mut HandsState) {
             &state.status_msg,
             "  [\u{2191}\u{2193}] Navigate  [a/Enter] Activate  [r] Refresh",
         ),
-        chunks[2],
+        chunks[3],
     );
 }
 
 fn draw_active(f: &mut Frame, area: Rect, state: &mut HandsState) {
     let chunks = Layout::vertical([
         Constraint::Length(1), // header
+        Constraint::Length(1), // separator
         Constraint::Min(3),    // list
         Constraint::Length(1), // hints
     ])
@@ -320,7 +327,7 @@ fn draw_active(f: &mut Frame, area: Rect, state: &mut HandsState) {
     f.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
             format!(
-                "  {:<16} {:<10} {:<20} {}",
+                "  {:<16} {:<12} {:<20} {}",
                 "Agent", "Status", "Hand", "Since"
             ),
             theme::table_header(),
@@ -328,43 +335,48 @@ fn draw_active(f: &mut Frame, area: Rect, state: &mut HandsState) {
         chunks[0],
     );
 
+    f.render_widget(widgets::separator(chunks[1].width), chunks[1]);
+
     if state.loading {
         f.render_widget(
             widgets::spinner(state.tick, "Loading active hands\u{2026}"),
-            chunks[1],
+            chunks[2],
         );
     } else if state.instances.is_empty() {
         f.render_widget(
             widgets::empty_state("No active hands. Press [1] to browse the marketplace."),
-            chunks[1],
+            chunks[2],
         );
     } else {
         let items: Vec<ListItem> = state
             .instances
             .iter()
             .map(|i| {
-                let status_style = match i.status.as_str() {
-                    "Active" => Style::default().fg(theme::GREEN),
-                    "Paused" => Style::default().fg(theme::YELLOW),
-                    _ => Style::default().fg(theme::RED),
+                let (status_icon, status_style) = match i.status.as_str() {
+                    "Active" => ("\u{25cf}", Style::default().fg(theme::GREEN)),
+                    "Paused" => ("\u{25cb}", Style::default().fg(theme::YELLOW)),
+                    _ => ("\u{25cb}", Style::default().fg(theme::RED)),
                 };
                 ListItem::new(Line::from(vec![
                     Span::styled(
                         format!("  {:<16}", widgets::truncate(&i.agent_name, 15)),
                         Style::default().fg(theme::CYAN),
                     ),
-                    Span::styled(format!("{:<10}", &i.status), status_style),
+                    Span::styled(format!("{status_icon} {:<10}", &i.status), status_style),
                     Span::styled(
                         format!("{:<20}", widgets::truncate(&i.hand_id, 19)),
-                        theme::dim_style(),
+                        Style::default().fg(theme::TEXT_SECONDARY),
                     ),
-                    Span::styled(widgets::truncate(&i.activated_at, 19), theme::dim_style()),
+                    Span::styled(
+                        widgets::truncate(&i.activated_at, 19),
+                        Style::default().fg(theme::TEXT_SECONDARY),
+                    ),
                 ]))
             })
             .collect();
 
         let list = widgets::themed_list(items);
-        f.render_stateful_widget(list, chunks[1], &mut state.active_list);
+        f.render_stateful_widget(list, chunks[2], &mut state.active_list);
     }
 
     f.render_widget(
@@ -374,6 +386,6 @@ fn draw_active(f: &mut Frame, area: Rect, state: &mut HandsState) {
             &state.status_msg,
             "  [\u{2191}\u{2193}] Navigate  [p] Pause/Resume  [d] Deactivate  [r] Refresh",
         ),
-        chunks[2],
+        chunks[3],
     );
 }

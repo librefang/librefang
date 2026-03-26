@@ -618,7 +618,7 @@ impl ChannelState {
 pub fn draw(f: &mut Frame, area: Rect, state: &mut ChannelState) {
     let ready = state.ready_count();
     let total = state.channels.len();
-    let title = format!("Channels ({ready}/{total} ready)");
+    let title = format!("\u{25c8} Channels ({ready}/{total} ready)");
 
     let inner = widgets::render_screen_block(f, area, &title);
 
@@ -632,29 +632,24 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut ChannelState) {
 fn draw_list(f: &mut Frame, area: Rect, state: &mut ChannelState) {
     let chunks = Layout::vertical([
         Constraint::Length(1), // category tabs
-        Constraint::Length(2), // header
+        Constraint::Length(1), // spacer
+        Constraint::Length(1), // header
         Constraint::Min(3),    // list
         Constraint::Length(1), // hints
     ])
     .split(area);
 
-    // Category tabs
-    let cat_spans: Vec<Span> = CATEGORIES
-        .iter()
-        .enumerate()
-        .map(|(i, cat)| {
-            if i == state.category_idx {
-                Span::styled(
-                    format!(" [{cat}] "),
-                    Style::default()
-                        .fg(theme::CYAN)
-                        .add_modifier(Modifier::BOLD),
-                )
-            } else {
-                Span::styled(format!("  {cat}  "), theme::dim_style())
-            }
-        })
-        .collect();
+    // Category tabs — use tab_active/tab_inactive for modern look
+    let mut cat_spans: Vec<Span> = vec![Span::raw("  ")];
+    for (i, cat) in CATEGORIES.iter().enumerate() {
+        let style = if i == state.category_idx {
+            theme::tab_active()
+        } else {
+            theme::tab_inactive()
+        };
+        cat_spans.push(Span::styled(format!(" {cat} "), style));
+        cat_spans.push(Span::raw(" "));
+    }
     f.render_widget(Paragraph::new(Line::from(cat_spans)), chunks[0]);
 
     // Header
@@ -666,56 +661,86 @@ fn draw_list(f: &mut Frame, area: Rect, state: &mut ChannelState) {
             ),
             theme::table_header(),
         )])),
-        chunks[1],
+        chunks[2],
     );
 
     if state.loading {
         f.render_widget(
             widgets::spinner(state.tick, "Loading channels\u{2026}"),
-            chunks[2],
+            chunks[3],
         );
     } else {
         let filtered = state.filtered_channels();
-        let items: Vec<ListItem> = filtered
-            .iter()
-            .map(|ch| {
-                let (badge, badge_style) = match ch.status {
-                    ChannelStatus::Ready => ("[Ready]", theme::channel_ready()),
-                    ChannelStatus::MissingEnv => ("[Missing env]", theme::channel_missing()),
-                    ChannelStatus::NotConfigured => ("[Not configured]", theme::channel_off()),
-                };
-                let env_summary: String = ch
-                    .env_vars
-                    .iter()
-                    .map(|(v, set)| {
-                        if *set {
-                            format!("\u{2714}{v}")
-                        } else {
-                            format!("\u{2718}{v}")
+        if filtered.is_empty() {
+            f.render_widget(
+                widgets::empty_state("No channels configured. Add messaging integrations here."),
+                chunks[3],
+            );
+        } else {
+            let items: Vec<ListItem> = filtered
+                .iter()
+                .map(|ch| {
+                    let (indicator, indicator_style) = match ch.status {
+                        ChannelStatus::Ready => (
+                            "\u{25cf}",
+                            Style::default()
+                                .fg(theme::GREEN)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        ChannelStatus::MissingEnv => {
+                            ("\u{25cf}", Style::default().fg(theme::YELLOW))
                         }
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                let cat_display = format!("{:<14}", ch.category);
-                ListItem::new(Line::from(vec![
-                    Span::styled(
-                        format!("  {:<18}", ch.display_name),
-                        Style::default().fg(theme::CYAN),
-                    ),
-                    Span::styled(cat_display, theme::dim_style()),
-                    Span::styled(format!(" {:<16}", badge), badge_style),
-                    Span::styled(format!(" {env_summary}"), theme::dim_style()),
-                ]))
-            })
-            .collect();
+                        ChannelStatus::NotConfigured => {
+                            ("\u{25cb}", Style::default().fg(theme::RED))
+                        }
+                    };
+                    let status_label = match ch.status {
+                        ChannelStatus::Ready => "Ready",
+                        ChannelStatus::MissingEnv => "Missing env",
+                        ChannelStatus::NotConfigured => "Not configured",
+                    };
+                    let env_summary: String = ch
+                        .env_vars
+                        .iter()
+                        .map(|(v, set)| {
+                            if *set {
+                                format!("\u{25cf} {v}")
+                            } else {
+                                format!("\u{25cb} {v}")
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join("  ");
+                    ListItem::new(Line::from(vec![
+                        Span::styled(format!("  {indicator} "), indicator_style),
+                        Span::styled(
+                            format!("{:<16}", ch.display_name),
+                            Style::default()
+                                .fg(theme::TEXT_PRIMARY)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(format!("{:<14}", ch.category), theme::dim_style()),
+                        Span::styled(
+                            format!("{:<16}", status_label),
+                            match ch.status {
+                                ChannelStatus::Ready => theme::channel_ready(),
+                                ChannelStatus::MissingEnv => theme::channel_missing(),
+                                ChannelStatus::NotConfigured => theme::channel_off(),
+                            },
+                        ),
+                        Span::styled(env_summary, theme::dim_style()),
+                    ]))
+                })
+                .collect();
 
-        let list = widgets::themed_list(items);
-        f.render_stateful_widget(list, chunks[2], &mut state.list_state);
+            let list = widgets::themed_list(items);
+            f.render_stateful_widget(list, chunks[3], &mut state.list_state);
+        }
     }
 
     f.render_widget(
         widgets::hint_bar("  [\u{2191}\u{2193}] Navigate  [Tab] Category  [Enter] Setup  [t] Test  [e/d] Enable/Disable  [r] Refresh"),
-        chunks[3],
+        chunks[4],
     );
 }
 

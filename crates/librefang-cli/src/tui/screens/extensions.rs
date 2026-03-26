@@ -281,7 +281,7 @@ impl ExtensionsState {
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
 pub fn draw(f: &mut Frame, area: Rect, state: &mut ExtensionsState) {
-    let inner = widgets::render_screen_block(f, area, "Extensions");
+    let inner = widgets::render_screen_block(f, area, "\u{29c9} Extensions");
 
     let chunks = Layout::vertical([
         Constraint::Length(1), // sub-tab bar
@@ -308,22 +308,35 @@ fn draw_sub_tabs(f: &mut Frame, area: Rect, state: &ExtensionsState) {
         (ExtSub::Health, "3 Health"),
     ];
     let mut spans = vec![Span::raw("  ")];
-    for (sub, label) in &tabs {
-        let style = if *sub == state.sub {
-            theme::tab_active()
+    for (i, (sub, label)) in tabs.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(
+                " \u{2502} ",
+                Style::default().fg(theme::BORDER),
+            ));
+        }
+        if *sub == state.sub {
+            spans.push(Span::styled(
+                format!(" \u{25cf} {label} "),
+                theme::tab_active(),
+            ));
         } else {
-            theme::tab_inactive()
-        };
-        spans.push(Span::styled(format!(" {label} "), style));
-        spans.push(Span::raw(" "));
+            spans.push(Span::styled(
+                format!(" \u{25cb} {label} "),
+                theme::tab_inactive(),
+            ));
+        }
     }
 
     // Show search query if active
     if state.searching {
-        spans.push(Span::raw("  "));
-        spans.push(Span::styled("Search: ", Style::default().fg(theme::YELLOW)));
+        spans.push(Span::raw("   "));
         spans.push(Span::styled(
-            format!("{}_", state.search_query),
+            "\u{1f50d} ",
+            Style::default().fg(theme::YELLOW),
+        ));
+        spans.push(Span::styled(
+            format!("{}\u{2588}", state.search_query),
             theme::input_style(),
         ));
     }
@@ -334,15 +347,24 @@ fn draw_sub_tabs(f: &mut Frame, area: Rect, state: &ExtensionsState) {
 fn status_badge(status: &str) -> (String, Style) {
     let lower = status.to_lowercase();
     if lower.contains("ready") || lower.contains("connected") {
-        ("[Ready]".to_string(), Style::default().fg(theme::GREEN))
+        (
+            "\u{25cf} Ready".to_string(),
+            Style::default().fg(theme::GREEN),
+        )
     } else if lower.contains("setup") {
-        ("[Setup]".to_string(), Style::default().fg(theme::YELLOW))
+        (
+            "\u{25d4} Setup".to_string(),
+            Style::default().fg(theme::YELLOW),
+        )
     } else if lower.contains("error") {
-        ("[Error]".to_string(), Style::default().fg(theme::RED))
+        (
+            "\u{25cf} Error".to_string(),
+            Style::default().fg(theme::RED),
+        )
     } else if lower.contains("disabled") {
-        ("[Off]".to_string(), theme::dim_style())
+        ("\u{25cb} Off".to_string(), theme::dim_style())
     } else {
-        ("".to_string(), theme::dim_style())
+        ("\u{25cb} ---".to_string(), theme::dim_style())
     }
 }
 
@@ -372,7 +394,7 @@ fn draw_browse(f: &mut Frame, area: Rect, state: &mut ExtensionsState) {
         );
     } else if state.all_extensions.is_empty() {
         f.render_widget(
-            widgets::empty_state("No integrations loaded. Press r to refresh."),
+            widgets::empty_state("No extensions installed. Browse the marketplace with [b]."),
             chunks[1],
         );
     } else {
@@ -382,9 +404,12 @@ fn draw_browse(f: &mut Frame, area: Rect, state: &mut ExtensionsState) {
             .iter()
             .map(|ext| {
                 let (badge, badge_style) = if ext.installed {
-                    ("[Installed]".to_string(), Style::default().fg(theme::GREEN))
+                    (
+                        "\u{25cf} Installed".to_string(),
+                        Style::default().fg(theme::GREEN),
+                    )
                 } else {
-                    ("[Available]".to_string(), theme::dim_style())
+                    ("\u{25cb} Available".to_string(), theme::dim_style())
                 };
                 ListItem::new(Line::from(vec![
                     Span::raw("  "),
@@ -454,7 +479,7 @@ fn draw_installed(f: &mut Frame, area: Rect, state: &mut ExtensionsState) {
 
     if items.is_empty() {
         f.render_widget(
-            widgets::empty_state("No integrations installed. Browse tab to add."),
+            widgets::empty_state("No extensions installed. Browse the marketplace with [b]."),
             chunks[1],
         );
     } else {
@@ -494,7 +519,7 @@ fn draw_health(f: &mut Frame, area: Rect, state: &mut ExtensionsState) {
 
     if state.health_entries.is_empty() {
         f.render_widget(
-            widgets::empty_state("No MCP health data. Install integrations first."),
+            widgets::empty_state("No extensions installed. Browse the marketplace with [b]."),
             chunks[1],
         );
     } else {
@@ -506,7 +531,10 @@ fn draw_health(f: &mut Frame, area: Rect, state: &mut ExtensionsState) {
                 let error_display = if h.last_error.is_empty() {
                     "\u{2014}".to_string()
                 } else if h.last_error.len() > 30 {
-                    format!("{}...", librefang_types::truncate_str(&h.last_error, 27))
+                    format!(
+                        "{}\u{2026}",
+                        librefang_types::truncate_str(&h.last_error, 27)
+                    )
                 } else {
                     h.last_error.clone()
                 };

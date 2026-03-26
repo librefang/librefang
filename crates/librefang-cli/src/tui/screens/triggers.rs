@@ -252,7 +252,7 @@ impl TriggerState {
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
 pub fn draw(f: &mut Frame, area: Rect, state: &mut TriggerState) {
-    let inner = widgets::render_screen_block(f, area, "Triggers");
+    let inner = widgets::render_screen_block(f, area, "\u{25c9} Triggers");
 
     match state.sub {
         TriggerSubScreen::List => draw_list(f, inner, state),
@@ -262,7 +262,8 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut TriggerState) {
 
 fn draw_list(f: &mut Frame, area: Rect, state: &mut TriggerState) {
     let chunks = Layout::vertical([
-        Constraint::Length(2), // header
+        Constraint::Length(1), // header
+        Constraint::Length(1), // separator
         Constraint::Min(3),    // list
         Constraint::Length(1), // hints
     ])
@@ -272,28 +273,34 @@ fn draw_list(f: &mut Frame, area: Rect, state: &mut TriggerState) {
         Paragraph::new(Line::from(vec![Span::styled(
             format!(
                 "  {:<14} {:<20} {:<8} {}",
-                "Agent", "Pattern", "Fires", "Enabled"
+                "Agent", "Pattern", "Fires", "Status"
             ),
             theme::table_header(),
         )])),
         chunks[0],
     );
 
+    f.render_widget(widgets::separator(chunks[1].width), chunks[1]);
+
     if state.loading {
         f.render_widget(
             widgets::spinner(state.tick, "Loading triggers\u{2026}"),
-            chunks[1],
+            chunks[2],
+        );
+    } else if state.triggers.is_empty() {
+        f.render_widget(
+            widgets::empty_state("No triggers configured. Create one with [n]."),
+            chunks[2],
         );
     } else {
         let mut items: Vec<ListItem> = state
             .triggers
             .iter()
             .map(|tr| {
-                let enabled_str = if tr.enabled { "\u{2714}" } else { "\u{2718}" };
-                let enabled_style = if tr.enabled {
-                    Style::default().fg(theme::GREEN)
+                let (enabled_icon, enabled_style) = if tr.enabled {
+                    ("\u{25cf} Active", Style::default().fg(theme::GREEN))
                 } else {
-                    Style::default().fg(theme::RED)
+                    ("\u{25cb} Off", Style::default().fg(theme::RED))
                 };
                 ListItem::new(Line::from(vec![
                     Span::styled(
@@ -304,8 +311,11 @@ fn draw_list(f: &mut Frame, area: Rect, state: &mut TriggerState) {
                         format!(" {:<20}", widgets::truncate(&tr.pattern, 19)),
                         Style::default().fg(theme::YELLOW),
                     ),
-                    Span::styled(format!(" {:<8}", tr.fires), theme::dim_style()),
-                    Span::styled(format!(" {enabled_str}"), enabled_style),
+                    Span::styled(
+                        format!(" {:<8}", tr.fires),
+                        Style::default().fg(theme::TEXT_SECONDARY),
+                    ),
+                    Span::styled(format!(" {enabled_icon}"), enabled_style),
                 ]))
             })
             .collect();
@@ -318,7 +328,7 @@ fn draw_list(f: &mut Frame, area: Rect, state: &mut TriggerState) {
         )])));
 
         let list = widgets::themed_list(items);
-        f.render_stateful_widget(list, chunks[1], &mut state.list_state);
+        f.render_stateful_widget(list, chunks[2], &mut state.list_state);
     }
 
     f.render_widget(
@@ -326,7 +336,7 @@ fn draw_list(f: &mut Frame, area: Rect, state: &mut TriggerState) {
             &state.status_msg,
             "  [\u{2191}\u{2193}] Navigate  [Enter] Create  [d] Delete  [r] Refresh",
         ),
-        chunks[2],
+        chunks[3],
     );
 }
 
@@ -334,36 +344,60 @@ fn draw_create(f: &mut Frame, area: Rect, state: &mut TriggerState) {
     let chunks = Layout::vertical([
         Constraint::Length(2), // title
         Constraint::Length(1), // separator
+        Constraint::Length(1), // step progress
+        Constraint::Length(1), // spacer
         Constraint::Min(6),    // content
-        Constraint::Length(1), // step indicator
         Constraint::Length(1), // hints
     ])
     .split(area);
 
     f.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(
-            "  Create New Trigger",
-            Style::default()
-                .fg(theme::CYAN)
-                .add_modifier(Modifier::BOLD),
-        )])),
+        Paragraph::new(Line::from(vec![
+            Span::styled("  \u{25c9} ", Style::default().fg(theme::ACCENT)),
+            Span::styled(
+                "Create New Trigger",
+                Style::default()
+                    .fg(theme::TEXT_PRIMARY)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])),
         chunks[0],
     );
 
     f.render_widget(widgets::separator(chunks[1].width), chunks[1]);
 
+    // Step progress indicator with filled/hollow circles
+    let progress: Vec<Span> = (0..6)
+        .map(|i| {
+            if i < state.create_step {
+                Span::styled("\u{25cf} ", Style::default().fg(theme::GREEN))
+            } else if i == state.create_step {
+                Span::styled("\u{25cf} ", Style::default().fg(theme::ACCENT))
+            } else {
+                Span::styled("\u{25cb} ", Style::default().fg(theme::TEXT_TERTIARY))
+            }
+        })
+        .collect();
+    let mut step_line = vec![Span::raw("  ")];
+    step_line.extend(progress);
+    step_line.push(Span::styled(
+        format!("  Step {} of 6", state.create_step + 1),
+        Style::default().fg(theme::TEXT_SECONDARY),
+    ));
+    f.render_widget(Paragraph::new(Line::from(step_line)), chunks[2]);
+
     match state.create_step {
         0 => draw_text_field(
             f,
-            chunks[2],
+            chunks[4],
             "Agent ID:",
             &state.create_agent_id,
             "agent-uuid",
         ),
-        1 => draw_pattern_picker(f, chunks[2], state),
+        1 => draw_pattern_picker(f, chunks[4], state),
         2 => draw_text_field(
             f,
-            chunks[2],
+            chunks[4],
             &format!(
                 "Pattern param for {}:",
                 PATTERN_TYPES
@@ -376,28 +410,20 @@ fn draw_create(f: &mut Frame, area: Rect, state: &mut TriggerState) {
         ),
         3 => draw_text_field(
             f,
-            chunks[2],
+            chunks[4],
             "Prompt template:",
             &state.create_prompt,
             "Handle this: {{event}}",
         ),
         4 => draw_text_field(
             f,
-            chunks[2],
+            chunks[4],
             "Max fires (0 = unlimited):",
             &state.create_max_fires,
             "0",
         ),
-        _ => draw_trigger_review(f, chunks[2], state),
+        _ => draw_trigger_review(f, chunks[4], state),
     }
-
-    f.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(
-            format!("  Step {} of 6", state.create_step + 1),
-            theme::dim_style(),
-        )])),
-        chunks[3],
-    );
 
     let hint_text = if state.create_step == 5 {
         "  [Enter] Create  [Esc] Back"
@@ -406,19 +432,23 @@ fn draw_create(f: &mut Frame, area: Rect, state: &mut TriggerState) {
     } else {
         "  [Enter] Next  [Esc] Back"
     };
-    f.render_widget(widgets::hint_bar(hint_text), chunks[4]);
+    f.render_widget(widgets::hint_bar(hint_text), chunks[5]);
 }
 
 fn draw_text_field(f: &mut Frame, area: Rect, label: &str, value: &str, placeholder: &str) {
     let chunks = Layout::vertical([
-        Constraint::Length(2),
+        Constraint::Length(1),
+        Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Min(0),
     ])
     .split(area);
 
     f.render_widget(
-        Paragraph::new(Line::from(vec![Span::raw(format!("  {label}"))])),
+        Paragraph::new(Line::from(vec![Span::styled(
+            format!("  {label}"),
+            Style::default().fg(theme::TEXT_PRIMARY),
+        )])),
         chunks[0],
     );
 
@@ -430,7 +460,7 @@ fn draw_text_field(f: &mut Frame, area: Rect, label: &str, value: &str, placehol
     };
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::raw("  > "),
+            Span::styled("  \u{276f} ", Style::default().fg(theme::ACCENT)),
             Span::styled(display, style),
             Span::styled(
                 "\u{2588}",
@@ -439,24 +469,37 @@ fn draw_text_field(f: &mut Frame, area: Rect, label: &str, value: &str, placehol
                     .add_modifier(Modifier::SLOW_BLINK),
             ),
         ])),
-        chunks[1],
+        chunks[2],
     );
 }
 
 fn draw_pattern_picker(f: &mut Frame, area: Rect, state: &mut TriggerState) {
-    let chunks = Layout::vertical([Constraint::Length(2), Constraint::Min(3)]).split(area);
+    let chunks = Layout::vertical([Constraint::Length(1), Constraint::Min(3)]).split(area);
 
     f.render_widget(
-        Paragraph::new(Line::from(vec![Span::raw("  Select pattern type:")])),
+        Paragraph::new(Line::from(vec![Span::styled(
+            "  Select pattern type:",
+            Style::default().fg(theme::TEXT_PRIMARY),
+        )])),
         chunks[0],
     );
 
     let items: Vec<ListItem> = PATTERN_TYPES
         .iter()
-        .map(|(name, desc)| {
+        .enumerate()
+        .map(|(i, (name, desc))| {
+            let indicator = if Some(i) == state.pattern_type_list.selected() {
+                "\u{25cf}"
+            } else {
+                "\u{25cb}"
+            };
             ListItem::new(Line::from(vec![
-                Span::styled(format!("  {:<20}", name), Style::default().fg(theme::CYAN)),
-                Span::styled(*desc, theme::dim_style()),
+                Span::styled(
+                    format!("  {indicator} "),
+                    Style::default().fg(theme::ACCENT),
+                ),
+                Span::styled(format!("{:<18}", name), Style::default().fg(theme::CYAN)),
+                Span::styled(*desc, Style::default().fg(theme::TEXT_SECONDARY)),
             ]))
         })
         .collect();
@@ -478,27 +521,36 @@ fn draw_trigger_review(f: &mut Frame, area: Rect, state: &TriggerState) {
 
     let lines = vec![
         Line::from(vec![
-            Span::raw("  Agent:   "),
+            Span::styled("  Agent:   ", Style::default().fg(theme::TEXT_SECONDARY)),
             Span::styled(&state.create_agent_id, Style::default().fg(theme::CYAN)),
         ]),
         Line::from(vec![
-            Span::raw("  Pattern: "),
+            Span::styled("  Pattern: ", Style::default().fg(theme::TEXT_SECONDARY)),
             Span::styled(pattern_name, Style::default().fg(theme::YELLOW)),
-            Span::raw(format!(" ({})", state.create_pattern_param)),
+            Span::styled(
+                format!(" ({})", state.create_pattern_param),
+                Style::default().fg(theme::TEXT_SECONDARY),
+            ),
         ]),
         Line::from(vec![
-            Span::raw("  Prompt:  "),
-            Span::styled(&state.create_prompt, theme::dim_style()),
+            Span::styled("  Prompt:  ", Style::default().fg(theme::TEXT_SECONDARY)),
+            Span::styled(
+                &state.create_prompt,
+                Style::default().fg(theme::TEXT_PRIMARY),
+            ),
         ]),
         Line::from(vec![
-            Span::raw("  Max:     "),
+            Span::styled("  Max:     ", Style::default().fg(theme::TEXT_SECONDARY)),
             Span::styled(max_fires, Style::default().fg(theme::GREEN)),
         ]),
         Line::from(""),
-        Line::from(vec![Span::styled(
-            "  Press Enter to create this trigger.",
-            theme::dim_style(),
-        )]),
+        Line::from(vec![
+            Span::styled("  \u{25cf} ", Style::default().fg(theme::ACCENT)),
+            Span::styled(
+                "Press Enter to create this trigger.",
+                Style::default().fg(theme::TEXT_SECONDARY),
+            ),
+        ]),
     ];
     f.render_widget(Paragraph::new(lines), area);
 }

@@ -237,7 +237,7 @@ impl TemplatesState {
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
 pub fn draw(f: &mut Frame, area: Rect, state: &mut TemplatesState) {
-    let inner = widgets::render_screen_block(f, area, "Templates");
+    let inner = widgets::render_screen_block(f, area, "\u{25a2} Templates");
 
     let chunks = Layout::vertical([
         Constraint::Length(2), // header + category filter
@@ -249,21 +249,25 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut TemplatesState) {
 
     // ── Category filter + header ──
     let active_cat = CATEGORIES[state.category_filter];
-    let cat_spans: Vec<Span> = CATEGORIES
-        .iter()
-        .map(|&c| {
-            if c == active_cat {
-                Span::styled(
-                    format!(" [{c}] "),
-                    Style::default()
-                        .fg(theme::ACCENT)
-                        .add_modifier(Modifier::BOLD),
-                )
-            } else {
-                Span::styled(format!(" {c} "), theme::dim_style())
-            }
-        })
-        .collect();
+    let mut cat_spans: Vec<Span> = vec![Span::raw("  ")];
+    for (i, &c) in CATEGORIES.iter().enumerate() {
+        if i > 0 {
+            cat_spans.push(Span::styled(
+                " \u{2502} ",
+                Style::default().fg(theme::BORDER),
+            ));
+        }
+        if c == active_cat {
+            cat_spans.push(Span::styled(
+                format!(" \u{25cf} {c} "),
+                Style::default()
+                    .fg(theme::ACCENT)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        } else {
+            cat_spans.push(Span::styled(format!(" \u{25cb} {c} "), theme::dim_style()));
+        }
+    }
     f.render_widget(
         Paragraph::new(vec![
             Line::from(cat_spans),
@@ -285,10 +289,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut TemplatesState) {
             chunks[1],
         );
     } else if state.filtered.is_empty() {
-        f.render_widget(
-            widgets::empty_state("No templates in this category."),
-            chunks[1],
-        );
+        f.render_widget(widgets::empty_state("No templates available."), chunks[1]);
     } else {
         let items: Vec<ListItem> = state
             .filtered
@@ -299,9 +300,9 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut TemplatesState) {
                 let auth_badge = if state.providers.is_empty() {
                     Span::raw("")
                 } else if configured {
-                    Span::styled(" \u{2714}", Style::default().fg(theme::GREEN))
+                    Span::styled(" \u{25cf}", Style::default().fg(theme::GREEN))
                 } else {
-                    Span::styled(" \u{2718}", Style::default().fg(theme::RED))
+                    Span::styled(" \u{25cb}", Style::default().fg(theme::RED))
                 };
                 let prov_model = format!("{}/{}", t.provider, widgets::truncate(&t.model, 12));
                 ListItem::new(Line::from(vec![

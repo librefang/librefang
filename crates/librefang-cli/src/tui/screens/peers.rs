@@ -87,7 +87,7 @@ impl PeersState {
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
 pub fn draw(f: &mut Frame, area: Rect, state: &mut PeersState) {
-    let inner = widgets::render_screen_block(f, area, "Peers");
+    let inner = widgets::render_screen_block(f, area, "\u{25cc} Peers");
 
     let chunks = Layout::vertical([
         Constraint::Length(2), // header
@@ -99,19 +99,32 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut PeersState) {
     // Header
     f.render_widget(
         Paragraph::new(vec![
-            Line::from(vec![Span::styled(
-                format!("  OFP Peer Network  ({} peers)", state.peers.len()),
-                Style::default()
-                    .fg(theme::CYAN)
-                    .add_modifier(Modifier::BOLD),
-            )]),
-            Line::from(vec![Span::styled(
-                format!(
-                    "  {:<14} {:<16} {:<20} {:<14} {:<8} {}",
-                    "Node ID", "Name", "Address", "State", "Agents", "Protocol"
+            Line::from(vec![
+                Span::styled(
+                    "  OFP Peer Network",
+                    Style::default()
+                        .fg(theme::CYAN)
+                        .add_modifier(Modifier::BOLD),
                 ),
-                theme::table_header(),
-            )]),
+                Span::styled(
+                    format!("  \u{2502} {} peers", state.peers.len()),
+                    Style::default().fg(theme::TEXT_SECONDARY),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("  ", theme::table_header()),
+                Span::styled(format!("{:<14}", "Node ID"), theme::table_header()),
+                Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
+                Span::styled(format!("{:<16}", "Name"), theme::table_header()),
+                Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
+                Span::styled(format!("{:<20}", "Address"), theme::table_header()),
+                Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
+                Span::styled(format!("{:<10}", "Status"), theme::table_header()),
+                Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
+                Span::styled(format!("{:<6}", "Agents"), theme::table_header()),
+                Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
+                Span::styled("Protocol", theme::table_header()),
+            ]),
         ]),
         chunks[0],
     );
@@ -124,9 +137,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut PeersState) {
         );
     } else if state.peers.is_empty() {
         f.render_widget(
-            widgets::empty_state(
-                "No peers connected. Configure [network] in config.toml to enable OFP.",
-            ),
+            widgets::empty_state("No peers connected. Enable OFP networking in config.toml."),
             chunks[1],
         );
     } else {
@@ -141,35 +152,42 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut PeersState) {
                 };
                 let (state_badge, state_style) = match p.state.to_lowercase().as_str() {
                     "connected" | "active" => {
-                        ("\u{2714} Connected", Style::default().fg(theme::GREEN))
+                        ("\u{25cf} Active", Style::default().fg(theme::GREEN))
                     }
-                    "disconnected" | "inactive" => {
-                        ("\u{2718} Disconnected", Style::default().fg(theme::RED))
-                    }
+                    "disconnected" | "inactive" => ("\u{25cb} Offline", theme::dim_style()),
                     "connecting" | "pending" => {
-                        ("\u{25cb} Connecting", Style::default().fg(theme::YELLOW))
+                        ("\u{25cb} Pending", Style::default().fg(theme::YELLOW))
                     }
                     _ => (&*p.state, theme::dim_style()),
                 };
                 ListItem::new(Line::from(vec![
+                    Span::styled("  ", Style::default()),
                     Span::styled(
-                        format!("  {:<14}", id_short),
+                        format!("{:<14}", id_short),
                         Style::default().fg(theme::PURPLE),
                     ),
+                    Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
                     Span::styled(
-                        format!(" {:<16}", widgets::truncate(&p.node_name, 15)),
+                        format!("{:<16}", widgets::truncate(&p.node_name, 15)),
                         Style::default().fg(theme::CYAN),
                     ),
+                    Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
                     Span::styled(
-                        format!(" {:<20}", widgets::truncate(&p.address, 19)),
-                        theme::dim_style(),
+                        format!("{:<20}", widgets::truncate(&p.address, 19)),
+                        Style::default().fg(theme::TEXT_SECONDARY),
                     ),
-                    Span::styled(format!(" {:<14}", state_badge), state_style),
+                    Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
+                    Span::styled(format!("{:<10}", state_badge), state_style),
+                    Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
                     Span::styled(
-                        format!(" {:<8}", p.agent_count),
+                        format!("{:<6}", p.agent_count),
                         Style::default().fg(theme::GREEN),
                     ),
-                    Span::styled(format!(" {}", &p.protocol_version), theme::dim_style()),
+                    Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
+                    Span::styled(
+                        p.protocol_version.clone(),
+                        Style::default().fg(theme::TEXT_TERTIARY),
+                    ),
                 ]))
             })
             .collect();
@@ -180,7 +198,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut PeersState) {
 
     // Hints
     f.render_widget(
-        widgets::hint_bar("  [\u{2191}\u{2193}] Navigate  [r] Refresh  (auto-refreshes every 15s)"),
+        widgets::hint_bar("  \u{2191}\u{2193} Navigate  r Refresh  (auto-refreshes every 15s)"),
         chunks[2],
     );
 }
