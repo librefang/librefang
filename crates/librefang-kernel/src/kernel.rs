@@ -8259,8 +8259,10 @@ system_prompt = "You are a helpful assistant."
 
         let metadata = CachedWorkspaceMetadata {
             workspace_context: {
-                let mut ws_ctx =
-                    librefang_runtime::workspace_context::WorkspaceContext::detect(workspace);
+                let mut ws_ctx = librefang_runtime::workspace_context::WorkspaceContext::detect(
+                    workspace,
+                    self.config.limits.max_workspace_file_size as u64,
+                );
                 Some(ws_ctx.build_context_section())
             },
             soul_md: read_identity_file(workspace, "SOUL.md"),

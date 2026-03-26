@@ -110,14 +110,26 @@ pub enum ContentBlock {
 /// Allowed image media types.
 const ALLOWED_IMAGE_TYPES: &[&str] = &["image/png", "image/jpeg", "image/gif", "image/webp"];
 
-/// Maximum decoded image size (5 MB).
+/// Default maximum decoded image size for message-level validation (5 MB).
 const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
 
-/// Validate an image content block.
+/// Validate an image content block using the compiled-in 5 MB default.
+///
+/// Prefer [`validate_image_with_limit`] when a
+/// [`LimitsConfig`](crate::config::LimitsConfig) is available.
+pub fn validate_image(media_type: &str, data: &str) -> Result<(), String> {
+    validate_image_with_limit(media_type, data, MAX_IMAGE_BYTES)
+}
+
+/// Validate an image content block with a caller-supplied decoded-size limit.
 ///
 /// Checks that the media type is an allowed image format and the
-/// base64 data doesn't exceed 5 MB when decoded (~7 MB base64).
-pub fn validate_image(media_type: &str, data: &str) -> Result<(), String> {
+/// base64 data doesn't exceed the limit when decoded.
+pub fn validate_image_with_limit(
+    media_type: &str,
+    data: &str,
+    max_image_bytes: usize,
+) -> Result<(), String> {
     if !ALLOWED_IMAGE_TYPES.contains(&media_type) {
         return Err(format!(
             "Unsupported image type '{}'. Allowed: {}",
@@ -125,14 +137,14 @@ pub fn validate_image(media_type: &str, data: &str) -> Result<(), String> {
             ALLOWED_IMAGE_TYPES.join(", ")
         ));
     }
-    // Base64 encodes 3 bytes into 4 chars, so max base64 len ≈ MAX_IMAGE_BYTES * 4/3
-    let max_b64_len = MAX_IMAGE_BYTES * 4 / 3 + 4; // small padding allowance
+    // Base64 encodes 3 bytes into 4 chars, so max base64 len ≈ max_image_bytes * 4/3
+    let max_b64_len = max_image_bytes * 4 / 3 + 4; // small padding allowance
     if data.len() > max_b64_len {
         return Err(format!(
             "Image too large: {} bytes base64 (max ~{} bytes for {} MB decoded)",
             data.len(),
             max_b64_len,
-            MAX_IMAGE_BYTES / (1024 * 1024)
+            max_image_bytes / (1024 * 1024)
         ));
     }
     Ok(())

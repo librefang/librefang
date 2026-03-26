@@ -2199,8 +2199,8 @@ pub async fn hand_send_message(
     };
 
     // Reject oversized messages
-    const MAX_MESSAGE_SIZE: usize = 64 * 1024;
-    if req.message.len() > MAX_MESSAGE_SIZE {
+    let max_msg = state.kernel.config_ref().limits.max_message_size;
+    if req.message.len() > max_msg {
         return (
             StatusCode::PAYLOAD_TOO_LARGE,
             Json(serde_json::json!({"error": "Message too large (max 64KB)"})),

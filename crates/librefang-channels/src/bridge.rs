@@ -330,6 +330,13 @@ pub trait ChannelBridgeHandle: Send + Sync {
     ) -> Result<String, String> {
         Err("Channel push not available".to_string())
     }
+
+    /// Maximum size in bytes for images downloaded from channels (default: 5 MB).
+    ///
+    /// Override in concrete implementations to read from `LimitsConfig`.
+    fn max_channel_image_bytes(&self) -> usize {
+        5 * 1024 * 1024
+    }
 }
 
 /// Owns all running channel adapters and dispatches messages to agents.
@@ -1064,7 +1071,9 @@ async fn dispatch_message(
         ref mime_type,
     } = message.content
     {
-        let blocks = download_image_to_blocks(url, caption.as_deref(), mime_type.as_deref()).await;
+        let max_img = handle.max_channel_image_bytes();
+        let blocks =
+            download_image_to_blocks(url, caption.as_deref(), mime_type.as_deref(), max_img).await;
         if blocks
             .iter()
             .any(|b| matches!(b, ContentBlock::Image { .. }))
@@ -1627,11 +1636,9 @@ async fn download_image_to_blocks(
     url: &str,
     caption: Option<&str>,
     mime_type_hint: Option<&str>,
+    max_channel_image_bytes: usize,
 ) -> Vec<ContentBlock> {
     use base64::Engine;
-
-    // 5 MB limit to prevent memory abuse from oversized images
-    const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
 
     let client = crate::http_client::new_client();
     let resp = match client.get(url).send().await {
@@ -1677,7 +1684,7 @@ async fn download_image_to_blocks(
         .or(header_type)
         .unwrap_or_else(|| detect_image_magic(&bytes).unwrap_or_else(|| media_type_from_url(url)));
 
-    if bytes.len() > MAX_IMAGE_BYTES {
+    if bytes.len() > max_channel_image_bytes {
         warn!(
             "Image too large ({} bytes), skipping vision — sending as text",
             bytes.len()

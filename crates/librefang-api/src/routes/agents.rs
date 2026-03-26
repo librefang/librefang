@@ -174,9 +174,6 @@ use std::sync::{Arc, LazyLock};
 // Shared manifest resolution helper
 // ---------------------------------------------------------------------------
 
-/// Maximum manifest size (1MB) to prevent parser memory exhaustion.
-const MAX_MANIFEST_SIZE: usize = 1024 * 1024;
-
 /// Resolved manifest ready for spawning.
 struct ResolvedManifest {
     manifest: AgentManifest,
@@ -238,7 +235,8 @@ async fn resolve_manifest(
     };
 
     // Size guard
-    if manifest_toml.len() > MAX_MANIFEST_SIZE {
+    let max_manifest = state.kernel.config_ref().limits.max_manifest_size;
+    if manifest_toml.len() > max_manifest {
         let t = ErrorTranslator::new(lang);
         return Err(ManifestError {
             message: t.t("api-error-manifest-too-large"),
@@ -1059,8 +1057,8 @@ pub async fn send_message(
     };
 
     // SECURITY: Reject oversized messages to prevent OOM / LLM token abuse.
-    const MAX_MESSAGE_SIZE: usize = 64 * 1024; // 64KB
-    if req.message.len() > MAX_MESSAGE_SIZE {
+    let max_msg = state.kernel.config_ref().limits.max_message_size;
+    if req.message.len() > max_msg {
         return (
             StatusCode::PAYLOAD_TOO_LARGE,
             Json(serde_json::json!({"error": err_too_large})),
@@ -1687,8 +1685,8 @@ pub async fn send_message_stream(
     };
 
     // SECURITY: Reject oversized messages to prevent OOM / LLM token abuse.
-    const MAX_MESSAGE_SIZE: usize = 64 * 1024; // 64KB
-    if req.message.len() > MAX_MESSAGE_SIZE {
+    let max_msg = state.kernel.config_ref().limits.max_message_size;
+    if req.message.len() > max_msg {
         return (
             StatusCode::PAYLOAD_TOO_LARGE,
             Json(serde_json::json!({"error": err_too_large})),
@@ -3621,9 +3619,9 @@ pub async fn set_agent_file(
         );
     }
 
-    // Max 32KB content
-    const MAX_FILE_SIZE: usize = 32_768;
-    if req.content.len() > MAX_FILE_SIZE {
+    // Max workspace file content
+    let max_file = state.kernel.config_ref().limits.max_workspace_file_size;
+    if req.content.len() > max_file {
         return (
             StatusCode::PAYLOAD_TOO_LARGE,
             Json(serde_json::json!({"error": t.t("api-error-file-too-large")})),
@@ -3843,9 +3841,6 @@ pub(crate) struct UploadMeta {
 pub(crate) static UPLOAD_REGISTRY: LazyLock<DashMap<String, UploadMeta>> =
     LazyLock::new(DashMap::new);
 
-/// Maximum upload size: 10 MB.
-const MAX_UPLOAD_SIZE: usize = 10 * 1024 * 1024;
-
 /// Allowed content type prefixes for upload.
 const ALLOWED_CONTENT_TYPES: &[&str] = &["image/", "text/", "application/pdf", "audio/"];
 
@@ -3929,7 +3924,8 @@ pub async fn upload_file(
         .to_string();
 
     // Validate size
-    if body.len() > MAX_UPLOAD_SIZE {
+    let max_upload = state.kernel.config_ref().limits.max_upload_size;
+    if body.len() > max_upload {
         return (
             StatusCode::PAYLOAD_TOO_LARGE,
             Json(serde_json::json!({"error": err_too_large_upload})),

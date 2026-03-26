@@ -32,10 +32,6 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
-/// Per-IP WebSocket connection tracker.
-/// Max 5 concurrent WS connections per IP address.
-const MAX_WS_PER_IP: usize = 5;
-
 /// Idle timeout: close WS after 30 minutes of no client messages.
 const WS_IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
@@ -115,13 +111,13 @@ impl Drop for WsConnectionGuard {
 }
 
 /// Try to acquire a WS connection slot for the given IP.
-/// Returns None if the IP has reached MAX_WS_PER_IP.
-fn try_acquire_ws_slot(ip: IpAddr) -> Option<WsConnectionGuard> {
+/// Returns None if the IP has reached the per-IP limit.
+fn try_acquire_ws_slot(ip: IpAddr, max_ws_per_ip: usize) -> Option<WsConnectionGuard> {
     let entry = ws_tracker()
         .entry(ip)
         .or_insert_with(|| AtomicUsize::new(0));
     let current = entry.value().fetch_add(1, Ordering::Relaxed);
-    if current >= MAX_WS_PER_IP {
+    if current >= max_ws_per_ip {
         entry.value().fetch_sub(1, Ordering::Relaxed);
         return None;
     }
@@ -177,11 +173,12 @@ pub async fn agent_ws(
 
     // SECURITY: Enforce per-IP WebSocket connection limit
     let ip = addr.ip();
+    let max_ws_per_ip = state.kernel.config_ref().limits.max_ws_per_ip;
 
-    let guard = match try_acquire_ws_slot(ip) {
+    let guard = match try_acquire_ws_slot(ip, max_ws_per_ip) {
         Some(g) => g,
         None => {
-            warn!(ip = %ip, "WebSocket rejected: too many connections from IP (max {MAX_WS_PER_IP})");
+            warn!(ip = %ip, max = max_ws_per_ip, "WebSocket rejected: too many connections from IP");
             return axum::http::StatusCode::TOO_MANY_REQUESTS.into_response();
         }
     };

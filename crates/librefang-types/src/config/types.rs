@@ -1320,6 +1320,107 @@ pub fn redact_proxy_url(url: &str) -> String {
     url.to_string()
 }
 
+// ---------------------------------------------------------------------------
+// Size & rate limits
+// ---------------------------------------------------------------------------
+
+/// Default: 5 MB (message-level image validation).
+const fn default_max_message_image_bytes() -> usize {
+    5 * 1024 * 1024
+}
+/// Default: 10 MB (media attachment image).
+const fn default_max_image_bytes() -> usize {
+    10 * 1024 * 1024
+}
+/// Default: 20 MB (media attachment audio).
+const fn default_max_audio_bytes() -> usize {
+    20 * 1024 * 1024
+}
+/// Default: 50 MB (media attachment video).
+const fn default_max_video_bytes() -> usize {
+    50 * 1024 * 1024
+}
+/// Default: 1 MB (agent manifest upload).
+const fn default_max_manifest_size() -> usize {
+    1024 * 1024
+}
+/// Default: 10 MB (file upload).
+const fn default_max_upload_size() -> usize {
+    10 * 1024 * 1024
+}
+/// Default: 64 KB (API message body).
+const fn default_max_message_size() -> usize {
+    64 * 1024
+}
+/// Default: 5 (WebSocket connections per IP).
+const fn default_max_ws_per_ip() -> usize {
+    5
+}
+/// Default: 32 KB (workspace context file).
+const fn default_max_workspace_file_size() -> usize {
+    32_768
+}
+/// Default: 5 MB (channel bridge downloaded image).
+const fn default_max_channel_image_bytes() -> usize {
+    5 * 1024 * 1024
+}
+
+/// Configurable size and rate limits.
+///
+/// All limits default to the same values that were previously hardcoded.
+/// Override in `[limits]` section of `config.toml`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LimitsConfig {
+    /// Maximum image size in message validation — base64-decoded (default: 5 MB).
+    #[serde(default = "default_max_message_image_bytes")]
+    pub max_message_image_bytes: usize,
+    /// Maximum image attachment size in bytes (default: 10 MB).
+    #[serde(default = "default_max_image_bytes")]
+    pub max_image_bytes: usize,
+    /// Maximum audio attachment size in bytes (default: 20 MB).
+    #[serde(default = "default_max_audio_bytes")]
+    pub max_audio_bytes: usize,
+    /// Maximum video attachment size in bytes (default: 50 MB).
+    #[serde(default = "default_max_video_bytes")]
+    pub max_video_bytes: usize,
+    /// Maximum manifest upload size in bytes (default: 1 MB).
+    #[serde(default = "default_max_manifest_size")]
+    pub max_manifest_size: usize,
+    /// Maximum file upload size in bytes (default: 10 MB).
+    #[serde(default = "default_max_upload_size")]
+    pub max_upload_size: usize,
+    /// Maximum API/WS message body size in bytes (default: 64 KB).
+    #[serde(default = "default_max_message_size")]
+    pub max_message_size: usize,
+    /// Maximum concurrent WebSocket connections per IP (default: 5).
+    #[serde(default = "default_max_ws_per_ip")]
+    pub max_ws_per_ip: usize,
+    /// Maximum workspace context file size in bytes (default: 32 KB).
+    #[serde(default = "default_max_workspace_file_size")]
+    pub max_workspace_file_size: usize,
+    /// Maximum channel-bridge downloaded image size in bytes (default: 5 MB).
+    #[serde(default = "default_max_channel_image_bytes")]
+    pub max_channel_image_bytes: usize,
+}
+
+impl Default for LimitsConfig {
+    fn default() -> Self {
+        Self {
+            max_message_image_bytes: default_max_message_image_bytes(),
+            max_image_bytes: default_max_image_bytes(),
+            max_audio_bytes: default_max_audio_bytes(),
+            max_video_bytes: default_max_video_bytes(),
+            max_manifest_size: default_max_manifest_size(),
+            max_upload_size: default_max_upload_size(),
+            max_message_size: default_max_message_size(),
+            max_ws_per_ip: default_max_ws_per_ip(),
+            max_workspace_file_size: default_max_workspace_file_size(),
+            max_channel_image_bytes: default_max_channel_image_bytes(),
+        }
+    }
+}
+
 /// Top-level kernel configuration.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1577,6 +1678,9 @@ pub struct KernelConfig {
     /// Controls which releases `librefang update` considers.
     #[serde(default)]
     pub update_channel: UpdateChannel,
+    /// Size and rate limits (image upload, message body, WS connections, etc.).
+    #[serde(default)]
+    pub limits: LimitsConfig,
 }
 
 /// Input sanitization mode for channel messages.
@@ -2400,6 +2504,7 @@ impl Default for KernelConfig {
             telemetry: TelemetryConfig::default(),
             prompt_intelligence: PromptIntelligenceConfig::default(),
             update_channel: UpdateChannel::default(),
+            limits: LimitsConfig::default(),
         }
     }
 }
@@ -2538,6 +2643,7 @@ impl std::fmt::Debug for KernelConfig {
             .field("privacy", &format!("{:?}", self.privacy.mode))
             .field("strict_config", &self.strict_config)
             .field("qwen_code_path", &self.qwen_code_path)
+            .field("limits", &self.limits)
             .finish()
     }
 }

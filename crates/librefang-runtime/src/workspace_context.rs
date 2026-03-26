@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use tracing::debug;
 
-/// Maximum file size to read for context files (32KB).
-const MAX_FILE_SIZE: u64 = 32_768;
+/// Default maximum file size to read for context files (32KB).
+const DEFAULT_MAX_FILE_SIZE: u64 = 32_768;
 
 /// Known context file names scanned in the workspace root.
 const CONTEXT_FILES: &[&str] = &[
@@ -69,11 +69,21 @@ pub struct WorkspaceContext {
     pub has_librefang_dir: bool,
     /// Cached context files.
     cache: HashMap<String, CachedFile>,
+    /// Maximum file size for context files.
+    max_file_size: u64,
 }
 
 impl WorkspaceContext {
     /// Detect workspace context from the given root directory.
-    pub fn detect(root: &Path) -> Self {
+    ///
+    /// `max_file_size` controls the upper bound for context files.
+    /// Pass `0` to use the compiled-in default (32 KB).
+    pub fn detect(root: &Path, max_file_size: u64) -> Self {
+        let max_file_size = if max_file_size == 0 {
+            DEFAULT_MAX_FILE_SIZE
+        } else {
+            max_file_size
+        };
         let project_type = detect_project_type(root);
         let is_git_repo = root.join(".git").exists();
         let has_librefang_dir = root.join(".librefang").exists();
@@ -81,7 +91,7 @@ impl WorkspaceContext {
         let mut cache = HashMap::new();
         for &name in CONTEXT_FILES {
             let file_path = root.join(name);
-            if let Some(cached) = read_cached_file(&file_path) {
+            if let Some(cached) = read_cached_file(&file_path, max_file_size) {
                 debug!(file = name, "Loaded workspace context file");
                 cache.insert(name.to_string(), cached);
             }
@@ -93,6 +103,7 @@ impl WorkspaceContext {
             is_git_repo,
             has_librefang_dir,
             cache,
+            max_file_size,
         }
     }
 
@@ -113,7 +124,7 @@ impl WorkspaceContext {
         }
 
         // Cache miss or mtime changed — re-read
-        if let Some(new_cached) = read_cached_file(&file_path) {
+        if let Some(new_cached) = read_cached_file(&file_path, self.max_file_size) {
             self.cache.insert(name.to_string(), new_cached);
             return self.cache.get(name).map(|c| c.content.as_str());
         }
@@ -159,9 +170,9 @@ impl WorkspaceContext {
 }
 
 /// Read a file into the cache if it exists and is under the size limit.
-fn read_cached_file(path: &Path) -> Option<CachedFile> {
+fn read_cached_file(path: &Path, max_file_size: u64) -> Option<CachedFile> {
     let meta = std::fs::metadata(path).ok()?;
-    if meta.len() > MAX_FILE_SIZE {
+    if meta.len() > max_file_size {
         debug!(
             path = %path.display(),
             size = meta.len(),
@@ -317,7 +328,7 @@ mod tests {
         std::fs::create_dir_all(dir.join(".git")).unwrap();
         std::fs::write(dir.join("AGENTS.md"), "# Agent Guidelines\nBe helpful.").unwrap();
 
-        let ctx = WorkspaceContext::detect(&dir);
+        let ctx = WorkspaceContext::detect(&dir, 0);
         assert_eq!(ctx.project_type, ProjectType::Rust);
         assert!(ctx.is_git_repo);
         assert!(ctx.cache.contains_key("AGENTS.md"));
@@ -332,7 +343,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("SOUL.md"), "I am a helpful agent.").unwrap();
 
-        let mut ctx = WorkspaceContext::detect(&dir);
+        let mut ctx = WorkspaceContext::detect(&dir, 0);
         let content1 = ctx.get_file("SOUL.md").map(|s| s.to_string());
         let content2 = ctx.get_file("SOUL.md").map(|s| s.to_string());
         assert_eq!(content1, content2);
@@ -351,7 +362,7 @@ mod tests {
         let big = "x".repeat(40_000);
         std::fs::write(dir.join("AGENTS.md"), &big).unwrap();
 
-        let ctx = WorkspaceContext::detect(&dir);
+        let ctx = WorkspaceContext::detect(&dir, 0);
         assert!(!ctx.cache.contains_key("AGENTS.md"));
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -366,7 +377,7 @@ mod tests {
         std::fs::create_dir_all(dir.join(".git")).unwrap();
         std::fs::write(dir.join("SOUL.md"), "Be nice").unwrap();
 
-        let mut ctx = WorkspaceContext::detect(&dir);
+        let mut ctx = WorkspaceContext::detect(&dir, 0);
         let section = ctx.build_context_section();
         assert!(section.contains("Rust"));
         assert!(section.contains("Git repository: yes"));

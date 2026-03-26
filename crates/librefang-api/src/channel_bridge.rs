@@ -1451,6 +1451,10 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             .send_channel_message(channel_type, recipient, message, thread_id)
             .await
     }
+
+    fn max_channel_image_bytes(&self) -> usize {
+        self.kernel.config_ref().limits.max_channel_image_bytes
+    }
 }
 
 /// Parse a trigger pattern string from chat into a `TriggerPattern`.

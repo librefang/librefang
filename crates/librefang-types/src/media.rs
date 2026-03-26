@@ -146,8 +146,20 @@ pub const ALLOWED_AUDIO_TYPES: &[&str] = &[
 pub const ALLOWED_VIDEO_TYPES: &[&str] = &["video/mp4", "video/quicktime", "video/webm"];
 
 impl MediaAttachment {
-    /// Validate the attachment against security constraints.
+    /// Validate the attachment against security constraints using the default
+    /// compiled-in limits.  Prefer [`validate_with_limits`] when a
+    /// [`LimitsConfig`](crate::config::LimitsConfig) is available.
     pub fn validate(&self) -> Result<(), String> {
+        self.validate_with_limits(MAX_IMAGE_BYTES, MAX_AUDIO_BYTES, MAX_VIDEO_BYTES)
+    }
+
+    /// Validate the attachment with caller-supplied size limits.
+    pub fn validate_with_limits(
+        &self,
+        max_image: u64,
+        max_audio: u64,
+        max_video: u64,
+    ) -> Result<(), String> {
         // Check MIME type allowlist
         let allowed = match self.media_type {
             MediaType::Image => ALLOWED_IMAGE_TYPES.contains(&self.mime_type.as_str()),
@@ -163,9 +175,9 @@ impl MediaAttachment {
 
         // Check size limits
         let max_bytes = match self.media_type {
-            MediaType::Image => MAX_IMAGE_BYTES,
-            MediaType::Audio => MAX_AUDIO_BYTES,
-            MediaType::Video => MAX_VIDEO_BYTES,
+            MediaType::Image => max_image,
+            MediaType::Audio => max_audio,
+            MediaType::Video => max_video,
         };
         if self.size_bytes > max_bytes {
             return Err(format!(
