@@ -1723,12 +1723,13 @@ async fn tool_agent_send(
         .ok_or("Missing 'message' parameter")?;
 
     // Check + increment inter-agent call depth
+    let max_depth = kh.max_agent_call_depth();
     let current_depth = AGENT_CALL_DEPTH.try_with(|d| d.get()).unwrap_or(0);
-    if current_depth >= MAX_AGENT_CALL_DEPTH {
+    if current_depth >= max_depth {
         return Err(format!(
             "Inter-agent call depth exceeded (max {}). \
              A->B->C chain is too deep. Use the task queue instead.",
-            MAX_AGENT_CALL_DEPTH
+            max_depth
         ));
     }
 

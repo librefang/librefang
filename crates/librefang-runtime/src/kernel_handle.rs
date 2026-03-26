@@ -388,4 +388,14 @@ pub trait KernelHandle: Send + Sync {
     ) -> Result<(), String> {
         Ok(())
     }
+
+    /// Tool execution timeout in seconds (from config). Default: 120.
+    fn tool_timeout_secs(&self) -> u64 {
+        120
+    }
+
+    /// Maximum inter-agent call depth (from config). Default: 5.
+    fn max_agent_call_depth(&self) -> u32 {
+        5
+    }
 }

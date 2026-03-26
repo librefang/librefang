@@ -1484,7 +1484,10 @@ impl LibreFangKernel {
             .map_err(|e| KernelError::BootFailed(format!("Prompt store init failed: {e}")))?;
 
         let supervisor = Supervisor::new();
-        let background = BackgroundExecutor::new(supervisor.subscribe());
+        let background = BackgroundExecutor::with_concurrency(
+            supervisor.subscribe(),
+            config.max_concurrent_bg_llm,
+        );
 
         // Initialize WASM sandbox engine (shared across all WASM agents)
         let wasm_sandbox = WasmSandbox::new()
@@ -9760,6 +9763,14 @@ impl KernelHandle for LibreFangKernel {
             Ok(false) => Ok(()),
             Err(e) => Err(format!("Failed to auto-track prompt version: {e}")),
         }
+    }
+
+    fn tool_timeout_secs(&self) -> u64 {
+        self.config.tool_timeout_secs
+    }
+
+    fn max_agent_call_depth(&self) -> u32 {
+        self.config.max_agent_call_depth
     }
 }
 

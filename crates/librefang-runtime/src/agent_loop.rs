@@ -1260,10 +1260,13 @@ pub async fn run_agent_loop(
                     let effective_exec_policy = manifest.exec_policy.as_ref();
 
                     // Timeout-wrapped execution with timing for decision trace
+                    let tool_timeout = kernel
+                        .as_ref()
+                        .map_or(TOOL_TIMEOUT_SECS, |k| k.tool_timeout_secs());
                     let trace_start = Instant::now();
                     let trace_timestamp = chrono::Utc::now();
                     let result = match tokio::time::timeout(
-                        Duration::from_secs(TOOL_TIMEOUT_SECS),
+                        Duration::from_secs(tool_timeout),
                         tool_runner::execute_tool(
                             &tool_call.id,
                             &tool_call.name,
@@ -1295,12 +1298,12 @@ pub async fn run_agent_loop(
                     {
                         Ok(result) => result,
                         Err(_) => {
-                            warn!(tool = %tool_call.name, "Tool execution timed out after {}s", TOOL_TIMEOUT_SECS);
+                            warn!(tool = %tool_call.name, "Tool execution timed out after {}s", tool_timeout);
                             librefang_types::tool::ToolResult {
                                 tool_use_id: tool_call.id.clone(),
                                 content: format!(
                                     "Tool '{}' timed out after {}s.",
-                                    tool_call.name, TOOL_TIMEOUT_SECS
+                                    tool_call.name, tool_timeout
                                 ),
                                 is_error: true,
                             }
@@ -2733,10 +2736,13 @@ pub async fn run_agent_loop_streaming(
                     let effective_exec_policy = manifest.exec_policy.as_ref();
 
                     // Timeout-wrapped execution with timing for decision trace
+                    let tool_timeout = kernel
+                        .as_ref()
+                        .map_or(TOOL_TIMEOUT_SECS, |k| k.tool_timeout_secs());
                     let trace_start = Instant::now();
                     let trace_timestamp = chrono::Utc::now();
                     let result = match tokio::time::timeout(
-                        Duration::from_secs(TOOL_TIMEOUT_SECS),
+                        Duration::from_secs(tool_timeout),
                         tool_runner::execute_tool(
                             &tool_call.id,
                             &tool_call.name,
@@ -2768,12 +2774,12 @@ pub async fn run_agent_loop_streaming(
                     {
                         Ok(result) => result,
                         Err(_) => {
-                            warn!(tool = %tool_call.name, "Tool execution timed out after {}s (streaming)", TOOL_TIMEOUT_SECS);
+                            warn!(tool = %tool_call.name, "Tool execution timed out after {}s (streaming)", tool_timeout);
                             librefang_types::tool::ToolResult {
                                 tool_use_id: tool_call.id.clone(),
                                 content: format!(
                                     "Tool '{}' timed out after {}s.",
-                                    tool_call.name, TOOL_TIMEOUT_SECS
+                                    tool_call.name, tool_timeout
                                 ),
                                 is_error: true,
                             }

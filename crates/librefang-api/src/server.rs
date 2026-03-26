@@ -424,7 +424,7 @@ pub async fn build_router(
         .layer(axum::middleware::from_fn(middleware::security_headers))
         .layer(axum::middleware::from_fn(middleware::request_logging))
         .layer(RequestBodyLimitLayer::new(
-            crate::validation::MAX_REQUEST_BODY_BYTES,
+            kernel.config_ref().max_request_body_bytes,
         ))
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http())
