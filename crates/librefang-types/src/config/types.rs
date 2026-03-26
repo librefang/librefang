@@ -381,6 +381,59 @@ impl Default for ReloadConfig {
     }
 }
 
+/// Retry / exponential-backoff defaults.
+///
+/// Controls how many times fallible operations (LLM calls, network requests,
+/// channel delivery) are retried, and the backoff timing between attempts.
+///
+/// ```toml
+/// [retry]
+/// max_attempts = 3
+/// min_delay_ms = 300
+/// max_delay_ms = 30000
+/// jitter = 0.2
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RetryConfig {
+    /// Maximum number of retry attempts (including the first try). Default: 3.
+    #[serde(default = "default_retry_max_attempts")]
+    pub max_attempts: u32,
+    /// Minimum delay between retries in milliseconds. Default: 300.
+    #[serde(default = "default_retry_min_delay_ms")]
+    pub min_delay_ms: u64,
+    /// Maximum delay between retries in milliseconds. Default: 30 000.
+    #[serde(default = "default_retry_max_delay_ms")]
+    pub max_delay_ms: u64,
+    /// Jitter factor for retry delays (0.0 = none, 1.0 = full). Default: 0.2.
+    #[serde(default = "default_retry_jitter")]
+    pub jitter: f64,
+}
+
+fn default_retry_max_attempts() -> u32 {
+    3
+}
+fn default_retry_min_delay_ms() -> u64 {
+    300
+}
+fn default_retry_max_delay_ms() -> u64 {
+    30_000
+}
+fn default_retry_jitter() -> f64 {
+    0.2
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self {
+            max_attempts: default_retry_max_attempts(),
+            min_delay_ms: default_retry_min_delay_ms(),
+            max_delay_ms: default_retry_max_delay_ms(),
+            jitter: default_retry_jitter(),
+        }
+    }
+}
+
 /// Webhook trigger authentication configuration.
 ///
 /// Controls the `/hooks/wake` and `/hooks/agent` endpoints for external
@@ -1573,6 +1626,9 @@ pub struct KernelConfig {
     /// Prompt intelligence configuration (versioning + A/B testing).
     #[serde(default)]
     pub prompt_intelligence: PromptIntelligenceConfig,
+    /// Retry / exponential-backoff defaults for fallible operations.
+    #[serde(default)]
+    pub retry: RetryConfig,
     /// CLI update channel (stable, beta, rc).
     /// Controls which releases `librefang update` considers.
     #[serde(default)]
@@ -2399,6 +2455,7 @@ impl Default for KernelConfig {
             inbox: InboxConfig::default(),
             telemetry: TelemetryConfig::default(),
             prompt_intelligence: PromptIntelligenceConfig::default(),
+            retry: RetryConfig::default(),
             update_channel: UpdateChannel::default(),
         }
     }

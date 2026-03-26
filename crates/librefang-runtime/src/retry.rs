@@ -7,38 +7,8 @@
 //! Jitter uses `std::time::SystemTime` UNIX nanos as a seed to avoid
 //! requiring the `rand` crate as a dependency.
 
+use librefang_types::config::RetryConfig;
 use tracing::{debug, warn};
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-/// Configuration for retry behavior.
-#[derive(Debug, Clone)]
-pub struct RetryConfig {
-    /// Maximum number of attempts (including the first try).
-    pub max_attempts: u32,
-    /// Minimum delay between retries in milliseconds.
-    pub min_delay_ms: u64,
-    /// Maximum delay between retries in milliseconds.
-    pub max_delay_ms: u64,
-    /// Jitter factor (0.0 = no jitter, 1.0 = full jitter).
-    ///
-    /// The actual sleep is `delay * (1 + random_fraction * jitter)`, where
-    /// `random_fraction` is in `[0, 1)`.
-    pub jitter: f64,
-}
-
-impl Default for RetryConfig {
-    fn default() -> Self {
-        Self {
-            max_attempts: 3,
-            min_delay_ms: 300,
-            max_delay_ms: 30_000,
-            jitter: 0.2,
-        }
-    }
-}
 
 /// Result of a retry operation.
 #[derive(Debug)]

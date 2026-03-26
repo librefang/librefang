@@ -89,6 +89,13 @@ debounce_ms = 500
 # model = "gpt-4o"
 # api_key_env = "OPENAI_API_KEY"
 
+# ── Retry / Backoff ─────────────────────────────────────────
+# [retry]
+# max_attempts = 3            # Total attempts (including first try)
+# min_delay_ms = 300           # Initial backoff delay
+# max_delay_ms = 30000         # Maximum backoff cap
+# jitter = 0.2                # Jitter factor (0.0–1.0)
+
 # ── Budget & Cost Control ────────────────────────────────────
 # [budget]
 # max_hourly_usd = 0.0         # 0 = unlimited
