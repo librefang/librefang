@@ -546,14 +546,37 @@ export function setOnUnauthorized(fn: (() => void) | null) {
   _unauthorizedFired = false;
 }
 
+export function getStoredApiKey(): string {
+  return localStorage.getItem("librefang-api-key") || "";
+}
+
 function authHeader(): HeadersInit {
   const lang = localStorage.getItem("i18nextLng") || navigator.language || "en";
-  const token = localStorage.getItem("librefang-api-key") || "";
+  const token = getStoredApiKey();
   const headers: HeadersInit = { "Accept-Language": lang };
   if (token) {
     headers["Authorization"] = `Bearer ${token}`;
   }
   return headers;
+}
+
+function buildHeaders(headers?: HeadersInit): Headers {
+  const merged = new Headers(headers);
+  const auth = new Headers(authHeader());
+  auth.forEach((value, key) => {
+    merged.set(key, value);
+  });
+  return merged;
+}
+
+export function buildAuthenticatedWebSocketUrl(path: string): string {
+  const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+  const url = new URL(`${proto}//${window.location.host}${path}`);
+  const token = getStoredApiKey();
+  if (token) {
+    url.searchParams.set("token", token);
+  }
+  return url.toString();
 }
 
 async function parseError(response: Response): Promise<Error> {
@@ -578,10 +601,9 @@ async function parseError(response: Response): Promise<Error> {
 
 async function get<T>(path: string): Promise<T> {
   const response = await fetch(path, {
-    headers: {
+    headers: buildHeaders({
       "Content-Type": "application/json",
-      ...authHeader()
-    }
+    })
   });
   if (!response.ok) {
     throw await parseError(response);
@@ -596,10 +618,9 @@ async function post<T>(path: string, body: unknown, timeout = DEFAULT_POST_TIMEO
   try {
     const response = await fetch(path, {
       method: "POST",
-      headers: {
+      headers: buildHeaders({
         "Content-Type": "application/json",
-        ...authHeader()
-      },
+      }),
       body: JSON.stringify(body),
       signal: controller.signal
     });
@@ -620,10 +641,23 @@ async function post<T>(path: string, body: unknown, timeout = DEFAULT_POST_TIMEO
 async function put<T>(path: string, body: unknown): Promise<T> {
   const response = await fetch(path, {
     method: "PUT",
-    headers: {
+    headers: buildHeaders({
       "Content-Type": "application/json",
-      ...authHeader()
-    },
+    }),
+    body: JSON.stringify(body)
+  });
+  if (!response.ok) {
+    throw await parseError(response);
+  }
+  return (await response.json()) as T;
+}
+
+async function patch<T>(path: string, body: unknown): Promise<T> {
+  const response = await fetch(path, {
+    method: "PATCH",
+    headers: buildHeaders({
+      "Content-Type": "application/json",
+    }),
     body: JSON.stringify(body)
   });
   if (!response.ok) {
@@ -635,15 +669,24 @@ async function put<T>(path: string, body: unknown): Promise<T> {
 async function del<T>(path: string): Promise<T> {
   const response = await fetch(path, {
     method: "DELETE",
-    headers: {
+    headers: buildHeaders({
       "Content-Type": "application/json",
-      ...authHeader()
-    }
+    })
   });
   if (!response.ok) {
     throw await parseError(response);
   }
   return (await response.json()) as T;
+}
+
+async function getText(path: string): Promise<string> {
+  const response = await fetch(path, {
+    headers: buildHeaders(),
+  });
+  if (!response.ok) {
+    throw await parseError(response);
+  }
+  return response.text();
 }
 
 export async function loadDashboardSnapshot(): Promise<DashboardSnapshot> {
@@ -752,7 +795,7 @@ export async function generateImage(req: { prompt: string; provider?: string; mo
 export async function synthesizeSpeech(req: { text: string; provider?: string; model?: string; voice?: string; format?: string }): Promise<Blob> {
   const resp = await fetch("/api/media/speech", {
     method: "POST",
-    headers: { "Content-Type": "application/json", ...authHeader() },
+    headers: buildHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(req),
   });
   if (!resp.ok) throw new Error(`TTS failed: ${resp.status}`);
@@ -770,7 +813,7 @@ export async function pollVideo(taskId: string): Promise<MediaVideoStatus> {
 export async function generateMusic(req: { prompt?: string; lyrics?: string; provider?: string; model?: string; instrumental?: boolean }): Promise<Blob> {
   const resp = await fetch("/api/media/music", {
     method: "POST",
-    headers: { "Content-Type": "application/json", ...authHeader() },
+    headers: buildHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(req),
   });
   if (!resp.ok) throw new Error(`Music generation failed: ${resp.status}`);
@@ -819,6 +862,11 @@ export async function wechatQrStatus(qrCode: string): Promise<QrStatusResponse> 
 export async function listSkills(): Promise<SkillItem[]> {
   const data = await get<SkillsResponse>("/api/skills");
   return data.skills ?? [];
+}
+
+export async function listTools(): Promise<any[]> {
+  const data = await get<any>("/api/tools");
+  return data.tools ?? data ?? [];
 }
 
 export async function installSkill(name: string): Promise<ApiActionResponse> {
@@ -1147,6 +1195,40 @@ export interface TaskQueueItem {
 
 export async function getHealthDetail(): Promise<HealthDetailResponse> {
   return get<HealthDetailResponse>("/api/health/detail");
+}
+
+export interface MemoryConfigResponse {
+  embedding_provider?: string;
+  embedding_model?: string;
+  embedding_api_key_env?: string;
+  decay_rate?: number;
+  proactive_memory?: {
+    enabled?: boolean;
+    auto_memorize?: boolean;
+    auto_retrieve?: boolean;
+    extraction_model?: string;
+    max_retrieve?: number;
+  };
+}
+
+export async function getMemoryConfig(): Promise<MemoryConfigResponse> {
+  return get<MemoryConfigResponse>("/api/memory/config");
+}
+
+export async function updateMemoryConfig(payload: {
+  embedding_provider?: string;
+  embedding_model?: string;
+  embedding_api_key_env?: string;
+  decay_rate?: number;
+  proactive_memory?: {
+    enabled?: boolean;
+    auto_memorize?: boolean;
+    auto_retrieve?: boolean;
+    extraction_model?: string;
+    max_retrieve?: number;
+  };
+}): Promise<ApiActionResponse> {
+  return patch<ApiActionResponse>("/api/memory/config", payload);
 }
 
 export async function getSecurityStatus(): Promise<SecurityStatusResponse> {
@@ -1667,7 +1749,7 @@ export async function checkAuthRequired(): Promise<boolean> {
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       const response = await fetch("/api/status", {
-        headers: { ...authHeader() },
+        headers: buildHeaders(),
       });
       return response.status === 401;
     } catch {
@@ -1687,7 +1769,7 @@ export function clearApiKey() {
 }
 
 export function hasApiKey(): boolean {
-  const key = localStorage.getItem("librefang-api-key");
+  const key = getStoredApiKey();
   return !!key && key.length > 0;
 }
 
@@ -1719,6 +1801,33 @@ export async function dashboardLogin(username: string, password: string): Promis
   } catch (e: any) {
     return { ok: false, error: e.message || "Network error" };
   }
+}
+
+export async function verifyStoredAuth(): Promise<boolean> {
+  if (!hasApiKey()) {
+    return false;
+  }
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const response = await fetch("/api/security", {
+        headers: buildHeaders(),
+      });
+      if (response.status === 401) {
+        clearApiKey();
+        return false;
+      }
+      return response.ok;
+    } catch {
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+  }
+
+  return false;
+}
+
+export async function getMetricsText(): Promise<string> {
+  return getText("/api/metrics");
 }
 
 // ── Plugins ──────────────────────────────────────────

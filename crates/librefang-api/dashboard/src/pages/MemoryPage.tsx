@@ -2,7 +2,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { formatDateTime } from "../lib/datetime";
 import { useState, useEffect, useMemo } from "react";
 import { useTranslation } from "react-i18next";
-import { listMemories, searchMemories, deleteMemory, getMemoryStats, addMemoryFromText, updateMemory, cleanupMemories, type MemoryStatsResponse, type MemoryItem } from "../api";
+import { listMemories, searchMemories, deleteMemory, getMemoryStats, addMemoryFromText, updateMemory, cleanupMemories, getMemoryConfig, updateMemoryConfig, type MemoryConfigResponse, type MemoryStatsResponse, type MemoryItem } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -171,7 +171,7 @@ function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
 
   const configQuery = useQuery({
     queryKey: ["memory", "config"],
-    queryFn: () => fetch("/api/memory/config").then(r => r.json()),
+    queryFn: getMemoryConfig,
   });
 
   const [form, setForm] = useState<Record<string, any> | null>(null);
@@ -179,7 +179,7 @@ function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
 
   // Init form from API data
   useEffect(() => {
-    const data = configQuery.data;
+    const data = configQuery.data as MemoryConfigResponse | undefined;
     if (data && !form) {
       setForm({
         embedding_provider: data.embedding_provider || "",
@@ -199,34 +199,25 @@ function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
     if (!form) return;
     setSaving(true);
     try {
-      const res = await fetch("/api/memory/config", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          embedding_provider: form.embedding_provider || undefined,
-          embedding_model: form.embedding_model || undefined,
-          embedding_api_key_env: form.embedding_api_key_env || undefined,
-          decay_rate: parseFloat(form.decay_rate) || 0.05,
-          proactive_memory: {
-            enabled: form.pm_enabled,
-            auto_memorize: form.pm_auto_memorize,
-            auto_retrieve: form.pm_auto_retrieve,
-            extraction_model: form.pm_extraction_model || undefined,
-            max_retrieve: parseInt(form.pm_max_retrieve) || 10,
-          },
-        }),
+      await updateMemoryConfig({
+        embedding_provider: form.embedding_provider || undefined,
+        embedding_model: form.embedding_model || undefined,
+        embedding_api_key_env: form.embedding_api_key_env || undefined,
+        decay_rate: parseFloat(form.decay_rate) || 0.05,
+        proactive_memory: {
+          enabled: form.pm_enabled,
+          auto_memorize: form.pm_auto_memorize,
+          auto_retrieve: form.pm_auto_retrieve,
+          extraction_model: form.pm_extraction_model || undefined,
+          max_retrieve: parseInt(form.pm_max_retrieve) || 10,
+        },
       });
-      if (res.ok) {
-        addToast(t("common.success"), "success");
-        queryClient.invalidateQueries({ queryKey: ["memory"] });
-        queryClient.invalidateQueries({ queryKey: ["health"] });
-        onClose();
-      } else {
-        const err = await res.json();
-        addToast(err.error || "Failed", "error");
-      }
-    } catch {
-      addToast("Failed to save", "error");
+      addToast(t("common.success"), "success");
+      queryClient.invalidateQueries({ queryKey: ["memory"] });
+      queryClient.invalidateQueries({ queryKey: ["health"] });
+      onClose();
+    } catch (error) {
+      addToast(error instanceof Error ? error.message : "Failed to save", "error");
     }
     setSaving(false);
   };

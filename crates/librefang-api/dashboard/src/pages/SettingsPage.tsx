@@ -7,20 +7,8 @@ import { Input } from "../components/ui/Input";
 import { PageHeader } from "../components/ui/PageHeader";
 import { ListSkeleton } from "../components/ui/Skeleton";
 import { Globe, Sun, Moon, Settings, PanelLeftClose, PanelLeft, Wrench, Search, RefreshCw } from "lucide-react";
+import { listTools } from "../api";
 import { useUIStore } from "../lib/store";
-
-// Tools API (inline since it's small)
-async function listTools(): Promise<any[]> {
-  const token = localStorage.getItem("librefang-api-key") || "";
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (token) {
-    headers["Authorization"] = `Bearer ${token}`;
-  }
-  const resp = await fetch("/api/tools", { headers });
-  if (!resp.ok) return [];
-  const data = await resp.json();
-  return data.tools ?? data ?? [];
-}
 
 // Tool name i18n mapping for Chinese
 const toolNameZh: Record<string, string> = {

@@ -4,23 +4,52 @@ import { useTranslation } from "react-i18next";
 import { Globe, Sun, Moon, Search, ChevronLeft, ChevronRight, ChevronDown, Menu, Home, Layers, MessageCircle, Clock, CheckCircle, Calendar, Shield, Users, Server, Network, Bell, Hand, BarChart3, Database, Activity, FileText, Settings, Puzzle, Cpu, Lock, Share2, Gauge } from "lucide-react";
 import { useUIStore } from "./lib/store";
 import { CommandPalette, useCommandPalette } from "./components/ui/CommandPalette";
-import { checkAuthRequired, setApiKey, getVersionInfo } from "./api";
+import { checkDashboardAuthMode, dashboardLogin, getVersionInfo, setApiKey, setOnUnauthorized, verifyStoredAuth, type AuthMode } from "./api";
 
-function AuthDialog({ onAuthenticated }: { onAuthenticated: () => void }) {
+function AuthDialog({ authMode, onAuthenticated }: { authMode: AuthMode; onAuthenticated: () => void }) {
   const { t } = useTranslation();
   const [key, setKey] = useState("");
-  const [error, setError] = useState(false);
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [errorKey, setErrorKey] = useState<"invalid" | "invalid_api_key" | "invalid_credentials" | null>(null);
+  const [submitting, setSubmitting] = useState(false);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!key.trim()) return;
-    setApiKey(key.trim());
-    const stillNeeded = await checkAuthRequired();
-    if (stillNeeded) {
-      setError(true);
-      return;
+    setSubmitting(true);
+    setErrorKey(null);
+
+    try {
+      if (authMode === "credentials") {
+        if (!username.trim() || !password) {
+          setErrorKey("invalid_credentials");
+          return;
+        }
+
+        const result = await dashboardLogin(username.trim(), password);
+        if (!result.ok) {
+          setErrorKey("invalid_credentials");
+          return;
+        }
+      } else {
+        if (!key.trim()) {
+          setErrorKey("invalid_api_key");
+          return;
+        }
+
+        setApiKey(key.trim());
+      }
+
+      const isAuthenticated = await verifyStoredAuth();
+      if (!isAuthenticated) {
+        setErrorKey(authMode === "credentials" ? "invalid_credentials" : "invalid_api_key");
+        return;
+      }
+
+      onAuthenticated();
+    } finally {
+      setSubmitting(false);
     }
-    onAuthenticated();
   }
 
   return (
@@ -31,27 +60,60 @@ function AuthDialog({ onAuthenticated }: { onAuthenticated: () => void }) {
             <div className="w-14 h-14 rounded-2xl bg-brand/10 flex items-center justify-center mb-4 ring-2 ring-brand/20">
               <Lock className="h-7 w-7 text-brand" />
             </div>
-            <h2 className="text-xl font-black tracking-tight">{t("auth.title")}</h2>
-            <p className="text-sm text-text-dim mt-1">{t("auth.description")}</p>
+            <h2 className="text-xl font-black tracking-tight">
+              {authMode === "credentials" ? t("auth.credentials_title") : t("auth.title")}
+            </h2>
+            <p className="text-sm text-text-dim mt-1">
+              {authMode === "credentials" ? t("auth.credentials_description") : t("auth.description")}
+            </p>
           </div>
           <form onSubmit={handleSubmit} className="space-y-4">
-            <input
-              type="password"
-              value={key}
-              onChange={(e) => { setKey(e.target.value); setError(false); }}
-              placeholder={t("auth.placeholder")}
-              autoFocus
-              className={`w-full rounded-xl border px-4 py-3 text-sm focus:ring-2 outline-none transition-colors ${
-                error
-                  ? "border-error focus:border-error focus:ring-error/10"
-                  : "border-border-subtle bg-main focus:border-brand focus:ring-brand/10"
-              }`}
-            />
-            {error && (
-              <p className="text-xs text-error font-medium">{t("auth.invalid")}</p>
+            {authMode === "credentials" ? (
+              <>
+                <input
+                  type="text"
+                  value={username}
+                  onChange={(e) => { setUsername(e.target.value); setErrorKey(null); }}
+                  placeholder={t("auth.username_placeholder")}
+                  autoFocus
+                  className={`w-full rounded-xl border px-4 py-3 text-sm focus:ring-2 outline-none transition-colors ${
+                    errorKey
+                      ? "border-error focus:border-error focus:ring-error/10"
+                      : "border-border-subtle bg-main focus:border-brand focus:ring-brand/10"
+                  }`}
+                />
+                <input
+                  type="password"
+                  value={password}
+                  onChange={(e) => { setPassword(e.target.value); setErrorKey(null); }}
+                  placeholder={t("auth.password_placeholder")}
+                  className={`w-full rounded-xl border px-4 py-3 text-sm focus:ring-2 outline-none transition-colors ${
+                    errorKey
+                      ? "border-error focus:border-error focus:ring-error/10"
+                      : "border-border-subtle bg-main focus:border-brand focus:ring-brand/10"
+                  }`}
+                />
+              </>
+            ) : (
+              <input
+                type="password"
+                value={key}
+                onChange={(e) => { setKey(e.target.value); setErrorKey(null); }}
+                placeholder={t("auth.placeholder")}
+                autoFocus
+                className={`w-full rounded-xl border px-4 py-3 text-sm focus:ring-2 outline-none transition-colors ${
+                  errorKey
+                    ? "border-error focus:border-error focus:ring-error/10"
+                    : "border-border-subtle bg-main focus:border-brand focus:ring-brand/10"
+                }`}
+              />
+            )}
+            {errorKey && (
+              <p className="text-xs text-error font-medium">{t(`auth.${errorKey}`)}</p>
             )}
             <button
               type="submit"
+              disabled={submitting || (authMode === "credentials" ? !username.trim() || !password : !key.trim())}
               className="w-full rounded-xl bg-brand py-3 text-sm font-bold text-white hover:bg-brand/90 transition-colors shadow-lg shadow-brand/20"
             >
               {t("auth.submit")}
@@ -79,19 +141,53 @@ export function App() {
   const { isOpen: isPaletteOpen, setIsOpen: setPaletteOpen } = useCommandPalette();
   const [authNeeded, setAuthNeeded] = useState(false);
   const [authChecked, setAuthChecked] = useState(false);
+  const [authMode, setAuthMode] = useState<AuthMode>("none");
   const [appVersion, setAppVersion] = useState("");
   const [hostname, setHostname] = useState("");
 
   // Check auth on mount
   useEffect(() => {
-    checkAuthRequired().then((needed) => {
-      setAuthNeeded(needed);
+    let cancelled = false;
+
+    setOnUnauthorized(() => {
+      if (cancelled) {
+        return;
+      }
+      setAuthNeeded(true);
       setAuthChecked(true);
     });
+
+    (async () => {
+      const mode = await checkDashboardAuthMode();
+      if (cancelled) {
+        return;
+      }
+
+      setAuthMode(mode);
+      if (mode === "none") {
+        setAuthNeeded(false);
+        setAuthChecked(true);
+        return;
+      }
+
+      const authenticated = await verifyStoredAuth();
+      if (cancelled) {
+        return;
+      }
+
+      setAuthNeeded(!authenticated);
+      setAuthChecked(true);
+    })();
+
     getVersionInfo().then((v) => {
       setAppVersion(v.version ?? "");
       setHostname(v.hostname ?? "");
     }).catch(() => {});
+
+    return () => {
+      cancelled = true;
+      setOnUnauthorized(null);
+    };
   }, []);
 
   useEffect(() => {
@@ -337,8 +433,8 @@ export function App() {
       </div>
 
       <CommandPalette isOpen={isPaletteOpen} onClose={() => setPaletteOpen(false)} />
-      {authChecked && authNeeded && (
-        <AuthDialog onAuthenticated={() => { setAuthNeeded(false); window.location.hash = "#/overview"; }} />
+      {authChecked && authNeeded && authMode !== "none" && (
+        <AuthDialog authMode={authMode} onAuthenticated={() => { setAuthNeeded(false); window.location.hash = "#/overview"; }} />
       )}
     </div>
   );
