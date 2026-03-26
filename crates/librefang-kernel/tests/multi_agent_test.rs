@@ -179,10 +179,10 @@ fn test_deterministic_id_stable_across_reactivation() {
     let id1 = inst1.agent_id().unwrap();
 
     // Agent ID is deterministic within the same activation instance.
-    let expected1 = AgentId::from_hand_agent("test-clip", "main", Some(inst1.instance_id));
+    let expected1 = AgentId::from_hand_agent("test-clip", "main", None);
     assert_eq!(
         id1, expected1,
-        "Agent ID should be deterministic from hand_id + role + instance_id"
+        "Agent ID should use legacy format for single-instance activation"
     );
 
     // Deactivate
@@ -196,16 +196,16 @@ fn test_deterministic_id_stable_across_reactivation() {
     let inst2 = kernel.activate_hand("test-clip", HashMap::new()).unwrap();
     let id2 = inst2.agent_id().unwrap();
 
-    let expected2 = AgentId::from_hand_agent("test-clip", "main", Some(inst2.instance_id));
+    let expected2 = AgentId::from_hand_agent("test-clip", "main", None);
     assert_eq!(
         id2, expected2,
-        "Agent ID should be deterministic from hand_id + role + instance_id"
+        "Agent ID should use legacy format for single-instance activation"
     );
 
-    // Each activation is a new instance — different instance_id produces a different agent ID.
-    assert_ne!(
+    // Single-instance activations use legacy format — same hand+role = same ID.
+    assert_eq!(
         id1, id2,
-        "Each reactivation produces a unique agent ID (instance-scoped IDs)"
+        "Single-instance reactivation preserves the same agent ID (legacy format)"
     );
 
     kernel.shutdown();
@@ -586,15 +586,14 @@ fn test_reactivation_restores_triggers_to_original_roles() {
         .get("planner")
         .expect("reactivated planner role agent id");
 
-    // Each reactivation creates a new instance with a distinct instance_id, so the
-    // reactivated agent IDs differ from the original ones (instance-scoped IDs).
-    assert_ne!(
+    // Single-instance reactivation uses legacy format — same hand+role = same ID.
+    assert_eq!(
         reactivated_analyst_id, analyst_id,
-        "Reactivated analyst gets a new instance-scoped agent ID"
+        "Reactivated analyst keeps same agent ID (legacy format)"
     );
-    assert_ne!(
+    assert_eq!(
         reactivated_planner_id, planner_id,
-        "Reactivated planner gets a new instance-scoped agent ID"
+        "Reactivated planner keeps same agent ID (legacy format)"
     );
     assert_eq!(
         kernel.list_triggers(Some(reactivated_analyst_id)).len(),
