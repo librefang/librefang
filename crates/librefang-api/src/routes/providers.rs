@@ -1077,7 +1077,14 @@ pub async fn set_provider_url(
     }
 
     // Probe reachability at the new URL
-    let probe = librefang_runtime::provider_health::probe_provider(&name, &base_url).await;
+    let ph = &state.provider_probe_cache;
+    let probe = librefang_runtime::provider_health::probe_provider(
+        &name,
+        &base_url,
+        Some(ph.probe_connect_timeout_secs()),
+        Some(ph.probe_timeout_secs()),
+    )
+    .await;
 
     // Merge discovered models into catalog
     if !probe.discovered_models.is_empty() {

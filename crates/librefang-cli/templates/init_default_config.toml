@@ -83,6 +83,12 @@ debounce_ms = 500
 # ollama = "http://localhost:11434/v1"
 # vllm = "http://localhost:8000/v1"
 
+# ── Provider Health Probes ────────────────────────────────────
+# [provider_health]
+# probe_timeout_secs = 2          # Overall request timeout (seconds)
+# probe_connect_timeout_secs = 1  # TCP connect timeout (seconds)
+# probe_cache_ttl_secs = 60       # Cache TTL for probe results (seconds)
+
 # ── Fallback Providers (LLM failover chain) ──────────────────
 # [[fallback_providers]]
 # provider = "openai"

@@ -54,33 +54,59 @@ pub fn is_local_provider(provider: &str) -> bool {
     )
 }
 
-/// Overall request timeout for local provider health probes (connect + response).
-const PROBE_TIMEOUT_SECS: u64 = 2;
+/// Default overall request timeout for local provider health probes (connect + response).
+const DEFAULT_PROBE_TIMEOUT_SECS: u64 = 2;
 
-/// TCP connect timeout — fail fast when the local port is not listening.
-const PROBE_CONNECT_TIMEOUT_SECS: u64 = 1;
+/// Default TCP connect timeout — fail fast when the local port is not listening.
+const DEFAULT_PROBE_CONNECT_TIMEOUT_SECS: u64 = 1;
 
 /// Default TTL for cached probe results (seconds).
-const PROBE_CACHE_TTL_SECS: u64 = 60;
+const DEFAULT_PROBE_CACHE_TTL_SECS: u64 = 60;
 
 // ── Probe cache ──────────────────────────────────────────────────────────
 
 /// Thread-safe cache for provider probe results.
 ///
-/// Entries expire after [`PROBE_CACHE_TTL_SECS`] seconds. The cache is
+/// Entries expire after the configured TTL (default 60 seconds). The cache is
 /// designed to be stored once in `AppState` and shared across requests.
 pub struct ProbeCache {
     inner: DashMap<String, (Instant, ProbeResult)>,
     ttl: Duration,
+    /// Overall request timeout for health probes (seconds).
+    probe_timeout_secs: u64,
+    /// TCP connect timeout for health probes (seconds).
+    probe_connect_timeout_secs: u64,
 }
 
 impl ProbeCache {
-    /// Create a new cache with the default 60-second TTL.
+    /// Create a new cache with the default TTL and timeout values.
     pub fn new() -> Self {
         Self {
             inner: DashMap::new(),
-            ttl: Duration::from_secs(PROBE_CACHE_TTL_SECS),
+            ttl: Duration::from_secs(DEFAULT_PROBE_CACHE_TTL_SECS),
+            probe_timeout_secs: DEFAULT_PROBE_TIMEOUT_SECS,
+            probe_connect_timeout_secs: DEFAULT_PROBE_CONNECT_TIMEOUT_SECS,
         }
+    }
+
+    /// Create a new cache with values from `ProviderHealthConfig`.
+    pub fn with_config(config: &librefang_types::config::ProviderHealthConfig) -> Self {
+        Self {
+            inner: DashMap::new(),
+            ttl: Duration::from_secs(config.probe_cache_ttl_secs),
+            probe_timeout_secs: config.probe_timeout_secs,
+            probe_connect_timeout_secs: config.probe_connect_timeout_secs,
+        }
+    }
+
+    /// Overall request timeout for health probes (seconds).
+    pub fn probe_timeout_secs(&self) -> u64 {
+        self.probe_timeout_secs
+    }
+
+    /// TCP connect timeout for health probes (seconds).
+    pub fn probe_connect_timeout_secs(&self) -> u64 {
+        self.probe_connect_timeout_secs
     }
 
     /// Look up a cached probe result. Returns `None` if missing or expired.
@@ -117,12 +143,23 @@ impl Default for ProbeCache {
 ///
 /// `base_url` should be the provider's base URL from the catalog (e.g.,
 /// `http://localhost:11434/v1` for Ollama, `http://localhost:8000/v1` for vLLM).
-pub async fn probe_provider(provider: &str, base_url: &str) -> ProbeResult {
+///
+/// `connect_timeout_secs` and `request_timeout_secs` control the TCP connect
+/// and overall request timeouts respectively. Pass `None` to use defaults.
+pub async fn probe_provider(
+    provider: &str,
+    base_url: &str,
+    connect_timeout_secs: Option<u64>,
+    request_timeout_secs: Option<u64>,
+) -> ProbeResult {
     let start = Instant::now();
 
+    let connect_timeout = connect_timeout_secs.unwrap_or(DEFAULT_PROBE_CONNECT_TIMEOUT_SECS);
+    let request_timeout = request_timeout_secs.unwrap_or(DEFAULT_PROBE_TIMEOUT_SECS);
+
     let client = match crate::http_client::proxied_client_builder()
-        .connect_timeout(Duration::from_secs(PROBE_CONNECT_TIMEOUT_SECS))
-        .timeout(Duration::from_secs(PROBE_TIMEOUT_SECS))
+        .connect_timeout(Duration::from_secs(connect_timeout))
+        .timeout(Duration::from_secs(request_timeout))
         .build()
     {
         Ok(c) => c,
@@ -253,6 +290,7 @@ pub async fn probe_provider(provider: &str, base_url: &str) -> ProbeResult {
 ///
 /// If the cache contains a non-expired entry the HTTP request is skipped
 /// entirely, making repeated `/api/providers` calls instantaneous.
+/// Timeout values are read from the cache's configuration.
 pub async fn probe_provider_cached(
     provider: &str,
     base_url: &str,
@@ -261,7 +299,13 @@ pub async fn probe_provider_cached(
     if let Some(cached) = cache.get(provider) {
         return cached;
     }
-    let result = probe_provider(provider, base_url).await;
+    let result = probe_provider(
+        provider,
+        base_url,
+        Some(cache.probe_connect_timeout_secs()),
+        Some(cache.probe_timeout_secs()),
+    )
+    .await;
     cache.insert(provider, result.clone());
     result
 }
@@ -357,15 +401,15 @@ mod tests {
     #[tokio::test]
     async fn test_probe_unreachable_returns_error() {
         // Probe a port that's almost certainly not running a server
-        let result = probe_provider("ollama", "http://127.0.0.1:19999").await;
+        let result = probe_provider("ollama", "http://127.0.0.1:19999", None, None).await;
         assert!(!result.reachable);
         assert!(result.error.is_some());
     }
 
     #[test]
     fn test_probe_timeout_value() {
-        assert_eq!(PROBE_TIMEOUT_SECS, 2);
-        assert_eq!(PROBE_CONNECT_TIMEOUT_SECS, 1);
+        assert_eq!(DEFAULT_PROBE_TIMEOUT_SECS, 2);
+        assert_eq!(DEFAULT_PROBE_CONNECT_TIMEOUT_SECS, 1);
     }
 
     #[test]
@@ -417,7 +461,20 @@ mod tests {
     fn test_probe_cache_default() {
         let cache = ProbeCache::default();
         assert!(cache.get("anything").is_none());
-        assert_eq!(cache.ttl, Duration::from_secs(PROBE_CACHE_TTL_SECS));
+        assert_eq!(cache.ttl, Duration::from_secs(DEFAULT_PROBE_CACHE_TTL_SECS));
+    }
+
+    #[test]
+    fn test_probe_cache_with_config() {
+        let config = librefang_types::config::ProviderHealthConfig {
+            probe_timeout_secs: 5,
+            probe_connect_timeout_secs: 3,
+            probe_cache_ttl_secs: 120,
+        };
+        let cache = ProbeCache::with_config(&config);
+        assert_eq!(cache.ttl, Duration::from_secs(120));
+        assert_eq!(cache.probe_timeout_secs(), 5);
+        assert_eq!(cache.probe_connect_timeout_secs(), 3);
     }
 
     #[test]

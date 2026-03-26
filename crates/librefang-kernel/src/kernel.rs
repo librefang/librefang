@@ -6725,10 +6725,15 @@ system_prompt = "You are a helpful assistant."
                         .collect()
                 };
 
+                let ph_config = &kernel.config.provider_health;
                 for (provider_id, base_url) in &local_providers {
-                    let result =
-                        librefang_runtime::provider_health::probe_provider(provider_id, base_url)
-                            .await;
+                    let result = librefang_runtime::provider_health::probe_provider(
+                        provider_id,
+                        base_url,
+                        Some(ph_config.probe_connect_timeout_secs),
+                        Some(ph_config.probe_timeout_secs),
+                    )
+                    .await;
                     if result.reachable {
                         info!(
                             provider = %provider_id,

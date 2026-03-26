@@ -1577,6 +1577,9 @@ pub struct KernelConfig {
     /// Controls which releases `librefang update` considers.
     #[serde(default)]
     pub update_channel: UpdateChannel,
+    /// Provider health probe configuration (timeouts, cache TTL).
+    #[serde(default)]
+    pub provider_health: ProviderHealthConfig,
 }
 
 /// Input sanitization mode for channel messages.
@@ -2172,6 +2175,57 @@ fn default_prompt_caching() -> bool {
     true
 }
 
+// ── Provider health probe defaults ──────────────────────────────────
+
+fn default_probe_timeout_secs() -> u64 {
+    2
+}
+
+fn default_probe_connect_timeout_secs() -> u64 {
+    1
+}
+
+fn default_probe_cache_ttl_secs() -> u64 {
+    60
+}
+
+/// Provider health probe configuration.
+///
+/// Controls timeouts and caching for local LLM provider health checks
+/// (Ollama, vLLM, LM Studio, Lemonade).
+///
+/// ```toml
+/// [provider_health]
+/// probe_timeout_secs = 2
+/// probe_connect_timeout_secs = 1
+/// probe_cache_ttl_secs = 60
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProviderHealthConfig {
+    /// Overall request timeout for health probe requests in seconds.
+    #[serde(default = "default_probe_timeout_secs")]
+    pub probe_timeout_secs: u64,
+    /// TCP connect timeout for health probes in seconds.
+    /// Fail fast when the local port is not listening.
+    #[serde(default = "default_probe_connect_timeout_secs")]
+    pub probe_connect_timeout_secs: u64,
+    /// Cache TTL for health probe results in seconds.
+    /// Cached results prevent repeated TCP connect attempts on dashboard refreshes.
+    #[serde(default = "default_probe_cache_ttl_secs")]
+    pub probe_cache_ttl_secs: u64,
+}
+
+impl Default for ProviderHealthConfig {
+    fn default() -> Self {
+        Self {
+            probe_timeout_secs: default_probe_timeout_secs(),
+            probe_connect_timeout_secs: default_probe_connect_timeout_secs(),
+            probe_cache_ttl_secs: default_probe_cache_ttl_secs(),
+        }
+    }
+}
+
 /// Configuration entry for an MCP server.
 ///
 /// This is the config.toml representation. The runtime `McpServerConfig`
@@ -2400,6 +2454,7 @@ impl Default for KernelConfig {
             telemetry: TelemetryConfig::default(),
             prompt_intelligence: PromptIntelligenceConfig::default(),
             update_channel: UpdateChannel::default(),
+            provider_health: ProviderHealthConfig::default(),
         }
     }
 }

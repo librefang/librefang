@@ -303,7 +303,9 @@ pub async fn build_router(
         shutdown_notify: Arc::new(tokio::sync::Notify::new()),
         clawhub_cache: dashmap::DashMap::new(),
         skillhub_cache: dashmap::DashMap::new(),
-        provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
+        provider_probe_cache: librefang_runtime::provider_health::ProbeCache::with_config(
+            &kernel.config_ref().provider_health,
+        ),
         webhook_store: crate::webhook_store::WebhookStore::load(
             kernel.config_ref().home_dir.join("webhooks.json"),
         ),
