@@ -322,11 +322,9 @@ allowed_channels = []
 # app_id = "your-app-id"
 # app_secret_env = "QQ_BOT_APP_SECRET"
 
-# [channels.wecom]
-# corp_id = "your-corp-id"
-# agent_id = "your-agent-id"
-# secret_env = "WECOM_SECRET"
-# webhook_port = 8454
+# [[wecom]]
+# bot_id = "YOUR_BOT_ID"
+# secret_env = "WECOM_BOT_SECRET"
 
 # [channels.wechat]
 # bot_token_env = "WECHAT_BOT_TOKEN"   # 可选：重启时跳过二维码登录
@@ -1434,32 +1432,24 @@ allowed_users = []
 | `account_id` | string 或 null | `null` | 用于多 Bot 路由的唯一 Bot 实例标识符。 |
 | `overrides` | object | （默认值） | 每个通道的行为覆盖配置。详见[通道行为覆盖](#通道行为覆盖)。 |
 
-#### `[channels.wecom]`
+#### `[[wecom]]`
 
-企业微信（WeCom，原微信企业版）通道适配器。
+企业微信（WeCom）智能机器人通道适配器。通过 WebSocket 连接到 `wss://openws.work.weixin.qq.com`。
 
 ```toml
-[channels.wecom]
-corp_id = "your-corp-id"
-agent_id = "your-agent-id"
-secret_env = "WECOM_SECRET"
-webhook_port = 8454
-# token_env = "WECOM_TOKEN"
-# encoding_aes_key_env = "WECOM_AES_KEY"
-# default_agent = "assistant"
+[[wecom]]
+bot_id = "YOUR_BOT_ID"
+secret_env = "WECOM_BOT_SECRET"
 # account_id = "my-wecom-bot"
+# default_agent = "assistant"
 ```
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `corp_id` | string | `""` | 企业微信企业 ID。 |
-| `agent_id` | string | `""` | 企业微信应用 Agent ID。 |
-| `secret_env` | string | `"WECOM_SECRET"` | 存放企业微信应用密钥的环境变量。 |
-| `webhook_port` | u16 | `8454` | 入站 Webhook 端口。 |
-| `token_env` | string 或 null | `null` | 存放回调验证令牌的环境变量。验证入站消息时必填。 |
-| `encoding_aes_key_env` | string 或 null | `null` | 存放消息加解密 AES Key 的环境变量。 |
-| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+| `bot_id` | string | `""` | 企业微信管理后台的智能机器人 Bot ID。 |
+| `secret_env` | string | `"WECOM_BOT_SECRET"` | 存放机器人密钥的环境变量。 |
 | `account_id` | string 或 null | `null` | 用于多 Bot 路由的唯一 Bot 实例标识符。 |
+| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
 | `overrides` | object | （默认值） | 每个通道的行为覆盖配置。详见[通道行为覆盖](#通道行为覆盖)。 |
 
 #### `[channels.wechat]`
