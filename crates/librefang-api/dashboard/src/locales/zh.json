@@ -391,5 +391,13 @@
     "per_agent": "按 Agent",
     "http_metrics": "HTTP 指标",
     "tokens_1h": "1小时窗口"
+  },
+  "schema_form": {
+    "select_option": "请选择...",
+    "comma_separated": "逗号分隔",
+    "add_item": "添加",
+    "load_error": "加载表单定义失败",
+    "required_missing": "请填写所有必填字段",
+    "from_schema": "从 Schema"
   }
 }
