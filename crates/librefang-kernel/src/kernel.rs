@@ -2702,6 +2702,7 @@ system_prompt = "You are a helpful assistant."
                         .format("%A, %B %d, %Y (%Y-%m-%d %H:%M %Z)")
                         .to_string(),
                 ),
+                active_goals: self.active_goals_for_prompt(Some(agent_id)),
             };
             manifest.model.system_prompt =
                 librefang_runtime::prompt_builder::build_system_prompt(&prompt_ctx);
@@ -3250,6 +3251,7 @@ system_prompt = "You are a helpful assistant."
                         .format("%A, %B %d, %Y (%Y-%m-%d %H:%M %Z)")
                         .to_string(),
                 ),
+                active_goals: self.active_goals_for_prompt(Some(agent_id)),
             };
             manifest.model.system_prompt =
                 librefang_runtime::prompt_builder::build_system_prompt(&prompt_ctx);
@@ -4185,6 +4187,7 @@ system_prompt = "You are a helpful assistant."
                         .format("%A, %B %d, %Y (%Y-%m-%d %H:%M %Z)")
                         .to_string(),
                 ),
+                active_goals: self.active_goals_for_prompt(Some(agent_id)),
             };
             manifest.model.system_prompt =
                 librefang_runtime::prompt_builder::build_system_prompt(&prompt_ctx);
@@ -8311,6 +8314,43 @@ system_prompt = "You are a helpful assistant."
         metadata
     }
 
+    /// Load active goals (pending/in_progress) as (title, status, progress) tuples
+    /// for injection into the agent system prompt.
+    fn active_goals_for_prompt(&self, agent_id: Option<AgentId>) -> Vec<(String, String, u8)> {
+        let shared_id = shared_memory_agent_id();
+        let goals: Vec<serde_json::Value> =
+            match self.memory.structured_get(shared_id, "__librefang_goals") {
+                Ok(Some(serde_json::Value::Array(arr))) => arr,
+                _ => return Vec::new(),
+            };
+        goals
+            .into_iter()
+            .filter(|g| {
+                let status = g["status"].as_str().unwrap_or("");
+                let is_active = status == "pending" || status == "in_progress";
+                if !is_active {
+                    return false;
+                }
+                match agent_id {
+                    Some(aid) => {
+                        // Include goals assigned to this agent OR unassigned goals
+                        match g["agent_id"].as_str() {
+                            Some(gid) => gid == aid.to_string(),
+                            None => true,
+                        }
+                    }
+                    None => true,
+                }
+            })
+            .map(|g| {
+                let title = g["title"].as_str().unwrap_or("").to_string();
+                let status = g["status"].as_str().unwrap_or("pending").to_string();
+                let progress = g["progress"].as_u64().unwrap_or(0) as u8;
+                (title, status, progress)
+            })
+            .collect()
+    }
+
     /// Build a compact skill summary for the system prompt so the agent knows
     /// what extra capabilities are installed.
     fn build_skill_summary(&self, skill_allowlist: &[String]) -> String {
@@ -9771,6 +9811,76 @@ impl KernelHandle for LibreFangKernel {
 
     fn max_agent_call_depth(&self) -> u32 {
         self.config.max_agent_call_depth
+    }
+
+    fn goal_list_active(
+        &self,
+        agent_id_filter: Option<&str>,
+    ) -> Result<Vec<serde_json::Value>, String> {
+        let shared_id = shared_memory_agent_id();
+        let goals: Vec<serde_json::Value> =
+            match self.memory.structured_get(shared_id, "__librefang_goals") {
+                Ok(Some(serde_json::Value::Array(arr))) => arr,
+                Ok(_) => return Ok(Vec::new()),
+                Err(e) => return Err(format!("Failed to load goals: {e}")),
+            };
+        let active: Vec<serde_json::Value> = goals
+            .into_iter()
+            .filter(|g| {
+                let status = g["status"].as_str().unwrap_or("");
+                let is_active = status == "pending" || status == "in_progress";
+                if !is_active {
+                    return false;
+                }
+                match agent_id_filter {
+                    Some(aid) => g["agent_id"].as_str() == Some(aid),
+                    None => true,
+                }
+            })
+            .collect();
+        Ok(active)
+    }
+
+    fn goal_update(
+        &self,
+        goal_id: &str,
+        status: Option<&str>,
+        progress: Option<u8>,
+    ) -> Result<serde_json::Value, String> {
+        let shared_id = shared_memory_agent_id();
+        let mut goals: Vec<serde_json::Value> =
+            match self.memory.structured_get(shared_id, "__librefang_goals") {
+                Ok(Some(serde_json::Value::Array(arr))) => arr,
+                Ok(_) => return Err(format!("Goal '{}' not found", goal_id)),
+                Err(e) => return Err(format!("Failed to load goals: {e}")),
+            };
+
+        let mut updated_goal = None;
+        for g in goals.iter_mut() {
+            if g["id"].as_str() == Some(goal_id) {
+                if let Some(s) = status {
+                    g["status"] = serde_json::Value::String(s.to_string());
+                }
+                if let Some(p) = progress {
+                    g["progress"] = serde_json::json!(p);
+                }
+                g["updated_at"] = serde_json::Value::String(chrono::Utc::now().to_rfc3339());
+                updated_goal = Some(g.clone());
+                break;
+            }
+        }
+
+        let result = updated_goal.ok_or_else(|| format!("Goal '{}' not found", goal_id))?;
+
+        self.memory
+            .structured_set(
+                shared_id,
+                "__librefang_goals",
+                serde_json::Value::Array(goals),
+            )
+            .map_err(|e| format!("Failed to save goals: {e}"))?;
+
+        Ok(result)
     }
 }
 

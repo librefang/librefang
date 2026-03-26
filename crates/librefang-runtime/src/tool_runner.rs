@@ -370,6 +370,9 @@ pub async fn execute_tool(
         "a2a_discover" => tool_a2a_discover(input).await,
         "a2a_send" => tool_a2a_send(input, kernel).await,
 
+        // Goal tracking tool
+        "goal_update" => tool_goal_update(input, kernel),
+
         // Browser automation tools
         "browser_navigate" => {
             let url = input["url"].as_str().unwrap_or("");
@@ -1342,6 +1345,20 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                 "properties": {}
             }),
         },
+        // --- Goal tracking tool ---
+        ToolDefinition {
+            name: "goal_update".to_string(),
+            description: "Update a goal's status and/or progress. Use this to autonomously track your progress toward assigned goals.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "goal_id": { "type": "string", "description": "The goal's UUID to update" },
+                    "status": { "type": "string", "enum": ["pending", "in_progress", "completed", "cancelled"], "description": "New status for the goal (optional)" },
+                    "progress": { "type": "integer", "description": "Progress percentage 0-100 (optional)" }
+                },
+                "required": ["goal_id"]
+            }),
+        },
         // --- System time tool ---
         ToolDefinition {
             name: "system_time".to_string(),
@@ -2049,6 +2066,38 @@ async fn tool_event_publish(
         .unwrap_or(serde_json::json!({}));
     kh.publish_event(event_type, payload).await?;
     Ok(format!("Event '{event_type}' published successfully."))
+}
+
+// ---------------------------------------------------------------------------
+// Goal tracking tools
+// ---------------------------------------------------------------------------
+
+fn tool_goal_update(
+    input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+) -> Result<String, String> {
+    let kh = require_kernel(kernel)?;
+    let goal_id = input["goal_id"]
+        .as_str()
+        .ok_or("Missing 'goal_id' parameter")?;
+    let status = input["status"].as_str();
+    let progress = input["progress"].as_u64().map(|p| p.min(100) as u8);
+
+    if status.is_none() && progress.is_none() {
+        return Err("At least one of 'status' or 'progress' must be provided".to_string());
+    }
+
+    if let Some(s) = status {
+        if !["pending", "in_progress", "completed", "cancelled"].contains(&s) {
+            return Err(format!(
+                "Invalid status '{}'. Must be: pending, in_progress, completed, or cancelled",
+                s
+            ));
+        }
+    }
+
+    let updated = kh.goal_update(goal_id, status, progress)?;
+    Ok(serde_json::to_string_pretty(&updated).unwrap_or_else(|_| updated.to_string()))
 }
 
 // ---------------------------------------------------------------------------
@@ -3984,8 +4033,8 @@ mod tests {
     fn test_builtin_tool_definitions() {
         let tools = builtin_tool_definitions();
         assert!(
-            tools.len() >= 39,
-            "Expected at least 39 tools, got {}",
+            tools.len() >= 40,
+            "Expected at least 40 tools, got {}",
             tools.len()
         );
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
@@ -4047,6 +4096,8 @@ mod tests {
         assert!(names.contains(&"text_to_speech"));
         assert!(names.contains(&"speech_to_text"));
         assert!(names.contains(&"docker_exec"));
+        // Goal tracking tool
+        assert!(names.contains(&"goal_update"));
         // Canvas tool
         assert!(names.contains(&"canvas_present"));
     }
@@ -5275,6 +5326,68 @@ tools = ["file_read"]
             "Should not get permission denied for allowed MCP tool, got: {}",
             result.content
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Goal system tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_goal_update_tool_definition_schema() {
+        let tools = builtin_tool_definitions();
+        let tool = tools
+            .iter()
+            .find(|t| t.name == "goal_update")
+            .expect("goal_update tool should be registered");
+        assert_eq!(tool.input_schema["type"], "object");
+        let required = tool.input_schema["required"].as_array().unwrap();
+        assert!(required.contains(&serde_json::json!("goal_id")));
+        let props = tool.input_schema["properties"].as_object().unwrap();
+        assert!(props.contains_key("goal_id"));
+        assert!(props.contains_key("status"));
+        assert!(props.contains_key("progress"));
+    }
+
+    #[test]
+    fn test_goal_update_missing_kernel() {
+        let input = serde_json::json!({
+            "goal_id": "some-uuid",
+            "status": "in_progress",
+            "progress": 50
+        });
+        let result = tool_goal_update(&input, None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Kernel handle"));
+    }
+
+    #[test]
+    fn test_goal_update_missing_goal_id() {
+        let input = serde_json::json!({
+            "status": "in_progress"
+        });
+        let result = tool_goal_update(&input, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_goal_update_no_fields() {
+        let input = serde_json::json!({
+            "goal_id": "some-uuid"
+        });
+        let result = tool_goal_update(&input, None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("At least one"));
+    }
+
+    #[test]
+    fn test_goal_update_invalid_status() {
+        let input = serde_json::json!({
+            "goal_id": "some-uuid",
+            "status": "done"
+        });
+        let result = tool_goal_update(&input, None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Invalid status"));
     }
 
     /// Mock kernel that validates capability inheritance in spawn_agent_checked.
