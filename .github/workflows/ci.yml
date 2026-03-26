@@ -258,7 +258,7 @@ jobs:
           else
             for crate in $CRATES; do
               echo "::group::Testing $crate"
-              cargo nextest run -p "$crate" --no-fail-fast && echo "✓ $crate" || exit 1
+              cargo nextest run -p "$crate" --no-fail-fast --no-tests=pass && echo "✓ $crate" || exit 1
               echo "::endgroup::"
             done
           fi
