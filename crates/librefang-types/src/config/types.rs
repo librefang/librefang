@@ -1448,6 +1448,49 @@ pub fn redact_proxy_url(url: &str) -> String {
     url.to_string()
 }
 
+// ── Trigger system defaults ────────────────────────────────────────────
+
+fn default_trigger_cooldown_secs() -> u64 {
+    5
+}
+fn default_max_triggers_per_event() -> usize {
+    10
+}
+fn default_max_trigger_depth() -> usize {
+    5
+}
+fn default_max_workflow_secs() -> u64 {
+    3600
+}
+
+/// Event-driven trigger system configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TriggersConfig {
+    /// Default cooldown between trigger firings in seconds (default: 5).
+    #[serde(default = "default_trigger_cooldown_secs")]
+    pub cooldown_secs: u64,
+    /// Maximum triggers that can fire per single event (default: 10).
+    #[serde(default = "default_max_triggers_per_event")]
+    pub max_per_event: usize,
+    /// Maximum trigger recursion depth (default: 5).
+    #[serde(default = "default_max_trigger_depth")]
+    pub max_depth: usize,
+    /// Maximum workflow execution time in seconds (default: 3600).
+    #[serde(default = "default_max_workflow_secs")]
+    pub max_workflow_secs: u64,
+}
+
+impl Default for TriggersConfig {
+    fn default() -> Self {
+        Self {
+            cooldown_secs: default_trigger_cooldown_secs(),
+            max_per_event: default_max_triggers_per_event(),
+            max_depth: default_max_trigger_depth(),
+            max_workflow_secs: default_max_workflow_secs(),
+        }
+    }
+}
+
 /// Top-level kernel configuration.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1557,6 +1600,9 @@ pub struct KernelConfig {
     /// Webhook trigger configuration (external event injection).
     #[serde(default)]
     pub webhook_triggers: Option<WebhookTriggerConfig>,
+    /// Event-driven trigger system configuration (cooldowns, depth limits, etc.).
+    #[serde(default)]
+    pub triggers: TriggersConfig,
     /// Execution approval policy.
     #[serde(default, alias = "approval_policy")]
     pub approval: crate::approval::ApprovalPolicy,
@@ -2595,6 +2641,7 @@ impl Default for KernelConfig {
             links: crate::media::LinkConfig::default(),
             reload: ReloadConfig::default(),
             webhook_triggers: None,
+            triggers: TriggersConfig::default(),
             approval: crate::approval::ApprovalPolicy::default(),
             max_cron_jobs: default_max_cron_jobs(),
             include: Vec::new(),
