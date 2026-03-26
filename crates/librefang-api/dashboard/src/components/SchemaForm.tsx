@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo } from "react";
+import { useState, useCallback, useEffect, useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { fetchRegistrySchema, type RegistrySchema, type RegistrySchemaField, type RegistrySchemaSection } from "../api";
@@ -25,7 +25,7 @@ function buildDefaults(
 ): Record<string, unknown> {
   const values: Record<string, unknown> = {};
 
-  for (const [key, field] of Object.entries(schema.fields)) {
+  for (const [key, field] of Object.entries(schema.fields ?? {})) {
     if (initialValues && key in initialValues) {
       values[key] = initialValues[key];
     } else if (field.default !== undefined) {
@@ -39,25 +39,23 @@ function buildDefaults(
 
   // Initialize sections — repeatable sections start with empty array,
   // non-repeatable sections get a single flat object with defaults
-  if (schema.sections) {
-    for (const [sectionKey, section] of Object.entries(schema.sections)) {
-      if (initialValues && sectionKey in initialValues) {
-        values[sectionKey] = initialValues[sectionKey];
-      } else if (section.repeatable) {
-        values[sectionKey] = [];
-      } else {
-        const sectionDefaults: Record<string, unknown> = {};
-        for (const [fKey, f] of Object.entries(section.fields)) {
-          if (f.default !== undefined) {
-            sectionDefaults[fKey] = f.default;
-          } else if (f.type === "bool") {
-            sectionDefaults[fKey] = false;
-          } else {
-            sectionDefaults[fKey] = "";
-          }
+  for (const [sectionKey, section] of Object.entries(schema.sections ?? {})) {
+    if (initialValues && sectionKey in initialValues) {
+      values[sectionKey] = initialValues[sectionKey];
+    } else if (section.repeatable) {
+      values[sectionKey] = [];
+    } else {
+      const sectionDefaults: Record<string, unknown> = {};
+      for (const [fKey, f] of Object.entries(section.fields ?? {})) {
+        if (f.default !== undefined) {
+          sectionDefaults[fKey] = f.default;
+        } else if (f.type === "bool") {
+          sectionDefaults[fKey] = false;
+        } else {
+          sectionDefaults[fKey] = "";
         }
-        values[sectionKey] = sectionDefaults;
       }
+      values[sectionKey] = sectionDefaults;
     }
   }
 
@@ -67,7 +65,7 @@ function buildDefaults(
 // Build a blank entry for a repeatable section
 function blankSectionEntry(section: RegistrySchemaSection): Record<string, unknown> {
   const entry: Record<string, unknown> = {};
-  for (const [key, field] of Object.entries(section.fields)) {
+  for (const [key, field] of Object.entries(section.fields ?? {})) {
     if (field.default !== undefined) {
       entry[key] = field.default;
     } else if (field.type === "bool") {
@@ -86,7 +84,7 @@ function validateRequired(
 ): string[] {
   const errors: string[] = [];
 
-  for (const [key, field] of Object.entries(schema.fields)) {
+  for (const [key, field] of Object.entries(schema.fields ?? {})) {
     if (field.required) {
       const v = values[key];
       if (v === undefined || v === null || v === "") {
@@ -95,31 +93,29 @@ function validateRequired(
     }
   }
 
-  if (schema.sections) {
-    for (const [sectionKey, section] of Object.entries(schema.sections)) {
-      if (section.repeatable) {
-        const items = values[sectionKey];
-        if (Array.isArray(items)) {
-          items.forEach((item, idx) => {
-            for (const [fKey, f] of Object.entries(section.fields)) {
-              if (f.required) {
-                const v = (item as Record<string, unknown>)[fKey];
-                if (v === undefined || v === null || v === "") {
-                  errors.push(`${sectionKey}[${idx}].${fKey}`);
-                }
+  for (const [sectionKey, section] of Object.entries(schema.sections ?? {})) {
+    if (section.repeatable) {
+      const items = values[sectionKey];
+      if (Array.isArray(items)) {
+        items.forEach((item, idx) => {
+          for (const [fKey, f] of Object.entries(section.fields ?? {})) {
+            if (f.required) {
+              const v = (item as Record<string, unknown>)[fKey];
+              if (v === undefined || v === null || v === "") {
+                errors.push(`${sectionKey}[${idx}].${fKey}`);
               }
             }
-          });
-        }
-      } else {
-        const sectionVal = values[sectionKey] as Record<string, unknown> | undefined;
-        if (sectionVal) {
-          for (const [fKey, f] of Object.entries(section.fields)) {
-            if (f.required) {
-              const v = sectionVal[fKey];
-              if (v === undefined || v === null || v === "") {
-                errors.push(`${sectionKey}.${fKey}`);
-              }
+          }
+        });
+      }
+    } else {
+      const sectionVal = values[sectionKey] as Record<string, unknown> | undefined;
+      if (sectionVal) {
+        for (const [fKey, f] of Object.entries(section.fields ?? {})) {
+          if (f.required) {
+            const v = sectionVal[fKey];
+            if (v === undefined || v === null || v === "") {
+              errors.push(`${sectionKey}.${fKey}`);
             }
           }
         }
@@ -215,7 +211,7 @@ function SchemaField({
             const raw = e.target.value;
             onChange(raw === "" ? "" : Number(raw));
           }}
-          placeholder={field.example ?? ""}
+          placeholder={field.example != null ? String(field.example) : ""}
           className={hasError ? "border-error" : ""}
         />
         {field.description && (
@@ -242,7 +238,7 @@ function SchemaField({
                 .filter(Boolean),
             );
           }}
-          placeholder={field.example ?? t("schema_form.comma_separated")}
+          placeholder={field.example != null ? String(field.example) : t("schema_form.comma_separated")}
           className={hasError ? "border-error" : ""}
         />
         {field.description && (
@@ -259,7 +255,7 @@ function SchemaField({
         label={field.required ? `${fieldKey} *` : fieldKey}
         value={String(value ?? "")}
         onChange={(e) => onChange(e.target.value)}
-        placeholder={field.example ?? ""}
+        placeholder={field.example != null ? String(field.example) : ""}
         className={hasError ? "border-error" : ""}
       />
       {field.description && (
@@ -348,7 +344,7 @@ function SectionFieldset({
                     <Trash2 className="w-3.5 h-3.5" />
                   </button>
                 </div>
-                {Object.entries(section.fields).map(([fKey, f]) => (
+                {Object.entries(section.fields ?? {}).map(([fKey, f]) => (
                   <SchemaField
                     key={fKey}
                     fieldKey={fKey}
@@ -406,7 +402,7 @@ function SectionFieldset({
           {section.description && (
             <p className="text-[10px] text-text-dim/60">{section.description}</p>
           )}
-          {Object.entries(section.fields).map(([fKey, f]) => (
+          {Object.entries(section.fields ?? {}).map(([fKey, f]) => (
             <SchemaField
               key={fKey}
               fieldKey={fKey}
@@ -472,10 +468,12 @@ export function SchemaForm({
 
   // Sync defaults into values when schema first arrives
   const [initialized, setInitialized] = useState(false);
-  if (schema && !initialized) {
-    setValues(defaultValues);
-    setInitialized(true);
-  }
+  useEffect(() => {
+    if (schema && !initialized) {
+      setValues(defaultValues);
+      setInitialized(true);
+    }
+  }, [schema, initialized, defaultValues]);
 
   const updateField = useCallback((key: string, value: unknown) => {
     setValues((prev) => ({ ...prev, [key]: value }));
@@ -553,7 +551,7 @@ export function SchemaForm({
 
   if (!schema) return null;
 
-  const topLevelFields = Object.entries(schema.fields);
+  const topLevelFields = Object.entries(schema.fields ?? {});
   const sections = schema.sections ? Object.entries(schema.sections) : [];
 
   return (

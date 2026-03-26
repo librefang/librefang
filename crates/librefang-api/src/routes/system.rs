@@ -3072,7 +3072,12 @@ pub async fn task_queue_retry(
 async fn registry_schema(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let home_dir = &state.kernel.config_ref().home_dir;
     match librefang_types::registry_schema::load_registry_schema(home_dir) {
-        Some(schema) => Json(serde_json::to_value(&schema).unwrap_or_default()).into_response(),
+        Some(schema) => match serde_json::to_value(&schema) {
+            Ok(val) => Json(val).into_response(),
+            Err(e) => ApiErrorResponse::internal(e)
+                .into_json_tuple()
+                .into_response(),
+        },
         None => ApiErrorResponse::not_found(
             "Registry schema not found or not yet in machine-parseable format",
         )
@@ -3089,7 +3094,12 @@ async fn registry_schema_by_type(
     let home_dir = &state.kernel.config_ref().home_dir;
     match librefang_types::registry_schema::load_registry_schema(home_dir) {
         Some(schema) => match schema.content_types.get(&content_type) {
-            Some(ct) => Json(serde_json::to_value(ct).unwrap_or_default()).into_response(),
+            Some(ct) => match serde_json::to_value(ct) {
+                Ok(val) => Json(val).into_response(),
+                Err(e) => ApiErrorResponse::internal(e)
+                    .into_json_tuple()
+                    .into_response(),
+            },
             None => ApiErrorResponse::not_found(format!(
                 "Content type '{content_type}' not found in registry schema"
             ))

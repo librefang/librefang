@@ -100,9 +100,7 @@ pub fn load_registry_schema(home_dir: &std::path::Path) -> Option<RegistrySchema
             match toml::from_str::<RegistrySchema>(&content) {
                 Ok(schema) if !schema.content_types.is_empty() => return Some(schema),
                 Ok(_) => continue, // parsed but empty — probably old comment-only format
-                Err(e) => {
-                    tracing::debug!("Failed to parse {}: {e}", path.display());
-                }
+                Err(_) => continue,
             }
         }
     }

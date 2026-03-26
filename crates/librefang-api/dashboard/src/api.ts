@@ -1913,6 +1913,10 @@ export interface RegistrySchema {
   sections?: Record<string, RegistrySchemaSection>;
 }
 
+export async function fetchAllRegistrySchemas(): Promise<Record<string, RegistrySchema>> {
+  return get<Record<string, RegistrySchema>>("/api/registry/schema");
+}
+
 export async function fetchRegistrySchema(contentType: string): Promise<RegistrySchema> {
   return get<RegistrySchema>(`/api/registry/schema/${encodeURIComponent(contentType)}`);
 }
