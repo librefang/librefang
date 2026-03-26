@@ -1277,14 +1277,37 @@ impl LibreFangKernel {
             .sqlite_path
             .clone()
             .unwrap_or_else(|| config.data_dir.join("librefang.db"));
-        let memory = Arc::new(
-            MemorySubstrate::open_with_chunking(
-                &db_path,
-                config.memory.decay_rate,
-                config.memory.chunking.clone(),
-            )
-            .map_err(|e| KernelError::BootFailed(format!("Memory init failed: {e}")))?,
-        );
+        let mut substrate = MemorySubstrate::open_with_chunking(
+            &db_path,
+            config.memory.decay_rate,
+            config.memory.chunking.clone(),
+        )
+        .map_err(|e| KernelError::BootFailed(format!("Memory init failed: {e}")))?;
+
+        // Optionally attach an external vector store backend.
+        if let Some(ref backend) = config.memory.vector_backend {
+            match backend.as_str() {
+                "http" => {
+                    let url = config.memory.vector_store_url.as_deref().ok_or_else(|| {
+                        KernelError::BootFailed(
+                            "vector_backend = \"http\" requires vector_store_url".into(),
+                        )
+                    })?;
+                    let store =
+                        std::sync::Arc::new(librefang_memory::HttpVectorStore::new(url));
+                    substrate.set_vector_store(store);
+                    tracing::info!("Vector store backend: http ({})", url);
+                }
+                "sqlite" | "" => { /* default — no external backend */ }
+                other => {
+                    return Err(KernelError::BootFailed(format!(
+                        "Unknown vector_backend: {other:?}"
+                    )));
+                }
+            }
+        }
+
+        let memory = Arc::new(substrate);
 
         // Create LLM driver.
         // For the API key, try: 1) explicit api_key_env from config, 2) provider_api_keys

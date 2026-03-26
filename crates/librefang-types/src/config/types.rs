@@ -2907,6 +2907,12 @@ pub struct MemoryConfig {
     /// Chunking configuration for long documents.
     #[serde(default)]
     pub chunking: ChunkConfig,
+    /// Vector store backend: `"sqlite"` (default) or `"http"`.
+    #[serde(default)]
+    pub vector_backend: Option<String>,
+    /// Base URL for the HTTP vector store (used when `vector_backend = "http"`).
+    #[serde(default)]
+    pub vector_store_url: Option<String>,
 }
 
 /// Configuration for splitting long documents into overlapping chunks.
@@ -2949,6 +2955,8 @@ impl Default for MemoryConfig {
             fts_only: None,
             decay: MemoryDecayConfig::default(),
             chunking: ChunkConfig::default(),
+            vector_backend: None,
+            vector_store_url: None,
         }
     }
 }
