@@ -221,8 +221,7 @@ fn encrypt_aes_cbc(key: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, String> {
     type Aes256CbcEncrypt = cbc::Encryptor<aes::Aes256>;
     let iv = &key[..16];
     let cipher = Aes256CbcEncrypt::new(key.into(), iv.into());
-    let encrypted = cipher
-        .encrypt_padded_vec_mut::<aes::cipher::block_padding::NoPadding>(&padded);
+    let encrypted = cipher.encrypt_padded_vec_mut::<aes::cipher::block_padding::NoPadding>(&padded);
 
     Ok(encrypted)
 }
@@ -360,6 +359,7 @@ impl WeComAdapter {
             shutdown_rx,
             mode: Mode::Websocket {
                 ws_tx: Arc::new(RwLock::new(None)),
+                pending_req_ids: Arc::new(RwLock::new(HashMap::new())),
             },
         }
     }
@@ -395,7 +395,6 @@ impl WeComAdapter {
     }
 
     /// Build a `aibot_respond_msg` reply frame (WebSocket mode).
-    #[allow(dead_code)]
     fn build_reply_frame(req_id: &str, text: &str) -> String {
         serde_json::json!({
             "action": "aibot_respond_msg",
@@ -435,6 +434,7 @@ impl WeComAdapter {
         account_id: Arc<Option<String>>,
         mut shutdown_rx: watch::Receiver<bool>,
         ws_tx_shared: Arc<RwLock<Option<mpsc::UnboundedSender<String>>>>,
+        pending_req_ids: ReqIdMap,
     ) -> Pin<Box<dyn Stream<Item = ChannelMessage> + Send>> {
         let (msg_tx, msg_rx) = mpsc::channel::<ChannelMessage>(256);
 
@@ -559,6 +559,12 @@ impl WeComAdapter {
                                             "wecom_req_id".to_string(),
                                             serde_json::json!(req_id),
                                         );
+
+                                        // Cache req_id so send() can use aibot_respond_msg
+                                        {
+                                            let mut map = pending_req_ids.write().await;
+                                            map.insert(from_user.clone(), req_id);
+                                        }
 
                                         if let Some(ref aid) = *account_id {
                                             msg.metadata.insert(
@@ -904,12 +910,16 @@ impl ChannelAdapter for WeComAdapter {
         let shutdown_rx = self.shutdown_rx.clone();
 
         match &self.mode {
-            Mode::Websocket { ws_tx } => Ok(Self::start_websocket(
+            Mode::Websocket {
+                ws_tx,
+                pending_req_ids,
+            } => Ok(Self::start_websocket(
                 self.bot_id.clone(),
                 self.secret.clone(),
                 account_id,
                 shutdown_rx,
                 Arc::clone(ws_tx),
+                Arc::clone(pending_req_ids),
             )),
             Mode::Callback {
                 webhook_port,
@@ -946,12 +956,26 @@ impl ChannelAdapter for WeComAdapter {
         };
 
         match &self.mode {
-            Mode::Websocket { ws_tx } => {
+            Mode::Websocket {
+                ws_tx,
+                pending_req_ids,
+            } => {
                 let guard = ws_tx.read().await;
                 let frame_tx = guard.as_ref().ok_or("WeCom bot WebSocket not connected")?;
                 let user_id = &user.platform_id;
+
+                // Try to use aibot_respond_msg with the cached req_id for this user
+                let req_id = {
+                    let mut map = pending_req_ids.write().await;
+                    map.remove(user_id)
+                };
+
                 for chunk in split_message(&text, MAX_MESSAGE_LEN) {
-                    let frame = Self::build_send_frame(user_id, chunk);
+                    let frame = if let Some(ref rid) = req_id {
+                        Self::build_reply_frame(rid, chunk)
+                    } else {
+                        Self::build_send_frame(user_id, chunk)
+                    };
                     frame_tx
                         .send(frame)
                         .map_err(|e| format!("WeCom bot send failed: {e}"))?;
@@ -963,10 +987,7 @@ impl ChannelAdapter for WeComAdapter {
                 ..
             } => {
                 // Try response_url from user metadata first, fall back to webhook key
-                let response_url = user
-                    .librefang_user
-                    .as_ref()
-                    .and_then(|_| None::<String>); // placeholder: response_url is per-message
+                let response_url = user.librefang_user.as_ref().and_then(|_| None::<String>); // placeholder: response_url is per-message
 
                 if let Some(url) = response_url {
                     // Use response_url (one-time, per-message)
@@ -984,9 +1005,9 @@ impl ChannelAdapter for WeComAdapter {
                 } else {
                     // Fall back to webhook key
                     let key_guard = webhook_key.read().await;
-                    let key = key_guard
-                        .as_ref()
-                        .ok_or("WeCom callback: no webhook key available (no messages received yet)")?;
+                    let key = key_guard.as_ref().ok_or(
+                        "WeCom callback: no webhook key available (no messages received yet)",
+                    )?;
                     let url = format!(
                         "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key={}",
                         key
