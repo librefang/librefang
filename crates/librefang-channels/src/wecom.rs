@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, watch, RwLock};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 use zeroize::Zeroizing;
 
 // ── Constants ──────────────────────────────────────────────────────
@@ -48,25 +48,53 @@ fn parse_ws_frame(text: &str) -> Option<serde_json::Value> {
     serde_json::from_str(text).ok()
 }
 
+/// Get the command/action from a frame (supports both `cmd` and `action` keys).
+fn frame_cmd(frame: &serde_json::Value) -> Option<&str> {
+    frame
+        .get("cmd")
+        .or_else(|| frame.get("action"))
+        .and_then(|v| v.as_str())
+}
+
+/// Get the data/body payload from a frame (supports both `body` and `data` keys).
+fn frame_body(frame: &serde_json::Value) -> Option<&serde_json::Value> {
+    frame.get("body").or_else(|| frame.get("data"))
+}
+
+/// Get `req_id` from a frame — checks `headers.req_id` first, then `data.req_id`.
+fn frame_req_id(frame: &serde_json::Value) -> Option<&str> {
+    frame
+        .get("headers")
+        .and_then(|h| h.get("req_id"))
+        .and_then(|v| v.as_str())
+        .or_else(|| {
+            frame_body(frame)
+                .and_then(|b| b.get("req_id"))
+                .and_then(|v| v.as_str())
+        })
+}
+
 /// Extract a message callback from a parsed JSON frame.
 /// Returns (req_id, from_user_id, content, is_group).
 fn extract_msg_callback(frame: &serde_json::Value) -> Option<(String, String, String, bool)> {
-    let action = frame.get("action")?.as_str()?;
-    if action != "aibot_msg_callback" {
+    let cmd = frame_cmd(frame)?;
+    if cmd != "aibot_msg_callback" {
         return None;
     }
-    let data = frame.get("data")?;
-    let req_id = data.get("req_id")?.as_str()?.to_string();
-    let from_user = data
+    let body = frame_body(frame)?;
+    let req_id = frame_req_id(frame)
+        .or_else(|| body.get("req_id").and_then(|v| v.as_str()))?
+        .to_string();
+    let from_user = body
         .get("from")
-        .and_then(|f| f.get("user_id"))
+        .and_then(|f| f.get("userid").or_else(|| f.get("user_id")))
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
 
-    let msgtype = data.get("msgtype").and_then(|v| v.as_str()).unwrap_or("");
+    let msgtype = body.get("msgtype").and_then(|v| v.as_str()).unwrap_or("");
     let content = match msgtype {
-        "text" => data
+        "text" => body
             .get("text")
             .and_then(|t| t.get("content"))
             .and_then(|v| v.as_str())
@@ -82,8 +110,9 @@ fn extract_msg_callback(frame: &serde_json::Value) -> Option<(String, String, St
         return None;
     }
 
-    let is_group = data
-        .get("chat_type")
+    let is_group = body
+        .get("chattype")
+        .or_else(|| body.get("chat_type"))
         .and_then(|v| v.as_str())
         .map(|t| t == "group")
         .unwrap_or(false);
@@ -92,17 +121,24 @@ fn extract_msg_callback(frame: &serde_json::Value) -> Option<(String, String, St
 }
 
 /// Check if a frame is a subscribe success acknowledgement.
+///
+/// The server response may not include a `cmd` field — it just returns
+/// `{"errcode": 0, "errmsg": "ok", "headers": {"req_id": "aibot_subscribe_..."}}`.
+/// We detect success by checking if `headers.req_id` starts with `"aibot_subscribe"` and errcode is 0.
 fn is_subscribe_success(frame: &serde_json::Value) -> bool {
-    let action = frame.get("action").and_then(|v| v.as_str());
     let errcode = frame.get("errcode").and_then(|v| v.as_i64());
-    let data_errcode = frame
-        .get("data")
-        .and_then(|d| d.get("errcode"))
-        .and_then(|v| v.as_i64());
 
-    matches!(action, Some("aibot_subscribe"))
-        && (errcode == Some(0) || errcode.is_none())
-        && (data_errcode == Some(0) || data_errcode.is_none())
+    // Method 1: explicit cmd field
+    if let Some(cmd) = frame_cmd(frame) {
+        return cmd == "aibot_subscribe" && (errcode == Some(0) || errcode.is_none());
+    }
+
+    // Method 2: infer from headers.req_id prefix (server omits cmd in ack frames)
+    if let Some(req_id) = frame_req_id(frame) {
+        return req_id.starts_with("aibot_subscribe") && errcode == Some(0);
+    }
+
+    false
 }
 
 // ── Callback-mode crypto helpers ───────────────────────────────────
@@ -203,6 +239,7 @@ fn decode_wecom_payload(encoding_aes_key: &str, encrypted_payload: &str) -> Resu
 }
 
 /// AES-CBC encrypt with PKCS#7 padding for building callback responses.
+#[allow(dead_code)] // used by build_encrypted_response (passive reply, not yet wired)
 fn encrypt_aes_cbc(key: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, String> {
     use cbc::cipher::{BlockEncryptMut, KeyIvInit};
 
@@ -216,18 +253,22 @@ fn encrypt_aes_cbc(key: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, String> {
     // PKCS#7 padding to 32-byte boundary
     let pad_len = 32 - (plaintext.len() % 32);
     let mut padded = plaintext.to_vec();
-    padded.extend(std::iter::repeat(pad_len as u8).take(pad_len));
+    padded.extend(std::iter::repeat_n(pad_len as u8, pad_len));
 
     type Aes256CbcEncrypt = cbc::Encryptor<aes::Aes256>;
     let iv = &key[..16];
     let cipher = Aes256CbcEncrypt::new(key.into(), iv.into());
-    let encrypted = cipher.encrypt_padded_vec_mut::<aes::cipher::block_padding::NoPadding>(&padded);
+    let len = padded.len();
+    let encrypted = cipher
+        .encrypt_padded_mut::<aes::cipher::block_padding::NoPadding>(&mut padded, len)
+        .map_err(|e| format!("AES-CBC encryption failed: {e}"))?;
 
-    Ok(encrypted)
+    Ok(encrypted.to_vec())
 }
 
 /// Build an encrypted response JSON for passive reply in callback mode.
 /// Format: `{"encrypt": "...", "msgsignature": "...", "timestamp": "...", "nonce": "..."}`
+#[allow(dead_code)] // passive reply not yet wired in callback mode
 fn build_encrypted_response(
     encoding_aes_key: &str,
     token: &str,
@@ -282,6 +323,7 @@ fn build_encrypted_response(
 }
 
 /// Generate 16 random bytes (non-cryptographic, sufficient for nonce).
+#[allow(dead_code)]
 fn rand_bytes() -> [u8; 16] {
     use std::collections::hash_map::RandomState;
     use std::hash::{BuildHasher, Hasher};
@@ -300,6 +342,7 @@ fn rand_bytes() -> [u8; 16] {
 }
 
 /// Generate a random u64 for nonce strings.
+#[allow(dead_code)]
 fn rand_u64() -> u64 {
     use std::collections::hash_map::RandomState;
     use std::hash::{BuildHasher, Hasher};
@@ -395,13 +438,19 @@ impl WeComAdapter {
     }
 
     /// Build a `aibot_respond_msg` reply frame (WebSocket mode).
+    ///
+    /// WeCom intelligent bot's `aibot_respond_msg` does NOT support `msgtype: "text"`.
+    /// Valid types are: stream, markdown, template_card, stream_with_template_card,
+    /// file, image, voice, video. For plain text replies we use `markdown`.
     fn build_reply_frame(req_id: &str, text: &str) -> String {
         serde_json::json!({
-            "action": "aibot_respond_msg",
-            "data": {
+            "cmd": "aibot_respond_msg",
+            "headers": {
                 "req_id": req_id,
-                "msgtype": "text",
-                "text": {
+            },
+            "body": {
+                "msgtype": "markdown",
+                "markdown": {
                     "content": text,
                 }
             }
@@ -412,13 +461,16 @@ impl WeComAdapter {
     /// Build a `aibot_send_msg` proactive message frame (WebSocket mode).
     fn build_send_frame(user_id: &str, text: &str) -> String {
         serde_json::json!({
-            "action": "aibot_send_msg",
-            "data": {
+            "cmd": "aibot_send_msg",
+            "headers": {
+                "req_id": format!("aibot_send_msg_{}", Utc::now().timestamp_millis()),
+            },
+            "body": {
                 "receiver": {
-                    "user_id": user_id,
+                    "userid": user_id,
                 },
-                "msgtype": "text",
-                "text": {
+                "msgtype": "markdown",
+                "markdown": {
                     "content": text,
                 }
             }
@@ -474,8 +526,11 @@ impl WeComAdapter {
                 }
 
                 let subscribe_frame = serde_json::json!({
-                    "action": "aibot_subscribe",
-                    "data": {
+                    "cmd": "aibot_subscribe",
+                    "headers": {
+                        "req_id": format!("aibot_subscribe_{}", Utc::now().timestamp_millis()),
+                    },
+                    "body": {
                         "bot_id": bot_id,
                         "secret": secret.as_str(),
                     }
@@ -497,48 +552,111 @@ impl WeComAdapter {
                             break 'inner false;
                         }
                         _ = heartbeat.tick() => {
-                            let ping = serde_json::json!({"action": "ping"}).to_string();
+                            let ping = serde_json::json!({
+                                "cmd": "ping",
+                                "headers": {
+                                    "req_id": format!("ping_{}", Utc::now().timestamp_millis()),
+                                }
+                            }).to_string();
                             if let Err(e) = ws_sink.send(WsMessage::Text(ping.into())).await {
                                 warn!("WeCom bot heartbeat failed: {e}");
                                 break 'inner true;
                             }
                         }
                         Some(frame_text) = frame_rx.recv() => {
+                            info!(frame_len = frame_text.len(), "WeCom bot: sending frame over WebSocket");
+                            debug!(frame = %frame_text, "WeCom bot: outgoing WS frame content");
                             if let Err(e) = ws_sink.send(WsMessage::Text(frame_text.into())).await {
-                                warn!("WeCom bot send failed: {e}");
+                                error!("WeCom bot WS sink send failed: {e}");
                                 break 'inner true;
                             }
+                            info!("WeCom bot: frame sent over WebSocket successfully");
                         }
                         ws_msg = ws_stream_rx.next() => {
                             match ws_msg {
                                 Some(Ok(WsMessage::Text(text))) => {
                                     let text_str: &str = &text;
+                                    debug!(raw_frame_len = text_str.len(), "WeCom bot received WS frame");
                                     let Some(frame) = parse_ws_frame(text_str) else {
-                                        debug!("WeCom bot: unparseable frame");
+                                        warn!(raw = %text_str, "WeCom bot: unparseable frame");
                                         continue 'inner;
                                     };
+
+                                    let cmd = frame_cmd(&frame).unwrap_or("unknown");
+                                    debug!(cmd = cmd, "WeCom bot parsed frame cmd");
 
                                     if is_subscribe_success(&frame) {
                                         info!("WeCom bot subscribed successfully");
                                         continue 'inner;
                                     }
 
-                                    if frame.get("action").and_then(|v| v.as_str())
-                                        == Some("aibot_event_callback")
-                                    {
-                                        debug!(event = ?frame.get("data"), "WeCom bot event");
+                                    // Subscribe failure
+                                    if cmd == "aibot_subscribe" {
+                                        let errcode = frame.get("errcode").and_then(|v| v.as_i64());
+                                        let errmsg = frame.get("errmsg").and_then(|v| v.as_str()).unwrap_or("");
+                                        error!(
+                                            errcode = ?errcode,
+                                            errmsg = errmsg,
+                                            "WeCom bot subscribe FAILED"
+                                        );
                                         continue 'inner;
                                     }
 
-                                    if frame.get("action").and_then(|v| v.as_str())
-                                        == Some("pong")
-                                    {
+                                    if cmd == "aibot_event_callback" {
+                                        debug!(event = ?frame_body(&frame), "WeCom bot event");
+                                        continue 'inner;
+                                    }
+
+                                    if cmd == "pong" {
+                                        continue 'inner;
+                                    }
+
+                                    // Server ack frames (no cmd, just errcode + headers.req_id)
+                                    // e.g. ping ack, send_msg ack, respond_msg ack
+                                    if cmd == "unknown" {
+                                        if let Some(req_id) = frame_req_id(&frame) {
+                                            let errcode = frame.get("errcode").and_then(|v| v.as_i64());
+                                            if errcode == Some(0) {
+                                                debug!(req_id = req_id, "WeCom bot: server ack OK");
+                                            } else {
+                                                let errmsg = frame.get("errmsg").and_then(|v| v.as_str()).unwrap_or("");
+                                                error!(req_id = req_id, errcode = ?errcode, errmsg = errmsg, "WeCom bot: server ack error");
+                                            }
+                                            continue 'inner;
+                                        }
+                                    }
+
+                                    // Log response frames from server (e.g. aibot_respond_msg / aibot_send_msg ack)
+                                    if cmd == "aibot_respond_msg" || cmd == "aibot_send_msg" {
+                                        let errcode = frame.get("errcode").and_then(|v| v.as_i64());
+                                        let errmsg = frame.get("errmsg").and_then(|v| v.as_str()).unwrap_or("");
+                                        if errcode.unwrap_or(0) != 0 {
+                                            error!(
+                                                cmd = cmd,
+                                                errcode = ?errcode,
+                                                errmsg = errmsg,
+                                                "WeCom bot send/reply got error response from server"
+                                            );
+                                        } else {
+                                            info!(
+                                                cmd = cmd,
+                                                errcode = ?errcode,
+                                                "WeCom bot send/reply acknowledged by server"
+                                            );
+                                        }
                                         continue 'inner;
                                     }
 
                                     if let Some((req_id, from_user, content, is_group)) =
                                         extract_msg_callback(&frame)
                                     {
+                                        info!(
+                                            req_id = %req_id,
+                                            from_user = %from_user,
+                                            content_len = content.len(),
+                                            is_group = is_group,
+                                            "WeCom bot received message via WebSocket"
+                                        );
                                         let mut msg = ChannelMessage {
                                             channel: ChannelType::Custom("wecom".to_string()),
                                             platform_message_id: req_id.clone(),
@@ -560,10 +678,28 @@ impl WeComAdapter {
                                             serde_json::json!(req_id),
                                         );
 
+                                        // Store response_url if present in the message body
+                                        if let Some(body) = frame_body(&frame) {
+                                            if let Some(url) = body.get("response_url").and_then(|v| v.as_str()) {
+                                                if !url.is_empty() {
+                                                    msg.metadata.insert(
+                                                        "wecom_response_url".to_string(),
+                                                        serde_json::json!(url),
+                                                    );
+                                                }
+                                            }
+                                        }
+
                                         // Cache req_id so send() can use aibot_respond_msg
                                         {
                                             let mut map = pending_req_ids.write().await;
-                                            map.insert(from_user.clone(), req_id);
+                                            map.insert(from_user.clone(), req_id.clone());
+                                            info!(
+                                                user_id = %from_user,
+                                                req_id = %req_id,
+                                                pending_count = map.len(),
+                                                "WeCom bot cached req_id for user"
+                                            );
                                         }
 
                                         if let Some(ref aid) = *account_id {
@@ -573,7 +709,13 @@ impl WeComAdapter {
                                             );
                                         }
 
-                                        let _ = msg_tx.send(msg).await;
+                                        if msg_tx.send(msg).await.is_err() {
+                                            error!("WeCom bot: msg_tx.send failed (receiver dropped)");
+                                        } else {
+                                            debug!("WeCom bot: message dispatched to bridge");
+                                        }
+                                    } else {
+                                        debug!(frame = %frame, "WeCom bot: frame did not match any handler");
                                     }
                                 }
                                 Some(Ok(WsMessage::Ping(data))) => {
@@ -617,6 +759,7 @@ impl WeComAdapter {
 
     // ── Callback mode start ────────────────────────────────────────
 
+    #[allow(clippy::type_complexity)]
     fn start_callback(
         account_id: Arc<Option<String>>,
         mut shutdown_rx: watch::Receiver<bool>,
@@ -765,10 +908,11 @@ impl WeComAdapter {
                             };
 
                             // Parse decrypted JSON message
+                            debug!(decrypted_json = %decrypted_json, "WeCom callback: decrypted payload");
                             let msg: serde_json::Value = match serde_json::from_str(&decrypted_json) {
                                 Ok(v) => v,
                                 Err(e) => {
-                                    warn!("WeCom callback: invalid decrypted JSON: {e}");
+                                    warn!(raw = %decrypted_json, "WeCom callback: invalid decrypted JSON: {e}");
                                     return (axum::http::StatusCode::OK, "").into_response();
                                 }
                             };
@@ -955,31 +1099,69 @@ impl ChannelAdapter for WeComAdapter {
             }
         };
 
+        info!(
+            user_id = %user.platform_id,
+            text_len = text.len(),
+            mode = match &self.mode {
+                Mode::Websocket { .. } => "websocket",
+                Mode::Callback { .. } => "callback",
+            },
+            "WeCom bot send() called"
+        );
+
         match &self.mode {
             Mode::Websocket {
                 ws_tx,
                 pending_req_ids,
             } => {
                 let guard = ws_tx.read().await;
-                let frame_tx = guard.as_ref().ok_or("WeCom bot WebSocket not connected")?;
+                let frame_tx = match guard.as_ref() {
+                    Some(tx) => tx,
+                    None => {
+                        error!(user_id = %user.platform_id, "WeCom bot WebSocket not connected (ws_tx is None)");
+                        return Err("WeCom bot WebSocket not connected".into());
+                    }
+                };
                 let user_id = &user.platform_id;
 
                 // Try to use aibot_respond_msg with the cached req_id for this user
                 let req_id = {
                     let mut map = pending_req_ids.write().await;
-                    map.remove(user_id)
+                    let rid = map.remove(user_id);
+                    info!(
+                        user_id = %user_id,
+                        req_id = ?rid,
+                        pending_count = map.len(),
+                        "WeCom bot req_id lookup"
+                    );
+                    rid
                 };
 
-                for chunk in split_message(&text, MAX_MESSAGE_LEN) {
+                let chunks: Vec<&str> = split_message(&text, MAX_MESSAGE_LEN);
+                info!(
+                    user_id = %user_id,
+                    chunk_count = chunks.len(),
+                    reply_mode = if req_id.is_some() { "aibot_respond_msg" } else { "aibot_send_msg" },
+                    "WeCom bot sending chunks"
+                );
+
+                for (i, chunk) in chunks.into_iter().enumerate() {
                     let frame = if let Some(ref rid) = req_id {
                         Self::build_reply_frame(rid, chunk)
                     } else {
                         Self::build_send_frame(user_id, chunk)
                     };
-                    frame_tx
-                        .send(frame)
-                        .map_err(|e| format!("WeCom bot send failed: {e}"))?;
+                    debug!(
+                        chunk_index = i,
+                        frame_len = frame.len(),
+                        "WeCom bot queuing frame"
+                    );
+                    frame_tx.send(frame).map_err(|e| {
+                        error!("WeCom bot frame_tx.send failed: {e}");
+                        format!("WeCom bot send failed: {e}")
+                    })?;
                 }
+                info!(user_id = %user_id, "WeCom bot send() completed (WebSocket)");
             }
             Mode::Callback {
                 client,
@@ -987,9 +1169,10 @@ impl ChannelAdapter for WeComAdapter {
                 ..
             } => {
                 // Try response_url from user metadata first, fall back to webhook key
-                let response_url = user.librefang_user.as_ref().and_then(|_| None::<String>); // placeholder: response_url is per-message
+                let response_url: Option<String> = None; // TODO: response_url is per-message, not available on ChannelUser
 
                 if let Some(url) = response_url {
+                    info!(url = %url, "WeCom bot replying via response_url");
                     // Use response_url (one-time, per-message)
                     for chunk in split_message(&text, MAX_MESSAGE_LEN) {
                         let payload = serde_json::json!({
@@ -997,34 +1180,48 @@ impl ChannelAdapter for WeComAdapter {
                             "text": { "content": chunk }
                         });
                         let resp = client.post(&url).json(&payload).send().await?;
-                        if !resp.status().is_success() {
-                            let err = resp.text().await.unwrap_or_default();
-                            warn!("WeCom response_url error: {err}");
+                        let status = resp.status();
+                        let body = resp.text().await.unwrap_or_default();
+                        if !status.is_success() {
+                            error!(status = %status, body = %body, "WeCom response_url error");
+                        } else {
+                            debug!(status = %status, body = %body, "WeCom response_url reply sent");
                         }
                     }
                 } else {
                     // Fall back to webhook key
                     let key_guard = webhook_key.read().await;
-                    let key = key_guard.as_ref().ok_or(
-                        "WeCom callback: no webhook key available (no messages received yet)",
-                    )?;
+                    let key = match key_guard.as_ref() {
+                        Some(k) => k.clone(),
+                        None => {
+                            error!(user_id = %user.platform_id, "WeCom callback: no webhook key available (no messages received yet)");
+                            return Err("WeCom callback: no webhook key available (no messages received yet)".into());
+                        }
+                    };
+                    drop(key_guard);
+
                     let url = format!(
                         "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key={}",
                         key
                     );
+                    info!(url = %url, "WeCom bot replying via webhook key");
                     for chunk in split_message(&text, MAX_MESSAGE_LEN) {
                         let payload = serde_json::json!({
                             "msgtype": "text",
                             "text": { "content": chunk }
                         });
                         let resp = client.post(&url).json(&payload).send().await?;
-                        if !resp.status().is_success() {
-                            let status = resp.status();
-                            let err = resp.text().await.unwrap_or_default();
-                            return Err(format!("WeCom webhook error {status}: {err}").into());
+                        let status = resp.status();
+                        let body = resp.text().await.unwrap_or_default();
+                        if !status.is_success() {
+                            error!(status = %status, body = %body, "WeCom webhook send error");
+                            return Err(format!("WeCom webhook error {status}: {body}").into());
+                        } else {
+                            info!(status = %status, body = %body, "WeCom webhook reply sent");
                         }
                     }
                 }
+                info!(user_id = %user.platform_id, "WeCom bot send() completed (Callback)");
             }
         }
 
@@ -1074,22 +1271,45 @@ mod tests {
     fn test_build_reply_frame() {
         let frame = WeComAdapter::build_reply_frame("req123", "hello");
         let parsed: serde_json::Value = serde_json::from_str(&frame).unwrap();
-        assert_eq!(parsed["action"], "aibot_respond_msg");
-        assert_eq!(parsed["data"]["req_id"], "req123");
-        assert_eq!(parsed["data"]["text"]["content"], "hello");
+        assert_eq!(parsed["cmd"], "aibot_respond_msg");
+        assert_eq!(parsed["headers"]["req_id"], "req123");
+        assert_eq!(parsed["body"]["msgtype"], "markdown");
+        assert_eq!(parsed["body"]["markdown"]["content"], "hello");
     }
 
     #[test]
     fn test_build_send_frame() {
         let frame = WeComAdapter::build_send_frame("user1", "hi");
         let parsed: serde_json::Value = serde_json::from_str(&frame).unwrap();
-        assert_eq!(parsed["action"], "aibot_send_msg");
-        assert_eq!(parsed["data"]["receiver"]["user_id"], "user1");
-        assert_eq!(parsed["data"]["text"]["content"], "hi");
+        assert_eq!(parsed["cmd"], "aibot_send_msg");
+        assert_eq!(parsed["body"]["receiver"]["userid"], "user1");
+        assert_eq!(parsed["body"]["msgtype"], "markdown");
+        assert_eq!(parsed["body"]["markdown"]["content"], "hi");
     }
 
     #[test]
-    fn test_extract_msg_callback() {
+    fn test_extract_msg_callback_cmd_format() {
+        // Official protocol: cmd/headers/body
+        let frame = serde_json::json!({
+            "cmd": "aibot_msg_callback",
+            "headers": { "req_id": "req123" },
+            "body": {
+                "from": { "user_id": "user1" },
+                "msgtype": "text",
+                "text": { "content": "hello bot" },
+                "chat_type": "single",
+            }
+        });
+        let (req_id, user, content, is_group) = extract_msg_callback(&frame).unwrap();
+        assert_eq!(req_id, "req123");
+        assert_eq!(user, "user1");
+        assert_eq!(content, "hello bot");
+        assert!(!is_group);
+    }
+
+    #[test]
+    fn test_extract_msg_callback_legacy_format() {
+        // Legacy format: action/data (backwards compat)
         let frame = serde_json::json!({
             "action": "aibot_msg_callback",
             "data": {
@@ -1110,9 +1330,9 @@ mod tests {
     #[test]
     fn test_extract_msg_callback_group() {
         let frame = serde_json::json!({
-            "action": "aibot_msg_callback",
-            "data": {
-                "req_id": "req456",
+            "cmd": "aibot_msg_callback",
+            "headers": { "req_id": "req456" },
+            "body": {
                 "from": { "user_id": "user2" },
                 "msgtype": "text",
                 "text": { "content": "group msg" },
@@ -1126,9 +1346,9 @@ mod tests {
     #[test]
     fn test_extract_msg_callback_ignores_non_text() {
         let frame = serde_json::json!({
-            "action": "aibot_msg_callback",
-            "data": {
-                "req_id": "req789",
+            "cmd": "aibot_msg_callback",
+            "headers": { "req_id": "req789" },
+            "body": {
                 "from": { "user_id": "user3" },
                 "msgtype": "image",
             }
@@ -1139,14 +1359,35 @@ mod tests {
     #[test]
     fn test_extract_msg_callback_ignores_other_actions() {
         let frame = serde_json::json!({
-            "action": "aibot_event_callback",
-            "data": { "event": "enter_chat" }
+            "cmd": "aibot_event_callback",
+            "body": { "event": "enter_chat" }
         });
         assert!(extract_msg_callback(&frame).is_none());
     }
 
     #[test]
-    fn test_is_subscribe_success() {
+    fn test_is_subscribe_success_cmd() {
+        let frame = serde_json::json!({
+            "cmd": "aibot_subscribe",
+            "errcode": 0,
+            "errmsg": "ok"
+        });
+        assert!(is_subscribe_success(&frame));
+    }
+
+    #[test]
+    fn test_is_subscribe_success_no_cmd() {
+        // Real server response: no cmd field, just errcode + headers.req_id
+        let frame = serde_json::json!({
+            "errcode": 0,
+            "errmsg": "ok",
+            "headers": { "req_id": "aibot_subscribe_1774529981774" }
+        });
+        assert!(is_subscribe_success(&frame));
+    }
+
+    #[test]
+    fn test_is_subscribe_success_legacy() {
         let frame = serde_json::json!({
             "action": "aibot_subscribe",
             "errcode": 0,
@@ -1158,11 +1399,34 @@ mod tests {
     #[test]
     fn test_is_subscribe_failure() {
         let frame = serde_json::json!({
-            "action": "aibot_subscribe",
+            "cmd": "aibot_subscribe",
             "errcode": 40001,
             "errmsg": "invalid secret"
         });
         assert!(!is_subscribe_success(&frame));
+    }
+
+    #[test]
+    fn test_extract_msg_callback_real_format() {
+        // Actual format from WeCom server (from logs)
+        let frame = serde_json::json!({
+            "cmd": "aibot_msg_callback",
+            "headers": { "req_id": "eiS8BA_YSomRowVhAtPz5QAA" },
+            "body": {
+                "aibotid": "aibcf7gdd",
+                "chattype": "single",
+                "from": { "userid": "0000002" },
+                "msgid": "08f2b98a",
+                "msgtype": "text",
+                "response_url": "https://qyapi.weixin.qq.com/cgi-bin/aibot/response?response_code=xxx",
+                "text": { "content": "你好" }
+            }
+        });
+        let (req_id, user, content, is_group) = extract_msg_callback(&frame).unwrap();
+        assert_eq!(req_id, "eiS8BA_YSomRowVhAtPz5QAA");
+        assert_eq!(user, "0000002");
+        assert_eq!(content, "你好");
+        assert!(!is_group);
     }
 
     #[test]
