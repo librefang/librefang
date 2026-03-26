@@ -122,6 +122,9 @@ enum Commands {
         /// Quick mode: no prompts, just write config + .env (for CI/scripts).
         #[arg(long)]
         quick: bool,
+        /// Upgrade an existing installation: backup config, sync registry, merge new defaults.
+        #[arg(long)]
+        upgrade: bool,
     },
     /// Start the LibreFang kernel daemon (API server + kernel).
     #[command(
@@ -434,6 +437,9 @@ enum Commands {
         /// Quick non-interactive mode.
         #[arg(long)]
         quick: bool,
+        /// Upgrade an existing installation.
+        #[arg(long)]
+        upgrade: bool,
     },
     /// Quick non-interactive initialization.
     #[command(
@@ -443,6 +449,9 @@ enum Commands {
         /// Quick mode (same as `init --quick`).
         #[arg(long)]
         quick: bool,
+        /// Upgrade an existing installation.
+        #[arg(long)]
+        upgrade: bool,
     },
     /// Interactive setup wizard for credentials and channels.
     #[command(
@@ -1546,7 +1555,13 @@ fn main() {
             }
         }
         Some(Commands::Tui) => tui::run(cli.config),
-        Some(Commands::Init { quick }) => cmd_init(quick),
+        Some(Commands::Init { quick, upgrade }) => {
+            if upgrade {
+                cmd_init_upgrade();
+            } else {
+                cmd_init(quick);
+            }
+        }
         Some(Commands::Start {
             tail,
             foreground,
@@ -1730,7 +1745,13 @@ fn main() {
             WebhooksCommands::Delete { id } => cmd_webhooks_delete(&id),
             WebhooksCommands::Test { id } => cmd_webhooks_test(&id),
         },
-        Some(Commands::Onboard { quick }) | Some(Commands::Setup { quick }) => cmd_init(quick),
+        Some(Commands::Onboard { quick, upgrade }) | Some(Commands::Setup { quick, upgrade }) => {
+            if upgrade {
+                cmd_init_upgrade();
+            } else {
+                cmd_init(quick);
+            }
+        }
         Some(Commands::Configure) => cmd_init(false),
         Some(Commands::Message { agent, text, json }) => cmd_message(&agent, &text, json),
         Some(Commands::System(sub)) => match sub {
@@ -1875,6 +1896,13 @@ fn cmd_init(quick: bool) {
 
     let librefang_dir = cli_librefang_home();
 
+    // Hint about --upgrade when config already exists
+    if librefang_dir.join("config.toml").exists() {
+        ui::hint(
+            "Existing installation detected. To upgrade in-place, run: librefang init --upgrade",
+        );
+    }
+
     // --- Ensure directories exist ---
     if !librefang_dir.exists() {
         std::fs::create_dir_all(&librefang_dir).unwrap_or_else(|e| {
@@ -1931,6 +1959,243 @@ fn cmd_init(quick: bool) {
     if !config_path.exists() {
         let (provider, api_key_env, model) = detect_best_provider();
         write_config_if_missing(&librefang_dir, &provider, &model, &api_key_env);
+    }
+}
+
+/// Upgrade an existing LibreFang installation: backup config, sync registry, merge new defaults.
+fn cmd_init_upgrade() {
+    let librefang_dir = cli_librefang_home();
+    let config_path = librefang_dir.join("config.toml");
+
+    // 1. Must have an existing installation
+    if !config_path.exists() {
+        ui::error("Nothing to upgrade — no config.toml found. Run `librefang init` first.");
+        std::process::exit(1);
+    }
+
+    ui::banner();
+    ui::blank();
+    ui::section("Upgrading LibreFang installation");
+
+    // 2. Backup existing config with timestamp
+    let backup_name = format!("config.toml.bak.{}", format_local_timestamp());
+    let backup_path = librefang_dir.join(&backup_name);
+    if let Err(e) = std::fs::copy(&config_path, &backup_path) {
+        ui::error(&format!("Failed to backup config: {e}"));
+        std::process::exit(1);
+    }
+    ui::success(&format!("Backed up config to {backup_name}"));
+
+    // 3. Sync registry
+    ui::hint("Syncing registry...");
+    librefang_runtime::registry_sync::sync_registry(
+        &librefang_dir,
+        librefang_runtime::registry_sync::DEFAULT_CACHE_TTL_SECS,
+    );
+    ui::success("Registry synced");
+
+    // 4. Initialize vault and git if missing
+    init_vault_if_missing(&librefang_dir);
+    init_git_if_missing(&librefang_dir);
+
+    // 5. Merge new default config fields
+    let existing_raw = match std::fs::read_to_string(&config_path) {
+        Ok(s) => s,
+        Err(e) => {
+            ui::error(&format!("Failed to read config.toml: {e}"));
+            std::process::exit(1);
+        }
+    };
+
+    let mut existing: toml::Value = match existing_raw.parse() {
+        Ok(v) => v,
+        Err(e) => {
+            ui::error(&format!("Failed to parse config.toml: {e}"));
+            ui::hint(&format!("Your original config was saved to {backup_name}"));
+            std::process::exit(1);
+        }
+    };
+
+    let (provider, api_key_env, model) = detect_best_provider();
+    let default_config_str = render_init_default_config(&provider, &model, &api_key_env);
+    let defaults: toml::Value = match default_config_str.parse() {
+        Ok(v) => v,
+        Err(e) => {
+            ui::error(&format!("Failed to parse default config template: {e}"));
+            std::process::exit(1);
+        }
+    };
+
+    let added = merge_toml_defaults(&mut existing, &defaults);
+
+    if added.is_empty() {
+        ui::success("Config is already up to date — no new fields added");
+    } else {
+        // Write merged config back
+        let merged_str = toml::to_string_pretty(&existing).unwrap_or_else(|e| {
+            ui::error(&format!("Failed to serialize merged config: {e}"));
+            ui::hint(&format!("Your original config was saved to {backup_name}"));
+            std::process::exit(1);
+        });
+        if let Err(e) = std::fs::write(&config_path, &merged_str) {
+            ui::error(&format!("Failed to write merged config: {e}"));
+            ui::hint(&format!("Your original config was saved to {backup_name}"));
+            std::process::exit(1);
+        }
+        restrict_file_permissions(&config_path);
+        ui::success(&format!("Added {} new config field(s):", added.len()));
+        for key in &added {
+            ui::kv("  +", key);
+        }
+    }
+
+    // 6. Check for legacy ~/.openclaw installation
+    if let Some(home) = dirs::home_dir() {
+        let openclaw_dir = home.join(".openclaw");
+        if openclaw_dir.exists() {
+            ui::blank();
+            ui::hint("Legacy ~/.openclaw installation detected.");
+            ui::hint("Run `librefang migrate --from openclaw` to migrate your data.");
+        }
+    }
+
+    // 7. Summary
+    ui::blank();
+    ui::success("Upgrade complete!");
+    ui::kv("Backup", &backup_name);
+    if !added.is_empty() {
+        ui::kv("New fields", &added.len().to_string());
+    }
+    ui::blank();
+}
+
+/// Generate a local timestamp string in YYYYMMDD-HHMMSS format without external deps.
+fn format_local_timestamp() -> String {
+    // Use libc to get local time on unix; fallback to UTC seconds on other platforms.
+    #[cfg(unix)]
+    {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as libc::time_t;
+        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+        // SAFETY: localtime_r is thread-safe and writes into our stack buffer.
+        unsafe { libc::localtime_r(&secs, &mut tm) };
+        format!(
+            "{:04}{:02}{:02}-{:02}{:02}{:02}",
+            tm.tm_year + 1900,
+            tm.tm_mon + 1,
+            tm.tm_mday,
+            tm.tm_hour,
+            tm.tm_min,
+            tm.tm_sec
+        )
+    }
+    #[cfg(not(unix))]
+    {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        // Fallback: use UTC (acceptable on Windows where libc tm isn't available)
+        let secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        // Simple UTC breakdown
+        let days = secs / 86400;
+        let day_secs = secs % 86400;
+        let hour = day_secs / 3600;
+        let min = (day_secs % 3600) / 60;
+        let sec = day_secs % 60;
+        // Days since 1970-01-01
+        let (year, month, day) = days_to_ymd(days);
+        format!("{year:04}{month:02}{day:02}-{hour:02}{min:02}{sec:02}")
+    }
+}
+
+/// Convert days since Unix epoch to (year, month, day). Used only on non-Unix platforms.
+#[cfg(not(unix))]
+fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
+    let mut year = 1970u64;
+    loop {
+        let days_in_year = if is_leap(year) { 366 } else { 365 };
+        if days < days_in_year {
+            break;
+        }
+        days -= days_in_year;
+        year += 1;
+    }
+    let leap = is_leap(year);
+    let month_days: [u64; 12] = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    let mut month = 1u64;
+    for &md in &month_days {
+        if days < md {
+            break;
+        }
+        days -= md;
+        month += 1;
+    }
+    (year, month, days + 1)
+}
+
+#[cfg(not(unix))]
+fn is_leap(y: u64) -> bool {
+    y % 4 == 0 && (y % 100 != 0 || y % 400 == 0)
+}
+
+/// Recursively merge default TOML values into an existing config.
+/// Only adds keys/sections that don't already exist — never overwrites.
+/// Returns a list of dotted key paths that were added.
+fn merge_toml_defaults(existing: &mut toml::Value, defaults: &toml::Value) -> Vec<String> {
+    let mut added = Vec::new();
+    merge_toml_recursive(existing, defaults, "", &mut added);
+    added
+}
+
+fn merge_toml_recursive(
+    existing: &mut toml::Value,
+    defaults: &toml::Value,
+    prefix: &str,
+    added: &mut Vec<String>,
+) {
+    let (Some(existing_table), Some(defaults_table)) =
+        (existing.as_table_mut(), defaults.as_table())
+    else {
+        return;
+    };
+
+    for (key, default_val) in defaults_table {
+        let dotted = if prefix.is_empty() {
+            key.clone()
+        } else {
+            format!("{prefix}.{key}")
+        };
+
+        match existing_table.get_mut(key) {
+            Some(existing_val) => {
+                // Key exists — recurse into sub-tables but never overwrite scalars
+                if existing_val.is_table() && default_val.is_table() {
+                    merge_toml_recursive(existing_val, default_val, &dotted, added);
+                }
+            }
+            None => {
+                // Key missing — add it
+                existing_table.insert(key.clone(), default_val.clone());
+                added.push(dotted);
+            }
+        }
     }
 }
 
