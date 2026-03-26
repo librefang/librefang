@@ -109,6 +109,12 @@ debounce_ms = 500
 # token_threshold_ratio = 0.7   # Trigger at this fraction of context window
 # max_chunk_chars = 80000       # Max chars per summarization chunk
 # max_retries = 3               # Max LLM summarization retries
+# ── Event Triggers ───────────────────────────────────────────
+# [triggers]
+# cooldown_secs = 5             # Default cooldown between trigger firings
+# max_per_event = 10            # Max triggers that can fire per event
+# max_depth = 5                 # Max trigger recursion depth
+# max_workflow_secs = 3600      # Max workflow execution time (1 hour)
 
 # ── Budget & Cost Control ────────────────────────────────────
 # [budget]

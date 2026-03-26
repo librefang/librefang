@@ -34,6 +34,7 @@ impl KernelConfig {
             "links",
             "reload",
             "webhook_triggers",
+            "triggers",
             "approval",
             "approval_policy", // alias for approval
             "max_cron_jobs",
@@ -654,6 +655,21 @@ impl KernelConfig {
         }
         if self.queue.concurrency.subagent_lane == 0 {
             self.queue.concurrency.subagent_lane = 1;
+        }
+
+        // Triggers: max_per_event must be >= 1 (0 would prevent any trigger from firing)
+        if self.triggers.max_per_event == 0 {
+            self.triggers.max_per_event = 1;
+        }
+        // Triggers: max_depth must be >= 1
+        if self.triggers.max_depth == 0 {
+            self.triggers.max_depth = 1;
+        }
+        // Triggers: max_workflow_secs min 10s, max 86400s (24h)
+        if self.triggers.max_workflow_secs < 10 {
+            self.triggers.max_workflow_secs = 10;
+        } else if self.triggers.max_workflow_secs > 86400 {
+            self.triggers.max_workflow_secs = 86400;
         }
     }
 }
