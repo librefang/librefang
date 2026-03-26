@@ -1237,6 +1237,7 @@ impl ChannelAdapter for WeComAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine;
 
     // ── WebSocket mode tests ────────────────────────────────────
 
