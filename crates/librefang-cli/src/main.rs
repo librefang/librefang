@@ -1984,6 +1984,7 @@ fn cmd_init_upgrade() {
         ui::error(&format!("Failed to backup config: {e}"));
         std::process::exit(1);
     }
+    restrict_file_permissions(&backup_path);
     ui::success(&format!("Backed up config to {backup_name}"));
 
     // 3. Sync registry (TTL=0 forces refresh regardless of last sync time)
@@ -1994,9 +1995,23 @@ fn cmd_init_upgrade() {
         ui::hint("Registry sync failed (network issue?) — continuing with cached content");
     }
 
-    // 4. Initialize vault and git if missing
+    // 4. Ensure data dir, vault, and git exist
+    let data_dir = librefang_dir.join("data");
+    if !data_dir.exists() {
+        let _ = std::fs::create_dir_all(&data_dir);
+    }
     init_vault_if_missing(&librefang_dir);
     init_git_if_missing(&librefang_dir);
+
+    // Ensure .gitignore excludes backup files (may be missing in older installations)
+    let gitignore = librefang_dir.join(".gitignore");
+    if gitignore.exists() {
+        if let Ok(content) = std::fs::read_to_string(&gitignore) {
+            if !content.contains("*.bak.*") {
+                let _ = std::fs::write(&gitignore, format!("{content}*.bak.*\n"));
+            }
+        }
+    }
 
     // 5. Merge new default config fields
     let existing_raw = match std::fs::read_to_string(&config_path) {
@@ -2220,7 +2235,7 @@ fn init_git_if_missing(librefang_dir: &std::path::Path) {
     if !gitignore.exists() {
         let _ = std::fs::write(
             &gitignore,
-            "secrets.env\nvault.enc\ndaemon.json\nlogs/\ncache/\nregistry/\ndata/\n*.db\n*.db-shm\n*.db-wal\n",
+            "secrets.env\nvault.enc\ndaemon.json\nlogs/\ncache/\nregistry/\ndata/\n*.db\n*.db-shm\n*.db-wal\n*.bak.*\n",
         );
     }
 
