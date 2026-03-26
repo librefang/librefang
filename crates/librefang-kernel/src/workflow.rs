@@ -2598,10 +2598,10 @@ mod tests {
         assert!(result.is_ok());
 
         let output = result.unwrap();
-        // Collect step joins all outputs
+        // Collect step outputs JSON with results array
         assert!(output.contains("Done: Task A"));
         assert!(output.contains("Done: Task B"));
-        assert!(output.contains("---"));
+        assert!(output.contains("results"));
     }
 
     #[tokio::test]
