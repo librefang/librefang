@@ -2774,15 +2774,28 @@ max_versions_per_agent = 50
 
 部分子系统有自己的配置，不在 `config.toml` 中，但值得了解：
 
-### 会话压缩（运行时）
+### 会话压缩
 
-通过 `CompactionConfig` 内部配置（目前未在 `config.toml` 中暴露）：
+通过 `config.toml` 中的 `[compaction]` 部分配置：
+
+```toml
+[compaction]
+threshold_messages = 30       # 消息数超过此值时触发压缩
+keep_recent = 10              # 压缩后逐字保留的最近消息数
+max_summary_tokens = 1024     # LLM 摘要的最大 Token 数
+token_threshold_ratio = 0.7   # 估算 Token 超过上下文窗口此比例时触发
+max_chunk_chars = 80000       # 每个摘要分块的最大字符数
+max_retries = 3               # LLM 摘要的最大重试次数
+```
 
 | 字段 | 默认值 | 说明 |
 |------|--------|------|
-| `threshold` | `80` | 会话消息数超过此值时触发压缩。 |
-| `keep_recent` | `20` | 压缩后保留的最近消息数量（逐字保留）。 |
+| `threshold_messages` | `30` | 会话消息数超过此值时触发压缩。 |
+| `keep_recent` | `10` | 压缩后保留的最近消息数量（逐字保留）。 |
 | `max_summary_tokens` | `1024` | LLM 对压缩消息生成摘要的最大 Token 数。 |
+| `token_threshold_ratio` | `0.7` | 估算 Token 超过上下文窗口此比例时触发压缩。 |
+| `max_chunk_chars` | `80000` | 每个摘要分块的最大字符数。 |
+| `max_retries` | `3` | LLM 摘要的最大重试次数。 |
 
 ### WASM 沙箱（运行时）
 

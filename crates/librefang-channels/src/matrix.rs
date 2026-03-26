@@ -16,10 +16,7 @@ use tokio::sync::{mpsc, watch, RwLock};
 use tracing::{debug, info, warn};
 use zeroize::Zeroizing;
 
-/// Maximum backoff duration on sync failures.
-const MAX_BACKOFF: Duration = Duration::from_secs(60);
-/// Initial backoff duration on sync failures.
-const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
+// Backoff durations are now configurable via MatrixConfig.
 /// Matrix /sync long-polling timeout in milliseconds.
 const SYNC_TIMEOUT_MS: u64 = 30000;
 const MAX_MESSAGE_LEN: usize = 4096;
@@ -42,6 +39,10 @@ pub struct MatrixAdapter {
     /// Used when processing `/sync` invite events (not yet wired).
     #[allow(dead_code)]
     auto_accept_invites: bool,
+    /// Initial backoff on sync failures.
+    initial_backoff: Duration,
+    /// Maximum backoff on sync failures.
+    max_backoff: Duration,
     /// Shutdown signal.
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
@@ -67,6 +68,8 @@ impl MatrixAdapter {
             allowed_rooms,
             account_id: None,
             auto_accept_invites,
+            initial_backoff: Duration::from_secs(1),
+            max_backoff: Duration::from_secs(60),
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
             since_token: Arc::new(RwLock::new(None)),
@@ -75,6 +78,13 @@ impl MatrixAdapter {
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
     pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
         self.account_id = account_id;
+        self
+    }
+
+    /// Set backoff configuration. Returns self for builder chaining.
+    pub fn with_backoff(mut self, initial_backoff_secs: u64, max_backoff_secs: u64) -> Self {
+        self.initial_backoff = Duration::from_secs(initial_backoff_secs);
+        self.max_backoff = Duration::from_secs(max_backoff_secs);
         self
     }
 
@@ -171,9 +181,11 @@ impl ChannelAdapter for MatrixAdapter {
         let since_token = Arc::clone(&self.since_token);
         let mut shutdown_rx = self.shutdown_rx.clone();
         let account_id = self.account_id.clone();
+        let initial_backoff = self.initial_backoff;
+        let max_backoff = self.max_backoff;
 
         tokio::spawn(async move {
-            let mut backoff = INITIAL_BACKOFF;
+            let mut backoff = initial_backoff;
 
             loop {
                 // Build /sync URL
@@ -197,7 +209,7 @@ impl ChannelAdapter for MatrixAdapter {
                             Err(e) => {
                                 warn!("Matrix /sync network error: {e}, retrying in {backoff:?}");
                                 tokio::time::sleep(backoff).await;
-                                backoff = calculate_backoff(backoff);
+                                backoff = calculate_backoff(backoff, max_backoff);
                                 continue;
                             }
                         }
@@ -208,15 +220,15 @@ impl ChannelAdapter for MatrixAdapter {
                     let status = resp.status();
                     warn!("Matrix /sync failed ({status}), retrying in {backoff:?}");
                     tokio::time::sleep(backoff).await;
-                    backoff = calculate_backoff(backoff);
+                    backoff = calculate_backoff(backoff, max_backoff);
                     continue;
                 }
 
                 // Reset backoff on success
-                if backoff > INITIAL_BACKOFF {
+                if backoff > initial_backoff {
                     debug!("Matrix /sync recovered, resetting backoff");
                 }
-                backoff = INITIAL_BACKOFF;
+                backoff = initial_backoff;
 
                 let body: serde_json::Value = match resp.json().await {
                     Ok(b) => b,
@@ -356,9 +368,9 @@ impl ChannelAdapter for MatrixAdapter {
     }
 }
 
-/// Calculate exponential backoff capped at MAX_BACKOFF.
-pub fn calculate_backoff(current: Duration) -> Duration {
-    (current * 2).min(MAX_BACKOFF)
+/// Calculate exponential backoff capped at the given maximum.
+pub fn calculate_backoff(current: Duration, max: Duration) -> Duration {
+    (current * 2).min(max)
 }
 
 #[cfg(test)]
@@ -401,59 +413,61 @@ mod tests {
 
     #[test]
     fn test_backoff_calculation() {
-        let b1 = calculate_backoff(Duration::from_secs(1));
+        let max = Duration::from_secs(60);
+        let b1 = calculate_backoff(Duration::from_secs(1), max);
         assert_eq!(b1, Duration::from_secs(2));
 
-        let b2 = calculate_backoff(Duration::from_secs(2));
+        let b2 = calculate_backoff(Duration::from_secs(2), max);
         assert_eq!(b2, Duration::from_secs(4));
 
-        let b3 = calculate_backoff(Duration::from_secs(32));
-        assert_eq!(b3, Duration::from_secs(60)); // capped at MAX_BACKOFF
+        let b3 = calculate_backoff(Duration::from_secs(32), max);
+        assert_eq!(b3, Duration::from_secs(60)); // capped at max_backoff
 
-        let b4 = calculate_backoff(Duration::from_secs(60));
-        assert_eq!(b4, Duration::from_secs(60)); // stays at MAX_BACKOFF
+        let b4 = calculate_backoff(Duration::from_secs(60), max);
+        assert_eq!(b4, Duration::from_secs(60)); // stays at max_backoff
     }
 
     #[test]
-    fn test_backoff_constants() {
-        assert_eq!(INITIAL_BACKOFF, Duration::from_secs(1));
-        assert_eq!(MAX_BACKOFF, Duration::from_secs(60));
-        assert!(INITIAL_BACKOFF < MAX_BACKOFF);
+    fn test_backoff_defaults() {
+        let initial = Duration::from_secs(1);
+        let max = Duration::from_secs(60);
+        assert!(initial < max);
     }
 
     #[test]
     fn test_backoff_progression() {
-        // Verify the full backoff sequence from INITIAL to MAX
-        let mut current = INITIAL_BACKOFF;
+        let initial = Duration::from_secs(1);
+        let max = Duration::from_secs(60);
+        // Verify the full backoff sequence from initial to max
+        let mut current = initial;
         let expected = [1, 2, 4, 8, 16, 32, 60, 60];
         for &exp_secs in &expected {
             assert_eq!(
                 current.as_secs(),
-                if current == INITIAL_BACKOFF && exp_secs == 1 {
+                if current == initial && exp_secs == 1 {
                     1
                 } else {
                     current.as_secs()
                 }
             );
-            current = calculate_backoff(current);
-            // After calculate_backoff, verify next value
+            current = calculate_backoff(current, max);
         }
         // Simpler: just walk the sequence
-        let mut b = INITIAL_BACKOFF;
+        let mut b = initial;
         assert_eq!(b, Duration::from_secs(1));
-        b = calculate_backoff(b);
+        b = calculate_backoff(b, max);
         assert_eq!(b, Duration::from_secs(2));
-        b = calculate_backoff(b);
+        b = calculate_backoff(b, max);
         assert_eq!(b, Duration::from_secs(4));
-        b = calculate_backoff(b);
+        b = calculate_backoff(b, max);
         assert_eq!(b, Duration::from_secs(8));
-        b = calculate_backoff(b);
+        b = calculate_backoff(b, max);
         assert_eq!(b, Duration::from_secs(16));
-        b = calculate_backoff(b);
+        b = calculate_backoff(b, max);
         assert_eq!(b, Duration::from_secs(32));
-        b = calculate_backoff(b);
+        b = calculate_backoff(b, max);
         assert_eq!(b, Duration::from_secs(60));
-        b = calculate_backoff(b);
+        b = calculate_backoff(b, max);
         assert_eq!(b, Duration::from_secs(60)); // stays capped
     }
 }

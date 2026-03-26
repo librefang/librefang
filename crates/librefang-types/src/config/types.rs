@@ -381,6 +381,72 @@ impl Default for ReloadConfig {
     }
 }
 
+/// API and WebSocket rate limiting configuration.
+///
+/// Controls GCRA token-bucket rate limiting for HTTP API requests and
+/// per-connection limits for WebSocket connections.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RateLimitConfig {
+    /// API token budget per minute per IP (GCRA algorithm). Default: 500.
+    #[serde(default = "default_api_requests_per_minute")]
+    pub api_requests_per_minute: u32,
+    /// Retry-After header value in seconds when rate limited. Default: 60.
+    #[serde(default = "default_retry_after_secs")]
+    pub retry_after_secs: u64,
+    /// Maximum concurrent WebSocket connections per IP. Default: 5.
+    #[serde(default = "default_max_ws_per_ip")]
+    pub max_ws_per_ip: usize,
+    /// Maximum WebSocket messages per minute per connection. Default: 10.
+    #[serde(default = "default_ws_messages_per_minute")]
+    pub ws_messages_per_minute: u32,
+    /// WebSocket idle timeout in seconds (close after inactivity). Default: 1800.
+    #[serde(default = "default_ws_idle_timeout_secs")]
+    pub ws_idle_timeout_secs: u64,
+    /// Text delta debounce interval in milliseconds. Default: 100.
+    #[serde(default = "default_ws_debounce_ms")]
+    pub ws_debounce_ms: u64,
+    /// Flush text buffer when it exceeds this many characters. Default: 200.
+    #[serde(default = "default_ws_debounce_chars")]
+    pub ws_debounce_chars: usize,
+}
+
+fn default_api_requests_per_minute() -> u32 {
+    500
+}
+fn default_retry_after_secs() -> u64 {
+    60
+}
+fn default_max_ws_per_ip() -> usize {
+    5
+}
+fn default_ws_messages_per_minute() -> u32 {
+    10
+}
+fn default_ws_idle_timeout_secs() -> u64 {
+    1800
+}
+fn default_ws_debounce_ms() -> u64 {
+    100
+}
+fn default_ws_debounce_chars() -> usize {
+    200
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            api_requests_per_minute: default_api_requests_per_minute(),
+            retry_after_secs: default_retry_after_secs(),
+            max_ws_per_ip: default_max_ws_per_ip(),
+            ws_messages_per_minute: default_ws_messages_per_minute(),
+            ws_idle_timeout_secs: default_ws_idle_timeout_secs(),
+            ws_debounce_ms: default_ws_debounce_ms(),
+            ws_debounce_chars: default_ws_debounce_chars(),
+        }
+    }
+}
+
 /// Webhook trigger authentication configuration.
 ///
 /// Controls the `/hooks/wake` and `/hooks/agent` endpoints for external
@@ -1163,6 +1229,68 @@ impl Default for SessionConfig {
     }
 }
 
+/// Session compaction configuration (exposed in `[compaction]` TOML section).
+///
+/// Controls when and how the LLM-based history compaction runs.
+/// Internal algorithmic ratios (base_chunk_ratio, safety_margin, etc.) are kept
+/// as private constants inside the runtime compactor and are not exposed here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CompactionTomlConfig {
+    /// Number of messages that triggers compaction (default: 30).
+    #[serde(default = "default_compaction_threshold")]
+    pub threshold_messages: usize,
+    /// Number of recent messages to preserve verbatim (default: 10).
+    #[serde(default = "default_compaction_keep_recent")]
+    pub keep_recent: usize,
+    /// Maximum tokens for summary output (default: 1024).
+    #[serde(default = "default_compaction_max_summary_tokens")]
+    pub max_summary_tokens: usize,
+    /// Token threshold ratio to trigger compaction (default: 0.7).
+    /// Compaction fires when estimated session tokens exceed this fraction
+    /// of the model's context window.
+    #[serde(default = "default_compaction_token_threshold_ratio")]
+    pub token_threshold_ratio: f64,
+    /// Maximum characters per summarization chunk (default: 80000).
+    #[serde(default = "default_compaction_max_chunk_chars")]
+    pub max_chunk_chars: usize,
+    /// Maximum retries for LLM summarization (default: 3).
+    #[serde(default = "default_compaction_max_retries")]
+    pub max_retries: u32,
+}
+
+fn default_compaction_threshold() -> usize {
+    30
+}
+fn default_compaction_keep_recent() -> usize {
+    10
+}
+fn default_compaction_max_summary_tokens() -> usize {
+    1024
+}
+fn default_compaction_token_threshold_ratio() -> f64 {
+    0.7
+}
+fn default_compaction_max_chunk_chars() -> usize {
+    80_000
+}
+fn default_compaction_max_retries() -> u32 {
+    3
+}
+
+impl Default for CompactionTomlConfig {
+    fn default() -> Self {
+        Self {
+            threshold_messages: default_compaction_threshold(),
+            keep_recent: default_compaction_keep_recent(),
+            max_summary_tokens: default_compaction_max_summary_tokens(),
+            token_threshold_ratio: default_compaction_token_threshold_ratio(),
+            max_chunk_chars: default_compaction_max_chunk_chars(),
+            max_retries: default_compaction_max_retries(),
+        }
+    }
+}
+
 /// Where a context injection should be placed in the session message list.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1320,6 +1448,49 @@ pub fn redact_proxy_url(url: &str) -> String {
     url.to_string()
 }
 
+// ── Trigger system defaults ────────────────────────────────────────────
+
+fn default_trigger_cooldown_secs() -> u64 {
+    5
+}
+fn default_max_triggers_per_event() -> usize {
+    10
+}
+fn default_max_trigger_depth() -> usize {
+    5
+}
+fn default_max_workflow_secs() -> u64 {
+    3600
+}
+
+/// Event-driven trigger system configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TriggersConfig {
+    /// Default cooldown between trigger firings in seconds (default: 5).
+    #[serde(default = "default_trigger_cooldown_secs")]
+    pub cooldown_secs: u64,
+    /// Maximum triggers that can fire per single event (default: 10).
+    #[serde(default = "default_max_triggers_per_event")]
+    pub max_per_event: usize,
+    /// Maximum trigger recursion depth (default: 5).
+    #[serde(default = "default_max_trigger_depth")]
+    pub max_depth: usize,
+    /// Maximum workflow execution time in seconds (default: 3600).
+    #[serde(default = "default_max_workflow_secs")]
+    pub max_workflow_secs: u64,
+}
+
+impl Default for TriggersConfig {
+    fn default() -> Self {
+        Self {
+            cooldown_secs: default_trigger_cooldown_secs(),
+            max_per_event: default_max_triggers_per_event(),
+            max_depth: default_max_trigger_depth(),
+            max_workflow_secs: default_max_workflow_secs(),
+        }
+    }
+}
+
 /// Top-level kernel configuration.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1429,6 +1600,9 @@ pub struct KernelConfig {
     /// Webhook trigger configuration (external event injection).
     #[serde(default)]
     pub webhook_triggers: Option<WebhookTriggerConfig>,
+    /// Event-driven trigger system configuration (cooldowns, depth limits, etc.).
+    #[serde(default)]
+    pub triggers: TriggersConfig,
     /// Execution approval policy.
     #[serde(default, alias = "approval_policy")]
     pub approval: crate::approval::ApprovalPolicy,
@@ -1514,6 +1688,9 @@ pub struct KernelConfig {
     /// Session retention policy (automatic cleanup of old/excess sessions).
     #[serde(default)]
     pub session: SessionConfig,
+    /// Session compaction configuration (LLM-based history summarization).
+    #[serde(default)]
+    pub compaction: CompactionTomlConfig,
     /// Message queue configuration (depth limits, TTL, concurrency).
     #[serde(default)]
     pub queue: QueueConfig,
@@ -1541,6 +1718,9 @@ pub struct KernelConfig {
     /// Plugin registry configuration.
     #[serde(default)]
     pub plugins: PluginsConfig,
+    /// Registry sync configuration (cache TTL, etc.).
+    #[serde(default)]
+    pub registry: RegistryConfig,
     /// PII privacy controls for LLM context filtering.
     #[serde(default)]
     pub privacy: PrivacyConfig,
@@ -1577,6 +1757,9 @@ pub struct KernelConfig {
     /// Controls which releases `librefang update` considers.
     #[serde(default)]
     pub update_channel: UpdateChannel,
+    /// API and WebSocket rate limiting configuration.
+    #[serde(default)]
+    pub rate_limit: RateLimitConfig,
 }
 
 /// Input sanitization mode for channel messages.
@@ -2153,6 +2336,34 @@ impl Default for HeartbeatTomlConfig {
     }
 }
 
+/// Registry sync configuration.
+///
+/// Configure in config.toml:
+/// ```toml
+/// [registry]
+/// cache_ttl_secs = 86400
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RegistryConfig {
+    /// Cache TTL for registry sync in seconds (default: 86400 = 24 hours).
+    /// The registry is re-downloaded when the local cache is older than this.
+    #[serde(default = "default_registry_cache_ttl_secs")]
+    pub cache_ttl_secs: u64,
+}
+
+fn default_registry_cache_ttl_secs() -> u64 {
+    86400
+}
+
+impl Default for RegistryConfig {
+    fn default() -> Self {
+        Self {
+            cache_ttl_secs: default_registry_cache_ttl_secs(),
+        }
+    }
+}
+
 /// Plugin registry configuration.
 ///
 /// Configure in config.toml:
@@ -2323,6 +2534,33 @@ fn default_true() -> bool {
     true
 }
 
+// ── Shared channel timeout defaults ────────────────────────────────
+
+/// Default initial backoff in seconds for channels using exponential backoff (1s).
+fn default_channel_initial_backoff_secs() -> u64 {
+    1
+}
+
+/// Default maximum backoff in seconds for channels using exponential backoff (60s).
+fn default_channel_max_backoff_secs() -> u64 {
+    60
+}
+
+/// Default initial backoff for channels that default to 2s (WeChat, QQ, Feishu, etc.).
+fn default_channel_initial_backoff_2s() -> u64 {
+    2
+}
+
+/// Default poll interval for Signal (2s).
+fn default_signal_poll_interval_secs() -> u64 {
+    2
+}
+
+/// Default Telegram long-poll timeout (30s).
+fn default_telegram_long_poll_timeout_secs() -> u64 {
+    30
+}
+
 impl Default for KernelConfig {
     fn default() -> Self {
         let home_dir = librefang_home_dir();
@@ -2358,6 +2596,7 @@ impl Default for KernelConfig {
             links: crate::media::LinkConfig::default(),
             reload: ReloadConfig::default(),
             webhook_triggers: None,
+            triggers: TriggersConfig::default(),
             approval: crate::approval::ApprovalPolicy::default(),
             max_cron_jobs: default_max_cron_jobs(),
             include: Vec::new(),
@@ -2382,6 +2621,7 @@ impl Default for KernelConfig {
             proxy: ProxyConfig::default(),
             prompt_caching: default_prompt_caching(),
             session: SessionConfig::default(),
+            compaction: CompactionTomlConfig::default(),
             queue: QueueConfig::default(),
             external_auth: ExternalAuthConfig::default(),
             tool_policy: crate::tool_policy::ToolPolicy::default(),
@@ -2391,6 +2631,7 @@ impl Default for KernelConfig {
             health_check: HealthCheckConfig::default(),
             heartbeat: HeartbeatTomlConfig::default(),
             plugins: PluginsConfig::default(),
+            registry: RegistryConfig::default(),
             cors_origin: Vec::new(),
             privacy: PrivacyConfig::default(),
             strict_config: false,
@@ -2400,6 +2641,7 @@ impl Default for KernelConfig {
             telemetry: TelemetryConfig::default(),
             prompt_intelligence: PromptIntelligenceConfig::default(),
             update_channel: UpdateChannel::default(),
+            rate_limit: RateLimitConfig::default(),
         }
     }
 }
@@ -2856,6 +3098,15 @@ pub struct TelegramConfig {
     /// Defaults to `https://api.telegram.org` when not set.
     #[serde(default)]
     pub api_url: Option<String>,
+    /// Initial backoff in seconds on API failures (default: 1).
+    #[serde(default = "default_channel_initial_backoff_secs")]
+    pub initial_backoff_secs: u64,
+    /// Maximum backoff in seconds on API failures (default: 60).
+    #[serde(default = "default_channel_max_backoff_secs")]
+    pub max_backoff_secs: u64,
+    /// Long-poll timeout in seconds sent to getUpdates (default: 30).
+    #[serde(default = "default_telegram_long_poll_timeout_secs")]
+    pub long_poll_timeout_secs: u64,
     /// Per-channel behavior overrides.
     #[serde(default)]
     pub overrides: ChannelOverrides,
@@ -2883,6 +3134,9 @@ impl Default for TelegramConfig {
             default_agent: None,
             poll_interval_secs: 1,
             api_url: None,
+            initial_backoff_secs: default_channel_initial_backoff_secs(),
+            max_backoff_secs: default_channel_max_backoff_secs(),
+            long_poll_timeout_secs: default_telegram_long_poll_timeout_secs(),
             overrides: ChannelOverrides::default(),
             thread_routes: std::collections::HashMap::new(),
         }
@@ -2918,6 +3172,12 @@ pub struct DiscordConfig {
     /// Example: `["hey bot", "!ask"]`
     #[serde(default)]
     pub mention_patterns: Vec<String>,
+    /// Initial backoff in seconds on WebSocket failures (default: 1).
+    #[serde(default = "default_channel_initial_backoff_secs")]
+    pub initial_backoff_secs: u64,
+    /// Maximum backoff in seconds on WebSocket failures (default: 60).
+    #[serde(default = "default_channel_max_backoff_secs")]
+    pub max_backoff_secs: u64,
     /// Per-channel behavior overrides.
     #[serde(default)]
     pub overrides: ChannelOverrides,
@@ -2934,6 +3194,8 @@ impl Default for DiscordConfig {
             intents: 37376,
             ignore_bots: true,
             mention_patterns: vec![],
+            initial_backoff_secs: default_channel_initial_backoff_secs(),
+            max_backoff_secs: default_channel_max_backoff_secs(),
             overrides: ChannelOverrides::default(),
         }
     }
@@ -2960,6 +3222,12 @@ pub struct SlackConfig {
     /// When `None` (default), Slack uses its own default behavior.
     #[serde(default)]
     pub unfurl_links: Option<bool>,
+    /// Initial backoff in seconds on WebSocket failures (default: 1).
+    #[serde(default = "default_channel_initial_backoff_secs")]
+    pub initial_backoff_secs: u64,
+    /// Maximum backoff in seconds on WebSocket failures (default: 60).
+    #[serde(default = "default_channel_max_backoff_secs")]
+    pub max_backoff_secs: u64,
     /// Per-channel behavior overrides.
     #[serde(default)]
     pub overrides: ChannelOverrides,
@@ -2978,6 +3246,8 @@ impl Default for SlackConfig {
             account_id: None,
             default_agent: None,
             unfurl_links: None,
+            initial_backoff_secs: default_channel_initial_backoff_secs(),
+            max_backoff_secs: default_channel_max_backoff_secs(),
             overrides: ChannelOverrides::default(),
             force_flat_replies: None,
         }
@@ -3059,6 +3329,9 @@ pub struct SignalConfig {
     pub account_id: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
+    /// Poll interval in seconds for checking new messages (default: 2).
+    #[serde(default = "default_signal_poll_interval_secs")]
+    pub poll_interval_secs: u64,
     /// Per-channel behavior overrides.
     #[serde(default)]
     pub overrides: ChannelOverrides,
@@ -3072,6 +3345,7 @@ impl Default for SignalConfig {
             allowed_users: vec![],
             account_id: None,
             default_agent: None,
+            poll_interval_secs: default_signal_poll_interval_secs(),
             overrides: ChannelOverrides::default(),
         }
     }
@@ -3098,6 +3372,12 @@ pub struct MatrixConfig {
     /// Whether to auto-accept room invites (default: false).
     #[serde(default)]
     pub auto_accept_invites: bool,
+    /// Initial backoff in seconds on sync failures (default: 1).
+    #[serde(default = "default_channel_initial_backoff_secs")]
+    pub initial_backoff_secs: u64,
+    /// Maximum backoff in seconds on sync failures (default: 60).
+    #[serde(default = "default_channel_max_backoff_secs")]
+    pub max_backoff_secs: u64,
     /// Per-channel behavior overrides.
     #[serde(default)]
     pub overrides: ChannelOverrides,
@@ -3113,6 +3393,8 @@ impl Default for MatrixConfig {
             account_id: None,
             default_agent: None,
             auto_accept_invites: false,
+            initial_backoff_secs: default_channel_initial_backoff_secs(),
+            max_backoff_secs: default_channel_max_backoff_secs(),
             overrides: ChannelOverrides::default(),
         }
     }
@@ -3224,6 +3506,12 @@ pub struct MattermostConfig {
     pub account_id: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
+    /// Initial backoff in seconds on WebSocket failures (default: 1).
+    #[serde(default = "default_channel_initial_backoff_secs")]
+    pub initial_backoff_secs: u64,
+    /// Maximum backoff in seconds on WebSocket failures (default: 60).
+    #[serde(default = "default_channel_max_backoff_secs")]
+    pub max_backoff_secs: u64,
     /// Per-channel behavior overrides.
     #[serde(default)]
     pub overrides: ChannelOverrides,
@@ -3237,6 +3525,8 @@ impl Default for MattermostConfig {
             allowed_channels: vec![],
             account_id: None,
             default_agent: None,
+            initial_backoff_secs: default_channel_initial_backoff_secs(),
+            max_backoff_secs: default_channel_max_backoff_secs(),
             overrides: ChannelOverrides::default(),
         }
     }
@@ -3264,6 +3554,12 @@ pub struct IrcConfig {
     pub account_id: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
+    /// Initial backoff in seconds on connection failures (default: 1).
+    #[serde(default = "default_channel_initial_backoff_secs")]
+    pub initial_backoff_secs: u64,
+    /// Maximum backoff in seconds on connection failures (default: 60).
+    #[serde(default = "default_channel_max_backoff_secs")]
+    pub max_backoff_secs: u64,
     /// Per-channel behavior overrides.
     #[serde(default)]
     pub overrides: ChannelOverrides,
@@ -3280,6 +3576,8 @@ impl Default for IrcConfig {
             use_tls: false,
             account_id: None,
             default_agent: None,
+            initial_backoff_secs: default_channel_initial_backoff_secs(),
+            max_backoff_secs: default_channel_max_backoff_secs(),
             overrides: ChannelOverrides::default(),
         }
     }
@@ -3791,6 +4089,12 @@ pub struct WeChatConfig {
     pub account_id: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
+    /// Initial backoff in seconds on API failures (default: 2).
+    #[serde(default = "default_channel_initial_backoff_2s")]
+    pub initial_backoff_secs: u64,
+    /// Maximum backoff in seconds on API failures (default: 60).
+    #[serde(default = "default_channel_max_backoff_secs")]
+    pub max_backoff_secs: u64,
     /// Per-channel behavior overrides.
     #[serde(default)]
     pub overrides: ChannelOverrides,
@@ -3803,6 +4107,8 @@ impl Default for WeChatConfig {
             allowed_users: vec![],
             account_id: None,
             default_agent: None,
+            initial_backoff_secs: default_channel_initial_backoff_2s(),
+            max_backoff_secs: default_channel_max_backoff_secs(),
             overrides: ChannelOverrides::default(),
         }
     }
