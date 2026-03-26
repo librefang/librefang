@@ -4090,7 +4090,22 @@ impl Default for FeishuConfig {
     }
 }
 
-/// WeCom intelligent bot (WebSocket long-connection) adapter configuration.
+/// Connection mode for the WeCom intelligent bot adapter.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WeComMode {
+    /// WebSocket long-connection (no public endpoint required).
+    #[default]
+    Websocket,
+    /// URL callback (requires a publicly reachable HTTP endpoint).
+    Callback,
+}
+
+/// WeCom intelligent bot adapter configuration.
+///
+/// Supports two connection modes:
+/// - `websocket` (default): connects to `wss://openws.work.weixin.qq.com`
+/// - `callback`: starts an HTTP server to receive message callbacks
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WeComConfig {
@@ -4098,6 +4113,14 @@ pub struct WeComConfig {
     pub bot_id: String,
     /// Env var name holding the bot secret.
     pub secret_env: String,
+    /// Connection mode: "websocket" (default) or "callback".
+    pub mode: WeComMode,
+    /// Port for the callback HTTP server (only used in callback mode).
+    pub webhook_port: u16,
+    /// Env var name holding the callback verification token (callback mode only).
+    pub token_env: Option<String>,
+    /// Env var name holding the EncodingAESKey (callback mode only).
+    pub encoding_aes_key_env: Option<String>,
     /// Unique identifier for this bot instance (used for multi-bot routing).
     #[serde(default)]
     pub account_id: Option<String>,
@@ -4113,6 +4136,10 @@ impl Default for WeComConfig {
         Self {
             bot_id: String::new(),
             secret_env: "WECOM_BOT_SECRET".to_string(),
+            mode: WeComMode::default(),
+            webhook_port: 8454,
+            token_env: None,
+            encoding_aes_key_env: None,
             account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),

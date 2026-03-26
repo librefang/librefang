@@ -2144,14 +2144,37 @@ pub async fn start_channel_bridge_with_config(
         ));
     }
 
-    // WeCom intelligent bot (WebSocket long-connection)
+    // WeCom intelligent bot (WebSocket or callback mode)
     #[cfg(feature = "channel-wecom")]
     for wc_config in config.wecom.iter() {
         if let Some(secret) = read_token(&wc_config.secret_env, "WeCom Bot") {
-            let adapter = Arc::new(
-                WeComAdapter::new(wc_config.bot_id.clone(), secret)
-                    .with_account_id(wc_config.account_id.clone()),
-            );
+            use librefang_types::config::WeComMode;
+            let adapter: Arc<WeComAdapter> = match wc_config.mode {
+                WeComMode::Websocket => Arc::new(
+                    WeComAdapter::new(wc_config.bot_id.clone(), secret)
+                        .with_account_id(wc_config.account_id.clone()),
+                ),
+                WeComMode::Callback => {
+                    let token = wc_config
+                        .token_env
+                        .as_ref()
+                        .and_then(|env| std::env::var(env).ok());
+                    let encoding_aes_key = wc_config
+                        .encoding_aes_key_env
+                        .as_ref()
+                        .and_then(|env| std::env::var(env).ok());
+                    Arc::new(
+                        WeComAdapter::new_callback(
+                            wc_config.bot_id.clone(),
+                            secret,
+                            wc_config.webhook_port,
+                            token,
+                            encoding_aes_key,
+                        )
+                        .with_account_id(wc_config.account_id.clone()),
+                    )
+                }
+            };
             adapters.push((
                 adapter,
                 wc_config.default_agent.clone(),

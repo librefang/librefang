@@ -142,7 +142,7 @@ channel-mumble = []
 channel-ntfy = []
 channel-qq = []
 channel-wechat = []
-channel-wecom = []
+channel-wecom = ["dep:aes", "dep:cbc", "dep:roxmltree"]
 channel-mqtt = ["dep:rumqttc"]
 
 [dependencies]
