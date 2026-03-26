@@ -79,6 +79,7 @@ struct State {
     key_input: String,
     key_ok: Option<bool>,
     status_msg: String,
+    save_warn: Option<String>,
     done_at: Option<Instant>,
 }
 
@@ -93,6 +94,7 @@ impl State {
             key_input: String::new(),
             key_ok: None,
             status_msg: String::new(),
+            save_warn: None,
             done_at: None,
         }
     }
@@ -203,8 +205,10 @@ pub fn run() -> GuideResult {
                             if !state.key_input.is_empty() {
                                 // Save key to .env and set in process
                                 let p = &FREE_PROVIDERS[state.selected];
-                                let _ = crate::dotenv::save_env_key(p.env_var, &state.key_input);
+                                let save_warn =
+                                    crate::dotenv::save_env_key(p.env_var, &state.key_input).err();
                                 std::env::set_var(p.env_var, &state.key_input);
+                                state.save_warn = save_warn.map(|e| e.to_string());
                                 state.status_msg = i18n::t("guide-testing-key");
                                 state.phase = Phase::Testing;
 
@@ -426,7 +430,7 @@ fn draw_testing(f: &mut Frame, area: Rect, state: &State) {
         None => theme::BLUE,
     };
 
-    let status = Paragraph::new(vec![
+    let mut lines = vec![
         Line::from(Span::styled(
             format!("  {} — {}...", p.display, i18n::t("guide-setting-up")),
             Style::default()
@@ -438,6 +442,13 @@ fn draw_testing(f: &mut Frame, area: Rect, state: &State) {
             format!("  {}", state.status_msg),
             Style::default().fg(status_color),
         )),
-    ]);
+    ];
+    if let Some(warn) = &state.save_warn {
+        lines.push(Line::from(Span::styled(
+            format!("  ⚠ .env save failed: {warn}"),
+            Style::default().fg(theme::YELLOW),
+        )));
+    }
+    let status = Paragraph::new(lines);
     f.render_widget(status, chunks[1]);
 }
