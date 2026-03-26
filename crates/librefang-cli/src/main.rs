@@ -120,10 +120,10 @@ enum Commands {
     )]
     Init {
         /// Quick mode: no prompts, just write config + .env (for CI/scripts).
-        #[arg(long)]
+        #[arg(long, conflicts_with = "upgrade")]
         quick: bool,
         /// Upgrade an existing installation: backup config, sync registry, merge new defaults.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "quick")]
         upgrade: bool,
     },
     /// Start the LibreFang kernel daemon (API server + kernel).
@@ -435,10 +435,10 @@ enum Commands {
     )]
     Onboard {
         /// Quick non-interactive mode.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "upgrade")]
         quick: bool,
         /// Upgrade an existing installation.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "quick")]
         upgrade: bool,
     },
     /// Quick non-interactive initialization.
@@ -447,10 +447,10 @@ enum Commands {
     )]
     Setup {
         /// Quick mode (same as `init --quick`).
-        #[arg(long)]
+        #[arg(long, conflicts_with = "upgrade")]
         quick: bool,
         /// Upgrade an existing installation.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "quick")]
         upgrade: bool,
     },
     /// Interactive setup wizard for credentials and channels.
