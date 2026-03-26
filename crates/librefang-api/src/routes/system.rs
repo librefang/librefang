@@ -3101,7 +3101,7 @@ async fn registry_schema_by_type(
         Some(schema) => match schema.content_types.get(&content_type) {
             Some(ct) => match serde_json::to_value(ct) {
                 Ok(val) => Json(val).into_response(),
-                Err(e) => ApiErrorResponse::internal(e)
+                Err(e) => ApiErrorResponse::internal(e.to_string())
                     .into_json_tuple()
                     .into_response(),
             },

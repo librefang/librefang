@@ -114,11 +114,11 @@ function validateSectionRequired(
   errors: string[],
 ): void {
   for (const [fKey, f] of Object.entries(section.fields ?? {})) {
-    if (f.required) {
-      const v = values[fKey];
-      if (v === undefined || v === null || v === "") {
-        errors.push(`${pathPrefix}.${fKey}`);
-      }
+    const v = values[fKey];
+    if (f.required && (v === undefined || v === null || v === "")) {
+      errors.push(`${pathPrefix}.${fKey}`);
+    } else if (f.type === "number" && typeof v === "string" && v !== "") {
+      errors.push(`${pathPrefix}.${fKey}`);
     }
   }
   for (const [sKey, s] of Object.entries(section.sections ?? {})) {
@@ -151,11 +151,11 @@ function validateRequired(
   const errors: string[] = [];
 
   for (const [key, field] of Object.entries(schema.fields ?? {})) {
-    if (field.required) {
-      const v = values[key];
-      if (v === undefined || v === null || v === "") {
-        errors.push(key);
-      }
+    const v = values[key];
+    if (field.required && (v === undefined || v === null || v === "")) {
+      errors.push(key);
+    } else if (field.type === "number" && typeof v === "string" && v !== "") {
+      errors.push(key);
     }
   }
 
@@ -266,7 +266,8 @@ function SchemaField({
           value={value === "" || value === undefined ? "" : String(value)}
           onChange={(e) => {
             const raw = e.target.value;
-            onChange(raw === "" ? "" : Number(raw));
+            const num = Number(raw);
+            onChange(raw === "" ? "" : Number.isNaN(num) ? raw : num);
           }}
           placeholder={field.example != null ? String(field.example) : ""}
           className={hasError ? "border-error" : ""}
