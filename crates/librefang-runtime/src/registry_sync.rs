@@ -35,7 +35,7 @@ pub const DEFAULT_CACHE_TTL_SECS: u64 = 24 * 60 * 60; // 24 hours
 /// `cache_ttl_secs` controls how long the local cache is considered fresh
 /// before triggering a re-download. Pass [`DEFAULT_CACHE_TTL_SECS`] when
 /// no user-configured value is available.
-pub fn sync_registry(home_dir: &Path, cache_ttl_secs: u64) {
+pub fn sync_registry(home_dir: &Path, cache_ttl_secs: u64) -> bool {
     let registry_cache = home_dir.join("registry");
 
     if !should_refresh(&registry_cache, cache_ttl_secs) {
@@ -55,7 +55,7 @@ pub fn sync_registry(home_dir: &Path, cache_ttl_secs: u64) {
             if let Err(e) = download_and_extract(&registry_cache) {
                 tracing::warn!("HTTP registry download also failed: {e}");
                 if !registry_cache.exists() {
-                    return;
+                    return false;
                 }
             }
         }
@@ -128,6 +128,7 @@ pub fn sync_registry(home_dir: &Path, cache_ttl_secs: u64) {
     if workspaces_dir.exists() {
         cleanup_stale_dirs(&workspaces_dir);
     }
+    true
 }
 
 /// Check whether we should re-download the registry.

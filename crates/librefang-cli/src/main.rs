@@ -1987,9 +1987,12 @@ fn cmd_init_upgrade() {
     ui::success(&format!("Backed up config to {backup_name}"));
 
     // 3. Sync registry (TTL=0 forces refresh regardless of last sync time)
-    // sync_registry logs warnings internally on network failure; it won't panic.
     ui::hint("Syncing registry...");
-    librefang_runtime::registry_sync::sync_registry(&librefang_dir, 0);
+    if librefang_runtime::registry_sync::sync_registry(&librefang_dir, 0) {
+        ui::success("Registry synced");
+    } else {
+        ui::hint("Registry sync failed (network issue?) — continuing with cached content");
+    }
 
     // 4. Initialize vault and git if missing
     init_vault_if_missing(&librefang_dir);

@@ -18,17 +18,17 @@ update_channel = "stable"      # stable | beta | rc
 dashboard_user = "librefang"
 dashboard_pass = "librefang"
 
+# ── Performance ──────────────────────────────────────────────
+prompt_caching = true           # Reduce LLM costs (Anthropic/OpenAI)
+stable_prefix_mode = true       # Improve prompt cache hit rate
+usage_footer = "tokens"         # off | tokens | cost | full
+
 # ── Default LLM ──────────────────────────────────────────────
 [default_model]
 provider = "{{provider}}"
 model = "{{model}}"
 api_key_env = "{{api_key_env}}"
 # base_url = ""               # Override API endpoint (e.g., local proxy)
-
-# ── Performance ──────────────────────────────────────────────
-prompt_caching = true           # Reduce LLM costs (Anthropic/OpenAI)
-stable_prefix_mode = true       # Improve prompt cache hit rate
-usage_footer = "tokens"         # off | tokens | cost | full
 
 # ── Memory ───────────────────────────────────────────────────
 [memory]
