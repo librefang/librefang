@@ -101,6 +101,19 @@ debounce_ms = 500
 # budget_tokens = 10000
 # stream_thinking = false
 
+# ── Provider Cooldown / Circuit Breaker ─────────────────────
+# [provider_cooldown]
+# base_secs = 60              # Base cooldown after provider error
+# max_secs = 3600             # Maximum cooldown (1 hour)
+# multiplier = 5.0            # Backoff multiplier per consecutive error
+# max_exponent = 3            # Cap on escalation exponent
+# billing_base_secs = 18000   # Base cooldown for billing/402 errors (5h)
+# billing_max_secs = 86400    # Max billing cooldown (24h)
+# billing_multiplier = 2.0    # Billing backoff multiplier
+# failure_window_secs = 86400 # Error counting window (24h)
+# probe_enabled = true        # Allow probe requests during cooldown
+# probe_interval_secs = 30    # Seconds between probes
+
 # ── Channels (uncomment to enable) ───────────────────────────
 # [channels.telegram]
 # bot_token_env = "TELEGRAM_BOT_TOKEN"

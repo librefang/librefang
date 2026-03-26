@@ -1467,6 +1467,9 @@ pub struct KernelConfig {
     /// Auth profiles for key rotation (provider name → profiles).
     #[serde(default)]
     pub auth_profiles: HashMap<String, Vec<AuthProfile>>,
+    /// Provider cooldown / circuit breaker configuration.
+    #[serde(default)]
+    pub provider_cooldown: ProviderCooldownConfig,
     /// Extended thinking configuration.
     #[serde(default)]
     pub thinking: Option<ThinkingConfig>,
@@ -2370,6 +2373,7 @@ impl Default for KernelConfig {
             docker: DockerSandboxConfig::default(),
             pairing: PairingConfig::default(),
             auth_profiles: HashMap::new(),
+            provider_cooldown: ProviderCooldownConfig::default(),
             thinking: None,
             budget: BudgetConfig::default(),
             provider_urls: HashMap::new(),
@@ -4428,6 +4432,111 @@ impl Default for LinkedInConfig {
             account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Provider cooldown / circuit breaker configuration
+// ---------------------------------------------------------------------------
+
+fn default_cooldown_base_secs() -> u64 {
+    60
+}
+fn default_cooldown_max_secs() -> u64 {
+    3600
+}
+fn default_cooldown_multiplier() -> f64 {
+    5.0
+}
+fn default_cooldown_max_exponent() -> u32 {
+    3
+}
+fn default_billing_base_secs() -> u64 {
+    18_000
+}
+fn default_billing_max_secs() -> u64 {
+    86_400
+}
+fn default_billing_multiplier() -> f64 {
+    2.0
+}
+fn default_failure_window_secs() -> u64 {
+    86_400
+}
+fn default_probe_enabled() -> bool {
+    true
+}
+fn default_probe_interval_secs() -> u64 {
+    30
+}
+
+/// Configuration for provider cooldown / circuit breaker behavior.
+///
+/// Controls how long a provider is suspended after errors and how
+/// the cooldown escalates on repeated failures.
+///
+/// ```toml
+/// [provider_cooldown]
+/// base_secs = 60
+/// max_secs = 3600
+/// multiplier = 5.0
+/// max_exponent = 3
+/// billing_base_secs = 18000
+/// billing_max_secs = 86400
+/// billing_multiplier = 2.0
+/// failure_window_secs = 86400
+/// probe_enabled = true
+/// probe_interval_secs = 30
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProviderCooldownConfig {
+    /// Base cooldown duration in seconds after provider error (default: 60).
+    #[serde(default = "default_cooldown_base_secs")]
+    pub base_secs: u64,
+    /// Maximum cooldown duration in seconds (default: 3600).
+    #[serde(default = "default_cooldown_max_secs")]
+    pub max_secs: u64,
+    /// Backoff multiplier for escalation (default: 5.0).
+    #[serde(default = "default_cooldown_multiplier")]
+    pub multiplier: f64,
+    /// Maximum escalation exponent (default: 3).
+    #[serde(default = "default_cooldown_max_exponent")]
+    pub max_exponent: u32,
+    /// Base cooldown for billing errors in seconds (default: 18000).
+    #[serde(default = "default_billing_base_secs")]
+    pub billing_base_secs: u64,
+    /// Maximum cooldown for billing errors in seconds (default: 86400).
+    #[serde(default = "default_billing_max_secs")]
+    pub billing_max_secs: u64,
+    /// Backoff multiplier for billing errors (default: 2.0).
+    #[serde(default = "default_billing_multiplier")]
+    pub billing_multiplier: f64,
+    /// Window for counting failures in seconds (default: 86400).
+    #[serde(default = "default_failure_window_secs")]
+    pub failure_window_secs: u64,
+    /// Enable recovery probes during cooldown (default: true).
+    #[serde(default = "default_probe_enabled")]
+    pub probe_enabled: bool,
+    /// Interval between recovery probes in seconds (default: 30).
+    #[serde(default = "default_probe_interval_secs")]
+    pub probe_interval_secs: u64,
+}
+
+impl Default for ProviderCooldownConfig {
+    fn default() -> Self {
+        Self {
+            base_secs: default_cooldown_base_secs(),
+            max_secs: default_cooldown_max_secs(),
+            multiplier: default_cooldown_multiplier(),
+            max_exponent: default_cooldown_max_exponent(),
+            billing_base_secs: default_billing_base_secs(),
+            billing_max_secs: default_billing_max_secs(),
+            billing_multiplier: default_billing_multiplier(),
+            failure_window_secs: default_failure_window_secs(),
+            probe_enabled: default_probe_enabled(),
+            probe_interval_secs: default_probe_interval_secs(),
         }
     }
 }

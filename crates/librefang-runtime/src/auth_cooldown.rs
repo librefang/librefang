@@ -56,6 +56,23 @@ impl Default for CooldownConfig {
     }
 }
 
+impl From<librefang_types::config::ProviderCooldownConfig> for CooldownConfig {
+    fn from(c: librefang_types::config::ProviderCooldownConfig) -> Self {
+        Self {
+            base_cooldown_secs: c.base_secs,
+            max_cooldown_secs: c.max_secs,
+            backoff_multiplier: c.multiplier,
+            max_exponent: c.max_exponent,
+            billing_base_cooldown_secs: c.billing_base_secs,
+            billing_max_cooldown_secs: c.billing_max_secs,
+            billing_multiplier: c.billing_multiplier,
+            failure_window_secs: c.failure_window_secs,
+            probe_enabled: c.probe_enabled,
+            probe_interval_secs: c.probe_interval_secs,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Circuit state
 // ---------------------------------------------------------------------------

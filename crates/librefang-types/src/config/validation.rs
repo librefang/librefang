@@ -47,6 +47,7 @@ impl KernelConfig {
             "docker",
             "pairing",
             "auth_profiles",
+            "provider_cooldown",
             "thinking",
             "budget",
             "provider_urls",
