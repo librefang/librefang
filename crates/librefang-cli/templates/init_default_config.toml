@@ -153,6 +153,15 @@ debounce_ms = 500
 # poll_interval_secs = 5
 # default_agent = "assistant"         # Agent to use when no agent: directive
 
+# ── Agent Loop Tuning ──────────────────────────────────────────
+# [agent_loop]
+# max_iterations = 50          # Max LLM round-trips per message
+# max_retries = 3              # Retries on rate-limit / overload
+# base_retry_delay_ms = 1000   # Base backoff delay (exponential)
+# tool_timeout_secs = 120      # Per-tool execution timeout
+# max_continuations = 5        # Max consecutive MaxTokens continuations
+# max_history_messages = 20    # Auto-trim threshold for message history
+
 # ── Network (P2P Federation) ─────────────────────────────────
 # network_enabled = false
 # [network]

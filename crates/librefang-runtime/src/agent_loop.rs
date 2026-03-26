@@ -33,40 +33,27 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tracing::{debug, info, instrument, warn};
 
-/// Maximum iterations in the agent loop before giving up.
-const MAX_ITERATIONS: u32 = 50;
-
-/// Maximum retries for rate-limited or overloaded API calls.
-const MAX_RETRIES: u32 = 3;
-
-/// Base delay for exponential backoff (milliseconds).
-const BASE_RETRY_DELAY_MS: u64 = 1000;
-
-/// Timeout for individual tool executions (seconds).
-/// Raised from 60s to 120s for browser automation and long-running builds.
-const TOOL_TIMEOUT_SECS: u64 = 120;
-
-/// Maximum consecutive MaxTokens continuations before returning partial response.
-/// Raised from 3 to 5 to allow longer-form generation.
-const MAX_CONTINUATIONS: u32 = 5;
-
-/// Maximum message history size before auto-trimming to prevent context overflow.
-const MAX_HISTORY_MESSAGES: usize = 20;
+use librefang_types::config::AgentLoopConfig;
 
 const STABLE_PREFIX_MODE_METADATA_KEY: &str = "stable_prefix_mode";
 
-/// Safely trim message history to `MAX_HISTORY_MESSAGES`, cutting at
+/// Safely trim message history to `max_history_messages`, cutting at
 /// conversation-turn boundaries so ToolUse/ToolResult pairs are never split.
 ///
 /// After trim + repair, if fewer than 2 messages survive the function
 /// synthesises a minimal `[user_message]` so the LLM always gets at least
 /// the current question.
-fn safe_trim_messages(messages: &mut Vec<Message>, agent_name: &str, user_message: &str) {
-    if messages.len() <= MAX_HISTORY_MESSAGES {
+fn safe_trim_messages(
+    messages: &mut Vec<Message>,
+    agent_name: &str,
+    user_message: &str,
+    max_history_messages: usize,
+) {
+    if messages.len() <= max_history_messages {
         return;
     }
 
-    let desired_trim = messages.len() - MAX_HISTORY_MESSAGES;
+    let desired_trim = messages.len() - max_history_messages;
 
     // Find a trim point that does not split ToolUse/ToolResult pairs.
     // Filter out 0 — drain(..0) is a no-op and would leave messages untrimmed.
@@ -419,6 +406,7 @@ pub async fn run_agent_loop(
     proactive_memory: Option<Arc<librefang_memory::ProactiveMemoryStore>>,
     context_engine: Option<&dyn ContextEngine>,
     pending_messages: Option<&tokio::sync::Mutex<mpsc::Receiver<String>>>,
+    agent_loop_config: &AgentLoopConfig,
 ) -> LibreFangResult<AgentLoopResult> {
     info!(agent = %manifest.name, "Starting agent loop");
 
@@ -736,7 +724,12 @@ pub async fn run_agent_loop(
     // Safety valve: trim excessively long message histories to prevent context
     // overflow. Cuts at conversation-turn boundaries so ToolUse/ToolResult
     // pairs are never split (fixes "EOF while parsing" from empty API responses).
-    safe_trim_messages(&mut messages, &manifest.name, user_message);
+    safe_trim_messages(
+        &mut messages,
+        &manifest.name,
+        user_message,
+        agent_loop_config.max_history_messages,
+    );
 
     // Proactively strip base64 image data from previous turns.  Images that
     // survived from earlier sessions (e.g. after a crash or daemon restart)
@@ -751,7 +744,7 @@ pub async fn run_agent_loop(
         .autonomous
         .as_ref()
         .map(|a| a.max_iterations)
-        .unwrap_or(MAX_ITERATIONS);
+        .unwrap_or(agent_loop_config.max_iterations);
 
     // Initialize loop guard — scale circuit breaker for autonomous agents
     let loop_guard_config = {
@@ -830,7 +823,14 @@ pub async fn run_agent_loop(
 
         // Call LLM with retry, error classification, and circuit breaker
         let provider_name = manifest.model.provider.as_str();
-        let mut response = call_with_retry(&*driver, request, Some(provider_name), None).await?;
+        let mut response = call_with_retry(
+            &*driver,
+            request,
+            Some(provider_name),
+            None,
+            agent_loop_config,
+        )
+        .await?;
 
         total_usage.input_tokens += response.usage.input_tokens;
         total_usage.output_tokens += response.usage.output_tokens;
@@ -1265,7 +1265,7 @@ pub async fn run_agent_loop(
                     let trace_start = Instant::now();
                     let trace_timestamp = chrono::Utc::now();
                     let result = match tokio::time::timeout(
-                        Duration::from_secs(TOOL_TIMEOUT_SECS),
+                        Duration::from_secs(agent_loop_config.tool_timeout_secs),
                         tool_runner::execute_tool(
                             &tool_call.id,
                             &tool_call.name,
@@ -1297,12 +1297,12 @@ pub async fn run_agent_loop(
                     {
                         Ok(result) => result,
                         Err(_) => {
-                            warn!(tool = %tool_call.name, "Tool execution timed out after {}s", TOOL_TIMEOUT_SECS);
+                            warn!(tool = %tool_call.name, "Tool execution timed out after {}s", agent_loop_config.tool_timeout_secs);
                             librefang_types::tool::ToolResult {
                                 tool_use_id: tool_call.id.clone(),
                                 content: format!(
                                     "Tool '{}' timed out after {}s.",
-                                    tool_call.name, TOOL_TIMEOUT_SECS
+                                    tool_call.name, agent_loop_config.tool_timeout_secs
                                 ),
                                 is_error: true,
                             }
@@ -1538,7 +1538,7 @@ pub async fn run_agent_loop(
             }
             StopReason::MaxTokens => {
                 consecutive_max_tokens += 1;
-                if consecutive_max_tokens >= MAX_CONTINUATIONS {
+                if consecutive_max_tokens >= agent_loop_config.max_continuations {
                     // Return partial response instead of continuing forever
                     let text = response.text();
                     let text = if text.trim().is_empty() {
@@ -1626,6 +1626,7 @@ async fn call_with_retry(
     request: CompletionRequest,
     provider: Option<&str>,
     cooldown: Option<&ProviderCooldown>,
+    agent_loop_config: &AgentLoopConfig,
 ) -> LibreFangResult<crate::llm_driver::CompletionResponse> {
     // Check circuit breaker before calling
     if let (Some(provider), Some(cooldown)) = (provider, cooldown) {
@@ -1647,7 +1648,7 @@ async fn call_with_retry(
 
     let mut last_error = None;
 
-    for attempt in 0..=MAX_RETRIES {
+    for attempt in 0..=agent_loop_config.max_retries {
         match driver.complete(request.clone()).await {
             Ok(response) => {
                 // Record success with circuit breaker
@@ -1657,16 +1658,19 @@ async fn call_with_retry(
                 return Ok(response);
             }
             Err(LlmError::RateLimited { retry_after_ms }) => {
-                if attempt == MAX_RETRIES {
+                if attempt == agent_loop_config.max_retries {
                     if let (Some(provider), Some(cooldown)) = (provider, cooldown) {
                         cooldown.record_failure(provider, false);
                     }
                     return Err(LibreFangError::LlmDriver(format!(
                         "Rate limited after {} retries",
-                        MAX_RETRIES
+                        agent_loop_config.max_retries
                     )));
                 }
-                let delay = std::cmp::max(retry_after_ms, BASE_RETRY_DELAY_MS * 2u64.pow(attempt));
+                let delay = std::cmp::max(
+                    retry_after_ms,
+                    agent_loop_config.base_retry_delay_ms * 2u64.pow(attempt),
+                );
                 warn!(
                     attempt,
                     delay_ms = delay,
@@ -1676,16 +1680,19 @@ async fn call_with_retry(
                 last_error = Some("Rate limited".to_string());
             }
             Err(LlmError::Overloaded { retry_after_ms }) => {
-                if attempt == MAX_RETRIES {
+                if attempt == agent_loop_config.max_retries {
                     if let (Some(provider), Some(cooldown)) = (provider, cooldown) {
                         cooldown.record_failure(provider, false);
                     }
                     return Err(LibreFangError::LlmDriver(format!(
                         "Model overloaded after {} retries",
-                        MAX_RETRIES
+                        agent_loop_config.max_retries
                     )));
                 }
-                let delay = std::cmp::max(retry_after_ms, BASE_RETRY_DELAY_MS * 2u64.pow(attempt));
+                let delay = std::cmp::max(
+                    retry_after_ms,
+                    agent_loop_config.base_retry_delay_ms * 2u64.pow(attempt),
+                );
                 warn!(
                     attempt,
                     delay_ms = delay,
@@ -1739,6 +1746,7 @@ async fn stream_with_retry(
     tx: mpsc::Sender<StreamEvent>,
     provider: Option<&str>,
     cooldown: Option<&ProviderCooldown>,
+    agent_loop_config: &AgentLoopConfig,
 ) -> LibreFangResult<crate::llm_driver::CompletionResponse> {
     // Check circuit breaker before calling
     if let (Some(provider), Some(cooldown)) = (provider, cooldown) {
@@ -1763,7 +1771,7 @@ async fn stream_with_retry(
 
     let mut last_error = None;
 
-    for attempt in 0..=MAX_RETRIES {
+    for attempt in 0..=agent_loop_config.max_retries {
         match driver.stream(request.clone(), tx.clone()).await {
             Ok(response) => {
                 if let (Some(provider), Some(cooldown)) = (provider, cooldown) {
@@ -1772,16 +1780,19 @@ async fn stream_with_retry(
                 return Ok(response);
             }
             Err(LlmError::RateLimited { retry_after_ms }) => {
-                if attempt == MAX_RETRIES {
+                if attempt == agent_loop_config.max_retries {
                     if let (Some(provider), Some(cooldown)) = (provider, cooldown) {
                         cooldown.record_failure(provider, false);
                     }
                     return Err(LibreFangError::LlmDriver(format!(
                         "Rate limited after {} retries",
-                        MAX_RETRIES
+                        agent_loop_config.max_retries
                     )));
                 }
-                let delay = std::cmp::max(retry_after_ms, BASE_RETRY_DELAY_MS * 2u64.pow(attempt));
+                let delay = std::cmp::max(
+                    retry_after_ms,
+                    agent_loop_config.base_retry_delay_ms * 2u64.pow(attempt),
+                );
                 warn!(
                     attempt,
                     delay_ms = delay,
@@ -1791,16 +1802,19 @@ async fn stream_with_retry(
                 last_error = Some("Rate limited".to_string());
             }
             Err(LlmError::Overloaded { retry_after_ms }) => {
-                if attempt == MAX_RETRIES {
+                if attempt == agent_loop_config.max_retries {
                     if let (Some(provider), Some(cooldown)) = (provider, cooldown) {
                         cooldown.record_failure(provider, false);
                     }
                     return Err(LibreFangError::LlmDriver(format!(
                         "Model overloaded after {} retries",
-                        MAX_RETRIES
+                        agent_loop_config.max_retries
                     )));
                 }
-                let delay = std::cmp::max(retry_after_ms, BASE_RETRY_DELAY_MS * 2u64.pow(attempt));
+                let delay = std::cmp::max(
+                    retry_after_ms,
+                    agent_loop_config.base_retry_delay_ms * 2u64.pow(attempt),
+                );
                 warn!(
                     attempt,
                     delay_ms = delay,
@@ -1877,6 +1891,7 @@ pub async fn run_agent_loop_streaming(
     proactive_memory: Option<Arc<librefang_memory::ProactiveMemoryStore>>,
     context_engine: Option<&dyn ContextEngine>,
     pending_messages: Option<&tokio::sync::Mutex<mpsc::Receiver<String>>>,
+    agent_loop_config: &AgentLoopConfig,
 ) -> LibreFangResult<AgentLoopResult> {
     info!(agent = %manifest.name, "Starting streaming agent loop");
 
@@ -2195,7 +2210,12 @@ pub async fn run_agent_loop_streaming(
     let final_response;
 
     // Safety valve: trim at conversation-turn boundaries (streaming path).
-    safe_trim_messages(&mut messages, &manifest.name, user_message);
+    safe_trim_messages(
+        &mut messages,
+        &manifest.name,
+        user_message,
+        agent_loop_config.max_history_messages,
+    );
 
     // Proactively strip stale image data from previous turns (streaming path).
     strip_prior_image_data(&mut messages);
@@ -2206,7 +2226,7 @@ pub async fn run_agent_loop_streaming(
         .autonomous
         .as_ref()
         .map(|a| a.max_iterations)
-        .unwrap_or(MAX_ITERATIONS);
+        .unwrap_or(agent_loop_config.max_iterations);
 
     // Initialize loop guard — scale circuit breaker for autonomous agents
     let loop_guard_config = {
@@ -2311,6 +2331,7 @@ pub async fn run_agent_loop_streaming(
             stream_tx.clone(),
             Some(provider_name),
             None,
+            agent_loop_config,
         )
         .await?;
 
@@ -2738,7 +2759,7 @@ pub async fn run_agent_loop_streaming(
                     let trace_start = Instant::now();
                     let trace_timestamp = chrono::Utc::now();
                     let result = match tokio::time::timeout(
-                        Duration::from_secs(TOOL_TIMEOUT_SECS),
+                        Duration::from_secs(agent_loop_config.tool_timeout_secs),
                         tool_runner::execute_tool(
                             &tool_call.id,
                             &tool_call.name,
@@ -2770,12 +2791,12 @@ pub async fn run_agent_loop_streaming(
                     {
                         Ok(result) => result,
                         Err(_) => {
-                            warn!(tool = %tool_call.name, "Tool execution timed out after {}s (streaming)", TOOL_TIMEOUT_SECS);
+                            warn!(tool = %tool_call.name, "Tool execution timed out after {}s (streaming)", agent_loop_config.tool_timeout_secs);
                             librefang_types::tool::ToolResult {
                                 tool_use_id: tool_call.id.clone(),
                                 content: format!(
                                     "Tool '{}' timed out after {}s.",
-                                    tool_call.name, TOOL_TIMEOUT_SECS
+                                    tool_call.name, agent_loop_config.tool_timeout_secs
                                 ),
                                 is_error: true,
                             }
@@ -3024,7 +3045,7 @@ pub async fn run_agent_loop_streaming(
             }
             StopReason::MaxTokens => {
                 consecutive_max_tokens += 1;
-                if consecutive_max_tokens >= MAX_CONTINUATIONS {
+                if consecutive_max_tokens >= agent_loop_config.max_continuations {
                     let text = response.text();
                     let text = if text.trim().is_empty() {
                         "[Partial response — token limit reached with no text output.]".to_string()
@@ -3832,14 +3853,14 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     #[test]
-    fn test_max_iterations_constant() {
-        assert_eq!(MAX_ITERATIONS, 50);
-    }
-
-    #[test]
-    fn test_retry_constants() {
-        assert_eq!(MAX_RETRIES, 3);
-        assert_eq!(BASE_RETRY_DELAY_MS, 1000);
+    fn test_agent_loop_config_defaults() {
+        let cfg = AgentLoopConfig::default();
+        assert_eq!(cfg.max_iterations, 50);
+        assert_eq!(cfg.max_retries, 3);
+        assert_eq!(cfg.base_retry_delay_ms, 1000);
+        assert_eq!(cfg.tool_timeout_secs, 120);
+        assert_eq!(cfg.max_continuations, 5);
+        assert_eq!(cfg.max_history_messages, 20);
     }
 
     #[test]
@@ -3874,21 +3895,6 @@ mod tests {
         let before_marker = result.split("[TRUNCATED:").next().unwrap();
         let trimmed = before_marker.trim_end();
         assert!(!trimmed.is_empty());
-    }
-
-    #[test]
-    fn test_max_continuations_constant() {
-        assert_eq!(MAX_CONTINUATIONS, 5);
-    }
-
-    #[test]
-    fn test_tool_timeout_constant() {
-        assert_eq!(TOOL_TIMEOUT_SECS, 120);
-    }
-
-    #[test]
-    fn test_max_history_messages() {
-        assert_eq!(MAX_HISTORY_MESSAGES, 20);
     }
 
     #[test]
@@ -3988,7 +3994,7 @@ mod tests {
     }
 
     /// Mock driver that returns empty text with MaxTokens stop reason,
-    /// repeated MAX_CONTINUATIONS times to trigger the max continuations path.
+    /// repeated max_continuations times to trigger the max continuations path.
     struct EmptyMaxTokensDriver;
 
     #[async_trait]
@@ -4075,6 +4081,7 @@ mod tests {
             None, // proactive_memory
             None, // context_engine
             None, // pending_messages
+            &AgentLoopConfig::default(),
         )
         .await
         .expect("Loop should complete without error");
@@ -4133,11 +4140,12 @@ mod tests {
             None, // proactive_memory
             None, // context_engine
             None, // pending_messages
+            &AgentLoopConfig::default(),
         )
         .await
         .expect("Loop should complete without error");
 
-        // Should hit MAX_CONTINUATIONS and return fallback instead of empty
+        // Should hit max_continuations and return fallback instead of empty
         assert!(
             !result.response.trim().is_empty(),
             "Response should not be empty on max tokens, got: {:?}",
@@ -4190,6 +4198,7 @@ mod tests {
             None, // proactive_memory
             None, // context_engine
             None, // pending_messages
+            &AgentLoopConfig::default(),
         )
         .await
         .expect("Loop should complete without error");
@@ -4240,6 +4249,7 @@ mod tests {
             None, // proactive_memory
             None, // context_engine
             None, // pending_messages
+            &AgentLoopConfig::default(),
         )
         .await
         .expect("Streaming loop should complete without error");
@@ -4372,6 +4382,7 @@ mod tests {
             None, // proactive_memory
             None, // context_engine
             None, // pending_messages
+            &AgentLoopConfig::default(),
         )
         .await
         .expect("Loop should recover via retry");
@@ -4423,6 +4434,7 @@ mod tests {
             None, // proactive_memory
             None, // context_engine
             None, // pending_messages
+            &AgentLoopConfig::default(),
         )
         .await
         .expect("Loop should complete with fallback");
@@ -4433,11 +4445,6 @@ mod tests {
             "Expected empty response fallback (no tools executed), got: {:?}",
             result.response
         );
-    }
-
-    #[tokio::test]
-    async fn test_max_history_messages_constant() {
-        assert_eq!(MAX_HISTORY_MESSAGES, 20);
     }
 
     #[tokio::test]
@@ -4482,6 +4489,7 @@ mod tests {
             None, // proactive_memory
             None, // context_engine
             None, // pending_messages
+            &AgentLoopConfig::default(),
         )
         .await
         .expect("Streaming loop should complete without error");
@@ -5263,6 +5271,7 @@ mod tests {
             None, // proactive_memory
             None, // context_engine
             None, // pending_messages
+            &AgentLoopConfig::default(),
         )
         .await
         .expect("Agent loop should complete");
@@ -5334,6 +5343,7 @@ mod tests {
             None, // proactive_memory
             None, // context_engine
             None, // pending_messages
+            &AgentLoopConfig::default(),
         )
         .await
         .expect("Normal loop should complete");
@@ -5401,6 +5411,7 @@ mod tests {
             None, // proactive_memory
             None, // context_engine
             None, // pending_messages
+            &AgentLoopConfig::default(),
         )
         .await
         .expect("Streaming loop should complete");

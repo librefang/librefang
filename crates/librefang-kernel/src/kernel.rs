@@ -2752,6 +2752,7 @@ system_prompt = "You are a helpful assistant."
             None, // no proactive memory
             None, // no context engine
             None, // no pending messages
+            &self.config.agent_loop,
         )
         .await
         .map_err(KernelError::LibreFang)?;
@@ -3405,6 +3406,7 @@ system_prompt = "You are a helpful assistant."
                 kernel_clone.proactive_memory.get().cloned(),
                 kernel_clone.context_engine_for_agent(&manifest),
                 Some(&injection_rx),
+                &kernel_clone.config.agent_loop,
             )
             .await;
 
@@ -4371,6 +4373,7 @@ system_prompt = "You are a helpful assistant."
             proactive_memory,
             self.context_engine_for_agent(&manifest),
             Some(&injection_rx),
+            &self.config.agent_loop,
         )
         .await;
 

@@ -313,6 +313,41 @@ impl Default for WebFetchConfig {
     }
 }
 
+/// Agent loop execution parameters.
+///
+/// Controls iteration limits, retry behaviour, tool timeouts, and history
+/// trimming for the core agent loop. All fields have sensible defaults so
+/// existing config files without an `[agent_loop]` section keep working.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AgentLoopConfig {
+    /// Maximum iterations in the agent loop before giving up.
+    pub max_iterations: u32,
+    /// Maximum retries for rate-limited or overloaded API calls.
+    pub max_retries: u32,
+    /// Base delay for exponential backoff (milliseconds).
+    pub base_retry_delay_ms: u64,
+    /// Timeout for individual tool executions (seconds).
+    pub tool_timeout_secs: u64,
+    /// Maximum consecutive MaxTokens continuations before returning partial response.
+    pub max_continuations: u32,
+    /// Maximum message history size before auto-trimming to prevent context overflow.
+    pub max_history_messages: usize,
+}
+
+impl Default for AgentLoopConfig {
+    fn default() -> Self {
+        Self {
+            max_iterations: 50,
+            max_retries: 3,
+            base_retry_delay_ms: 1000,
+            tool_timeout_secs: 120,
+            max_continuations: 5,
+            max_history_messages: 20,
+        }
+    }
+}
+
 /// Browser automation configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1577,6 +1612,9 @@ pub struct KernelConfig {
     /// Controls which releases `librefang update` considers.
     #[serde(default)]
     pub update_channel: UpdateChannel,
+    /// Agent loop execution parameters (iteration limits, retries, timeouts).
+    #[serde(default)]
+    pub agent_loop: AgentLoopConfig,
 }
 
 /// Input sanitization mode for channel messages.
@@ -2400,6 +2438,7 @@ impl Default for KernelConfig {
             telemetry: TelemetryConfig::default(),
             prompt_intelligence: PromptIntelligenceConfig::default(),
             update_channel: UpdateChannel::default(),
+            agent_loop: AgentLoopConfig::default(),
         }
     }
 }
