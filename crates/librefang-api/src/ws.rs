@@ -33,8 +33,6 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
-/// Per-IP WebSocket connection tracker.
-
 // ---------------------------------------------------------------------------
 // Verbose Level
 // ---------------------------------------------------------------------------
