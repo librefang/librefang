@@ -58,7 +58,7 @@ tracing-opentelemetry = "0.30"
 
 # Prometheus metrics
 metrics = "0.24"
-metrics-exporter-prometheus = "0.16"
+metrics-exporter-prometheus = "0.18"
 
 # Time
 chrono = { version = "0.4", features = ["serde"] }
