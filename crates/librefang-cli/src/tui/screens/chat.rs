@@ -594,22 +594,50 @@ fn draw_messages(f: &mut Frame, area: Rect, state: &ChatState) {
 
     let mut lines: Vec<Line> = Vec::new();
 
-    // Empty state: show welcome message when no messages yet
+    // Empty state: centered welcome with suggestions
     if state.messages.is_empty() && state.streaming_text.is_empty() && !state.thinking {
-        let blank_lines = area.height.saturating_sub(4) / 2;
+        let blank_lines = area.height.saturating_sub(8) / 3;
         for _ in 0..blank_lines {
             lines.push(Line::from(""));
         }
         lines.push(Line::from(vec![Span::styled(
-            "  Send a message to start chatting.",
-            theme::dim_style(),
+            "  \u{25b8} Ready to chat",
+            Style::default()
+                .fg(theme::ACCENT)
+                .add_modifier(Modifier::BOLD),
         )]));
+        lines.push(Line::from(""));
         lines.push(Line::from(vec![Span::styled(
-            "  Type /help for available commands.",
+            "  Try asking:",
             theme::dim_style(),
         )]));
-        let para = Paragraph::new(lines);
-        f.render_widget(para, area);
+        lines.push(Line::from(vec![
+            Span::styled("    \u{25e6} ", Style::default().fg(theme::BORDER)),
+            Span::styled(
+                "\"Explain this codebase\"",
+                Style::default().fg(theme::TEXT_SECONDARY),
+            ),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("    \u{25e6} ", Style::default().fg(theme::BORDER)),
+            Span::styled(
+                "\"Write a unit test for...\"",
+                Style::default().fg(theme::TEXT_SECONDARY),
+            ),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("    \u{25e6} ", Style::default().fg(theme::BORDER)),
+            Span::styled(
+                "\"What does this function do?\"",
+                Style::default().fg(theme::TEXT_SECONDARY),
+            ),
+        ]));
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![Span::styled(
+            "  Type /help for commands  \u{2022}  Ctrl+M to switch models",
+            theme::hint_style(),
+        )]));
+        f.render_widget(Paragraph::new(lines), area);
         return;
     }
 

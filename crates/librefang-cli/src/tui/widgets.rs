@@ -28,7 +28,8 @@ pub fn screen_block(title: &str) -> Block<'_> {
         .padding(Padding::horizontal(1))
 }
 
-/// Inner card block with rounded corners — for dashboard stat cards and similar.
+/// Inner card block with rounded corners — for stat cards and similar.
+#[allow(dead_code)]
 pub fn card_block(title: &str) -> Block<'_> {
     Block::default()
         .title(Span::styled(
@@ -49,6 +50,7 @@ pub fn render_screen_block(f: &mut Frame, area: Rect, title: &str) -> Rect {
 }
 
 /// Render a card_block, return the inner area.
+#[allow(dead_code)]
 pub fn render_card_block(f: &mut Frame, area: Rect, title: &str) -> Rect {
     let block = card_block(title);
     let inner = block.inner(area);

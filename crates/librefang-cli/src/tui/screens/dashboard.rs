@@ -88,91 +88,130 @@ impl DashboardState {
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
 pub fn draw(f: &mut Frame, area: Rect, state: &mut DashboardState) {
-    let inner = widgets::render_screen_block(f, area, "Dashboard");
+    let inner = widgets::render_screen_block(f, area, "\u{25a3} Dashboard");
 
     let chunks = Layout::vertical([
-        Constraint::Length(5), // stat cards
+        Constraint::Length(3), // stat row (compact)
         Constraint::Length(1), // separator
-        Constraint::Min(4),    // audit trail
+        Constraint::Length(1), // audit header
+        Constraint::Min(3),    // audit content
         Constraint::Length(1), // hints
     ])
     .split(inner);
 
-    // ── Stat cards ──────────────────────────────────────────────────────────
-    draw_stat_cards(f, chunks[0], state);
+    // ── Stat row (inline, no card borders — cleaner) ──
+    draw_stat_row(f, chunks[0], state);
 
-    // ── Separator ───────────────────────────────────────────────────────────
+    // ── Separator ──
     f.render_widget(widgets::separator(chunks[1].width), chunks[1]);
 
-    // ── Audit trail ─────────────────────────────────────────────────────────
-    draw_audit_trail(f, chunks[2], state);
+    // ── Audit trail ──
+    draw_audit_header(f, chunks[2]);
+    draw_audit_body(f, chunks[3], state);
 
-    // ── Hints ───────────────────────────────────────────────────────────────
+    // ── Hints ──
     f.render_widget(
-        widgets::hint_bar("  [r] Refresh  [a] Go to Agents  [\u{2191}\u{2193}] Scroll audit"),
-        chunks[3],
+        widgets::hint_bar(
+            "  [r] Refresh  [a] Agents  [\u{2191}\u{2193}] Scroll  [PgUp/PgDn] Fast scroll",
+        ),
+        chunks[4],
     );
 }
 
-fn draw_stat_cards(f: &mut Frame, area: Rect, state: &DashboardState) {
+fn draw_stat_row(f: &mut Frame, area: Rect, state: &DashboardState) {
     let cols = Layout::horizontal([
-        Constraint::Percentage(33),
-        Constraint::Percentage(34),
-        Constraint::Percentage(33),
+        Constraint::Percentage(25),
+        Constraint::Percentage(25),
+        Constraint::Percentage(25),
+        Constraint::Percentage(25),
     ])
     .split(area);
 
-    // Agents card
-    let agents_inner = widgets::render_card_block(f, cols[0], "Agents");
-    let count_text = format!("{}", state.agent_count);
-    f.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                format!(" {count_text}"),
-                Style::default()
-                    .fg(theme::GREEN)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" active", theme::dim_style()),
-        ])),
-        agents_inner,
+    // Agents
+    draw_stat_cell(
+        f,
+        cols[0],
+        "AGENTS",
+        &format!("{}", state.agent_count),
+        if state.agent_count > 0 {
+            theme::GREEN
+        } else {
+            theme::TEXT_TERTIARY
+        },
     );
 
-    // Uptime card
-    let uptime_inner = widgets::render_card_block(f, cols[1], "Uptime");
-    let uptime_str = format_uptime(state.uptime_secs);
-    f.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(
-            format!(" {uptime_str}"),
-            Style::default()
-                .fg(theme::YELLOW)
-                .add_modifier(Modifier::BOLD),
-        )])),
-        uptime_inner,
+    // Uptime
+    draw_stat_cell(
+        f,
+        cols[1],
+        "UPTIME",
+        &format_uptime(state.uptime_secs),
+        theme::BLUE,
     );
 
-    // Provider card
-    let provider_inner = widgets::render_card_block(f, cols[2], "Provider");
-    let provider_text = if state.provider.is_empty() {
-        "not set".to_string()
+    // Provider
+    let prov = if state.provider.is_empty() {
+        "\u{2014}".to_string()
     } else {
-        format!("{}/{}", state.provider, state.model)
+        state.provider.clone()
     };
+    draw_stat_cell(f, cols[2], "PROVIDER", &prov, theme::ACCENT);
+
+    // Model
+    let model = if state.model.is_empty() {
+        "\u{2014}".to_string()
+    } else {
+        widgets::truncate(&state.model, 16)
+    };
+    draw_stat_cell(f, cols[3], "MODEL", &model, theme::PURPLE);
+}
+
+fn draw_stat_cell(
+    f: &mut Frame,
+    area: Rect,
+    label: &str,
+    value: &str,
+    color: ratatui::style::Color,
+) {
+    let rows = Layout::vertical([
+        Constraint::Length(1), // label
+        Constraint::Length(1), // value
+        Constraint::Min(0),
+    ])
+    .split(area);
+
     f.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(
-            format!(" {provider_text}"),
-            Style::default().fg(theme::CYAN),
-        )])),
-        provider_inner,
+        Paragraph::new(Span::styled(
+            format!("  {label}"),
+            Style::default().fg(theme::TEXT_TERTIARY),
+        )),
+        rows[0],
+    );
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            format!("  {value}"),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        )),
+        rows[1],
     );
 }
 
-fn draw_audit_trail(f: &mut Frame, area: Rect, state: &DashboardState) {
+fn draw_audit_header(f: &mut Frame, area: Rect) {
+    f.render_widget(
+        Paragraph::new(Line::from(vec![Span::styled(
+            format!(
+                "  {:<18} {:<12} {:<14} {}",
+                "Time", "Agent", "Action", "Detail"
+            ),
+            theme::table_header(),
+        )])),
+        area,
+    );
+}
+
+fn draw_audit_body(f: &mut Frame, area: Rect, state: &DashboardState) {
     if state.loading {
-        f.render_widget(
-            widgets::spinner(state.tick, "Loading audit trail\u{2026}"),
-            area,
-        );
+        f.render_widget(widgets::spinner(state.tick, "Loading\u{2026}"), area);
         return;
     }
 
@@ -181,35 +220,7 @@ fn draw_audit_trail(f: &mut Frame, area: Rect, state: &DashboardState) {
         return;
     }
 
-    let mut lines: Vec<Line> = Vec::new();
-
-    // Header
-    lines.push(Line::from(vec![Span::styled(
-        format!(
-            "  {:<20} {:<14} {:<16} {}",
-            "Timestamp", "Agent", "Action", "Detail"
-        ),
-        theme::table_header(),
-    )]));
-
-    for row in &state.recent_audit {
-        lines.push(Line::from(vec![
-            Span::styled(format!("  {:<20}", row.timestamp), theme::dim_style()),
-            Span::styled(
-                format!(" {:<14}", widgets::truncate(&row.agent, 13)),
-                Style::default().fg(theme::CYAN),
-            ),
-            Span::styled(
-                format!(" {:<16}", widgets::truncate(&row.action, 15)),
-                Style::default().fg(theme::YELLOW),
-            ),
-            Span::styled(
-                format!(" {}", widgets::truncate(&row.detail, 30)),
-                theme::dim_style(),
-            ),
-        ]));
-    }
-
+    let lines = items_to_lines(&state.recent_audit, area.width as usize);
     let total = lines.len() as u16;
     let visible = area.height;
     let max_scroll = total.saturating_sub(visible);
@@ -218,6 +229,33 @@ fn draw_audit_trail(f: &mut Frame, area: Rect, state: &DashboardState) {
         .min(max_scroll);
 
     f.render_widget(Paragraph::new(lines).scroll((scroll, 0)), area);
+}
+
+fn items_to_lines(rows: &[AuditRow], _width: usize) -> Vec<Line<'_>> {
+    rows.iter()
+        .map(|row| {
+            let time_short = if row.timestamp.len() > 16 {
+                &row.timestamp[row.timestamp.len() - 16..]
+            } else {
+                &row.timestamp
+            };
+            Line::from(vec![
+                Span::styled(format!("  {:<18}", time_short), theme::dim_style()),
+                Span::styled(
+                    format!(" {:<12}", widgets::truncate(&row.agent, 11)),
+                    Style::default().fg(theme::CYAN),
+                ),
+                Span::styled(
+                    format!(" {:<14}", widgets::truncate(&row.action, 13)),
+                    Style::default().fg(theme::YELLOW),
+                ),
+                Span::styled(
+                    format!(" {}", widgets::truncate(&row.detail, 28)),
+                    theme::dim_style(),
+                ),
+            ])
+        })
+        .collect()
 }
 
 fn format_uptime(secs: u64) -> String {
