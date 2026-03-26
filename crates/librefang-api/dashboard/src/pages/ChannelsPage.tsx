@@ -426,22 +426,19 @@ function ConfigDialog({ channel, onClose, t }: { channel: Channel; onClose: () =
 function QrLoginDialog({ channel, onClose, t }: { channel: Channel; onClose: () => void; t: (key: string) => string }) {
   const queryClient = useQueryClient();
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const cancelledRef = useRef(false);
   const [phase, setPhase] = useState<"idle" | "loading" | "scanning" | "success" | "error">("idle");
   const [qrCode, setQrCode] = useState("");
   const [message, setMessage] = useState("");
 
   const cleanup = useCallback(() => {
-    if (pollRef.current) {
-      clearInterval(pollRef.current);
-      pollRef.current = null;
-    }
+    cancelledRef.current = true;
   }, []);
 
-  useEffect(() => () => cleanup(), [cleanup]);
+  useEffect(() => () => { cancelledRef.current = true; }, []);
 
   const startQr = useCallback(async () => {
-    cleanup();
+    cancelledRef.current = false;
     setPhase("loading");
     setMessage("");
     try {
@@ -461,27 +458,36 @@ function QrLoginDialog({ channel, onClose, t }: { channel: Channel; onClose: () 
         QRCode.toCanvas(canvasRef.current, qrContent, { width: 256, margin: 2 });
       }
 
-      // Poll for scan status
-      pollRef.current = setInterval(async () => {
-        try {
-          const status = await wechatQrStatus(res.qr_code!);
-          if (status.connected && status.bot_token) {
-            cleanup();
-            setPhase("success");
-            setMessage("Login successful! Saving configuration...");
-            // Save bot_token via configure endpoint
-            await configureChannel(channel.name, { bot_token_env: status.bot_token });
-            queryClient.invalidateQueries({ queryKey: ["channels", "list"] });
-            setTimeout(onClose, 1500);
-          } else if (status.expired) {
-            cleanup();
-            setPhase("error");
-            setMessage(status.message || "QR code expired");
+      // Serial long-poll: wait for each request to finish before sending the next.
+      // The backend holds each request ~30s (iLink long-poll), so setInterval would
+      // stack up parallel requests that all resolve at once on scan → flashing UI.
+      const pollLoop = async () => {
+        while (!cancelledRef.current) {
+          try {
+            const status = await wechatQrStatus(res.qr_code!);
+            if (cancelledRef.current) break;
+            if (status.connected && status.bot_token) {
+              cancelledRef.current = true;
+              setPhase("success");
+              setMessage("Login successful! Saving configuration...");
+              await configureChannel(channel.name, { bot_token_env: status.bot_token });
+              queryClient.invalidateQueries({ queryKey: ["channels", "list"] });
+              setTimeout(onClose, 1500);
+              return;
+            } else if (status.expired) {
+              cancelledRef.current = true;
+              setPhase("error");
+              setMessage(status.message || "QR code expired");
+              return;
+            }
+          } catch {
+            // Transient error — wait briefly then retry
+            if (cancelledRef.current) break;
+            await new Promise(r => setTimeout(r, 3000));
           }
-        } catch {
-          // Ignore transient poll errors
         }
-      }, 3000);
+      };
+      pollLoop();
     } catch (e) {
       setPhase("error");
       setMessage(e instanceof Error ? e.message : "Failed to start QR login");

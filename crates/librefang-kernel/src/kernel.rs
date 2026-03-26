@@ -1308,6 +1308,32 @@ impl LibreFangKernel {
 
         let memory = Arc::new(substrate);
 
+        // Resolve "auto" provider: scan environment for the first available API key.
+        if config.default_model.provider == "auto" || config.default_model.provider.is_empty() {
+            if let Some((provider, model, env_var)) = drivers::detect_available_provider() {
+                info!(
+                    provider = %provider,
+                    model = %model,
+                    env_var = %env_var,
+                    "Auto-detected default provider from environment"
+                );
+                config.default_model.provider = provider.to_string();
+                config.default_model.model = model.to_string();
+                config.default_model.api_key_env = env_var.to_string();
+            } else {
+                warn!("No API keys detected in environment — defaulting to ollama (local)");
+                config.default_model.provider = "ollama".to_string();
+                config.default_model.model = "llama3.2".to_string();
+                config.default_model.api_key_env = String::new();
+                if !config.provider_urls.contains_key("ollama") {
+                    config.provider_urls.insert(
+                        "ollama".to_string(),
+                        "http://localhost:11434/v1".to_string(),
+                    );
+                }
+            }
+        }
+
         // Create LLM driver.
         // For the API key, try: 1) explicit api_key_env from config, 2) provider_api_keys
         // mapping, 3) auth profiles, 4) convention {PROVIDER}_API_KEY. This ensures
