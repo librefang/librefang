@@ -14,7 +14,7 @@ use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, info};
 
-const POLL_INTERVAL: Duration = Duration::from_secs(2);
+// Poll interval is now configurable via SignalConfig.
 
 /// Signal adapter via signal-cli REST API.
 pub struct SignalAdapter {
@@ -28,6 +28,8 @@ pub struct SignalAdapter {
     allowed_users: Vec<String>,
     /// Optional account identifier for multi-bot routing.
     account_id: Option<String>,
+    /// Poll interval for checking new messages.
+    poll_interval: Duration,
     /// Shutdown signal.
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
@@ -43,6 +45,7 @@ impl SignalAdapter {
             client: crate::http_client::new_client(),
             allowed_users,
             account_id: None,
+            poll_interval: Duration::from_secs(2),
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
         }
@@ -50,6 +53,12 @@ impl SignalAdapter {
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
     pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
         self.account_id = account_id;
+        self
+    }
+
+    /// Set the poll interval. Returns self for builder chaining.
+    pub fn with_poll_interval(mut self, poll_interval_secs: u64) -> Self {
+        self.poll_interval = Duration::from_secs(poll_interval_secs);
         self
     }
 
@@ -124,10 +133,11 @@ impl ChannelAdapter for SignalAdapter {
         let client = self.client.clone();
         let mut shutdown_rx = self.shutdown_rx.clone();
         let account_id = self.account_id.clone();
+        let poll_interval = self.poll_interval;
 
         info!(
             "Starting Signal adapter (polling {} every {:?})",
-            api_url, POLL_INTERVAL
+            api_url, poll_interval
         );
 
         tokio::spawn(async move {
@@ -137,7 +147,7 @@ impl ChannelAdapter for SignalAdapter {
                         info!("Signal adapter shutting down");
                         break;
                     }
-                    _ = tokio::time::sleep(POLL_INTERVAL) => {}
+                    _ = tokio::time::sleep(poll_interval) => {}
                 }
 
                 // Poll for new messages

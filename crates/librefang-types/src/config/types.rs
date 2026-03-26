@@ -2323,6 +2323,33 @@ fn default_true() -> bool {
     true
 }
 
+// ── Shared channel timeout defaults ────────────────────────────────
+
+/// Default initial backoff in seconds for channels using exponential backoff (1s).
+fn default_channel_initial_backoff_secs() -> u64 {
+    1
+}
+
+/// Default maximum backoff in seconds for channels using exponential backoff (60s).
+fn default_channel_max_backoff_secs() -> u64 {
+    60
+}
+
+/// Default initial backoff for channels that default to 2s (WeChat, QQ, Feishu, etc.).
+fn default_channel_initial_backoff_2s() -> u64 {
+    2
+}
+
+/// Default poll interval for Signal (2s).
+fn default_signal_poll_interval_secs() -> u64 {
+    2
+}
+
+/// Default Telegram long-poll timeout (30s).
+fn default_telegram_long_poll_timeout_secs() -> u64 {
+    30
+}
+
 impl Default for KernelConfig {
     fn default() -> Self {
         let home_dir = librefang_home_dir();
@@ -2856,6 +2883,15 @@ pub struct TelegramConfig {
     /// Defaults to `https://api.telegram.org` when not set.
     #[serde(default)]
     pub api_url: Option<String>,
+    /// Initial backoff in seconds on API failures (default: 1).
+    #[serde(default = "default_channel_initial_backoff_secs")]
+    pub initial_backoff_secs: u64,
+    /// Maximum backoff in seconds on API failures (default: 60).
+    #[serde(default = "default_channel_max_backoff_secs")]
+    pub max_backoff_secs: u64,
+    /// Long-poll timeout in seconds sent to getUpdates (default: 30).
+    #[serde(default = "default_telegram_long_poll_timeout_secs")]
+    pub long_poll_timeout_secs: u64,
     /// Per-channel behavior overrides.
     #[serde(default)]
     pub overrides: ChannelOverrides,
@@ -2883,6 +2919,9 @@ impl Default for TelegramConfig {
             default_agent: None,
             poll_interval_secs: 1,
             api_url: None,
+            initial_backoff_secs: default_channel_initial_backoff_secs(),
+            max_backoff_secs: default_channel_max_backoff_secs(),
+            long_poll_timeout_secs: default_telegram_long_poll_timeout_secs(),
             overrides: ChannelOverrides::default(),
             thread_routes: std::collections::HashMap::new(),
         }
@@ -2918,6 +2957,12 @@ pub struct DiscordConfig {
     /// Example: `["hey bot", "!ask"]`
     #[serde(default)]
     pub mention_patterns: Vec<String>,
+    /// Initial backoff in seconds on WebSocket failures (default: 1).
+    #[serde(default = "default_channel_initial_backoff_secs")]
+    pub initial_backoff_secs: u64,
+    /// Maximum backoff in seconds on WebSocket failures (default: 60).
+    #[serde(default = "default_channel_max_backoff_secs")]
+    pub max_backoff_secs: u64,
     /// Per-channel behavior overrides.
     #[serde(default)]
     pub overrides: ChannelOverrides,
@@ -2934,6 +2979,8 @@ impl Default for DiscordConfig {
             intents: 37376,
             ignore_bots: true,
             mention_patterns: vec![],
+            initial_backoff_secs: default_channel_initial_backoff_secs(),
+            max_backoff_secs: default_channel_max_backoff_secs(),
             overrides: ChannelOverrides::default(),
         }
     }
@@ -2960,6 +3007,12 @@ pub struct SlackConfig {
     /// When `None` (default), Slack uses its own default behavior.
     #[serde(default)]
     pub unfurl_links: Option<bool>,
+    /// Initial backoff in seconds on WebSocket failures (default: 1).
+    #[serde(default = "default_channel_initial_backoff_secs")]
+    pub initial_backoff_secs: u64,
+    /// Maximum backoff in seconds on WebSocket failures (default: 60).
+    #[serde(default = "default_channel_max_backoff_secs")]
+    pub max_backoff_secs: u64,
     /// Per-channel behavior overrides.
     #[serde(default)]
     pub overrides: ChannelOverrides,
@@ -2978,6 +3031,8 @@ impl Default for SlackConfig {
             account_id: None,
             default_agent: None,
             unfurl_links: None,
+            initial_backoff_secs: default_channel_initial_backoff_secs(),
+            max_backoff_secs: default_channel_max_backoff_secs(),
             overrides: ChannelOverrides::default(),
             force_flat_replies: None,
         }
@@ -3059,6 +3114,9 @@ pub struct SignalConfig {
     pub account_id: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
+    /// Poll interval in seconds for checking new messages (default: 2).
+    #[serde(default = "default_signal_poll_interval_secs")]
+    pub poll_interval_secs: u64,
     /// Per-channel behavior overrides.
     #[serde(default)]
     pub overrides: ChannelOverrides,
@@ -3072,6 +3130,7 @@ impl Default for SignalConfig {
             allowed_users: vec![],
             account_id: None,
             default_agent: None,
+            poll_interval_secs: default_signal_poll_interval_secs(),
             overrides: ChannelOverrides::default(),
         }
     }
@@ -3098,6 +3157,12 @@ pub struct MatrixConfig {
     /// Whether to auto-accept room invites (default: false).
     #[serde(default)]
     pub auto_accept_invites: bool,
+    /// Initial backoff in seconds on sync failures (default: 1).
+    #[serde(default = "default_channel_initial_backoff_secs")]
+    pub initial_backoff_secs: u64,
+    /// Maximum backoff in seconds on sync failures (default: 60).
+    #[serde(default = "default_channel_max_backoff_secs")]
+    pub max_backoff_secs: u64,
     /// Per-channel behavior overrides.
     #[serde(default)]
     pub overrides: ChannelOverrides,
@@ -3113,6 +3178,8 @@ impl Default for MatrixConfig {
             account_id: None,
             default_agent: None,
             auto_accept_invites: false,
+            initial_backoff_secs: default_channel_initial_backoff_secs(),
+            max_backoff_secs: default_channel_max_backoff_secs(),
             overrides: ChannelOverrides::default(),
         }
     }
@@ -3224,6 +3291,12 @@ pub struct MattermostConfig {
     pub account_id: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
+    /// Initial backoff in seconds on WebSocket failures (default: 1).
+    #[serde(default = "default_channel_initial_backoff_secs")]
+    pub initial_backoff_secs: u64,
+    /// Maximum backoff in seconds on WebSocket failures (default: 60).
+    #[serde(default = "default_channel_max_backoff_secs")]
+    pub max_backoff_secs: u64,
     /// Per-channel behavior overrides.
     #[serde(default)]
     pub overrides: ChannelOverrides,
@@ -3237,6 +3310,8 @@ impl Default for MattermostConfig {
             allowed_channels: vec![],
             account_id: None,
             default_agent: None,
+            initial_backoff_secs: default_channel_initial_backoff_secs(),
+            max_backoff_secs: default_channel_max_backoff_secs(),
             overrides: ChannelOverrides::default(),
         }
     }
@@ -3264,6 +3339,12 @@ pub struct IrcConfig {
     pub account_id: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
+    /// Initial backoff in seconds on connection failures (default: 1).
+    #[serde(default = "default_channel_initial_backoff_secs")]
+    pub initial_backoff_secs: u64,
+    /// Maximum backoff in seconds on connection failures (default: 60).
+    #[serde(default = "default_channel_max_backoff_secs")]
+    pub max_backoff_secs: u64,
     /// Per-channel behavior overrides.
     #[serde(default)]
     pub overrides: ChannelOverrides,
@@ -3280,6 +3361,8 @@ impl Default for IrcConfig {
             use_tls: false,
             account_id: None,
             default_agent: None,
+            initial_backoff_secs: default_channel_initial_backoff_secs(),
+            max_backoff_secs: default_channel_max_backoff_secs(),
             overrides: ChannelOverrides::default(),
         }
     }
@@ -3791,6 +3874,12 @@ pub struct WeChatConfig {
     pub account_id: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
+    /// Initial backoff in seconds on API failures (default: 2).
+    #[serde(default = "default_channel_initial_backoff_2s")]
+    pub initial_backoff_secs: u64,
+    /// Maximum backoff in seconds on API failures (default: 60).
+    #[serde(default = "default_channel_max_backoff_secs")]
+    pub max_backoff_secs: u64,
     /// Per-channel behavior overrides.
     #[serde(default)]
     pub overrides: ChannelOverrides,
@@ -3803,6 +3892,8 @@ impl Default for WeChatConfig {
             allowed_users: vec![],
             account_id: None,
             default_agent: None,
+            initial_backoff_secs: default_channel_initial_backoff_2s(),
+            max_backoff_secs: default_channel_max_backoff_secs(),
             overrides: ChannelOverrides::default(),
         }
     }
