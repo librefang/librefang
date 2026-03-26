@@ -3132,13 +3132,27 @@ async fn create_registry_content(
 ) -> impl IntoResponse {
     let home_dir = &state.kernel.config_ref().home_dir;
 
-    // Extract identifier (id or name) from the values
+    // Extract identifier (id or name) from the values.
+    // Check top-level first, then look in nested sections (e.g. skill.name).
     let identifier = body.as_object().and_then(|m| {
+        // Top-level id/name
         m.get("id")
             .or_else(|| m.get("name"))
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string())
+            .or_else(|| {
+                // Search one level deep in sections (e.g. {"skill": {"name": "..."}})
+                m.values().find_map(|v| {
+                    v.as_object().and_then(|sub| {
+                        sub.get("id")
+                            .or_else(|| sub.get("name"))
+                            .and_then(|v| v.as_str())
+                            .filter(|s| !s.is_empty())
+                            .map(|s| s.to_string())
+                    })
+                })
+            })
     });
 
     let identifier = match identifier {

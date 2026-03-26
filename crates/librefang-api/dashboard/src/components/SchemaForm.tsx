@@ -569,8 +569,10 @@ export function SchemaForm({
 
   const updateSection = useCallback((sectionKey: string, newVal: unknown) => {
     setValues((prev) => ({ ...prev, [sectionKey]: newVal }));
-    // Clear section errors
-    setErrors((prev) => prev.filter((e) => !e.startsWith(sectionKey)));
+    // Clear section errors (match "key." or "key[" to avoid prefix collisions)
+    setErrors((prev) => prev.filter((e) =>
+      e !== sectionKey && !e.startsWith(`${sectionKey}.`) && !e.startsWith(`${sectionKey}[`)
+    ));
   }, []);
 
   const handleSubmit = async () => {
