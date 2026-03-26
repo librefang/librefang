@@ -1896,8 +1896,8 @@ fn cmd_init(quick: bool) {
 
     let librefang_dir = cli_librefang_home();
 
-    // Hint about --upgrade when config already exists
-    if librefang_dir.join("config.toml").exists() {
+    // Hint about --upgrade when config already exists (skip in quick/CI mode)
+    if !quick && librefang_dir.join("config.toml").exists() {
         ui::hint(
             "Existing installation detected. To upgrade in-place, run: librefang init --upgrade",
         );
@@ -1987,9 +1987,9 @@ fn cmd_init_upgrade() {
     ui::success(&format!("Backed up config to {backup_name}"));
 
     // 3. Sync registry (TTL=0 forces refresh regardless of last sync time)
+    // sync_registry logs warnings internally on network failure; it won't panic.
     ui::hint("Syncing registry...");
     librefang_runtime::registry_sync::sync_registry(&librefang_dir, 0);
-    ui::success("Registry synced");
 
     // 4. Initialize vault and git if missing
     init_vault_if_missing(&librefang_dir);
