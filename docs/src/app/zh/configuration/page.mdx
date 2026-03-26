@@ -322,7 +322,7 @@ allowed_channels = []
 # app_id = "your-app-id"
 # app_secret_env = "QQ_BOT_APP_SECRET"
 
-# [[wecom]]
+# [channels.wecom]
 # bot_id = "YOUR_BOT_ID"
 # secret_env = "WECOM_BOT_SECRET"
 
@@ -1432,12 +1432,12 @@ allowed_users = []
 | `account_id` | string 或 null | `null` | 用于多 Bot 路由的唯一 Bot 实例标识符。 |
 | `overrides` | object | （默认值） | 每个通道的行为覆盖配置。详见[通道行为覆盖](#通道行为覆盖)。 |
 
-#### `[[wecom]]`
+#### `[channels.wecom]`
 
 企业微信（WeCom）智能机器人通道适配器。通过 WebSocket 连接到 `wss://openws.work.weixin.qq.com`。
 
 ```toml
-[[wecom]]
+[channels.wecom]
 bot_id = "YOUR_BOT_ID"
 secret_env = "WECOM_BOT_SECRET"
 # account_id = "my-wecom-bot"

@@ -323,7 +323,7 @@ allowed_channels = []
 # app_id = "your-app-id"
 # app_secret_env = "QQ_BOT_APP_SECRET"
 
-# [[wecom]]
+# [channels.wecom]
 # bot_id = "YOUR_BOT_ID"
 # secret_env = "WECOM_BOT_SECRET"
 
@@ -1433,12 +1433,12 @@ allowed_users = []
 | `account_id` | string or null | `null` | Unique bot instance identifier for multi-bot routing. |
 | `overrides` | object | (defaults) | Per-channel behavior overrides. See [Channel Overrides](#channel-overrides). |
 
-#### `[[wecom]]`
+#### `[channels.wecom]`
 
 WeCom (formerly WeChat Work / Enterprise WeChat) intelligent bot adapter. Connects via WebSocket to `wss://openws.work.weixin.qq.com`.
 
 ```toml
-[[wecom]]
+[channels.wecom]
 bot_id = "YOUR_BOT_ID"
 secret_env = "WECOM_BOT_SECRET"
 # account_id = "my-wecom-bot"
