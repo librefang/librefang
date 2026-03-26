@@ -1293,8 +1293,7 @@ impl LibreFangKernel {
                             "vector_backend = \"http\" requires vector_store_url".into(),
                         )
                     })?;
-                    let store =
-                        std::sync::Arc::new(librefang_memory::HttpVectorStore::new(url));
+                    let store = std::sync::Arc::new(librefang_memory::HttpVectorStore::new(url));
                     substrate.set_vector_store(store);
                     tracing::info!("Vector store backend: http ({})", url);
                 }

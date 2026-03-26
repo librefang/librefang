@@ -180,10 +180,7 @@ impl VectorStore for HttpVectorStore {
         Ok(())
     }
 
-    async fn get_embeddings(
-        &self,
-        ids: &[&str],
-    ) -> LibreFangResult<HashMap<String, Vec<f32>>> {
+    async fn get_embeddings(&self, ids: &[&str]) -> LibreFangResult<HashMap<String, Vec<f32>>> {
         if ids.is_empty() {
             return Ok(HashMap::new());
         }
@@ -204,12 +201,9 @@ impl VectorStore for HttpVectorStore {
             )));
         }
 
-        let map: HashMap<String, Vec<f32>> = resp
-            .json()
-            .await
-            .map_err(|e| {
-                LibreFangError::Internal(format!("HTTP vector get_embeddings parse: {e}"))
-            })?;
+        let map: HashMap<String, Vec<f32>> = resp.json().await.map_err(|e| {
+            LibreFangError::Internal(format!("HTTP vector get_embeddings parse: {e}"))
+        })?;
         Ok(map)
     }
 

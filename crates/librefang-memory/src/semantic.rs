@@ -397,8 +397,7 @@ impl SemanticStore {
         let filter_clone = filter.clone();
         let results: Vec<librefang_types::memory::VectorSearchResult> =
             tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current()
-                    .block_on(vs.search(&qe, limit, filter_clone))
+                tokio::runtime::Handle::current().block_on(vs.search(&qe, limit, filter_clone))
             })?;
 
         debug!(
