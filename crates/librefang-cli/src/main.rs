@@ -4098,7 +4098,8 @@ fn cmd_doctor(json: bool, repair: bool) {
                                         checks.push(serde_json::json!({"check": "mcp_server_config", "status": "warn", "name": server.name}));
                                     }
                                 }
-                                librefang_types::config::McpTransportEntry::Sse { url } => {
+                                librefang_types::config::McpTransportEntry::Sse { url }
+                                | librefang_types::config::McpTransportEntry::Http { url } => {
                                     if url.is_empty() {
                                         if !json {
                                             ui::check_warn(&format!(

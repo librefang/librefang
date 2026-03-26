@@ -4081,6 +4081,7 @@ dependencies = [
  "futures",
  "hex",
  "hmac",
+ "http",
  "librefang-channels",
  "librefang-memory",
  "librefang-skills",
@@ -6440,10 +6441,13 @@ dependencies = [
  "async-trait",
  "chrono",
  "futures",
+ "http",
  "pin-project-lite",
  "process-wrap",
+ "reqwest 0.13.2",
  "serde",
  "serde_json",
+ "sse-stream",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
@@ -7334,6 +7338,19 @@ dependencies = [
  "js-sys",
  "rsqlite-vfs",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "sse-stream"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eb4dc4d33c68ec1f27d386b5610a351922656e1fdf5c05bbaad930cd1519479a"
+dependencies = [
+ "bytes",
+ "futures-util",
+ "http-body",
+ "http-body-util",
+ "pin-project-lite",
 ]
 
 [[package]]

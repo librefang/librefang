@@ -2452,6 +2452,12 @@ fn serialize_mcp_transport(
                 "url": url,
             })
         }
+        librefang_types::config::McpTransportEntry::Http { url } => {
+            serde_json::json!({
+                "type": "http",
+                "url": url,
+            })
+        }
         librefang_types::config::McpTransportEntry::HttpCompat {
             base_url,
             headers,

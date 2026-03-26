@@ -6,6 +6,7 @@
 //!
 //! All MCP tools are namespaced with `mcp_{server}_{tool}` to prevent collisions.
 
+use http::{HeaderName, HeaderValue};
 use librefang_types::config::{
     HttpCompatHeaderConfig, HttpCompatMethod, HttpCompatRequestMode, HttpCompatResponseMode,
     HttpCompatToolConfig,
@@ -13,6 +14,7 @@ use librefang_types::config::{
 use librefang_types::tool::ToolDefinition;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::Arc;
 use tracing::{debug, info};
 
 // ---------------------------------------------------------------------------
@@ -39,6 +41,12 @@ pub struct McpServerConfig {
     /// the parent environment and pass it through.
     #[serde(default)]
     pub env: Vec<String>,
+    /// Extra HTTP headers to send with every SSE / Streamable-HTTP request.
+    /// Each entry is `"Header-Name: value"`.  Useful for authentication
+    /// (`Authorization: Bearer <token>`), API keys (`X-Api-Key: ...`),
+    /// or any custom headers required by a remote MCP server.
+    #[serde(default)]
+    pub headers: Vec<String>,
 }
 
 fn default_timeout() -> u64 {
@@ -57,6 +65,10 @@ pub enum McpTransport {
     },
     /// HTTP Server-Sent Events (JSON-RPC over HTTP POST).
     Sse { url: String },
+    /// Streamable HTTP transport (MCP 2025-03-26+).
+    /// Single endpoint, client sends Accept: application/json, text/event-stream.
+    /// Supports Mcp-Session-Id for session management.
+    Http { url: String },
     /// Built-in compatibility adapter for plain HTTP/JSON backends.
     HttpCompat {
         base_url: String,
@@ -206,6 +218,9 @@ impl McpConnection {
                 Self::connect_stdio(command, args, &config.env).await?
             }
             McpTransport::Sse { url } => Self::connect_sse(url).await?,
+            McpTransport::Http { url } => {
+                Self::connect_streamable_http(url, &config.headers).await?
+            }
             McpTransport::HttpCompat {
                 base_url,
                 headers,
@@ -386,6 +401,62 @@ impl McpConnection {
             },
             None, // Tools discovered later via sse_initialize + sse_discover_tools
         ))
+    }
+
+    // --- Streamable HTTP transport (rmcp SDK) ---
+
+    /// Connect using Streamable HTTP transport (or SSE fallback via the same endpoint).
+    ///
+    /// The `rmcp` SDK's `StreamableHttpClientTransport` handles the full
+    /// Streamable HTTP protocol: Accept headers, Mcp-Session-Id tracking,
+    /// SSE stream parsing, and content-type negotiation.
+    async fn connect_streamable_http(
+        url: &str,
+        headers: &[String],
+    ) -> Result<(McpInner, Option<Vec<rmcp::model::Tool>>), String> {
+        use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+        use rmcp::transport::StreamableHttpClientTransport;
+        use rmcp::ServiceExt;
+
+        Self::check_ssrf(url, "Streamable HTTP")?;
+
+        // Parse custom headers (e.g., "Authorization: Bearer <token>").
+        let mut custom_headers: HashMap<HeaderName, HeaderValue> = HashMap::new();
+        for header_str in headers {
+            if let Some((name, value)) = header_str.split_once(':') {
+                let name = name.trim();
+                let value = value.trim();
+                if let (Ok(hn), Ok(hv)) = (
+                    HeaderName::from_bytes(name.as_bytes()),
+                    HeaderValue::from_str(value),
+                ) {
+                    custom_headers.insert(hn, hv);
+                }
+            }
+        }
+
+        let config = StreamableHttpClientTransportConfig {
+            uri: Arc::from(url),
+            custom_headers,
+            ..Default::default()
+        };
+
+        let transport = StreamableHttpClientTransport::from_config(config);
+
+        let client = ()
+            .into_dyn()
+            .serve(transport)
+            .await
+            .map_err(|e| format!("MCP Streamable HTTP connection failed: {e}"))?;
+
+        // Discover tools via rmcp (with timeout)
+        let timeout = std::time::Duration::from_secs(60);
+        let tools = tokio::time::timeout(timeout, client.list_all_tools())
+            .await
+            .map_err(|_| "MCP tools/list timed out after 60s for Streamable HTTP".to_string())?
+            .map_err(|e| format!("MCP tools/list failed: {e}"))?;
+
+        Ok((McpInner::Rmcp(client), Some(tools)))
     }
 
     /// Send the MCP `initialize` handshake over SSE transport.
@@ -1227,6 +1298,7 @@ mod tests {
                 "GITHUB_PERSONAL_ACCESS_TOKEN=ghp_test123".to_string(),
                 "LEGACY_NAME_ONLY".to_string(),
             ],
+            headers: vec![],
         };
 
         let json = serde_json::to_string(&config).unwrap();
@@ -1253,6 +1325,7 @@ mod tests {
             },
             timeout_secs: 60,
             env: vec![],
+            headers: vec![],
         };
         let json = serde_json::to_string(&sse_config).unwrap();
         let back: McpServerConfig = serde_json::from_str(&json).unwrap();
@@ -1283,6 +1356,7 @@ mod tests {
             },
             timeout_secs: 45,
             env: vec![],
+            headers: vec![],
         };
         let json = serde_json::to_string(&http_compat_config).unwrap();
         let back: McpServerConfig = serde_json::from_str(&json).unwrap();
@@ -1298,6 +1372,27 @@ mod tests {
                 assert_eq!(tools[0].name, "search");
             }
             _ => panic!("Expected HttpCompat transport"),
+        }
+
+        // HTTP (Streamable HTTP) variant
+        let http_config = McpServerConfig {
+            name: "atlassian".to_string(),
+            transport: McpTransport::Http {
+                url: "https://mcp.atlassian.com/v1/mcp".to_string(),
+            },
+            timeout_secs: 120,
+            env: vec![],
+            headers: vec!["Authorization: Bearer test-token-456".to_string()],
+        };
+        let json = serde_json::to_string(&http_config).unwrap();
+        let back: McpServerConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.headers.len(), 1);
+        assert_eq!(back.headers[0], "Authorization: Bearer test-token-456");
+        match back.transport {
+            McpTransport::Http { url } => {
+                assert_eq!(url, "https://mcp.atlassian.com/v1/mcp")
+            }
+            _ => panic!("Expected Http transport"),
         }
     }
 
@@ -1329,6 +1424,7 @@ mod tests {
                 },
                 timeout_secs: 30,
                 env: vec![],
+                headers: vec![],
             },
             tools: Vec::new(),
             original_names: HashMap::new(),
@@ -1490,6 +1586,7 @@ mod tests {
             },
             timeout_secs: 5,
             env: vec![],
+            headers: vec![],
         })
         .await
         .unwrap();

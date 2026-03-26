@@ -508,6 +508,9 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
                 Some(librefang_types::config::McpTransportEntry::Sse { url }) => {
                     serde_json::json!({ "type": "sse", "url": url })
                 }
+                Some(librefang_types::config::McpTransportEntry::Http { url }) => {
+                    serde_json::json!({ "type": "http", "url": url })
+                }
                 Some(librefang_types::config::McpTransportEntry::HttpCompat {
                     base_url, ..
                 }) => {
