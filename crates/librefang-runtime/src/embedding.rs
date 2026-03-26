@@ -26,6 +26,8 @@ pub enum EmbeddingError {
     Parse(String),
     #[error("Missing API key: {0}")]
     MissingApiKey(String),
+    #[error("Unsupported: {0}")]
+    Unsupported(String),
 }
 
 /// Configuration for creating an embedding driver.
@@ -61,6 +63,21 @@ pub trait EmbeddingDriver: Send + Sync {
 
     /// Return the dimensionality of embeddings produced by this driver.
     fn dimensions(&self) -> usize;
+
+    /// Compute an embedding vector for raw image data.
+    ///
+    /// Returns `Err(EmbeddingError::Unsupported)` by default — drivers that
+    /// support vision/multimodal models should override this.
+    async fn embed_image(&self, _image_data: &[u8]) -> Result<Vec<f32>, EmbeddingError> {
+        Err(EmbeddingError::Unsupported(
+            "Image embeddings not supported by this driver".into(),
+        ))
+    }
+
+    /// Whether this driver supports image embeddings.
+    fn supports_images(&self) -> bool {
+        false
+    }
 }
 
 /// OpenAI-compatible embedding driver.

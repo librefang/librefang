@@ -3928,8 +3928,9 @@ pub async fn upload_file(
         .unwrap_or("upload")
         .to_string();
 
-    // Validate size
-    if body.len() > MAX_UPLOAD_SIZE {
+    // Validate size (use config override or fall back to compiled default)
+    let upload_limit = state.kernel.config_ref().max_upload_size_bytes;
+    if body.len() > upload_limit {
         return (
             StatusCode::PAYLOAD_TOO_LARGE,
             Json(serde_json::json!({"error": err_too_large_upload})),

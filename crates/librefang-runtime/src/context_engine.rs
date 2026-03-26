@@ -524,6 +524,9 @@ impl ContextEngine for ScriptableContextEngine {
                                 accessed_at: chrono::Utc::now(),
                                 access_count: 0,
                                 scope: "hook".to_string(),
+                                image_url: None,
+                                image_embedding: None,
+                                modality: Default::default(),
                             });
                         }
                     }

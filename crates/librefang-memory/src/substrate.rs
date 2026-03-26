@@ -457,7 +457,7 @@ impl MemorySubstrate {
 
         if !should_chunk {
             return semantic
-                .remember_with_embedding(agent_id, content, source, scope, metadata, embedding);
+                .remember_with_embedding(agent_id, content, source, scope, metadata, embedding, None, None, Default::default());
         }
 
         let chunks =
@@ -496,6 +496,9 @@ impl MemorySubstrate {
                 scope,
                 chunk_meta,
                 None,
+                None,
+                None,
+                Default::default(),
             )?;
 
             if parent_id.is_none() {

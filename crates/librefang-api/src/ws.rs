@@ -19,6 +19,7 @@ use axum::response::IntoResponse;
 use dashmap::DashMap;
 use futures::stream::SplitSink;
 use futures::{SinkExt, StreamExt};
+use librefang_channels::types::SenderContext;
 use librefang_runtime::kernel_handle::KernelHandle;
 use librefang_runtime::llm_driver::StreamEvent;
 use librefang_runtime::llm_errors;
@@ -189,7 +190,7 @@ pub async fn agent_ws(
     }
 
     let id_str = id.clone();
-    ws.on_upgrade(move |socket| handle_agent_ws(socket, state, agent_id, id_str, guard))
+    ws.on_upgrade(move |socket| handle_agent_ws(socket, state, agent_id, id_str, ip, guard))
         .into_response()
 }
 
@@ -206,6 +207,7 @@ async fn handle_agent_ws(
     state: Arc<AppState>,
     agent_id: AgentId,
     id_str: String,
+    client_ip: IpAddr,
     _guard: WsConnectionGuard,
 ) {
     info!(agent_id = %id_str, "WebSocket connected");
@@ -353,7 +355,7 @@ async fn handle_agent_ws(
                 }
                 msg_times.push(now);
 
-                handle_text_message(&sender, &state, agent_id, &text, &verbose).await;
+                handle_text_message(&sender, &state, agent_id, &text, &verbose, client_ip).await;
             }
             Message::Close(_) => {
                 info!(agent_id = %id_str, "WebSocket closed by client");
@@ -384,6 +386,7 @@ async fn handle_text_message(
     agent_id: AgentId,
     text: &str,
     verbose: &Arc<AtomicU8>,
+    client_ip: IpAddr,
 ) {
     // Parse the message
     let parsed: serde_json::Value = match serde_json::from_str(text) {
@@ -528,9 +531,22 @@ async fn handle_text_message(
             // Send message to agent with streaming
             let kernel_handle: Arc<dyn KernelHandle> =
                 state.kernel.clone() as Arc<dyn KernelHandle>;
+            let sender_ctx = SenderContext {
+                channel: "webui".to_string(),
+                user_id: client_ip.to_string(),
+                display_name: "Web UI".to_string(),
+                is_group: false,
+                thread_id: None,
+                account_id: None,
+            };
             match state
                 .kernel
-                .send_message_streaming_with_routing(agent_id, &content, Some(kernel_handle))
+                .send_message_streaming_with_sender_context_and_routing(
+                    agent_id,
+                    &content,
+                    Some(kernel_handle),
+                    &sender_ctx,
+                )
                 .await
             {
                 Ok((mut rx, handle)) => {
@@ -642,9 +658,9 @@ async fn handle_text_message(
                             // naturally.  We give it up to 5 s before aborting
                             // as a safety net.
                             let drain_result =
-                                tokio::time::timeout(Duration::from_secs(5), stream_task).await;
+                                tokio::time::timeout(Duration::from_secs(30), stream_task).await;
                             if drain_result.is_err() {
-                                debug!("stream forwarder did not finish within 5 s — aborting");
+                                warn!("stream forwarder did not finish within 30 s — sending response before abort");
                             }
 
                             // Send typing lifecycle: stop

@@ -772,6 +772,19 @@ impl std::fmt::Display for MemoryId {
     }
 }
 
+/// Modality of a memory fragment (text, image, or multimodal).
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryModality {
+    /// Pure text memory.
+    #[default]
+    Text,
+    /// Image-only memory.
+    Image,
+    /// Combined text + image memory.
+    MultiModal,
+}
+
 /// Where a memory came from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -815,6 +828,15 @@ pub struct MemoryFragment {
     pub access_count: u64,
     /// Memory scope/collection name.
     pub scope: String,
+    /// Optional URL to an associated image.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_url: Option<String>,
+    /// Optional image embedding vector.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_embedding: Option<Vec<f32>>,
+    /// Modality of this memory (text, image, or multimodal).
+    #[serde(default)]
+    pub modality: MemoryModality,
 }
 
 /// Filter criteria for memory recall.
@@ -1259,6 +1281,9 @@ mod tests {
             accessed_at: Utc::now(),
             access_count: 0,
             scope: "episodic".to_string(),
+            image_url: None,
+            image_embedding: None,
+            modality: Default::default(),
         };
         let json = serde_json::to_string(&fragment).unwrap();
         let deserialized: MemoryFragment = serde_json::from_str(&json).unwrap();

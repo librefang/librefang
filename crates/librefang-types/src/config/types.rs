@@ -1770,6 +1770,26 @@ pub struct KernelConfig {
     /// API and WebSocket rate limiting configuration.
     #[serde(default)]
     pub rate_limit: RateLimitConfig,
+    /// Timeout for individual tool executions in seconds.
+    /// Increase for browser automation or long-running builds.
+    #[serde(default = "default_tool_timeout_secs")]
+    pub tool_timeout_secs: u64,
+    /// Maximum upload size in bytes (default: 10 MB).
+    /// Enterprise deployments may need larger file uploads.
+    #[serde(default = "default_max_upload_size_bytes")]
+    pub max_upload_size_bytes: usize,
+    /// Maximum number of concurrent background LLM calls across all agents.
+    /// Increase on high-core servers that can handle more parallel inference.
+    #[serde(default = "default_max_concurrent_bg_llm")]
+    pub max_concurrent_bg_llm: usize,
+    /// Maximum inter-agent call depth to prevent infinite recursion (A->B->C->...).
+    /// Complex workflows may need deeper agent chains.
+    #[serde(default = "default_max_agent_call_depth")]
+    pub max_agent_call_depth: u32,
+    /// Maximum request body size in bytes (global safety net).
+    /// Individual endpoints may enforce tighter limits.
+    #[serde(default = "default_max_request_body_bytes")]
+    pub max_request_body_bytes: usize,
 }
 
 /// Input sanitization mode for channel messages.
@@ -2224,6 +2244,31 @@ fn default_max_cron_jobs() -> usize {
     500
 }
 
+/// Default tool execution timeout in seconds (120s).
+fn default_tool_timeout_secs() -> u64 {
+    120
+}
+
+/// Default maximum upload size in bytes (10 MB).
+fn default_max_upload_size_bytes() -> usize {
+    10 * 1024 * 1024
+}
+
+/// Default maximum concurrent background LLM calls.
+fn default_max_concurrent_bg_llm() -> usize {
+    5
+}
+
+/// Default maximum inter-agent call depth.
+fn default_max_agent_call_depth() -> u32 {
+    5
+}
+
+/// Default maximum request body size in bytes (1 MB).
+fn default_max_request_body_bytes() -> usize {
+    1_024 * 1_024
+}
+
 /// Audit log configuration.
 ///
 /// Configure in config.toml:
@@ -2652,6 +2697,11 @@ impl Default for KernelConfig {
             prompt_intelligence: PromptIntelligenceConfig::default(),
             update_channel: UpdateChannel::default(),
             rate_limit: RateLimitConfig::default(),
+            tool_timeout_secs: default_tool_timeout_secs(),
+            max_upload_size_bytes: default_max_upload_size_bytes(),
+            max_concurrent_bg_llm: default_max_concurrent_bg_llm(),
+            max_agent_call_depth: default_max_agent_call_depth(),
+            max_request_body_bytes: default_max_request_body_bytes(),
         }
     }
 }
