@@ -85,6 +85,30 @@ pub fn sync_registry(home_dir: &Path) {
         }
     }
 
+    // Pre-install workflow templates (always overwrite so updates land)
+    let workflows_src = registry_cache.join("workflows");
+    if workflows_src.is_dir() {
+        let workflows_dest = home_dir.join("workflows").join("templates");
+        let _ = std::fs::create_dir_all(&workflows_dest);
+        let mut installed = 0usize;
+        if let Ok(entries) = std::fs::read_dir(&workflows_src) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("toml") {
+                    if let Some(name) = path.file_name() {
+                        let dest = workflows_dest.join(name);
+                        if std::fs::copy(&path, &dest).is_ok() {
+                            installed += 1;
+                        }
+                    }
+                }
+            }
+        }
+        if installed > 0 {
+            tracing::info!("Pre-installed {installed} workflow template(s) from registry");
+        }
+    }
+
     // Sync root-level files (aliases.toml, schema.toml)
     for name in &["aliases.toml", "schema.toml"] {
         let src = registry_cache.join(name);
