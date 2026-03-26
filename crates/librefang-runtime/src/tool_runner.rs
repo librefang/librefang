@@ -2076,7 +2076,7 @@ fn tool_goal_update(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
 ) -> Result<String, String> {
-    let kh = require_kernel(kernel)?;
+    // Validate input before touching the kernel
     let goal_id = input["goal_id"]
         .as_str()
         .ok_or("Missing 'goal_id' parameter")?;
@@ -2096,6 +2096,7 @@ fn tool_goal_update(
         }
     }
 
+    let kh = require_kernel(kernel)?;
     let updated = kh.goal_update(goal_id, status, progress)?;
     Ok(serde_json::to_string_pretty(&updated).unwrap_or_else(|_| updated.to_string()))
 }
@@ -5093,24 +5094,19 @@ mod tests {
     #[tokio::test]
     async fn test_agent_spawn_capability_escalation_denied() {
         // SECURITY: sub-agent cannot request tools the parent doesn't have.
-        // Parent only has file_read, but child manifest requests shell_exec.
+        // Parent only has file_read, but child requests shell_exec.
         let kernel: Arc<dyn KernelHandle> = Arc::new(SpawnCheckKernel {
             should_fail_escalation: true,
         });
         let parent_allowed = vec!["file_read".to_string(), "agent_spawn".to_string()];
-        let child_manifest = r#"
-name = "escalated-child"
-module = "native"
-[model]
-provider = "groq"
-model = "llama3-8b-8192"
-[capabilities]
-tools = ["shell_exec", "file_read"]
-"#;
         let result = execute_tool(
             "test-id",
             "agent_spawn",
-            &serde_json::json!({"manifest_toml": child_manifest}),
+            &serde_json::json!({
+                "name": "escalated-child",
+                "system_prompt": "You are a test agent.",
+                "tools": ["shell_exec", "file_read"]
+            }),
             Some(&kernel),
             Some(&parent_allowed),
             Some("parent-agent-id"),
@@ -5153,19 +5149,14 @@ tools = ["shell_exec", "file_read"]
             "file_write".to_string(),
             "agent_spawn".to_string(),
         ];
-        let child_manifest = r#"
-name = "good-child"
-module = "native"
-[model]
-provider = "groq"
-model = "llama3-8b-8192"
-[capabilities]
-tools = ["file_read"]
-"#;
         let result = execute_tool(
             "test-id",
             "agent_spawn",
-            &serde_json::json!({"manifest_toml": child_manifest}),
+            &serde_json::json!({
+                "name": "good-child",
+                "system_prompt": "You are a test agent.",
+                "tools": ["file_read"]
+            }),
             Some(&kernel),
             Some(&parent_allowed),
             Some("parent-agent-id"),
