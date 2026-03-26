@@ -99,10 +99,13 @@ pub struct ModelCatalogEntry {
     /// Cost per million output tokens (USD).
     pub output_cost_per_m: f64,
     /// Whether the model supports tool/function calling.
+    #[serde(default)]
     pub supports_tools: bool,
     /// Whether the model supports vision/image inputs.
+    #[serde(default)]
     pub supports_vision: bool,
     /// Whether the model supports streaming responses.
+    #[serde(default)]
     pub supports_streaming: bool,
     /// Aliases for this model (e.g. ["sonnet", "claude-sonnet"]).
     #[serde(default)]
