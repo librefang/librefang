@@ -518,6 +518,7 @@ fn draw_send_modal(f: &mut Frame, area: Rect, state: &CommsState) {
     let block = Block::default()
         .title(Span::styled(" Send Message ", theme::title_style()))
         .borders(Borders::ALL)
+        .border_set(ratatui::symbols::border::ROUNDED)
         .border_style(Style::default().fg(theme::ACCENT))
         .padding(Padding::horizontal(1));
     let inner = block.inner(modal);
@@ -590,6 +591,7 @@ fn draw_task_modal(f: &mut Frame, area: Rect, state: &CommsState) {
     let block = Block::default()
         .title(Span::styled(" Post Task ", theme::title_style()))
         .borders(Borders::ALL)
+        .border_set(ratatui::symbols::border::ROUNDED)
         .border_style(Style::default().fg(theme::ACCENT))
         .padding(Padding::horizontal(1));
     let inner = block.inner(modal);

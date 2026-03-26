@@ -265,6 +265,7 @@ fn draw_stat_card(
             Style::default().fg(color),
         ))
         .borders(Borders::ALL)
+        .border_set(ratatui::symbols::border::ROUNDED)
         .border_style(Style::default().fg(theme::DIM));
     let card_inner = card.inner(area);
     f.render_widget(card, area);

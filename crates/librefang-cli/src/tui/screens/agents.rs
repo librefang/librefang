@@ -938,6 +938,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut AgentSelectState) {
         )]))
         .title_alignment(Alignment::Left)
         .borders(Borders::ALL)
+        .border_set(ratatui::symbols::border::ROUNDED)
         .border_style(Style::default().fg(theme::ACCENT))
         .padding(Padding::horizontal(1));
 

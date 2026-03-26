@@ -412,6 +412,7 @@ fn draw_paste_key(f: &mut Frame, area: Rect, state: &State) {
     let input = Paragraph::new(Span::styled(display_key, style)).block(
         Block::default()
             .borders(Borders::ALL)
+            .border_set(ratatui::symbols::border::ROUNDED)
             .border_style(Style::default().fg(theme::BORDER))
             .title(Span::styled(" API Key ", theme::dim_style())),
     );
