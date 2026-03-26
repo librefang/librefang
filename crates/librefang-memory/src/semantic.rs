@@ -11,7 +11,7 @@ use chrono::Utc;
 use librefang_types::agent::AgentId;
 use librefang_types::error::{LibreFangError, LibreFangResult};
 use librefang_types::memory::{
-    MemoryFilter, MemoryFragment, MemoryId, MemoryModality, MemorySource,
+    MemoryFilter, MemoryFragment, MemoryId, MemoryModality, MemorySource, VectorStore,
 };
 use rusqlite::Connection;
 use std::collections::HashMap;
@@ -19,15 +19,40 @@ use std::sync::{Arc, Mutex};
 use tracing::debug;
 
 /// Semantic store backed by SQLite with optional vector search.
+///
+/// When a [`VectorStore`] backend is provided, vector similarity search in
+/// [`recall_with_embedding`](Self::recall_with_embedding) is delegated to that
+/// backend instead of doing in-process cosine similarity over SQLite BLOBs.
+/// When no backend is set (the default), the original SQLite path is used.
 #[derive(Clone)]
 pub struct SemanticStore {
     conn: Arc<Mutex<Connection>>,
+    vector_store: Option<Arc<dyn VectorStore>>,
 }
 
 impl SemanticStore {
     /// Create a new semantic store wrapping the given connection.
     pub fn new(conn: Arc<Mutex<Connection>>) -> Self {
-        Self { conn }
+        Self {
+            conn,
+            vector_store: None,
+        }
+    }
+
+    /// Create a new semantic store with an external vector backend.
+    pub fn new_with_vector_store(
+        conn: Arc<Mutex<Connection>>,
+        vector_store: Arc<dyn VectorStore>,
+    ) -> Self {
+        Self {
+            conn,
+            vector_store: Some(vector_store),
+        }
+    }
+
+    /// Set or replace the vector store backend at runtime.
+    pub fn set_vector_store(&mut self, store: Arc<dyn VectorStore>) {
+        self.vector_store = Some(store);
     }
 
     /// Get a reference to the underlying connection for advanced operations.
@@ -121,6 +146,11 @@ impl SemanticStore {
 
     /// Search for memories using vector similarity when a query embedding is provided,
     /// falling back to LIKE matching otherwise.
+    ///
+    /// When an external [`VectorStore`] is configured **and** a `query_embedding`
+    /// is supplied, the search is delegated to that backend.  The returned IDs
+    /// are then hydrated into full [`MemoryFragment`]s from SQLite so the caller
+    /// always gets the same rich result type.
     pub fn recall_with_embedding(
         &self,
         query: &str,
@@ -128,6 +158,11 @@ impl SemanticStore {
         filter: Option<MemoryFilter>,
         query_embedding: Option<&[f32]>,
     ) -> LibreFangResult<Vec<MemoryFragment>> {
+        // ── Delegate to external vector store when available ──────────
+        if let (Some(vs), Some(qe)) = (&self.vector_store, query_embedding) {
+            return self.recall_via_vector_store(vs, qe, limit, filter.clone());
+        }
+
         let conn = self
             .conn
             .lock()
@@ -337,6 +372,57 @@ impl SemanticStore {
         }
 
         // Update access counts for returned memories
+        for frag in &fragments {
+            let _ = conn.execute(
+                "UPDATE memories SET access_count = access_count + 1, accessed_at = ?1 WHERE id = ?2",
+                rusqlite::params![Utc::now().to_rfc3339(), frag.id.0.to_string()],
+            );
+        }
+
+        Ok(fragments)
+    }
+
+    /// Delegate vector search to an external [`VectorStore`] backend, then
+    /// hydrate the returned IDs into full [`MemoryFragment`]s from SQLite.
+    fn recall_via_vector_store(
+        &self,
+        vs: &Arc<dyn VectorStore>,
+        query_embedding: &[f32],
+        limit: usize,
+        filter: Option<MemoryFilter>,
+    ) -> LibreFangResult<Vec<MemoryFragment>> {
+        // VectorStore is async — run inside a small blocking-compatible context.
+        let vs = Arc::clone(vs);
+        let qe = query_embedding.to_vec();
+        let filter_clone = filter.clone();
+        let results: Vec<librefang_types::memory::VectorSearchResult> =
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current()
+                    .block_on(vs.search(&qe, limit, filter_clone))
+            })?;
+
+        debug!(
+            "VectorStore ({}) recall: {} results",
+            vs.backend_name(),
+            results.len()
+        );
+
+        // Hydrate full MemoryFragments from SQLite by ID
+        let mut fragments = Vec::with_capacity(results.len());
+        for r in &results {
+            let mem_id = uuid::Uuid::parse_str(&r.id)
+                .map(MemoryId)
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            if let Some(frag) = self.get_by_id(mem_id, false)? {
+                fragments.push(frag);
+            }
+        }
+
+        // Update access counts
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         for frag in &fragments {
             let _ = conn.execute(
                 "UPDATE memories SET access_count = access_count + 1, accessed_at = ?1 WHERE id = ?2",
@@ -822,7 +908,7 @@ fn embedding_from_bytes(bytes: &[u8]) -> Vec<f32> {
 // ---------------------------------------------------------------------------
 
 use async_trait::async_trait;
-use librefang_types::memory::{VectorSearchResult, VectorStore};
+use librefang_types::memory::VectorSearchResult;
 
 /// SQLite-backed vector store (the default backend).
 ///

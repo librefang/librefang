@@ -4033,6 +4033,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "librefang-types",
+ "reqwest 0.13.2",
  "rmp-serde",
  "rusqlite",
  "serde",

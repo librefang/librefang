@@ -17,6 +17,7 @@
 pub mod chunker;
 pub mod consolidation;
 pub mod decay;
+pub mod http_vector_store;
 pub mod knowledge;
 pub mod migration;
 pub mod proactive;
@@ -41,4 +42,5 @@ pub use proactive::{MemoryExportItem, MemoryStats, ProactiveMemoryStore};
 pub use prompt::PromptStore;
 
 // Re-export vector store implementations
+pub use http_vector_store::HttpVectorStore;
 pub use semantic::SqliteVectorStore;
