@@ -1081,12 +1081,15 @@ fn draw_agent_list_full(f: &mut Frame, area: Rect, state: &mut AgentSelectState)
         })
         .collect();
 
-    items.push(ListItem::new(Line::from(vec![Span::styled(
-        "  + Create new agent",
-        Style::default()
-            .fg(theme::GREEN)
-            .add_modifier(Modifier::BOLD),
-    )])));
+    items.push(ListItem::new(Line::from(vec![
+        Span::styled("  \u{2795} ", Style::default().fg(theme::ACCENT)),
+        Span::styled(
+            "Create new agent",
+            Style::default()
+                .fg(theme::ACCENT)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ])));
 
     let list = widgets::themed_list(items);
 
