@@ -140,6 +140,12 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             "/webhooks/{id}/test",
             axum::routing::post(test_webhook),
         )
+        // Registry schema (machine-parseable content type definitions)
+        .route("/registry/schema", axum::routing::get(registry_schema))
+        .route(
+            "/registry/schema/{content_type}",
+            axum::routing::get(registry_schema_by_type),
+        )
 }
 use crate::middleware::RequestLanguage;
 use crate::types::ApiErrorResponse;
@@ -3055,6 +3061,44 @@ pub async fn task_queue_retry(
             })),
         ),
         Err(e) => ApiErrorResponse::internal(e).into_json_tuple(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Registry Schema
+// ---------------------------------------------------------------------------
+
+/// GET /api/registry/schema — Return the full registry schema for all content types.
+async fn registry_schema(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let home_dir = &state.kernel.config_ref().home_dir;
+    match librefang_types::registry_schema::load_registry_schema(home_dir) {
+        Some(schema) => Json(serde_json::to_value(&schema).unwrap_or_default()).into_response(),
+        None => ApiErrorResponse::not_found(
+            "Registry schema not found or not yet in machine-parseable format",
+        )
+        .into_json_tuple()
+        .into_response(),
+    }
+}
+
+/// GET /api/registry/schema/:content_type — Return schema for a specific content type.
+async fn registry_schema_by_type(
+    State(state): State<Arc<AppState>>,
+    Path(content_type): Path<String>,
+) -> impl IntoResponse {
+    let home_dir = &state.kernel.config_ref().home_dir;
+    match librefang_types::registry_schema::load_registry_schema(home_dir) {
+        Some(schema) => match schema.content_types.get(&content_type) {
+            Some(ct) => Json(serde_json::to_value(ct).unwrap_or_default()).into_response(),
+            None => ApiErrorResponse::not_found(format!(
+                "Content type '{content_type}' not found in registry schema"
+            ))
+            .into_json_tuple()
+            .into_response(),
+        },
+        None => ApiErrorResponse::not_found("Registry schema not found")
+            .into_json_tuple()
+            .into_response(),
     }
 }
 

@@ -114,13 +114,18 @@ pub fn sync_registry(home_dir: &Path, cache_ttl_secs: u64) {
         }
     }
 
-    // Sync root-level files (aliases.toml, schema.toml)
-    for name in &["aliases.toml", "schema.toml"] {
-        let src = registry_cache.join(name);
-        let dest = home_dir.join(name);
-        if src.exists() && !dest.exists() {
-            let _ = std::fs::copy(&src, &dest);
-        }
+    // Sync aliases (only on first run — user may customize)
+    let aliases_src = registry_cache.join("aliases.toml");
+    let aliases_dest = home_dir.join("aliases.toml");
+    if aliases_src.exists() && !aliases_dest.exists() {
+        let _ = std::fs::copy(&aliases_src, &aliases_dest);
+    }
+
+    // Sync schema (always overwrite — API needs the latest version)
+    let schema_src = registry_cache.join("schema.toml");
+    let schema_dest = home_dir.join("schema.toml");
+    if schema_src.exists() {
+        let _ = std::fs::copy(&schema_src, &schema_dest);
     }
 
     // Clean up stale hand directories in workspaces
