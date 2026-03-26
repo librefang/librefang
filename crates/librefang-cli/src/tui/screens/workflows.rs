@@ -449,11 +449,7 @@ fn draw_create(f: &mut Frame, area: Rect, state: &WorkflowState) {
         chunks[0],
     );
 
-    let sep = "\u{2500}".repeat(chunks[1].width as usize);
-    f.render_widget(
-        Paragraph::new(Span::styled(sep, theme::dim_style())),
-        chunks[1],
-    );
+    f.render_widget(widgets::separator(chunks[1].width), chunks[1]);
 
     let (label, value, placeholder) = match state.create_step {
         0 => ("Workflow name:", &state.create_name, "my-workflow"),
@@ -563,11 +559,7 @@ fn draw_run_input(f: &mut Frame, area: Rect, state: &WorkflowState) {
         chunks[0],
     );
 
-    let sep = "\u{2500}".repeat(chunks[1].width as usize);
-    f.render_widget(
-        Paragraph::new(Span::styled(sep, theme::dim_style())),
-        chunks[1],
-    );
+    f.render_widget(widgets::separator(chunks[1].width), chunks[1]);
 
     f.render_widget(
         Paragraph::new(Line::from(vec![Span::raw("  Input (JSON or text):")])),

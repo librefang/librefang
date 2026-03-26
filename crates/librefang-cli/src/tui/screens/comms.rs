@@ -354,13 +354,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut CommsState) {
     );
 
     // Separator
-    f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            "\u{2500}".repeat(inner.width as usize),
-            theme::dim_style(),
-        ))),
-        chunks[1],
-    );
+    f.render_widget(widgets::separator(inner.width), chunks[1]);
 
     // Topology tree
     draw_topology(f, chunks[2], state);

@@ -494,12 +494,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut WizardState) {
     f.render_widget(Paragraph::new(header), chunks[1]);
 
     // Separator
-    let sep_w = content.width.min(60) as usize;
-    let sep = Line::from(vec![Span::styled(
-        "\u{2500}".repeat(sep_w),
-        Style::default().fg(theme::BORDER),
-    )]);
-    f.render_widget(Paragraph::new(sep), chunks[2]);
+    f.render_widget(widgets::separator(content.width.min(60)), chunks[2]);
 
     match state.step {
         WizardStep::Provider => draw_provider(f, chunks[3], state),

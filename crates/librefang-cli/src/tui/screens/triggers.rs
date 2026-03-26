@@ -350,11 +350,7 @@ fn draw_create(f: &mut Frame, area: Rect, state: &mut TriggerState) {
         chunks[0],
     );
 
-    let sep = "\u{2500}".repeat(chunks[1].width as usize);
-    f.render_widget(
-        Paragraph::new(Span::styled(sep, theme::dim_style())),
-        chunks[1],
-    );
+    f.render_widget(widgets::separator(chunks[1].width), chunks[1]);
 
     match state.create_step {
         0 => draw_text_field(

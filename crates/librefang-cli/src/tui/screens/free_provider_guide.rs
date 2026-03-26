@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 
 use crate::i18n;
 use crate::tui::theme;
+use crate::tui::widgets;
 
 // ── Constants ─────────────────────────────────────────────────────────────
 
@@ -314,14 +315,7 @@ fn draw(f: &mut Frame, area: Rect, state: &State) {
     f.render_widget(Paragraph::new(header), chunks[1]);
 
     // ── Separator ──
-    let sep_w = content.width.min(60) as usize;
-    f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            "\u{2500}".repeat(sep_w),
-            Style::default().fg(theme::BORDER),
-        ))),
-        chunks[2],
-    );
+    f.render_widget(widgets::separator(content.width.min(60)), chunks[2]);
 
     // ── Phase content ──
     match state.phase {

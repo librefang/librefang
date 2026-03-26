@@ -294,11 +294,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut SkillsState) {
     // Sub-tab bar
     draw_sub_tabs(f, chunks[0], state.sub);
 
-    let sep = "\u{2500}".repeat(chunks[1].width as usize);
-    f.render_widget(
-        Paragraph::new(Span::styled(sep, theme::dim_style())),
-        chunks[1],
-    );
+    f.render_widget(widgets::separator(chunks[1].width), chunks[1]);
 
     match state.sub {
         SkillsSub::Installed => draw_installed(f, chunks[2], state),

@@ -419,12 +419,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut ChatState) {
     draw_messages(f, chunks[0], state);
 
     // ── Separator ────────────────────────────────────────────────────────────
-    let sep_line = "\u{2500}".repeat(chunks[1].width as usize);
-    let sep = Paragraph::new(Line::from(vec![Span::styled(
-        sep_line,
-        Style::default().fg(theme::BORDER),
-    )]));
-    f.render_widget(sep, chunks[1]);
+    f.render_widget(widgets::separator(chunks[1].width), chunks[1]);
 
     // ── Input ────────────────────────────────────────────────────────────────
     let input_line = if state.is_streaming {

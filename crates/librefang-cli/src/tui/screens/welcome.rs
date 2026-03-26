@@ -303,12 +303,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut WelcomeState) {
     f.render_widget(Paragraph::new(tagline), chunks[2]);
 
     // ── Separator ────────────────────────────────────────────────────────────
-    let sep_w = content.width.min(60) as usize;
-    let sep_line = Line::from(vec![Span::styled(
-        "\u{2500}".repeat(sep_w),
-        Style::default().fg(theme::BORDER),
-    )]);
-    f.render_widget(Paragraph::new(sep_line.clone()), chunks[3]);
+    f.render_widget(widgets::separator(content.width.min(60)), chunks[3]);
 
     // ── Status block ─────────────────────────────────────────────────────────
     if state.detecting {
@@ -388,7 +383,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut WelcomeState) {
     }
 
     // ── Separator 2 ──────────────────────────────────────────────────────────
-    f.render_widget(Paragraph::new(sep_line), chunks[5]);
+    f.render_widget(widgets::separator(content.width.min(60)), chunks[5]);
 
     // ── Menu ─────────────────────────────────────────────────────────────────
     if !state.detecting {

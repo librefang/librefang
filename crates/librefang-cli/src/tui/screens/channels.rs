@@ -761,11 +761,7 @@ fn draw_setup(f: &mut Frame, area: Rect, state: &ChannelState) {
     );
 
     // Separator
-    let sep = "\u{2500}".repeat(chunks[1].width as usize);
-    f.render_widget(
-        Paragraph::new(Span::styled(sep, theme::dim_style())),
-        chunks[1],
-    );
+    f.render_widget(widgets::separator(chunks[1].width), chunks[1]);
 
     // Current field
     if env_vars.is_empty() {
