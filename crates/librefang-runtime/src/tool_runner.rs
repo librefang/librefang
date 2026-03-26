@@ -16,6 +16,7 @@ use std::sync::Arc;
 use tracing::{debug, warn};
 
 /// Maximum inter-agent call depth to prevent infinite recursion (A->B->C->...).
+#[allow(dead_code)]
 const MAX_AGENT_CALL_DEPTH: u32 = 5;
 
 /// Check if a shell command should be blocked by taint tracking.

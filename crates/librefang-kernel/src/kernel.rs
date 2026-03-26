@@ -1872,6 +1872,7 @@ impl LibreFangKernel {
         };
 
         let workflow_home_dir = config.home_dir.clone();
+        let trigger_config = config.triggers.clone();
         let kernel = Self {
             config,
             registry: AgentRegistry::new(),
@@ -1884,7 +1885,7 @@ impl LibreFangKernel {
             supervisor,
             workflows: WorkflowEngine::new_with_persistence(&workflow_home_dir),
             template_registry: WorkflowTemplateRegistry::new(),
-            triggers: TriggerEngine::with_config(&config.triggers),
+            triggers: TriggerEngine::with_config(&trigger_config),
             background,
             audit_log: Arc::new(AuditLog::with_db(memory.usage_conn())),
             metering,

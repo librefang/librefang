@@ -456,8 +456,17 @@ impl MemorySubstrate {
             chunk_config.enabled && content.chars().count() > chunk_config.max_chunk_size;
 
         if !should_chunk {
-            return semantic
-                .remember_with_embedding(agent_id, content, source, scope, metadata, embedding, None, None, Default::default());
+            return semantic.remember_with_embedding(
+                agent_id,
+                content,
+                source,
+                scope,
+                metadata,
+                embedding,
+                None,
+                None,
+                Default::default(),
+            );
         }
 
         let chunks =

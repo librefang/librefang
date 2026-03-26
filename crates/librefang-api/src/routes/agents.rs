@@ -3844,6 +3844,7 @@ pub(crate) static UPLOAD_REGISTRY: LazyLock<DashMap<String, UploadMeta>> =
     LazyLock::new(DashMap::new);
 
 /// Maximum upload size: 10 MB.
+#[allow(dead_code)]
 const MAX_UPLOAD_SIZE: usize = 10 * 1024 * 1024;
 
 /// Allowed content type prefixes for upload.

@@ -10,7 +10,9 @@
 use chrono::Utc;
 use librefang_types::agent::AgentId;
 use librefang_types::error::{LibreFangError, LibreFangResult};
-use librefang_types::memory::{MemoryFilter, MemoryFragment, MemoryId, MemoryModality, MemorySource};
+use librefang_types::memory::{
+    MemoryFilter, MemoryFragment, MemoryId, MemoryModality, MemorySource,
+};
 use rusqlite::Connection;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -42,7 +44,17 @@ impl SemanticStore {
         scope: &str,
         metadata: HashMap<String, serde_json::Value>,
     ) -> LibreFangResult<MemoryId> {
-        self.remember_with_embedding(agent_id, content, source, scope, metadata, None, None, None, MemoryModality::Text)
+        self.remember_with_embedding(
+            agent_id,
+            content,
+            source,
+            scope,
+            metadata,
+            None,
+            None,
+            None,
+            MemoryModality::Text,
+        )
     }
 
     /// Store a new memory fragment with an optional embedding vector and multimodal fields.
