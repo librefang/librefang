@@ -244,6 +244,25 @@ let cachedAgentId = null;
 let ownJid = null;
 
 // ---------------------------------------------------------------------------
+// Markdown → WhatsApp formatting conversion
+// ---------------------------------------------------------------------------
+// LLM responses use standard Markdown but WhatsApp has its own formatting
+// syntax. Convert the most common patterns so messages render correctly.
+function markdownToWhatsApp(text) {
+  if (!text) return text;
+  // Bold: **text** or __text__ → *text*
+  text = text.replace(/\*\*(.+?)\*\*/g, '*$1*');
+  text = text.replace(/__(.+?)__/g, '*$1*');
+  // Italic: single *text* (not bold) → _text_ (WhatsApp italic)
+  text = text.replace(/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, '_$1_');
+  // Strikethrough: ~~text~~ → ~text~
+  text = text.replace(/~~(.+?)~~/g, '~$1~');
+  // Inline code: `text` → ```text``` (WhatsApp has no inline code)
+  text = text.replace(/(?<!`)(`{1})(?!`)(.+?)(?<!`)\1(?!`)/g, '```$2```');
+  return text;
+}
+
+// ---------------------------------------------------------------------------
 // Step B: Conversation Tracker — in-memory Map with TTL
 // ---------------------------------------------------------------------------
 // Map<stranger_jid, ConversationState>
@@ -501,7 +520,7 @@ async function executeRelay(relay) {
   }
 
   try {
-    const sentRelay = await sock.sendMessage(jid, { text: message });
+    const sentRelay = await sock.sendMessage(jid, { text: markdownToWhatsApp(message) });
 
     // F4: Audit log
     console.log(`[gateway] RELAY SENT | to: ${convo.pushName} (${convo.phone}) [${jid}] | message: "${message.substring(0, 100)}" | timestamp: ${new Date().toISOString()}`);
@@ -960,7 +979,8 @@ async function startConnection() {
           messageToSend = messageText;
         }
 
-        const response = await forwardToLibreFang(messageToSend, systemPrefix, phone, pushName, isOwner, attachments);
+        const rawResponse = await forwardToLibreFang(messageToSend, systemPrefix, phone, pushName, isOwner, attachments);
+        const response = markdownToWhatsApp(rawResponse);
 
         if (response && sock) {
           if (isStranger) {
@@ -1489,7 +1509,8 @@ async function runCatchUpSweep() {
       // If there's a response and it's a stranger, try to send it back
       if (response && !isOwner && msg.jid && !msg.jid.endsWith('@g.us')) {
         try {
-          await sock.sendMessage(msg.jid, { text: response });
+          const formatted = markdownToWhatsApp(response);
+          await sock.sendMessage(msg.jid, { text: formatted });
           dbSaveMessage({ id: randomUUID(), jid: msg.jid, senderJid: ownJid, pushName: null, phone: msg.phone, text: response, direction: 'outbound', timestamp: Date.now(), processed: 1, rawType: 'text' });
         } catch (sendErr) {
           console.warn(`[gateway][catchup] Could not send catch-up reply to ${msg.jid}: ${sendErr.message}`);
@@ -1533,7 +1554,8 @@ async function sendMessage(to, text) {
   // Normalize phone → JID: "+1234567890" → "1234567890@s.whatsapp.net"
   const jid = to.replace(/^\+/, '').replace(/@.*$/, '') + '@s.whatsapp.net';
 
-  const sent = await sock.sendMessage(jid, { text });
+  const formatted = markdownToWhatsApp(text);
+  const sent = await sock.sendMessage(jid, { text: formatted });
   // Save outbound message to DB
   dbSaveMessage({
     id: sent?.key?.id || randomUUID(),
