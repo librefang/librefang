@@ -132,7 +132,7 @@ pub fn sync_registry(home_dir: &Path, cache_ttl_secs: u64) {
             .and_then(|c| {
                 toml::from_str::<librefang_types::registry_schema::RegistrySchema>(&c).ok()
             })
-            .map_or(false, |s| !s.content_types.is_empty());
+            .is_some_and(|s| !s.content_types.is_empty());
         if src_parseable {
             let _ = std::fs::copy(&schema_src, &schema_dest);
         }
