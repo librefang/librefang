@@ -2779,7 +2779,7 @@ system_prompt = "You are a helpful assistant."
             input_tokens: result.total_usage.input_tokens,
             output_tokens: result.total_usage.output_tokens,
             cost_usd: cost,
-            tool_calls: result.iterations.saturating_sub(1),
+            tool_calls: result.decision_traces.len() as u32,
             latency_ms,
         };
         if let Err(e) = self.metering.check_all_and_record(
@@ -2892,6 +2892,9 @@ system_prompt = "You are a helpful assistant."
             Ok(result) => {
                 // Record token usage for quota tracking
                 self.scheduler.record_usage(agent_id, &result.total_usage);
+                // Record tool calls for rate limiting
+                let tool_count = result.decision_traces.len() as u32;
+                self.scheduler.record_tool_calls(agent_id, tool_count);
 
                 // Update last active time
                 let _ = self.registry.set_state(agent_id, AgentState::Running);
@@ -3009,10 +3012,8 @@ system_prompt = "You are a helpful assistant."
         tokio::sync::mpsc::Receiver<StreamEvent>,
         tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
     )> {
-        // Try to acquire a shared read lock on the config reload barrier.
-        // Use try_read to avoid blocking the runtime — this is a sync fn.
-        // If a reload is in progress we proceed without the guard; the
-        // streaming task will pick up the latest config values when it runs.
+        // Try to acquire config reload barrier (non-blocking — this is a sync fn).
+        // If a reload is in progress we proceed without the guard.
         let _config_guard = self.config_reload_lock.try_read();
 
         // Enforce quota before spawning the streaming task
@@ -3436,6 +3437,11 @@ system_prompt = "You are a helpful assistant."
                     kernel_clone
                         .scheduler
                         .record_usage(agent_id, &result.total_usage);
+                    // Record tool calls for rate limiting
+                    let tool_count = result.decision_traces.len() as u32;
+                    kernel_clone
+                        .scheduler
+                        .record_tool_calls(agent_id, tool_count);
 
                     // Atomically check quotas and persist usage to SQLite
                     // (mirrors non-streaming path — prevents TOCTOU race)
@@ -3457,7 +3463,7 @@ system_prompt = "You are a helpful assistant."
                         input_tokens: result.total_usage.input_tokens,
                         output_tokens: result.total_usage.output_tokens,
                         cost_usd: cost,
-                        tool_calls: result.iterations.saturating_sub(1),
+                        tool_calls: result.decision_traces.len() as u32,
                         latency_ms,
                     };
                     if let Err(e) = kernel_clone.metering.check_all_and_record(
@@ -4413,7 +4419,7 @@ system_prompt = "You are a helpful assistant."
             input_tokens: result.total_usage.input_tokens,
             output_tokens: result.total_usage.output_tokens,
             cost_usd: cost,
-            tool_calls: result.iterations.saturating_sub(1),
+            tool_calls: result.decision_traces.len() as u32,
             latency_ms,
         };
         if let Err(e) = self.metering.check_all_and_record(
