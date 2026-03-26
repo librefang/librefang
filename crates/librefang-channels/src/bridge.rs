@@ -555,14 +555,14 @@ fn flush_debounced(
         return None;
     };
 
-    let handle = handle.clone();
+    let channel_handle = handle.clone();
     let router = router.clone();
     let adapter = adapter.clone();
     let rate_limiter = rate_limiter.clone();
     let sanitizer = Arc::clone(sanitizer);
     let sem = semaphore.clone();
 
-    tokio::spawn(async move {
+    let join_handle = tokio::spawn(async move {
         let _permit = match sem.acquire().await {
             Ok(p) => p,
             Err(_) => return,
@@ -581,7 +581,7 @@ fn flush_debounced(
             }
 
             let ct_str = channel_type_str(&merged_msg.channel);
-            let overrides = handle
+            let overrides = channel_handle
                 .channel_overrides(
                     ct_str,
                     merged_msg
@@ -625,7 +625,7 @@ fn flush_debounced(
             .await;
         }
     });
-    Some(handle)
+    Some(join_handle)
 }
 
 /// Owns all running channel adapters and dispatches messages to agents.
