@@ -19,6 +19,7 @@ use axum::response::IntoResponse;
 use dashmap::DashMap;
 use futures::stream::SplitSink;
 use futures::{SinkExt, StreamExt};
+use librefang_channels::types::SenderContext;
 use librefang_runtime::kernel_handle::KernelHandle;
 use librefang_runtime::llm_driver::StreamEvent;
 use librefang_runtime::llm_errors;
@@ -33,17 +34,6 @@ use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
 /// Per-IP WebSocket connection tracker.
-/// Max 5 concurrent WS connections per IP address.
-const MAX_WS_PER_IP: usize = 5;
-
-/// Idle timeout: close WS after 30 minutes of no client messages.
-const WS_IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
-
-/// Text delta debounce interval.
-const DEBOUNCE_MS: u64 = 100;
-
-/// Flush text buffer when it exceeds this many characters.
-const DEBOUNCE_CHARS: usize = 200;
 
 // ---------------------------------------------------------------------------
 // Verbose Level
@@ -115,13 +105,13 @@ impl Drop for WsConnectionGuard {
 }
 
 /// Try to acquire a WS connection slot for the given IP.
-/// Returns None if the IP has reached MAX_WS_PER_IP.
-fn try_acquire_ws_slot(ip: IpAddr) -> Option<WsConnectionGuard> {
+/// Returns None if the IP has reached `max_ws_per_ip`.
+fn try_acquire_ws_slot(ip: IpAddr, max_ws_per_ip: usize) -> Option<WsConnectionGuard> {
     let entry = ws_tracker()
         .entry(ip)
         .or_insert_with(|| AtomicUsize::new(0));
     let current = entry.value().fetch_add(1, Ordering::Relaxed);
-    if current >= MAX_WS_PER_IP {
+    if current >= max_ws_per_ip {
         entry.value().fetch_sub(1, Ordering::Relaxed);
         return None;
     }
@@ -177,11 +167,12 @@ pub async fn agent_ws(
 
     // SECURITY: Enforce per-IP WebSocket connection limit
     let ip = addr.ip();
+    let max_ws_per_ip = state.kernel.config_ref().rate_limit.max_ws_per_ip;
 
-    let guard = match try_acquire_ws_slot(ip) {
+    let guard = match try_acquire_ws_slot(ip, max_ws_per_ip) {
         Some(g) => g,
         None => {
-            warn!(ip = %ip, "WebSocket rejected: too many connections from IP (max {MAX_WS_PER_IP})");
+            warn!(ip = %ip, max_ws_per_ip, "WebSocket rejected: too many connections from IP");
             return axum::http::StatusCode::TOO_MANY_REQUESTS.into_response();
         }
     };
@@ -199,7 +190,7 @@ pub async fn agent_ws(
     }
 
     let id_str = id.clone();
-    ws.on_upgrade(move |socket| handle_agent_ws(socket, state, agent_id, id_str, guard))
+    ws.on_upgrade(move |socket| handle_agent_ws(socket, state, agent_id, id_str, ip, guard))
         .into_response()
 }
 
@@ -216,6 +207,7 @@ async fn handle_agent_ws(
     state: Arc<AppState>,
     agent_id: AgentId,
     id_str: String,
+    client_ip: IpAddr,
     _guard: WsConnectionGuard,
 ) {
     info!(agent_id = %id_str, "WebSocket connected");
@@ -288,10 +280,12 @@ async fn handle_agent_ws(
         }
     });
 
-    // Per-connection rate limiting: max 10 messages per 60 seconds
+    // Per-connection rate limiting (configurable via [rate_limit])
+    let rl_cfg = state.kernel.config_ref().rate_limit.clone();
+    let max_per_min: usize = rl_cfg.ws_messages_per_minute as usize;
+    let ws_idle_timeout = Duration::from_secs(rl_cfg.ws_idle_timeout_secs);
     let mut msg_times: Vec<std::time::Instant> = Vec::new();
-    const MAX_PER_MIN: usize = 10;
-    const WINDOW: Duration = Duration::from_secs(60);
+    let window: Duration = Duration::from_secs(60);
 
     // Track last activity for idle timeout
     let mut last_activity = std::time::Instant::now();
@@ -305,13 +299,14 @@ async fn handle_agent_ws(
                     None => break, // Stream ended
                 }
             }
-            _ = tokio::time::sleep(WS_IDLE_TIMEOUT.saturating_sub(last_activity.elapsed())) => {
-                info!(agent_id = %id_str, "WebSocket idle timeout (30 min)");
+            _ = tokio::time::sleep(ws_idle_timeout.saturating_sub(last_activity.elapsed())) => {
+                let timeout_secs = ws_idle_timeout.as_secs();
+                info!(agent_id = %id_str, timeout_secs, "WebSocket idle timeout");
                 let _ = send_json(
                     &sender,
                     &serde_json::json!({
                         "type": "error",
-                        "content": "Connection closed due to inactivity (30 min timeout)",
+                        "content": format!("Connection closed due to inactivity ({timeout_secs}s timeout)"),
                     }),
                 ).await;
                 break;
@@ -346,13 +341,13 @@ async fn handle_agent_ws(
 
                 // SECURITY: Per-connection rate limiting
                 let now = std::time::Instant::now();
-                msg_times.retain(|t| now.duration_since(*t) < WINDOW);
-                if msg_times.len() >= MAX_PER_MIN {
+                msg_times.retain(|t| now.duration_since(*t) < window);
+                if msg_times.len() >= max_per_min {
                     let _ = send_json(
                         &sender,
                         &serde_json::json!({
                             "type": "error",
-                            "content": "Rate limit exceeded. Max 10 messages per minute.",
+                            "content": format!("Rate limit exceeded. Max {max_per_min} messages per minute."),
                         }),
                     )
                     .await;
@@ -360,7 +355,7 @@ async fn handle_agent_ws(
                 }
                 msg_times.push(now);
 
-                handle_text_message(&sender, &state, agent_id, &text, &verbose).await;
+                handle_text_message(&sender, &state, agent_id, &text, &verbose, client_ip).await;
             }
             Message::Close(_) => {
                 info!(agent_id = %id_str, "WebSocket closed by client");
@@ -391,6 +386,7 @@ async fn handle_text_message(
     agent_id: AgentId,
     text: &str,
     verbose: &Arc<AtomicU8>,
+    client_ip: IpAddr,
 ) {
     // Parse the message
     let parsed: serde_json::Value = match serde_json::from_str(text) {
@@ -535,15 +531,31 @@ async fn handle_text_message(
             // Send message to agent with streaming
             let kernel_handle: Arc<dyn KernelHandle> =
                 state.kernel.clone() as Arc<dyn KernelHandle>;
+            let sender_ctx = SenderContext {
+                channel: "webui".to_string(),
+                user_id: client_ip.to_string(),
+                display_name: "Web UI".to_string(),
+                is_group: false,
+                thread_id: None,
+                account_id: None,
+            };
             match state
                 .kernel
-                .send_message_streaming_with_routing(agent_id, &content, Some(kernel_handle))
+                .send_message_streaming_with_sender_context_and_routing(
+                    agent_id,
+                    &content,
+                    Some(kernel_handle),
+                    &sender_ctx,
+                )
                 .await
             {
                 Ok((mut rx, handle)) => {
                     // Forward stream events to WebSocket with debouncing
                     let sender_stream = Arc::clone(sender);
                     let verbose_clone = Arc::clone(verbose);
+                    let rl = &state.kernel.config_ref().rate_limit;
+                    let debounce_chars = rl.ws_debounce_chars;
+                    let debounce_ms = rl.ws_debounce_ms;
                     let stream_task = tokio::spawn(async move {
                         let mut text_buffer = String::new();
                         let far_future = tokio::time::Instant::now() + Duration::from_secs(86400);
@@ -571,7 +583,7 @@ async fn handle_text_message(
                                         Some(ev) => {
                                             if let StreamEvent::TextDelta { ref text } = ev {
                                                 text_buffer.push_str(text);
-                                                if text_buffer.len() >= DEBOUNCE_CHARS {
+                                                if text_buffer.len() >= debounce_chars {
                                                     let _ = flush_text_buffer(
                                                         &sender_stream,
                                                         &mut text_buffer,
@@ -581,7 +593,7 @@ async fn handle_text_message(
                                                 } else if flush_deadline >= far_future {
                                                     flush_deadline =
                                                         tokio::time::Instant::now()
-                                                            + Duration::from_millis(DEBOUNCE_MS);
+                                                            + Duration::from_millis(debounce_ms);
                                                 }
                                             } else {
                                                 // Flush pending text before non-text events
@@ -646,9 +658,9 @@ async fn handle_text_message(
                             // naturally.  We give it up to 5 s before aborting
                             // as a safety net.
                             let drain_result =
-                                tokio::time::timeout(Duration::from_secs(5), stream_task).await;
+                                tokio::time::timeout(Duration::from_secs(30), stream_task).await;
                             if drain_result.is_err() {
-                                debug!("stream forwarder did not finish within 5 s — aborting");
+                                warn!("stream forwarder did not finish within 30 s — sending response before abort");
                             }
 
                             // Send typing lifecycle: stop

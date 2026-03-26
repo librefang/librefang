@@ -789,7 +789,6 @@ pub fn read_codex_credential() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use librefang_types::model_catalog::{LMSTUDIO_BASE_URL, OLLAMA_BASE_URL};
 
     /// Build a catalog for tests.
     ///
@@ -1260,7 +1259,7 @@ mod tests {
     fn test_set_provider_url() {
         let mut catalog = test_catalog();
         let old_url = catalog.get_provider("ollama").unwrap().base_url.clone();
-        assert_eq!(old_url, OLLAMA_BASE_URL);
+        assert_eq!(old_url, "http://localhost:11434/v1");
 
         let updated = catalog.set_provider_url("ollama", "http://192.168.1.100:11434/v1");
         assert!(updated);
@@ -1305,7 +1304,7 @@ mod tests {
         // lmstudio should be unchanged
         assert_eq!(
             catalog.get_provider("lmstudio").unwrap().base_url,
-            LMSTUDIO_BASE_URL
+            "http://localhost:1234/v1"
         );
     }
 

@@ -16,6 +16,7 @@ use std::sync::Arc;
 use tracing::{debug, warn};
 
 /// Maximum inter-agent call depth to prevent infinite recursion (A->B->C->...).
+#[allow(dead_code)]
 const MAX_AGENT_CALL_DEPTH: u32 = 5;
 
 /// Check if a shell command should be blocked by taint tracking.
@@ -681,7 +682,7 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                 "properties": {
                     "name": {
                         "type": "string",
-                        "description": "The name of the new agent"
+                        "description": "Unique name for the new agent. Ensure it does not conflict with existing agents."
                     },
                     "system_prompt": {
                         "type": "string",
@@ -690,7 +691,7 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                     "tools": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "List of tools to enable for the new agent, The full tool name must be used"
+                        "description": "Select from all available tools, including MCP tools. Use the full tool names only"
                     },
                     "network": {
                         "type": "boolean",
@@ -699,7 +700,7 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                     "shell": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "List of allowed shell commands for the new agent (requires shell_exec in tools, e.g., [\"uv *\", \"git *\", \"cargo *\"])"
+                        "description": "Preset necessary shell commands based on the agent's task (e.g., [\"uv *\", \"pnpm *\"]). "
                     }
                 },
                 "required": ["name", "system_prompt"]
@@ -1723,12 +1724,13 @@ async fn tool_agent_send(
         .ok_or("Missing 'message' parameter")?;
 
     // Check + increment inter-agent call depth
+    let max_depth = kh.max_agent_call_depth();
     let current_depth = AGENT_CALL_DEPTH.try_with(|d| d.get()).unwrap_or(0);
-    if current_depth >= MAX_AGENT_CALL_DEPTH {
+    if current_depth >= max_depth {
         return Err(format!(
             "Inter-agent call depth exceeded (max {}). \
              A->B->C chain is too deep. Use the task queue instead.",
-            MAX_AGENT_CALL_DEPTH
+            max_depth
         ));
     }
 
@@ -1737,6 +1739,43 @@ async fn tool_agent_send(
             kh.send_to_agent(agent_id, message).await
         })
         .await
+}
+
+/// Build agent manifest TOML from parsed parameters.
+fn build_agent_manifest_toml(
+    name: &str,
+    system_prompt: &str,
+    tools: Vec<String>,
+    shell: Vec<String>,
+    network: bool,
+) -> Result<String, String> {
+    let mut tools = tools;
+    let has_shell = !shell.is_empty();
+
+    // Auto-add shell_exec to tools if shell is specified (without duplicates)
+    if has_shell && !tools.iter().any(|t| t == "shell_exec") {
+        tools.push("shell_exec".to_string());
+    }
+
+    let mut capabilities = serde_json::json!({
+        "tools": tools,
+    });
+    if network {
+        capabilities["network"] = serde_json::json!(["*"]);
+    }
+    if has_shell {
+        capabilities["shell"] = serde_json::json!(shell);
+    }
+
+    let manifest_json = serde_json::json!({
+        "name": name,
+        "model": {
+            "system_prompt": system_prompt,
+        },
+        "capabilities": capabilities,
+    });
+
+    toml::to_string(&manifest_json).map_err(|e| format!("Failed to serialize to TOML: {}", e))
 }
 
 /// Expand a list of tool names into full `Capability` grants for the parent.
@@ -1791,13 +1830,11 @@ async fn tool_agent_spawn(
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
 
-    // Parse input parameters
     let name = input["name"].as_str().ok_or("Missing 'name' parameter")?;
     let system_prompt = input["system_prompt"]
         .as_str()
         .ok_or("Missing 'system_prompt' parameter")?;
 
-    // Parse optional parameters
     let tools: Vec<String> = input["tools"]
         .as_array()
         .map(|arr| {
@@ -1808,7 +1845,6 @@ async fn tool_agent_spawn(
         .unwrap_or_default();
 
     let network = input["network"].as_bool().unwrap_or(false);
-
     let shell: Vec<String> = input["shell"]
         .as_array()
         .map(|arr| {
@@ -1818,30 +1854,7 @@ async fn tool_agent_spawn(
         })
         .unwrap_or_default();
 
-    // Build the manifest using a simplified intermediate structure
-    let has_shell = tools.iter().any(|t| t == "shell_exec") && !shell.is_empty();
-
-    let mut capabilities = serde_json::json!({
-        "tools": tools,
-    });
-    if network {
-        capabilities["network"] = serde_json::json!(["*"]);
-    }
-    if has_shell {
-        capabilities["shell"] = serde_json::json!(shell);
-    }
-
-    let manifest_json = serde_json::json!({
-        "name": name,
-        "model": {
-            "system_prompt": system_prompt,
-        },
-        "capabilities": capabilities,
-    });
-
-    let manifest_toml = toml::to_string(&manifest_json)
-        .map_err(|e| format!("Failed to serialize to TOML: {}", e))?;
-
+    let manifest_toml = build_agent_manifest_toml(name, system_prompt, tools, shell, network)?;
     // Build parent capabilities from the parent's allowed tools list.
     // This prevents a sub-agent from escalating privileges beyond what
     // its parent is permitted to use (capability inheritance enforcement).
@@ -4820,6 +4833,95 @@ mod tests {
         assert_eq!(output["title"], "Test");
         // Cleanup
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_agent_spawn_manifest_all_cases() {
+        let mut toml;
+
+        // Case 1: Minimal - only name and system_prompt
+        toml = build_agent_manifest_toml("test-agent", "You are helpful.", vec![], vec![], false)
+            .unwrap();
+        assert!(toml.contains("name = \"test-agent\""));
+        assert!(toml.contains("system_prompt = \"You are helpful.\""));
+        assert!(toml.contains("tools = []"));
+        assert!(!toml.contains("network"));
+        assert!(!toml.contains("shell = ["));
+
+        // Case 2: With tools (no network)
+        toml = build_agent_manifest_toml(
+            "coder",
+            "You are a coder.",
+            vec!["file_read".to_string(), "file_write".to_string()],
+            vec![],
+            false,
+        )
+        .unwrap();
+        assert!(toml.contains("tools = [\"file_read\", \"file_write\"]"));
+        assert!(!toml.contains("network"));
+
+        // Case 3: network explicitly enabled
+        toml = build_agent_manifest_toml(
+            "web-agent",
+            "You browse the web.",
+            vec!["web_fetch".to_string()],
+            vec![],
+            true,
+        )
+        .unwrap();
+        assert!(toml.contains("web_fetch"));
+        assert!(toml.contains("network = [\"*\"]"));
+
+        // Case 4: shell without shell_exec - should auto-add shell_exec to tools
+        toml = build_agent_manifest_toml(
+            "shell-test",
+            "You run commands.",
+            vec!["git".to_string()],
+            vec!["uv *".to_string()],
+            false,
+        )
+        .unwrap();
+        assert!(toml.contains("shell = [\"uv *\"]"));
+        assert!(toml.contains("shell_exec")); // auto-added
+
+        // Case 5: shell with explicit shell_exec (should not duplicate)
+        toml = build_agent_manifest_toml(
+            "shell-test",
+            "You run commands.",
+            vec!["shell_exec".to_string(), "git".to_string()],
+            vec!["uv *".to_string(), "cargo *".to_string()],
+            false,
+        )
+        .unwrap();
+        assert!(toml.contains("shell = [\"uv *\", \"cargo *\"]"));
+        // shell_exec should only appear once
+        let shell_exec_count = toml.matches("shell_exec").count();
+        assert_eq!(shell_exec_count, 1);
+
+        // Case 6: Special chars in strings
+        toml = build_agent_manifest_toml(
+            "agent-with\"quotes",
+            "He said \"hello\" and '''goodbye'''.",
+            vec![],
+            vec![],
+            false,
+        )
+        .unwrap();
+        assert!(toml.contains("agent-with\"quotes"));
+
+        // Case 7: Multiple tools with web_fetch and shell (auto-adds shell_exec)
+        toml = build_agent_manifest_toml(
+            "multi-agent",
+            "You do everything.",
+            vec!["web_fetch".to_string(), "git".to_string()],
+            vec!["ls *".to_string()],
+            true,
+        )
+        .unwrap();
+        assert!(toml.contains("web_fetch"));
+        assert!(toml.contains("network = [\"*\"]"));
+        assert!(toml.contains("shell = [\"ls *\"]"));
+        assert!(toml.contains("shell_exec")); // auto-added
     }
 
     // -----------------------------------------------------------------------

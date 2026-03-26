@@ -21,8 +21,9 @@ const REGISTRY_REPO: &str = "https://github.com/librefang/librefang-registry.git
 /// Prefix inside the tarball (GitHub convention: `{repo}-{branch}/`).
 const TARBALL_PREFIX: &str = "librefang-registry-main/";
 
-/// How long (in seconds) before we re-download the registry.
-const CACHE_MAX_AGE_SECS: u64 = 24 * 60 * 60; // 24 hours
+/// Default cache TTL: how long (in seconds) before we re-download the registry.
+/// Callers without access to `KernelConfig` can use this value directly.
+pub const DEFAULT_CACHE_TTL_SECS: u64 = 24 * 60 * 60; // 24 hours
 
 /// Sync all content from the registry to the local librefang home directory.
 ///
@@ -30,10 +31,14 @@ const CACHE_MAX_AGE_SECS: u64 = 24 * 60 * 60; // 24 hours
 /// that don't already exist on disk (preserves user customization).
 /// Tries git first (incremental pull, supports private forks), falls back to
 /// HTTP tarball download when git is unavailable (Docker, minimal VMs).
-pub fn sync_registry(home_dir: &Path) {
+///
+/// `cache_ttl_secs` controls how long the local cache is considered fresh
+/// before triggering a re-download. Pass [`DEFAULT_CACHE_TTL_SECS`] when
+/// no user-configured value is available.
+pub fn sync_registry(home_dir: &Path, cache_ttl_secs: u64) {
     let registry_cache = home_dir.join("registry");
 
-    if !should_refresh(&registry_cache) {
+    if !should_refresh(&registry_cache, cache_ttl_secs) {
         tracing::debug!("Registry cache is fresh, skipping download");
     } else {
         // Try git first (faster incremental updates, private fork support)
@@ -128,8 +133,8 @@ pub fn sync_registry(home_dir: &Path) {
 /// Check whether we should re-download the registry.
 ///
 /// Returns `false` if the cache exists and the marker file is younger than
-/// [`CACHE_MAX_AGE_SECS`].
-fn should_refresh(registry_cache: &Path) -> bool {
+/// `cache_ttl_secs`.
+fn should_refresh(registry_cache: &Path, cache_ttl_secs: u64) -> bool {
     let marker = registry_cache.join(".sync_marker");
     if !marker.exists() {
         return true;
@@ -143,7 +148,7 @@ fn should_refresh(registry_cache: &Path) -> bool {
     let Ok(age) = modified.elapsed() else {
         return true;
     };
-    age.as_secs() > CACHE_MAX_AGE_SECS
+    age.as_secs() > cache_ttl_secs
 }
 
 /// Touch (create/update) the sync marker file.
@@ -280,7 +285,7 @@ pub fn resolve_home_dir_for_tests() -> std::path::PathBuf {
                 .map(|d| d.count() == 0)
                 .unwrap_or(true)
         {
-            sync_registry(&home);
+            sync_registry(&home, DEFAULT_CACHE_TTL_SECS);
         }
         home
     })
@@ -508,7 +513,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cache = tmp.path().join("registry");
         std::fs::create_dir_all(&cache).unwrap();
-        assert!(super::should_refresh(&cache));
+        assert!(super::should_refresh(&cache, super::DEFAULT_CACHE_TTL_SECS));
     }
 
     #[test]
@@ -517,7 +522,10 @@ mod tests {
         let cache = tmp.path().join("registry");
         std::fs::create_dir_all(&cache).unwrap();
         super::touch_marker(&cache);
-        assert!(!super::should_refresh(&cache));
+        assert!(!super::should_refresh(
+            &cache,
+            super::DEFAULT_CACHE_TTL_SECS
+        ));
     }
 
     #[test]

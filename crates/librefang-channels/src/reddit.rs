@@ -36,7 +36,11 @@ const MAX_MESSAGE_LEN: usize = 10000;
 const TOKEN_REFRESH_BUFFER_SECS: u64 = 300;
 
 /// Custom User-Agent required by Reddit API guidelines.
-const USER_AGENT: &str = "librefang:v1.0.0 (by /u/librefang-bot)";
+const USER_AGENT: &str = concat!(
+    "librefang:v",
+    env!("CARGO_PKG_VERSION"),
+    " (by /u/librefang-bot)"
+);
 
 /// Reddit OAuth2 API adapter.
 ///

@@ -105,6 +105,15 @@ impl MemorySubstrate {
         &self.knowledge
     }
 
+    /// Attach an external vector store backend to the semantic store.
+    ///
+    /// When set, [`SemanticStore::recall_with_embedding`] will delegate vector
+    /// similarity search to this backend instead of doing in-process cosine
+    /// similarity over SQLite BLOBs.
+    pub fn set_vector_store(&mut self, store: Arc<dyn librefang_types::memory::VectorStore>) {
+        self.semantic.set_vector_store(store);
+    }
+
     /// Get the shared database connection (for constructing stores from outside).
     pub fn usage_conn(&self) -> Arc<Mutex<Connection>> {
         Arc::clone(&self.conn)
@@ -456,8 +465,17 @@ impl MemorySubstrate {
             chunk_config.enabled && content.chars().count() > chunk_config.max_chunk_size;
 
         if !should_chunk {
-            return semantic
-                .remember_with_embedding(agent_id, content, source, scope, metadata, embedding);
+            return semantic.remember_with_embedding(
+                agent_id,
+                content,
+                source,
+                scope,
+                metadata,
+                embedding,
+                None,
+                None,
+                Default::default(),
+            );
         }
 
         let chunks =
@@ -496,6 +514,9 @@ impl MemorySubstrate {
                 scope,
                 chunk_meta,
                 None,
+                None,
+                None,
+                Default::default(),
             )?;
 
             if parent_id.is_none() {

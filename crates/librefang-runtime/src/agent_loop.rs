@@ -18,7 +18,7 @@ use crate::web_search::WebToolsContext;
 use librefang_memory::session::Session;
 use librefang_memory::{MemorySubstrate, ProactiveMemoryHooks};
 use librefang_skills::registry::SkillRegistry;
-use librefang_types::agent::AgentManifest;
+use librefang_types::agent::{AgentManifest, STABLE_PREFIX_MODE_METADATA_KEY};
 use librefang_types::error::{LibreFangError, LibreFangResult};
 use librefang_types::memory::{Memory, MemoryFilter, MemorySource};
 use librefang_types::memory::{MemoryFragment, MemoryId};
@@ -52,8 +52,6 @@ const MAX_CONTINUATIONS: u32 = 5;
 
 /// Maximum message history size before auto-trimming to prevent context overflow.
 const MAX_HISTORY_MESSAGES: usize = 20;
-
-const STABLE_PREFIX_MODE_METADATA_KEY: &str = "stable_prefix_mode";
 
 /// Safely trim message history to `MAX_HISTORY_MESSAGES`, cutting at
 /// conversation-turn boundaries so ToolUse/ToolResult pairs are never split.
@@ -363,6 +361,9 @@ fn proactive_item_to_fragment(
         accessed_at: chrono::Utc::now(),
         access_count: 0,
         scope: item.level.scope_str().to_string(),
+        image_url: None,
+        image_embedding: None,
+        modality: Default::default(),
     }
 }
 
@@ -1262,10 +1263,13 @@ pub async fn run_agent_loop(
                     let effective_exec_policy = manifest.exec_policy.as_ref();
 
                     // Timeout-wrapped execution with timing for decision trace
+                    let tool_timeout = kernel
+                        .as_ref()
+                        .map_or(TOOL_TIMEOUT_SECS, |k| k.tool_timeout_secs());
                     let trace_start = Instant::now();
                     let trace_timestamp = chrono::Utc::now();
                     let result = match tokio::time::timeout(
-                        Duration::from_secs(TOOL_TIMEOUT_SECS),
+                        Duration::from_secs(tool_timeout),
                         tool_runner::execute_tool(
                             &tool_call.id,
                             &tool_call.name,
@@ -1297,12 +1301,12 @@ pub async fn run_agent_loop(
                     {
                         Ok(result) => result,
                         Err(_) => {
-                            warn!(tool = %tool_call.name, "Tool execution timed out after {}s", TOOL_TIMEOUT_SECS);
+                            warn!(tool = %tool_call.name, "Tool execution timed out after {}s", tool_timeout);
                             librefang_types::tool::ToolResult {
                                 tool_use_id: tool_call.id.clone(),
                                 content: format!(
                                     "Tool '{}' timed out after {}s.",
-                                    tool_call.name, TOOL_TIMEOUT_SECS
+                                    tool_call.name, tool_timeout
                                 ),
                                 is_error: true,
                             }
@@ -2735,10 +2739,13 @@ pub async fn run_agent_loop_streaming(
                     let effective_exec_policy = manifest.exec_policy.as_ref();
 
                     // Timeout-wrapped execution with timing for decision trace
+                    let tool_timeout = kernel
+                        .as_ref()
+                        .map_or(TOOL_TIMEOUT_SECS, |k| k.tool_timeout_secs());
                     let trace_start = Instant::now();
                     let trace_timestamp = chrono::Utc::now();
                     let result = match tokio::time::timeout(
-                        Duration::from_secs(TOOL_TIMEOUT_SECS),
+                        Duration::from_secs(tool_timeout),
                         tool_runner::execute_tool(
                             &tool_call.id,
                             &tool_call.name,
@@ -2770,12 +2777,12 @@ pub async fn run_agent_loop_streaming(
                     {
                         Ok(result) => result,
                         Err(_) => {
-                            warn!(tool = %tool_call.name, "Tool execution timed out after {}s (streaming)", TOOL_TIMEOUT_SECS);
+                            warn!(tool = %tool_call.name, "Tool execution timed out after {}s (streaming)", tool_timeout);
                             librefang_types::tool::ToolResult {
                                 tool_use_id: tool_call.id.clone(),
                                 content: format!(
                                     "Tool '{}' timed out after {}s.",
-                                    tool_call.name, TOOL_TIMEOUT_SECS
+                                    tool_call.name, tool_timeout
                                 ),
                                 is_error: true,
                             }

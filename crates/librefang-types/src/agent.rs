@@ -7,6 +7,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use uuid::Uuid;
 
+/// Metadata key for stable prefix mode flag.
+pub const STABLE_PREFIX_MODE_METADATA_KEY: &str = "stable_prefix_mode";
+
 /// Unique identifier for a user.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct UserId(pub Uuid);

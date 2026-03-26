@@ -61,6 +61,9 @@ pub struct ContextEngineConfig {
     pub stable_prefix_mode: bool,
     /// Maximum number of memories to recall per query.
     pub max_recall_results: usize,
+    /// User-facing compaction configuration (from `[compaction]` TOML section).
+    /// When `None`, runtime defaults are used.
+    pub compaction: Option<librefang_types::config::CompactionTomlConfig>,
 }
 
 impl Default for ContextEngineConfig {
@@ -69,6 +72,7 @@ impl Default for ContextEngineConfig {
             context_window_tokens: 200_000,
             stable_prefix_mode: false,
             max_recall_results: 5,
+            compaction: None,
         }
     }
 }
@@ -204,10 +208,11 @@ impl DefaultContextEngine {
         memory: Arc<MemorySubstrate>,
         embedding_driver: Option<Arc<dyn EmbeddingDriver + Send + Sync>>,
     ) -> Self {
-        let compaction_config = CompactionConfig {
-            context_window_tokens: config.context_window_tokens,
-            ..CompactionConfig::default()
+        let mut compaction_config = match config.compaction {
+            Some(ref toml) => CompactionConfig::from_toml(toml),
+            None => CompactionConfig::default(),
         };
+        compaction_config.context_window_tokens = config.context_window_tokens;
         Self {
             config,
             memory,
@@ -519,6 +524,9 @@ impl ContextEngine for ScriptableContextEngine {
                                 accessed_at: chrono::Utc::now(),
                                 access_count: 0,
                                 scope: "hook".to_string(),
+                                image_url: None,
+                                image_embedding: None,
+                                modality: Default::default(),
                             });
                         }
                     }

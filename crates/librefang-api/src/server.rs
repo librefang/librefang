@@ -355,7 +355,11 @@ pub async fn build_router(
         api_key_lock: api_key_lock.clone(),
         active_sessions: active_sessions.clone(),
     };
-    let gcra_limiter = rate_limiter::create_rate_limiter();
+    let rl_cfg = &state.kernel.config_ref().rate_limit;
+    let gcra_limiter = rate_limiter::GcraState {
+        limiter: rate_limiter::create_rate_limiter(rl_cfg.api_requests_per_minute),
+        retry_after_secs: rl_cfg.retry_after_secs,
+    };
 
     // Build the versioned API routes. All /api/* endpoints are defined once
     // in api_v1_routes() and mounted at both /api and /api/v1 for backward
@@ -420,7 +424,7 @@ pub async fn build_router(
         .layer(axum::middleware::from_fn(middleware::security_headers))
         .layer(axum::middleware::from_fn(middleware::request_logging))
         .layer(RequestBodyLimitLayer::new(
-            crate::validation::MAX_REQUEST_BODY_BYTES,
+            kernel.config_ref().max_request_body_bytes,
         ))
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http())

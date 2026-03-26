@@ -150,8 +150,6 @@ impl PromptMetadataCache {
     }
 }
 
-const STABLE_PREFIX_MODE_METADATA_KEY: &str = "stable_prefix_mode";
-
 /// The main LibreFang kernel — coordinates all subsystems.
 /// Stub LLM driver used when no providers are configured.
 /// Returns a helpful error so the dashboard still boots and users can configure providers.
@@ -1279,14 +1277,37 @@ impl LibreFangKernel {
             .sqlite_path
             .clone()
             .unwrap_or_else(|| config.data_dir.join("librefang.db"));
-        let memory = Arc::new(
-            MemorySubstrate::open_with_chunking(
-                &db_path,
-                config.memory.decay_rate,
-                config.memory.chunking.clone(),
-            )
-            .map_err(|e| KernelError::BootFailed(format!("Memory init failed: {e}")))?,
-        );
+        let mut substrate = MemorySubstrate::open_with_chunking(
+            &db_path,
+            config.memory.decay_rate,
+            config.memory.chunking.clone(),
+        )
+        .map_err(|e| KernelError::BootFailed(format!("Memory init failed: {e}")))?;
+
+        // Optionally attach an external vector store backend.
+        if let Some(ref backend) = config.memory.vector_backend {
+            match backend.as_str() {
+                "http" => {
+                    let url = config.memory.vector_store_url.as_deref().ok_or_else(|| {
+                        KernelError::BootFailed(
+                            "vector_backend = \"http\" requires vector_store_url".into(),
+                        )
+                    })?;
+                    let store =
+                        std::sync::Arc::new(librefang_memory::HttpVectorStore::new(url));
+                    substrate.set_vector_store(store);
+                    tracing::info!("Vector store backend: http ({})", url);
+                }
+                "sqlite" | "" => { /* default — no external backend */ }
+                other => {
+                    return Err(KernelError::BootFailed(format!(
+                        "Unknown vector_backend: {other:?}"
+                    )));
+                }
+            }
+        }
+
+        let memory = Arc::new(substrate);
 
         // Create LLM driver.
         // For the API key, try: 1) explicit api_key_env from config, 2) provider_api_keys
@@ -1486,7 +1507,10 @@ impl LibreFangKernel {
             .map_err(|e| KernelError::BootFailed(format!("Prompt store init failed: {e}")))?;
 
         let supervisor = Supervisor::new();
-        let background = BackgroundExecutor::new(supervisor.subscribe());
+        let background = BackgroundExecutor::with_concurrency(
+            supervisor.subscribe(),
+            config.max_concurrent_bg_llm,
+        );
 
         // Initialize WASM sandbox engine (shared across all WASM agents)
         let wasm_sandbox = WasmSandbox::new()
@@ -1504,7 +1528,10 @@ impl LibreFangKernel {
         // Auto-sync registry content on first boot or after upgrade when
         // Sync registry: downloads if cache is stale, pre-installs providers/agents/integrations.
         // Skips download if cache is fresh; skips copy if files already exist.
-        librefang_runtime::registry_sync::sync_registry(&config.home_dir);
+        librefang_runtime::registry_sync::sync_registry(
+            &config.home_dir,
+            config.registry.cache_ttl_secs,
+        );
 
         // Initialize model catalog, detect provider auth, and apply URL overrides
         let mut model_catalog =
@@ -1852,6 +1879,7 @@ impl LibreFangKernel {
             context_window_tokens: 200_000, // default, overridden per-agent at call time
             stable_prefix_mode: config.stable_prefix_mode,
             max_recall_results: 5,
+            compaction: Some(config.compaction.clone()),
         };
         let context_engine: Option<Box<dyn librefang_runtime::context_engine::ContextEngine>> = {
             let emb_arc: Option<
@@ -1867,6 +1895,7 @@ impl LibreFangKernel {
         };
 
         let workflow_home_dir = config.home_dir.clone();
+        let trigger_config = config.triggers.clone();
         let kernel = Self {
             config,
             registry: AgentRegistry::new(),
@@ -1879,7 +1908,7 @@ impl LibreFangKernel {
             supervisor,
             workflows: WorkflowEngine::new_with_persistence(&workflow_home_dir),
             template_registry: WorkflowTemplateRegistry::new(),
-            triggers: TriggerEngine::new(),
+            triggers: TriggerEngine::with_config(&trigger_config),
             background,
             audit_log: Arc::new(AuditLog::with_db(memory.usage_conn())),
             metering,
@@ -3074,7 +3103,7 @@ system_prompt = "You are a helpful assistant."
                 estimate_token_count, needs_compaction as check_compact,
                 needs_compaction_by_tokens, CompactionConfig,
             };
-            let config = CompactionConfig::default();
+            let config = CompactionConfig::from_toml(&self.config.compaction);
             let by_messages = check_compact(&session, &config);
             let estimated = estimate_token_count(
                 &session.messages,
@@ -3479,7 +3508,7 @@ system_prompt = "You are a helpful assistant."
                         use librefang_runtime::compactor::{
                             estimate_token_count, needs_compaction_by_tokens, CompactionConfig,
                         };
-                        let config = CompactionConfig::default();
+                        let config = CompactionConfig::from_toml(&kernel_clone.config.compaction);
                         let estimated = estimate_token_count(&session.messages, None, None);
                         if needs_compaction_by_tokens(estimated, &config) {
                             let kc = kernel_clone.clone();
@@ -5349,7 +5378,7 @@ system_prompt = "You are a helpful assistant."
                 label: None,
             });
 
-        let config = CompactionConfig::default();
+        let config = CompactionConfig::from_toml(&self.config.compaction);
 
         if !needs_compaction(&session, &config) {
             return Ok(format!(
@@ -6257,14 +6286,14 @@ system_prompt = "You are a helpful assistant."
     ///
     /// Any matching triggers will dispatch messages to the subscribing agents.
     /// Returns the list of (agent_id, message) pairs that were triggered.
-    /// Includes depth limiting to prevent circular trigger chains (max 5 levels).
+    /// Includes depth limiting to prevent circular trigger chains.
     pub async fn publish_event(&self, event: Event) -> Vec<(AgentId, String)> {
         // Depth guard: prevent circular trigger chains
         static TRIGGER_DEPTH: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        const MAX_TRIGGER_DEPTH: u32 = 5;
+        let max_trigger_depth = self.config.triggers.max_depth as u32;
 
         let depth = TRIGGER_DEPTH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if depth >= MAX_TRIGGER_DEPTH {
+        if depth >= max_trigger_depth {
             TRIGGER_DEPTH.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
             warn!(
                 depth,
@@ -6422,16 +6451,16 @@ system_prompt = "You are a helpful assistant."
         };
 
         // SECURITY: Global workflow timeout to prevent runaway execution.
-        const MAX_WORKFLOW_SECS: u64 = 3600; // 1 hour
+        let max_workflow_secs = self.config.triggers.max_workflow_secs;
 
         let output = tokio::time::timeout(
-            std::time::Duration::from_secs(MAX_WORKFLOW_SECS),
+            std::time::Duration::from_secs(max_workflow_secs),
             self.workflows.execute_run(run_id, resolver, send_message),
         )
         .await
         .map_err(|_| {
             KernelError::LibreFang(LibreFangError::Internal(format!(
-                "Workflow timed out after {MAX_WORKFLOW_SECS}s"
+                "Workflow timed out after {max_workflow_secs}s"
             )))
         })?
         .map_err(|e| {
@@ -9734,6 +9763,14 @@ impl KernelHandle for LibreFangKernel {
             Ok(false) => Ok(()),
             Err(e) => Err(format!("Failed to auto-track prompt version: {e}")),
         }
+    }
+
+    fn tool_timeout_secs(&self) -> u64 {
+        self.config.tool_timeout_secs
+    }
+
+    fn max_agent_call_depth(&self) -> u32 {
+        self.config.max_agent_call_depth
     }
 }
 

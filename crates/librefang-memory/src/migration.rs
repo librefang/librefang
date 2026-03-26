@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 14;
+const SCHEMA_VERSION: u32 = 15;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -65,6 +65,10 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
 
     if current_version < 14 {
         migrate_v14(conn)?;
+    }
+
+    if current_version < 15 {
+        migrate_v15(conn)?;
     }
 
     set_schema_version(conn, SCHEMA_VERSION)?;
@@ -502,6 +506,33 @@ fn migrate_v14(conn: &Connection) -> Result<(), rusqlite::Error> {
     }
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) VALUES (14, datetime('now'), 'Add latency_ms column to usage_events')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Version 15: Add multimodal memory columns for image URL, image embedding, and modality.
+fn migrate_v15(conn: &Connection) -> Result<(), rusqlite::Error> {
+    if !column_exists(conn, "memories", "image_url") {
+        conn.execute(
+            "ALTER TABLE memories ADD COLUMN image_url TEXT DEFAULT NULL",
+            [],
+        )?;
+    }
+    if !column_exists(conn, "memories", "image_embedding") {
+        conn.execute(
+            "ALTER TABLE memories ADD COLUMN image_embedding BLOB DEFAULT NULL",
+            [],
+        )?;
+    }
+    if !column_exists(conn, "memories", "modality") {
+        conn.execute(
+            "ALTER TABLE memories ADD COLUMN modality TEXT DEFAULT 'text'",
+            [],
+        )?;
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) VALUES (15, datetime('now'), 'Add multimodal memory columns (image_url, image_embedding, modality)')",
         [],
     )?;
     Ok(())
