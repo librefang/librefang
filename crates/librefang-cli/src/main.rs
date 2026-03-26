@@ -1986,12 +1986,9 @@ fn cmd_init_upgrade() {
     }
     ui::success(&format!("Backed up config to {backup_name}"));
 
-    // 3. Sync registry
+    // 3. Sync registry (TTL=0 forces refresh regardless of last sync time)
     ui::hint("Syncing registry...");
-    librefang_runtime::registry_sync::sync_registry(
-        &librefang_dir,
-        librefang_runtime::registry_sync::DEFAULT_CACHE_TTL_SECS,
-    );
+    librefang_runtime::registry_sync::sync_registry(&librefang_dir, 0);
     ui::success("Registry synced");
 
     // 4. Initialize vault and git if missing
@@ -2026,24 +2023,36 @@ fn cmd_init_upgrade() {
         }
     };
 
-    let added = merge_toml_defaults(&mut existing, &defaults);
+    // Find top-level keys/sections missing from user config and append them
+    // as TOML fragments. This preserves the original file's comments and formatting.
+    let added = find_missing_toplevel_keys(&existing, &defaults);
 
     if added.is_empty() {
         ui::success("Config is already up to date — no new fields added");
     } else {
-        // Write merged config back
-        let merged_str = toml::to_string_pretty(&existing).unwrap_or_else(|e| {
-            ui::error(&format!("Failed to serialize merged config: {e}"));
-            ui::hint(&format!("Your original config was saved to {backup_name}"));
-            std::process::exit(1);
-        });
-        if let Err(e) = std::fs::write(&config_path, &merged_str) {
-            ui::error(&format!("Failed to write merged config: {e}"));
+        // Build TOML snippets for each missing key and append to existing file
+        let mut appendix =
+            String::from("\n# ── Added by upgrade ────────────────────────────────────\n");
+        for key in &added {
+            if let Some(val) = defaults.get(key) {
+                // Serialize just this key as a standalone TOML fragment
+                let mut fragment = toml::map::Map::new();
+                fragment.insert(key.clone(), val.clone());
+                if let Ok(snippet) = toml::to_string_pretty(&toml::Value::Table(fragment)) {
+                    appendix.push('\n');
+                    appendix.push_str(&snippet);
+                }
+            }
+        }
+        let mut content = existing_raw.clone();
+        content.push_str(&appendix);
+        if let Err(e) = std::fs::write(&config_path, &content) {
+            ui::error(&format!("Failed to write config: {e}"));
             ui::hint(&format!("Your original config was saved to {backup_name}"));
             std::process::exit(1);
         }
         restrict_file_permissions(&config_path);
-        ui::success(&format!("Added {} new config field(s):", added.len()));
+        ui::success(&format!("Added {} new config section(s):", added.len()));
         for key in &added {
             ui::kv("  +", key);
         }
@@ -2155,48 +2164,19 @@ fn is_leap(y: u64) -> bool {
     y % 4 == 0 && (y % 100 != 0 || y % 400 == 0)
 }
 
-/// Recursively merge default TOML values into an existing config.
-/// Only adds keys/sections that don't already exist — never overwrites.
-/// Returns a list of dotted key paths that were added.
-fn merge_toml_defaults(existing: &mut toml::Value, defaults: &toml::Value) -> Vec<String> {
-    let mut added = Vec::new();
-    merge_toml_recursive(existing, defaults, "", &mut added);
-    added
-}
-
-fn merge_toml_recursive(
-    existing: &mut toml::Value,
-    defaults: &toml::Value,
-    prefix: &str,
-    added: &mut Vec<String>,
-) {
-    let (Some(existing_table), Some(defaults_table)) =
-        (existing.as_table_mut(), defaults.as_table())
+/// Find top-level keys in `defaults` that are missing from `existing`.
+/// Only checks top-level — does not recurse into sub-tables to avoid
+/// injecting partial sections the user intentionally omitted.
+fn find_missing_toplevel_keys(existing: &toml::Value, defaults: &toml::Value) -> Vec<String> {
+    let (Some(existing_table), Some(defaults_table)) = (existing.as_table(), defaults.as_table())
     else {
-        return;
+        return Vec::new();
     };
-
-    for (key, default_val) in defaults_table {
-        let dotted = if prefix.is_empty() {
-            key.clone()
-        } else {
-            format!("{prefix}.{key}")
-        };
-
-        match existing_table.get_mut(key) {
-            Some(existing_val) => {
-                // Key exists — recurse into sub-tables but never overwrite scalars
-                if existing_val.is_table() && default_val.is_table() {
-                    merge_toml_recursive(existing_val, default_val, &dotted, added);
-                }
-            }
-            None => {
-                // Key missing — add it
-                existing_table.insert(key.clone(), default_val.clone());
-                added.push(dotted);
-            }
-        }
-    }
+    defaults_table
+        .keys()
+        .filter(|k| !existing_table.contains_key(*k))
+        .cloned()
+        .collect()
 }
 
 /// Initialize vault if it doesn't exist yet (silent no-op if already initialized).
