@@ -146,6 +146,11 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             "/registry/schema/{content_type}",
             axum::routing::get(registry_schema_by_type),
         )
+        // Registry content creation
+        .route(
+            "/registry/content/{content_type}",
+            axum::routing::post(create_registry_content),
+        )
 }
 use crate::middleware::RequestLanguage;
 use crate::types::ApiErrorResponse;
@@ -3109,6 +3114,148 @@ async fn registry_schema_by_type(
         None => ApiErrorResponse::not_found("Registry schema not found")
             .into_json_tuple()
             .into_response(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Registry Content Creation
+// ---------------------------------------------------------------------------
+
+/// POST /api/registry/content/:content_type — Create a new registry content file.
+///
+/// Accepts JSON form values, converts to TOML, and writes to the appropriate
+/// directory under `~/.librefang/`.
+async fn create_registry_content(
+    State(state): State<Arc<AppState>>,
+    Path(content_type): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let home_dir = &state.kernel.config_ref().home_dir;
+
+    // Extract identifier (id or name) from the values
+    let identifier = body.as_object().and_then(|m| {
+        m.get("id")
+            .or_else(|| m.get("name"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+    });
+
+    let identifier = match identifier {
+        Some(id) => id,
+        None => {
+            return ApiErrorResponse::bad_request("Missing required 'id' or 'name' field")
+                .into_json_tuple()
+                .into_response();
+        }
+    };
+
+    // Validate identifier (prevent path traversal)
+    if identifier.contains('/') || identifier.contains('\\') || identifier.contains("..") {
+        return ApiErrorResponse::bad_request("Invalid identifier")
+            .into_json_tuple()
+            .into_response();
+    }
+
+    // Determine target file path
+    let target = match content_type.as_str() {
+        "provider" => home_dir
+            .join("providers")
+            .join(format!("{identifier}.toml")),
+        "agent" => home_dir.join("agents").join(&identifier).join("agent.toml"),
+        "hand" => home_dir.join("hands").join(&identifier).join("HAND.toml"),
+        "integration" => home_dir
+            .join("integrations")
+            .join(format!("{identifier}.toml")),
+        "skill" => home_dir.join("skills").join(&identifier).join("skill.toml"),
+        "plugin" => home_dir
+            .join("plugins")
+            .join(&identifier)
+            .join("plugin.toml"),
+        _ => {
+            return ApiErrorResponse::bad_request(format!("Unknown content type '{content_type}'"))
+                .into_json_tuple()
+                .into_response();
+        }
+    };
+
+    // Don't overwrite existing content
+    if target.exists() {
+        return ApiErrorResponse::conflict(format!("{content_type} '{identifier}' already exists"))
+            .into_json_tuple()
+            .into_response();
+    }
+
+    // Convert JSON values to TOML
+    let toml_value = json_to_toml_value(&body);
+    let toml_string = match toml::to_string_pretty(&toml_value) {
+        Ok(s) => s,
+        Err(e) => {
+            return ApiErrorResponse::internal(e)
+                .into_json_tuple()
+                .into_response();
+        }
+    };
+
+    // Create parent directories and write file
+    if let Some(parent) = target.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            return ApiErrorResponse::internal(e)
+                .into_json_tuple()
+                .into_response();
+        }
+    }
+    if let Err(e) = std::fs::write(&target, toml_string) {
+        return ApiErrorResponse::internal(e)
+            .into_json_tuple()
+            .into_response();
+    }
+
+    Json(serde_json::json!({
+        "ok": true,
+        "content_type": content_type,
+        "identifier": identifier,
+        "path": target.display().to_string(),
+    }))
+    .into_response()
+}
+
+/// Recursively convert serde_json::Value to toml::Value, stripping empty
+/// strings and empty arrays to keep the generated TOML clean.
+fn json_to_toml_value(json: &serde_json::Value) -> toml::Value {
+    match json {
+        serde_json::Value::Null => toml::Value::String(String::new()),
+        serde_json::Value::Bool(b) => toml::Value::Boolean(*b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                toml::Value::Integer(i)
+            } else if let Some(f) = n.as_f64() {
+                toml::Value::Float(f)
+            } else {
+                toml::Value::String(n.to_string())
+            }
+        }
+        serde_json::Value::String(s) => toml::Value::String(s.clone()),
+        serde_json::Value::Array(arr) => {
+            let items: Vec<toml::Value> = arr.iter().map(json_to_toml_value).collect();
+            toml::Value::Array(items)
+        }
+        serde_json::Value::Object(map) => {
+            let mut table = toml::map::Map::new();
+            for (k, v) in map {
+                // Skip empty strings, empty arrays, and null values
+                match v {
+                    serde_json::Value::String(s) if s.is_empty() => continue,
+                    serde_json::Value::Array(a) if a.is_empty() => continue,
+                    serde_json::Value::Null => continue,
+                    // Skip empty sub-objects (sections with all empty values)
+                    serde_json::Value::Object(m) if m.is_empty() => continue,
+                    _ => {}
+                }
+                table.insert(k.clone(), json_to_toml_value(v));
+            }
+            toml::Value::Table(table)
+        }
     }
 }
 

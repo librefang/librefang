@@ -121,11 +121,21 @@ pub fn sync_registry(home_dir: &Path, cache_ttl_secs: u64) {
         let _ = std::fs::copy(&aliases_src, &aliases_dest);
     }
 
-    // Sync schema (always overwrite — API needs the latest version)
+    // Sync schema — only overwrite when source is machine-parseable.
+    // The registry may still ship the old comment-based format; copying that
+    // would replace a valid schema the user (or a prior release) placed manually.
     let schema_src = registry_cache.join("schema.toml");
     let schema_dest = home_dir.join("schema.toml");
     if schema_src.exists() {
-        let _ = std::fs::copy(&schema_src, &schema_dest);
+        let src_parseable = std::fs::read_to_string(&schema_src)
+            .ok()
+            .and_then(|c| {
+                toml::from_str::<librefang_types::registry_schema::RegistrySchema>(&c).ok()
+            })
+            .map_or(false, |s| !s.content_types.is_empty());
+        if src_parseable {
+            let _ = std::fs::copy(&schema_src, &schema_dest);
+        }
     }
 
     // Clean up stale hand directories in workspaces

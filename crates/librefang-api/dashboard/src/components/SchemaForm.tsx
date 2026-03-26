@@ -18,6 +18,35 @@ interface SchemaFormProps {
   submitLabel?: string;
 }
 
+// Recursively build defaults for a single section (including sub-sections)
+function buildSectionDefaults(
+  section: RegistrySchemaSection,
+  initialValues?: Record<string, unknown>,
+): Record<string, unknown> {
+  const defaults: Record<string, unknown> = {};
+  for (const [fKey, f] of Object.entries(section.fields ?? {})) {
+    if (initialValues && fKey in initialValues) {
+      defaults[fKey] = initialValues[fKey];
+    } else if (f.default !== undefined) {
+      defaults[fKey] = f.default;
+    } else if (f.type === "bool") {
+      defaults[fKey] = false;
+    } else {
+      defaults[fKey] = "";
+    }
+  }
+  for (const [sKey, s] of Object.entries(section.sections ?? {})) {
+    if (initialValues && sKey in initialValues) {
+      defaults[sKey] = initialValues[sKey];
+    } else if (s.repeatable) {
+      defaults[sKey] = [];
+    } else {
+      defaults[sKey] = buildSectionDefaults(s);
+    }
+  }
+  return defaults;
+}
+
 // Build initial form values from schema defaults and provided initialValues
 function buildDefaults(
   schema: RegistrySchema,
@@ -38,31 +67,24 @@ function buildDefaults(
   }
 
   // Initialize sections — repeatable sections start with empty array,
-  // non-repeatable sections get a single flat object with defaults
+  // non-repeatable sections get a single flat object with defaults (recursive)
   for (const [sectionKey, section] of Object.entries(schema.sections ?? {})) {
     if (initialValues && sectionKey in initialValues) {
       values[sectionKey] = initialValues[sectionKey];
     } else if (section.repeatable) {
       values[sectionKey] = [];
     } else {
-      const sectionDefaults: Record<string, unknown> = {};
-      for (const [fKey, f] of Object.entries(section.fields ?? {})) {
-        if (f.default !== undefined) {
-          sectionDefaults[fKey] = f.default;
-        } else if (f.type === "bool") {
-          sectionDefaults[fKey] = false;
-        } else {
-          sectionDefaults[fKey] = "";
-        }
-      }
-      values[sectionKey] = sectionDefaults;
+      values[sectionKey] = buildSectionDefaults(
+        section,
+        initialValues?.[sectionKey] as Record<string, unknown> | undefined,
+      );
     }
   }
 
   return values;
 }
 
-// Build a blank entry for a repeatable section
+// Build a blank entry for a repeatable section (including sub-section defaults)
 function blankSectionEntry(section: RegistrySchemaSection): Record<string, unknown> {
   const entry: Record<string, unknown> = {};
   for (const [key, field] of Object.entries(section.fields ?? {})) {
@@ -74,7 +96,51 @@ function blankSectionEntry(section: RegistrySchemaSection): Record<string, unkno
       entry[key] = "";
     }
   }
+  for (const [sKey, s] of Object.entries(section.sections ?? {})) {
+    if (s.repeatable) {
+      entry[sKey] = [];
+    } else {
+      entry[sKey] = buildSectionDefaults(s);
+    }
+  }
   return entry;
+}
+
+// Recursively validate required fields within a section
+function validateSectionRequired(
+  section: RegistrySchemaSection,
+  values: Record<string, unknown>,
+  pathPrefix: string,
+  errors: string[],
+): void {
+  for (const [fKey, f] of Object.entries(section.fields ?? {})) {
+    if (f.required) {
+      const v = values[fKey];
+      if (v === undefined || v === null || v === "") {
+        errors.push(`${pathPrefix}.${fKey}`);
+      }
+    }
+  }
+  for (const [sKey, s] of Object.entries(section.sections ?? {})) {
+    if (s.repeatable) {
+      const items = values[sKey];
+      if (Array.isArray(items)) {
+        items.forEach((item, idx) => {
+          validateSectionRequired(
+            s,
+            item as Record<string, unknown>,
+            `${pathPrefix}.${sKey}[${idx}]`,
+            errors,
+          );
+        });
+      }
+    } else {
+      const subVal = values[sKey] as Record<string, unknown> | undefined;
+      if (subVal) {
+        validateSectionRequired(s, subVal, `${pathPrefix}.${sKey}`, errors);
+      }
+    }
+  }
 }
 
 // Validate required fields; returns list of field paths that are missing
@@ -98,27 +164,18 @@ function validateRequired(
       const items = values[sectionKey];
       if (Array.isArray(items)) {
         items.forEach((item, idx) => {
-          for (const [fKey, f] of Object.entries(section.fields ?? {})) {
-            if (f.required) {
-              const v = (item as Record<string, unknown>)[fKey];
-              if (v === undefined || v === null || v === "") {
-                errors.push(`${sectionKey}[${idx}].${fKey}`);
-              }
-            }
-          }
+          validateSectionRequired(
+            section,
+            item as Record<string, unknown>,
+            `${sectionKey}[${idx}]`,
+            errors,
+          );
         });
       }
     } else {
       const sectionVal = values[sectionKey] as Record<string, unknown> | undefined;
       if (sectionVal) {
-        for (const [fKey, f] of Object.entries(section.fields ?? {})) {
-          if (f.required) {
-            const v = sectionVal[fKey];
-            if (v === undefined || v === null || v === "") {
-              errors.push(`${sectionKey}.${fKey}`);
-            }
-          }
-        }
+        validateSectionRequired(section, sectionVal, sectionKey, errors);
       }
     }
   }
@@ -265,22 +322,25 @@ function SchemaField({
   );
 }
 
-// Collapsible section fieldset
+// Collapsible section fieldset (supports recursive sub-sections)
 function SectionFieldset({
   sectionKey,
   section,
   values,
   errors,
   onChange,
+  pathPrefix,
 }: {
   sectionKey: string;
   section: RegistrySchemaSection;
   values: Record<string, unknown>;
   errors: string[];
   onChange: (sectionKey: string, newVal: unknown) => void;
+  pathPrefix?: string;
 }) {
   const { t } = useTranslation();
   const [collapsed, setCollapsed] = useState(false);
+  const fullPath = pathPrefix ?? sectionKey;
 
   if (section.repeatable) {
     const items = (Array.isArray(values[sectionKey]) ? values[sectionKey] : []) as Record<string, unknown>[];
@@ -351,7 +411,20 @@ function SectionFieldset({
                     field={f}
                     value={item[fKey]}
                     onChange={(v) => updateItem(idx, fKey, v)}
-                    hasError={errors.includes(`${sectionKey}[${idx}].${fKey}`)}
+                    hasError={errors.includes(`${fullPath}[${idx}].${fKey}`)}
+                  />
+                ))}
+                {Object.entries(section.sections ?? {}).map(([subKey, subSection]) => (
+                  <SectionFieldset
+                    key={subKey}
+                    sectionKey={subKey}
+                    section={subSection}
+                    values={item}
+                    errors={errors}
+                    onChange={(subSectionKey, newSubVal) => {
+                      updateItem(idx, subSectionKey, newSubVal);
+                    }}
+                    pathPrefix={`${fullPath}[${idx}].${subKey}`}
                   />
                 ))}
               </div>
@@ -409,7 +482,20 @@ function SectionFieldset({
               field={f}
               value={sectionVal[fKey]}
               onChange={(v) => updateField(fKey, v)}
-              hasError={errors.includes(`${sectionKey}.${fKey}`)}
+              hasError={errors.includes(`${fullPath}.${fKey}`)}
+            />
+          ))}
+          {Object.entries(section.sections ?? {}).map(([subKey, subSection]) => (
+            <SectionFieldset
+              key={subKey}
+              sectionKey={subKey}
+              section={subSection}
+              values={sectionVal}
+              errors={errors}
+              onChange={(subSectionKey, newSubVal) => {
+                onChange(sectionKey, { ...sectionVal, [subSectionKey]: newSubVal });
+              }}
+              pathPrefix={`${fullPath}.${subKey}`}
             />
           ))}
         </div>

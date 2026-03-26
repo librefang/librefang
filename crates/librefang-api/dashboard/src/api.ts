@@ -1920,3 +1920,20 @@ export async function fetchAllRegistrySchemas(): Promise<Record<string, Registry
 export async function fetchRegistrySchema(contentType: string): Promise<RegistrySchema> {
   return get<RegistrySchema>(`/api/registry/schema/${encodeURIComponent(contentType)}`);
 }
+
+export interface CreateRegistryContentResponse {
+  ok: boolean;
+  content_type: string;
+  identifier: string;
+  path: string;
+}
+
+export async function createRegistryContent(
+  contentType: string,
+  values: Record<string, unknown>,
+): Promise<CreateRegistryContentResponse> {
+  return post<CreateRegistryContentResponse>(
+    `/api/registry/content/${encodeURIComponent(contentType)}`,
+    values,
+  );
+}
