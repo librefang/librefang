@@ -3079,7 +3079,7 @@ async fn registry_schema(State(state): State<Arc<AppState>>) -> impl IntoRespons
     match librefang_types::registry_schema::load_registry_schema(home_dir) {
         Some(schema) => match serde_json::to_value(&schema) {
             Ok(val) => Json(val).into_response(),
-            Err(e) => ApiErrorResponse::internal(e)
+            Err(e) => ApiErrorResponse::internal(e.to_string())
                 .into_json_tuple()
                 .into_response(),
         },
@@ -3205,7 +3205,7 @@ async fn create_registry_content(
     let toml_string = match toml::to_string_pretty(&toml_value) {
         Ok(s) => s,
         Err(e) => {
-            return ApiErrorResponse::internal(e)
+            return ApiErrorResponse::internal(e.to_string())
                 .into_json_tuple()
                 .into_response();
         }
@@ -3214,13 +3214,13 @@ async fn create_registry_content(
     // Create parent directories and write file
     if let Some(parent) = target.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
-            return ApiErrorResponse::internal(e)
+            return ApiErrorResponse::internal(e.to_string())
                 .into_json_tuple()
                 .into_response();
         }
     }
     if let Err(e) = std::fs::write(&target, toml_string) {
-        return ApiErrorResponse::internal(e)
+        return ApiErrorResponse::internal(e.to_string())
             .into_json_tuple()
             .into_response();
     }
