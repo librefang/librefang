@@ -617,6 +617,7 @@ impl KernelConfig {
     ///
     /// Called after loading config to prevent zero timeouts, unbounded buffers,
     /// or other misconfigurations that cause silent failures at runtime.
+    #[allow(clippy::manual_clamp)]
     pub fn clamp_bounds(&mut self) {
         // Browser timeout: min 5s, max 300s
         if self.browser.timeout_secs == 0 {
