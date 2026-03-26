@@ -381,15 +381,14 @@ fn draw_paste_key(f: &mut Frame, area: Rect, state: &State) {
     let display_key = if state.key_input.is_empty() {
         format!("  ({})", i18n::t("guide-paste-key-placeholder"))
     } else {
-        let len = state.key_input.len();
+        let chars: Vec<char> = state.key_input.chars().collect();
+        let len = chars.len();
         if len <= 8 {
             format!("  {}", "*".repeat(len))
         } else {
-            format!(
-                "  {}...{}",
-                &state.key_input[..4],
-                &state.key_input[len - 4..]
-            )
+            let prefix: String = chars[..4].iter().collect();
+            let suffix: String = chars[len - 4..].iter().collect();
+            format!("  {}...{}", prefix, suffix)
         }
     };
 
