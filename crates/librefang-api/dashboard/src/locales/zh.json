@@ -11,7 +11,7 @@
   "common": {
     "refresh": "刷新", "status": "状态", "daemon_online": "守护进程在线", "infrastructure": "控制台",
     "toggle_theme": "切换主题", "change_language": "切换语言", "delete": "删除", "cancel": "取消",
-    "save": "保存", "saving": "保存中...", "edit": "编辑", "confirm": "确认", "loading": "加载中...", "search": "搜索", "back": "返回", "retry": "重试",
+    "save": "保存", "saving": "保存中...", "edit": "编辑", "confirm": "确认", "loading": "加载中...", "search": "搜索", "back": "返回", "retry": "重试", "create": "创建",
     "actions": "操作", "clear": "清空", "load": "加载", "active": "活跃", "idle": "空闲", "running": "运行中",
     "online": "在线", "offline": "离线", "setup": "需配置", "ok": "正常", "config": "配置", "interact": "交互",
     "never": "从不", "unknown": "未知", "no_data": "暂无数据", "resume": "恢复", "close": "关闭", "yes": "是", "no": "否", "details": "详情",
@@ -62,6 +62,7 @@
     "key_placeholder": "输入 API Key...", "key_placeholder_existing": "输入新 Key 替换旧的...",
     "optional": "可选", "remove_key": "移除 Key",
     "base_url": "Base URL", "api_key": "API Key",
+    "add": "添加供应商",
     "help": "管理大模型供应商连接。测试连通性、配置 API Key，监控供应商健康状态。"
   },
   "channels": {
