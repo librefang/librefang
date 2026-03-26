@@ -2386,32 +2386,29 @@ fn launch_desktop_app(_librefang_dir: &std::path::Path) {
 }
 
 /// Auto-detect the best available provider.
+///
+/// Delegates to the runtime's `detect_available_provider()` which probes 13+
+/// providers (OpenAI, Anthropic, Gemini, Groq, DeepSeek, OpenRouter, Mistral,
+/// Together, Fireworks, xAI, Perplexity, Cohere, Azure OpenAI) plus the
+/// GOOGLE_API_KEY alias.  Falls back to local Ollama, then the interactive
+/// free-provider TUI guide.
 fn detect_best_provider() -> (String, String, String) {
-    let providers = provider_list();
-
-    for (p, env_var, display) in &providers {
-        if std::env::var(*env_var).is_ok() {
-            ui::success(&i18n::t_args(
-                "detected-provider",
-                &[("display", *display), ("env_var", *env_var)],
-            ));
-            return (
-                (*p).to_string(),
-                (*env_var).to_string(),
-                default_model_for_provider(p),
-            );
-        }
-    }
-    // Also check GOOGLE_API_KEY
-    if std::env::var("GOOGLE_API_KEY").is_ok() {
-        ui::success(&i18n::t("detected-gemini"));
+    // 1. Check all cloud provider API keys via the runtime registry
+    if let Some((provider, _model, env_var)) =
+        librefang_runtime::drivers::detect_available_provider()
+    {
+        ui::success(&i18n::t_args(
+            "detected-provider",
+            &[("display", provider), ("env_var", env_var)],
+        ));
         return (
-            "gemini".to_string(),
-            "GOOGLE_API_KEY".to_string(),
-            default_model_for_provider("gemini"),
+            provider.to_string(),
+            env_var.to_string(),
+            default_model_for_provider(provider),
         );
     }
-    // Check if Ollama is running locally (no API key needed)
+
+    // 2. Check if Ollama is running locally (no API key needed)
     if check_ollama_available() {
         ui::success(&i18n::t("detected-ollama"));
         return (
@@ -2421,14 +2418,14 @@ fn detect_best_provider() -> (String, String, String) {
         );
     }
 
-    // No API key found — launch TUI guide to pick a free provider
+    // 3. No API key found — launch TUI guide to pick a free provider
     if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
         if let Some(result) = guide_free_provider_setup() {
             return result;
         }
     }
 
-    // Non-interactive fallback: just print hints
+    // 4. Non-interactive fallback: just print hints
     ui::hint(&i18n::t("hint-no-api-keys"));
     ui::hint(&i18n::t("hint-groq-free"));
     ui::hint(&i18n::t("hint-gemini-free"));
@@ -2438,18 +2435,6 @@ fn detect_best_provider() -> (String, String, String) {
         "GROQ_API_KEY".to_string(),
         default_model_for_provider("groq"),
     )
-}
-
-/// Static list of supported providers: (id, env_var, display_name).
-fn provider_list() -> Vec<(&'static str, &'static str, &'static str)> {
-    vec![
-        ("groq", "GROQ_API_KEY", "Groq"),
-        ("gemini", "GEMINI_API_KEY", "Gemini"),
-        ("deepseek", "DEEPSEEK_API_KEY", "DeepSeek"),
-        ("anthropic", "ANTHROPIC_API_KEY", "Anthropic"),
-        ("openai", "OPENAI_API_KEY", "OpenAI"),
-        ("openrouter", "OPENROUTER_API_KEY", "OpenRouter"),
-    ]
 }
 
 /// Interactive TUI guide: help user pick a free LLM provider and set up an API key.
