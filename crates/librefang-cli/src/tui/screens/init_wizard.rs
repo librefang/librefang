@@ -415,6 +415,18 @@ impl State {
         }
     }
 
+    fn step_index(&self) -> usize {
+        match self.step {
+            Step::Welcome => 0,
+            Step::Migration => 1,
+            Step::Provider => 2,
+            Step::ApiKey => 3,
+            Step::Model => 4,
+            Step::Routing => 5,
+            Step::Complete => 6,
+        }
+    }
+
     /// Advance to the Provider step, optionally pre-selecting a migrated provider.
     fn advance_to_provider(&mut self) {
         if let Some(ref prov_name) = self.migrated_provider {
@@ -1236,6 +1248,7 @@ fn draw(f: &mut Frame, area: Rect, state: &mut State) {
     let chunks = Layout::vertical([
         Constraint::Length(1), // top pad
         Constraint::Length(1), // header
+        Constraint::Length(1), // progress bar
         Constraint::Length(1), // separator
         Constraint::Min(1),    // step content
     ])
@@ -1254,18 +1267,45 @@ fn draw(f: &mut Frame, area: Rect, state: &mut State) {
     ]);
     f.render_widget(Paragraph::new(header), chunks[1]);
 
+    // Progress bar: ●──●──●──○──○──○──○
+    let step_idx = state.step_index();
+    let mut progress_spans: Vec<Span> = Vec::new();
+    for i in 0..7 {
+        if i > 0 {
+            let line_style = if i <= step_idx {
+                Style::default().fg(theme::ACCENT)
+            } else {
+                Style::default().fg(theme::BORDER)
+            };
+            progress_spans.push(Span::styled("\u{2500}\u{2500}", line_style));
+        }
+        if i < step_idx {
+            progress_spans.push(Span::styled("\u{25cf}", Style::default().fg(theme::ACCENT)));
+        } else if i == step_idx {
+            progress_spans.push(Span::styled(
+                "\u{25cf}",
+                Style::default()
+                    .fg(theme::ACCENT)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        } else {
+            progress_spans.push(Span::styled("\u{25cb}", Style::default().fg(theme::BORDER)));
+        }
+    }
+    f.render_widget(Paragraph::new(Line::from(progress_spans)), chunks[2]);
+
     // Separator
-    f.render_widget(widgets::separator(content.width.min(60)), chunks[2]);
+    f.render_widget(widgets::separator(content.width.min(60)), chunks[3]);
 
     // Step content (full remaining area)
     match state.step {
-        Step::Welcome => draw_welcome(f, chunks[3]),
-        Step::Migration => draw_migration(f, chunks[3], state),
-        Step::Provider => draw_provider(f, chunks[3], state),
-        Step::ApiKey => draw_api_key(f, chunks[3], state),
-        Step::Model => draw_model(f, chunks[3], state),
-        Step::Routing => draw_routing(f, chunks[3], state),
-        Step::Complete => draw_complete(f, chunks[3], state),
+        Step::Welcome => draw_welcome(f, chunks[4]),
+        Step::Migration => draw_migration(f, chunks[4], state),
+        Step::Provider => draw_provider(f, chunks[4], state),
+        Step::ApiKey => draw_api_key(f, chunks[4], state),
+        Step::Model => draw_model(f, chunks[4], state),
+        Step::Routing => draw_routing(f, chunks[4], state),
+        Step::Complete => draw_complete(f, chunks[4], state),
     }
 }
 
