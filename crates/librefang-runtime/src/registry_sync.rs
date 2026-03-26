@@ -58,7 +58,7 @@ pub fn sync_registry(home_dir: &Path) {
 
     // Pre-install core content users need out of the box.
     // Skills and plugins stay in registry — users install via dashboard.
-    for &dir_name in &["providers", "integrations", "channels", "workflows"] {
+    for &dir_name in &["providers", "integrations", "channels"] {
         let src_dir = registry_cache.join(dir_name);
         if src_dir.exists() {
             sync_flat_files(&src_dir, &home_dir.join(dir_name), dir_name);
