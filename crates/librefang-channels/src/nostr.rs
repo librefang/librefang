@@ -20,7 +20,7 @@ use tracing::{info, warn};
 use zeroize::Zeroizing;
 
 /// Maximum message length for Nostr events.
-const MAX_MESSAGE_LEN: usize = 4096;
+const DEFAULT_MAX_MESSAGE_LEN: usize = 4096;
 
 /// Nostr NIP-01 relay channel adapter using WebSocket.
 ///
@@ -40,6 +40,8 @@ pub struct NostrAdapter {
     shutdown_rx: watch::Receiver<bool>,
     /// Set of already-seen event IDs to avoid duplicates across relays.
     seen_events: Arc<RwLock<std::collections::HashSet<String>>>,
+    /// Maximum outbound message length before splitting.
+    max_msg_len: usize,
 }
 
 impl NostrAdapter {
@@ -57,11 +59,20 @@ impl NostrAdapter {
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
             seen_events: Arc::new(RwLock::new(std::collections::HashSet::new())),
+            max_msg_len: DEFAULT_MAX_MESSAGE_LEN,
         }
     }
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
     pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
         self.account_id = account_id;
+        self
+    }
+
+    /// Override the maximum outbound message length. Returns self for builder chaining.
+    pub fn with_max_message_length(mut self, len: Option<u32>) -> Self {
+        if let Some(v) = len {
+            self.max_msg_len = v as usize;
+        }
         self
     }
 
@@ -126,7 +137,7 @@ impl NostrAdapter {
         recipient_pubkey: &str,
         text: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let chunks = split_message(text, MAX_MESSAGE_LEN);
+        let chunks = split_message(text, self.max_msg_len);
 
         for chunk in chunks {
             let event_msg = self.build_event(recipient_pubkey, chunk);

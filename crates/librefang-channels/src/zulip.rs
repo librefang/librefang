@@ -18,7 +18,7 @@ use tokio::sync::{mpsc, watch, RwLock};
 use tracing::{info, warn};
 use zeroize::Zeroizing;
 
-const MAX_MESSAGE_LEN: usize = 10000;
+const DEFAULT_MAX_MESSAGE_LEN: usize = 10000;
 const POLL_TIMEOUT_SECS: u64 = 60;
 
 /// Zulip channel adapter using REST API with event queue long-polling.
@@ -40,6 +40,8 @@ pub struct ZulipAdapter {
     shutdown_rx: watch::Receiver<bool>,
     /// Current event queue ID for resuming polls.
     queue_id: Arc<RwLock<Option<String>>>,
+    /// Maximum outbound message length before splitting.
+    max_msg_len: usize,
 }
 
 impl ZulipAdapter {
@@ -68,11 +70,20 @@ impl ZulipAdapter {
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
             queue_id: Arc::new(RwLock::new(None)),
+            max_msg_len: DEFAULT_MAX_MESSAGE_LEN,
         }
     }
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
     pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
         self.account_id = account_id;
+        self
+    }
+
+    /// Override the maximum outbound message length. Returns self for builder chaining.
+    pub fn with_max_message_length(mut self, len: Option<u32>) -> Self {
+        if let Some(v) = len {
+            self.max_msg_len = v as usize;
+        }
         self
     }
 
@@ -149,7 +160,7 @@ impl ZulipAdapter {
         text: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/api/v1/messages", self.server_url);
-        let chunks = split_message(text, MAX_MESSAGE_LEN);
+        let chunks = split_message(text, self.max_msg_len);
 
         for chunk in chunks {
             let mut params = vec![

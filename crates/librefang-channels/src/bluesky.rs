@@ -23,7 +23,7 @@ use zeroize::Zeroizing;
 const DEFAULT_SERVICE_URL: &str = "https://bsky.social";
 
 /// Maximum Bluesky post length (grapheme clusters).
-const MAX_MESSAGE_LEN: usize = 300;
+const DEFAULT_MAX_MESSAGE_LEN: usize = 300;
 
 /// Notification poll interval in seconds.
 const POLL_INTERVAL_SECS: u64 = 5;
@@ -53,6 +53,8 @@ pub struct BlueskyAdapter {
     shutdown_rx: watch::Receiver<bool>,
     /// Cached session (access_jwt, refresh_jwt, did, expiry).
     session: Arc<RwLock<Option<BlueskySession>>>,
+    /// Maximum outbound message length before splitting.
+    max_msg_len: usize,
 }
 
 /// Cached Bluesky session data.
@@ -79,6 +81,14 @@ impl BlueskyAdapter {
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
     pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
         self.account_id = account_id;
+        self
+    }
+
+    /// Override the maximum outbound message length. Returns self for builder chaining.
+    pub fn with_max_message_length(mut self, len: Option<u32>) -> Self {
+        if let Some(v) = len {
+            self.max_msg_len = v as usize;
+        }
         self
     }
 
@@ -224,7 +234,7 @@ impl BlueskyAdapter {
         let (token, did) = self.get_token().await?;
         let url = format!("{}/xrpc/com.atproto.repo.createRecord", self.service_url);
 
-        let chunks = split_message(text, MAX_MESSAGE_LEN);
+        let chunks = split_message(text, self.max_msg_len);
 
         for chunk in chunks {
             let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);

@@ -22,7 +22,7 @@ use zeroize::Zeroizing;
 const TWIST_API_BASE: &str = "https://api.twist.com/api/v3";
 
 /// Maximum message length for Twist comments.
-const MAX_MESSAGE_LEN: usize = 10000;
+const DEFAULT_MAX_MESSAGE_LEN: usize = 10000;
 
 /// Polling interval in seconds for new comments.
 const POLL_INTERVAL_SECS: u64 = 5;
@@ -48,6 +48,8 @@ pub struct TwistAdapter {
     shutdown_rx: watch::Receiver<bool>,
     /// Last seen comment ID per channel for incremental polling.
     last_comment_ids: Arc<RwLock<HashMap<String, i64>>>,
+    /// Maximum outbound message length before splitting.
+    max_msg_len: usize,
 }
 
 impl TwistAdapter {
@@ -68,11 +70,20 @@ impl TwistAdapter {
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
             last_comment_ids: Arc::new(RwLock::new(HashMap::new())),
+            max_msg_len: DEFAULT_MAX_MESSAGE_LEN,
         }
     }
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
     pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
         self.account_id = account_id;
+        self
+    }
+
+    /// Override the maximum outbound message length. Returns self for builder chaining.
+    pub fn with_max_message_length(mut self, len: Option<u32>) -> Self {
+        if let Some(v) = len {
+            self.max_msg_len = v as usize;
+        }
         self
     }
 
@@ -193,7 +204,7 @@ impl TwistAdapter {
         text: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/comments/add", TWIST_API_BASE);
-        let chunks = split_message(text, MAX_MESSAGE_LEN);
+        let chunks = split_message(text, self.max_msg_len);
 
         for chunk in chunks {
             let body = serde_json::json!({
@@ -613,7 +624,7 @@ mod tests {
 
     #[test]
     fn test_twist_constants() {
-        assert_eq!(MAX_MESSAGE_LEN, 10000);
+        assert_eq!(DEFAULT_MAX_MESSAGE_LEN, 10000);
         assert_eq!(POLL_INTERVAL_SECS, 5);
         assert!(TWIST_API_BASE.starts_with("https://"));
     }

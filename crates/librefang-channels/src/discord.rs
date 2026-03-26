@@ -19,7 +19,7 @@ use zeroize::Zeroizing;
 const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
 const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
-const DISCORD_MSG_LIMIT: usize = 2000;
+const DEFAULT_MAX_MESSAGE_LEN: usize = 2000;
 
 /// Discord Gateway opcodes.
 mod opcode {
@@ -54,6 +54,8 @@ pub struct DiscordAdapter {
     session_id: Arc<RwLock<Option<String>>>,
     /// Resume gateway URL.
     resume_gateway_url: Arc<RwLock<Option<String>>>,
+    /// Maximum outbound message length before splitting.
+    max_msg_len: usize,
 }
 
 impl DiscordAdapter {
@@ -80,11 +82,20 @@ impl DiscordAdapter {
             bot_user_id: Arc::new(RwLock::new(None)),
             session_id: Arc::new(RwLock::new(None)),
             resume_gateway_url: Arc::new(RwLock::new(None)),
+            max_msg_len: DEFAULT_MAX_MESSAGE_LEN,
         }
     }
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
     pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
         self.account_id = account_id;
+        self
+    }
+
+    /// Override the maximum outbound message length. Returns self for builder chaining.
+    pub fn with_max_message_length(mut self, len: Option<u32>) -> Self {
+        if let Some(v) = len {
+            self.max_msg_len = v as usize;
+        }
         self
     }
 
@@ -114,7 +125,7 @@ impl DiscordAdapter {
         text: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{DISCORD_API_BASE}/channels/{channel_id}/messages");
-        let chunks = split_message(text, DISCORD_MSG_LIMIT);
+        let chunks = split_message(text, self.max_msg_len);
 
         for chunk in chunks {
             let body = serde_json::json!({ "content": chunk });

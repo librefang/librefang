@@ -78,6 +78,9 @@ pub struct ChannelOverrides {
     pub usage_footer: Option<UsageFooterMode>,
     /// Typing indicator mode override.
     pub typing_mode: Option<TypingMode>,
+    /// Maximum outbound message length (characters) before splitting.
+    /// When set, overrides the channel adapter's built-in platform default.
+    pub max_message_length: Option<u32>,
 }
 
 /// Controls what usage info appears in response footers.

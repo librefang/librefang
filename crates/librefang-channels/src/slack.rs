@@ -21,7 +21,7 @@ use zeroize::Zeroizing;
 const SLACK_API_BASE: &str = "https://slack.com/api";
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
 const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
-const SLACK_MSG_LIMIT: usize = 3000;
+const DEFAULT_MAX_MESSAGE_LEN: usize = 3000;
 
 /// Slack Socket Mode adapter.
 pub struct SlackAdapter {
@@ -41,6 +41,8 @@ pub struct SlackAdapter {
     bot_user_id: Arc<RwLock<Option<String>>>,
     /// When true, replies are posted as top-level channel messages instead of threads.
     force_flat_replies: bool,
+    /// Maximum outbound message length before splitting.
+    max_msg_len: usize,
 }
 
 impl SlackAdapter {
@@ -57,12 +59,21 @@ impl SlackAdapter {
             shutdown_rx,
             bot_user_id: Arc::new(RwLock::new(None)),
             force_flat_replies: false,
+            max_msg_len: DEFAULT_MAX_MESSAGE_LEN,
         }
     }
 
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
     pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
         self.account_id = account_id;
+        self
+    }
+
+    /// Override the maximum outbound message length. Returns self for builder chaining.
+    pub fn with_max_message_length(mut self, len: Option<u32>) -> Self {
+        if let Some(v) = len {
+            self.max_msg_len = v as usize;
+        }
         self
     }
 
@@ -210,7 +221,7 @@ impl SlackAdapter {
         text: &str,
         thread_ts: Option<&str>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let chunks = split_message(text, SLACK_MSG_LIMIT);
+        let chunks = split_message(text, self.max_msg_len);
 
         for chunk in chunks {
             let mut body = serde_json::json!({

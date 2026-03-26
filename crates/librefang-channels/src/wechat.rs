@@ -27,7 +27,7 @@ const MAX_BACKOFF: Duration = Duration::from_secs(60);
 /// Initial backoff on failures.
 const INITIAL_BACKOFF: Duration = Duration::from_secs(2);
 /// Maximum message length for WeChat text messages.
-const MAX_MESSAGE_LEN: usize = 4096;
+const DEFAULT_MAX_MESSAGE_LEN: usize = 4096;
 /// Channel version sent in base_info.
 const CHANNEL_VERSION: &str = "1.0.2";
 
@@ -76,6 +76,8 @@ pub struct WeChatAdapter {
     last_error: Arc<RwLock<Option<String>>>,
     /// X-WECHAT-UIN header value, generated on construction.
     wechat_uin: String,
+    /// Maximum outbound message length before splitting.
+    max_msg_len: usize,
 }
 
 /// Generate a random UIN for the X-WECHAT-UIN header.
@@ -118,12 +120,21 @@ impl WeChatAdapter {
             started_at: Arc::new(RwLock::new(None)),
             last_error: Arc::new(RwLock::new(None)),
             wechat_uin: generate_wechat_uin(),
+            max_msg_len: DEFAULT_MAX_MESSAGE_LEN,
         }
     }
 
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
     pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
         self.account_id = account_id;
+        self
+    }
+
+    /// Override the maximum outbound message length. Returns self for builder chaining.
+    pub fn with_max_message_length(mut self, len: Option<u32>) -> Self {
+        if let Some(v) = len {
+            self.max_msg_len = v as usize;
+        }
         self
     }
 
@@ -297,7 +308,7 @@ impl WeChatAdapter {
         let url = format!("{}/ilink/bot/sendmessage", ILINK_BASE);
 
         // Split long messages
-        let chunks = split_message(text, MAX_MESSAGE_LEN);
+        let chunks = split_message(text, self.max_msg_len);
         for chunk in chunks {
             let client_id = uuid::Uuid::new_v4().to_string();
             let body = serde_json::json!({

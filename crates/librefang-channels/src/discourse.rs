@@ -19,7 +19,7 @@ use tracing::{info, warn};
 use zeroize::Zeroizing;
 
 const POLL_INTERVAL_SECS: u64 = 10;
-const MAX_MESSAGE_LEN: usize = 32000;
+const DEFAULT_MAX_MESSAGE_LEN: usize = 32000;
 
 /// Discourse forum channel adapter.
 ///
@@ -43,6 +43,8 @@ pub struct DiscourseAdapter {
     shutdown_rx: watch::Receiver<bool>,
     /// Last seen post ID (for incremental polling).
     last_post_id: Arc<RwLock<u64>>,
+    /// Maximum outbound message length before splitting.
+    max_msg_len: usize,
 }
 
 impl DiscourseAdapter {
@@ -71,11 +73,20 @@ impl DiscourseAdapter {
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
             last_post_id: Arc::new(RwLock::new(0)),
+            max_msg_len: DEFAULT_MAX_MESSAGE_LEN,
         }
     }
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
     pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
         self.account_id = account_id;
+        self
+    }
+
+    /// Override the maximum outbound message length. Returns self for builder chaining.
+    pub fn with_max_message_length(mut self, len: Option<u32>) -> Self {
+        if let Some(v) = len {
+            self.max_msg_len = v as usize;
+        }
         self
     }
 
@@ -140,7 +151,7 @@ impl DiscourseAdapter {
         raw: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/posts.json", self.base_url);
-        let chunks = split_message(raw, MAX_MESSAGE_LEN);
+        let chunks = split_message(raw, self.max_msg_len);
 
         for chunk in chunks {
             let body = serde_json::json!({

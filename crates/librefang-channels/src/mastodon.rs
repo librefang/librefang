@@ -20,7 +20,7 @@ use tracing::{info, warn};
 use zeroize::Zeroizing;
 
 /// Maximum Mastodon status length (default server limit).
-const MAX_MESSAGE_LEN: usize = 500;
+const DEFAULT_MAX_MESSAGE_LEN: usize = 500;
 
 /// SSE reconnect delay on error.
 const SSE_RECONNECT_DELAY_SECS: u64 = 5;
@@ -47,6 +47,8 @@ pub struct MastodonAdapter {
     shutdown_rx: watch::Receiver<bool>,
     /// Bot's own account ID (populated after verification).
     own_account_id: Arc<RwLock<Option<String>>>,
+    /// Maximum outbound message length before splitting.
+    max_msg_len: usize,
 }
 
 impl MastodonAdapter {
@@ -66,11 +68,20 @@ impl MastodonAdapter {
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
             own_account_id: Arc::new(RwLock::new(None)),
+            max_msg_len: DEFAULT_MAX_MESSAGE_LEN,
         }
     }
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
     pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
         self.account_id = account_id;
+        self
+    }
+
+    /// Override the maximum outbound message length. Returns self for builder chaining.
+    pub fn with_max_message_length(mut self, len: Option<u32>) -> Self {
+        if let Some(v) = len {
+            self.max_msg_len = v as usize;
+        }
         self
     }
 
@@ -110,7 +121,7 @@ impl MastodonAdapter {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/api/v1/statuses", self.instance_url);
 
-        let chunks = split_message(text, MAX_MESSAGE_LEN);
+        let chunks = split_message(text, self.max_msg_len);
 
         let mut reply_id = in_reply_to_id.map(|s| s.to_string());
 

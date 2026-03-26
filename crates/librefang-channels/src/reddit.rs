@@ -30,7 +30,7 @@ const REDDIT_API_BASE: &str = "https://oauth.reddit.com";
 const POLL_INTERVAL_SECS: u64 = 5;
 
 /// Maximum Reddit comment/message text length.
-const MAX_MESSAGE_LEN: usize = 10000;
+const DEFAULT_MAX_MESSAGE_LEN: usize = 10000;
 
 /// OAuth2 token refresh buffer — refresh 5 minutes before actual expiry.
 const TOKEN_REFRESH_BUFFER_SECS: u64 = 300;
@@ -65,6 +65,8 @@ pub struct RedditAdapter {
     cached_token: Arc<RwLock<Option<(String, Instant)>>>,
     /// Track last seen comment IDs to avoid duplicates.
     seen_comments: Arc<RwLock<HashMap<String, bool>>>,
+    /// Maximum outbound message length before splitting.
+    max_msg_len: usize,
 }
 
 impl RedditAdapter {
@@ -104,11 +106,20 @@ impl RedditAdapter {
             shutdown_rx,
             cached_token: Arc::new(RwLock::new(None)),
             seen_comments: Arc::new(RwLock::new(HashMap::new())),
+            max_msg_len: DEFAULT_MAX_MESSAGE_LEN,
         }
     }
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
     pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
         self.account_id = account_id;
+        self
+    }
+
+    /// Override the maximum outbound message length. Returns self for builder chaining.
+    pub fn with_max_message_length(mut self, len: Option<u32>) -> Self {
+        if let Some(v) = len {
+            self.max_msg_len = v as usize;
+        }
         self
     }
 
@@ -187,7 +198,7 @@ impl RedditAdapter {
         let token = self.get_token().await?;
         let url = format!("{}/api/comment", REDDIT_API_BASE);
 
-        let chunks = split_message(text, MAX_MESSAGE_LEN);
+        let chunks = split_message(text, self.max_msg_len);
 
         // Reddit only allows one reply per parent, so join chunks
         let full_text = chunks.join("\n\n---\n\n");

@@ -23,7 +23,7 @@ const QQ_TOKEN_URL: &str = "https://bots.qq.com/app/getAppAccessToken";
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
 const INITIAL_BACKOFF: Duration = Duration::from_secs(2);
 /// QQ message length limit (approximate).
-const QQ_MAX_MESSAGE_LEN: usize = 2000;
+const DEFAULT_MAX_MESSAGE_LEN: usize = 2000;
 
 /// Intent bit flags for QQ Bot API v2.
 const INTENT_GUILDS: u32 = 1 << 0;
@@ -56,6 +56,8 @@ pub struct QqAdapter {
     last_error: Arc<RwLock<Option<String>>>,
     /// Current access token (refreshed periodically).
     access_token: Arc<RwLock<Option<String>>>,
+    /// Maximum outbound message length before splitting.
+    max_msg_len: usize,
 }
 
 impl QqAdapter {
@@ -78,11 +80,20 @@ impl QqAdapter {
             started_at: Arc::new(RwLock::new(None)),
             last_error: Arc::new(RwLock::new(None)),
             access_token: Arc::new(RwLock::new(None)),
+            max_msg_len: DEFAULT_MAX_MESSAGE_LEN,
         }
     }
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
     pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
         self.account_id = account_id;
+        self
+    }
+
+    /// Override the maximum outbound message length. Returns self for builder chaining.
+    pub fn with_max_message_length(mut self, len: Option<u32>) -> Self {
+        if let Some(v) = len {
+            self.max_msg_len = v as usize;
+        }
         self
     }
 
@@ -480,7 +491,7 @@ impl ChannelAdapter for QqAdapter {
         if parts.len() == 2 {
             let endpoint = parts[0];
             let msg_id = parts[1];
-            for chunk in split_message(&text, QQ_MAX_MESSAGE_LEN) {
+            for chunk in split_message(&text, self.max_msg_len) {
                 if let Err(e) = self.send_qq_message(endpoint, msg_id, chunk).await {
                     warn!("QQ: failed to send message: {}", e);
                 }

@@ -24,7 +24,7 @@ use tokio::sync::{mpsc, watch, RwLock};
 use tracing::{debug, info, warn};
 use zeroize::Zeroizing;
 
-const MAX_MESSAGE_LEN: usize = 4096;
+const DEFAULT_MAX_MESSAGE_LEN: usize = 4096;
 const TOKEN_REFRESH_MARGIN_SECS: u64 = 300;
 const DEFAULT_TOKEN_LIFETIME_SECS: u64 = 3600;
 const GOOGLE_CHAT_SCOPE: &str = "https://www.googleapis.com/auth/chat.bot";
@@ -103,6 +103,8 @@ pub struct GoogleChatAdapter {
     shutdown_rx: watch::Receiver<bool>,
     /// Cached OAuth2 access token with expiry instant.
     cached_token: Arc<RwLock<Option<(String, Instant)>>>,
+    /// Maximum outbound message length before splitting.
+    max_msg_len: usize,
 }
 
 impl GoogleChatAdapter {
@@ -123,11 +125,20 @@ impl GoogleChatAdapter {
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
             cached_token: Arc::new(RwLock::new(None)),
+            max_msg_len: DEFAULT_MAX_MESSAGE_LEN,
         }
     }
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
     pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
         self.account_id = account_id;
+        self
+    }
+
+    /// Override the maximum outbound message length. Returns self for builder chaining.
+    pub fn with_max_message_length(mut self, len: Option<u32>) -> Self {
+        if let Some(v) = len {
+            self.max_msg_len = v as usize;
+        }
         self
     }
 
@@ -288,7 +299,7 @@ impl GoogleChatAdapter {
         let token = self.get_access_token().await?;
         let url = format!("https://chat.googleapis.com/v1/{}/messages", space_id);
 
-        let chunks = split_message(text, MAX_MESSAGE_LEN);
+        let chunks = split_message(text, self.max_msg_len);
         for chunk in chunks {
             let body = serde_json::json!({
                 "text": chunk,

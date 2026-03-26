@@ -29,7 +29,7 @@ const LINE_REPLY_URL: &str = "https://api.line.me/v2/bot/message/reply";
 const LINE_PROFILE_URL: &str = "https://api.line.me/v2/bot/profile";
 
 /// Maximum LINE message text length (characters).
-const MAX_MESSAGE_LEN: usize = 5000;
+const DEFAULT_MAX_MESSAGE_LEN: usize = 5000;
 
 /// LINE Messaging API adapter.
 ///
@@ -52,6 +52,8 @@ pub struct LineAdapter {
     /// Shutdown signal.
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
+    /// Maximum outbound message length before splitting.
+    max_msg_len: usize,
 }
 
 impl LineAdapter {
@@ -71,11 +73,20 @@ impl LineAdapter {
             account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
+            max_msg_len: DEFAULT_DEFAULT_MAX_MESSAGE_LEN,
         }
     }
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
     pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
         self.account_id = account_id;
+        self
+    }
+
+    /// Override the maximum outbound message length. Returns self for builder chaining.
+    pub fn with_max_message_length(mut self, len: Option<u32>) -> Self {
+        if let Some(v) = len {
+            self.max_msg_len = v as usize;
+        }
         self
     }
 
@@ -165,7 +176,7 @@ impl LineAdapter {
         to: &str,
         text: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let chunks = split_message(text, MAX_MESSAGE_LEN);
+        let chunks = split_message(text, self.max_msg_len);
 
         for chunk in chunks {
             let body = serde_json::json!({
@@ -203,7 +214,7 @@ impl LineAdapter {
         reply_token: &str,
         text: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let chunks = split_message(text, MAX_MESSAGE_LEN);
+        let chunks = split_message(text, self.max_msg_len);
         // LINE reply API allows up to 5 messages per reply
         let messages: Vec<serde_json::Value> = chunks
             .into_iter()

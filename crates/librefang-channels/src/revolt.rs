@@ -26,7 +26,7 @@ const DEFAULT_API_URL: &str = "https://api.revolt.chat";
 const DEFAULT_WS_URL: &str = "wss://ws.revolt.chat";
 
 /// Maximum Revolt message text length (characters).
-const MAX_MESSAGE_LEN: usize = 2000;
+const DEFAULT_MAX_MESSAGE_LEN: usize = 2000;
 
 /// Maximum backoff duration for WebSocket reconnection.
 const MAX_BACKOFF_SECS: u64 = 60;
@@ -57,6 +57,8 @@ pub struct RevoltAdapter {
     shutdown_rx: watch::Receiver<bool>,
     /// Bot's own user ID (populated after authentication).
     bot_user_id: Arc<RwLock<Option<String>>>,
+    /// Maximum outbound message length before splitting.
+    max_msg_len: usize,
 }
 
 impl RevoltAdapter {
@@ -74,6 +76,14 @@ impl RevoltAdapter {
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
     pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
         self.account_id = account_id;
+        self
+    }
+
+    /// Override the maximum outbound message length. Returns self for builder chaining.
+    pub fn with_max_message_length(mut self, len: Option<u32>) -> Self {
+        if let Some(v) = len {
+            self.max_msg_len = v as usize;
+        }
         self
     }
 
@@ -134,7 +144,7 @@ impl RevoltAdapter {
         text: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/channels/{}/messages", self.api_url, channel_id);
-        let chunks = split_message(text, MAX_MESSAGE_LEN);
+        let chunks = split_message(text, self.max_msg_len);
 
         for chunk in chunks {
             let body = serde_json::json!({
@@ -166,7 +176,7 @@ impl RevoltAdapter {
         text: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/channels/{}/messages", self.api_url, channel_id);
-        let chunks = split_message(text, MAX_MESSAGE_LEN);
+        let chunks = split_message(text, self.max_msg_len);
 
         for (i, chunk) in chunks.iter().enumerate() {
             let mut body = serde_json::json!({

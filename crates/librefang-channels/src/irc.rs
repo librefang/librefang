@@ -23,7 +23,7 @@ use zeroize::Zeroizing;
 
 /// Maximum IRC message length per RFC 2812 (including CRLF).
 /// We use 510 for the payload (512 minus CRLF).
-const MAX_MESSAGE_LEN: usize = 510;
+const DEFAULT_MAX_MESSAGE_LEN: usize = 510;
 
 /// Maximum length for a single PRIVMSG payload, accounting for the
 /// `:nick!user@host PRIVMSG #channel :` prefix overhead (~80 chars conservative).
@@ -58,6 +58,8 @@ pub struct IrcAdapter {
     /// Shared write handle for sending messages from the `send()` method.
     /// Populated after `start()` connects to the server.
     write_tx: Arc<RwLock<Option<mpsc::Sender<String>>>>,
+    /// Maximum outbound message length before splitting.
+    max_msg_len: usize,
 }
 
 impl IrcAdapter {
@@ -89,11 +91,20 @@ impl IrcAdapter {
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
             write_tx: Arc::new(RwLock::new(None)),
+            max_msg_len: DEFAULT_MAX_MESSAGE_LEN,
         }
     }
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
     pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
         self.account_id = account_id;
+        self
+    }
+
+    /// Override the maximum outbound message length. Returns self for builder chaining.
+    pub fn with_max_message_length(mut self, len: Option<u32>) -> Self {
+        if let Some(v) = len {
+            self.max_msg_len = v as usize;
+        }
         self
     }
 
@@ -449,7 +460,7 @@ impl ChannelAdapter for IrcAdapter {
         let chunks = split_message(&text, MAX_PRIVMSG_PAYLOAD);
         for chunk in chunks {
             let raw = format!("PRIVMSG {target} :{chunk}\r\n");
-            if raw.len() > MAX_MESSAGE_LEN + 2 {
+            if raw.len() > DEFAULT_MAX_MESSAGE_LEN + 2 {
                 // Shouldn't happen with MAX_PRIVMSG_PAYLOAD, but be safe
                 warn!("IRC message exceeds 512 bytes, truncating");
             }

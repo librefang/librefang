@@ -28,7 +28,7 @@ const WECOM_TOKEN_URL: &str = "https://qyapi.weixin.qq.com/cgi-bin/gettoken";
 const WECOM_SEND_URL: &str = "https://qyapi.weixin.qq.com/cgi-bin/message/send";
 
 /// Maximum WeCom message text length (characters).
-const MAX_MESSAGE_LEN: usize = 2048;
+const DEFAULT_MAX_MESSAGE_LEN: usize = 2048;
 
 /// Token refresh buffer — refresh 5 minutes before actual expiry.
 const TOKEN_REFRESH_BUFFER_SECS: u64 = 300;
@@ -220,6 +220,8 @@ pub struct WeComAdapter {
     shutdown_rx: watch::Receiver<bool>,
     /// Cached access token and its expiry instant.
     cached_token: Arc<RwLock<Option<(String, Instant)>>>,
+    /// Maximum outbound message length before splitting.
+    max_msg_len: usize,
 }
 
 impl WeComAdapter {
@@ -238,11 +240,20 @@ impl WeComAdapter {
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
             cached_token: Arc::new(RwLock::new(None)),
+            max_msg_len: DEFAULT_MAX_MESSAGE_LEN,
         }
     }
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
     pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
         self.account_id = account_id;
+        self
+    }
+
+    /// Override the maximum outbound message length. Returns self for builder chaining.
+    pub fn with_max_message_length(mut self, len: Option<u32>) -> Self {
+        if let Some(v) = len {
+            self.max_msg_len = v as usize;
+        }
         self
     }
 
@@ -594,7 +605,7 @@ impl ChannelAdapter for WeComAdapter {
         match content {
             ChannelContent::Text(text) => {
                 // Split long messages
-                for chunk in split_message(&text, MAX_MESSAGE_LEN) {
+                for chunk in split_message(&text, self.max_msg_len) {
                     self.send_text(user_id, chunk).await?;
                 }
             }
@@ -660,8 +671,8 @@ mod tests {
 
     #[test]
     fn test_max_message_length() {
-        // MAX_MESSAGE_LEN should be 2048 for WeCom
-        assert_eq!(MAX_MESSAGE_LEN, 2048);
+        // DEFAULT_MAX_MESSAGE_LEN should be 2048 for WeCom
+        assert_eq!(DEFAULT_MAX_MESSAGE_LEN, 2048);
     }
 
     #[test]

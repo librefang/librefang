@@ -34,6 +34,9 @@ const DEFAULT_API_URL: &str = "https://api.telegram.org";
 /// provides a safe margin while keeping the UX responsive.
 const STREAMING_EDIT_INTERVAL: Duration = Duration::from_millis(1000);
 
+/// Default maximum message length for Telegram messages.
+const DEFAULT_MAX_MESSAGE_LEN: usize = 4096;
+
 /// Telegram Bot API adapter using long-polling.
 pub struct TelegramAdapter {
     /// SECURITY: Bot token is zeroized on drop to prevent memory disclosure.
@@ -52,6 +55,8 @@ pub struct TelegramAdapter {
     thread_routes: HashMap<String, String>,
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
+    /// Maximum outbound message length before splitting.
+    max_msg_len: usize,
 }
 
 impl TelegramAdapter {
@@ -82,6 +87,7 @@ impl TelegramAdapter {
             thread_routes: HashMap::new(),
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
+            max_msg_len: DEFAULT_MAX_MESSAGE_LEN,
         }
     }
 
@@ -94,6 +100,14 @@ impl TelegramAdapter {
     /// Set thread-based agent routing. Returns self for builder chaining.
     pub fn with_thread_routes(mut self, thread_routes: HashMap<String, String>) -> Self {
         self.thread_routes = thread_routes;
+        self
+    }
+
+    /// Override the maximum outbound message length. Returns self for builder chaining.
+    pub fn with_max_message_length(mut self, len: Option<u32>) -> Self {
+        if let Some(v) = len {
+            self.max_msg_len = v as usize;
+        }
         self
     }
 
@@ -136,7 +150,7 @@ impl TelegramAdapter {
         let sanitized = sanitize_telegram_html(text);
 
         // Telegram has a 4096 character limit per message — split if needed
-        let chunks = split_message(&sanitized, 4096);
+        let chunks = split_message(&sanitized, self.max_msg_len);
         for chunk in chunks {
             let mut body = serde_json::json!({
                 "chat_id": chat_id,
@@ -1053,7 +1067,7 @@ impl ChannelAdapter for TelegramAdapter {
             // Split *before* sanitization — api_edit_message / api_send_message
             // sanitize internally, so pre-sanitizing here would double-escape
             // HTML entities.
-            let chunks = split_message(&formatted, 4096);
+            let chunks = split_message(&formatted, self.max_msg_len);
             if chunks.len() <= 1 {
                 // Single message — just edit in place.
                 let _ = self

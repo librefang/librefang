@@ -20,7 +20,7 @@ use tracing::{info, warn};
 use zeroize::Zeroizing;
 
 /// Maximum message length for Keybase messages.
-const MAX_MESSAGE_LEN: usize = 10000;
+const DEFAULT_MAX_MESSAGE_LEN: usize = 10000;
 
 /// Polling interval in seconds for new messages.
 const POLL_INTERVAL_SECS: u64 = 3;
@@ -49,6 +49,8 @@ pub struct KeybaseAdapter {
     shutdown_rx: watch::Receiver<bool>,
     /// Last read message ID per conversation for incremental polling.
     last_msg_ids: Arc<RwLock<HashMap<String, i64>>>,
+    /// Maximum outbound message length before splitting.
+    max_msg_len: usize,
 }
 
 impl KeybaseAdapter {
@@ -69,11 +71,20 @@ impl KeybaseAdapter {
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
             last_msg_ids: Arc::new(RwLock::new(HashMap::new())),
+            max_msg_len: DEFAULT_MAX_MESSAGE_LEN,
         }
     }
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
     pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
         self.account_id = account_id;
+        self
+    }
+
+    /// Override the maximum outbound message length. Returns self for builder chaining.
+    pub fn with_max_message_length(mut self, len: Option<u32>) -> Self {
+        if let Some(v) = len {
+            self.max_msg_len = v as usize;
+        }
         self
     }
 
@@ -160,7 +171,7 @@ impl KeybaseAdapter {
         channel: &serde_json::Value,
         text: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let chunks = split_message(text, MAX_MESSAGE_LEN);
+        let chunks = split_message(text, self.max_msg_len);
 
         for chunk in chunks {
             let payload = serde_json::json!({

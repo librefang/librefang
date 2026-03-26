@@ -18,7 +18,7 @@ use tokio::sync::{mpsc, watch};
 use tracing::{info, warn};
 use zeroize::Zeroizing;
 
-const MAX_MESSAGE_LEN: usize = 65535;
+const DEFAULT_MAX_MESSAGE_LEN: usize = 65535;
 
 /// Gotify push notification channel adapter.
 ///
@@ -39,6 +39,8 @@ pub struct GotifyAdapter {
     /// Shutdown signal.
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
+    /// Maximum outbound message length before splitting.
+    max_msg_len: usize,
 }
 
 impl GotifyAdapter {
@@ -59,11 +61,20 @@ impl GotifyAdapter {
             account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
+            max_msg_len: DEFAULT_DEFAULT_MAX_MESSAGE_LEN,
         }
     }
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
     pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
         self.account_id = account_id;
+        self
+    }
+
+    /// Override the maximum outbound message length. Returns self for builder chaining.
+    pub fn with_max_message_length(mut self, len: Option<u32>) -> Self {
+        if let Some(v) = len {
+            self.max_msg_len = v as usize;
+        }
         self
     }
 
@@ -106,7 +117,7 @@ impl GotifyAdapter {
             self.server_url,
             self.app_token.as_str()
         );
-        let chunks = split_message(message, MAX_MESSAGE_LEN);
+        let chunks = split_message(message, self.max_msg_len);
 
         for (i, chunk) in chunks.iter().enumerate() {
             let chunk_title = if chunks.len() > 1 {

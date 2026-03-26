@@ -26,7 +26,7 @@ const WEBEX_API_BASE: &str = "https://webexapis.com/v1";
 const WEBEX_WS_URL: &str = "wss://mercury-connection-a.wbx2.com/v1/apps/wx2/registrations";
 
 /// Maximum message length for Webex (official limit is 7439 characters).
-const MAX_MESSAGE_LEN: usize = 7439;
+const DEFAULT_MAX_MESSAGE_LEN: usize = 7439;
 
 /// Webex Bot channel adapter using WebSocket for events and REST for sending.
 ///
@@ -47,6 +47,8 @@ pub struct WebexAdapter {
     shutdown_rx: watch::Receiver<bool>,
     /// Cached bot identity (ID and display name).
     bot_info: Arc<RwLock<Option<(String, String)>>>,
+    /// Maximum outbound message length before splitting.
+    max_msg_len: usize,
 }
 
 impl WebexAdapter {
@@ -65,11 +67,20 @@ impl WebexAdapter {
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
             bot_info: Arc::new(RwLock::new(None)),
+            max_msg_len: DEFAULT_MAX_MESSAGE_LEN,
         }
     }
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
     pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
         self.account_id = account_id;
+        self
+    }
+
+    /// Override the maximum outbound message length. Returns self for builder chaining.
+    pub fn with_max_message_length(mut self, len: Option<u32>) -> Self {
+        if let Some(v) = len {
+            self.max_msg_len = v as usize;
+        }
         self
     }
 
@@ -162,7 +173,7 @@ impl WebexAdapter {
         text: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/messages", WEBEX_API_BASE);
-        let chunks = split_message(text, MAX_MESSAGE_LEN);
+        let chunks = split_message(text, self.max_msg_len);
 
         for chunk in chunks {
             let body = serde_json::json!({
@@ -196,7 +207,7 @@ impl WebexAdapter {
         text: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/messages", WEBEX_API_BASE);
-        let chunks = split_message(text, MAX_MESSAGE_LEN);
+        let chunks = split_message(text, self.max_msg_len);
 
         for chunk in chunks {
             let body = if person_id.contains('@') {
@@ -531,7 +542,7 @@ mod tests {
 
     #[test]
     fn test_webex_message_length_limit() {
-        assert_eq!(MAX_MESSAGE_LEN, 7439);
+        assert_eq!(DEFAULT_MAX_MESSAGE_LEN, 7439);
     }
 
     #[test]

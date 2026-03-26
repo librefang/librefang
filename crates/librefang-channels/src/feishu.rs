@@ -105,7 +105,7 @@ pub enum FeishuReceiveMode {
 // ---------------------------------------------------------------------------
 
 /// Maximum Feishu message text length (characters).
-const MAX_MESSAGE_LEN: usize = 4096;
+const DEFAULT_MAX_MESSAGE_LEN: usize = 4096;
 
 /// Token refresh buffer — refresh 5 minutes before actual expiry.
 const TOKEN_REFRESH_BUFFER_SECS: u64 = 300;
@@ -149,6 +149,8 @@ pub struct FeishuAdapter {
     shutdown_rx: watch::Receiver<bool>,
     /// Cached tenant access token and its expiry instant.
     cached_token: Arc<RwLock<Option<(String, Instant)>>>,
+    /// Maximum outbound message length before splitting.
+    max_msg_len: usize,
 }
 
 impl FeishuAdapter {
@@ -180,6 +182,14 @@ impl FeishuAdapter {
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
     pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
         self.account_id = account_id;
+        self
+    }
+
+    /// Override the maximum outbound message length. Returns self for builder chaining.
+    pub fn with_max_message_length(mut self, len: Option<u32>) -> Self {
+        if let Some(v) = len {
+            self.max_msg_len = v as usize;
+        }
         self
     }
 
@@ -271,7 +281,7 @@ impl FeishuAdapter {
             url::form_urlencoded::byte_serialize(receive_id_type.as_bytes()).collect();
         let url = format!("{}?receive_id_type={}", self.send_url(), encoded_type);
 
-        let chunks = split_message(text, MAX_MESSAGE_LEN);
+        let chunks = split_message(text, self.max_msg_len);
 
         for chunk in chunks {
             let content = serde_json::json!({

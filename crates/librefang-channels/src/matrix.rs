@@ -22,7 +22,7 @@ const MAX_BACKOFF: Duration = Duration::from_secs(60);
 const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 /// Matrix /sync long-polling timeout in milliseconds.
 const SYNC_TIMEOUT_MS: u64 = 30000;
-const MAX_MESSAGE_LEN: usize = 4096;
+const DEFAULT_MAX_MESSAGE_LEN: usize = 4096;
 
 /// Matrix channel adapter using the Client-Server API.
 pub struct MatrixAdapter {
@@ -47,6 +47,8 @@ pub struct MatrixAdapter {
     shutdown_rx: watch::Receiver<bool>,
     /// Sync token for resuming /sync.
     since_token: Arc<RwLock<Option<String>>>,
+    /// Maximum outbound message length before splitting.
+    max_msg_len: usize,
 }
 
 impl MatrixAdapter {
@@ -70,11 +72,20 @@ impl MatrixAdapter {
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
             since_token: Arc::new(RwLock::new(None)),
+            max_msg_len: DEFAULT_MAX_MESSAGE_LEN,
         }
     }
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
     pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
         self.account_id = account_id;
+        self
+    }
+
+    /// Override the maximum outbound message length. Returns self for builder chaining.
+    pub fn with_max_message_length(mut self, len: Option<u32>) -> Self {
+        if let Some(v) = len {
+            self.max_msg_len = v as usize;
+        }
         self
     }
 
@@ -90,7 +101,7 @@ impl MatrixAdapter {
             self.homeserver_url, room_id, txn_id
         );
 
-        let chunks = crate::types::split_message(text, MAX_MESSAGE_LEN);
+        let chunks = crate::types::split_message(text, self.max_msg_len);
         for chunk in chunks {
             let body = serde_json::json!({
                 "msgtype": "m.text",
