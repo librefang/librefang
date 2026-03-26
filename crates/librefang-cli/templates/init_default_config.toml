@@ -96,6 +96,17 @@ debounce_ms = 500
 # max_monthly_usd = 0.0
 # alert_threshold = 0.8        # Alert at 80% of limit
 
+# ── Context Budget Tuning ───────────────────────────────────
+# [context_budget]
+# tool_chars_per_token = 2.0       # Char density for tool output estimation
+# general_chars_per_token = 4.0    # Char density for general text
+# per_result_cap = 0.30            # Max fraction of context per tool result
+# single_result_max = 0.50         # Absolute max fraction for one result
+# tool_headroom = 0.75             # Fraction reserved for all tool results
+# default_context_window = 200000  # Fallback context window (tokens)
+# overflow_stage1_threshold = 0.70 # Triggers moderate trim
+# overflow_stage2_threshold = 0.90 # Triggers aggressive trim
+
 # ── Extended Thinking (Claude models) ────────────────────────
 # [thinking]
 # budget_tokens = 10000

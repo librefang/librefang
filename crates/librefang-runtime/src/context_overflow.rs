@@ -68,15 +68,37 @@ fn drain_unpinned_from_front(messages: &mut Vec<Message>, target: usize) -> usiz
 /// Run the 4-stage overflow recovery pipeline.
 ///
 /// Returns the recovery stage applied and the number of messages/results affected.
+///
+/// `stage1_threshold` and `stage2_threshold` are fractions of `context_window`
+/// (e.g. 0.70 and 0.90). Pass `None` to use the built-in defaults (0.70 / 0.90).
 pub fn recover_from_overflow(
     messages: &mut Vec<Message>,
     system_prompt: &str,
     tools: &[ToolDefinition],
     context_window: usize,
 ) -> RecoveryStage {
+    recover_from_overflow_with_thresholds(
+        messages,
+        system_prompt,
+        tools,
+        context_window,
+        0.70,
+        0.90,
+    )
+}
+
+/// Like [`recover_from_overflow`] but with explicit stage thresholds.
+pub fn recover_from_overflow_with_thresholds(
+    messages: &mut Vec<Message>,
+    system_prompt: &str,
+    tools: &[ToolDefinition],
+    context_window: usize,
+    stage1_threshold: f64,
+    stage2_threshold: f64,
+) -> RecoveryStage {
     let estimated = estimate_tokens(messages, system_prompt, tools);
-    let threshold_70 = (context_window as f64 * 0.70) as usize;
-    let threshold_90 = (context_window as f64 * 0.90) as usize;
+    let threshold_70 = (context_window as f64 * stage1_threshold) as usize;
+    let threshold_90 = (context_window as f64 * stage2_threshold) as usize;
 
     // No recovery needed
     if estimated <= threshold_70 {

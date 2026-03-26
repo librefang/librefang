@@ -48,7 +48,7 @@ use tracing::{debug, warn};
 
 use crate::compactor::{self, CompactionConfig, CompactionResult};
 use crate::context_budget::{apply_context_guard, ContextBudget};
-use crate::context_overflow::{recover_from_overflow, RecoveryStage};
+use crate::context_overflow::{recover_from_overflow_with_thresholds, RecoveryStage};
 use crate::embedding::EmbeddingDriver;
 use crate::llm_driver::LlmDriver;
 
@@ -192,6 +192,7 @@ pub trait ContextEngine: Send + Sync {
 /// - Embedding-based semantic memory recall with LIKE fallback
 pub struct DefaultContextEngine {
     config: ContextEngineConfig,
+    budget_config: librefang_types::config::ContextBudgetConfig,
     memory: Arc<MemorySubstrate>,
     embedding_driver: Option<Arc<dyn EmbeddingDriver + Send + Sync>>,
     compaction_config: CompactionConfig,
@@ -201,6 +202,7 @@ impl DefaultContextEngine {
     /// Create a new default context engine.
     pub fn new(
         config: ContextEngineConfig,
+        budget_config: librefang_types::config::ContextBudgetConfig,
         memory: Arc<MemorySubstrate>,
         embedding_driver: Option<Arc<dyn EmbeddingDriver + Send + Sync>>,
     ) -> Self {
@@ -210,6 +212,7 @@ impl DefaultContextEngine {
         };
         Self {
             config,
+            budget_config,
             memory,
             embedding_driver,
             compaction_config,
@@ -300,7 +303,14 @@ impl ContextEngine for DefaultContextEngine {
     ) -> LibreFangResult<AssembleResult> {
         // Stage 1: Overflow recovery pipeline (4-stage cascade, respects pinned messages)
         // Uses the per-agent context window size, not the boot-time default.
-        let recovery = recover_from_overflow(messages, system_prompt, tools, context_window_tokens);
+        let recovery = recover_from_overflow_with_thresholds(
+            messages,
+            system_prompt,
+            tools,
+            context_window_tokens,
+            self.budget_config.overflow_stage1_threshold,
+            self.budget_config.overflow_stage2_threshold,
+        );
 
         if recovery == RecoveryStage::FinalError {
             warn!("ContextEngine: overflow unrecoverable — suggest /reset or /compact");
@@ -313,7 +323,7 @@ impl ContextEngine for DefaultContextEngine {
 
         // Stage 2: Context guard — compact oversized tool results
         // Build a per-agent budget so tool result caps match the actual context window.
-        let agent_budget = ContextBudget::new(context_window_tokens);
+        let agent_budget = ContextBudget::from_config(context_window_tokens, &self.budget_config);
         apply_context_guard(messages, &agent_budget, tools);
 
         Ok(AssembleResult { recovery })
@@ -355,7 +365,7 @@ impl ContextEngine for DefaultContextEngine {
     }
 
     fn truncate_tool_result(&self, content: &str, context_window_tokens: usize) -> String {
-        let budget = ContextBudget::new(context_window_tokens);
+        let budget = ContextBudget::from_config(context_window_tokens, &self.budget_config);
         crate::context_budget::truncate_tool_result_dynamic(content, &budget)
     }
 }
@@ -746,11 +756,17 @@ pub fn list_installed_plugins() -> Vec<librefang_types::config::PluginManifest> 
 /// 3. Otherwise, return a plain `DefaultContextEngine`
 pub fn build_context_engine(
     toml_config: &librefang_types::config::ContextEngineTomlConfig,
+    budget_config: &librefang_types::config::ContextBudgetConfig,
     runtime_config: ContextEngineConfig,
     memory: Arc<MemorySubstrate>,
     embedding_driver: Option<Arc<dyn EmbeddingDriver + Send + Sync>>,
 ) -> Box<dyn ContextEngine> {
-    let default = DefaultContextEngine::new(runtime_config, memory, embedding_driver);
+    let default = DefaultContextEngine::new(
+        runtime_config,
+        budget_config.clone(),
+        memory,
+        embedding_driver,
+    );
 
     // Warn if an unknown engine name is configured
     if toml_config.engine != "default" {
@@ -808,7 +824,8 @@ mod tests {
     #[tokio::test]
     async fn test_bootstrap_default() {
         let config = ContextEngineConfig::default();
-        let engine = DefaultContextEngine::new(config.clone(), make_memory(), None);
+        let engine =
+            DefaultContextEngine::new(config.clone(), Default::default(), make_memory(), None);
         assert!(engine.bootstrap(&config).await.is_ok());
     }
 
@@ -818,7 +835,7 @@ mod tests {
             stable_prefix_mode: true,
             ..Default::default()
         };
-        let engine = DefaultContextEngine::new(config, make_memory(), None);
+        let engine = DefaultContextEngine::new(config, Default::default(), make_memory(), None);
         let result = engine.ingest(AgentId::new(), "hello").await.unwrap();
         assert!(result.recalled_memories.is_empty());
     }
@@ -851,7 +868,7 @@ mod tests {
             .unwrap();
 
         let config = ContextEngineConfig::default();
-        let engine = DefaultContextEngine::new(config, memory, None);
+        let engine = DefaultContextEngine::new(config, Default::default(), memory, None);
         let result = engine.ingest(agent_id, "Rust").await.unwrap();
         assert_eq!(result.recalled_memories.len(), 1);
         assert!(result.recalled_memories[0].content.contains("Rust"));
@@ -860,7 +877,7 @@ mod tests {
     #[tokio::test]
     async fn test_assemble_no_overflow() {
         let config = ContextEngineConfig::default();
-        let engine = DefaultContextEngine::new(config, make_memory(), None);
+        let engine = DefaultContextEngine::new(config, Default::default(), make_memory(), None);
         let mut messages = vec![Message::user("hi"), Message::assistant("hello")];
         let result = engine
             .assemble(&mut messages, "system", &[], 200_000)
@@ -875,7 +892,7 @@ mod tests {
             context_window_tokens: 100, // tiny window
             ..Default::default()
         };
-        let engine = DefaultContextEngine::new(config, make_memory(), None);
+        let engine = DefaultContextEngine::new(config, Default::default(), make_memory(), None);
 
         // Create messages that exceed the tiny context window
         let mut messages: Vec<Message> = (0..20)
@@ -901,7 +918,7 @@ mod tests {
             context_window_tokens: 500,
             ..Default::default()
         };
-        let engine = DefaultContextEngine::new(config, make_memory(), None);
+        let engine = DefaultContextEngine::new(config, Default::default(), make_memory(), None);
         let big_content = "x".repeat(10_000);
         let truncated = engine.truncate_tool_result(&big_content, 500);
         assert!(truncated.len() < big_content.len());
@@ -911,7 +928,7 @@ mod tests {
     #[tokio::test]
     async fn test_after_turn_noop() {
         let config = ContextEngineConfig::default();
-        let engine = DefaultContextEngine::new(config, make_memory(), None);
+        let engine = DefaultContextEngine::new(config, Default::default(), make_memory(), None);
         assert!(engine
             .after_turn(AgentId::new(), &[Message::user("hi")])
             .await
@@ -921,7 +938,7 @@ mod tests {
     #[tokio::test]
     async fn test_subagent_hooks_noop() {
         let config = ContextEngineConfig::default();
-        let engine = DefaultContextEngine::new(config, make_memory(), None);
+        let engine = DefaultContextEngine::new(config, Default::default(), make_memory(), None);
         let parent = AgentId::new();
         let child = AgentId::new();
         assert!(engine.prepare_subagent_context(parent, child).await.is_ok());
@@ -1034,7 +1051,13 @@ ingest = "hooks/ingest.py"
     fn test_build_context_engine_default() {
         let toml_config = librefang_types::config::ContextEngineTomlConfig::default();
         let runtime_config = ContextEngineConfig::default();
-        let engine = build_context_engine(&toml_config, runtime_config, make_memory(), None);
+        let engine = build_context_engine(
+            &toml_config,
+            &Default::default(),
+            runtime_config,
+            make_memory(),
+            None,
+        );
         // Should not panic — returns DefaultContextEngine
         let _ = engine;
     }
@@ -1047,7 +1070,13 @@ ingest = "hooks/ingest.py"
         };
         let runtime_config = ContextEngineConfig::default();
         // Should fall back to default engine, not panic
-        let engine = build_context_engine(&toml_config, runtime_config, make_memory(), None);
+        let engine = build_context_engine(
+            &toml_config,
+            &Default::default(),
+            runtime_config,
+            make_memory(),
+            None,
+        );
         let _ = engine;
     }
 }

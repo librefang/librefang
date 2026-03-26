@@ -1526,6 +1526,9 @@ pub struct KernelConfig {
     /// Proactive memory (mem0-style) configuration.
     #[serde(default)]
     pub proactive_memory: crate::memory::ProactiveMemoryConfig,
+    /// Context budget and overflow recovery tuning.
+    #[serde(default)]
+    pub context_budget: ContextBudgetConfig,
     /// Pluggable context engine configuration.
     #[serde(default)]
     pub context_engine: ContextEngineTomlConfig,
@@ -1718,6 +1721,93 @@ pub struct VertexAiConfig {
 /// token_url = "https://github.com/login/oauth/access_token"
 /// userinfo_url = "https://api.github.com/user"
 /// client_id = "your-github-client-id"
+// -- Context budget default value functions ----------------------------------
+
+fn default_tool_chars_per_token() -> f64 {
+    2.0
+}
+fn default_general_chars_per_token() -> f64 {
+    4.0
+}
+fn default_per_result_cap() -> f64 {
+    0.30
+}
+fn default_single_result_max() -> f64 {
+    0.50
+}
+fn default_tool_headroom() -> f64 {
+    0.75
+}
+fn default_context_window_tokens() -> usize {
+    200_000
+}
+fn default_overflow_stage1_threshold() -> f64 {
+    0.70
+}
+fn default_overflow_stage2_threshold() -> f64 {
+    0.90
+}
+
+/// Tuning knobs for the context budget and overflow recovery pipeline.
+///
+/// All fraction fields are expressed as values between 0.0 and 1.0 relative to
+/// the model's context window size. Configure in `config.toml`:
+///
+/// ```toml
+/// [context_budget]
+/// tool_chars_per_token = 2.0
+/// general_chars_per_token = 4.0
+/// per_result_cap = 0.30
+/// single_result_max = 0.50
+/// tool_headroom = 0.75
+/// default_context_window = 200000
+/// overflow_stage1_threshold = 0.70
+/// overflow_stage2_threshold = 0.90
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ContextBudgetConfig {
+    /// Characters per token for tool output estimation (default: 2.0).
+    #[serde(default = "default_tool_chars_per_token")]
+    pub tool_chars_per_token: f64,
+    /// Characters per token for general text estimation (default: 4.0).
+    #[serde(default = "default_general_chars_per_token")]
+    pub general_chars_per_token: f64,
+    /// Max fraction of context window for a single tool result (default: 0.30).
+    #[serde(default = "default_per_result_cap")]
+    pub per_result_cap: f64,
+    /// Max fraction of context window for single large result (default: 0.50).
+    #[serde(default = "default_single_result_max")]
+    pub single_result_max: f64,
+    /// Fraction of context window reserved for tool results (default: 0.75).
+    #[serde(default = "default_tool_headroom")]
+    pub tool_headroom: f64,
+    /// Default context window size in tokens (default: 200000).
+    #[serde(default = "default_context_window_tokens")]
+    pub default_context_window: usize,
+    /// Context usage fraction that triggers stage 1 recovery (default: 0.70).
+    #[serde(default = "default_overflow_stage1_threshold")]
+    pub overflow_stage1_threshold: f64,
+    /// Context usage fraction that triggers stage 2 recovery (default: 0.90).
+    #[serde(default = "default_overflow_stage2_threshold")]
+    pub overflow_stage2_threshold: f64,
+}
+
+impl Default for ContextBudgetConfig {
+    fn default() -> Self {
+        Self {
+            tool_chars_per_token: default_tool_chars_per_token(),
+            general_chars_per_token: default_general_chars_per_token(),
+            per_result_cap: default_per_result_cap(),
+            single_result_max: default_single_result_max(),
+            tool_headroom: default_tool_headroom(),
+            default_context_window: default_context_window_tokens(),
+            overflow_stage1_threshold: default_overflow_stage1_threshold(),
+            overflow_stage2_threshold: default_overflow_stage2_threshold(),
+        }
+    }
+}
+
 /// Pluggable context engine configuration.
 ///
 /// Configure in config.toml:
@@ -2386,6 +2476,7 @@ impl Default for KernelConfig {
             external_auth: ExternalAuthConfig::default(),
             tool_policy: crate::tool_policy::ToolPolicy::default(),
             proactive_memory: crate::memory::ProactiveMemoryConfig::default(),
+            context_budget: ContextBudgetConfig::default(),
             context_engine: ContextEngineTomlConfig::default(),
             audit: AuditConfig::default(),
             health_check: HealthCheckConfig::default(),

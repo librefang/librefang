@@ -5,6 +5,7 @@
 //! - Layer 2: Context guard that scans all tool results before LLM calls
 //!   and compacts oldest results when total exceeds 75% headroom.
 
+use librefang_types::config::ContextBudgetConfig;
 use librefang_types::message::{ContentBlock, Message, MessageContent};
 use librefang_types::tool::ToolDefinition;
 use tracing::debug;
@@ -18,33 +19,48 @@ pub struct ContextBudget {
     pub tool_chars_per_token: f64,
     /// Estimated characters per token for general content.
     pub general_chars_per_token: f64,
+    /// Fraction of context window for per-result cap.
+    per_result_cap_frac: f64,
+    /// Fraction of context window for single result max.
+    single_result_max_frac: f64,
+    /// Fraction of context window for tool headroom.
+    tool_headroom_frac: f64,
 }
 
 impl ContextBudget {
-    /// Create a new budget from a context window size.
+    /// Create a new budget from a context window size using built-in defaults.
     pub fn new(context_window_tokens: usize) -> Self {
+        Self::from_config(context_window_tokens, &ContextBudgetConfig::default())
+    }
+
+    /// Create a budget from a context window size and external configuration.
+    pub fn from_config(context_window_tokens: usize, cfg: &ContextBudgetConfig) -> Self {
         Self {
             context_window_tokens,
-            tool_chars_per_token: 2.0,
-            general_chars_per_token: 4.0,
+            tool_chars_per_token: cfg.tool_chars_per_token,
+            general_chars_per_token: cfg.general_chars_per_token,
+            per_result_cap_frac: cfg.per_result_cap,
+            single_result_max_frac: cfg.single_result_max,
+            tool_headroom_frac: cfg.tool_headroom,
         }
     }
 
-    /// Per-result character cap: 30% of context window converted to chars.
+    /// Per-result character cap based on configured fraction of context window.
     pub fn per_result_cap(&self) -> usize {
-        let tokens_for_tool = (self.context_window_tokens as f64 * 0.30) as usize;
+        let tokens_for_tool =
+            (self.context_window_tokens as f64 * self.per_result_cap_frac) as usize;
         (tokens_for_tool as f64 * self.tool_chars_per_token) as usize
     }
 
-    /// Single result absolute max: 50% of context window.
+    /// Single result absolute max based on configured fraction.
     pub fn single_result_max(&self) -> usize {
-        let tokens = (self.context_window_tokens as f64 * 0.50) as usize;
+        let tokens = (self.context_window_tokens as f64 * self.single_result_max_frac) as usize;
         (tokens as f64 * self.tool_chars_per_token) as usize
     }
 
-    /// Total tool result headroom: 75% of context window in chars.
+    /// Total tool result headroom based on configured fraction in chars.
     pub fn total_tool_headroom_chars(&self) -> usize {
-        let tokens = (self.context_window_tokens as f64 * 0.75) as usize;
+        let tokens = (self.context_window_tokens as f64 * self.tool_headroom_frac) as usize;
         (tokens as f64 * self.tool_chars_per_token) as usize
     }
 }
@@ -99,24 +115,24 @@ pub fn truncate_tool_result_dynamic(content: &str, budget: &ContextBudget) -> St
         let cap_bytes = (cap.saturating_sub(summary_reserve) as f64 * bytes_per_char) as usize;
         let break_point = find_safe_break_before(content, cap_bytes);
         return format!(
-            "{}\n\n[TRUNCATED: result was {} chars, showing first {} (budget: {}% of {}K context window)]",
+            "{}\n\n[TRUNCATED: result was {} chars, showing first {} (budget: {:.0}% of {}K context window)]",
             &content[..break_point],
             char_count,
             content[..break_point].chars().count(),
-            30,
+            budget.per_result_cap_frac * 100.0,
             budget.context_window_tokens / 1000
         );
     }
 
     format!(
-        "{}{}{}\n\n[TRUNCATED: result was {} chars, showing first {} + last {} (budget: {}% of {}K context window)]",
+        "{}{}{}\n\n[TRUNCATED: result was {} chars, showing first {} + last {} (budget: {:.0}% of {}K context window)]",
         &content[..head_end],
         TRUNCATION_MARKER,
         &content[tail_start..],
         char_count,
         content[..head_end].chars().count(),
         content[tail_start..].chars().count(),
-        30,
+        budget.per_result_cap_frac * 100.0,
         budget.context_window_tokens / 1000
     )
 }

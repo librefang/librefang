@@ -1859,6 +1859,7 @@ impl LibreFangKernel {
             > = embedding_driver.as_ref().map(Arc::clone);
             let engine = librefang_runtime::context_engine::build_context_engine(
                 &config.context_engine,
+                &config.context_budget,
                 context_engine_config.clone(),
                 memory.clone(),
                 emb_arc,
