@@ -381,6 +381,72 @@ impl Default for ReloadConfig {
     }
 }
 
+/// API and WebSocket rate limiting configuration.
+///
+/// Controls GCRA token-bucket rate limiting for HTTP API requests and
+/// per-connection limits for WebSocket connections.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RateLimitConfig {
+    /// API token budget per minute per IP (GCRA algorithm). Default: 500.
+    #[serde(default = "default_api_requests_per_minute")]
+    pub api_requests_per_minute: u32,
+    /// Retry-After header value in seconds when rate limited. Default: 60.
+    #[serde(default = "default_retry_after_secs")]
+    pub retry_after_secs: u64,
+    /// Maximum concurrent WebSocket connections per IP. Default: 5.
+    #[serde(default = "default_max_ws_per_ip")]
+    pub max_ws_per_ip: usize,
+    /// Maximum WebSocket messages per minute per connection. Default: 10.
+    #[serde(default = "default_ws_messages_per_minute")]
+    pub ws_messages_per_minute: u32,
+    /// WebSocket idle timeout in seconds (close after inactivity). Default: 1800.
+    #[serde(default = "default_ws_idle_timeout_secs")]
+    pub ws_idle_timeout_secs: u64,
+    /// Text delta debounce interval in milliseconds. Default: 100.
+    #[serde(default = "default_ws_debounce_ms")]
+    pub ws_debounce_ms: u64,
+    /// Flush text buffer when it exceeds this many characters. Default: 200.
+    #[serde(default = "default_ws_debounce_chars")]
+    pub ws_debounce_chars: usize,
+}
+
+fn default_api_requests_per_minute() -> u32 {
+    500
+}
+fn default_retry_after_secs() -> u64 {
+    60
+}
+fn default_max_ws_per_ip() -> usize {
+    5
+}
+fn default_ws_messages_per_minute() -> u32 {
+    10
+}
+fn default_ws_idle_timeout_secs() -> u64 {
+    1800
+}
+fn default_ws_debounce_ms() -> u64 {
+    100
+}
+fn default_ws_debounce_chars() -> usize {
+    200
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            api_requests_per_minute: default_api_requests_per_minute(),
+            retry_after_secs: default_retry_after_secs(),
+            max_ws_per_ip: default_max_ws_per_ip(),
+            ws_messages_per_minute: default_ws_messages_per_minute(),
+            ws_idle_timeout_secs: default_ws_idle_timeout_secs(),
+            ws_debounce_ms: default_ws_debounce_ms(),
+            ws_debounce_chars: default_ws_debounce_chars(),
+        }
+    }
+}
+
 /// Webhook trigger authentication configuration.
 ///
 /// Controls the `/hooks/wake` and `/hooks/agent` endpoints for external
@@ -1577,6 +1643,9 @@ pub struct KernelConfig {
     /// Controls which releases `librefang update` considers.
     #[serde(default)]
     pub update_channel: UpdateChannel,
+    /// API and WebSocket rate limiting configuration.
+    #[serde(default)]
+    pub rate_limit: RateLimitConfig,
 }
 
 /// Input sanitization mode for channel messages.
@@ -2400,6 +2469,7 @@ impl Default for KernelConfig {
             telemetry: TelemetryConfig::default(),
             prompt_intelligence: PromptIntelligenceConfig::default(),
             update_channel: UpdateChannel::default(),
+            rate_limit: RateLimitConfig::default(),
         }
     }
 }

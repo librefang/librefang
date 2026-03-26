@@ -89,6 +89,16 @@ debounce_ms = 500
 # model = "gpt-4o"
 # api_key_env = "OPENAI_API_KEY"
 
+# ── Rate Limiting ────────────────────────────────────────────
+# [rate_limit]
+# api_requests_per_minute = 500   # GCRA token budget per IP
+# retry_after_secs = 60           # Retry-After header value (429 responses)
+# max_ws_per_ip = 5               # Max concurrent WebSocket connections per IP
+# ws_messages_per_minute = 10     # Max WebSocket messages per minute per connection
+# ws_idle_timeout_secs = 1800     # Close idle WebSocket after 30 min
+# ws_debounce_ms = 100            # Text delta debounce interval
+# ws_debounce_chars = 200         # Flush text buffer at this character count
+
 # ── Budget & Cost Control ────────────────────────────────────
 # [budget]
 # max_hourly_usd = 0.0         # 0 = unlimited
