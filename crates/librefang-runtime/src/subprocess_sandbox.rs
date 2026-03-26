@@ -89,63 +89,109 @@ use librefang_types::config::{ExecPolicy, ExecSecurityMode};
 
 /// SECURITY: Check for shell metacharacters that enable command injection.
 ///
-/// Blocks ALL shell operators that can chain commands, redirect I/O,
+/// Blocks shell operators that can chain commands, redirect I/O,
 /// perform substitution, or otherwise escape the intended command boundary.
 /// This is a defense-in-depth layer — even with allowlist validation,
 /// metacharacters must be rejected first to prevent injection.
+///
+/// Characters inside matched quotes (single or double) are treated as literal
+/// arguments and are NOT flagged — only unquoted metacharacters are dangerous.
 pub fn contains_shell_metacharacters(command: &str) -> Option<String> {
-    // ── Command substitution ──────────────────────────────────────────
-    // Backtick substitution: `cmd`
-    if command.contains('`') {
-        return Some("backtick command substitution".to_string());
-    }
-    // Dollar-paren substitution: $(cmd)
-    if command.contains("$(") {
-        return Some("$() command substitution".to_string());
-    }
-    // Dollar-brace expansion: ${VAR}
-    if command.contains("${") {
-        return Some("${} variable expansion".to_string());
-    }
-
-    // ── Command chaining ──────────────────────────────────────────────
-    // Semicolons: cmd1;cmd2
-    if command.contains(';') {
-        return Some("semicolon command chaining".to_string());
-    }
-    // Pipes: cmd1|cmd2 (data exfiltration + arbitrary command)
-    if command.contains('|') {
-        return Some("pipe operator".to_string());
-    }
-
-    // ── I/O redirection ───────────────────────────────────────────────
-    // Output/input/append redirect: >, <, >>
-    // Also catches here-strings <<<, process substitution <() >()
-    if command.contains('>') || command.contains('<') {
-        return Some("I/O redirection".to_string());
-    }
-
-    // ── Expansion and globbing ────────────────────────────────────────
-    // Brace expansion: {cmd1,cmd2} or {1..10}
-    if command.contains('{') || command.contains('}') {
-        return Some("brace expansion".to_string());
-    }
-
-    // ── Embedded newlines ─────────────────────────────────────────────
+    // First, check characters that are dangerous even inside quotes:
+    // newlines and null bytes break the command boundary regardless of quoting.
     if command.contains('\n') || command.contains('\r') {
         return Some("embedded newline".to_string());
     }
-    // Null bytes (can truncate strings in C-based shells)
     if command.contains('\0') {
         return Some("null byte".to_string());
     }
 
+    // Scan only unquoted portions of the command for shell metacharacters.
+    let unquoted = strip_quoted_regions(command);
+
+    // ── Command substitution ──────────────────────────────────────────
+    if unquoted.contains('`') {
+        return Some("backtick command substitution".to_string());
+    }
+    if unquoted.contains("$(") {
+        return Some("$() command substitution".to_string());
+    }
+    if unquoted.contains("${") {
+        return Some("${} variable expansion".to_string());
+    }
+
+    // ── Command chaining ──────────────────────────────────────────────
+    if unquoted.contains(';') {
+        return Some("semicolon command chaining".to_string());
+    }
+    if unquoted.contains('|') {
+        return Some("pipe operator".to_string());
+    }
+
+    // ── I/O redirection ───────────────────────────────────────────────
+    if unquoted.contains('>') || unquoted.contains('<') {
+        return Some("I/O redirection".to_string());
+    }
+
+    // ── Expansion and globbing ────────────────────────────────────────
+    if unquoted.contains('{') || unquoted.contains('}') {
+        return Some("brace expansion".to_string());
+    }
+
     // ── Background execution and logical chaining ──────────────────────
-    // Both & (background) and && (logical AND) are dangerous
-    if command.contains('&') {
+    if unquoted.contains('&') {
         return Some("ampersand operator".to_string());
     }
     None
+}
+
+/// Replace quoted regions with spaces, preserving only unquoted characters.
+///
+/// Handles single quotes (`'...'`) and double quotes (`"..."`).
+/// Backslash escapes inside double quotes are respected (`\"`).
+/// Single quotes have no escape mechanism (POSIX behavior).
+fn strip_quoted_regions(command: &str) -> String {
+    let mut result = String::with_capacity(command.len());
+    let chars: Vec<char> = command.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+
+    while i < len {
+        match chars[i] {
+            '\'' => {
+                // Single-quoted region: skip until closing '
+                i += 1;
+                while i < len && chars[i] != '\'' {
+                    i += 1;
+                }
+                if i < len {
+                    i += 1; // skip closing '
+                }
+                result.push(' '); // placeholder
+            }
+            '"' => {
+                // Double-quoted region: skip until unescaped closing "
+                i += 1;
+                while i < len && chars[i] != '"' {
+                    if chars[i] == '\\' && i + 1 < len {
+                        i += 2; // skip escaped char
+                    } else {
+                        i += 1;
+                    }
+                }
+                if i < len {
+                    i += 1; // skip closing "
+                }
+                result.push(' '); // placeholder
+            }
+            c => {
+                result.push(c);
+                i += 1;
+            }
+        }
+    }
+
+    result
 }
 
 /// Extract the base command name from a command string.
@@ -813,6 +859,45 @@ mod tests {
         assert!(contains_shell_metacharacters("ls -la").is_none());
         assert!(contains_shell_metacharacters("cat file.txt").is_none());
         assert!(contains_shell_metacharacters("echo hello world").is_none());
+    }
+
+    #[test]
+    fn test_metachar_inside_single_quotes_ok() {
+        // Characters inside single quotes are literal, not shell operators
+        assert!(contains_shell_metacharacters("echo 'a > b'").is_none());
+        assert!(contains_shell_metacharacters("echo 'hello | world'").is_none());
+        assert!(contains_shell_metacharacters("echo '{foo}'").is_none());
+        assert!(contains_shell_metacharacters("python3 -c 'if x > 0: print(x)'").is_none());
+    }
+
+    #[test]
+    fn test_metachar_inside_double_quotes_ok() {
+        // Characters inside double quotes are literal (for our purposes)
+        assert!(contains_shell_metacharacters(r#"echo "a > b""#).is_none());
+        assert!(contains_shell_metacharacters(r#"echo "hello | world""#).is_none());
+        assert!(contains_shell_metacharacters(r#"python3 -c "if x > 0: print(x)""#).is_none());
+        assert!(contains_shell_metacharacters(r#"echo "a && b""#).is_none());
+    }
+
+    #[test]
+    fn test_metachar_escaped_quote_in_double_quotes() {
+        // Escaped quote inside double quotes should not end the quoted region
+        assert!(contains_shell_metacharacters(r#"echo "say \"hello > world\"""#).is_none());
+    }
+
+    #[test]
+    fn test_metachar_unquoted_still_blocked() {
+        // Metacharacters outside quotes must still be blocked
+        assert!(contains_shell_metacharacters("echo 'safe' > output.txt").is_some());
+        assert!(contains_shell_metacharacters("echo 'ok' | grep x").is_some());
+        assert!(contains_shell_metacharacters("echo 'a' && echo 'b'").is_some());
+    }
+
+    #[test]
+    fn test_metachar_newline_blocked_even_in_quotes() {
+        // Newlines are dangerous even inside quotes (break command boundary)
+        assert!(contains_shell_metacharacters("echo 'hello\nworld'").is_some());
+        assert!(contains_shell_metacharacters("echo \"hello\nworld\"").is_some());
     }
 
     #[test]
