@@ -1,11 +1,12 @@
 //! Settings screen: provider key management, model catalog, tools list.
 
 use crate::tui::theme;
+use crate::tui::widgets;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Padding, Paragraph};
+use ratatui::widgets::{ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
 // ── Data types ──────────────────────────────────────────────────────────────
@@ -270,17 +271,7 @@ impl SettingsState {
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
 pub fn draw(f: &mut Frame, area: Rect, state: &mut SettingsState) {
-    let block = Block::default()
-        .title(Line::from(vec![Span::styled(
-            " Settings ",
-            theme::title_style(),
-        )]))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::ACCENT))
-        .padding(Padding::horizontal(1));
-
-    let inner = block.inner(area);
-    f.render_widget(block, area);
+    let inner = widgets::render_screen_block(f, area, "Settings");
 
     let chunks = Layout::vertical([
         Constraint::Length(1), // sub-tab bar
@@ -313,13 +304,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut SettingsState) {
         SettingsSub::Models => "  [\u{2191}\u{2193}] Navigate  [r] Refresh",
         SettingsSub::Tools => "  [\u{2191}\u{2193}] Navigate  [r] Refresh",
     };
-    f.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(
-            hint_text,
-            theme::hint_style(),
-        )])),
-        chunks[3],
-    );
+    f.render_widget(widgets::hint_bar(hint_text), chunks[3]);
 }
 
 fn draw_sub_tabs(f: &mut Frame, area: Rect, active: SettingsSub) {
@@ -358,22 +343,12 @@ fn draw_providers(f: &mut Frame, area: Rect, state: &mut SettingsState) {
     );
 
     if state.loading && state.providers.is_empty() {
-        let spinner = theme::SPINNER_FRAMES[state.tick % theme::SPINNER_FRAMES.len()];
         f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(format!("  {spinner} "), Style::default().fg(theme::CYAN)),
-                Span::styled("Loading providers\u{2026}", theme::dim_style()),
-            ])),
+            widgets::spinner(state.tick, "Loading providers\u{2026}"),
             chunks[1],
         );
     } else if state.providers.is_empty() {
-        f.render_widget(
-            Paragraph::new(Span::styled(
-                "  No providers available.",
-                theme::dim_style(),
-            )),
-            chunks[1],
-        );
+        f.render_widget(widgets::empty_state("No providers available."), chunks[1]);
     } else {
         let items: Vec<ListItem> = state
             .providers
@@ -413,9 +388,7 @@ fn draw_providers(f: &mut Frame, area: Rect, state: &mut SettingsState) {
             })
             .collect();
 
-        let list = List::new(items)
-            .highlight_style(theme::selected_style())
-            .highlight_symbol("> ");
+        let list = widgets::themed_list(items);
         f.render_stateful_widget(list, chunks[1], &mut state.provider_list);
     }
 
@@ -497,19 +470,12 @@ fn draw_models(f: &mut Frame, area: Rect, state: &mut SettingsState) {
     );
 
     if state.loading && state.models.is_empty() {
-        let spinner = theme::SPINNER_FRAMES[state.tick % theme::SPINNER_FRAMES.len()];
         f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(format!("  {spinner} "), Style::default().fg(theme::CYAN)),
-                Span::styled("Loading models\u{2026}", theme::dim_style()),
-            ])),
+            widgets::spinner(state.tick, "Loading models\u{2026}"),
             chunks[1],
         );
     } else if state.models.is_empty() {
-        f.render_widget(
-            Paragraph::new(Span::styled("  No models available.", theme::dim_style())),
-            chunks[1],
-        );
+        f.render_widget(widgets::empty_state("No models available."), chunks[1]);
     } else {
         let items: Vec<ListItem> = state
             .models
@@ -534,11 +500,11 @@ fn draw_models(f: &mut Frame, area: Rect, state: &mut SettingsState) {
                 let cost = format!("${:.2}/${:.2}", m.cost_input, m.cost_output);
                 ListItem::new(Line::from(vec![
                     Span::styled(
-                        format!("  {:<28}", truncate(&m.id, 27)),
+                        format!("  {:<28}", widgets::truncate(&m.id, 27)),
                         Style::default().fg(theme::CYAN),
                     ),
                     Span::styled(
-                        format!(" {:<14}", truncate(&m.provider, 13)),
+                        format!(" {:<14}", widgets::truncate(&m.provider, 13)),
                         theme::dim_style(),
                     ),
                     Span::styled(format!(" {:<10}", &m.tier), tier_style),
@@ -548,9 +514,7 @@ fn draw_models(f: &mut Frame, area: Rect, state: &mut SettingsState) {
             })
             .collect();
 
-        let list = List::new(items)
-            .highlight_style(theme::selected_style())
-            .highlight_symbol("> ");
+        let list = widgets::themed_list(items);
         f.render_stateful_widget(list, chunks[1], &mut state.model_list);
     }
 }
@@ -571,10 +535,7 @@ fn draw_tools(f: &mut Frame, area: Rect, state: &mut SettingsState) {
     );
 
     if state.tools.is_empty() {
-        f.render_widget(
-            Paragraph::new(Span::styled("  No tools available.", theme::dim_style())),
-            chunks[1],
-        );
+        f.render_widget(widgets::empty_state("No tools available."), chunks[1]);
     } else {
         let items: Vec<ListItem> = state
             .tools
@@ -582,32 +543,19 @@ fn draw_tools(f: &mut Frame, area: Rect, state: &mut SettingsState) {
             .map(|t| {
                 ListItem::new(Line::from(vec![
                     Span::styled(
-                        format!("  {:<24}", truncate(&t.name, 23)),
+                        format!("  {:<24}", widgets::truncate(&t.name, 23)),
                         Style::default().fg(theme::CYAN),
                     ),
                     Span::styled(
-                        format!(" {}", truncate(&t.description, 50)),
+                        format!(" {}", widgets::truncate(&t.description, 50)),
                         theme::dim_style(),
                     ),
                 ]))
             })
             .collect();
 
-        let list = List::new(items)
-            .highlight_style(theme::selected_style())
-            .highlight_symbol("> ");
+        let list = widgets::themed_list(items);
         f.render_stateful_widget(list, chunks[1], &mut state.tool_list);
-    }
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!(
-            "{}\u{2026}",
-            librefang_types::truncate_str(s, max.saturating_sub(1))
-        )
     }
 }
 

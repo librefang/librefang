@@ -1,11 +1,11 @@
 //! Dashboard screen: system overview with stat cards and scrollable audit trail.
 
-use crate::tui::theme;
+use crate::tui::{theme, widgets};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Padding, Paragraph};
+use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 // ── Data types ──────────────────────────────────────────────────────────────
@@ -88,17 +88,7 @@ impl DashboardState {
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
 pub fn draw(f: &mut Frame, area: Rect, state: &mut DashboardState) {
-    let block = Block::default()
-        .title(Line::from(vec![Span::styled(
-            " Dashboard ",
-            theme::title_style(),
-        )]))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::ACCENT))
-        .padding(Padding::horizontal(1));
-
-    let inner = block.inner(area);
-    f.render_widget(block, area);
+    let inner = widgets::render_screen_block(f, area, "Dashboard");
 
     let chunks = Layout::vertical([
         Constraint::Length(5), // stat cards
@@ -112,21 +102,16 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut DashboardState) {
     draw_stat_cards(f, chunks[0], state);
 
     // ── Separator ───────────────────────────────────────────────────────────
-    let sep = "\u{2500}".repeat(chunks[1].width as usize);
-    f.render_widget(
-        Paragraph::new(Span::styled(sep, theme::dim_style())),
-        chunks[1],
-    );
+    f.render_widget(widgets::separator(chunks[1].width), chunks[1]);
 
     // ── Audit trail ─────────────────────────────────────────────────────────
     draw_audit_trail(f, chunks[2], state);
 
     // ── Hints ───────────────────────────────────────────────────────────────
-    let hints = Paragraph::new(Line::from(vec![Span::styled(
-        "  [r] Refresh  [a] Go to Agents  [\u{2191}\u{2193}] Scroll audit",
-        theme::hint_style(),
-    )]));
-    f.render_widget(hints, chunks[3]);
+    f.render_widget(
+        widgets::hint_bar("  [r] Refresh  [a] Go to Agents  [\u{2191}\u{2193}] Scroll audit"),
+        chunks[3],
+    );
 }
 
 fn draw_stat_cards(f: &mut Frame, area: Rect, state: &DashboardState) {
@@ -138,12 +123,7 @@ fn draw_stat_cards(f: &mut Frame, area: Rect, state: &DashboardState) {
     .split(area);
 
     // Agents card
-    let agents_block = Block::default()
-        .title(Span::styled(" Agents ", Style::default().fg(theme::CYAN)))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::DIM));
-    let agents_inner = agents_block.inner(cols[0]);
-    f.render_widget(agents_block, cols[0]);
+    let agents_inner = widgets::render_card_block(f, cols[0], "Agents");
     let count_text = format!("{}", state.agent_count);
     f.render_widget(
         Paragraph::new(Line::from(vec![
@@ -159,12 +139,7 @@ fn draw_stat_cards(f: &mut Frame, area: Rect, state: &DashboardState) {
     );
 
     // Uptime card
-    let uptime_block = Block::default()
-        .title(Span::styled(" Uptime ", Style::default().fg(theme::CYAN)))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::DIM));
-    let uptime_inner = uptime_block.inner(cols[1]);
-    f.render_widget(uptime_block, cols[1]);
+    let uptime_inner = widgets::render_card_block(f, cols[1], "Uptime");
     let uptime_str = format_uptime(state.uptime_secs);
     f.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
@@ -177,12 +152,7 @@ fn draw_stat_cards(f: &mut Frame, area: Rect, state: &DashboardState) {
     );
 
     // Provider card
-    let provider_block = Block::default()
-        .title(Span::styled(" Provider ", Style::default().fg(theme::CYAN)))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::DIM));
-    let provider_inner = provider_block.inner(cols[2]);
-    f.render_widget(provider_block, cols[2]);
+    let provider_inner = widgets::render_card_block(f, cols[2], "Provider");
     let provider_text = if state.provider.is_empty() {
         "not set".to_string()
     } else {
@@ -199,22 +169,15 @@ fn draw_stat_cards(f: &mut Frame, area: Rect, state: &DashboardState) {
 
 fn draw_audit_trail(f: &mut Frame, area: Rect, state: &DashboardState) {
     if state.loading {
-        let spinner = theme::SPINNER_FRAMES[state.tick % theme::SPINNER_FRAMES.len()];
         f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(format!("  {spinner} "), Style::default().fg(theme::CYAN)),
-                Span::styled("Loading audit trail\u{2026}", theme::dim_style()),
-            ])),
+            widgets::spinner(state.tick, "Loading audit trail\u{2026}"),
             area,
         );
         return;
     }
 
     if state.recent_audit.is_empty() {
-        f.render_widget(
-            Paragraph::new(Span::styled("  No audit entries yet.", theme::dim_style())),
-            area,
-        );
+        f.render_widget(widgets::empty_state("No audit entries yet."), area);
         return;
     }
 
@@ -233,15 +196,15 @@ fn draw_audit_trail(f: &mut Frame, area: Rect, state: &DashboardState) {
         lines.push(Line::from(vec![
             Span::styled(format!("  {:<20}", row.timestamp), theme::dim_style()),
             Span::styled(
-                format!(" {:<14}", truncate(&row.agent, 13)),
+                format!(" {:<14}", widgets::truncate(&row.agent, 13)),
                 Style::default().fg(theme::CYAN),
             ),
             Span::styled(
-                format!(" {:<16}", truncate(&row.action, 15)),
+                format!(" {:<16}", widgets::truncate(&row.action, 15)),
                 Style::default().fg(theme::YELLOW),
             ),
             Span::styled(
-                format!(" {}", truncate(&row.detail, 30)),
+                format!(" {}", widgets::truncate(&row.detail, 30)),
                 theme::dim_style(),
             ),
         ]));
@@ -266,16 +229,5 @@ fn format_uptime(secs: u64) -> String {
         format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
     } else {
         format!("{}d {}h", secs / 86400, (secs % 86400) / 3600)
-    }
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!(
-            "{}\u{2026}",
-            librefang_types::truncate_str(s, max.saturating_sub(1))
-        )
     }
 }

@@ -1,11 +1,12 @@
 //! Triggers screen: CRUD with pattern type picker.
 
 use crate::tui::theme;
+use crate::tui::widgets;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Padding, Paragraph};
+use ratatui::widgets::{ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
 // ── Data types ──────────────────────────────────────────────────────────────
@@ -251,17 +252,7 @@ impl TriggerState {
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
 pub fn draw(f: &mut Frame, area: Rect, state: &mut TriggerState) {
-    let block = Block::default()
-        .title(Line::from(vec![Span::styled(
-            " Triggers ",
-            theme::title_style(),
-        )]))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::ACCENT))
-        .padding(Padding::horizontal(1));
-
-    let inner = block.inner(area);
-    f.render_widget(block, area);
+    let inner = widgets::render_screen_block(f, area, "Triggers");
 
     match state.sub {
         TriggerSubScreen::List => draw_list(f, inner, state),
@@ -289,12 +280,8 @@ fn draw_list(f: &mut Frame, area: Rect, state: &mut TriggerState) {
     );
 
     if state.loading {
-        let spinner = theme::SPINNER_FRAMES[state.tick % theme::SPINNER_FRAMES.len()];
         f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(format!("  {spinner} "), Style::default().fg(theme::CYAN)),
-                Span::styled("Loading triggers\u{2026}", theme::dim_style()),
-            ])),
+            widgets::spinner(state.tick, "Loading triggers\u{2026}"),
             chunks[1],
         );
     } else {
@@ -310,11 +297,11 @@ fn draw_list(f: &mut Frame, area: Rect, state: &mut TriggerState) {
                 };
                 ListItem::new(Line::from(vec![
                     Span::styled(
-                        format!("  {:<14}", truncate(&tr.agent_id, 13)),
+                        format!("  {:<14}", widgets::truncate(&tr.agent_id, 13)),
                         Style::default().fg(theme::CYAN),
                     ),
                     Span::styled(
-                        format!(" {:<20}", truncate(&tr.pattern, 19)),
+                        format!(" {:<20}", widgets::truncate(&tr.pattern, 19)),
                         Style::default().fg(theme::YELLOW),
                     ),
                     Span::styled(format!(" {:<8}", tr.fires), theme::dim_style()),
@@ -330,34 +317,17 @@ fn draw_list(f: &mut Frame, area: Rect, state: &mut TriggerState) {
                 .add_modifier(Modifier::BOLD),
         )])));
 
-        let list = List::new(items)
-            .highlight_style(theme::selected_style())
-            .highlight_symbol("> ");
+        let list = widgets::themed_list(items);
         f.render_stateful_widget(list, chunks[1], &mut state.list_state);
     }
 
-    if !state.status_msg.is_empty() {
-        // Overlay status msg at bottom of list area
-        let msg_area = Rect {
-            x: chunks[1].x,
-            y: chunks[1].y + chunks[1].height.saturating_sub(1),
-            width: chunks[1].width,
-            height: 1,
-        };
-        f.render_widget(
-            Paragraph::new(Span::styled(
-                format!("  {}", state.status_msg),
-                Style::default().fg(theme::YELLOW),
-            )),
-            msg_area,
-        );
-    }
-
-    let hints = Paragraph::new(Line::from(vec![Span::styled(
-        "  [\u{2191}\u{2193}] Navigate  [Enter] Create  [d] Delete  [r] Refresh",
-        theme::hint_style(),
-    )]));
-    f.render_widget(hints, chunks[2]);
+    f.render_widget(
+        widgets::status_or_hint(
+            &state.status_msg,
+            "  [\u{2191}\u{2193}] Navigate  [Enter] Create  [d] Delete  [r] Refresh",
+        ),
+        chunks[2],
+    );
 }
 
 fn draw_create(f: &mut Frame, area: Rect, state: &mut TriggerState) {
@@ -440,13 +410,7 @@ fn draw_create(f: &mut Frame, area: Rect, state: &mut TriggerState) {
     } else {
         "  [Enter] Next  [Esc] Back"
     };
-    f.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(
-            hint_text,
-            theme::hint_style(),
-        )])),
-        chunks[4],
-    );
+    f.render_widget(widgets::hint_bar(hint_text), chunks[4]);
 }
 
 fn draw_text_field(f: &mut Frame, area: Rect, label: &str, value: &str, placeholder: &str) {
@@ -501,9 +465,7 @@ fn draw_pattern_picker(f: &mut Frame, area: Rect, state: &mut TriggerState) {
         })
         .collect();
 
-    let list = List::new(items)
-        .highlight_style(theme::selected_style())
-        .highlight_symbol("> ");
+    let list = widgets::themed_list(items);
     f.render_stateful_widget(list, chunks[1], &mut state.pattern_type_list);
 }
 
@@ -543,15 +505,4 @@ fn draw_trigger_review(f: &mut Frame, area: Rect, state: &TriggerState) {
         )]),
     ];
     f.render_widget(Paragraph::new(lines), area);
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!(
-            "{}\u{2026}",
-            librefang_types::truncate_str(s, max.saturating_sub(1))
-        )
-    }
 }

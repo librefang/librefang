@@ -1,11 +1,11 @@
 //! Logs screen: real-time log viewer with level filter and search.
 
-use crate::tui::theme;
+use crate::tui::{theme, widgets};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Padding, Paragraph};
+use ratatui::widgets::{ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
 // ── Data types ──────────────────────────────────────────────────────────────
@@ -256,17 +256,7 @@ impl LogsState {
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
 pub fn draw(f: &mut Frame, area: Rect, state: &mut LogsState) {
-    let block = Block::default()
-        .title(Line::from(vec![Span::styled(
-            " Logs ",
-            theme::title_style(),
-        )]))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::ACCENT))
-        .padding(Padding::horizontal(1));
-
-    let inner = block.inner(area);
-    f.render_widget(block, area);
+    let inner = widgets::render_screen_block(f, area, "Logs");
 
     let chunks = Layout::vertical([
         Constraint::Length(2), // header: filter + search
@@ -276,28 +266,21 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut LogsState) {
     .split(inner);
 
     // ── Header ──
+    let table_header_text = format!(
+        "  {:<20} {:<6} {:<16} {:<14} {}",
+        "Timestamp", "Level", "Action", "Agent", "Detail"
+    );
+
     if state.search_mode {
+        let header_rows =
+            Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(chunks[0]);
+        f.render_widget(widgets::search_input(&state.search_buf), header_rows[0]);
         f.render_widget(
-            Paragraph::new(vec![
-                Line::from(vec![
-                    Span::styled("  / ", Style::default().fg(theme::ACCENT)),
-                    Span::styled(&state.search_buf, theme::input_style()),
-                    Span::styled(
-                        "\u{2588}",
-                        Style::default()
-                            .fg(theme::GREEN)
-                            .add_modifier(Modifier::SLOW_BLINK),
-                    ),
-                ]),
-                Line::from(vec![Span::styled(
-                    format!(
-                        "  {:<20} {:<6} {:<16} {:<14} {}",
-                        "Timestamp", "Level", "Action", "Agent", "Detail"
-                    ),
-                    theme::table_header(),
-                )]),
-            ]),
-            chunks[0],
+            Paragraph::new(Line::from(vec![Span::styled(
+                &table_header_text,
+                theme::table_header(),
+            )])),
+            header_rows[1],
         );
     } else {
         let auto_badge = if state.auto_refresh {
@@ -331,10 +314,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut LogsState) {
                     search_hint,
                 ]),
                 Line::from(vec![Span::styled(
-                    format!(
-                        "  {:<20} {:<6} {:<16} {:<14} {}",
-                        "Timestamp", "Level", "Action", "Agent", "Detail"
-                    ),
+                    &table_header_text,
                     theme::table_header(),
                 )]),
             ]),
@@ -344,20 +324,13 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut LogsState) {
 
     // ── Log list ──
     if state.loading && state.entries.is_empty() {
-        let spinner = theme::SPINNER_FRAMES[state.tick % theme::SPINNER_FRAMES.len()];
         f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(format!("  {spinner} "), Style::default().fg(theme::CYAN)),
-                Span::styled("Loading logs\u{2026}", theme::dim_style()),
-            ])),
+            widgets::spinner(state.tick, "Loading logs\u{2026}"),
             chunks[1],
         );
     } else if state.filtered.is_empty() {
         f.render_widget(
-            Paragraph::new(Span::styled(
-                "  No log entries match the current filter.",
-                theme::dim_style(),
-            )),
+            widgets::empty_state("No log entries match the current filter."),
             chunks[1],
         );
     } else {
@@ -368,46 +341,33 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut LogsState) {
                 let e = &state.entries[idx];
                 ListItem::new(Line::from(vec![
                     Span::styled(
-                        format!("  {:<20}", truncate(&e.timestamp, 19)),
+                        format!("  {:<20}", widgets::truncate(&e.timestamp, 19)),
                         theme::dim_style(),
                     ),
                     Span::styled(format!(" {:<6}", e.level.label()), e.level.style()),
                     Span::styled(
-                        format!(" {:<16}", truncate(&e.action, 15)),
+                        format!(" {:<16}", widgets::truncate(&e.action, 15)),
                         Style::default().fg(theme::CYAN),
                     ),
                     Span::styled(
-                        format!(" {:<14}", truncate(&e.agent, 13)),
+                        format!(" {:<14}", widgets::truncate(&e.agent, 13)),
                         Style::default().fg(theme::PURPLE),
                     ),
-                    Span::styled(format!(" {}", truncate(&e.detail, 30)), theme::dim_style()),
+                    Span::styled(
+                        format!(" {}", widgets::truncate(&e.detail, 30)),
+                        theme::dim_style(),
+                    ),
                 ]))
             })
             .collect();
 
-        let list = List::new(items)
-            .highlight_style(theme::selected_style())
-            .highlight_symbol("> ");
+        let list = widgets::themed_list(items);
         f.render_stateful_widget(list, chunks[1], &mut state.list_state);
     }
 
     // ── Hints ──
     f.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(
-            "  [\u{2191}\u{2193}] Navigate  [f] Filter Level  [/] Search  [a] Toggle Auto-refresh  [r] Refresh",
-            theme::hint_style(),
-        )])),
+        widgets::hint_bar("  [\u{2191}\u{2193}] Navigate  [f] Filter Level  [/] Search  [a] Toggle Auto-refresh  [r] Refresh"),
         chunks[2],
     );
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!(
-            "{}\u{2026}",
-            librefang_types::truncate_str(s, max.saturating_sub(1))
-        )
-    }
 }

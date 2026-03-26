@@ -1,11 +1,12 @@
 //! Comms screen: Agent communication topology + live event feed.
 
 use crate::tui::theme;
+use crate::tui::widgets;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Padding, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, ListItem, ListState, Padding, Paragraph};
 use ratatui::Frame;
 
 // ── Data types ──────────────────────────────────────────────────────────────
@@ -322,17 +323,7 @@ impl CommsState {
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
 pub fn draw(f: &mut Frame, area: Rect, state: &mut CommsState) {
-    let block = Block::default()
-        .title(Line::from(vec![Span::styled(
-            " Comms ",
-            theme::title_style(),
-        )]))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::ACCENT))
-        .padding(Padding::horizontal(1));
-
-    let inner = block.inner(area);
-    f.render_widget(block, area);
+    let inner = widgets::render_screen_block(f, area, "Comms");
 
     let chunks = Layout::vertical([
         Constraint::Length(2),      // header
@@ -408,10 +399,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut CommsState) {
     } else {
         "  [s]end  [t]ask  [r]efresh  [Tab] focus  [\u{2191}\u{2193}] scroll".to_string()
     };
-    f.render_widget(
-        Paragraph::new(Line::from(Span::styled(hint_text, theme::hint_style()))),
-        chunks[5],
-    );
+    f.render_widget(widgets::hint_bar(&hint_text), chunks[5]);
 
     // Modal overlays
     if state.show_send_modal {
@@ -424,22 +412,15 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut CommsState) {
 
 fn draw_topology(f: &mut Frame, area: Rect, state: &CommsState) {
     if state.loading && state.nodes.is_empty() {
-        let spinner = theme::SPINNER_FRAMES[state.tick % theme::SPINNER_FRAMES.len()];
         f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(format!("  {spinner} "), Style::default().fg(theme::CYAN)),
-                Span::styled("Loading topology\u{2026}", theme::dim_style()),
-            ])),
+            widgets::spinner(state.tick, "Loading topology\u{2026}"),
             area,
         );
         return;
     }
 
     if state.nodes.is_empty() {
-        f.render_widget(
-            Paragraph::new(Span::styled("  No agents running.", theme::dim_style())),
-            area,
-        );
+        f.render_widget(widgets::empty_state("No agents running."), area);
         return;
     }
 
@@ -498,13 +479,7 @@ fn draw_topology(f: &mut Frame, area: Rect, state: &CommsState) {
 
 fn draw_event_list(f: &mut Frame, area: Rect, state: &mut CommsState) {
     if state.events.is_empty() {
-        f.render_widget(
-            Paragraph::new(Span::styled(
-                "  No inter-agent events yet.",
-                theme::dim_style(),
-            )),
-            area,
-        );
+        f.render_widget(widgets::empty_state("No inter-agent events yet."), area);
         return;
     }
 
@@ -519,7 +494,7 @@ fn draw_event_list(f: &mut Frame, area: Rect, state: &mut CommsState) {
             } else {
                 format!(" \u{2192} {}", ev.target_name)
             };
-            let detail = truncate(&ev.detail, 50);
+            let detail = widgets::truncate(&ev.detail, 50);
             ListItem::new(Line::from(vec![
                 Span::styled(
                     format!("  {:<8}", short_time(&ev.timestamp)),
@@ -538,9 +513,7 @@ fn draw_event_list(f: &mut Frame, area: Rect, state: &mut CommsState) {
         })
         .collect();
 
-    let list = List::new(items)
-        .highlight_style(theme::selected_style())
-        .highlight_symbol("> ");
+    let list = widgets::themed_list(items);
     f.render_stateful_widget(list, area, &mut state.event_list_state);
 }
 
@@ -741,17 +714,6 @@ fn short_time(ts: &str) -> String {
         }
     }
     ts.chars().take(8).collect()
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!(
-            "{}\u{2026}",
-            librefang_types::truncate_str(s, max.saturating_sub(1))
-        )
-    }
 }
 
 fn centered_rect(percent_x: u16, height: u16, area: Rect) -> Rect {

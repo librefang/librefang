@@ -1,11 +1,12 @@
 //! Extensions screen: browse, install/remove integrations, view MCP health.
 
 use crate::tui::theme;
+use crate::tui::widgets;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Padding, Paragraph};
+use ratatui::widgets::{ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
 // ── Data types ──────────────────────────────────────────────────────────────
@@ -280,17 +281,7 @@ impl ExtensionsState {
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
 pub fn draw(f: &mut Frame, area: Rect, state: &mut ExtensionsState) {
-    let block = Block::default()
-        .title(Line::from(vec![Span::styled(
-            " Extensions ",
-            theme::title_style(),
-        )]))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::ACCENT))
-        .padding(Padding::horizontal(1));
-
-    let inner = block.inner(area);
-    f.render_widget(block, area);
+    let inner = widgets::render_screen_block(f, area, "Extensions");
 
     let chunks = Layout::vertical([
         Constraint::Length(1), // sub-tab bar
@@ -379,20 +370,13 @@ fn draw_browse(f: &mut Frame, area: Rect, state: &mut ExtensionsState) {
     );
 
     if state.loading {
-        let spinner = theme::SPINNER_FRAMES[state.tick % theme::SPINNER_FRAMES.len()];
         f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(format!("  {spinner} "), Style::default().fg(theme::CYAN)),
-                Span::styled("Loading integrations\u{2026}", theme::dim_style()),
-            ])),
+            widgets::spinner(state.tick, "Loading integrations\u{2026}"),
             chunks[1],
         );
     } else if state.all_extensions.is_empty() {
         f.render_widget(
-            Paragraph::new(Span::styled(
-                "  No integrations loaded. Press r to refresh.",
-                theme::dim_style(),
-            )),
+            widgets::empty_state("No integrations loaded. Press r to refresh."),
             chunks[1],
         );
     } else {
@@ -420,7 +404,7 @@ fn draw_browse(f: &mut Frame, area: Rect, state: &mut ExtensionsState) {
             })
             .collect();
 
-        let list = List::new(items).highlight_style(theme::selected_style());
+        let list = widgets::themed_list(items);
         f.render_stateful_widget(list, chunks[1], &mut state.browse_list);
     }
 
@@ -429,10 +413,7 @@ fn draw_browse(f: &mut Frame, area: Rect, state: &mut ExtensionsState) {
     } else {
         "  j/k navigate \u{2022} Enter install \u{2022} / search \u{2022} r refresh"
     };
-    f.render_widget(
-        Paragraph::new(Span::styled(hints, theme::hint_style())),
-        chunks[2],
-    );
+    f.render_widget(widgets::hint_bar(hints), chunks[2]);
 }
 
 fn draw_installed(f: &mut Frame, area: Rect, state: &mut ExtensionsState) {
@@ -477,24 +458,21 @@ fn draw_installed(f: &mut Frame, area: Rect, state: &mut ExtensionsState) {
 
     if items.is_empty() {
         f.render_widget(
-            Paragraph::new(Span::styled(
-                "  No integrations installed. Browse tab to add.",
-                theme::dim_style(),
-            )),
+            widgets::empty_state("No integrations installed. Browse tab to add."),
             chunks[1],
         );
     } else {
-        let list = List::new(items).highlight_style(theme::selected_style());
+        let list = widgets::themed_list(items);
         f.render_stateful_widget(list, chunks[1], &mut state.installed_list);
     }
 
-    let hints = if state.confirm_remove {
-        "  Press y to confirm removal, any other key to cancel"
-    } else {
-        "  j/k navigate \u{2022} d remove \u{2022} r refresh"
-    };
     f.render_widget(
-        Paragraph::new(Span::styled(hints, theme::hint_style())),
+        widgets::confirm_or_status_or_hint(
+            state.confirm_remove,
+            "  Press y to confirm removal, any other key to cancel",
+            &state.status_msg,
+            "  j/k navigate \u{2022} d remove \u{2022} r refresh",
+        ),
         chunks[2],
     );
 }
@@ -520,10 +498,7 @@ fn draw_health(f: &mut Frame, area: Rect, state: &mut ExtensionsState) {
 
     if state.health_entries.is_empty() {
         f.render_widget(
-            Paragraph::new(Span::styled(
-                "  No MCP health data. Install integrations first.",
-                theme::dim_style(),
-            )),
+            widgets::empty_state("No MCP health data. Install integrations first."),
             chunks[1],
         );
     } else {
@@ -575,15 +550,14 @@ fn draw_health(f: &mut Frame, area: Rect, state: &mut ExtensionsState) {
             })
             .collect();
 
-        let list = List::new(items).highlight_style(theme::selected_style());
+        let list = widgets::themed_list(items);
         f.render_stateful_widget(list, chunks[1], &mut state.health_list);
     }
 
     f.render_widget(
-        Paragraph::new(Span::styled(
+        widgets::hint_bar(
             "  j/k navigate \u{2022} r/Enter reconnect \u{2022} auto-reconnect active",
-            theme::hint_style(),
-        )),
+        ),
         chunks[2],
     );
 }

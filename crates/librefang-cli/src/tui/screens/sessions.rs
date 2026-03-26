@@ -1,11 +1,11 @@
 //! Sessions screen: browse agent sessions, open in chat, delete.
 
-use crate::tui::theme;
+use crate::tui::{theme, widgets};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::layout::Rect;
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Padding, Paragraph};
+use ratatui::widgets::{ListItem, Paragraph};
 use ratatui::Frame;
 
 // ── Data types ──────────────────────────────────────────────────────────────
@@ -24,7 +24,7 @@ pub struct SessionInfo {
 pub struct SessionsState {
     pub sessions: Vec<SessionInfo>,
     pub filtered: Vec<usize>,
-    pub list_state: ListState,
+    pub list_state: ratatui::widgets::ListState,
     pub search_buf: String,
     pub search_mode: bool,
     pub loading: bool,
@@ -48,7 +48,7 @@ impl SessionsState {
         Self {
             sessions: Vec::new(),
             filtered: Vec::new(),
-            list_state: ListState::default(),
+            list_state: ratatui::widgets::ListState::default(),
             search_buf: String::new(),
             search_mode: false,
             loading: false,
@@ -174,40 +174,13 @@ impl SessionsState {
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
 pub fn draw(f: &mut Frame, area: Rect, state: &mut SessionsState) {
-    let block = Block::default()
-        .title(Line::from(vec![Span::styled(
-            " Sessions ",
-            theme::title_style(),
-        )]))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::ACCENT))
-        .padding(Padding::horizontal(1));
+    let inner = widgets::render_screen_block(f, area, "Sessions");
 
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-
-    let chunks = Layout::vertical([
-        Constraint::Length(2), // header + search
-        Constraint::Min(3),    // list
-        Constraint::Length(1), // hints / status
-    ])
-    .split(inner);
+    let (header, content, hints) = widgets::layout_hch(inner, 2);
 
     // ── Header / search bar ──
     if state.search_mode {
-        f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled("  / ", Style::default().fg(theme::ACCENT)),
-                Span::styled(&state.search_buf, theme::input_style()),
-                Span::styled(
-                    "\u{2588}",
-                    Style::default()
-                        .fg(theme::GREEN)
-                        .add_modifier(Modifier::SLOW_BLINK),
-                ),
-            ])),
-            chunks[0],
-        );
+        f.render_widget(widgets::search_input(&state.search_buf), header);
     } else {
         let search_hint = if state.search_buf.is_empty() {
             String::new()
@@ -225,25 +198,18 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut SessionsState) {
                 ),
                 Span::styled(search_hint, theme::dim_style()),
             ])),
-            chunks[0],
+            header,
         );
     }
 
     // ── List ──
     if state.loading {
-        let spinner = theme::SPINNER_FRAMES[state.tick % theme::SPINNER_FRAMES.len()];
         f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(format!("  {spinner} "), Style::default().fg(theme::CYAN)),
-                Span::styled("Loading sessions\u{2026}", theme::dim_style()),
-            ])),
-            chunks[1],
+            widgets::spinner(state.tick, "Loading sessions\u{2026}"),
+            content,
         );
     } else if state.filtered.is_empty() {
-        f.render_widget(
-            Paragraph::new(Span::styled("  No sessions found.", theme::dim_style())),
-            chunks[1],
-        );
+        f.render_widget(widgets::empty_state("No sessions found."), content);
     } else {
         let items: Vec<ListItem> = state
             .filtered
@@ -257,7 +223,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut SessionsState) {
                 };
                 ListItem::new(Line::from(vec![
                     Span::styled(
-                        format!("  {:<20}", truncate(&s.agent_name, 19)),
+                        format!("  {:<20}", widgets::truncate(&s.agent_name, 19)),
                         Style::default().fg(theme::CYAN),
                     ),
                     Span::styled(format!(" {:<16}", id_short), theme::dim_style()),
@@ -270,47 +236,18 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut SessionsState) {
             })
             .collect();
 
-        let list = List::new(items)
-            .highlight_style(theme::selected_style())
-            .highlight_symbol("> ");
-        f.render_stateful_widget(list, chunks[1], &mut state.list_state);
+        let list = widgets::themed_list(items);
+        f.render_stateful_widget(list, content, &mut state.list_state);
     }
 
     // ── Hints / status ──
-    if state.confirm_delete {
-        f.render_widget(
-            Paragraph::new(Line::from(vec![Span::styled(
-                "  Delete this session? [y] Yes  [any] Cancel",
-                Style::default().fg(theme::YELLOW),
-            )])),
-            chunks[2],
-        );
-    } else if !state.status_msg.is_empty() {
-        f.render_widget(
-            Paragraph::new(Line::from(vec![Span::styled(
-                format!("  {}", state.status_msg),
-                Style::default().fg(theme::GREEN),
-            )])),
-            chunks[2],
-        );
-    } else {
-        f.render_widget(
-            Paragraph::new(Line::from(vec![Span::styled(
-                "  [\u{2191}\u{2193}] Navigate  [Enter] Open in Chat  [d] Delete  [/] Search  [r] Refresh",
-                theme::hint_style(),
-            )])),
-            chunks[2],
-        );
-    }
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!(
-            "{}\u{2026}",
-            librefang_types::truncate_str(s, max.saturating_sub(1))
-        )
-    }
+    f.render_widget(
+        widgets::confirm_or_status_or_hint(
+            state.confirm_delete,
+            "  Delete this session? [y] Yes  [any] Cancel",
+            &state.status_msg,
+            "  [\u{2191}\u{2193}] Navigate  [Enter] Open in Chat  [d] Delete  [/] Search  [r] Refresh",
+        ),
+        hints,
+    );
 }

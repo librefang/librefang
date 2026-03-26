@@ -1,11 +1,11 @@
 //! Templates screen: browse agent templates and spawn with one click.
 
-use crate::tui::theme;
+use crate::tui::{theme, widgets};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Padding, Paragraph};
+use ratatui::widgets::{ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
 // ── Data types ──────────────────────────────────────────────────────────────
@@ -237,17 +237,7 @@ impl TemplatesState {
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
 pub fn draw(f: &mut Frame, area: Rect, state: &mut TemplatesState) {
-    let block = Block::default()
-        .title(Line::from(vec![Span::styled(
-            " Templates ",
-            theme::title_style(),
-        )]))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::ACCENT))
-        .padding(Padding::horizontal(1));
-
-    let inner = block.inner(area);
-    f.render_widget(block, area);
+    let inner = widgets::render_screen_block(f, area, "Templates");
 
     let chunks = Layout::vertical([
         Constraint::Length(2), // header + category filter
@@ -290,20 +280,13 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut TemplatesState) {
 
     // ── List ──
     if state.loading {
-        let spinner = theme::SPINNER_FRAMES[state.tick % theme::SPINNER_FRAMES.len()];
         f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(format!("  {spinner} "), Style::default().fg(theme::CYAN)),
-                Span::styled("Loading templates\u{2026}", theme::dim_style()),
-            ])),
+            widgets::spinner(state.tick, "Loading templates\u{2026}"),
             chunks[1],
         );
     } else if state.filtered.is_empty() {
         f.render_widget(
-            Paragraph::new(Span::styled(
-                "  No templates in this category.",
-                theme::dim_style(),
-            )),
+            widgets::empty_state("No templates in this category."),
             chunks[1],
         );
     } else {
@@ -320,10 +303,10 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut TemplatesState) {
                 } else {
                     Span::styled(" \u{2718}", Style::default().fg(theme::RED))
                 };
-                let prov_model = format!("{}/{}", t.provider, truncate(&t.model, 12));
+                let prov_model = format!("{}/{}", t.provider, widgets::truncate(&t.model, 12));
                 ListItem::new(Line::from(vec![
                     Span::styled(
-                        format!("  {:<22}", truncate(&t.name, 21)),
+                        format!("  {:<22}", widgets::truncate(&t.name, 21)),
                         Style::default().fg(theme::CYAN),
                     ),
                     Span::styled(
@@ -331,21 +314,19 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut TemplatesState) {
                         Style::default().fg(theme::YELLOW),
                     ),
                     Span::styled(
-                        format!(" {:<16}", truncate(&prov_model, 15)),
+                        format!(" {:<16}", widgets::truncate(&prov_model, 15)),
                         Style::default().fg(theme::BLUE),
                     ),
                     auth_badge,
                     Span::styled(
-                        format!("  {}", truncate(&t.description, 28)),
+                        format!("  {}", widgets::truncate(&t.description, 28)),
                         theme::dim_style(),
                     ),
                 ]))
             })
             .collect();
 
-        let list = List::new(items)
-            .highlight_style(theme::selected_style())
-            .highlight_symbol("> ");
+        let list = widgets::themed_list(items);
         f.render_stateful_widget(list, chunks[1], &mut state.list_state);
     }
 
@@ -386,22 +367,8 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut TemplatesState) {
         );
     } else {
         f.render_widget(
-            Paragraph::new(Line::from(vec![Span::styled(
-                "  [\u{2191}\u{2193}] Navigate  [Enter] Spawn Agent  [f] Filter Category  [r] Refresh",
-                theme::hint_style(),
-            )])),
+            widgets::hint_bar("  [\u{2191}\u{2193}] Navigate  [Enter] Spawn Agent  [f] Filter Category  [r] Refresh"),
             chunks[3],
         );
-    }
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!(
-            "{}\u{2026}",
-            librefang_types::truncate_str(s, max.saturating_sub(1))
-        )
     }
 }

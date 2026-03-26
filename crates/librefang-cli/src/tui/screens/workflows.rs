@@ -1,11 +1,12 @@
 //! Workflows screen: CRUD, run input, run history.
 
 use crate::tui::theme;
+use crate::tui::widgets;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Padding, Paragraph};
+use ratatui::widgets::{ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
 // ── Data types ──────────────────────────────────────────────────────────────
@@ -279,17 +280,7 @@ impl WorkflowState {
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
 pub fn draw(f: &mut Frame, area: Rect, state: &mut WorkflowState) {
-    let block = Block::default()
-        .title(Line::from(vec![Span::styled(
-            " Workflows ",
-            theme::title_style(),
-        )]))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::ACCENT))
-        .padding(Padding::horizontal(1));
-
-    let inner = block.inner(area);
-    f.render_widget(block, area);
+    let inner = widgets::render_screen_block(f, area, "Workflows");
 
     match state.sub {
         WorkflowSubScreen::List => draw_list(f, inner, state),
@@ -317,12 +308,8 @@ fn draw_list(f: &mut Frame, area: Rect, state: &mut WorkflowState) {
     );
 
     if state.loading {
-        let spinner = theme::SPINNER_FRAMES[state.tick % theme::SPINNER_FRAMES.len()];
         f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(format!("  {spinner} "), Style::default().fg(theme::CYAN)),
-                Span::styled("Loading workflows\u{2026}", theme::dim_style()),
-            ])),
+            widgets::spinner(state.tick, "Loading workflows\u{2026}"),
             chunks[1],
         );
     } else {
@@ -332,11 +319,11 @@ fn draw_list(f: &mut Frame, area: Rect, state: &mut WorkflowState) {
             .map(|wf| {
                 ListItem::new(Line::from(vec![
                     Span::styled(
-                        format!("  {:<12}", truncate(&wf.id, 11)),
+                        format!("  {:<12}", widgets::truncate(&wf.id, 11)),
                         theme::dim_style(),
                     ),
                     Span::styled(
-                        format!(" {:<24}", truncate(&wf.name, 23)),
+                        format!(" {:<24}", widgets::truncate(&wf.name, 23)),
                         Style::default().fg(theme::CYAN),
                     ),
                     Span::styled(
@@ -355,17 +342,14 @@ fn draw_list(f: &mut Frame, area: Rect, state: &mut WorkflowState) {
                 .add_modifier(Modifier::BOLD),
         )])));
 
-        let list = List::new(items)
-            .highlight_style(theme::selected_style())
-            .highlight_symbol("> ");
+        let list = widgets::themed_list(items);
         f.render_stateful_widget(list, chunks[1], &mut state.list_state);
     }
 
-    let hints = Paragraph::new(Line::from(vec![Span::styled(
-        "  [\u{2191}\u{2193}] Navigate  [Enter] View runs  [x] Run  [r] Refresh",
-        theme::hint_style(),
-    )]));
-    f.render_widget(hints, chunks[2]);
+    f.render_widget(
+        widgets::hint_bar("  [\u{2191}\u{2193}] Navigate  [Enter] View runs  [x] Run  [r] Refresh"),
+        chunks[2],
+    );
 }
 
 fn draw_runs(f: &mut Frame, area: Rect, state: &mut WorkflowState) {
@@ -406,10 +390,7 @@ fn draw_runs(f: &mut Frame, area: Rect, state: &mut WorkflowState) {
 
     if state.runs.is_empty() {
         f.render_widget(
-            Paragraph::new(Span::styled(
-                "  No runs yet. Press [x] from the list to run.",
-                theme::dim_style(),
-            )),
+            widgets::empty_state("No runs yet. Press [x] from the list to run."),
             chunks[2],
         );
     } else {
@@ -420,7 +401,7 @@ fn draw_runs(f: &mut Frame, area: Rect, state: &mut WorkflowState) {
                 let (badge, badge_style) = theme::state_badge(&run.state);
                 ListItem::new(Line::from(vec![
                     Span::styled(
-                        format!("  {:<12}", truncate(&run.id, 11)),
+                        format!("  {:<12}", widgets::truncate(&run.id, 11)),
                         theme::dim_style(),
                     ),
                     Span::styled(format!(" {:<12}", badge), badge_style),
@@ -429,24 +410,21 @@ fn draw_runs(f: &mut Frame, area: Rect, state: &mut WorkflowState) {
                         Style::default().fg(theme::YELLOW),
                     ),
                     Span::styled(
-                        format!(" {}", truncate(&run.output_preview, 30)),
+                        format!(" {}", widgets::truncate(&run.output_preview, 30)),
                         theme::dim_style(),
                     ),
                 ]))
             })
             .collect();
 
-        let list = List::new(items)
-            .highlight_style(theme::selected_style())
-            .highlight_symbol("> ");
+        let list = widgets::themed_list(items);
         f.render_stateful_widget(list, chunks[2], &mut state.runs_list_state);
     }
 
-    let hints = Paragraph::new(Line::from(vec![Span::styled(
-        "  [\u{2191}\u{2193}] Navigate  [r] Refresh  [Esc] Back",
-        theme::hint_style(),
-    )]));
-    f.render_widget(hints, chunks[3]);
+    f.render_widget(
+        widgets::hint_bar("  [\u{2191}\u{2193}] Navigate  [r] Refresh  [Esc] Back"),
+        chunks[3],
+    );
 }
 
 fn draw_create(f: &mut Frame, area: Rect, state: &WorkflowState) {
@@ -555,13 +533,7 @@ fn draw_create(f: &mut Frame, area: Rect, state: &WorkflowState) {
     } else {
         "  [Enter] Next  [Esc] Back"
     };
-    f.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(
-            hint_text,
-            theme::hint_style(),
-        )])),
-        chunks[6],
-    );
+    f.render_widget(widgets::hint_bar(hint_text), chunks[6]);
 }
 
 fn draw_run_input(f: &mut Frame, area: Rect, state: &WorkflowState) {
@@ -626,13 +598,7 @@ fn draw_run_input(f: &mut Frame, area: Rect, state: &WorkflowState) {
         chunks[3],
     );
 
-    f.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(
-            "  [Enter] Run  [Esc] Cancel",
-            theme::hint_style(),
-        )])),
-        chunks[5],
-    );
+    f.render_widget(widgets::hint_bar("  [Enter] Run  [Esc] Cancel"), chunks[5]);
 }
 
 fn draw_run_result(f: &mut Frame, area: Rect, state: &WorkflowState) {
@@ -654,12 +620,8 @@ fn draw_run_result(f: &mut Frame, area: Rect, state: &WorkflowState) {
     );
 
     if state.loading {
-        let spinner = theme::SPINNER_FRAMES[state.tick % theme::SPINNER_FRAMES.len()];
         f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(format!("  {spinner} "), Style::default().fg(theme::CYAN)),
-                Span::styled("Running workflow\u{2026}", theme::dim_style()),
-            ])),
+            widgets::spinner(state.tick, "Running workflow\u{2026}"),
             chunks[1],
         );
     } else if let Some(ref result) = state.run_result {
@@ -678,28 +640,8 @@ fn draw_run_result(f: &mut Frame, area: Rect, state: &WorkflowState) {
             chunks[1],
         );
     } else {
-        f.render_widget(
-            Paragraph::new(Span::styled("  No result.", theme::dim_style())),
-            chunks[1],
-        );
+        f.render_widget(widgets::empty_state("No result."), chunks[1]);
     }
 
-    f.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(
-            "  [Enter/Esc] Back",
-            theme::hint_style(),
-        )])),
-        chunks[2],
-    );
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!(
-            "{}\u{2026}",
-            librefang_types::truncate_str(s, max.saturating_sub(1))
-        )
-    }
+    f.render_widget(widgets::hint_bar("  [Enter/Esc] Back"), chunks[2]);
 }

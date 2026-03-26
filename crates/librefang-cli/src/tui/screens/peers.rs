@@ -1,11 +1,12 @@
 //! Peers screen: OFP peer network status with auto-refresh.
 
 use crate::tui::theme;
+use crate::tui::widgets;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Padding, Paragraph};
+use ratatui::widgets::{ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
 // ── Data types ──────────────────────────────────────────────────────────────
@@ -86,17 +87,7 @@ impl PeersState {
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
 pub fn draw(f: &mut Frame, area: Rect, state: &mut PeersState) {
-    let block = Block::default()
-        .title(Line::from(vec![Span::styled(
-            " Peers ",
-            theme::title_style(),
-        )]))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::ACCENT))
-        .padding(Padding::horizontal(1));
-
-    let inner = block.inner(area);
-    f.render_widget(block, area);
+    let inner = widgets::render_screen_block(f, area, "Peers");
 
     let chunks = Layout::vertical([
         Constraint::Length(2), // header
@@ -127,20 +118,15 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut PeersState) {
 
     // List
     if state.loading && state.peers.is_empty() {
-        let spinner = theme::SPINNER_FRAMES[state.tick % theme::SPINNER_FRAMES.len()];
         f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(format!("  {spinner} "), Style::default().fg(theme::CYAN)),
-                Span::styled("Discovering peers\u{2026}", theme::dim_style()),
-            ])),
+            widgets::spinner(state.tick, "Discovering peers\u{2026}"),
             chunks[1],
         );
     } else if state.peers.is_empty() {
         f.render_widget(
-            Paragraph::new(Span::styled(
-                "  No peers connected. Configure [network] in config.toml to enable OFP.",
-                theme::dim_style(),
-            )),
+            widgets::empty_state(
+                "No peers connected. Configure [network] in config.toml to enable OFP.",
+            ),
             chunks[1],
         );
     } else {
@@ -171,11 +157,11 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut PeersState) {
                         Style::default().fg(theme::PURPLE),
                     ),
                     Span::styled(
-                        format!(" {:<16}", truncate(&p.node_name, 15)),
+                        format!(" {:<16}", widgets::truncate(&p.node_name, 15)),
                         Style::default().fg(theme::CYAN),
                     ),
                     Span::styled(
-                        format!(" {:<20}", truncate(&p.address, 19)),
+                        format!(" {:<20}", widgets::truncate(&p.address, 19)),
                         theme::dim_style(),
                     ),
                     Span::styled(format!(" {:<14}", state_badge), state_style),
@@ -188,29 +174,13 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut PeersState) {
             })
             .collect();
 
-        let list = List::new(items)
-            .highlight_style(theme::selected_style())
-            .highlight_symbol("> ");
+        let list = widgets::themed_list(items);
         f.render_stateful_widget(list, chunks[1], &mut state.list_state);
     }
 
     // Hints
     f.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(
-            "  [\u{2191}\u{2193}] Navigate  [r] Refresh  (auto-refreshes every 15s)",
-            theme::hint_style(),
-        )])),
+        widgets::hint_bar("  [\u{2191}\u{2193}] Navigate  [r] Refresh  (auto-refreshes every 15s)"),
         chunks[2],
     );
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!(
-            "{}\u{2026}",
-            librefang_types::truncate_str(s, max.saturating_sub(1))
-        )
-    }
 }

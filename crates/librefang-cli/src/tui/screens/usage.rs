@@ -1,11 +1,12 @@
 //! Usage screen: token/cost analytics with summary, by-model, by-agent views.
 
 use crate::tui::theme;
+use crate::tui::widgets;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Padding, Paragraph};
+use ratatui::widgets::{Block, Borders, ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
 // ── Data types ──────────────────────────────────────────────────────────────
@@ -158,17 +159,7 @@ impl UsageState {
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
 pub fn draw(f: &mut Frame, area: Rect, state: &mut UsageState) {
-    let block = Block::default()
-        .title(Line::from(vec![Span::styled(
-            " Usage ",
-            theme::title_style(),
-        )]))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::ACCENT))
-        .padding(Padding::horizontal(1));
-
-    let inner = block.inner(area);
-    f.render_widget(block, area);
+    let inner = widgets::render_screen_block(f, area, "Usage");
 
     let chunks = Layout::vertical([
         Constraint::Length(1), // sub-tab bar
@@ -194,10 +185,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut UsageState) {
     }
 
     f.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(
-            "  [1] Summary  [2] By Model  [3] By Agent  [r] Refresh",
-            theme::hint_style(),
-        )])),
+        widgets::hint_bar("  [1] Summary  [2] By Model  [3] By Agent  [r] Refresh"),
         chunks[3],
     );
 }
@@ -223,12 +211,8 @@ fn draw_sub_tabs(f: &mut Frame, area: Rect, active: UsageSub) {
 
 fn draw_summary(f: &mut Frame, area: Rect, state: &UsageState) {
     if state.loading {
-        let spinner = theme::SPINNER_FRAMES[state.tick % theme::SPINNER_FRAMES.len()];
         f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(format!("  {spinner} "), Style::default().fg(theme::CYAN)),
-                Span::styled("Loading usage data\u{2026}", theme::dim_style()),
-            ])),
+            widgets::spinner(state.tick, "Loading usage data\u{2026}"),
             area,
         );
         return;
@@ -316,19 +300,9 @@ fn draw_by_model(f: &mut Frame, area: Rect, state: &mut UsageState) {
     );
 
     if state.loading {
-        let spinner = theme::SPINNER_FRAMES[state.tick % theme::SPINNER_FRAMES.len()];
-        f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(format!("  {spinner} "), Style::default().fg(theme::CYAN)),
-                Span::styled("Loading\u{2026}", theme::dim_style()),
-            ])),
-            chunks[1],
-        );
+        f.render_widget(widgets::spinner(state.tick, "Loading\u{2026}"), chunks[1]);
     } else if state.by_model.is_empty() {
-        f.render_widget(
-            Paragraph::new(Span::styled("  No usage data.", theme::dim_style())),
-            chunks[1],
-        );
+        f.render_widget(widgets::empty_state("No usage data."), chunks[1]);
     } else {
         let items: Vec<ListItem> = state
             .by_model
@@ -336,7 +310,7 @@ fn draw_by_model(f: &mut Frame, area: Rect, state: &mut UsageState) {
             .map(|m| {
                 ListItem::new(Line::from(vec![
                     Span::styled(
-                        format!("  {:<28}", truncate(&m.model_id, 27)),
+                        format!("  {:<28}", widgets::truncate(&m.model_id, 27)),
                         Style::default().fg(theme::CYAN),
                     ),
                     Span::styled(
@@ -356,9 +330,7 @@ fn draw_by_model(f: &mut Frame, area: Rect, state: &mut UsageState) {
             })
             .collect();
 
-        let list = List::new(items)
-            .highlight_style(theme::selected_style())
-            .highlight_symbol("> ");
+        let list = widgets::themed_list(items);
         f.render_stateful_widget(list, chunks[1], &mut state.model_list);
     }
 }
@@ -382,19 +354,9 @@ fn draw_by_agent(f: &mut Frame, area: Rect, state: &mut UsageState) {
     );
 
     if state.loading {
-        let spinner = theme::SPINNER_FRAMES[state.tick % theme::SPINNER_FRAMES.len()];
-        f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(format!("  {spinner} "), Style::default().fg(theme::CYAN)),
-                Span::styled("Loading\u{2026}", theme::dim_style()),
-            ])),
-            chunks[1],
-        );
+        f.render_widget(widgets::spinner(state.tick, "Loading\u{2026}"), chunks[1]);
     } else if state.by_agent.is_empty() {
-        f.render_widget(
-            Paragraph::new(Span::styled("  No usage data.", theme::dim_style())),
-            chunks[1],
-        );
+        f.render_widget(widgets::empty_state("No usage data."), chunks[1]);
     } else {
         let items: Vec<ListItem> = state
             .by_agent
@@ -402,7 +364,7 @@ fn draw_by_agent(f: &mut Frame, area: Rect, state: &mut UsageState) {
             .map(|a| {
                 ListItem::new(Line::from(vec![
                     Span::styled(
-                        format!("  {:<24}", truncate(&a.agent_name, 23)),
+                        format!("  {:<24}", widgets::truncate(&a.agent_name, 23)),
                         Style::default().fg(theme::CYAN),
                     ),
                     Span::styled(
@@ -418,9 +380,7 @@ fn draw_by_agent(f: &mut Frame, area: Rect, state: &mut UsageState) {
             })
             .collect();
 
-        let list = List::new(items)
-            .highlight_style(theme::selected_style())
-            .highlight_symbol("> ");
+        let list = widgets::themed_list(items);
         f.render_stateful_widget(list, chunks[1], &mut state.agent_list);
     }
 }
@@ -432,16 +392,5 @@ fn format_tokens(n: u64) -> String {
         format!("{:.1}K", n as f64 / 1_000.0)
     } else {
         format!("{n}")
-    }
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!(
-            "{}\u{2026}",
-            librefang_types::truncate_str(s, max.saturating_sub(1))
-        )
     }
 }

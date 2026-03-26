@@ -1,6 +1,7 @@
 //! Chat screen: scrollable message history, streaming output, tool spinners, input.
 
 use crate::tui::theme;
+use crate::tui::widgets;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -466,8 +467,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut ChatState) {
     } else {
         "    [Enter] Send  [Ctrl+M] Models  [\u{2191}\u{2193}] Scroll  [Esc] Back"
     };
-    let hints = Paragraph::new(Line::from(vec![Span::styled(hints, theme::hint_style())]));
-    f.render_widget(hints, chunks[3]);
+    f.render_widget(widgets::hint_bar(hints), chunks[3]);
 
     // ── Model picker overlay ────────────────────────────────────────────────
     if state.show_model_picker {
@@ -528,13 +528,7 @@ fn draw_model_picker(f: &mut Frame, area: Rect, state: &ChatState) {
     let total = filtered.len();
 
     if total == 0 {
-        f.render_widget(
-            Paragraph::new(Line::from(vec![Span::styled(
-                " No models match",
-                theme::dim_style(),
-            )])),
-            chunks[1],
-        );
+        f.render_widget(widgets::empty_state("No models match"), chunks[1]);
         return;
     }
 
@@ -688,7 +682,7 @@ fn draw_messages(f: &mut Frame, area: Rect, state: &ChatState) {
 
                     // Input line (skip if empty)
                     if !info.input.is_empty() {
-                        let val = truncate_line(&info.input, max_val);
+                        let val = widgets::truncate(&info.input, max_val);
                         lines.push(Line::from(vec![
                             Span::styled("  \u{2502} ", Style::default().fg(border_color)),
                             Span::styled("input: ", theme::dim_style()),
@@ -708,14 +702,14 @@ fn draw_messages(f: &mut Frame, area: Rect, state: &ChatState) {
                             ),
                         ]));
                     } else if is_err {
-                        let val = truncate_line(&info.result, max_val);
+                        let val = widgets::truncate(&info.result, max_val);
                         lines.push(Line::from(vec![
                             Span::styled("  \u{2502} ", Style::default().fg(border_color)),
                             Span::styled("error: ", Style::default().fg(theme::RED)),
                             Span::raw(val),
                         ]));
                     } else {
-                        let val = truncate_line(&info.result, max_val);
+                        let val = widgets::truncate(&info.result, max_val);
                         lines.push(Line::from(vec![
                             Span::styled("  \u{2502} ", Style::default().fg(border_color)),
                             Span::styled("result: ", theme::dim_style()),
@@ -751,10 +745,10 @@ fn draw_messages(f: &mut Frame, area: Rect, state: &ChatState) {
 
     // Add "thinking..." spinner while waiting for first token
     if state.thinking {
-        let spinner = theme::SPINNER_FRAMES[state.spinner_frame];
+        let frame = theme::SPINNER_FRAMES[state.spinner_frame % theme::SPINNER_FRAMES.len()];
         lines.push(Line::from(vec![
-            Span::styled(format!("  {spinner} "), Style::default().fg(theme::CYAN)),
-            Span::styled("thinking\u{2026}", Style::default().fg(theme::DIM)),
+            Span::styled(format!("  {frame} "), Style::default().fg(theme::CYAN)),
+            Span::styled("thinking\u{2026}", theme::dim_style()),
         ]));
     }
 
@@ -879,16 +873,4 @@ fn sanitize_function_tags(text: &str) -> String {
     }
     out.push_str(rest);
     out
-}
-
-/// Truncate a string to `max_len` chars, appending `…` if truncated.
-fn truncate_line(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        s.to_string()
-    } else {
-        format!(
-            "{}\u{2026}",
-            librefang_types::truncate_str(s, max_len.saturating_sub(1))
-        )
-    }
 }

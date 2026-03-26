@@ -6,6 +6,7 @@ pub mod chat_runner;
 pub mod event;
 pub mod screens;
 pub mod theme;
+pub mod widgets;
 
 use event::{AppEvent, BackendRef};
 use librefang_kernel::LibreFangKernel;

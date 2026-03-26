@@ -1,11 +1,12 @@
 //! Channels screen: list all 40 adapters, setup wizards, test & toggle.
 
 use crate::tui::theme;
+use crate::tui::widgets;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Padding, Paragraph};
+use ratatui::widgets::{ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
 // ── Data types ──────────────────────────────────────────────────────────────
@@ -617,16 +618,9 @@ impl ChannelState {
 pub fn draw(f: &mut Frame, area: Rect, state: &mut ChannelState) {
     let ready = state.ready_count();
     let total = state.channels.len();
-    let title = format!(" Channels ({ready}/{total} ready) ");
+    let title = format!("Channels ({ready}/{total} ready)");
 
-    let block = Block::default()
-        .title(Line::from(vec![Span::styled(title, theme::title_style())]))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::ACCENT))
-        .padding(Padding::horizontal(1));
-
-    let inner = block.inner(area);
-    f.render_widget(block, area);
+    let inner = widgets::render_screen_block(f, area, &title);
 
     match state.sub {
         ChannelSubScreen::List => draw_list(f, inner, state),
@@ -676,12 +670,8 @@ fn draw_list(f: &mut Frame, area: Rect, state: &mut ChannelState) {
     );
 
     if state.loading {
-        let spinner = theme::SPINNER_FRAMES[state.tick % theme::SPINNER_FRAMES.len()];
         f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(format!("  {spinner} "), Style::default().fg(theme::CYAN)),
-                Span::styled("Loading channels\u{2026}", theme::dim_style()),
-            ])),
+            widgets::spinner(state.tick, "Loading channels\u{2026}"),
             chunks[2],
         );
     } else {
@@ -719,17 +709,14 @@ fn draw_list(f: &mut Frame, area: Rect, state: &mut ChannelState) {
             })
             .collect();
 
-        let list = List::new(items)
-            .highlight_style(theme::selected_style())
-            .highlight_symbol("> ");
+        let list = widgets::themed_list(items);
         f.render_stateful_widget(list, chunks[2], &mut state.list_state);
     }
 
-    let hints = Paragraph::new(Line::from(vec![Span::styled(
-        "  [\u{2191}\u{2193}] Navigate  [Tab] Category  [Enter] Setup  [t] Test  [e/d] Enable/Disable  [r] Refresh",
-        theme::hint_style(),
-    )]));
-    f.render_widget(hints, chunks[3]);
+    f.render_widget(
+        widgets::hint_bar("  [\u{2191}\u{2193}] Navigate  [Tab] Category  [Enter] Setup  [t] Test  [e/d] Enable/Disable  [r] Refresh"),
+        chunks[3],
+    );
 }
 
 fn draw_setup(f: &mut Frame, area: Rect, state: &ChannelState) {
@@ -847,10 +834,7 @@ fn draw_setup(f: &mut Frame, area: Rect, state: &ChannelState) {
 
     // Hints
     f.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(
-            "  [Enter] Next field / Save  [Esc] Back",
-            theme::hint_style(),
-        )])),
+        widgets::hint_bar("  [Enter] Next field / Save  [Esc] Back"),
         chunks[5],
     );
 }
@@ -885,12 +869,8 @@ fn draw_testing(f: &mut Frame, area: Rect, state: &ChannelState) {
 
     match &state.test_result {
         None => {
-            let spinner = theme::SPINNER_FRAMES[state.tick % theme::SPINNER_FRAMES.len()];
             f.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::styled(format!("  {spinner} "), Style::default().fg(theme::CYAN)),
-                    Span::styled("Checking credentials\u{2026}", theme::dim_style()),
-                ])),
+                widgets::spinner(state.tick, "Checking credentials\u{2026}"),
                 chunks[1],
             );
         }
@@ -923,11 +903,5 @@ fn draw_testing(f: &mut Frame, area: Rect, state: &ChannelState) {
         }
     }
 
-    f.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(
-            "  [Enter/Esc] Back",
-            theme::hint_style(),
-        )])),
-        chunks[2],
-    );
+    f.render_widget(widgets::hint_bar("  [Enter/Esc] Back"), chunks[2]);
 }

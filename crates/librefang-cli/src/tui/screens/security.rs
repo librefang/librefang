@@ -1,11 +1,12 @@
 //! Security screen: security feature dashboard and chain verification.
 
 use crate::tui::theme;
+use crate::tui::widgets;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Padding, Paragraph};
+use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 // ── Data types ──────────────────────────────────────────────────────────────
@@ -196,17 +197,7 @@ impl SecurityState {
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
 pub fn draw(f: &mut Frame, area: Rect, state: &mut SecurityState) {
-    let block = Block::default()
-        .title(Line::from(vec![Span::styled(
-            " Security ",
-            theme::title_style(),
-        )]))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::ACCENT))
-        .padding(Padding::horizontal(1));
-
-    let inner = block.inner(area);
-    f.render_widget(block, area);
+    let inner = widgets::render_screen_block(f, area, "Security");
 
     let chunks = Layout::vertical([
         Constraint::Min(4),    // features
@@ -265,12 +256,8 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut SecurityState) {
     match state.chain_verified {
         None => {
             if state.loading {
-                let spinner = theme::SPINNER_FRAMES[state.tick % theme::SPINNER_FRAMES.len()];
                 f.render_widget(
-                    Paragraph::new(Line::from(vec![
-                        Span::styled(format!("  {spinner} "), Style::default().fg(theme::CYAN)),
-                        Span::styled("Verifying audit chain\u{2026}", theme::dim_style()),
-                    ])),
+                    widgets::spinner(state.tick, "Verifying audit chain\u{2026}"),
                     chunks[1],
                 );
             } else {
@@ -317,10 +304,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut SecurityState) {
 
     // ── Hints ──
     f.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(
-            "  [\u{2191}\u{2193}] Scroll  [v] Verify Chain  [r] Refresh",
-            theme::hint_style(),
-        )])),
+        widgets::hint_bar("  [\u{2191}\u{2193}] Scroll  [v] Verify Chain  [r] Refresh"),
         chunks[2],
     );
 }

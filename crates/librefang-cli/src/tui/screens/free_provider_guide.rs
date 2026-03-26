@@ -379,7 +379,7 @@ fn draw_select(f: &mut Frame, area: Rect, state: &State) {
         .highlight_style(theme::selected_style().add_modifier(Modifier::BOLD))
         .highlight_symbol("▸ ");
 
-    let mut ls = state.list.clone();
+    let mut ls = state.list;
     f.render_stateful_widget(list, chunks[3], &mut ls);
 }
 

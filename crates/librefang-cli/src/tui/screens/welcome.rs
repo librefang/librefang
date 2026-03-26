@@ -8,6 +8,7 @@ use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
 use crate::tui::theme;
+use crate::tui::widgets;
 
 // ── ASCII Logo ───────────────────────────────────────────────────────────────
 
@@ -311,12 +312,10 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut WelcomeState) {
 
     // ── Status block ─────────────────────────────────────────────────────────
     if state.detecting {
-        let spinner = theme::SPINNER_FRAMES[state.tick % theme::SPINNER_FRAMES.len()];
-        let line = Line::from(vec![
-            Span::styled(format!("{spinner} "), Style::default().fg(theme::YELLOW)),
-            Span::styled("Checking for daemon\u{2026}", theme::dim_style()),
-        ]);
-        f.render_widget(Paragraph::new(line), chunks[4]);
+        f.render_widget(
+            widgets::spinner(state.tick, "Checking for daemon\u{2026}"),
+            chunks[4],
+        );
     } else {
         let mut status_lines: Vec<Line> = Vec::new();
 
@@ -417,16 +416,18 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut WelcomeState) {
     }
 
     // ── Hints ────────────────────────────────────────────────────────────────
-    let hints = if state.ctrl_c_pending {
-        Line::from(vec![Span::styled(
-            "Press Ctrl+C again to exit",
-            Style::default().fg(theme::YELLOW),
-        )])
+    if state.ctrl_c_pending {
+        f.render_widget(
+            Paragraph::new(Line::from(vec![Span::styled(
+                "Press Ctrl+C again to exit",
+                Style::default().fg(theme::YELLOW),
+            )])),
+            chunks[7],
+        );
     } else {
-        Line::from(vec![Span::styled(
-            "\u{2191}\u{2193} navigate  enter select  q quit",
-            theme::hint_style(),
-        )])
-    };
-    f.render_widget(Paragraph::new(hints), chunks[7]);
+        f.render_widget(
+            widgets::hint_bar("\u{2191}\u{2193} navigate  enter select  q quit"),
+            chunks[7],
+        );
+    }
 }

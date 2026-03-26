@@ -1,11 +1,12 @@
 //! Audit screen: audit log viewer with action filter and chain verification.
 
 use crate::tui::theme;
+use crate::tui::widgets;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Padding, Paragraph};
+use ratatui::widgets::{ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
 // ── Data types ──────────────────────────────────────────────────────────────
@@ -193,17 +194,7 @@ impl AuditState {
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
 pub fn draw(f: &mut Frame, area: Rect, state: &mut AuditState) {
-    let block = Block::default()
-        .title(Line::from(vec![Span::styled(
-            " Audit Trail ",
-            theme::title_style(),
-        )]))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::ACCENT))
-        .padding(Padding::horizontal(1));
-
-    let inner = block.inner(area);
-    f.render_widget(block, area);
+    let inner = widgets::render_screen_block(f, area, "Audit Trail");
 
     let chunks = Layout::vertical([
         Constraint::Length(2), // header + filter
@@ -241,20 +232,13 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut AuditState) {
 
     // ── List ──
     if state.loading {
-        let spinner = theme::SPINNER_FRAMES[state.tick % theme::SPINNER_FRAMES.len()];
         f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(format!("  {spinner} "), Style::default().fg(theme::CYAN)),
-                Span::styled("Loading audit trail\u{2026}", theme::dim_style()),
-            ])),
+            widgets::spinner(state.tick, "Loading audit trail\u{2026}"),
             chunks[1],
         );
     } else if state.filtered.is_empty() {
         f.render_widget(
-            Paragraph::new(Span::styled(
-                "  No audit entries match the current filter.",
-                theme::dim_style(),
-            )),
+            widgets::empty_state("No audit entries match the current filter."),
             chunks[1],
         );
     } else {
@@ -280,29 +264,30 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut AuditState) {
                 };
                 ListItem::new(Line::from(vec![
                     Span::styled(
-                        format!("  {:<20}", truncate(&e.timestamp, 19)),
+                        format!("  {:<20}", widgets::truncate(&e.timestamp, 19)),
                         theme::dim_style(),
                     ),
                     Span::styled(
-                        format!(" {:<16}", truncate(action_display, 15)),
+                        format!(" {:<16}", widgets::truncate(action_display, 15)),
                         action_style,
                     ),
                     Span::styled(
-                        format!(" {:<14}", truncate(&e.agent, 13)),
+                        format!(" {:<14}", widgets::truncate(&e.agent, 13)),
                         Style::default().fg(theme::CYAN),
                     ),
                     Span::styled(
                         format!(" {:<10}", hash_short),
                         Style::default().fg(theme::PURPLE),
                     ),
-                    Span::styled(format!(" {}", truncate(&e.detail, 24)), theme::dim_style()),
+                    Span::styled(
+                        format!(" {}", widgets::truncate(&e.detail, 24)),
+                        theme::dim_style(),
+                    ),
                 ]))
             })
             .collect();
 
-        let list = List::new(items)
-            .highlight_style(theme::selected_style())
-            .highlight_symbol("> ");
+        let list = widgets::themed_list(items);
         f.render_stateful_widget(list, chunks[1], &mut state.list_state);
     }
 
@@ -335,15 +320,4 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut AuditState) {
     };
 
     f.render_widget(Paragraph::new(vec![chain_line, hints]), chunks[2]);
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!(
-            "{}\u{2026}",
-            librefang_types::truncate_str(s, max.saturating_sub(1))
-        )
-    }
 }
