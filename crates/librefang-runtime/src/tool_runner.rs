@@ -231,23 +231,12 @@ pub async fn execute_tool(
             }
         }
 
-        // Shell tool — metacharacter check + exec policy + taint check
+        // Shell tool — exec policy + metacharacter check + taint check
         "shell_exec" => {
             let command = input["command"].as_str().unwrap_or("");
 
-            // SECURITY: Always check for shell metacharacters, even in Full mode.
-            // These enable command injection regardless of exec policy.
-            if let Some(reason) = crate::subprocess_sandbox::contains_shell_metacharacters(command)
-            {
-                return ToolResult {
-                    tool_use_id: tool_use_id.to_string(),
-                    content: format!(
-                        "shell_exec blocked: command contains {reason}. \
-                         Shell metacharacters are never allowed."
-                    ),
-                    is_error: true,
-                };
-            }
+            let is_full_exec = exec_policy
+                .is_some_and(|p| p.mode == librefang_types::config::ExecSecurityMode::Full);
 
             // Exec policy enforcement (allowlist / deny / full)
             if let Some(policy) = exec_policy {
@@ -265,9 +254,25 @@ pub async fn execute_tool(
                     };
                 }
             }
+
+            // SECURITY: Check for shell metacharacters in non-full modes.
+            // Full mode explicitly trusts the agent — skip metacharacter checks.
+            if !is_full_exec {
+                if let Some(reason) =
+                    crate::subprocess_sandbox::contains_shell_metacharacters(command)
+                {
+                    return ToolResult {
+                        tool_use_id: tool_use_id.to_string(),
+                        content: format!(
+                            "shell_exec blocked: command contains {reason}. \
+                             Shell metacharacters are not allowed in allowlist mode."
+                        ),
+                        is_error: true,
+                    };
+                }
+            }
+
             // Skip heuristic taint patterns for Full exec policy (e.g. hand agents that need curl)
-            let is_full_exec = exec_policy
-                .is_some_and(|p| p.mode == librefang_types::config::ExecSecurityMode::Full);
             if !is_full_exec {
                 if let Some(violation) = check_taint_shell_exec(command) {
                     return ToolResult {
