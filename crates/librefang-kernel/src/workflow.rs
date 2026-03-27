@@ -1897,55 +1897,85 @@ impl WorkflowTemplateRegistry {
 
     /// Load templates from a directory. Only reads top-level `*.toml` files.
     ///
-    /// **Must not be called from async context** — uses blocking I/O.
+    /// Safe to call from any context — filesystem I/O and the lock acquisition
+    /// are performed on a dedicated thread that is fully outside the Tokio
+    /// runtime, avoiding the "cannot block the current thread from within a
+    /// runtime" panic on constrained platforms (e.g. Termux/Android).
     pub fn load_templates_from_dir(&self, dir: &std::path::Path) -> usize {
         use tracing::{info, warn};
 
-        if !dir.is_dir() {
+        // Phase 1 — read & parse template files (pure sync I/O, no lock needed).
+        let dir = dir.to_path_buf();
+        let parsed: Vec<Result<WorkflowTemplate, (std::path::PathBuf, String)>> = {
+            if !dir.is_dir() {
+                return 0;
+            }
+
+            let entries = match std::fs::read_dir(&dir) {
+                Ok(e) => e,
+                Err(e) => {
+                    warn!("Cannot read template directory {}: {e}", dir.display());
+                    return 0;
+                }
+            };
+
+            let mut results = Vec::new();
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+                    continue;
+                }
+                // Skip files > 1 MiB
+                if let Ok(meta) = std::fs::metadata(&path) {
+                    if meta.len() > 1_048_576 {
+                        warn!("Skipping oversized template file: {}", path.display());
+                        continue;
+                    }
+                }
+                let content = match std::fs::read_to_string(&path) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        results.push(Err((path, e.to_string())));
+                        continue;
+                    }
+                };
+                match toml::from_str::<WorkflowTemplate>(&content) {
+                    Ok(tpl) => results.push(Ok(tpl)),
+                    Err(e) => results.push(Err((path, e.to_string()))),
+                }
+            }
+            results
+        };
+
+        if parsed.is_empty() {
             return 0;
         }
 
-        let entries = match std::fs::read_dir(dir) {
-            Ok(e) => e,
-            Err(e) => {
-                warn!("Cannot read template directory {}: {e}", dir.display());
-                return 0;
-            }
-        };
-
-        let mut map = self.templates.blocking_write();
-        let mut count = 0;
-
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("toml") {
-                continue;
-            }
-            // Skip files > 1 MiB
-            if let Ok(meta) = std::fs::metadata(&path) {
-                if meta.len() > 1_048_576 {
-                    warn!("Skipping oversized template file: {}", path.display());
-                    continue;
+        // Phase 2 — acquire the write lock and insert.
+        // Use a scoped OS thread so `blocking_write()` never sees a Tokio
+        // runtime context, which would panic on single-threaded /
+        // thread-constrained runtimes.
+        let count = std::thread::scope(|s| {
+            s.spawn(|| {
+                let mut map = self.templates.blocking_write();
+                let mut count = 0usize;
+                for result in parsed {
+                    match result {
+                        Ok(tpl) => {
+                            info!(id = %tpl.id, name = %tpl.name, "Loaded workflow template");
+                            map.insert(tpl.id.clone(), tpl);
+                            count += 1;
+                        }
+                        Err((path, e)) => {
+                            warn!("Failed to load template {}: {e}", path.display());
+                        }
+                    }
                 }
-            }
-            let content = match std::fs::read_to_string(&path) {
-                Ok(c) => c,
-                Err(e) => {
-                    warn!("Cannot read {}: {e}", path.display());
-                    continue;
-                }
-            };
-            match toml::from_str::<WorkflowTemplate>(&content) {
-                Ok(tpl) => {
-                    info!(id = %tpl.id, name = %tpl.name, "Loaded workflow template");
-                    map.insert(tpl.id.clone(), tpl);
-                    count += 1;
-                }
-                Err(e) => {
-                    warn!("Failed to parse template {}: {e}", path.display());
-                }
-            }
-        }
+                count
+            })
+            .join()
+            .unwrap_or(0)
+        });
         count
     }
 
