@@ -1,11 +1,12 @@
 //! Comms screen: Agent communication topology + live event feed.
 
 use crate::tui::theme;
+use crate::tui::widgets;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Padding, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, ListItem, ListState, Padding, Paragraph};
 use ratatui::Frame;
 
 // ── Data types ──────────────────────────────────────────────────────────────
@@ -322,20 +323,10 @@ impl CommsState {
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
 pub fn draw(f: &mut Frame, area: Rect, state: &mut CommsState) {
-    let block = Block::default()
-        .title(Line::from(vec![Span::styled(
-            " Comms ",
-            theme::title_style(),
-        )]))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::ACCENT))
-        .padding(Padding::horizontal(1));
-
-    let inner = block.inner(area);
-    f.render_widget(block, area);
+    let inner = widgets::render_screen_block(f, area, "\u{25ef} Comms");
 
     let chunks = Layout::vertical([
-        Constraint::Length(2),      // header
+        Constraint::Length(1),      // focus tabs
         Constraint::Length(1),      // separator
         Constraint::Percentage(35), // topology
         Constraint::Length(1),      // separator
@@ -344,57 +335,42 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut CommsState) {
     ])
     .split(inner);
 
-    // Header
+    // Focus tab indicator
+    let topo_style = if state.focus == CommsFocus::Topology {
+        theme::tab_active()
+    } else {
+        theme::tab_inactive()
+    };
+    let event_style = if state.focus == CommsFocus::EventList {
+        theme::tab_active()
+    } else {
+        theme::tab_inactive()
+    };
     f.render_widget(
-        Paragraph::new(vec![
-            Line::from(vec![Span::styled(
+        Paragraph::new(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
                 format!(
-                    "  Agent Topology  ({} agents, {} edges)",
+                    " Topology ({} agents, {} edges) ",
                     state.nodes.len(),
                     state.edges.len()
                 ),
-                Style::default()
-                    .fg(theme::CYAN)
-                    .add_modifier(Modifier::BOLD),
-            )]),
-            Line::from(""),
-        ]),
+                topo_style,
+            ),
+            Span::raw("  "),
+            Span::styled(format!(" Events ({}) ", state.events.len()), event_style),
+        ])),
         chunks[0],
     );
 
     // Separator
-    f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            "\u{2500}".repeat(inner.width as usize),
-            theme::dim_style(),
-        ))),
-        chunks[1],
-    );
+    f.render_widget(widgets::separator(inner.width), chunks[1]);
 
     // Topology tree
     draw_topology(f, chunks[2], state);
 
     // Separator
-    let event_label = if state.focus == CommsFocus::EventList {
-        "  \u{25b6} Live Event Feed"
-    } else {
-        "    Live Event Feed"
-    };
-    f.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                event_label,
-                Style::default()
-                    .fg(theme::CYAN)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("  ({} events)", state.events.len()),
-                theme::dim_style(),
-            ),
-        ])),
-        chunks[3],
-    );
+    f.render_widget(widgets::separator(inner.width), chunks[3]);
 
     // Event list
     draw_event_list(f, chunks[4], state);
@@ -408,10 +384,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut CommsState) {
     } else {
         "  [s]end  [t]ask  [r]efresh  [Tab] focus  [\u{2191}\u{2193}] scroll".to_string()
     };
-    f.render_widget(
-        Paragraph::new(Line::from(Span::styled(hint_text, theme::hint_style()))),
-        chunks[5],
-    );
+    f.render_widget(widgets::hint_bar(&hint_text), chunks[5]);
 
     // Modal overlays
     if state.show_send_modal {
@@ -424,12 +397,8 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut CommsState) {
 
 fn draw_topology(f: &mut Frame, area: Rect, state: &CommsState) {
     if state.loading && state.nodes.is_empty() {
-        let spinner = theme::SPINNER_FRAMES[state.tick % theme::SPINNER_FRAMES.len()];
         f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(format!("  {spinner} "), Style::default().fg(theme::CYAN)),
-                Span::styled("Loading topology\u{2026}", theme::dim_style()),
-            ])),
+            widgets::spinner(state.tick, "Loading topology\u{2026}"),
             area,
         );
         return;
@@ -437,7 +406,7 @@ fn draw_topology(f: &mut Frame, area: Rect, state: &CommsState) {
 
     if state.nodes.is_empty() {
         f.render_widget(
-            Paragraph::new(Span::styled("  No agents running.", theme::dim_style())),
+            widgets::empty_state("No agents running. Start agents to see communication."),
             area,
         );
         return;
@@ -447,21 +416,22 @@ fn draw_topology(f: &mut Frame, area: Rect, state: &CommsState) {
     let mut lines = Vec::new();
 
     for root in state.root_nodes() {
-        let state_style = state_color(&root.state);
+        let (indicator, indicator_style) = state_indicator(&root.state);
         let mut spans = vec![
             Span::styled("  ", Style::default()),
-            Span::styled(format!("[{}]", &root.state), state_style),
+            Span::styled(format!("{indicator} "), indicator_style),
             Span::styled(
-                format!(" {} ", root.name),
+                format!("{} ", root.name),
                 Style::default()
                     .fg(if focus_highlight {
-                        theme::CYAN
+                        theme::ACCENT
                     } else {
-                        theme::TEXT
+                        theme::TEXT_PRIMARY
                     })
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(format!("({})", root.model), theme::dim_style()),
+            Span::styled(format!("({}) ", root.model), theme::dim_style()),
+            Span::styled(root.state.clone(), state_color(&root.state)),
         ];
         // Peer annotations
         for peer in state.peers_of(&root.id) {
@@ -480,15 +450,19 @@ fn draw_topology(f: &mut Frame, area: Rect, state: &CommsState) {
             } else {
                 "\u{2514}\u{2500}\u{2500} "
             };
+            let (child_ind, child_ind_style) = state_indicator(&child.state);
             lines.push(Line::from(vec![
                 Span::styled("    ", Style::default()),
-                Span::styled(branch, theme::dim_style()),
-                Span::styled(format!("[{}]", child.state), state_color(&child.state)),
+                Span::styled(branch, Style::default().fg(theme::BORDER)),
+                Span::styled(format!("{child_ind} "), child_ind_style),
                 Span::styled(
-                    format!(" {} ", child.name),
-                    Style::default().fg(theme::TEXT),
+                    format!("{} ", child.name),
+                    Style::default()
+                        .fg(theme::TEXT_PRIMARY)
+                        .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(format!("({})", child.model), theme::dim_style()),
+                Span::styled(format!("({}) ", child.model), theme::dim_style()),
+                Span::styled(child.state.clone(), state_color(&child.state)),
             ]));
         }
     }
@@ -499,10 +473,7 @@ fn draw_topology(f: &mut Frame, area: Rect, state: &CommsState) {
 fn draw_event_list(f: &mut Frame, area: Rect, state: &mut CommsState) {
     if state.events.is_empty() {
         f.render_widget(
-            Paragraph::new(Span::styled(
-                "  No inter-agent events yet.",
-                theme::dim_style(),
-            )),
+            widgets::empty_state("No inter-agent events yet. Activity will appear here."),
             area,
         );
         return;
@@ -514,22 +485,24 @@ fn draw_event_list(f: &mut Frame, area: Rect, state: &mut CommsState) {
         .map(|ev| {
             let kind_style = kind_color(&ev.kind);
             let kind_label = kind_short(&ev.kind);
+            let kind_indicator = kind_indicator(&ev.kind);
             let target_part = if ev.target_name.is_empty() {
                 String::new()
             } else {
                 format!(" \u{2192} {}", ev.target_name)
             };
-            let detail = truncate(&ev.detail, 50);
+            let detail = widgets::truncate(&ev.detail, 50);
             ListItem::new(Line::from(vec![
                 Span::styled(
                     format!("  {:<8}", short_time(&ev.timestamp)),
-                    theme::dim_style(),
+                    Style::default().fg(theme::TEXT_TERTIARY),
                 ),
+                Span::styled(format!(" {kind_indicator}"), kind_style),
                 Span::styled(format!(" {:<10}", kind_label), kind_style),
                 Span::styled(
-                    format!(" {}", ev.source_name),
+                    ev.source_name.to_string(),
                     Style::default()
-                        .fg(theme::CYAN)
+                        .fg(theme::TEXT_PRIMARY)
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(target_part, Style::default().fg(theme::PURPLE)),
@@ -538,9 +511,7 @@ fn draw_event_list(f: &mut Frame, area: Rect, state: &mut CommsState) {
         })
         .collect();
 
-    let list = List::new(items)
-        .highlight_style(theme::selected_style())
-        .highlight_symbol("> ");
+    let list = widgets::themed_list(items);
     f.render_stateful_widget(list, area, &mut state.event_list_state);
 }
 
@@ -551,8 +522,9 @@ fn draw_send_modal(f: &mut Frame, area: Rect, state: &CommsState) {
     let block = Block::default()
         .title(Span::styled(" Send Message ", theme::title_style()))
         .borders(Borders::ALL)
+        .border_set(ratatui::symbols::border::ROUNDED)
         .border_style(Style::default().fg(theme::ACCENT))
-        .padding(Padding::uniform(1));
+        .padding(Padding::horizontal(1));
     let inner = block.inner(modal);
     f.render_widget(block, modal);
 
@@ -611,10 +583,7 @@ fn draw_send_modal(f: &mut Frame, area: Rect, state: &CommsState) {
         rows[5],
     );
     f.render_widget(
-        Paragraph::new(Span::styled(
-            "[Tab] field  [Enter] send  [Esc] cancel",
-            theme::hint_style(),
-        )),
+        widgets::hint_bar("[Tab] field  [Enter] send  [Esc] cancel"),
         rows[6],
     );
 }
@@ -626,8 +595,9 @@ fn draw_task_modal(f: &mut Frame, area: Rect, state: &CommsState) {
     let block = Block::default()
         .title(Span::styled(" Post Task ", theme::title_style()))
         .borders(Borders::ALL)
+        .border_set(ratatui::symbols::border::ROUNDED)
         .border_style(Style::default().fg(theme::ACCENT))
-        .padding(Padding::uniform(1));
+        .padding(Padding::horizontal(1));
     let inner = block.inner(modal);
     f.render_widget(block, modal);
 
@@ -689,10 +659,7 @@ fn draw_task_modal(f: &mut Frame, area: Rect, state: &CommsState) {
         rows[5],
     );
     f.render_widget(
-        Paragraph::new(Span::styled(
-            "[Tab] field  [Enter] post  [Esc] cancel",
-            theme::hint_style(),
-        )),
+        widgets::hint_bar("[Tab] field  [Enter] post  [Esc] cancel"),
         rows[6],
     );
 }
@@ -705,6 +672,20 @@ fn state_color(state: &str) -> Style {
         "Suspended" => Style::default().fg(theme::YELLOW),
         "Terminated" | "Crashed" => Style::default().fg(theme::RED),
         _ => theme::dim_style(),
+    }
+}
+
+fn state_indicator(state: &str) -> (&'static str, Style) {
+    match state {
+        "Running" => (
+            "\u{25cf}",
+            Style::default()
+                .fg(theme::GREEN)
+                .add_modifier(Modifier::BOLD),
+        ),
+        "Suspended" => ("\u{25cf}", Style::default().fg(theme::YELLOW)),
+        "Terminated" | "Crashed" => ("\u{25cb}", Style::default().fg(theme::RED)),
+        _ => ("\u{25cb}", theme::dim_style()),
     }
 }
 
@@ -732,6 +713,16 @@ fn kind_short(kind: &str) -> &str {
     }
 }
 
+fn kind_indicator(kind: &str) -> &'static str {
+    match kind {
+        "agent_spawned" | "task_completed" => "\u{25cf}", // filled green-ish
+        "agent_message" | "task_claimed" => "\u{25cf}",   // filled
+        "agent_terminated" => "\u{25cb}",                 // hollow
+        "task_posted" => "\u{25cf}",                      // filled yellow-ish
+        _ => "\u{25cb}",
+    }
+}
+
 fn short_time(ts: &str) -> String {
     // Extract HH:MM:SS from ISO-8601
     if let Some(t_pos) = ts.find('T') {
@@ -741,17 +732,6 @@ fn short_time(ts: &str) -> String {
         }
     }
     ts.chars().take(8).collect()
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!(
-            "{}\u{2026}",
-            librefang_types::truncate_str(s, max.saturating_sub(1))
-        )
-    }
 }
 
 fn centered_rect(percent_x: u16, height: u16, area: Rect) -> Rect {

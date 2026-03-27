@@ -3,6 +3,7 @@
 
 use crate::templates::{self, AgentTemplate};
 use crate::tui::theme;
+use crate::tui::widgets;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -937,6 +938,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut AgentSelectState) {
         )]))
         .title_alignment(Alignment::Left)
         .borders(Borders::ALL)
+        .border_set(ratatui::symbols::border::ROUNDED)
         .border_style(Style::default().fg(theme::ACCENT))
         .padding(Padding::horizontal(1));
 
@@ -979,17 +981,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut AgentSelectState) {
 
 /// Full-area agent list with table layout and search bar.
 fn draw_agent_list_full(f: &mut Frame, area: Rect, state: &mut AgentSelectState) {
-    let block = Block::default()
-        .title(Line::from(vec![Span::styled(
-            " Agents ",
-            theme::title_style(),
-        )]))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::ACCENT))
-        .padding(Padding::horizontal(1));
-
-    let inner = block.inner(area);
-    f.render_widget(block, area);
+    let inner = widgets::render_screen_block(f, area, "Agents");
 
     let has_search = state.search_active || !state.search_query.is_empty();
     let search_height = if has_search { 1 } else { 0 };
@@ -1048,17 +1040,20 @@ fn draw_agent_list_full(f: &mut Frame, area: Rect, state: &mut AgentSelectState)
                 ListItem::new(Line::from(vec![
                     Span::styled(format!("  {:<5}", badge), badge_style),
                     Span::styled(
-                        format!(" {:<18}", truncate(&a.name, 17)),
+                        format!(" {:<18}", widgets::truncate(&a.name, 17)),
                         Style::default().fg(theme::CYAN),
                     ),
                     Span::styled(
                         format!(
                             " {:<24}",
-                            truncate(&format!("{}/{}", a.provider, a.model), 23)
+                            widgets::truncate(&format!("{}/{}", a.provider, a.model), 23)
                         ),
                         Style::default().fg(theme::YELLOW),
                     ),
-                    Span::styled(format!(" {}", truncate(&a.id, 12)), theme::dim_style()),
+                    Span::styled(
+                        format!(" {}", widgets::truncate(&a.id, 12)),
+                        theme::dim_style(),
+                    ),
                 ]))
             } else {
                 let local = combined - daemon_count;
@@ -1067,18 +1062,18 @@ fn draw_agent_list_full(f: &mut Frame, area: Rect, state: &mut AgentSelectState)
                 ListItem::new(Line::from(vec![
                     Span::styled(format!("  {:<5}", badge), badge_style),
                     Span::styled(
-                        format!(" {:<18}", truncate(&a.name, 17)),
+                        format!(" {:<18}", widgets::truncate(&a.name, 17)),
                         Style::default().fg(theme::CYAN),
                     ),
                     Span::styled(
                         format!(
                             " {:<24}",
-                            truncate(&format!("{}/{}", a.provider, a.model), 23)
+                            widgets::truncate(&format!("{}/{}", a.provider, a.model), 23)
                         ),
                         Style::default().fg(theme::YELLOW),
                     ),
                     Span::styled(
-                        format!(" {}", truncate(&format!("{}", a.id), 12)),
+                        format!(" {}", widgets::truncate(&format!("{}", a.id), 12)),
                         theme::dim_style(),
                     ),
                 ]))
@@ -1086,16 +1081,17 @@ fn draw_agent_list_full(f: &mut Frame, area: Rect, state: &mut AgentSelectState)
         })
         .collect();
 
-    items.push(ListItem::new(Line::from(vec![Span::styled(
-        "  + Create new agent",
-        Style::default()
-            .fg(theme::GREEN)
-            .add_modifier(Modifier::BOLD),
-    )])));
+    items.push(ListItem::new(Line::from(vec![
+        Span::styled("  \u{2795} ", Style::default().fg(theme::ACCENT)),
+        Span::styled(
+            "Create new agent",
+            Style::default()
+                .fg(theme::ACCENT)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ])));
 
-    let list = List::new(items)
-        .highlight_style(theme::selected_style())
-        .highlight_symbol("> ");
+    let list = widgets::themed_list(items);
 
     f.render_stateful_widget(list, chunks[2], &mut state.list);
 
@@ -1122,25 +1118,12 @@ fn draw_agent_list_full(f: &mut Frame, area: Rect, state: &mut AgentSelectState)
     } else {
         "  [\u{2191}\u{2193}] Navigate  [Enter] Detail  [/] Search  [Esc] Back"
     };
-    f.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(hints, theme::hint_style())])),
-        chunks[3],
-    );
+    f.render_widget(widgets::hint_bar(hints), chunks[3]);
 }
 
 /// Draw agent detail view.
 fn draw_detail(f: &mut Frame, area: Rect, state: &AgentSelectState) {
-    let block = Block::default()
-        .title(Line::from(vec![Span::styled(
-            " Agent Detail ",
-            theme::title_style(),
-        )]))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::ACCENT))
-        .padding(Padding::horizontal(1));
-
-    let inner = block.inner(area);
-    f.render_widget(block, area);
+    let inner = widgets::render_screen_block(f, area, "Agent Detail");
 
     let chunks = Layout::vertical([
         Constraint::Min(10),   // detail
@@ -1254,18 +1237,12 @@ fn draw_detail(f: &mut Frame, area: Rect, state: &AgentSelectState) {
             f.render_widget(Paragraph::new(lines), chunks[0]);
         }
         None => {
-            f.render_widget(
-                Paragraph::new(Span::styled("  No agent selected.", theme::dim_style())),
-                chunks[0],
-            );
+            f.render_widget(widgets::empty_state("No agent selected."), chunks[0]);
         }
     }
 
     f.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(
-            "  [s] Edit skills  [m] Edit MCP  [c] Chat  [k] Kill  [Esc] Back",
-            theme::hint_style(),
-        )])),
+        widgets::hint_bar("  [s] Edit skills  [m] Edit MCP  [c] Chat  [k] Kill  [Esc] Back"),
         chunks[1],
     );
 }
@@ -1292,17 +1269,14 @@ fn draw_create_method(f: &mut Frame, area: Rect, state: &mut AgentSelectState) {
         ])),
     ];
 
-    let list = List::new(items)
-        .highlight_style(theme::selected_style())
-        .highlight_symbol("> ");
+    let list = widgets::themed_list(items);
 
     f.render_stateful_widget(list, chunks[1], &mut state.create_method_list);
 
-    let hints = Paragraph::new(Line::from(vec![Span::styled(
-        "    [\u{2191}\u{2193}] Navigate  [Enter] Select  [Esc] Back",
-        theme::hint_style(),
-    )]));
-    f.render_widget(hints, chunks[2]);
+    f.render_widget(
+        widgets::hint_bar("    [\u{2191}\u{2193}] Navigate  [Enter] Select  [Esc] Back"),
+        chunks[2],
+    );
 }
 
 fn draw_template_picker(f: &mut Frame, area: Rect, state: &mut AgentSelectState) {
@@ -1323,17 +1297,14 @@ fn draw_template_picker(f: &mut Frame, area: Rect, state: &mut AgentSelectState)
         })
         .collect();
 
-    let list = List::new(items)
-        .highlight_style(theme::selected_style())
-        .highlight_symbol("> ");
+    let list = widgets::themed_list(items);
 
     f.render_stateful_widget(list, chunks[0], &mut state.template_list);
 
-    let hints = Paragraph::new(Line::from(vec![Span::styled(
-        "    [\u{2191}\u{2193}] Navigate  [Enter] Select  [Esc] Back",
-        theme::hint_style(),
-    )]));
-    f.render_widget(hints, chunks[1]);
+    f.render_widget(
+        widgets::hint_bar("    [\u{2191}\u{2193}] Navigate  [Enter] Select  [Esc] Back"),
+        chunks[1],
+    );
 }
 
 fn draw_text_input(f: &mut Frame, area: Rect, label: &str, value: &str, placeholder: &str) {
@@ -1376,11 +1347,7 @@ fn draw_text_input(f: &mut Frame, area: Rect, label: &str, value: &str, placehol
         f.render_widget(hint, chunks[2]);
     }
 
-    let hints = Paragraph::new(Line::from(vec![Span::styled(
-        "    [Enter] Next  [Esc] Back",
-        theme::hint_style(),
-    )]));
-    f.render_widget(hints, chunks[4]);
+    f.render_widget(widgets::hint_bar("    [Enter] Next  [Esc] Back"), chunks[4]);
 }
 
 fn draw_tool_select(f: &mut Frame, area: Rect, state: &AgentSelectState) {
@@ -1417,11 +1384,12 @@ fn draw_tool_select(f: &mut Frame, area: Rect, state: &AgentSelectState) {
     let list = List::new(items);
     f.render_widget(list, chunks[1]);
 
-    let hints = Paragraph::new(Line::from(vec![Span::styled(
-        "    [\u{2191}\u{2193}] Navigate  [Space] Toggle  [Enter] Create  [Esc] Back",
-        theme::hint_style(),
-    )]));
-    f.render_widget(hints, chunks[2]);
+    f.render_widget(
+        widgets::hint_bar(
+            "    [\u{2191}\u{2193}] Navigate  [Space] Toggle  [Enter] Create  [Esc] Back",
+        ),
+        chunks[2],
+    );
 }
 
 fn draw_skill_select(f: &mut Frame, area: Rect, state: &AgentSelectState) {
@@ -1457,14 +1425,7 @@ fn draw_edit_allowlist(f: &mut Frame, area: Rect, state: &AgentSelectState) {
         _ => return,
     };
 
-    let block = Block::default()
-        .title(Line::from(vec![Span::styled(title, theme::title_style())]))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::ACCENT))
-        .padding(Padding::horizontal(1));
-
-    let inner = block.inner(area);
-    f.render_widget(block, area);
+    let inner = widgets::render_screen_block(f, area, title.trim());
 
     draw_checkbox_list(
         f,
@@ -1495,8 +1456,7 @@ fn draw_checkbox_list(
     f.render_widget(prompt, chunks[0]);
 
     if items.is_empty() {
-        let msg = Paragraph::new(Span::styled("  (none available)", theme::dim_style()));
-        f.render_widget(msg, chunks[1]);
+        f.render_widget(widgets::empty_state("(none available)"), chunks[1]);
     } else {
         let list_items: Vec<ListItem> = items
             .iter()
@@ -1521,20 +1481,5 @@ fn draw_checkbox_list(
         f.render_widget(list, chunks[1]);
     }
 
-    let hints = Paragraph::new(Line::from(vec![Span::styled(
-        hints_text,
-        theme::hint_style(),
-    )]));
-    f.render_widget(hints, chunks[2]);
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!(
-            "{}\u{2026}",
-            librefang_types::truncate_str(s, max.saturating_sub(1))
-        )
-    }
+    f.render_widget(widgets::hint_bar(hints_text), chunks[2]);
 }

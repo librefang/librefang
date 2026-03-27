@@ -1,11 +1,12 @@
 //! Usage screen: token/cost analytics with summary, by-model, by-agent views.
 
 use crate::tui::theme;
+use crate::tui::widgets;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Padding, Paragraph};
+use ratatui::widgets::{Block, Borders, ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
 // ── Data types ──────────────────────────────────────────────────────────────
@@ -158,17 +159,7 @@ impl UsageState {
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
 pub fn draw(f: &mut Frame, area: Rect, state: &mut UsageState) {
-    let block = Block::default()
-        .title(Line::from(vec![Span::styled(
-            " Usage ",
-            theme::title_style(),
-        )]))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::ACCENT))
-        .padding(Padding::horizontal(1));
-
-    let inner = block.inner(area);
-    f.render_widget(block, area);
+    let inner = widgets::render_screen_block(f, area, "\u{25b4} Usage");
 
     let chunks = Layout::vertical([
         Constraint::Length(1), // sub-tab bar
@@ -181,11 +172,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut UsageState) {
     // Sub-tab bar
     draw_sub_tabs(f, chunks[0], state.sub);
 
-    let sep = "\u{2500}".repeat(chunks[1].width as usize);
-    f.render_widget(
-        Paragraph::new(Span::styled(sep, theme::dim_style())),
-        chunks[1],
-    );
+    f.render_widget(widgets::separator(chunks[1].width), chunks[1]);
 
     match state.sub {
         UsageSub::Summary => draw_summary(f, chunks[2], state),
@@ -194,10 +181,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut UsageState) {
     }
 
     f.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(
-            "  [1] Summary  [2] By Model  [3] By Agent  [r] Refresh",
-            theme::hint_style(),
-        )])),
+        widgets::hint_bar("  [1] Summary  [2] By Model  [3] By Agent  [r] Refresh"),
         chunks[3],
     );
 }
@@ -209,26 +193,32 @@ fn draw_sub_tabs(f: &mut Frame, area: Rect, active: UsageSub) {
         (UsageSub::ByAgent, "3 By Agent"),
     ];
     let mut spans = vec![Span::raw("  ")];
-    for (sub, label) in &tabs {
-        let style = if *sub == active {
-            theme::tab_active()
+    for (i, (sub, label)) in tabs.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(
+                " \u{2502} ",
+                Style::default().fg(theme::BORDER),
+            ));
+        }
+        if *sub == active {
+            spans.push(Span::styled(
+                format!(" \u{25cf} {label} "),
+                theme::tab_active(),
+            ));
         } else {
-            theme::tab_inactive()
-        };
-        spans.push(Span::styled(format!(" {label} "), style));
-        spans.push(Span::raw(" "));
+            spans.push(Span::styled(
+                format!(" \u{25cb} {label} "),
+                theme::tab_inactive(),
+            ));
+        }
     }
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn draw_summary(f: &mut Frame, area: Rect, state: &UsageState) {
     if state.loading {
-        let spinner = theme::SPINNER_FRAMES[state.tick % theme::SPINNER_FRAMES.len()];
         f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(format!("  {spinner} "), Style::default().fg(theme::CYAN)),
-                Span::styled("Loading usage data\u{2026}", theme::dim_style()),
-            ])),
+            widgets::spinner(state.tick, "Loading usage data\u{2026}"),
             area,
         );
         return;
@@ -280,20 +270,31 @@ fn draw_stat_card(
     color: ratatui::style::Color,
 ) {
     let card = Block::default()
-        .title(Span::styled(
-            format!(" {title} "),
-            Style::default().fg(color),
-        ))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::DIM));
+        .border_set(ratatui::symbols::border::ROUNDED)
+        .border_style(Style::default().fg(theme::BORDER));
     let card_inner = card.inner(area);
     f.render_widget(card, area);
+
+    let inner_chunks = Layout::vertical([
+        Constraint::Length(1), // label
+        Constraint::Min(1),    // value
+    ])
+    .split(card_inner);
+
+    f.render_widget(
+        Paragraph::new(Line::from(vec![Span::styled(
+            format!(" {title}"),
+            Style::default().fg(theme::TEXT_TERTIARY),
+        )])),
+        inner_chunks[0],
+    );
     f.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
             format!(" {value}"),
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         )])),
-        card_inner,
+        inner_chunks[1],
     );
 }
 
@@ -316,17 +317,10 @@ fn draw_by_model(f: &mut Frame, area: Rect, state: &mut UsageState) {
     );
 
     if state.loading {
-        let spinner = theme::SPINNER_FRAMES[state.tick % theme::SPINNER_FRAMES.len()];
-        f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(format!("  {spinner} "), Style::default().fg(theme::CYAN)),
-                Span::styled("Loading\u{2026}", theme::dim_style()),
-            ])),
-            chunks[1],
-        );
+        f.render_widget(widgets::spinner(state.tick, "Loading\u{2026}"), chunks[1]);
     } else if state.by_model.is_empty() {
         f.render_widget(
-            Paragraph::new(Span::styled("  No usage data.", theme::dim_style())),
+            widgets::empty_state("No usage data. Send messages to see token stats."),
             chunks[1],
         );
     } else {
@@ -336,7 +330,7 @@ fn draw_by_model(f: &mut Frame, area: Rect, state: &mut UsageState) {
             .map(|m| {
                 ListItem::new(Line::from(vec![
                     Span::styled(
-                        format!("  {:<28}", truncate(&m.model_id, 27)),
+                        format!("  {:<28}", widgets::truncate(&m.model_id, 27)),
                         Style::default().fg(theme::CYAN),
                     ),
                     Span::styled(
@@ -356,9 +350,7 @@ fn draw_by_model(f: &mut Frame, area: Rect, state: &mut UsageState) {
             })
             .collect();
 
-        let list = List::new(items)
-            .highlight_style(theme::selected_style())
-            .highlight_symbol("> ");
+        let list = widgets::themed_list(items);
         f.render_stateful_widget(list, chunks[1], &mut state.model_list);
     }
 }
@@ -382,17 +374,10 @@ fn draw_by_agent(f: &mut Frame, area: Rect, state: &mut UsageState) {
     );
 
     if state.loading {
-        let spinner = theme::SPINNER_FRAMES[state.tick % theme::SPINNER_FRAMES.len()];
-        f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(format!("  {spinner} "), Style::default().fg(theme::CYAN)),
-                Span::styled("Loading\u{2026}", theme::dim_style()),
-            ])),
-            chunks[1],
-        );
+        f.render_widget(widgets::spinner(state.tick, "Loading\u{2026}"), chunks[1]);
     } else if state.by_agent.is_empty() {
         f.render_widget(
-            Paragraph::new(Span::styled("  No usage data.", theme::dim_style())),
+            widgets::empty_state("No usage data. Send messages to see token stats."),
             chunks[1],
         );
     } else {
@@ -402,7 +387,7 @@ fn draw_by_agent(f: &mut Frame, area: Rect, state: &mut UsageState) {
             .map(|a| {
                 ListItem::new(Line::from(vec![
                     Span::styled(
-                        format!("  {:<24}", truncate(&a.agent_name, 23)),
+                        format!("  {:<24}", widgets::truncate(&a.agent_name, 23)),
                         Style::default().fg(theme::CYAN),
                     ),
                     Span::styled(
@@ -418,9 +403,7 @@ fn draw_by_agent(f: &mut Frame, area: Rect, state: &mut UsageState) {
             })
             .collect();
 
-        let list = List::new(items)
-            .highlight_style(theme::selected_style())
-            .highlight_symbol("> ");
+        let list = widgets::themed_list(items);
         f.render_stateful_widget(list, chunks[1], &mut state.agent_list);
     }
 }
@@ -432,16 +415,5 @@ fn format_tokens(n: u64) -> String {
         format!("{:.1}K", n as f64 / 1_000.0)
     } else {
         format!("{n}")
-    }
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!(
-            "{}\u{2026}",
-            librefang_types::truncate_str(s, max.saturating_sub(1))
-        )
     }
 }
