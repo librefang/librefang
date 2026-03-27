@@ -2,7 +2,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { formatTime, formatDateTime } from "../lib/datetime";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { listProviders, testProvider, setProviderKey, deleteProviderKey, setProviderUrl, createRegistryContent } from "../api";
+import { listProviders, testProvider, setProviderKey, deleteProviderKey, setProviderUrl, createRegistryContent, setDefaultProvider } from "../api";
 import { isProviderAvailable } from "../lib/status";
 import { SchemaForm } from "../components/SchemaForm";
 import { PageHeader } from "../components/ui/PageHeader";
@@ -17,7 +17,7 @@ import { useUIStore } from "../lib/store";
 import {
   Server, Zap, Clock, Key, Globe, CheckCircle2, XCircle, Loader2, AlertCircle, Search,
   SortAsc, SortDesc, CheckSquare, Square, ChevronRight, X, Grid3X3, List, Filter,
-  ExternalLink, Activity, Cpu, Cloud, Bot, Globe2, Sparkles, Plus
+  ExternalLink, Activity, Cpu, Cloud, Bot, Globe2, Sparkles, Plus, Star
 } from "lucide-react";
 
 const REFRESH_MS = 30000;
@@ -76,16 +76,18 @@ interface Provider {
 interface ProviderCardProps {
   provider: Provider;
   isSelected: boolean;
+  isDefault: boolean;
   pendingId: string | null;
   viewMode: ViewMode;
   onSelect: (id: string, checked: boolean) => void;
   onTest: (id: string) => void;
+  onSetDefault: (id: string) => void;
   onViewDetails: (provider: Provider) => void;
   onQuickConfig: (provider: Provider) => void;
   t: (key: string) => string;
 }
 
-function ProviderCard({ provider: p, isSelected, pendingId, viewMode, onSelect, onTest, onViewDetails, onQuickConfig, t }: ProviderCardProps) {
+function ProviderCard({ provider: p, isSelected, isDefault, pendingId, viewMode, onSelect, onTest, onSetDefault, onViewDetails, onQuickConfig, t }: ProviderCardProps) {
   const isConfigured = isProviderAvailable(p.auth_status);
 
   if (viewMode === "list") {
@@ -145,9 +147,19 @@ function ProviderCard({ provider: p, isSelected, pendingId, viewMode, onSelect, 
         </div>
 
         <div className="flex items-center gap-1 shrink-0 self-end sm:self-auto">
+          {isDefault && (
+            <Badge variant="brand" className="shrink-0">
+              <Star className="w-3 h-3 mr-1 inline" />{t("providers.is_default")}
+            </Badge>
+          )}
           {!isConfigured && (
             <Button variant="ghost" size="sm" onClick={() => onQuickConfig(p)} leftIcon={<Key className="w-3 h-3" />}>
               <span className="hidden sm:inline">{t("providers.config")}</span>
+            </Button>
+          )}
+          {isConfigured && !isDefault && (
+            <Button variant="ghost" size="sm" onClick={() => onSetDefault(p.id)} leftIcon={<Star className="w-3 h-3" />}>
+              <span className="hidden sm:inline">{t("providers.set_as_default")}</span>
             </Button>
           )}
           <Button
@@ -281,11 +293,25 @@ function ProviderCard({ provider: p, isSelected, pendingId, viewMode, onSelect, 
           )}
         </div>
 
+        {/* Default badge */}
+        {isDefault && (
+          <div className="mb-2">
+            <Badge variant="brand">
+              <Star className="w-3 h-3 mr-1 inline" />{t("providers.is_default")}
+            </Badge>
+          </div>
+        )}
+
         {/* Actions */}
         <div className="flex gap-2 mt-auto">
           {!isConfigured && (
             <Button variant="ghost" size="sm" onClick={() => onQuickConfig(p)} leftIcon={<Key className="w-3 h-3" />} className="flex-1">
               {t("providers.config")}
+            </Button>
+          )}
+          {isConfigured && !isDefault && (
+            <Button variant="ghost" size="sm" onClick={() => onSetDefault(p.id)} leftIcon={<Star className="w-3 h-3" />} className="flex-1">
+              {t("providers.set_as_default")}
             </Button>
           )}
           <Button
@@ -483,9 +509,12 @@ export function ProvidersPage() {
   const addToast = useUIStore((s) => s.addToast);
 
   const providersQuery = useQuery({ queryKey: ["providers", "list"], queryFn: listProviders, refetchInterval: REFRESH_MS });
+  const statusQuery = useQuery({ queryKey: ["status"], queryFn: () => fetch("/api/status").then(r => r.json()) as Promise<{ default_provider?: string }>, refetchInterval: REFRESH_MS });
   const testMutation = useMutation({ mutationFn: testProvider });
+  const defaultProviderMutation = useMutation({ mutationFn: setDefaultProvider });
 
   const providers = providersQuery.data ?? [];
+  const currentDefaultProvider = statusQuery.data?.default_provider ?? "";
   const configuredCount = useMemo(() => providers.filter(p => isProviderAvailable(p.auth_status)).length, [providers]);
   const unconfiguredCount = useMemo(() => providers.filter(p => !isProviderAvailable(p.auth_status)).length, [providers]);
 
@@ -634,6 +663,16 @@ export function ProvidersPage() {
       setKeyError(e?.message || String(e));
     } finally {
       setKeySaving(false);
+    }
+  };
+
+  const handleSetDefault = async (id: string) => {
+    try {
+      await defaultProviderMutation.mutateAsync(id);
+      await statusQuery.refetch();
+      addToast(t("providers.default_set"), "success");
+    } catch (e: any) {
+      addToast(e?.message || t("common.error"), "error");
     }
   };
 
@@ -801,10 +840,12 @@ export function ProvidersPage() {
                 key={p.id}
                 provider={p}
                 isSelected={selectedIds.has(p.id)}
+                isDefault={p.id === currentDefaultProvider}
                 pendingId={pendingId}
                 viewMode={viewMode}
                 onSelect={handleSelect}
                 onTest={handleTest}
+                onSetDefault={handleSetDefault}
                 onViewDetails={setDetailsProvider}
                 onQuickConfig={handleQuickConfig}
                 t={t}

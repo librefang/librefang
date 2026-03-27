@@ -62,6 +62,9 @@
     "key_placeholder": "Enter API key...", "key_placeholder_existing": "Enter new key to replace...",
     "optional": "optional", "remove_key": "Remove Key",
     "base_url": "Base URL", "api_key": "API Key",
+    "set_as_default": "Set as Default",
+    "default_set": "Default provider updated",
+    "is_default": "Default",
     "add": "Add Provider",
     "help": "Manage LLM provider connections. Test connectivity, configure API keys, and monitor provider health status."
   },
