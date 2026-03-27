@@ -113,10 +113,7 @@ pub struct PkceChallenge {
 
 /// Generate a PKCE code verifier and S256 challenge.
 pub fn generate_pkce() -> PkceChallenge {
-    use rand::Rng;
-    let mut rng = rand::rng();
-    let mut bytes = [0u8; 64];
-    rng.fill(&mut bytes);
+    let bytes: [u8; 64] = rand::random();
 
     let verifier = URL_SAFE_NO_PAD.encode(bytes);
     let challenge = {
@@ -133,10 +130,7 @@ pub fn generate_pkce() -> PkceChallenge {
 
 /// Generate a random state parameter (16 bytes, hex-encoded).
 pub fn create_state() -> String {
-    use rand::Rng;
-    let mut rng = rand::rng();
-    let mut bytes = [0u8; 16];
-    rng.fill(&mut bytes);
+    let bytes: [u8; 16] = rand::random();
     hex::encode(bytes)
 }
 
