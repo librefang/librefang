@@ -500,9 +500,11 @@ impl TelegramAdapter {
             self.api_base_url,
             self.token.as_str()
         );
+        let sanitized = sanitize_telegram_html(text);
         let mut body = serde_json::json!({
             "chat_id": chat_id,
-            "text": text,
+            "text": sanitized,
+            "parse_mode": "HTML",
         });
         if let Some(tid) = thread_id {
             body["message_thread_id"] = serde_json::json!(tid);
