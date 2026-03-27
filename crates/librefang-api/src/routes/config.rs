@@ -1294,6 +1294,27 @@ pub async fn config_reload(State(state): State<Arc<AppState>>) -> impl IntoRespo
     );
     match state.kernel.reload_config() {
         Ok(plan) => {
+            // If channel config changed, the kernel already cleared the adapter
+            // registry — but we also need to stop the old BridgeManager and
+            // restart adapters from the new config.
+            if plan
+                .hot_actions
+                .contains(&librefang_kernel::config_reload::HotAction::ReloadChannels)
+            {
+                match crate::channel_bridge::reload_channels_from_disk(&state).await {
+                    Ok(names) => {
+                        tracing::info!(
+                            "Hot-reload: restarted channel bridge with {} adapter(s): {:?}",
+                            names.len(),
+                            names,
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!("Hot-reload: failed to restart channel bridge: {e}");
+                    }
+                }
+            }
+
             let status = if plan.restart_required {
                 "partial"
             } else if plan.has_changes() {
