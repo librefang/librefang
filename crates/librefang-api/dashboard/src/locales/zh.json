@@ -62,6 +62,9 @@
     "key_placeholder": "输入 API Key...", "key_placeholder_existing": "输入新 Key 替换旧的...",
     "optional": "可选", "remove_key": "移除 Key",
     "base_url": "Base URL", "api_key": "API Key",
+    "set_as_default": "设为默认",
+    "default_set": "默认供应商已更新",
+    "is_default": "默认",
     "add": "添加供应商",
     "help": "管理大模型供应商连接。测试连通性、配置 API Key，监控供应商健康状态。"
   },

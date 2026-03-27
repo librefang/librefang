@@ -681,6 +681,7 @@ pub struct BridgeManager {
     shutdown_tx: watch::Sender<bool>,
     shutdown_rx: watch::Receiver<bool>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
+    adapters: Vec<Arc<dyn ChannelAdapter>>,
 }
 
 impl BridgeManager {
@@ -695,6 +696,7 @@ impl BridgeManager {
             shutdown_tx,
             shutdown_rx,
             tasks: Vec::new(),
+            adapters: Vec::new(),
         }
     }
 
@@ -713,6 +715,7 @@ impl BridgeManager {
             shutdown_tx,
             shutdown_rx,
             tasks: Vec::new(),
+            adapters: Vec::new(),
         }
     }
 
@@ -880,6 +883,7 @@ impl BridgeManager {
             self.tasks.push(task);
         }
 
+        self.adapters.push(adapter);
         Ok(())
     }
 
@@ -1000,7 +1004,18 @@ impl BridgeManager {
 
     /// Stop all adapters and wait for dispatch tasks to finish.
     pub async fn stop(&mut self) {
+        // Signal the dispatch loops to stop
         let _ = self.shutdown_tx.send(true);
+
+        // Stop each adapter's internal tasks (WebSocket connections, callback
+        // servers, etc.) so they release ports and connections before we
+        // potentially restart them during hot-reload.
+        for adapter in self.adapters.drain(..) {
+            if let Err(e) = adapter.stop().await {
+                warn!(adapter = adapter.name(), error = %e, "Error stopping channel adapter");
+            }
+        }
+
         for task in self.tasks.drain(..) {
             let _ = task.await;
         }
