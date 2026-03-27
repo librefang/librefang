@@ -95,14 +95,14 @@ bytes = "1"
 futures = "0.3"
 
 # MCP SDK
-rmcp = { version = "1.2", default-features = false, features = ["client", "transport-child-process"] }
+rmcp = { version = "1.3", default-features = false, features = ["client", "transport-child-process"] }
 
 # WebSocket client (for Discord/Slack gateway)
 tokio-tungstenite = { version = "0.29.0", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
 url = "2"
 
 # WASM sandbox
-wasmtime = "42"
+wasmtime = "43"
 
 # HTTP server (for API daemon)
 axum = { version = "0.8", features = ["ws"] }
