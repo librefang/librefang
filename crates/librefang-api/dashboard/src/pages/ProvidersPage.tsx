@@ -2,7 +2,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { formatTime, formatDateTime } from "../lib/datetime";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { listProviders, testProvider, setProviderKey, deleteProviderKey, setProviderUrl, createRegistryContent, setDefaultProvider, getStatus } from "../api";
+import { listProviders, testProvider, setProviderKey, deleteProviderKey, setProviderUrl, createRegistryContent, setDefaultProvider } from "../api";
 import { isProviderAvailable } from "../lib/status";
 import { SchemaForm } from "../components/SchemaForm";
 import { PageHeader } from "../components/ui/PageHeader";
@@ -840,10 +840,12 @@ export function ProvidersPage() {
                 key={p.id}
                 provider={p}
                 isSelected={selectedIds.has(p.id)}
+                isDefault={p.id === currentDefaultProvider}
                 pendingId={pendingId}
                 viewMode={viewMode}
                 onSelect={handleSelect}
                 onTest={handleTest}
+                onSetDefault={handleSetDefault}
                 onViewDetails={setDetailsProvider}
                 onQuickConfig={handleQuickConfig}
                 t={t}
