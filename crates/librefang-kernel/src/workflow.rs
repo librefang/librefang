@@ -2945,6 +2945,72 @@ id = "{id}"
         assert!(reg.remove("r1").await.is_none());
     }
 
+    /// Regression test for #1764: calling `load_templates_from_dir` from inside
+    /// a Tokio runtime (as the daemon does via `rt.block_on`) must not panic
+    /// with "Cannot block the current thread from within a runtime".
+    #[tokio::test]
+    async fn load_templates_from_dir_does_not_panic_inside_runtime() {
+        let reg = WorkflowTemplateRegistry::new();
+        let dir = std::env::temp_dir().join("librefang_test_no_templates");
+        // Non-existent directory — should return 0 without panicking.
+        let count = reg.load_templates_from_dir(&dir);
+        assert_eq!(count, 0);
+    }
+
+    /// Regression test for #1764: verify templates are actually loaded when
+    /// called from inside a Tokio runtime context.
+    #[tokio::test]
+    async fn load_templates_from_dir_loads_inside_runtime() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tpl_content = r#"
+id = "regression-1764"
+name = "Regression Test"
+description = "test"
+
+[[parameters]]
+name = "x"
+param_type = "string"
+required = true
+
+[[steps]]
+name = "s1"
+prompt_template = "do {{x}}"
+"#;
+        std::fs::write(tmp.path().join("test.toml"), tpl_content).unwrap();
+
+        let reg = WorkflowTemplateRegistry::new();
+        let count = reg.load_templates_from_dir(tmp.path());
+        assert_eq!(count, 1);
+        assert!(reg.get("regression-1764").await.is_some());
+    }
+
+    /// Regression test for #1764: the exact scenario that caused the panic —
+    /// `current_thread` runtime (most constrained, similar to Termux).
+    #[tokio::test(flavor = "current_thread")]
+    async fn load_templates_from_dir_safe_on_current_thread_runtime() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tpl_content = r#"
+id = "regression-1764"
+name = "Regression Test"
+description = "test"
+
+[[parameters]]
+name = "x"
+param_type = "string"
+required = true
+
+[[steps]]
+name = "s1"
+prompt_template = "do {{x}}"
+"#;
+        std::fs::write(tmp.path().join("test.toml"), tpl_content).unwrap();
+
+        let reg = WorkflowTemplateRegistry::new();
+        let count = reg.load_templates_from_dir(tmp.path());
+        assert_eq!(count, 1);
+        assert!(reg.get("regression-1764").await.is_some());
+    }
+
     // ---- Subagent context inheritance tests ----
 
     #[tokio::test]
