@@ -819,6 +819,8 @@ pub fn create_driver(config: &DriverConfig) -> Result<Arc<dyn LlmDriver>, LlmErr
 ///
 /// Returns `(provider, model, api_key_env)` for the first provider that has a
 /// configured API key, checked in a user-friendly priority order.
+/// Note: `model` is always `""` — callers should resolve the default model
+/// via `ModelCatalog`.
 pub fn detect_available_provider() -> Option<(&'static str, &'static str, &'static str)> {
     // Priority order: popular cloud providers are checked first so that
     // users with multiple keys get the most common one by default.

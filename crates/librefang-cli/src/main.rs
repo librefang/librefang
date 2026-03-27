@@ -2397,9 +2397,17 @@ fn detect_best_provider() -> (String, String, String) {
     if let Some((provider, _model, env_var)) =
         librefang_runtime::drivers::detect_available_provider()
     {
+        // Capitalize provider name for display (e.g. "groq" → "Groq")
+        let display_name = {
+            let mut c = provider.chars();
+            match c.next() {
+                None => String::new(),
+                Some(first) => first.to_uppercase().to_string() + c.as_str(),
+            }
+        };
         ui::success(&i18n::t_args(
             "detected-provider",
-            &[("display", provider), ("env_var", env_var)],
+            &[("display", &display_name), ("env_var", env_var)],
         ));
         return (
             provider.to_string(),
@@ -2419,7 +2427,7 @@ fn detect_best_provider() -> (String, String, String) {
     }
 
     // 3. No API key found — launch TUI guide to pick a free provider
-    if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+    {
         if let Some(result) = guide_free_provider_setup() {
             return result;
         }
@@ -2430,6 +2438,7 @@ fn detect_best_provider() -> (String, String, String) {
     ui::hint(&i18n::t("hint-groq-free"));
     ui::hint(&i18n::t("hint-gemini-free"));
     ui::hint(&i18n::t("hint-deepseek-free"));
+    ui::hint(&i18n::t("hint-ollama-local"));
     (
         "groq".to_string(),
         "GROQ_API_KEY".to_string(),
@@ -3876,7 +3885,7 @@ fn cmd_doctor(json: bool, repair: bool) {
         let set = std::env::var(env_var).is_ok();
         if set {
             // --- Check 9: Live key validation ---
-            let valid = test_api_key(provider_id, env_var);
+            let valid = test_api_key(provider_id, &std::env::var(env_var).unwrap_or_default());
             if valid {
                 if !json {
                     ui::provider_status(name, env_var, true);
@@ -6392,11 +6401,10 @@ fn provider_to_env_var(provider: &str) -> String {
 ///
 /// Returns true if the key is accepted (status != 401/403).
 /// Returns true on timeout/network errors (best-effort — don't block setup).
-pub(crate) fn test_api_key(provider: &str, env_var: &str) -> bool {
-    let key = match std::env::var(env_var) {
-        Ok(k) => k,
-        Err(_) => return false,
-    };
+pub(crate) fn test_api_key(provider: &str, key: &str) -> bool {
+    if key.is_empty() {
+        return false;
+    }
 
     let client = match crate::http_client::client_builder()
         .timeout(std::time::Duration::from_secs(10))
@@ -6409,16 +6417,16 @@ pub(crate) fn test_api_key(provider: &str, env_var: &str) -> bool {
     let result = match provider.to_lowercase().as_str() {
         "groq" => client
             .get("https://api.groq.com/openai/v1/models")
-            .bearer_auth(&key)
+            .bearer_auth(key)
             .send(),
         "anthropic" => client
             .get("https://api.anthropic.com/v1/models")
-            .header("x-api-key", &key)
+            .header("x-api-key", key)
             .header("anthropic-version", "2023-06-01")
             .send(),
         "openai" => client
             .get("https://api.openai.com/v1/models")
-            .bearer_auth(&key)
+            .bearer_auth(key)
             .send(),
         "gemini" | "google" => client
             .get(format!(
@@ -6427,11 +6435,11 @@ pub(crate) fn test_api_key(provider: &str, env_var: &str) -> bool {
             .send(),
         "deepseek" => client
             .get("https://api.deepseek.com/models")
-            .bearer_auth(&key)
+            .bearer_auth(key)
             .send(),
         "openrouter" => client
             .get("https://openrouter.ai/api/v1/models")
-            .bearer_auth(&key)
+            .bearer_auth(key)
             .send(),
         _ => return true, // unknown provider — skip test
     };
@@ -6815,7 +6823,7 @@ fn cmd_config_set_key(provider: &str) {
             // Test the key
             print!("  Testing key... ");
             io::stdout().flush().unwrap();
-            if test_api_key(provider, &env_var) {
+            if test_api_key(provider, &key) {
                 println!("{}", "OK".bright_green());
             } else {
                 println!("{}", "could not verify (may still work)".bright_yellow());
@@ -6866,7 +6874,7 @@ fn cmd_config_test_key(provider: &str) {
 
     print!("  Testing {provider} ({env_var})... ");
     io::stdout().flush().unwrap();
-    if test_api_key(provider, &env_var) {
+    if test_api_key(provider, &std::env::var(&env_var).unwrap_or_default()) {
         println!("{}", "OK".bright_green());
     } else {
         println!("{}", "FAILED (401/403)".bright_red());

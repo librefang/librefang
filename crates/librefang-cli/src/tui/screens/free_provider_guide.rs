@@ -188,6 +188,9 @@ pub fn run() -> GuideResult {
             if let Some(t) = state.done_at {
                 if t.elapsed() >= DONE_DELAY {
                     let p = state.provider();
+                    // Ensure the env var is set in-process so the daemon
+                    // picks it up on boot (covers both verified and unverified).
+                    std::env::set_var(p.env_var, &state.key_input);
                     break GuideResult::Completed {
                         provider: p.name.to_string(),
                         env_var: p.env_var.to_string(),
@@ -261,16 +264,23 @@ fn submit_key(state: &mut State, test_tx: &std::sync::mpsc::Sender<bool>) {
     state.save_warn = crate::dotenv::save_env_key(p.env_var, &state.key_input)
         .err()
         .map(|e| e.to_string());
-    std::env::set_var(p.env_var, &state.key_input);
     state.status_msg = i18n::t("guide-testing-key");
     state.phase = Phase::Testing;
     state.test_started = Some(Instant::now());
 
     let name = p.name.to_string();
+    let key = state.key_input.clone();
     let var = p.env_var.to_string();
     let tx = test_tx.clone();
     std::thread::spawn(move || {
-        let _ = tx.send(crate::test_api_key(&name, &var));
+        let ok = crate::test_api_key(&name, &key);
+        if ok {
+            // Only set env var after successful verification so the daemon
+            // picks it up on boot.  set_var is called from the spawned thread
+            // after the test completes — no concurrent env access.
+            std::env::set_var(&var, &key);
+        }
+        let _ = tx.send(ok);
     });
 }
 

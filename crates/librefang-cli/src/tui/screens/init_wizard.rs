@@ -835,13 +835,10 @@ pub fn run() -> InitResult {
                                         .provider()
                                         .map(|p| p.name.to_string())
                                         .unwrap_or_default();
-                                    let env_var = state
-                                        .provider()
-                                        .map(|p| p.env_var.to_string())
-                                        .unwrap_or_default();
+                                    let key_value = state.api_key_input.clone();
                                     let tx = test_tx.clone();
                                     std::thread::spawn(move || {
-                                        let ok = crate::test_api_key(&provider_name, &env_var);
+                                        let ok = crate::test_api_key(&provider_name, &key_value);
                                         let _ = tx.send(ok);
                                     });
                                 }

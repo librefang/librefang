@@ -220,7 +220,7 @@ fn draw_audit_body(f: &mut Frame, area: Rect, state: &DashboardState) {
         return;
     }
 
-    let lines = items_to_lines(&state.recent_audit, area.width as usize);
+    let lines = items_to_lines(&state.recent_audit);
     let total = lines.len() as u16;
     let visible = area.height;
     let max_scroll = total.saturating_sub(visible);
@@ -231,7 +231,7 @@ fn draw_audit_body(f: &mut Frame, area: Rect, state: &DashboardState) {
     f.render_widget(Paragraph::new(lines).scroll((scroll, 0)), area);
 }
 
-fn items_to_lines(rows: &[AuditRow], _width: usize) -> Vec<Line<'_>> {
+fn items_to_lines(rows: &[AuditRow]) -> Vec<Line<'_>> {
     rows.iter()
         .map(|row| {
             let time_short = if row.timestamp.len() > 16 {
