@@ -49,7 +49,6 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
         )
 }
 
-use super::network::remove_toml_section;
 use super::skills::{remove_secret_env, write_secret_env};
 use super::AppState;
 use axum::extract::{Path, Query, State};
@@ -724,20 +723,8 @@ pub async fn set_provider_key(
         if let Some(model_id) = default_model {
             // Update config.toml to persist the switch
             let config_path = state.kernel.home_dir().join("config.toml");
-            let update_toml = format!(
-                "\n[default_model]\nprovider = \"{}\"\nmodel = \"{}\"\napi_key_env = \"{}\"\n",
-                name, model_id, env_var
-            );
-            if let Ok(existing) = std::fs::read_to_string(&config_path) {
-                // Remove existing [default_model] section if present, then append
-                let cleaned = remove_toml_section(&existing, "default_model");
-                if let Err(e) =
-                    std::fs::write(&config_path, format!("{}\n{}", cleaned.trim(), update_toml))
-                {
-                    tracing::warn!("Failed to write config file: {e}");
-                }
-            } else if let Err(e) = std::fs::write(&config_path, update_toml) {
-                tracing::warn!("Failed to write config file: {e}");
+            if let Err(e) = persist_default_model(&config_path, &name, &model_id, &env_var) {
+                tracing::warn!("Failed to persist default_model to config.toml: {e}");
             }
 
             // Hot-update the in-memory default model override so resolve_driver()
@@ -1158,19 +1145,13 @@ pub async fn set_default_provider(
 
     // Update config.toml to persist the switch
     let config_path = state.kernel.home_dir().join("config.toml");
-    let update_toml = format!(
-        "\n[default_model]\nprovider = \"{}\"\nmodel = \"{}\"\napi_key_env = \"{}\"\n",
-        name, model_id, env_var
-    );
-    if let Ok(existing) = std::fs::read_to_string(&config_path) {
-        let cleaned = remove_toml_section(&existing, "default_model");
-        if let Err(e) = std::fs::write(&config_path, format!("{}\n{}", cleaned.trim(), update_toml))
-        {
-            tracing::warn!("Failed to write config file: {e}");
+    let persisted = match persist_default_model(&config_path, &name, &model_id, &env_var) {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::warn!("Failed to persist default_model to config.toml: {e}");
+            false
         }
-    } else if let Err(e) = std::fs::write(&config_path, update_toml) {
-        tracing::warn!("Failed to write config file: {e}");
-    }
+    };
 
     // Hot-update the in-memory default model override
     {
@@ -1195,8 +1176,40 @@ pub async fn set_default_provider(
             "provider": name,
             "model": model_id,
             "api_key_env": env_var,
+            "persisted": persisted,
         })),
     )
+}
+
+/// Safely persist the `[default_model]` section into config.toml using proper
+/// TOML serialization (avoids format-string injection).
+fn persist_default_model(
+    config_path: &std::path::Path,
+    provider: &str,
+    model: &str,
+    api_key_env: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut dm_table = toml::map::Map::new();
+    dm_table.insert(
+        "provider".to_string(),
+        toml::Value::String(provider.to_string()),
+    );
+    dm_table.insert("model".to_string(), toml::Value::String(model.to_string()));
+    dm_table.insert(
+        "api_key_env".to_string(),
+        toml::Value::String(api_key_env.to_string()),
+    );
+
+    let content = std::fs::read_to_string(config_path).unwrap_or_default();
+    let mut doc: toml::Value = if content.trim().is_empty() {
+        toml::Value::Table(toml::map::Map::new())
+    } else {
+        toml::from_str(&content)?
+    };
+    let root = doc.as_table_mut().ok_or("Config is not a TOML table")?;
+    root.insert("default_model".to_string(), toml::Value::Table(dm_table));
+    std::fs::write(config_path, toml::to_string_pretty(&doc)?)?;
+    Ok(())
 }
 
 /// Upsert a provider URL in the `[provider_urls]` section of config.toml.
