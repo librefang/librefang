@@ -3076,4 +3076,330 @@ mod tests {
             "image/jpeg"
         );
     }
+
+    #[test]
+    fn test_content_to_text_command() {
+        let cmd = ChannelContent::Command {
+            name: "help".to_string(),
+            args: vec!["list".to_string()],
+        };
+        assert_eq!(content_to_text(&cmd), "/help list");
+    }
+
+    #[test]
+    fn test_content_to_text_command_no_args() {
+        let cmd = ChannelContent::Command {
+            name: "status".to_string(),
+            args: vec![],
+        };
+        assert_eq!(content_to_text(&cmd), "/status");
+    }
+
+    #[test]
+    fn test_content_to_text_text() {
+        let text = ChannelContent::Text("hello world".to_string());
+        assert_eq!(content_to_text(&text), "hello world");
+    }
+
+    #[test]
+    fn test_content_to_text_image() {
+        let img = ChannelContent::Image {
+            url: "https://example.com/photo.jpg".to_string(),
+            caption: Some("A cat".to_string()),
+            mime_type: None,
+        };
+        assert_eq!(
+            content_to_text(&img),
+            "[Photo: https://example.com/photo.jpg]\nA cat"
+        );
+    }
+
+    #[test]
+    fn test_content_to_text_image_no_caption() {
+        let img = ChannelContent::Image {
+            url: "https://example.com/photo.jpg".to_string(),
+            caption: None,
+            mime_type: None,
+        };
+        assert_eq!(
+            content_to_text(&img),
+            "[Photo: https://example.com/photo.jpg]"
+        );
+    }
+
+    #[test]
+    fn test_content_to_text_file() {
+        let file = ChannelContent::File {
+            url: "https://example.com/doc.pdf".to_string(),
+            filename: "document.pdf".to_string(),
+        };
+        assert_eq!(
+            content_to_text(&file),
+            "[File (document.pdf): https://example.com/doc.pdf]"
+        );
+    }
+
+    #[test]
+    fn test_content_to_text_voice() {
+        let voice = ChannelContent::Voice {
+            url: "https://example.com/voice.ogg".to_string(),
+            duration_seconds: 30,
+            caption: None,
+        };
+        assert_eq!(
+            content_to_text(&voice),
+            "[Voice message (30s): https://example.com/voice.ogg]"
+        );
+    }
+
+    #[test]
+    fn test_content_to_text_button_callback() {
+        let cb = ChannelContent::ButtonCallback {
+            action: "approve".to_string(),
+            message_text: Some("Approved".to_string()),
+        };
+        assert_eq!(content_to_text(&cb), "[Button: approve]");
+    }
+
+    mod message_debouncer {
+        use super::*;
+        use std::collections::HashMap;
+
+        fn make_test_message(text: &str) -> ChannelMessage {
+            ChannelMessage {
+                channel: ChannelType::Discord,
+                platform_message_id: "msg1".to_string(),
+                sender: ChannelUser {
+                    platform_id: "user123".to_string(),
+                    display_name: "TestUser".to_string(),
+                    librefang_user: None,
+                },
+                content: ChannelContent::Text(text.to_string()),
+                target_agent: None,
+                timestamp: chrono::Utc::now(),
+                is_group: false,
+                thread_id: None,
+                metadata: HashMap::new(),
+            }
+        }
+
+        fn make_test_command(name: &str, args: Vec<String>) -> ChannelMessage {
+            ChannelMessage {
+                channel: ChannelType::Discord,
+                platform_message_id: "msg1".to_string(),
+                sender: ChannelUser {
+                    platform_id: "user123".to_string(),
+                    display_name: "TestUser".to_string(),
+                    librefang_user: None,
+                },
+                content: ChannelContent::Command {
+                    name: name.to_string(),
+                    args,
+                },
+                target_agent: None,
+                timestamp: chrono::Utc::now(),
+                is_group: false,
+                thread_id: None,
+                metadata: HashMap::new(),
+            }
+        }
+
+        fn assert_content_eq(actual: &ChannelContent, expected: &str) {
+            let actual_text = content_to_text(actual);
+            assert_eq!(actual_text, expected);
+        }
+
+        #[tokio::test]
+        async fn test_debouncer_single_message() {
+            let (debouncer, _rx) = MessageDebouncer::new(100, 5000, 10);
+            let mut buffers: HashMap<String, SenderBuffer> = HashMap::new();
+
+            let msg = make_test_message("hello");
+            let pending = PendingMessage {
+                message: msg.clone(),
+                image_blocks: None,
+            };
+
+            debouncer.push("discord:user123", pending, &mut buffers);
+
+            let result = debouncer.drain("discord:user123", &mut buffers);
+            assert!(result.is_some());
+            let (drained_msg, blocks) = result.unwrap();
+            assert_content_eq(&drained_msg.content, "hello");
+            assert!(blocks.is_none());
+        }
+
+        #[tokio::test]
+        async fn test_debouncer_multiple_texts_merge() {
+            let (debouncer, _rx) = MessageDebouncer::new(100, 5000, 10);
+            let mut buffers: HashMap<String, SenderBuffer> = HashMap::new();
+
+            let msg1 = make_test_message("hello");
+            let msg2 = make_test_message("world");
+
+            debouncer.push(
+                "discord:user123",
+                PendingMessage {
+                    message: msg1,
+                    image_blocks: None,
+                },
+                &mut buffers,
+            );
+            debouncer.push(
+                "discord:user123",
+                PendingMessage {
+                    message: msg2,
+                    image_blocks: None,
+                },
+                &mut buffers,
+            );
+
+            let result = debouncer.drain("discord:user123", &mut buffers);
+            assert!(result.is_some());
+            let (drained_msg, _) = result.unwrap();
+            assert_content_eq(&drained_msg.content, "hello\nworld");
+        }
+
+        #[tokio::test]
+        async fn test_debouncer_commands_same_name_merge() {
+            let (debouncer, _rx) = MessageDebouncer::new(100, 5000, 10);
+            let mut buffers: HashMap<String, SenderBuffer> = HashMap::new();
+
+            let cmd1 = make_test_command("help", vec!["list".to_string()]);
+            let cmd2 = make_test_command("help", vec!["status".to_string()]);
+
+            debouncer.push(
+                "discord:user123",
+                PendingMessage {
+                    message: cmd1,
+                    image_blocks: None,
+                },
+                &mut buffers,
+            );
+            debouncer.push(
+                "discord:user123",
+                PendingMessage {
+                    message: cmd2,
+                    image_blocks: None,
+                },
+                &mut buffers,
+            );
+
+            let result = debouncer.drain("discord:user123", &mut buffers);
+            assert!(result.is_some());
+            let (drained_msg, _) = result.unwrap();
+            match drained_msg.content {
+                ChannelContent::Command { name, args } => {
+                    assert_eq!(name, "help");
+                    assert_eq!(args, vec!["list", "status"]);
+                }
+                _ => panic!("Expected Command content"),
+            }
+        }
+
+        #[tokio::test]
+        async fn test_debouncer_different_commands_no_merge() {
+            let (debouncer, _rx) = MessageDebouncer::new(100, 5000, 10);
+            let mut buffers: HashMap<String, SenderBuffer> = HashMap::new();
+
+            let cmd1 = make_test_command("help", vec![]);
+            let cmd2 = make_test_command("status", vec![]);
+
+            debouncer.push(
+                "discord:user123",
+                PendingMessage {
+                    message: cmd1,
+                    image_blocks: None,
+                },
+                &mut buffers,
+            );
+            debouncer.push(
+                "discord:user123",
+                PendingMessage {
+                    message: cmd2,
+                    image_blocks: None,
+                },
+                &mut buffers,
+            );
+
+            let result = debouncer.drain("discord:user123", &mut buffers);
+            assert!(result.is_some());
+            let (drained_msg, _) = result.unwrap();
+            assert_content_eq(&drained_msg.content, "/help\n/status");
+        }
+
+        #[tokio::test]
+        async fn test_debouncer_empty_buffer_returns_none() {
+            let (debouncer, _rx) = MessageDebouncer::new(100, 5000, 10);
+            let mut buffers: HashMap<String, SenderBuffer> = HashMap::new();
+
+            let result = debouncer.drain("discord:user123", &mut buffers);
+            assert!(result.is_none());
+        }
+
+        #[tokio::test]
+        async fn test_debouncer_different_senders_separate() {
+            let (debouncer, _rx) = MessageDebouncer::new(100, 5000, 10);
+            let mut buffers: HashMap<String, SenderBuffer> = HashMap::new();
+
+            let msg1 = make_test_message("hello from user1");
+            let msg2 = make_test_message("hello from user2");
+
+            debouncer.push(
+                "discord:user1",
+                PendingMessage {
+                    message: msg1,
+                    image_blocks: None,
+                },
+                &mut buffers,
+            );
+            debouncer.push(
+                "discord:user2",
+                PendingMessage {
+                    message: msg2,
+                    image_blocks: None,
+                },
+                &mut buffers,
+            );
+
+            let result1 = debouncer.drain("discord:user1", &mut buffers);
+            let result2 = debouncer.drain("discord:user2", &mut buffers);
+
+            assert!(result1.is_some());
+            assert!(result2.is_some());
+            assert_content_eq(&result1.unwrap().0.content, "hello from user1");
+            assert_content_eq(&result2.unwrap().0.content, "hello from user2");
+        }
+
+        #[tokio::test]
+        async fn test_debouncer_max_buffer_triggers_flush() {
+            let (debouncer, _rx) = MessageDebouncer::new(1000, 5000, 2);
+            let mut buffers: HashMap<String, SenderBuffer> = HashMap::new();
+
+            let msg1 = make_test_message("1");
+            let msg2 = make_test_message("2");
+
+            debouncer.push(
+                "discord:user123",
+                PendingMessage {
+                    message: msg1,
+                    image_blocks: None,
+                },
+                &mut buffers,
+            );
+            debouncer.push(
+                "discord:user123",
+                PendingMessage {
+                    message: msg2,
+                    image_blocks: None,
+                },
+                &mut buffers,
+            );
+
+            let result = debouncer.drain("discord:user123", &mut buffers);
+            assert!(result.is_some());
+            let (drained_msg, _) = result.unwrap();
+            assert_content_eq(&drained_msg.content, "1\n2");
+        }
+    }
 }
