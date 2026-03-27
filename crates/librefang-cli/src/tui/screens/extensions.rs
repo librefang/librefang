@@ -1,11 +1,12 @@
 //! Extensions screen: browse, install/remove integrations, view MCP health.
 
 use crate::tui::theme;
+use crate::tui::widgets;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Padding, Paragraph};
+use ratatui::widgets::{ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
 // ── Data types ──────────────────────────────────────────────────────────────
@@ -280,17 +281,7 @@ impl ExtensionsState {
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
 pub fn draw(f: &mut Frame, area: Rect, state: &mut ExtensionsState) {
-    let block = Block::default()
-        .title(Line::from(vec![Span::styled(
-            " Extensions ",
-            theme::title_style(),
-        )]))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::ACCENT))
-        .padding(Padding::horizontal(1));
-
-    let inner = block.inner(area);
-    f.render_widget(block, area);
+    let inner = widgets::render_screen_block(f, area, "\u{29c9} Extensions");
 
     let chunks = Layout::vertical([
         Constraint::Length(1), // sub-tab bar
@@ -301,11 +292,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut ExtensionsState) {
 
     draw_sub_tabs(f, chunks[0], state);
 
-    let sep = "\u{2500}".repeat(chunks[1].width as usize);
-    f.render_widget(
-        Paragraph::new(Span::styled(sep, theme::dim_style())),
-        chunks[1],
-    );
+    f.render_widget(widgets::separator(chunks[1].width), chunks[1]);
 
     match state.sub {
         ExtSub::Browse => draw_browse(f, chunks[2], state),
@@ -321,22 +308,35 @@ fn draw_sub_tabs(f: &mut Frame, area: Rect, state: &ExtensionsState) {
         (ExtSub::Health, "3 Health"),
     ];
     let mut spans = vec![Span::raw("  ")];
-    for (sub, label) in &tabs {
-        let style = if *sub == state.sub {
-            theme::tab_active()
+    for (i, (sub, label)) in tabs.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(
+                " \u{2502} ",
+                Style::default().fg(theme::BORDER),
+            ));
+        }
+        if *sub == state.sub {
+            spans.push(Span::styled(
+                format!(" \u{25cf} {label} "),
+                theme::tab_active(),
+            ));
         } else {
-            theme::tab_inactive()
-        };
-        spans.push(Span::styled(format!(" {label} "), style));
-        spans.push(Span::raw(" "));
+            spans.push(Span::styled(
+                format!(" \u{25cb} {label} "),
+                theme::tab_inactive(),
+            ));
+        }
     }
 
     // Show search query if active
     if state.searching {
-        spans.push(Span::raw("  "));
-        spans.push(Span::styled("Search: ", Style::default().fg(theme::YELLOW)));
+        spans.push(Span::raw("   "));
         spans.push(Span::styled(
-            format!("{}_", state.search_query),
+            "\u{1f50d} ",
+            Style::default().fg(theme::YELLOW),
+        ));
+        spans.push(Span::styled(
+            format!("{}\u{2588}", state.search_query),
             theme::input_style(),
         ));
     }
@@ -347,15 +347,24 @@ fn draw_sub_tabs(f: &mut Frame, area: Rect, state: &ExtensionsState) {
 fn status_badge(status: &str) -> (String, Style) {
     let lower = status.to_lowercase();
     if lower.contains("ready") || lower.contains("connected") {
-        ("[Ready]".to_string(), Style::default().fg(theme::GREEN))
+        (
+            "\u{25cf} Ready".to_string(),
+            Style::default().fg(theme::GREEN),
+        )
     } else if lower.contains("setup") {
-        ("[Setup]".to_string(), Style::default().fg(theme::YELLOW))
+        (
+            "\u{25d4} Setup".to_string(),
+            Style::default().fg(theme::YELLOW),
+        )
     } else if lower.contains("error") {
-        ("[Error]".to_string(), Style::default().fg(theme::RED))
+        (
+            "\u{25cf} Error".to_string(),
+            Style::default().fg(theme::RED),
+        )
     } else if lower.contains("disabled") {
-        ("[Off]".to_string(), theme::dim_style())
+        ("\u{25cb} Off".to_string(), theme::dim_style())
     } else {
-        ("".to_string(), theme::dim_style())
+        ("\u{25cb} ---".to_string(), theme::dim_style())
     }
 }
 
@@ -379,20 +388,13 @@ fn draw_browse(f: &mut Frame, area: Rect, state: &mut ExtensionsState) {
     );
 
     if state.loading {
-        let spinner = theme::SPINNER_FRAMES[state.tick % theme::SPINNER_FRAMES.len()];
         f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(format!("  {spinner} "), Style::default().fg(theme::CYAN)),
-                Span::styled("Loading integrations\u{2026}", theme::dim_style()),
-            ])),
+            widgets::spinner(state.tick, "Loading integrations\u{2026}"),
             chunks[1],
         );
     } else if state.all_extensions.is_empty() {
         f.render_widget(
-            Paragraph::new(Span::styled(
-                "  No integrations loaded. Press r to refresh.",
-                theme::dim_style(),
-            )),
+            widgets::empty_state("No extensions installed. Browse the marketplace with [b]."),
             chunks[1],
         );
     } else {
@@ -402,9 +404,12 @@ fn draw_browse(f: &mut Frame, area: Rect, state: &mut ExtensionsState) {
             .iter()
             .map(|ext| {
                 let (badge, badge_style) = if ext.installed {
-                    ("[Installed]".to_string(), Style::default().fg(theme::GREEN))
+                    (
+                        "\u{25cf} Installed".to_string(),
+                        Style::default().fg(theme::GREEN),
+                    )
                 } else {
-                    ("[Available]".to_string(), theme::dim_style())
+                    ("\u{25cb} Available".to_string(), theme::dim_style())
                 };
                 ListItem::new(Line::from(vec![
                     Span::raw("  "),
@@ -420,7 +425,7 @@ fn draw_browse(f: &mut Frame, area: Rect, state: &mut ExtensionsState) {
             })
             .collect();
 
-        let list = List::new(items).highlight_style(theme::selected_style());
+        let list = widgets::themed_list(items);
         f.render_stateful_widget(list, chunks[1], &mut state.browse_list);
     }
 
@@ -429,10 +434,7 @@ fn draw_browse(f: &mut Frame, area: Rect, state: &mut ExtensionsState) {
     } else {
         "  j/k navigate \u{2022} Enter install \u{2022} / search \u{2022} r refresh"
     };
-    f.render_widget(
-        Paragraph::new(Span::styled(hints, theme::hint_style())),
-        chunks[2],
-    );
+    f.render_widget(widgets::hint_bar(hints), chunks[2]);
 }
 
 fn draw_installed(f: &mut Frame, area: Rect, state: &mut ExtensionsState) {
@@ -477,24 +479,21 @@ fn draw_installed(f: &mut Frame, area: Rect, state: &mut ExtensionsState) {
 
     if items.is_empty() {
         f.render_widget(
-            Paragraph::new(Span::styled(
-                "  No integrations installed. Browse tab to add.",
-                theme::dim_style(),
-            )),
+            widgets::empty_state("No extensions installed. Browse the marketplace with [b]."),
             chunks[1],
         );
     } else {
-        let list = List::new(items).highlight_style(theme::selected_style());
+        let list = widgets::themed_list(items);
         f.render_stateful_widget(list, chunks[1], &mut state.installed_list);
     }
 
-    let hints = if state.confirm_remove {
-        "  Press y to confirm removal, any other key to cancel"
-    } else {
-        "  j/k navigate \u{2022} d remove \u{2022} r refresh"
-    };
     f.render_widget(
-        Paragraph::new(Span::styled(hints, theme::hint_style())),
+        widgets::confirm_or_status_or_hint(
+            state.confirm_remove,
+            "  Press y to confirm removal, any other key to cancel",
+            &state.status_msg,
+            "  j/k navigate \u{2022} d remove \u{2022} r refresh",
+        ),
         chunks[2],
     );
 }
@@ -520,10 +519,7 @@ fn draw_health(f: &mut Frame, area: Rect, state: &mut ExtensionsState) {
 
     if state.health_entries.is_empty() {
         f.render_widget(
-            Paragraph::new(Span::styled(
-                "  No MCP health data. Install integrations first.",
-                theme::dim_style(),
-            )),
+            widgets::empty_state("No extensions installed. Browse the marketplace with [b]."),
             chunks[1],
         );
     } else {
@@ -535,7 +531,10 @@ fn draw_health(f: &mut Frame, area: Rect, state: &mut ExtensionsState) {
                 let error_display = if h.last_error.is_empty() {
                     "\u{2014}".to_string()
                 } else if h.last_error.len() > 30 {
-                    format!("{}...", librefang_types::truncate_str(&h.last_error, 27))
+                    format!(
+                        "{}\u{2026}",
+                        librefang_types::truncate_str(&h.last_error, 27)
+                    )
                 } else {
                     h.last_error.clone()
                 };
@@ -575,15 +574,14 @@ fn draw_health(f: &mut Frame, area: Rect, state: &mut ExtensionsState) {
             })
             .collect();
 
-        let list = List::new(items).highlight_style(theme::selected_style());
+        let list = widgets::themed_list(items);
         f.render_stateful_widget(list, chunks[1], &mut state.health_list);
     }
 
     f.render_widget(
-        Paragraph::new(Span::styled(
+        widgets::hint_bar(
             "  j/k navigate \u{2022} r/Enter reconnect \u{2022} auto-reconnect active",
-            theme::hint_style(),
-        )),
+        ),
         chunks[2],
     );
 }

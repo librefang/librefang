@@ -6,6 +6,7 @@ pub mod chat_runner;
 pub mod event;
 pub mod screens;
 pub mod theme;
+pub mod widgets;
 
 use event::{AppEvent, BackendRef};
 use librefang_kernel::LibreFangKernel;
@@ -86,25 +87,25 @@ const TABS: &[Tab] = &[
 impl Tab {
     fn label(self) -> &'static str {
         match self {
-            Tab::Dashboard => "Dashboard",
-            Tab::Agents => "Agents",
-            Tab::Chat => "Chat",
-            Tab::Sessions => "Sessions",
-            Tab::Workflows => "Workflows",
-            Tab::Triggers => "Triggers",
-            Tab::Memory => "Memory",
-            Tab::Channels => "Channels",
-            Tab::Skills => "Skills",
-            Tab::Hands => "Hands",
-            Tab::Extensions => "Extensions",
-            Tab::Templates => "Templates",
-            Tab::Peers => "Peers",
-            Tab::Comms => "Comms",
-            Tab::Security => "Security",
-            Tab::Audit => "Audit",
-            Tab::Usage => "Usage",
-            Tab::Settings => "Settings",
-            Tab::Logs => "Logs",
+            Tab::Dashboard => "\u{25a3} Dash",
+            Tab::Agents => "\u{2726} Agents",
+            Tab::Chat => "\u{25e6} Chat",
+            Tab::Sessions => "\u{25c7} Sessions",
+            Tab::Workflows => "\u{25b7} Flows",
+            Tab::Triggers => "\u{25c9} Triggers",
+            Tab::Memory => "\u{25a1} Memory",
+            Tab::Channels => "\u{25c8} Channels",
+            Tab::Skills => "\u{2605} Skills",
+            Tab::Hands => "\u{270b} Hands",
+            Tab::Extensions => "\u{29c9} Ext",
+            Tab::Templates => "\u{25a2} Tpl",
+            Tab::Peers => "\u{25cc} Peers",
+            Tab::Comms => "\u{25ef} Comms",
+            Tab::Security => "\u{25c6} Sec",
+            Tab::Audit => "\u{25c8} Audit",
+            Tab::Usage => "\u{25b4} Usage",
+            Tab::Settings => "\u{2699} Config",
+            Tab::Logs => "\u{25b9} Logs",
         }
     }
 
@@ -2213,11 +2214,11 @@ impl App {
                     let spinner =
                         theme::SPINNER_FRAMES[self.welcome.tick % theme::SPINNER_FRAMES.len()];
                     let msg = format!(" {spinner} Booting kernel\u{2026}");
-                    render_toast(frame, area, &msg, theme::YELLOW);
+                    widgets::render_toast(frame, area, &msg, theme::YELLOW);
                 }
                 if let Some(ref err) = self.kernel_boot_error {
                     let msg = format!(" \u{2718} {err}");
-                    render_toast(frame, area, &msg, theme::RED);
+                    widgets::render_toast(frame, area, &msg, theme::RED);
                 }
             }
             Phase::Boot(BootScreen::Wizard) => wizard::draw(frame, area, &mut self.wizard),
@@ -2372,19 +2373,6 @@ impl App {
         let bar = Paragraph::new(Line::from(spans)).style(Style::default().bg(theme::BG_CARD));
         frame.render_widget(bar, area);
     }
-}
-
-/// Draw a one-line toast at the bottom of the screen.
-fn render_toast(frame: &mut ratatui::Frame, area: Rect, msg: &str, color: ratatui::style::Color) {
-    let w = (msg.len() as u16 + 4).min(area.width);
-    let x = area.width.saturating_sub(w) / 2;
-    let y = area.height.saturating_sub(2);
-    let toast_area = Rect::new(x, y, w, 1);
-    let para = Paragraph::new(Line::from(vec![Span::styled(
-        msg,
-        Style::default().fg(color),
-    )]));
-    frame.render_widget(para, toast_area);
 }
 
 // ─── Entry point ─────────────────────────────────────────────────────────────
