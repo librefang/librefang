@@ -515,11 +515,12 @@ pub async fn add_custom_model(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+    let default_provider = state.kernel.config_ref().default_model.provider.clone();
     let provider = body
         .get("provider")
         .and_then(|v| v.as_str())
-        .unwrap_or("openrouter")
-        .to_string();
+        .map(|s| s.to_string())
+        .unwrap_or(default_provider);
     let context_window = body
         .get("context_window")
         .and_then(|v| v.as_u64())
