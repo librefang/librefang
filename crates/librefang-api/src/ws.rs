@@ -432,7 +432,17 @@ async fn handle_text_message(
             {
                 let registry = state.kernel.agent_registry();
                 if let Some(entry) = registry.get(agent_id) {
-                    let dm = &state.kernel.config_ref().default_model;
+                    let dm = {
+                        let dm_override = state
+                            .kernel
+                            .default_model_override_ref()
+                            .read()
+                            .unwrap_or_else(|e| e.into_inner());
+                        crate::routes::agents::effective_default_model(
+                            &state.kernel.config_ref().default_model,
+                            dm_override.as_ref(),
+                        )
+                    };
                     let provider = if entry.manifest.model.provider.is_empty()
                         || entry.manifest.model.provider == "default"
                     {
