@@ -250,14 +250,17 @@ let ownJid = null;
 // syntax. Convert the most common patterns so messages render correctly.
 function markdownToWhatsApp(text) {
   if (!text) return text;
-  // Bold: **text** or __text__ → *text*
-  text = text.replace(/\*\*(.+?)\*\*/g, '*$1*');
-  text = text.replace(/__(.+?)__/g, '*$1*');
-  // Italic: single *text* (not bold) → _text_ (WhatsApp italic)
+  // Bold: **text** or __text__ → placeholder, then restore as *text* (WhatsApp bold)
+  // Using placeholder avoids the italic regex from re-matching converted bold.
+  text = text.replace(/\*\*(.+?)\*\*/g, '\x01BOLD$1BOLD\x01');
+  text = text.replace(/__(.+?)__/g, '\x01BOLD$1BOLD\x01');
+  // Italic: *text* → _text_ (WhatsApp italic) — only matches remaining single-star
   text = text.replace(/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, '_$1_');
+  // Restore bold placeholders → *text* (WhatsApp bold)
+  text = text.replace(/\x01BOLD(.+?)BOLD\x01/g, '*$1*');
   // Strikethrough: ~~text~~ → ~text~
   text = text.replace(/~~(.+?)~~/g, '~$1~');
-  // Inline code: `text` → ```text``` (WhatsApp has no inline code)
+  // Inline code: `text` → ```text``` (WhatsApp monospace)
   text = text.replace(/(?<!`)(`{1})(?!`)(.+?)(?<!`)\1(?!`)/g, '```$2```');
   return text;
 }
@@ -979,17 +982,17 @@ async function startConnection() {
           messageToSend = messageText;
         }
 
-        const rawResponse = await forwardToLibreFang(messageToSend, systemPrefix, phone, pushName, isOwner, attachments);
-        const response = markdownToWhatsApp(rawResponse);
+        const response = await forwardToLibreFang(messageToSend, systemPrefix, phone, pushName, isOwner, attachments);
 
         if (response && sock) {
           if (isStranger) {
             // Step C: Agent response goes to STRANGER, not owner
             const { notifications, cleanedText } = extractNotifyOwner(response);
 
-            // Send cleaned response to the stranger
+            // Send cleaned response to the stranger (format after tag extraction)
             if (cleanedText) {
-              const sentReply = await sock.sendMessage(sender, { text: cleanedText });
+              const formattedText = markdownToWhatsApp(cleanedText);
+              const sentReply = await sock.sendMessage(sender, { text: formattedText });
               console.log(`[gateway] Replied to stranger ${pushName} (${phone})`);
 
               // Track outbound message
@@ -1045,6 +1048,7 @@ async function startConnection() {
 
             if (ownerReply) {
               // Bug fix: Reply to the SENDER's JID, not always OWNER_JID[0]
+              ownerReply = markdownToWhatsApp(ownerReply);
               const sentOwner = await sock.sendMessage(sender, { text: ownerReply });
               console.log(`[gateway] Replied to owner (${sender})`);
               dbSaveMessage({ id: sentOwner?.key?.id || randomUUID(), jid: sender, senderJid: ownJid, pushName: null, phone, text: ownerReply, direction: 'outbound', timestamp: Date.now(), processed: 1, rawType: 'text' });
@@ -1052,7 +1056,7 @@ async function startConnection() {
 
           } else {
             // Groups or no owner routing — reply directly
-            const sentGroup = await sock.sendMessage(sender, { text: response });
+            const sentGroup = await sock.sendMessage(sender, { text: markdownToWhatsApp(response) });
             console.log(`[gateway] Replied to ${pushName}`);
             dbSaveMessage({ id: sentGroup?.key?.id || randomUUID(), jid: sender, senderJid: ownJid, pushName: null, phone, text: response, direction: 'outbound', timestamp: Date.now(), processed: 1, rawType: 'text' });
           }
@@ -1556,14 +1560,14 @@ async function sendMessage(to, text) {
 
   const formatted = markdownToWhatsApp(text);
   const sent = await sock.sendMessage(jid, { text: formatted });
-  // Save outbound message to DB
+  // Save outbound message to DB (store formatted text to match what was delivered)
   dbSaveMessage({
     id: sent?.key?.id || randomUUID(),
     jid,
     senderJid: ownJid || null,
     pushName: null,
     phone: to,
-    text,
+    text: formatted,
     direction: 'outbound',
     timestamp: Date.now(),
     processed: 1,
@@ -1870,6 +1874,7 @@ process.on('SIGTERM', () => {
 
 // Export for testing
 module.exports = {
+  markdownToWhatsApp,
   extractNotifyOwner,
   extractRelayCommands,
   buildConversationsContext,

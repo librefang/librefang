@@ -9,6 +9,7 @@ const { Readable } = require('node:stream');
 process.env.WHATSAPP_DB_PATH = '/tmp/test-wa-gateway-' + process.pid + '.db';
 
 const {
+  markdownToWhatsApp,
   extractNotifyOwner,
   extractRelayCommands,
   buildConversationsContext,
@@ -18,6 +19,62 @@ const {
   parseBody,
   MAX_BODY_SIZE,
 } = require('./index.js');
+
+// ---------------------------------------------------------------------------
+// markdownToWhatsApp
+// ---------------------------------------------------------------------------
+describe('markdownToWhatsApp', () => {
+  it('converts bold **text** to *text*', () => {
+    assert.equal(markdownToWhatsApp('Hello **world**!'), 'Hello *world*!');
+  });
+
+  it('converts bold __text__ to *text*', () => {
+    assert.equal(markdownToWhatsApp('Hello __world__!'), 'Hello *world*!');
+  });
+
+  it('converts italic *text* to _text_', () => {
+    assert.equal(markdownToWhatsApp('Hello *world*!'), 'Hello _world_!');
+  });
+
+  it('does not corrupt bold into italic (ordering bug)', () => {
+    // **bold** should become *bold* (WhatsApp bold), NOT _bold_ (italic)
+    assert.equal(markdownToWhatsApp('**bold** and *italic*'), '*bold* and _italic_');
+  });
+
+  it('handles mixed bold and italic in same line', () => {
+    assert.equal(markdownToWhatsApp('**strong** then *emphasis*'), '*strong* then _emphasis_');
+  });
+
+  it('converts strikethrough ~~text~~ to ~text~', () => {
+    assert.equal(markdownToWhatsApp('~~deleted~~'), '~deleted~');
+  });
+
+  it('converts inline code `text` to ```text```', () => {
+    assert.equal(markdownToWhatsApp('Use `npm install`'), 'Use ```npm install```');
+  });
+
+  it('does not touch triple backticks (code blocks)', () => {
+    const input = '```\ncode block\n```';
+    assert.equal(markdownToWhatsApp(input), input);
+  });
+
+  it('handles all formats together', () => {
+    const input = '**bold** *italic* ~~strike~~ `code`';
+    const expected = '*bold* _italic_ ~strike~ ```code```';
+    assert.equal(markdownToWhatsApp(input), expected);
+  });
+
+  it('returns null/empty input unchanged', () => {
+    assert.equal(markdownToWhatsApp(null), null);
+    assert.equal(markdownToWhatsApp(''), '');
+    assert.equal(markdownToWhatsApp(undefined), undefined);
+  });
+
+  it('does not mangle plain text', () => {
+    const plain = 'Just a normal message with no formatting.';
+    assert.equal(markdownToWhatsApp(plain), plain);
+  });
+});
 
 // ---------------------------------------------------------------------------
 // extractNotifyOwner
