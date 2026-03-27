@@ -43,6 +43,10 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
             axum::routing::put(set_provider_url),
         )
         .route("/providers/{name}", axum::routing::get(get_provider))
+        .route(
+            "/providers/{name}/default",
+            axum::routing::post(set_default_provider),
+        )
 }
 
 use super::network::remove_toml_section;
@@ -1102,6 +1106,97 @@ pub async fn set_provider_url(
     }
 
     (StatusCode::OK, Json(resp))
+}
+
+/// POST /api/providers/{name}/default — Set a provider as the default model provider.
+///
+/// Looks up the best default model for the given provider and updates both
+/// the in-memory override and config.toml so it persists across restarts.
+#[utoipa::path(
+    post,
+    path = "/api/providers/{name}/default",
+    tag = "models",
+    params(("name" = String, Path, description = "Provider identifier")),
+    responses(
+        (status = 200, description = "Default provider updated", body = serde_json::Value),
+        (status = 400, description = "No model found for provider"),
+        (status = 404, description = "Provider not found")
+    )
+)]
+pub async fn set_default_provider(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    // Verify the provider exists in the catalog
+    let (default_model, env_var) = {
+        let catalog = state
+            .kernel
+            .model_catalog_ref()
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        let provider = match catalog.get_provider(&name) {
+            Some(p) => p.clone(),
+            None => {
+                return ApiErrorResponse::not_found(format!("Provider '{}' not found", name))
+                    .into_json_tuple();
+            }
+        };
+        let model_id = catalog.default_model_for_provider(&name);
+        (model_id, provider.api_key_env.clone())
+    };
+
+    let model_id = match default_model {
+        Some(id) => id,
+        None => {
+            return ApiErrorResponse::bad_request(format!(
+                "No models found for provider '{}'",
+                name
+            ))
+            .into_json_tuple();
+        }
+    };
+
+    // Update config.toml to persist the switch
+    let config_path = state.kernel.home_dir().join("config.toml");
+    let update_toml = format!(
+        "\n[default_model]\nprovider = \"{}\"\nmodel = \"{}\"\napi_key_env = \"{}\"\n",
+        name, model_id, env_var
+    );
+    if let Ok(existing) = std::fs::read_to_string(&config_path) {
+        let cleaned = remove_toml_section(&existing, "default_model");
+        if let Err(e) = std::fs::write(&config_path, format!("{}\n{}", cleaned.trim(), update_toml))
+        {
+            tracing::warn!("Failed to write config file: {e}");
+        }
+    } else if let Err(e) = std::fs::write(&config_path, update_toml) {
+        tracing::warn!("Failed to write config file: {e}");
+    }
+
+    // Hot-update the in-memory default model override
+    {
+        let new_dm = librefang_types::config::DefaultModelConfig {
+            provider: name.clone(),
+            model: model_id.clone(),
+            api_key_env: env_var.clone(),
+            base_url: None,
+        };
+        let mut guard = state
+            .kernel
+            .default_model_override_ref()
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        *guard = Some(new_dm);
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "updated",
+            "provider": name,
+            "model": model_id,
+            "api_key_env": env_var,
+        })),
+    )
 }
 
 /// Upsert a provider URL in the `[provider_urls]` section of config.toml.
