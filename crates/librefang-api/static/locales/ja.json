@@ -921,7 +921,7 @@
     "connectionFailed": "接続失敗",
     "copilotAuthenticated": "GitHub Copilot の認証に成功しました",
     "customModelIdPlaceholder": "例: my-org/my-model",
-    "customModelProviderPlaceholder": "openrouter",
+    "customModelProviderPlaceholder": "例: openai, groq, anthropic",
     "deleteCustomModelConfirm": "カスタムモデル \"{model}\" を削除しますか?",
     "deleteFailed": "削除に失敗しました: {message}",
     "deviceCodeExpired": "デバイスコードの有効期限が切れました。再試行してください。",

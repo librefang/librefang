@@ -881,7 +881,7 @@
     "connectionFailed": "连接失败",
     "copilotAuthenticated": "GitHub Copilot 认证成功！",
     "customModelIdPlaceholder": "例如 my-org/my-model",
-    "customModelProviderPlaceholder": "openrouter",
+    "customModelProviderPlaceholder": "例如 openai, groq, anthropic",
     "deleteCustomModelConfirm": "删除自定义模型“{model}”？",
     "deleteFailed": "删除失败：{message}",
     "deviceCodeExpired": "设备码已过期，请重试。",
