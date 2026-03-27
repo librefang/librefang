@@ -3193,8 +3193,11 @@ async fn create_registry_content(
         }
     };
 
-    // Don't overwrite existing content
-    if target.exists() {
+    let existed = target.exists();
+
+    // Provider files support online add/update flows from the dashboard.
+    // Other registry content types still use create-only semantics.
+    if existed && !registry_content_allows_overwrite(&content_type) {
         return ApiErrorResponse::conflict(format!("{content_type} '{identifier}' already exists"))
             .into_json_tuple()
             .into_response();
@@ -3225,13 +3228,37 @@ async fn create_registry_content(
             .into_response();
     }
 
+    if content_type == "provider" {
+        let refreshed = rebuild_model_catalog(home_dir);
+        let mut guard = state
+            .kernel
+            .model_catalog_ref()
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        *guard = refreshed;
+    }
+
     Json(serde_json::json!({
         "ok": true,
         "content_type": content_type,
         "identifier": identifier,
         "path": target.display().to_string(),
+        "updated": existed,
     }))
     .into_response()
+}
+
+fn registry_content_allows_overwrite(content_type: &str) -> bool {
+    content_type == "provider"
+}
+
+fn rebuild_model_catalog(
+    home_dir: &std::path::Path,
+) -> librefang_runtime::model_catalog::ModelCatalog {
+    let mut catalog = librefang_runtime::model_catalog::ModelCatalog::new(home_dir);
+    catalog.load_custom_models(&home_dir.join("custom_models.json"));
+    catalog.detect_auth();
+    catalog
 }
 
 /// Recursively convert serde_json::Value to toml::Value, stripping empty
@@ -3270,6 +3297,63 @@ fn json_to_toml_value(json: &serde_json::Value) -> toml::Value {
             }
             toml::Value::Table(table)
         }
+    }
+}
+
+#[cfg(test)]
+mod registry_content_tests {
+    use super::*;
+    use librefang_types::model_catalog::AuthStatus;
+
+    #[test]
+    fn test_registry_content_allows_provider_overwrite_only() {
+        assert!(registry_content_allows_overwrite("provider"));
+        assert!(!registry_content_allows_overwrite("agent"));
+        assert!(!registry_content_allows_overwrite("skill"));
+    }
+
+    #[test]
+    fn test_rebuild_model_catalog_loads_provider_files_and_custom_models() {
+        let tmp = tempfile::tempdir().unwrap();
+        let providers_dir = tmp.path().join("providers");
+        std::fs::create_dir_all(&providers_dir).unwrap();
+        std::fs::write(
+            providers_dir.join("local-demo.toml"),
+            r#"
+[provider]
+id = "local-demo"
+display_name = "Local Demo"
+api_key_env = ""
+base_url = "http://localhost:11434/v1"
+key_required = false
+"#,
+        )
+        .unwrap();
+
+        std::fs::write(
+            tmp.path().join("custom_models.json"),
+            r#"[{
+  "id": "demo-model",
+  "display_name": "Demo Model",
+  "provider": "local-demo",
+  "tier": "custom",
+  "context_window": 4096,
+  "max_output_tokens": 1024,
+  "input_cost_per_m": 0.0,
+  "output_cost_per_m": 0.0,
+  "supports_tools": true,
+  "supports_vision": false,
+  "supports_streaming": true,
+  "aliases": []
+}]"#,
+        )
+        .unwrap();
+
+        let catalog = rebuild_model_catalog(tmp.path());
+        let provider = catalog.get_provider("local-demo").expect("provider loaded");
+
+        assert_eq!(provider.auth_status, AuthStatus::NotRequired);
+        assert!(catalog.find_model("demo-model").is_some());
     }
 }
 
