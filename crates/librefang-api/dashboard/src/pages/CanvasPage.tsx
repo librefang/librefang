@@ -1527,13 +1527,24 @@ function CanvasPageInner() {
   }, [selectedWorkflow, setNodes, setEdges]);
 
   // Select saved workflow
-  const handleSelectWorkflow = useCallback((w: WorkflowItem) => {
+  const handleSelectWorkflow = useCallback(async (w: WorkflowItem) => {
     setSelectedWorkflow(w);
     setWorkflowName(w.name);
     setWorkflowDescription(w.description || "");
     setEditingNode(null);
 
-    const stepsArray = Array.isArray(w.steps) ? w.steps : [];
+    // List endpoint returns steps as a count (number); fetch full detail when needed
+    let stepsArray: any[];
+    if (Array.isArray(w.steps)) {
+      stepsArray = w.steps;
+    } else {
+      try {
+        const full = await getWorkflow(w.id);
+        stepsArray = Array.isArray(full.steps) ? full.steps : [];
+      } catch {
+        stepsArray = [];
+      }
+    }
     const newNodes: Node[] = stepsArray.map((step: any, idx: number) => {
       const fullPrompt = step.prompt_template || step.prompt || "";
       return {
@@ -1601,11 +1612,9 @@ function CanvasPageInner() {
   const handleTemplateInstantiate = useCallback(async (workflowId: string) => {
     setShowTemplateBrowser(false);
     try {
-      // Refresh sidebar list
       const updatedList = await listWorkflows();
       setWorkflows(updatedList);
-      // Fetch full workflow detail (list endpoint returns step count, not step objects)
-      const created = await getWorkflow(workflowId);
+      const created = updatedList.find(w => w.id === workflowId);
       if (created) {
         handleSelectWorkflow(created);
       }
