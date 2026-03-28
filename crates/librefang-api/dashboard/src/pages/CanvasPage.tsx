@@ -1601,9 +1601,11 @@ function CanvasPageInner() {
   const handleTemplateInstantiate = useCallback(async (workflowId: string) => {
     setShowTemplateBrowser(false);
     try {
+      // Refresh sidebar list
       const updatedList = await listWorkflows();
       setWorkflows(updatedList);
-      const created = updatedList.find(w => w.id === workflowId);
+      // Fetch full workflow detail (list endpoint returns step count, not step objects)
+      const created = await getWorkflow(workflowId);
       if (created) {
         handleSelectWorkflow(created);
       }
