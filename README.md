@@ -40,7 +40,7 @@ Traditional agent frameworks wait for you to type something. LibreFang runs **ag
 > LibreFang is a community fork of [`RightNow-AI/openfang`](https://github.com/RightNow-AI/openfang) with open governance and a merge-first PR policy. See [GOVERNANCE.md](docs/GOVERNANCE.md) for details.
 
 <p align="center">
-  <img src="public/assets/dashboard.jpg" width="800" alt="LibreFang Dashboard" />
+  <img src="public/assets/dashboard.png" width="800" alt="LibreFang Dashboard" />
 </p>
 
 ## Quick Start
