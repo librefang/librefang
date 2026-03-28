@@ -21,14 +21,14 @@
   <rect x="12" y="12" width="776" height="296" rx="14" class="panel" />
   <text x="30" y="52" class="title">Star History</text>
   <text x="30" y="74" class="subtitle">librefang/librefang</text>
-  <text x="770" y="52" class="value" text-anchor="end">130</text>
-  <text x="770" y="74" class="subtitle" text-anchor="end">Updated 2026-03-27 09:00 UTC</text>
+  <text x="770" y="52" class="value" text-anchor="end">134</text>
+  <text x="770" y="74" class="subtitle" text-anchor="end">Updated 2026-03-28 08:48 UTC</text>
   <line x1="84" y1="274.00" x2="772.00" y2="274.00" class="axis" />
   <line x1="84" y1="104.00" x2="84" y2="274.00" class="axis" />
-  <path d="M 84.00,274.00 L 84.00,268.77 L 129.87,264.85 L 175.73,259.62 L 221.60,253.08 L 267.47,251.77 L 313.33,247.85 L 359.20,196.85 L 405.07,168.08 L 450.93,155.00 L 496.80,144.54 L 542.67,136.69 L 588.53,126.23 L 634.40,119.69 L 680.27,114.46 L 726.13,109.23 L 772.00,104.00 L 772.00,274.00 Z" class="area" />
-  <polyline points="84.00,268.77 129.87,264.85 175.73,259.62 221.60,253.08 267.47,251.77 313.33,247.85 359.20,196.85 405.07,168.08 450.93,155.00 496.80,144.54 542.67,136.69 588.53,126.23 634.40,119.69 680.27,114.46 726.13,109.23 772.00,104.00" class="line" />
+  <path d="M 84.00,274.00 L 84.00,268.93 L 127.00,265.12 L 170.00,260.04 L 213.00,253.70 L 256.00,252.43 L 299.00,248.63 L 342.00,199.15 L 385.00,171.24 L 428.00,158.55 L 471.00,148.40 L 514.00,140.79 L 557.00,130.64 L 600.00,124.30 L 643.00,119.22 L 686.00,114.15 L 729.00,106.54 L 772.00,104.00 L 772.00,274.00 Z" class="area" />
+  <polyline points="84.00,268.93 127.00,265.12 170.00,260.04 213.00,253.70 256.00,252.43 299.00,248.63 342.00,199.15 385.00,171.24 428.00,158.55 471.00,148.40 514.00,140.79 557.00,130.64 600.00,124.30 643.00,119.22 686.00,114.15 729.00,106.54 772.00,104.00" class="line" />
   <text x="84" y="306" class="axis-label" text-anchor="start">2026-03-12</text>
-  <text x="772.00" y="306" class="axis-label" text-anchor="end">2026-03-27</text>
-  <text x="74" y="108.00" class="axis-label" text-anchor="end">130</text>
+  <text x="772.00" y="306" class="axis-label" text-anchor="end">2026-03-28</text>
+  <text x="74" y="108.00" class="axis-label" text-anchor="end">134</text>
   <text x="74" y="278.00" class="axis-label" text-anchor="end">0</text>
 </svg>
