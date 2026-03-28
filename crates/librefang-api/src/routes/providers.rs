@@ -1225,12 +1225,11 @@ fn upsert_provider_url(
         )
         .into());
     }
-    if config_path.components().any(|c| {
-        matches!(
-            c,
-            std::path::Component::ParentDir | std::path::Component::Prefix(_)
-        )
-    }) {
+    // Block path-traversal (`..`) but allow Windows drive-letter prefixes
+    if config_path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!("unsafe config path '{}'", config_path.display()),

@@ -1566,13 +1566,11 @@ pub async fn config_set(
     };
 
     let config_path = state.kernel.home_dir().join("config.toml");
+    // Block path-traversal (`..`) but allow Windows drive-letter prefixes
     if config_path.file_name().and_then(|n| n.to_str()) != Some("config.toml")
-        || config_path.components().any(|c| {
-            matches!(
-                c,
-                std::path::Component::ParentDir | std::path::Component::Prefix(_)
-            )
-        })
+        || config_path
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
     {
         return (
             StatusCode::BAD_REQUEST,

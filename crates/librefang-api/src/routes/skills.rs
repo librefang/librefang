@@ -2946,12 +2946,14 @@ fn validate_static_file_path(
             expected_file_name
         ));
     }
-    if path.components().any(|c| {
-        matches!(
-            c,
-            std::path::Component::ParentDir | std::path::Component::Prefix(_)
-        )
-    }) {
+    // Block path-traversal components (`..`). We intentionally do NOT reject
+    // `Component::Prefix` — on Windows every absolute path contains a drive-
+    // letter prefix (e.g. `C:`), and the paths passed here are constructed
+    // server-side via `home_dir().join(file)`, so the prefix is legitimate.
+    if path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
         return Err(format!("unsafe path '{}'", path.display()));
     }
     Ok(())
