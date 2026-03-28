@@ -5,6 +5,27 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
+## [2026.3.28] - 2026-03-28
+
+### Added
+
+- TUI guide for free provider setup on first run (#1731) (@houko)
+- Add set-as-default button to provider UI (#1753) (@houko)
+
+### Fixed
+
+- Use English for shared contacts label (#1732) (@f-liva)
+- Use live default model for provider auth checks (#1748) (@TechWizard9999)
+- Hot-reload Wecom channel config without restart (#1754) (@houko)
+- Use effective default provider instead of hardcoded OpenRouter (#1755) (@houko)
+- Add parse_mode and sanitization to streaming initial message (#1759) (@f-liva)
+- Avoid blocking_write panic in daemon on Termux/Android (#1765) (@houko)
+
+### Maintenance
+
+- Batch upgrade dependencies (#1752) (@houko)
+
+
 ## [2026.3.26] - 2026-03-26
 
 ### Added
