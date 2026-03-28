@@ -423,12 +423,28 @@ pub async fn build_router(
         .layer(axum::middleware::from_fn(middleware::api_version_headers))
         .layer(axum::middleware::from_fn(middleware::security_headers))
         .layer(axum::middleware::from_fn(middleware::request_logging))
-        .layer(RequestBodyLimitLayer::new(
-            kernel.config_ref().max_request_body_bytes,
-        ))
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http())
         .layer(cors);
+
+    // Split body-limit application: apply the global limit to the main app,
+    // then merge the upload route WITHOUT the limit.  The handler enforces its
+    // own configurable max_upload_size_bytes (default 10 MB).
+    let upload_routes = Router::new()
+        .route(
+            "/api/agents/{id}/upload",
+            axum::routing::post(routes::agents::upload_file),
+        )
+        .route(
+            "/api/v1/agents/{id}/upload",
+            axum::routing::post(routes::agents::upload_file),
+        );
+
+    let app = app
+        .layer(RequestBodyLimitLayer::new(
+            kernel.config_ref().max_request_body_bytes,
+        ))
+        .merge(upload_routes);
 
     // NOTE: HTTP metrics are recorded inside `request_logging` middleware via
     // `librefang_telemetry::metrics::record_http_request()`.  A separate metrics
