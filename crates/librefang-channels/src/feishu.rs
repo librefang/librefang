@@ -1190,11 +1190,12 @@ fn is_duplicate_event(payload: &serde_json::Value, seen: &Mutex<HashMap<String, 
     }
 
     match map.entry(event_id.to_string()) {
-        std::collections::hash_map::Entry::Occupied(e) => {
+        std::collections::hash_map::Entry::Occupied(mut e) => {
             if now.duration_since(*e.get()) < EVENT_DEDUP_WINDOW {
                 return true; // duplicate
             }
-            // Expired — treat as new
+            // Expired — refresh timestamp and treat as new
+            e.insert(now);
             false
         }
         std::collections::hash_map::Entry::Vacant(e) => {
