@@ -407,7 +407,23 @@ function ConfigDialog({ channel, onClose, t }: { channel: Channel; onClose: () =
                   {field.label || field.key} {field.required && <span className="text-error">*</span>}
                   {field.show_when && <span className="ml-1 text-[10px] text-text-dim">({field.show_when} mode)</span>}
                 </label>
-                {field.type === "select" && field.options ? (
+                {field.readonly ? (
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={field.placeholder || field.value || ""}
+                      readOnly
+                      className="flex-1 rounded-lg border border-border-subtle bg-main/50 px-3 py-2 text-xs text-text-dim font-mono"
+                    />
+                    <button
+                      onClick={() => navigator.clipboard.writeText(field.placeholder || field.value || "")}
+                      className="px-3 py-2 rounded-lg bg-brand/10 text-brand text-xs hover:bg-brand/20 transition-colors"
+                      title="Copy"
+                    >
+                      Copy
+                    </button>
+                  </div>
+                ) : field.type === "select" && field.options ? (
                   <select
                     defaultValue={field.value || ""}
                     onChange={(e) => handleAddConfig(field.key, e.target.value)}
