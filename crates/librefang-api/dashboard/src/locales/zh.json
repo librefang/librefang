@@ -289,6 +289,10 @@
     "theme": "界面主题", "language": "语言", "theme_light": "浅色", "theme_dark": "深色", "system_config": "系统配置",
     "nav_layout": "导航菜单布局", "nav_grouped": "分组", "nav_collapsible": "二级菜单",
     "tools_title": "工具", "tools_search": "搜索工具...",
+    "change_password": "修改密码",
+    "pw_current": "当前密码", "pw_new": "新密码", "pw_confirm": "确认新密码",
+    "pw_submit": "修改密码", "pw_success": "密码修改成功，正在跳转至登录页...",
+    "pw_failed": "密码修改失败", "pw_mismatch": "两次输入的新密码不一致", "pw_empty": "新密码不能为空", "pw_too_short": "密码长度不能少于 8 个字符",
     "help": "配置系统偏好设置。切换主题、语言、导航布局，浏览可用工具列表。"
   },
   "chat": {
