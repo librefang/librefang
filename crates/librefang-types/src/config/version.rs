@@ -17,6 +17,11 @@ pub const fn default_config_version() -> u32 {
 /// until the value matches `CONFIG_VERSION`. Returns the final version
 /// reached (equal to `CONFIG_VERSION` on success).
 pub fn run_migrations(raw: &mut toml::Value, from_version: u32) -> Result<u32, String> {
+    if from_version > CONFIG_VERSION {
+        return Err(format!(
+            "Config version {from_version} is newer than supported version {CONFIG_VERSION}"
+        ));
+    }
     let mut version = from_version;
     while version < CONFIG_VERSION {
         match version {
