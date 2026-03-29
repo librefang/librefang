@@ -752,7 +752,7 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
             ChannelField { key: "encoding_aes_key_env", label: "EncodingAESKey", field_type: FieldType::Secret, env_var: Some("WECOM_ENCODING_AES_KEY"), required: true, placeholder: "EncodingAESKey from WeCom admin console", advanced: false, options: None, show_when: Some("callback"), readonly: false },
             ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
         ],
-        setup_steps: &["Create an intelligent bot at WeCom admin console", "Copy Bot ID and Secret from the bot settings page", "WebSocket mode: enter Bot ID and Secret directly (no server needed)", "Callback mode: also set Callback Port, create a public HTTPS URL, set Callback Token and EncodingAESKey env vars in your server environment"],
+        setup_steps: &["Create an intelligent bot at WeCom admin console", "Copy Bot ID and Secret from the bot settings page", "WebSocket mode: enter Bot ID and Secret directly (no server needed)", "Callback mode: set Callback Token and EncodingAESKey, then configure the displayed Callback URL in WeCom admin"],
         config_template: "[channels.wecom]\nbot_id = \"\"\nsecret_env = \"WECOM_BOT_SECRET\"\nmode = \"websocket\"",
     },
     ChannelMeta {

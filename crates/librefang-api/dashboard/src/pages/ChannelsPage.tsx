@@ -308,7 +308,12 @@ function ConfigDialog({ channel, onClose, t }: { channel: Channel; onClose: () =
     const vals: Record<string, string> = {};
     for (const f of fields) {
       if (f.readonly) continue;
-      vals[f.key] = (f.type !== "secret" && f.value) ? f.value : "";
+      if (f.type === "select" && f.options?.length) {
+        // Select: use saved value or fall back to first option
+        vals[f.key] = f.value || f.options[0];
+      } else {
+        vals[f.key] = (f.type !== "secret" && f.value) ? f.value : "";
+      }
     }
     return vals;
   }, [fields]);
