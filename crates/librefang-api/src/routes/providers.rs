@@ -305,7 +305,7 @@ fn attach_probe_result(
     if let Some(err) = &probe.error {
         entry["error_message"] = serde_json::json!(err);
     }
-    entry["last_tested"] = serde_json::json!(chrono::Utc::now().to_rfc3339());
+    entry["last_tested"] = serde_json::json!(&probe.probed_at);
 }
 
 /// GET /api/providers — List all providers with auth status.

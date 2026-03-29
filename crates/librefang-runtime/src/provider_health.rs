@@ -30,7 +30,7 @@ pub struct DiscoveredModelInfo {
 }
 
 /// Result of probing a provider endpoint.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ProbeResult {
     /// Whether the provider responded successfully.
     pub reachable: bool,
@@ -42,6 +42,21 @@ pub struct ProbeResult {
     pub discovered_model_info: Vec<DiscoveredModelInfo>,
     /// Error message if the probe failed.
     pub error: Option<String>,
+    /// Wall-clock time when the probe was executed (RFC 3339).
+    pub probed_at: String,
+}
+
+impl Default for ProbeResult {
+    fn default() -> Self {
+        Self {
+            reachable: false,
+            latency_ms: 0,
+            discovered_models: Vec::new(),
+            discovered_model_info: Vec::new(),
+            error: None,
+            probed_at: chrono::Utc::now().to_rfc3339(),
+        }
+    }
 }
 
 /// Check if a provider is a local HTTP provider that supports health probing.
