@@ -611,9 +611,12 @@ export function ProvidersPage() {
   const handleTest = async (id: string) => {
     setPendingId(id);
     try {
-      await testMutation.mutateAsync(id);
-      addToast(t("common.success"), "success");
-      // Refetch to get updated status
+      const result = await testMutation.mutateAsync(id);
+      if (result.status === "error") {
+        addToast(result.error || t("common.error"), "error");
+      } else {
+        addToast(t("common.success"), "success");
+      }
       await providersQuery.refetch();
     } catch (e: any) {
       addToast(e.message || t("common.error"), "error");
