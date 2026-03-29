@@ -17,7 +17,9 @@ use librefang_types::agent::AgentId;
 use librefang_types::config::{ChannelOverrides, DmPolicy, GroupPolicy, OutputFormat};
 use librefang_types::message::ContentBlock;
 use regex::RegexSet;
+use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, error, info, warn};
 
@@ -332,9 +334,6 @@ pub trait ChannelBridgeHandle: Send + Sync {
     }
 }
 
-use std::collections::HashMap;
-use std::time::Instant;
-
 struct PendingMessage {
     message: ChannelMessage,
     image_blocks: Option<Vec<ContentBlock>>,
@@ -481,16 +480,21 @@ impl MessageDebouncer {
             all_blocks.extend(blocks);
         }
 
-        let first_is_command = matches!(merged_msg.content, ChannelContent::Command { .. });
+        let first_content_type = std::mem::discriminant(&merged_msg.content);
+        let mut all_same_type = true;
         let mut all_commands_same_name: Option<String> = None;
 
-        if first_is_command {
+        if matches!(merged_msg.content, ChannelContent::Command { .. }) {
             if let ChannelContent::Command { name, .. } = &merged_msg.content {
                 all_commands_same_name = Some(name.clone());
             }
         }
 
         for pm in &messages {
+            if std::mem::discriminant(&pm.message.content) != first_content_type {
+                all_same_type = false;
+                break;
+            }
             if let Some(name) = &all_commands_same_name {
                 if let ChannelContent::Command { name: n, .. } = &pm.message.content {
                     if n != name {
@@ -504,23 +508,34 @@ impl MessageDebouncer {
             }
         }
 
-        if let Some(command_name) = all_commands_same_name {
-            let mut cmd_args: Vec<String> = Vec::new();
-            if let ChannelContent::Command { args, .. } = &merged_msg.content {
-                cmd_args.extend(args.clone());
-            }
-            for pm in messages {
-                if let ChannelContent::Command { args, .. } = pm.message.content {
-                    cmd_args.extend(args);
+        if all_same_type {
+            if let Some(command_name) = all_commands_same_name {
+                let mut cmd_args: Vec<String> = Vec::new();
+                if let ChannelContent::Command { args, .. } = &merged_msg.content {
+                    cmd_args.extend(args.clone());
                 }
-                if let Some(blocks) = pm.image_blocks {
-                    all_blocks.extend(blocks);
+                for pm in messages {
+                    if let ChannelContent::Command { args, .. } = pm.message.content {
+                        cmd_args.extend(args);
+                    }
+                    if let Some(blocks) = pm.image_blocks {
+                        all_blocks.extend(blocks);
+                    }
                 }
+                merged_msg.content = ChannelContent::Command {
+                    name: command_name,
+                    args: cmd_args,
+                };
+            } else {
+                let mut text_parts = vec![content_to_text(&merged_msg.content)];
+                for pm in messages {
+                    text_parts.push(content_to_text(&pm.message.content));
+                    if let Some(blocks) = pm.image_blocks {
+                        all_blocks.extend(blocks);
+                    }
+                }
+                merged_msg.content = ChannelContent::Text(text_parts.join("\n"));
             }
-            merged_msg.content = ChannelContent::Command {
-                name: command_name,
-                args: cmd_args,
-            };
         } else {
             let mut text_parts = vec![content_to_text(&merged_msg.content)];
             for pm in messages {
@@ -625,6 +640,48 @@ fn flush_debounced(
             }
 
             let ct_str = channel_type_str(&merged_msg.channel);
+
+            // --- Input sanitization (prompt injection detection) ---
+            if !sanitizer.is_off() {
+                let text_to_check: Option<&str> = match &merged_msg.content {
+                    ChannelContent::Text(t) => Some(t.as_str()),
+                    ChannelContent::Image { caption, .. } => caption.as_deref(),
+                    ChannelContent::Voice { caption, .. } => caption.as_deref(),
+                    ChannelContent::Video { caption, .. } => caption.as_deref(),
+                    _ => None,
+                };
+                if let Some(text) = text_to_check {
+                    match sanitizer.check(text) {
+                        SanitizeResult::Clean => {}
+                        SanitizeResult::Warned(reason) => {
+                            warn!(
+                                channel = ct_str,
+                                user = %merged_msg.sender.display_name,
+                                reason = reason.as_str(),
+                                "Suspicious channel input (warn mode, allowing through)"
+                            );
+                        }
+                        SanitizeResult::Blocked(reason) => {
+                            warn!(
+                                channel = ct_str,
+                                user = %merged_msg.sender.display_name,
+                                reason = reason.as_str(),
+                                "Blocked channel input (prompt injection detected)"
+                            );
+                            let _ = adapter
+                                .send(
+                                    &merged_msg.sender,
+                                    ChannelContent::Text(
+                                        "Your message could not be processed.".to_string(),
+                                    ),
+                                )
+                                .await;
+                            return;
+                        }
+                    }
+                }
+            }
+
             let overrides = channel_handle
                 .channel_overrides(
                     ct_str,
@@ -841,8 +898,14 @@ impl BridgeManager {
                                 }
                                 None => {
                                     let keys: Vec<String> = buffers.keys().cloned().collect();
+                                    let mut handles = Vec::new();
                                     for key in keys {
-                                        flush_debounced(&debouncer, &key, &mut buffers, &handle, &router, &adapter_clone, &rate_limiter, &sanitizer, &semaphore);
+                                        if let Some(handle) = flush_debounced(&debouncer, &key, &mut buffers, &handle, &router, &adapter_clone, &rate_limiter, &sanitizer, &semaphore) {
+                                            handles.push(handle);
+                                        }
+                                    }
+                                    for handle in handles {
+                                        let _ = handle.await;
                                     }
                                     info!("Channel adapter {} stream ended", adapter_clone.name());
                                     break;

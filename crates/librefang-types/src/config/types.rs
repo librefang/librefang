@@ -51,32 +51,42 @@ pub enum OutputFormat {
 }
 
 /// Per-channel behavior overrides.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ChannelOverrides {
     /// Model override (uses agent's default if None).
+    #[serde(default)]
     pub model: Option<String>,
     /// System prompt override.
+    #[serde(default)]
     pub system_prompt: Option<String>,
     /// DM policy.
+    #[serde(default)]
     pub dm_policy: DmPolicy,
     /// Group message policy.
+    #[serde(default)]
     pub group_policy: GroupPolicy,
     /// Regex patterns that can trigger a reply in group chats when
     /// `group_policy` is `mention_only`.
     #[serde(default)]
     pub group_trigger_patterns: Vec<String>,
     /// Global rate limit for this channel (messages per minute, 0 = unlimited).
+    #[serde(default)]
     pub rate_limit_per_minute: u32,
     /// Per-user rate limit (messages per minute, 0 = unlimited).
+    #[serde(default)]
     pub rate_limit_per_user: u32,
     /// Enable thread replies.
+    #[serde(default)]
     pub threading: bool,
     /// Output format override.
+    #[serde(default)]
     pub output_format: Option<OutputFormat>,
     /// Usage footer mode override.
+    #[serde(default)]
     pub usage_footer: Option<UsageFooterMode>,
     /// Typing indicator mode override.
+    #[serde(default)]
     pub typing_mode: Option<TypingMode>,
     /// Message debounce window in milliseconds. Default: 0 (disabled).
     #[serde(default)]
@@ -87,6 +97,27 @@ pub struct ChannelOverrides {
     /// Maximum number of messages to buffer per sender before forcing dispatch. Default: 64.
     #[serde(default = "default_message_debounce_max_buffer")]
     pub message_debounce_max_buffer: usize,
+}
+
+impl Default for ChannelOverrides {
+    fn default() -> Self {
+        Self {
+            model: None,
+            system_prompt: None,
+            dm_policy: DmPolicy::default(),
+            group_policy: GroupPolicy::default(),
+            group_trigger_patterns: Vec::new(),
+            rate_limit_per_minute: 0,
+            rate_limit_per_user: 0,
+            threading: false,
+            output_format: None,
+            usage_footer: None,
+            typing_mode: None,
+            message_debounce_ms: 0,
+            message_debounce_max_ms: 30000,
+            message_debounce_max_buffer: 64,
+        }
+    }
 }
 
 fn default_message_debounce_max_ms() -> u64 {
