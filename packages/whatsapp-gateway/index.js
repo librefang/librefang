@@ -936,6 +936,9 @@ async function startConnection() {
       });
       dbUpdateLastSeen(sender, msgTimestamp);
 
+      // Send read receipt (blue ticks) immediately
+      await sock.readMessages([msg.key]);
+
       // Forward to LibreFang agent
       try {
         // Track stranger messages
