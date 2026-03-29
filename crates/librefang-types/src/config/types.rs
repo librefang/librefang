@@ -2439,6 +2439,11 @@ impl Default for HeartbeatTomlConfig {
 /// ```toml
 /// [registry]
 /// cache_ttl_secs = 86400
+/// # Optional: proxy/mirror prefix for users behind the GFW.
+/// # All GitHub URLs are prefixed with this value, e.g.
+/// #   registry_mirror = "https://ghproxy.cn"
+/// # turns "https://github.com/..." into "https://ghproxy.cn/https://github.com/..."
+/// registry_mirror = ""
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -2447,6 +2452,15 @@ pub struct RegistryConfig {
     /// The registry is re-downloaded when the local cache is older than this.
     #[serde(default = "default_registry_cache_ttl_secs")]
     pub cache_ttl_secs: u64,
+    /// Mirror/proxy prefix for GitHub URLs. When non-empty, all outbound
+    /// GitHub requests (tarball downloads, git clones, raw content fetches)
+    /// are prefixed with this URL. Useful for users in China Mainland where
+    /// direct GitHub access is slow or blocked.
+    ///
+    /// Example: `"https://ghproxy.cn"` rewrites
+    /// `https://github.com/...` → `https://ghproxy.cn/https://github.com/...`
+    #[serde(default)]
+    pub registry_mirror: String,
 }
 
 fn default_registry_cache_ttl_secs() -> u64 {
@@ -2457,6 +2471,7 @@ impl Default for RegistryConfig {
     fn default() -> Self {
         Self {
             cache_ttl_secs: default_registry_cache_ttl_secs(),
+            registry_mirror: String::new(),
         }
     }
 }
