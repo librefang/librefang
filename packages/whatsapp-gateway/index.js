@@ -250,20 +250,47 @@ let ownJid = null;
 // syntax. Convert the most common patterns so messages render correctly.
 function markdownToWhatsApp(text) {
   if (!text) return text;
-  // Bold: **text** or __text__ → placeholder, then restore as *text* (WhatsApp bold)
-  // Using placeholder avoids the italic regex from re-matching converted bold.
-  // Any literal `*` inside bold content is escaped to \x02 so the italic regex
-  // cannot match across placeholder boundaries, then restored after italic runs.
+
+  // Step 1: Protect inline code from formatting — replace with placeholders.
+  // Must run BEFORE bold/italic so `**bold**` inside backticks is untouched.
+  const codeSlots = [];
+  text = text.replace(/(?<!`)(`{1})(?!`)(.+?)(?<!`)\1(?!`)/g, (_, _tick, content) => {
+    const idx = codeSlots.length;
+    codeSlots.push(content);
+    return '\x01CODE' + idx + 'CODE\x01';
+  });
+
+  // Step 2: Protect backslash-escaped stars — \* should stay literal.
+  text = text.replace(/\\\*/g, '\x01ESCAPED_STAR\x01');
+
+  // Step 3: Bold — **text** or __text__ → placeholder.
+  // Only **text** is treated as bold. The __text__ form is intentionally
+  // skipped because it's ambiguous with Python dunders (__init__, __main__).
+  // LLM responses almost always use ** for bold.
+  // Escape any `*` inside bold content to \x02 to prevent italic regex collision.
   text = text.replace(/\*\*(.+?)\*\*/g, (_, inner) => '\x01BOLD' + inner.replace(/\*/g, '\x02') + 'BOLD\x01');
-  text = text.replace(/__(.+?)__/g, (_, inner) => '\x01BOLD' + inner.replace(/\*/g, '\x02') + 'BOLD\x01');
-  // Italic: *text* → _text_ (WhatsApp italic) — only matches remaining single-star
-  text = text.replace(/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, '_$1_');
-  // Restore bold placeholders → *text* (WhatsApp bold), and unescape \x02 → *
+
+  // Step 4: Italic — *text* → _text_ (WhatsApp italic).
+  // Exclude bullet-list items: lines starting with `* ` (star + space).
+  text = text.replace(/(?<!\*)\*(?!\*)(?!\s)(.+?)(?<!\s|\*)\*(?!\*)/g, (match, inner, offset) => {
+    // Check if this is a bullet list item (star at line start followed by space)
+    const lineStart = text.lastIndexOf('\n', offset - 1) + 1;
+    if (offset === lineStart && text[offset + 1] === ' ') return match;
+    return '_' + inner + '_';
+  });
+
+  // Step 5: Restore bold placeholders → *text* (WhatsApp bold)
   text = text.replace(/\x01BOLD(.+?)BOLD\x01/g, (_, inner) => '*' + inner.replace(/\x02/g, '*') + '*');
-  // Strikethrough: ~~text~~ → ~text~
+
+  // Step 6: Strikethrough — ~~text~~ → ~text~
   text = text.replace(/~~(.+?)~~/g, '~$1~');
-  // Inline code: `text` → ```text``` (WhatsApp monospace)
-  text = text.replace(/(?<!`)(`{1})(?!`)(.+?)(?<!`)\1(?!`)/g, '```$2```');
+
+  // Step 7: Restore inline code placeholders → ```text``` (WhatsApp monospace)
+  text = text.replace(/\x01CODE(\d+)CODE\x01/g, (_, idx) => '```' + codeSlots[Number(idx)] + '```');
+
+  // Step 8: Restore escaped stars → literal *
+  text = text.replace(/\x01ESCAPED_STAR\x01/g, '*');
+
   return text;
 }
 

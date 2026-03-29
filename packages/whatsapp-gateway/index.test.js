@@ -28,8 +28,8 @@ describe('markdownToWhatsApp', () => {
     assert.equal(markdownToWhatsApp('Hello **world**!'), 'Hello *world*!');
   });
 
-  it('converts bold __text__ to *text*', () => {
-    assert.equal(markdownToWhatsApp('Hello __world__!'), 'Hello *world*!');
+  it('does not convert __text__ (ambiguous with Python dunders)', () => {
+    assert.equal(markdownToWhatsApp('Hello __world__!'), 'Hello __world__!');
   });
 
   it('converts italic *text* to _text_', () => {
@@ -73,6 +73,22 @@ describe('markdownToWhatsApp', () => {
   it('does not corrupt stars inside bold placeholders (placeholder collision)', () => {
     // **some *nested* text** should keep bold wrapper, not let italic regex match inside
     assert.equal(markdownToWhatsApp('**some *nested* text**'), '*some *nested* text*');
+  });
+
+  it('does not convert Python dunder __init__ to bold', () => {
+    assert.equal(markdownToWhatsApp('Call __init__ method'), 'Call __init__ method');
+  });
+
+  it('does not format inside inline code', () => {
+    assert.equal(markdownToWhatsApp('Use `**bold**` in code'), 'Use ```**bold**``` in code');
+  });
+
+  it('preserves backslash-escaped stars', () => {
+    assert.equal(markdownToWhatsApp('Price is \\*special\\*'), 'Price is *special*');
+  });
+
+  it('does not convert bullet list * item to italic', () => {
+    assert.equal(markdownToWhatsApp('* first item\n* second item'), '* first item\n* second item');
   });
 
   it('does not mangle plain text', () => {
