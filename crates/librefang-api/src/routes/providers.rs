@@ -1001,7 +1001,16 @@ pub async fn test_provider(
 
     let latency_ms = start.elapsed().as_millis();
 
-    if status_code == 401 || status_code == 403 {
+    if (200..300).contains(&status_code) {
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "status": "ok",
+                "provider": name,
+                "latency_ms": latency_ms,
+            })),
+        )
+    } else if status_code == 401 || status_code == 403 {
         (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -1010,22 +1019,22 @@ pub async fn test_provider(
                 "error": format!("Authentication failed (HTTP {})", status_code),
             })),
         )
-    } else if status_code >= 500 {
+    } else if status_code == 429 {
         (
             StatusCode::OK,
             Json(serde_json::json!({
                 "status": "error",
                 "provider": name,
-                "error": format!("Server error (HTTP {})", status_code),
+                "error": format!("Rate limited (HTTP 429)"),
             })),
         )
     } else {
         (
             StatusCode::OK,
             Json(serde_json::json!({
-                "status": "ok",
+                "status": "error",
                 "provider": name,
-                "latency_ms": latency_ms,
+                "error": format!("HTTP {}", status_code),
             })),
         )
     }
