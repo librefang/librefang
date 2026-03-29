@@ -301,6 +301,10 @@
     "theme": "Interface Theme", "language": "Language", "theme_light": "Light", "theme_dark": "Dark", "system_config": "System Configuration",
     "nav_layout": "Navigation Layout", "nav_grouped": "Grouped", "nav_collapsible": "Collapsible",
     "tools_title": "Tools", "tools_search": "Search tools...",
+    "change_password": "Change Password",
+    "pw_current": "Current Password", "pw_new": "New Password", "pw_confirm": "Confirm New Password",
+    "pw_submit": "Change Password", "pw_success": "Password changed. Redirecting to login...",
+    "pw_failed": "Failed to change password", "pw_mismatch": "New passwords do not match", "pw_empty": "New password cannot be empty",
     "help": "Configure system preferences. Switch theme, language, navigation layout, and browse available tools."
   },
   "chat": {
