@@ -747,9 +747,9 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
             ChannelField { key: "bot_id", label: "Bot ID", field_type: FieldType::Text, env_var: None, required: true, placeholder: "aibxxxxx", advanced: false, options: None, show_when: None, readonly: false },
             ChannelField { key: "secret_env", label: "Bot Secret", field_type: FieldType::Secret, env_var: Some("WECOM_BOT_SECRET"), required: true, placeholder: "xxxxxxxxxxxxxxxx...", advanced: false, options: None, show_when: None, readonly: false },
             ChannelField { key: "mode", label: "Connection Mode", field_type: FieldType::Select, env_var: None, required: false, placeholder: "websocket", advanced: false, options: Some(&["websocket", "callback"]), show_when: None, readonly: false },
-            ChannelField { key: "callback_url", label: "Callback URL", field_type: FieldType::Text, env_var: None, required: false, placeholder: "https://your-domain.com/wecom/webhook", advanced: false, options: None, show_when: Some("callback"), readonly: true },
-            ChannelField { key: "token_env", label: "Callback Token (env var name)", field_type: FieldType::Secret, env_var: Some("WECOM_CALLBACK_TOKEN"), required: true, placeholder: "WECOM_CALLBACK_TOKEN", advanced: false, options: None, show_when: Some("callback"), readonly: false },
-            ChannelField { key: "encoding_aes_key_env", label: "EncodingAESKey (env var name)", field_type: FieldType::Secret, env_var: Some("WECOM_ENCODING_AES_KEY"), required: true, placeholder: "WECOM_ENCODING_AES_KEY", advanced: false, options: None, show_when: Some("callback"), readonly: false },
+            ChannelField { key: "callback_url", label: "Callback URL (configure in WeCom admin)", field_type: FieldType::Text, env_var: None, required: false, placeholder: "", advanced: false, options: None, show_when: Some("callback"), readonly: true },
+            ChannelField { key: "token_env", label: "Callback Token", field_type: FieldType::Secret, env_var: Some("WECOM_CALLBACK_TOKEN"), required: true, placeholder: "Token from WeCom admin console", advanced: false, options: None, show_when: Some("callback"), readonly: false },
+            ChannelField { key: "encoding_aes_key_env", label: "EncodingAESKey", field_type: FieldType::Secret, env_var: Some("WECOM_ENCODING_AES_KEY"), required: true, placeholder: "EncodingAESKey from WeCom admin console", advanced: false, options: None, show_when: Some("callback"), readonly: false },
             ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
         ],
         setup_steps: &["Create an intelligent bot at WeCom admin console", "Copy Bot ID and Secret from the bot settings page", "WebSocket mode: enter Bot ID and Secret directly (no server needed)", "Callback mode: also set Callback Port, create a public HTTPS URL, set Callback Token and EncodingAESKey env vars in your server environment"],
@@ -877,6 +877,36 @@ fn build_field_json(
         }
     }
     field
+}
+
+/// For channels with a readonly `callback_url` field, dynamically inject the
+/// actual URL based on the configured `webhook_port` so the user sees a real
+/// value to copy into the platform admin console.
+fn inject_callback_url(
+    fields: &mut [serde_json::Value],
+    channel_name: &str,
+    config_values: Option<&serde_json::Value>,
+) {
+    // Map channel name → (default port, path)
+    let (default_port, path) = match channel_name {
+        "wecom" => (8454u16, "/wecom/webhook"),
+        _ => return,
+    };
+
+    let port = config_values
+        .and_then(|v| v.get("webhook_port"))
+        .and_then(|v| v.as_u64())
+        .map(|p| p as u16)
+        .unwrap_or(default_port);
+
+    let url = format!("http://0.0.0.0:{port}{path}");
+
+    for field in fields.iter_mut() {
+        if field.get("key").and_then(|v| v.as_str()) == Some("callback_url") {
+            field["value"] = serde_json::Value::String(url.clone());
+            field["has_value"] = serde_json::Value::Bool(true);
+        }
+    }
 }
 
 /// Find a channel definition by name.
@@ -1100,11 +1130,12 @@ pub async fn list_channels(State(state): State<Arc<AppState>>) -> impl IntoRespo
             });
 
         let config_vals = channel_config_values(&live_channels, meta.name);
-        let fields: Vec<serde_json::Value> = meta
+        let mut fields: Vec<serde_json::Value> = meta
             .fields
             .iter()
             .map(|f| build_field_json(f, config_vals.as_ref()))
             .collect();
+        inject_callback_url(&mut fields, meta.name, config_vals.as_ref());
 
         channels.push(serde_json::json!({
             "name": meta.name,
@@ -1170,11 +1201,12 @@ pub async fn get_channel(
         });
 
     let config_vals = channel_config_values(&live_channels, meta.name);
-    let fields: Vec<serde_json::Value> = meta
+    let mut fields: Vec<serde_json::Value> = meta
         .fields
         .iter()
         .map(|f| build_field_json(f, config_vals.as_ref()))
         .collect();
+    inject_callback_url(&mut fields, meta.name, config_vals.as_ref());
 
     (
         StatusCode::OK,

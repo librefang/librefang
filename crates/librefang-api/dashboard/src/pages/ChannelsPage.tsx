@@ -1,7 +1,7 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { listChannels, configureChannel, wechatQrStart, wechatQrStatus } from "../api";
+import { listChannels, configureChannel, wechatQrStart, wechatQrStatus, type ChannelItem } from "../api";
 import QRCode from "qrcode";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
@@ -44,32 +44,7 @@ type SortField = "name" | "category";
 type SortOrder = "asc" | "desc";
 type ViewMode = "grid" | "list";
 
-interface Channel {
-  name: string;
-  display_name?: string;
-  configured?: boolean;
-  has_token?: boolean;
-  category?: string;
-  description?: string;
-  icon?: string;
-  difficulty?: string;
-  setup_time?: string;
-  quick_setup?: string;
-  setup_type?: string;
-  setup_steps?: string[];
-  fields?: {
-    key: string;
-    label?: string;
-    type?: string;
-    required?: boolean;
-    advanced?: boolean;
-    has_value?: boolean;
-    env_var?: string | null;
-    options?: string[];
-    value?: string;
-    show_when?: string;
-  }[];
-}
+type Channel = ChannelItem;
 
 interface ChannelCardProps {
   channel: Channel;
@@ -323,42 +298,52 @@ function DetailsModal({ channel, onClose, onConfigure, t }: {
   );
 }
 
-// Config Dialog
+// Config Dialog — standard form with controlled inputs
 function ConfigDialog({ channel, onClose, t }: { channel: Channel; onClose: () => void; t: (key: string) => string }) {
   const queryClient = useQueryClient();
-  // Pre-populate configs from field values so unchanged selects are still submitted
-  const initialConfigs = useMemo(() => {
+  const fields = useMemo(() => (channel.fields ?? []).filter(f => !f.advanced), [channel.fields]);
+
+  // Build initial form values: non-secret fields use saved value, secrets start empty
+  const initialValues = useMemo(() => {
     const vals: Record<string, string> = {};
-    (channel.fields ?? []).forEach((f: any) => {
-      if (f.value && f.type !== "secret") {
-        vals[f.key] = f.value;
-      }
-    });
+    for (const f of fields) {
+      if (f.readonly) continue;
+      vals[f.key] = (f.type !== "secret" && f.value) ? f.value : "";
+    }
     return vals;
-  }, [channel.fields]);
-  const [configs, setConfigs] = useState<Record<string, string>>(initialConfigs);
+  }, [fields]);
+  const [values, setValues] = useState<Record<string, string>>(initialValues);
+
+  const setValue = (key: string, val: string) => setValues(prev => ({ ...prev, [key]: val }));
+
+  // Find the "controlling" select field (e.g. mode) to drive show_when visibility
+  const controlField = useMemo(() => fields.find(f => f.type === "select" && f.options), [fields]);
+  const controlValue = controlField ? (values[controlField.key] || "") : "";
+
+  // Filter visible fields: hide those whose show_when doesn't match the control value
+  const visibleFields = useMemo(
+    () => fields.filter(f => !f.show_when || f.show_when === controlValue),
+    [fields, controlValue],
+  );
+
+  // Only submit non-readonly, non-empty values (skip untouched secrets)
+  const handleSubmit = () => {
+    const payload: Record<string, string> = {};
+    for (const f of visibleFields) {
+      if (f.readonly) continue;
+      const v = values[f.key];
+      if (v) payload[f.key] = v;
+    }
+    configMutation.mutate(payload);
+  };
 
   const configMutation = useMutation({
-    mutationFn: () => configureChannel(channel.name, configs),
+    mutationFn: (payload: Record<string, string>) => configureChannel(channel.name, payload),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["channels", "list"] });
       onClose();
     }
   });
-
-  const handleAddConfig = (key: string, value: string) => {
-    if (key.trim()) {
-      setConfigs(prev => ({ ...prev, [key.trim()]: value }));
-    }
-  };
-
-  const handleRemoveConfig = (key: string) => {
-    setConfigs(prev => {
-      const next = { ...prev };
-      delete next[key];
-      return next;
-    });
-  };
 
   return (
     <div className="fixed inset-0 bg-black/40 flex items-end sm:items-center justify-center z-50 backdrop-blur-sm" onClick={onClose}>
@@ -380,44 +365,25 @@ function ConfigDialog({ channel, onClose, t }: { channel: Channel; onClose: () =
         <div className="p-6">
         <p className="text-xs text-text-dim mb-5">{channel.description}</p>
 
-        {/* Added Configurations */}
-        {Object.keys(configs).length > 0 && (
-          <div className="space-y-2 mb-4">
-            {Object.entries(configs).map(([key, value]) => (
-              <div key={key} className="flex items-center justify-between bg-main rounded-lg px-3 py-2">
-                <div className="min-w-0 flex-1">
-                  <span className="text-xs font-bold text-brand">{key}</span>
-                  <span className="text-text-dim mx-2">:</span>
-                  <span className="text-xs font-mono truncate">{value}</span>
-                </div>
-                <button onClick={() => handleRemoveConfig(key)} className="text-error hover:text-error/80 ml-2">
-                  <X className="w-4 h-4" />
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
-
         {/* Configuration Fields */}
-        {channel.fields && channel.fields.length > 0 ? (
-          <div className="space-y-3 mb-6 max-h-60 overflow-y-auto">
-            {channel.fields.filter(f => !f.advanced && (!f.show_when || Object.values(configs).includes(f.show_when))).map((field, idx) => (
-              <div key={idx}>
+        {visibleFields.length > 0 ? (
+          <div className="space-y-3 mb-6 max-h-80 overflow-y-auto">
+            {visibleFields.map((field) => (
+              <div key={field.key}>
                 <label className="text-xs font-bold text-text-dim mb-1 block">
                   {field.label || field.key} {field.required && <span className="text-error">*</span>}
-                  {field.show_when && <span className="ml-1 text-[10px] text-text-dim">({field.show_when} mode)</span>}
                 </label>
                 {field.readonly ? (
                   <div className="flex gap-2">
                     <input
                       type="text"
-                      value={field.placeholder || field.value || ""}
+                      value={field.value || field.placeholder || ""}
                       readOnly
                       className="flex-1 rounded-lg border border-border-subtle bg-main/50 px-3 py-2 text-xs text-text-dim font-mono"
                     />
                     <button
-                      onClick={() => navigator.clipboard.writeText(field.placeholder || field.value || "")}
-                      className="px-3 py-2 rounded-lg bg-brand/10 text-brand text-xs hover:bg-brand/20 transition-colors"
+                      onClick={() => navigator.clipboard.writeText(field.value || field.placeholder || "")}
+                      className="px-3 py-2 rounded-lg bg-brand/10 text-brand text-xs hover:bg-brand/20 transition-colors shrink-0"
                       title="Copy"
                     >
                       Copy
@@ -425,21 +391,20 @@ function ConfigDialog({ channel, onClose, t }: { channel: Channel; onClose: () =
                   </div>
                 ) : field.type === "select" && field.options ? (
                   <select
-                    defaultValue={field.value || ""}
-                    onChange={(e) => handleAddConfig(field.key, e.target.value)}
+                    value={values[field.key] || ""}
+                    onChange={(e) => setValue(field.key, e.target.value)}
                     className="w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-xs focus:border-brand focus:ring-1 focus:ring-brand/20 outline-none"
                   >
-                    <option value="">Select...</option>
                     {field.options.map((opt) => (
                       <option key={opt} value={opt}>{opt}</option>
                     ))}
                   </select>
                 ) : (
                   <input
-                    type={field.type === "password" ? "password" : "text"}
-                    defaultValue={field.has_value ? "••••••••" : ""}
-                    onBlur={(e) => handleAddConfig(field.key, e.target.value)}
-                    placeholder={field.env_var || field.key}
+                    type={field.type === "secret" ? "password" : "text"}
+                    value={values[field.key] || ""}
+                    onChange={(e) => setValue(field.key, e.target.value)}
+                    placeholder={field.has_value ? "••••••••  (leave empty to keep)" : (field.placeholder || field.env_var || field.key)}
                     className="w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-xs focus:border-brand focus:ring-1 focus:ring-brand/20 outline-none"
                   />
                 )}
@@ -455,7 +420,7 @@ function ConfigDialog({ channel, onClose, t }: { channel: Channel; onClose: () =
         {/* Buttons */}
         <div className="flex gap-3">
           <Button variant="secondary" className="flex-1" onClick={onClose}>{t("common.cancel")}</Button>
-          <Button variant="primary" className="flex-1" onClick={() => configMutation.mutate()} disabled={configMutation.isPending}>
+          <Button variant="primary" className="flex-1" onClick={handleSubmit} disabled={configMutation.isPending}>
             {configMutation.isPending ? t("common.saving") : t("common.save")}
           </Button>
         </div>
