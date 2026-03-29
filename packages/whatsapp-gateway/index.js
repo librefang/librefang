@@ -244,6 +244,57 @@ let cachedAgentId = null;
 let ownJid = null;
 
 // ---------------------------------------------------------------------------
+// Markdown → WhatsApp formatting conversion
+// ---------------------------------------------------------------------------
+// LLM responses use standard Markdown but WhatsApp has its own formatting
+// syntax. Convert the most common patterns so messages render correctly.
+function markdownToWhatsApp(text) {
+  if (!text) return text;
+
+  // Step 1: Protect inline code from formatting — replace with placeholders.
+  // Must run BEFORE bold/italic so `**bold**` inside backticks is untouched.
+  const codeSlots = [];
+  text = text.replace(/(?<!`)(`{1})(?!`)(.+?)(?<!`)\1(?!`)/g, (_, _tick, content) => {
+    const idx = codeSlots.length;
+    codeSlots.push(content);
+    return '\x01CODE' + idx + 'CODE\x01';
+  });
+
+  // Step 2: Protect backslash-escaped stars — \* should stay literal.
+  text = text.replace(/\\\*/g, '\x01ESCAPED_STAR\x01');
+
+  // Step 3: Bold — **text** or __text__ → placeholder.
+  // Only **text** is treated as bold. The __text__ form is intentionally
+  // skipped because it's ambiguous with Python dunders (__init__, __main__).
+  // LLM responses almost always use ** for bold.
+  // Escape any `*` inside bold content to \x02 to prevent italic regex collision.
+  text = text.replace(/\*\*(.+?)\*\*/g, (_, inner) => '\x01BOLD' + inner.replace(/\*/g, '\x02') + 'BOLD\x01');
+
+  // Step 4: Italic — *text* → _text_ (WhatsApp italic).
+  // Exclude bullet-list items: lines starting with `* ` (star + space).
+  text = text.replace(/(?<!\*)\*(?!\*)(?!\s)(.+?)(?<!\s|\*)\*(?!\*)/g, (match, inner, offset) => {
+    // Check if this is a bullet list item (star at line start followed by space)
+    const lineStart = text.lastIndexOf('\n', offset - 1) + 1;
+    if (offset === lineStart && text[offset + 1] === ' ') return match;
+    return '_' + inner + '_';
+  });
+
+  // Step 5: Restore bold placeholders → *text* (WhatsApp bold)
+  text = text.replace(/\x01BOLD(.+?)BOLD\x01/g, (_, inner) => '*' + inner.replace(/\x02/g, '*') + '*');
+
+  // Step 6: Strikethrough — ~~text~~ → ~text~
+  text = text.replace(/~~(.+?)~~/g, '~$1~');
+
+  // Step 7: Restore inline code placeholders → ```text``` (WhatsApp monospace)
+  text = text.replace(/\x01CODE(\d+)CODE\x01/g, (_, idx) => '```' + codeSlots[Number(idx)] + '```');
+
+  // Step 8: Restore escaped stars → literal *
+  text = text.replace(/\x01ESCAPED_STAR\x01/g, '*');
+
+  return text;
+}
+
+// ---------------------------------------------------------------------------
 // Step B: Conversation Tracker — in-memory Map with TTL
 // ---------------------------------------------------------------------------
 // Map<stranger_jid, ConversationState>
@@ -501,7 +552,7 @@ async function executeRelay(relay) {
   }
 
   try {
-    const sentRelay = await sock.sendMessage(jid, { text: message });
+    const sentRelay = await sock.sendMessage(jid, { text: markdownToWhatsApp(message) });
 
     // F4: Audit log
     console.log(`[gateway] RELAY SENT | to: ${convo.pushName} (${convo.phone}) [${jid}] | message: "${message.substring(0, 100)}" | timestamp: ${new Date().toISOString()}`);
@@ -967,9 +1018,10 @@ async function startConnection() {
             // Step C: Agent response goes to STRANGER, not owner
             const { notifications, cleanedText } = extractNotifyOwner(response);
 
-            // Send cleaned response to the stranger
+            // Send cleaned response to the stranger (format after tag extraction)
             if (cleanedText) {
-              const sentReply = await sock.sendMessage(sender, { text: cleanedText });
+              const formattedText = markdownToWhatsApp(cleanedText);
+              const sentReply = await sock.sendMessage(sender, { text: formattedText });
               console.log(`[gateway] Replied to stranger ${pushName} (${phone})`);
 
               // Track outbound message
@@ -1025,6 +1077,7 @@ async function startConnection() {
 
             if (ownerReply) {
               // Bug fix: Reply to the SENDER's JID, not always OWNER_JID[0]
+              ownerReply = markdownToWhatsApp(ownerReply);
               const sentOwner = await sock.sendMessage(sender, { text: ownerReply });
               console.log(`[gateway] Replied to owner (${sender})`);
               dbSaveMessage({ id: sentOwner?.key?.id || randomUUID(), jid: sender, senderJid: ownJid, pushName: null, phone, text: ownerReply, direction: 'outbound', timestamp: Date.now(), processed: 1, rawType: 'text' });
@@ -1032,7 +1085,7 @@ async function startConnection() {
 
           } else {
             // Groups or no owner routing — reply directly
-            const sentGroup = await sock.sendMessage(sender, { text: response });
+            const sentGroup = await sock.sendMessage(sender, { text: markdownToWhatsApp(response) });
             console.log(`[gateway] Replied to ${pushName}`);
             dbSaveMessage({ id: sentGroup?.key?.id || randomUUID(), jid: sender, senderJid: ownJid, pushName: null, phone, text: response, direction: 'outbound', timestamp: Date.now(), processed: 1, rawType: 'text' });
           }
@@ -1489,7 +1542,8 @@ async function runCatchUpSweep() {
       // If there's a response and it's a stranger, try to send it back
       if (response && !isOwner && msg.jid && !msg.jid.endsWith('@g.us')) {
         try {
-          await sock.sendMessage(msg.jid, { text: response });
+          const formatted = markdownToWhatsApp(response);
+          await sock.sendMessage(msg.jid, { text: formatted });
           dbSaveMessage({ id: randomUUID(), jid: msg.jid, senderJid: ownJid, pushName: null, phone: msg.phone, text: response, direction: 'outbound', timestamp: Date.now(), processed: 1, rawType: 'text' });
         } catch (sendErr) {
           console.warn(`[gateway][catchup] Could not send catch-up reply to ${msg.jid}: ${sendErr.message}`);
@@ -1533,15 +1587,16 @@ async function sendMessage(to, text) {
   // Normalize phone → JID: "+1234567890" → "1234567890@s.whatsapp.net"
   const jid = to.replace(/^\+/, '').replace(/@.*$/, '') + '@s.whatsapp.net';
 
-  const sent = await sock.sendMessage(jid, { text });
-  // Save outbound message to DB
+  const formatted = markdownToWhatsApp(text);
+  const sent = await sock.sendMessage(jid, { text: formatted });
+  // Save outbound message to DB (store formatted text to match what was delivered)
   dbSaveMessage({
     id: sent?.key?.id || randomUUID(),
     jid,
     senderJid: ownJid || null,
     pushName: null,
     phone: to,
-    text,
+    text: formatted,
     direction: 'outbound',
     timestamp: Date.now(),
     processed: 1,
@@ -1848,6 +1903,7 @@ process.on('SIGTERM', () => {
 
 // Export for testing
 module.exports = {
+  markdownToWhatsApp,
   extractNotifyOwner,
   extractRelayCommands,
   buildConversationsContext,
