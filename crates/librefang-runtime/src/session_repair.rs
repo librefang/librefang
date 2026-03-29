@@ -624,9 +624,9 @@ pub fn prune_heartbeat_turns(messages: &mut Vec<Message>, keep_recent: usize) {
     let prune_end = messages.len() - keep_recent;
     let mut to_remove = Vec::new();
 
-    for i in 0..prune_end {
-        if messages[i].role == Role::Assistant {
-            let is_no_reply = match &messages[i].content {
+    for (i, msg) in messages.iter().enumerate().take(prune_end) {
+        if msg.role == Role::Assistant {
+            let is_no_reply = match &msg.content {
                 MessageContent::Text(text) => {
                     let t = text.trim();
                     t == "NO_REPLY" || t == "[no reply needed]"
@@ -641,10 +641,8 @@ pub fn prune_heartbeat_turns(messages: &mut Vec<Message>, keep_recent: usize) {
             };
             if is_no_reply {
                 to_remove.push(i);
-                // Also mark the preceding user message if it's a heartbeat trigger
-                if i > 0 && messages[i - 1].role == Role::User {
-                    to_remove.push(i - 1);
-                }
+                // Keep the preceding user message — it may contain useful context
+                // even when the agent chose not to reply.
             }
         }
     }
@@ -1296,10 +1294,13 @@ mod tests {
             Message::assistant("Hi there!"),
         ];
         prune_heartbeat_turns(&mut messages, 2);
-        // Should have removed the first 4 messages (2 heartbeat pairs)
-        assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0].role, Role::User);
-        assert_eq!(messages[1].role, Role::Assistant);
+        // Should have removed only the 2 NO_REPLY assistant responses,
+        // keeping the user messages that triggered them.
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[0].role, Role::User); // "ping"
+        assert_eq!(messages[1].role, Role::User); // "ping2"
+        assert_eq!(messages[2].role, Role::User); // "Hello"
+        assert_eq!(messages[3].role, Role::Assistant); // "Hi there!"
     }
 
     #[test]
