@@ -1944,3 +1944,17 @@ export async function createRegistryContent(
     values,
   );
 }
+
+// ---------------------------------------------------------------------------
+// Auth — change password
+// ---------------------------------------------------------------------------
+
+export async function changePassword(
+  currentPassword: string,
+  newPassword: string,
+): Promise<{ ok: boolean; error?: string; message?: string }> {
+  return post<{ ok: boolean; error?: string; message?: string }>(
+    "/api/auth/change-password",
+    { current_password: currentPassword, new_password: newPassword },
+  );
+}
