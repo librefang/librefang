@@ -24,7 +24,7 @@ use futures::Stream;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch, RwLock};
 use tracing::{debug, error, info, warn};
@@ -116,6 +116,14 @@ const WS_INITIAL_BACKOFF: Duration = Duration::from_secs(2);
 /// Maximum back-off between WebSocket reconnection attempts.
 const WS_MAX_BACKOFF: Duration = Duration::from_secs(60);
 
+/// Event dedup window — ignore events with the same event_id within this window.
+/// Feishu retries webhook callbacks up to 3 times within ~1 minute, so 5 minutes
+/// provides ample coverage.
+const EVENT_DEDUP_WINDOW: Duration = Duration::from_secs(300);
+
+/// Maximum number of seen events before triggering a purge of expired entries.
+const EVENT_DEDUP_MAX_ENTRIES: usize = 10_000;
+
 // ---------------------------------------------------------------------------
 // Adapter
 // ---------------------------------------------------------------------------
@@ -149,6 +157,9 @@ pub struct FeishuAdapter {
     shutdown_rx: watch::Receiver<bool>,
     /// Cached tenant access token and its expiry instant.
     cached_token: Arc<RwLock<Option<(String, Instant)>>>,
+    /// Event dedup cache — maps event_id → first-seen Instant.
+    /// Prevents duplicate processing when Feishu retries webhook/WS events.
+    seen_events: Arc<Mutex<HashMap<String, Instant>>>,
 }
 
 impl FeishuAdapter {
@@ -174,6 +185,7 @@ impl FeishuAdapter {
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
             cached_token: Arc::new(RwLock::new(None)),
+            seen_events: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -425,6 +437,7 @@ impl FeishuAdapter {
     fn start_webhook(&self, tx: mpsc::Sender<ChannelMessage>) {
         let port = self.webhook_port;
         let verification_token = self.verification_token.clone();
+        let seen_events = Arc::clone(&self.seen_events);
         let encrypt_key = self.encrypt_key.clone();
         let mut shutdown_rx = self.shutdown_rx.clone();
         let account_id = Arc::new(self.account_id.clone());
@@ -442,10 +455,12 @@ impl FeishuAdapter {
                     let vt = Arc::clone(&verification_token);
                     let ek = Arc::clone(&encrypt_key);
                     let tx = Arc::clone(&tx);
+                    let seen = Arc::clone(&seen_events);
                     move |body: axum::extract::Json<serde_json::Value>| {
                         let vt = Arc::clone(&vt);
                         let ek = Arc::clone(&ek);
                         let tx = Arc::clone(&tx);
+                        let seen = Arc::clone(&seen);
                         async move {
                             let payload =
                                 match decrypt_feishu_payload_if_needed(&body.0, ek.as_deref()) {
@@ -477,6 +492,16 @@ impl FeishuAdapter {
                                     axum::Json(serde_json::json!({
                                         "challenge": challenge,
                                     })),
+                                );
+                            }
+
+                            // Deduplicate by event_id — Feishu retries webhook
+                            // callbacks up to 3 times when the response is slow.
+                            if is_duplicate_event(&payload, &seen) {
+                                debug!("{label}: duplicate event, skipping");
+                                return (
+                                    axum::http::StatusCode::OK,
+                                    axum::Json(serde_json::json!({})),
                                 );
                             }
 
@@ -562,6 +587,7 @@ impl FeishuAdapter {
         let mut shutdown_rx = self.shutdown_rx.clone();
         let account_id = Arc::new(self.account_id.clone());
         let client = self.client.clone();
+        let seen_events = Arc::clone(&self.seen_events);
 
         tokio::spawn(async move {
             let label = region.label();
@@ -650,6 +676,13 @@ impl FeishuAdapter {
                                         }
                                     }
 
+                                    // Deduplicate by event_id (WS reconnects
+                                    // can re-deliver events)
+                                    if is_duplicate_event(&payload, &seen_events) {
+                                        debug!("{label}: WS duplicate event, skipping");
+                                        continue;
+                                    }
+
                                     // The WS gateway wraps the normal event callback
                                     // in an envelope: { "header": {...}, "event": {...} }
                                     // which matches the v2 schema.
@@ -706,6 +739,11 @@ impl FeishuAdapter {
                                                 continue;
                                             }
                                         };
+
+                                        if is_duplicate_event(&payload, &seen_events) {
+                                            debug!("{label}: WS binary duplicate event, skipping");
+                                            continue;
+                                        }
 
                                         let parsed = parse_feishu_event(&payload, region)
                                             .or_else(|| parse_card_action(&payload, region));
@@ -1126,6 +1164,44 @@ fn parse_card_action(event: &serde_json::Value, region: FeishuRegion) -> Option<
         thread_id: None,
         metadata,
     })
+}
+
+/// Check whether an event has already been processed (by its `event_id` header).
+///
+/// Returns `true` if the event is a duplicate that should be skipped.
+/// Performs lazy purge of expired entries when the cache grows too large.
+fn is_duplicate_event(payload: &serde_json::Value, seen: &Mutex<HashMap<String, Instant>>) -> bool {
+    let event_id = payload
+        .get("header")
+        .and_then(|h| h.get("event_id"))
+        .and_then(|v| v.as_str());
+
+    let Some(event_id) = event_id else {
+        // No event_id in header (e.g. challenge, pong) — not dedup-able.
+        return false;
+    };
+
+    let now = Instant::now();
+    let mut map = seen.lock().unwrap_or_else(|e| e.into_inner());
+
+    // Purge expired entries when the map is too large.
+    if map.len() >= EVENT_DEDUP_MAX_ENTRIES {
+        map.retain(|_, ts| now.duration_since(*ts) < EVENT_DEDUP_WINDOW);
+    }
+
+    match map.entry(event_id.to_string()) {
+        std::collections::hash_map::Entry::Occupied(e) => {
+            if now.duration_since(*e.get()) < EVENT_DEDUP_WINDOW {
+                return true; // duplicate
+            }
+            // Expired — treat as new
+            false
+        }
+        std::collections::hash_map::Entry::Vacant(e) => {
+            e.insert(now);
+            false
+        }
+    }
 }
 
 /// Parse a Feishu/Lark v2 webhook/WS event into a `ChannelMessage`.
@@ -2188,5 +2264,52 @@ mod tests {
         });
 
         assert!(parse_card_action(&event, FeishuRegion::Cn).is_none());
+    }
+
+    // ── Event dedup tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_dedup_first_event_passes() {
+        let seen = Mutex::new(HashMap::new());
+        let payload = serde_json::json!({
+            "header": { "event_id": "evt-100", "event_type": "im.message.receive_v1" },
+            "event": {}
+        });
+        assert!(!is_duplicate_event(&payload, &seen));
+    }
+
+    #[test]
+    fn test_dedup_same_event_blocked() {
+        let seen = Mutex::new(HashMap::new());
+        let payload = serde_json::json!({
+            "header": { "event_id": "evt-200", "event_type": "im.message.receive_v1" },
+            "event": {}
+        });
+        assert!(!is_duplicate_event(&payload, &seen));
+        assert!(is_duplicate_event(&payload, &seen)); // second time = duplicate
+    }
+
+    #[test]
+    fn test_dedup_different_events_pass() {
+        let seen = Mutex::new(HashMap::new());
+        let p1 = serde_json::json!({ "header": { "event_id": "evt-a" } });
+        let p2 = serde_json::json!({ "header": { "event_id": "evt-b" } });
+        assert!(!is_duplicate_event(&p1, &seen));
+        assert!(!is_duplicate_event(&p2, &seen));
+    }
+
+    #[test]
+    fn test_dedup_no_header_passes() {
+        let seen = Mutex::new(HashMap::new());
+        let payload = serde_json::json!({ "challenge": "test" });
+        assert!(!is_duplicate_event(&payload, &seen));
+        assert!(!is_duplicate_event(&payload, &seen)); // still passes
+    }
+
+    #[test]
+    fn test_dedup_no_event_id_passes() {
+        let seen = Mutex::new(HashMap::new());
+        let payload = serde_json::json!({ "header": { "event_type": "foo" } });
+        assert!(!is_duplicate_event(&payload, &seen));
     }
 }
