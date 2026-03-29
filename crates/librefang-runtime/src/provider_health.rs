@@ -261,6 +261,7 @@ pub async fn probe_provider(provider: &str, base_url: &str) -> ProbeResult {
         discovered_models: models,
         discovered_model_info: model_info,
         error: None,
+        ..Default::default()
     }
 }
 
@@ -420,6 +421,7 @@ mod tests {
             discovered_models: vec!["llama3".into()],
             discovered_model_info: vec![],
             error: None,
+            ..Default::default()
         };
         cache.insert("ollama", result.clone());
         let cached = cache.get("ollama").expect("should be cached");
