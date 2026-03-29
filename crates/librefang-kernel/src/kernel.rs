@@ -6717,7 +6717,8 @@ system_prompt = "You are a helpful assistant."
             Vec::new();
 
         for entry in &agents {
-            if matches!(entry.manifest.schedule, ScheduleMode::Reactive) {
+            if matches!(entry.manifest.schedule, ScheduleMode::Reactive) || !entry.manifest.enabled
+            {
                 continue;
             }
             bg_agents.push((
