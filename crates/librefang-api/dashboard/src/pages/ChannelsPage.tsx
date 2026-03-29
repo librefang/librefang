@@ -65,6 +65,9 @@ interface Channel {
     advanced?: boolean;
     has_value?: boolean;
     env_var?: string | null;
+    options?: string[];
+    value?: string;
+    show_when?: string;
   }[];
 }
 
@@ -323,7 +326,17 @@ function DetailsModal({ channel, onClose, onConfigure, t }: {
 // Config Dialog
 function ConfigDialog({ channel, onClose, t }: { channel: Channel; onClose: () => void; t: (key: string) => string }) {
   const queryClient = useQueryClient();
-  const [configs, setConfigs] = useState<Record<string, string>>({});
+  // Pre-populate configs from field values so unchanged selects are still submitted
+  const initialConfigs = useMemo(() => {
+    const vals: Record<string, string> = {};
+    (channel.fields ?? []).forEach((f: any) => {
+      if (f.value && f.type !== "secret") {
+        vals[f.key] = f.value;
+      }
+    });
+    return vals;
+  }, [channel.fields]);
+  const [configs, setConfigs] = useState<Record<string, string>>(initialConfigs);
 
   const configMutation = useMutation({
     mutationFn: () => configureChannel(channel.name, configs),
@@ -388,18 +401,32 @@ function ConfigDialog({ channel, onClose, t }: { channel: Channel; onClose: () =
         {/* Configuration Fields */}
         {channel.fields && channel.fields.length > 0 ? (
           <div className="space-y-3 mb-6 max-h-60 overflow-y-auto">
-            {channel.fields.filter(f => !f.advanced).map((field, idx) => (
+            {channel.fields.filter(f => !f.advanced && (!f.show_when || Object.values(configs).includes(f.show_when))).map((field, idx) => (
               <div key={idx}>
                 <label className="text-xs font-bold text-text-dim mb-1 block">
                   {field.label || field.key} {field.required && <span className="text-error">*</span>}
+                  {field.show_when && <span className="ml-1 text-[10px] text-text-dim">({field.show_when} mode)</span>}
                 </label>
-                <input
-                  type={field.type === "password" ? "password" : "text"}
-                  defaultValue={field.has_value ? "••••••••" : ""}
-                  onBlur={(e) => handleAddConfig(field.key, e.target.value)}
-                  placeholder={field.env_var || field.key}
-                  className="w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-xs focus:border-brand focus:ring-1 focus:ring-brand/20 outline-none"
-                />
+                {field.type === "select" && field.options ? (
+                  <select
+                    defaultValue={field.value || ""}
+                    onChange={(e) => handleAddConfig(field.key, e.target.value)}
+                    className="w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-xs focus:border-brand focus:ring-1 focus:ring-brand/20 outline-none"
+                  >
+                    <option value="">Select...</option>
+                    {field.options.map((opt) => (
+                      <option key={opt} value={opt}>{opt}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    type={field.type === "password" ? "password" : "text"}
+                    defaultValue={field.has_value ? "••••••••" : ""}
+                    onBlur={(e) => handleAddConfig(field.key, e.target.value)}
+                    placeholder={field.env_var || field.key}
+                    className="w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-xs focus:border-brand focus:ring-1 focus:ring-brand/20 outline-none"
+                  />
+                )}
               </div>
             ))}
           </div>
