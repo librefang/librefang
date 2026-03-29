@@ -249,17 +249,15 @@ jobs:
       - name: Build tests (throttled to reduce peak memory)
         run: cargo nextest run --workspace --no-run -j 2
       - name: Run affected crate tests
-        env:
-          RUST_TEST_THREADS: "2"
         run: |
           CRATES="${{ needs.changes.outputs.crates }}"
           if [ -z "$CRATES" ]; then
             echo "No affected crates detected, running all"
-            cargo nextest run --workspace --no-fail-fast
+            cargo nextest run --workspace --no-fail-fast --test-threads 2
           else
             for crate in $CRATES; do
               echo "::group::Testing $crate"
-              cargo nextest run -p "$crate" --no-fail-fast --no-tests=pass && echo "✓ $crate" || exit 1
+              cargo nextest run -p "$crate" --no-fail-fast --no-tests=pass --test-threads 2 && echo "✓ $crate" || exit 1
               echo "::endgroup::"
             done
           fi
