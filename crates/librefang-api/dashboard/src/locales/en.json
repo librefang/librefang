@@ -304,7 +304,7 @@
     "change_password": "Change Password",
     "pw_current": "Current Password", "pw_new": "New Password", "pw_confirm": "Confirm New Password",
     "pw_submit": "Change Password", "pw_success": "Password changed. Redirecting to login...",
-    "pw_failed": "Failed to change password", "pw_mismatch": "New passwords do not match", "pw_empty": "New password cannot be empty",
+    "pw_failed": "Failed to change password", "pw_mismatch": "New passwords do not match", "pw_empty": "New password cannot be empty", "pw_too_short": "Password must be at least 8 characters",
     "help": "Configure system preferences. Switch theme, language, navigation layout, and browse available tools."
   },
   "chat": {

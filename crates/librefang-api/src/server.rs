@@ -348,6 +348,18 @@ async fn change_password(
             .into_response();
     }
 
+    // Validate minimum password length
+    if body.new_password.len() < 8 {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            axum::response::Json(serde_json::json!({
+                "ok": false,
+                "error": "Password must be at least 8 characters"
+            })),
+        )
+            .into_response();
+    }
+
     // Hash the new password with Argon2id
     let new_hash = match crate::password_hash::hash_password(&body.new_password) {
         Ok(h) => h,

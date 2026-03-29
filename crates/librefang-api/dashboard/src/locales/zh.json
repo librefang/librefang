@@ -292,7 +292,7 @@
     "change_password": "修改密码",
     "pw_current": "当前密码", "pw_new": "新密码", "pw_confirm": "确认新密码",
     "pw_submit": "修改密码", "pw_success": "密码修改成功，正在跳转至登录页...",
-    "pw_failed": "密码修改失败", "pw_mismatch": "两次输入的新密码不一致", "pw_empty": "新密码不能为空",
+    "pw_failed": "密码修改失败", "pw_mismatch": "两次输入的新密码不一致", "pw_empty": "新密码不能为空", "pw_too_short": "密码长度不能少于 8 个字符",
     "help": "配置系统偏好设置。切换主题、语言、导航布局，浏览可用工具列表。"
   },
   "chat": {

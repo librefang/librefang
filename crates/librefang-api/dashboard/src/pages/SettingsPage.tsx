@@ -198,6 +198,10 @@ export function SettingsPage() {
                   setPwMessage({ type: "error", text: t("settings.pw_empty") });
                   return;
                 }
+                if (newPassword.length < 8) {
+                  setPwMessage({ type: "error", text: t("settings.pw_too_short") });
+                  return;
+                }
                 setPwChanging(true);
                 try {
                   const res = await changePassword(currentPassword, newPassword);
