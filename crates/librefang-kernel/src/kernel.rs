@@ -942,6 +942,13 @@ impl LibreFangKernel {
         &self.model_catalog
     }
 
+    /// Invalidate all cached LLM drivers so the next request rebuilds them
+    /// with current provider URLs / API keys.
+    #[inline]
+    pub fn clear_driver_cache(&self) {
+        self.driver_cache.clear();
+    }
+
     /// Skill registry (RwLock — hot-reload on install/uninstall).
     #[inline]
     pub fn skill_registry_ref(
