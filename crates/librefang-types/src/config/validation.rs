@@ -5,6 +5,7 @@ use super::types::*;
 impl KernelConfig {
     pub fn known_top_level_fields() -> &'static [&'static str] {
         &[
+            "config_version",
             "home_dir",
             "data_dir",
             "log_level",
