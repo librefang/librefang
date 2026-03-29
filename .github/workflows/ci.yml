@@ -9,9 +9,10 @@ on:
 permissions:
   contents: read
 
-# Prevent multiple CI runs from competing for runner resources
+# On PRs: only one run per branch, cancel stale runs.
+# On main: each push gets its own group (by SHA) so parallel runs never interfere.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.ref == 'refs/heads/main' && format('{0}-{1}', github.workflow, github.sha) || format('{0}-{1}', github.workflow, github.ref) }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
