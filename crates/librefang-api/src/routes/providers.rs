@@ -303,8 +303,9 @@ fn attach_probe_result(
         entry["discovered_model_info"] = serde_json::json!(&probe.discovered_model_info);
     }
     if let Some(err) = &probe.error {
-        entry["error"] = serde_json::json!(err);
+        entry["error_message"] = serde_json::json!(err);
     }
+    entry["last_tested"] = serde_json::json!(&probe.probed_at);
 }
 
 /// GET /api/providers — List all providers with auth status.
