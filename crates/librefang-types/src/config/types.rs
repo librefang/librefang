@@ -1495,6 +1495,10 @@ impl Default for TriggersConfig {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct KernelConfig {
+    /// Configuration schema version for automatic migration.
+    /// Old configs without this field default to 1 (via `default_config_version`).
+    #[serde(default = "super::version::default_config_version")]
+    pub config_version: u32,
     /// LibreFang home directory (default: ~/.librefang).
     pub home_dir: PathBuf,
     /// Data directory for databases (default: ~/.librefang/data).
@@ -2625,6 +2629,7 @@ impl Default for KernelConfig {
     fn default() -> Self {
         let home_dir = librefang_home_dir();
         Self {
+            config_version: super::version::CONFIG_VERSION,
             data_dir: home_dir.join("data"),
             home_dir,
             log_level: "info".to_string(),
