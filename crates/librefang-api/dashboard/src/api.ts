@@ -95,7 +95,10 @@ export interface ChannelField {
   has_value?: boolean;
   env_var?: string | null;
   placeholder?: string | null;
-  value?: unknown;
+  value?: string;
+  options?: string[];
+  show_when?: string;
+  readonly?: boolean;
 }
 
 export interface ChannelItem {

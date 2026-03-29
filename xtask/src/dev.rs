@@ -20,6 +20,9 @@ pub struct DevArgs {
 pub fn run(args: DevArgs) -> Result<(), Box<dyn std::error::Error>> {
     let root = repo_root();
 
+    // Kill stale processes on relevant ports
+    kill_stale_processes();
+
     // Build the daemon binary
     println!("Building librefang-cli...");
     let mut build_cmd = Command::new("cargo");
@@ -45,6 +48,12 @@ pub fn run(args: DevArgs) -> Result<(), Box<dyn std::error::Error>> {
     let dashboard_dir = root.join("crates/librefang-api/dashboard");
     let mut _dashboard_child = None;
     if !args.no_dashboard && dashboard_dir.join("package.json").exists() {
+        println!("Installing dashboard dependencies...");
+        let _ = Command::new("pnpm")
+            .arg("install")
+            .current_dir(&dashboard_dir)
+            .status();
+
         println!("Starting dashboard dev server...");
         let child = Command::new("pnpm")
             .arg("dev")
@@ -54,6 +63,19 @@ pub fn run(args: DevArgs) -> Result<(), Box<dyn std::error::Error>> {
             Ok(c) => _dashboard_child = Some(c),
             Err(e) => eprintln!("Warning: could not start dashboard dev server: {}", e),
         }
+
+        // Open browser once dashboard is ready
+        std::thread::spawn(|| {
+            let dashboard_url = detect_dashboard_url();
+            for _ in 0..60 {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                if reqwest_probe("http://127.0.0.1:5173/dashboard/") {
+                    let _ = Command::new("open").arg(&dashboard_url).status();
+                    return;
+                }
+            }
+            eprintln!("Warning: dashboard did not become ready in time");
+        });
     }
 
     // Start daemon
@@ -77,4 +99,57 @@ pub fn run(args: DevArgs) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+/// Kill stale processes on API and dashboard ports.
+fn kill_stale_processes() {
+    // Remove launchctl service if registered
+    let _ = Command::new("launchctl")
+        .args(["remove", "ai.librefang.daemon"])
+        .output();
+
+    // Kill listeners on API port and dashboard dev server ports
+    for port in [4545, 5173, 5174, 5175, 5176, 5177, 5178] {
+        let output = Command::new("lsof")
+            .args(["-ti", &format!(":{port}"), "-sTCP:LISTEN"])
+            .output();
+        if let Ok(out) = output {
+            let pids = String::from_utf8_lossy(&out.stdout);
+            for pid in pids.split_whitespace() {
+                let _ = Command::new("kill").args(["-9", pid]).output();
+            }
+        }
+    }
+
+    std::thread::sleep(std::time::Duration::from_secs(1));
+}
+
+/// Detect the LAN IP and build the dashboard URL.
+fn detect_dashboard_url() -> String {
+    // macOS: ipconfig getifaddr en0
+    if let Ok(out) = Command::new("ipconfig").args(["getifaddr", "en0"]).output() {
+        let ip = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !ip.is_empty() {
+            return format!("http://{ip}:5173/dashboard/");
+        }
+    }
+    // Linux: hostname -I
+    if let Ok(out) = Command::new("hostname").arg("-I").output() {
+        if let Some(ip) = String::from_utf8_lossy(&out.stdout)
+            .split_whitespace()
+            .next()
+        {
+            return format!("http://{ip}:5173/dashboard/");
+        }
+    }
+    "http://127.0.0.1:5173/dashboard/".to_string()
+}
+
+/// Probe a URL to check if it's reachable (simple TCP-level check via curl).
+fn reqwest_probe(url: &str) -> bool {
+    Command::new("curl")
+        .args(["-s", "-o", "/dev/null", "-w", "%{http_code}", url])
+        .output()
+        .map(|o| !o.stdout.is_empty() && o.stdout != b"000")
+        .unwrap_or(false)
 }
