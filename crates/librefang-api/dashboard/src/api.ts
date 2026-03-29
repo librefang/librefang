@@ -95,7 +95,10 @@ export interface ChannelField {
   has_value?: boolean;
   env_var?: string | null;
   placeholder?: string | null;
-  value?: unknown;
+  value?: string;
+  options?: string[];
+  show_when?: string;
+  readonly?: boolean;
 }
 
 export interface ChannelItem {
@@ -1939,5 +1942,19 @@ export async function createRegistryContent(
   return post<CreateRegistryContentResponse>(
     `/api/registry/content/${encodeURIComponent(contentType)}`,
     values,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Auth — change password
+// ---------------------------------------------------------------------------
+
+export async function changePassword(
+  currentPassword: string,
+  newPassword: string,
+): Promise<{ ok: boolean; error?: string; message?: string }> {
+  return post<{ ok: boolean; error?: string; message?: string }>(
+    "/api/auth/change-password",
+    { current_password: currentPassword, new_password: newPassword },
   );
 }
