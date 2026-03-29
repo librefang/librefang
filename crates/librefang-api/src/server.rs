@@ -68,6 +68,10 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
             "/auth/dashboard-check",
             axum::routing::get(dashboard_auth_check),
         )
+        .route(
+            "/auth/change-password",
+            axum::routing::post(change_password),
+        )
         // OAuth/OIDC external authentication endpoints
         .route(
             "/auth/providers",
@@ -266,6 +270,156 @@ async fn dashboard_auth_check(
     axum::response::Json(serde_json::json!({
         "mode": if has_credentials { "credentials" } else if has_api_key { "api_key" } else { "none" },
     }))
+}
+
+/// Request body for POST /api/auth/change-password.
+#[derive(serde::Deserialize)]
+struct ChangePasswordRequest {
+    current_password: String,
+    new_password: String,
+}
+
+/// Change the dashboard password.
+///
+/// Verifies the current password against the stored hash (or legacy plaintext),
+/// then hashes the new password with Argon2id and persists `dashboard_pass_hash`
+/// to config.toml. All existing sessions are invalidated on success.
+async fn change_password(
+    axum::extract::State(state): axum::extract::State<Arc<routes::AppState>>,
+    axum::Json(body): axum::Json<ChangePasswordRequest>,
+) -> axum::response::Response {
+    let cfg = state.kernel.config_ref();
+
+    let cfg_user = resolve_dashboard_credential(
+        &cfg.dashboard_user,
+        "LIBREFANG_DASHBOARD_USER",
+        &cfg.home_dir,
+    );
+    let cfg_user = cfg_user.trim().to_string();
+    let cfg_pass = resolve_dashboard_credential(
+        &cfg.dashboard_pass,
+        "LIBREFANG_DASHBOARD_PASS",
+        &cfg.home_dir,
+    );
+    let cfg_pass = cfg_pass.trim().to_string();
+    let pass_hash = cfg.dashboard_pass_hash.trim();
+
+    // Must have credential-based auth configured
+    let has_password = !pass_hash.is_empty() || !cfg_pass.is_empty();
+    if cfg_user.is_empty() || !has_password {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            axum::response::Json(serde_json::json!({
+                "ok": false,
+                "error": "Password authentication is not configured"
+            })),
+        )
+            .into_response();
+    }
+
+    // Verify current password (reuse existing verification logic)
+    let verify = crate::password_hash::verify_dashboard_password(
+        &cfg_user,
+        &body.current_password,
+        &cfg_user,
+        &cfg_pass,
+        pass_hash,
+    );
+    if matches!(verify, crate::password_hash::VerifyResult::Denied) {
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            axum::response::Json(serde_json::json!({
+                "ok": false,
+                "error": "Current password is incorrect"
+            })),
+        )
+            .into_response();
+    }
+
+    // Validate new password is not empty
+    if body.new_password.trim().is_empty() {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            axum::response::Json(serde_json::json!({
+                "ok": false,
+                "error": "New password cannot be empty"
+            })),
+        )
+            .into_response();
+    }
+
+    // Hash the new password with Argon2id
+    let new_hash = match crate::password_hash::hash_password(&body.new_password) {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::error!("Failed to hash new password: {e}");
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                axum::response::Json(serde_json::json!({
+                    "ok": false,
+                    "error": "Failed to hash new password"
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    // Persist to config.toml
+    let config_path = state.kernel.home_dir().join("config.toml");
+    let mut table: toml::value::Table = if config_path.exists() {
+        match std::fs::read_to_string(&config_path) {
+            Ok(content) => toml::from_str(&content).unwrap_or_default(),
+            Err(_) => toml::value::Table::new(),
+        }
+    } else {
+        toml::value::Table::new()
+    };
+    table.insert(
+        "dashboard_pass_hash".to_string(),
+        toml::Value::String(new_hash),
+    );
+    // Remove legacy plaintext password if present
+    table.remove("dashboard_pass");
+
+    let toml_string = match toml::to_string_pretty(&table) {
+        Ok(s) => s,
+        Err(e) => {
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                axum::response::Json(serde_json::json!({
+                    "ok": false,
+                    "error": format!("Failed to serialize config: {e}")
+                })),
+            )
+                .into_response();
+        }
+    };
+    if let Err(e) = std::fs::write(&config_path, &toml_string) {
+        return (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            axum::response::Json(serde_json::json!({
+                "ok": false,
+                "error": format!("Failed to write config: {e}")
+            })),
+        )
+            .into_response();
+    }
+
+    // Trigger config reload so the kernel picks up the new hash
+    if let Err(e) = state.kernel.reload_config() {
+        tracing::warn!("Config reload after password change failed: {e}");
+    }
+
+    // Invalidate all existing sessions to force re-login
+    state.active_sessions.write().await.clear();
+
+    tracing::info!("Dashboard password changed successfully");
+
+    axum::response::Json(serde_json::json!({
+        "ok": true,
+        "message": "Password changed successfully"
+    }))
+    .into_response()
 }
 
 /// Build the full API router with all routes, middleware, and state.
