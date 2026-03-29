@@ -1574,6 +1574,7 @@ impl LibreFangKernel {
         librefang_runtime::registry_sync::sync_registry(
             &config.home_dir,
             config.registry.cache_ttl_secs,
+            &config.registry.registry_mirror,
         );
 
         // Initialize model catalog, detect provider auth, and apply URL overrides

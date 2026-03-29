@@ -28,7 +28,15 @@ const CATALOG_REPO: &str = "librefang/librefang-registry";
 /// Sync the model catalog from the remote repository.
 ///
 /// Downloads TOML files from GitHub and saves to `home_dir/cache/catalog/`.
-pub async fn sync_catalog_to(home_dir: &std::path::Path) -> Result<CatalogSyncResult, String> {
+///
+/// `registry_mirror` is an optional proxy/mirror prefix for GitHub URLs.
+/// When non-empty, all GitHub API and raw-content URLs are prefixed with
+/// this value (e.g. `"https://ghproxy.cn"` rewrites
+/// `https://api.github.com/...` → `https://ghproxy.cn/https://api.github.com/...`).
+pub async fn sync_catalog_to(
+    home_dir: &std::path::Path,
+    registry_mirror: &str,
+) -> Result<CatalogSyncResult, String> {
     let cache_dir = home_dir.join("cache").join("catalog");
     let providers_dir = cache_dir.join("providers");
 
@@ -41,8 +49,12 @@ pub async fn sync_catalog_to(home_dir: &std::path::Path) -> Result<CatalogSyncRe
         .map_err(|e| format!("HTTP client error: {e}"))?;
 
     // Get the repo tree to find all TOML files
-    let tree_url =
-        format!("https://api.github.com/repos/{CATALOG_REPO}/git/trees/main?recursive=1");
+    let mirror = registry_mirror.trim_end_matches('/');
+    let tree_url = if mirror.is_empty() {
+        format!("https://api.github.com/repos/{CATALOG_REPO}/git/trees/main?recursive=1")
+    } else {
+        format!("{mirror}/https://api.github.com/repos/{CATALOG_REPO}/git/trees/main?recursive=1")
+    };
     let tree_resp = client
         .get(&tree_url)
         .send()
@@ -70,8 +82,11 @@ pub async fn sync_catalog_to(home_dir: &std::path::Path) -> Result<CatalogSyncRe
                 && ((path.starts_with("providers/") && path.ends_with(".toml"))
                     || path == "aliases.toml")
             {
-                let raw_url =
-                    format!("https://raw.githubusercontent.com/{CATALOG_REPO}/main/{path}");
+                let raw_url = if mirror.is_empty() {
+                    format!("https://raw.githubusercontent.com/{CATALOG_REPO}/main/{path}")
+                } else {
+                    format!("{mirror}/https://raw.githubusercontent.com/{CATALOG_REPO}/main/{path}")
+                };
                 match client.get(&raw_url).send().await {
                     Ok(resp) if resp.status().is_success() => {
                         if let Ok(content) = resp.text().await {
