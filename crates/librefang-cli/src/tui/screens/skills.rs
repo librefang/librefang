@@ -1,11 +1,12 @@
 //! Skills screen: installed skills, ClawHub marketplace, MCP servers.
 
 use crate::tui::theme;
+use crate::tui::widgets;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Padding, Paragraph};
+use ratatui::widgets::{ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
 // ── Data types ──────────────────────────────────────────────────────────────
@@ -281,17 +282,7 @@ impl SkillsState {
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
 pub fn draw(f: &mut Frame, area: Rect, state: &mut SkillsState) {
-    let block = Block::default()
-        .title(Line::from(vec![Span::styled(
-            " Skills ",
-            theme::title_style(),
-        )]))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::ACCENT))
-        .padding(Padding::horizontal(1));
-
-    let inner = block.inner(area);
-    f.render_widget(block, area);
+    let inner = widgets::render_screen_block(f, area, "\u{2605} Skills");
 
     let chunks = Layout::vertical([
         Constraint::Length(1), // sub-tab bar
@@ -303,11 +294,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut SkillsState) {
     // Sub-tab bar
     draw_sub_tabs(f, chunks[0], state.sub);
 
-    let sep = "\u{2500}".repeat(chunks[1].width as usize);
-    f.render_widget(
-        Paragraph::new(Span::styled(sep, theme::dim_style())),
-        chunks[1],
-    );
+    f.render_widget(widgets::separator(chunks[1].width), chunks[1]);
 
     match state.sub {
         SkillsSub::Installed => draw_installed(f, chunks[2], state),
@@ -346,7 +333,7 @@ fn draw_installed(f: &mut Frame, area: Rect, state: &mut SkillsState) {
     f.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
             format!(
-                "  {:<20} {:<8} {:<12} {}",
+                "  {:<22} {:<10} {:<12} {}",
                 "Name", "Runtime", "Source", "Description"
             ),
             theme::table_header(),
@@ -355,20 +342,13 @@ fn draw_installed(f: &mut Frame, area: Rect, state: &mut SkillsState) {
     );
 
     if state.loading {
-        let spinner = theme::SPINNER_FRAMES[state.tick % theme::SPINNER_FRAMES.len()];
         f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(format!("  {spinner} "), Style::default().fg(theme::CYAN)),
-                Span::styled("Loading skills\u{2026}", theme::dim_style()),
-            ])),
+            widgets::spinner(state.tick, "Loading skills\u{2026}"),
             chunks[1],
         );
     } else if state.installed.is_empty() {
         f.render_widget(
-            Paragraph::new(Span::styled(
-                "  No skills installed. Press [2] to browse ClawHub.",
-                theme::dim_style(),
-            )),
+            widgets::empty_state("No skills installed. Browse ClawHub to find skills."),
             chunks[1],
         );
     } else {
@@ -389,57 +369,52 @@ fn draw_installed(f: &mut Frame, area: Rect, state: &mut SkillsState) {
                     "prompt" => "PROMPT",
                     _ => &s.runtime,
                 };
-                let source_style = match s.source.as_str() {
-                    "clawhub" => Style::default().fg(theme::ACCENT),
-                    "builtin" | "built-in" => Style::default().fg(theme::GREEN),
-                    _ => theme::dim_style(),
+                let (source_indicator, source_style) = match s.source.as_str() {
+                    "clawhub" => (
+                        "\u{25cf}",
+                        Style::default()
+                            .fg(theme::ACCENT)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    "builtin" | "built-in" => (
+                        "\u{25cf}",
+                        Style::default()
+                            .fg(theme::GREEN)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    _ => ("\u{25cb}", theme::dim_style()),
                 };
                 ListItem::new(Line::from(vec![
+                    Span::styled(format!("  {source_indicator} "), source_style),
                     Span::styled(
-                        format!("  {:<20}", truncate(&s.name, 19)),
-                        Style::default().fg(theme::CYAN),
+                        format!("{:<19}", widgets::truncate(&s.name, 18)),
+                        Style::default()
+                            .fg(theme::TEXT_PRIMARY)
+                            .add_modifier(Modifier::BOLD),
                     ),
-                    Span::styled(format!(" {:<8}", runtime_badge), runtime_style),
-                    Span::styled(format!(" {:<12}", &s.source), source_style),
+                    Span::styled(format!(" {:<10}", runtime_badge), runtime_style),
+                    Span::styled(format!("{:<12}", &s.source), source_style),
                     Span::styled(
-                        format!(" {}", truncate(&s.description, 30)),
+                        format!(" {}", widgets::truncate(&s.description, 30)),
                         theme::dim_style(),
                     ),
                 ]))
             })
             .collect();
 
-        let list = List::new(items)
-            .highlight_style(theme::selected_style())
-            .highlight_symbol("> ");
+        let list = widgets::themed_list(items);
         f.render_stateful_widget(list, chunks[1], &mut state.installed_list);
     }
 
-    if state.confirm_uninstall {
-        f.render_widget(
-            Paragraph::new(Line::from(vec![Span::styled(
-                "  Uninstall this skill? [y] Yes  [any] Cancel",
-                Style::default().fg(theme::YELLOW),
-            )])),
-            chunks[2],
-        );
-    } else if !state.status_msg.is_empty() {
-        f.render_widget(
-            Paragraph::new(Line::from(vec![Span::styled(
-                format!("  {}", state.status_msg),
-                Style::default().fg(theme::GREEN),
-            )])),
-            chunks[2],
-        );
-    } else {
-        f.render_widget(
-            Paragraph::new(Line::from(vec![Span::styled(
-                "  [\u{2191}\u{2193}] Navigate  [u] Uninstall  [r] Refresh",
-                theme::hint_style(),
-            )])),
-            chunks[2],
-        );
-    }
+    f.render_widget(
+        widgets::confirm_or_status_or_hint(
+            state.confirm_uninstall,
+            "  Uninstall this skill? [y] Yes  [any] Cancel",
+            &state.status_msg,
+            "  [\u{2191}\u{2193}] Navigate  [u] Uninstall  [r] Refresh",
+        ),
+        chunks[2],
+    );
 }
 
 fn draw_clawhub(f: &mut Frame, area: Rect, state: &mut SkillsState) {
@@ -484,20 +459,13 @@ fn draw_clawhub(f: &mut Frame, area: Rect, state: &mut SkillsState) {
     }
 
     if state.loading {
-        let spinner = theme::SPINNER_FRAMES[state.tick % theme::SPINNER_FRAMES.len()];
         f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(format!("  {spinner} "), Style::default().fg(theme::CYAN)),
-                Span::styled("Searching ClawHub\u{2026}", theme::dim_style()),
-            ])),
+            widgets::spinner(state.tick, "Searching ClawHub\u{2026}"),
             chunks[1],
         );
     } else if state.clawhub_results.is_empty() {
         f.render_widget(
-            Paragraph::new(Span::styled(
-                "  No results. Press [/] to search or [s] to change sort.",
-                theme::dim_style(),
-            )),
+            widgets::empty_state("No results. Press [/] to search or [s] to change sort."),
             chunks[1],
         );
     } else {
@@ -506,35 +474,37 @@ fn draw_clawhub(f: &mut Frame, area: Rect, state: &mut SkillsState) {
             .iter()
             .map(|r| {
                 let dl = format_count(r.downloads);
+                let runtime_style = match r.runtime.as_str() {
+                    "python" | "py" => Style::default().fg(theme::BLUE),
+                    "node" | "js" => Style::default().fg(theme::YELLOW),
+                    "wasm" => Style::default().fg(theme::PURPLE),
+                    _ => Style::default().fg(theme::GREEN),
+                };
                 ListItem::new(Line::from(vec![
                     Span::styled(
-                        format!("  {:<24}", truncate(&r.name, 23)),
-                        Style::default().fg(theme::CYAN),
+                        format!("  {:<24}", widgets::truncate(&r.name, 23)),
+                        Style::default()
+                            .fg(theme::TEXT_PRIMARY)
+                            .add_modifier(Modifier::BOLD),
                     ),
-                    Span::styled(format!(" {:<10}", dl), Style::default().fg(theme::GREEN)),
+                    Span::styled(format!(" {:<10}", dl), Style::default().fg(theme::ACCENT)),
+                    Span::styled(format!(" {:<10}", &r.runtime), runtime_style),
                     Span::styled(
-                        format!(" {:<10}", &r.runtime),
-                        Style::default().fg(theme::BLUE),
-                    ),
-                    Span::styled(
-                        format!(" {}", truncate(&r.description, 30)),
+                        format!(" {}", widgets::truncate(&r.description, 30)),
                         theme::dim_style(),
                     ),
                 ]))
             })
             .collect();
 
-        let list = List::new(items)
-            .highlight_style(theme::selected_style())
-            .highlight_symbol("> ");
+        let list = widgets::themed_list(items);
         f.render_stateful_widget(list, chunks[1], &mut state.clawhub_list);
     }
 
     f.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(
+        widgets::hint_bar(
             "  [\u{2191}\u{2193}] Navigate  [i] Install  [/] Search  [s] Sort  [r] Refresh",
-            theme::hint_style(),
-        )])),
+        ),
         chunks[2],
     );
 }
@@ -549,27 +519,20 @@ fn draw_mcp(f: &mut Frame, area: Rect, state: &mut SkillsState) {
 
     f.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
-            format!("  {:<20} {:<14} {}", "Server", "Status", "Tools"),
+            format!("  {:<22} {:<16} {}", "Server", "Status", "Tools"),
             theme::table_header(),
         )])),
         chunks[0],
     );
 
     if state.loading {
-        let spinner = theme::SPINNER_FRAMES[state.tick % theme::SPINNER_FRAMES.len()];
         f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(format!("  {spinner} "), Style::default().fg(theme::CYAN)),
-                Span::styled("Loading MCP servers\u{2026}", theme::dim_style()),
-            ])),
+            widgets::spinner(state.tick, "Loading MCP servers\u{2026}"),
             chunks[1],
         );
     } else if state.mcp_servers.is_empty() {
         f.render_widget(
-            Paragraph::new(Span::styled(
-                "  No MCP servers configured.",
-                theme::dim_style(),
-            )),
+            widgets::empty_state("No MCP servers configured. Add servers in config.toml."),
             chunks[1],
         );
     } else {
@@ -577,46 +540,39 @@ fn draw_mcp(f: &mut Frame, area: Rect, state: &mut SkillsState) {
             .mcp_servers
             .iter()
             .map(|s| {
-                let (badge, style) = if s.connected {
-                    ("\u{2714} Connected", Style::default().fg(theme::GREEN))
+                let (indicator, label, style) = if s.connected {
+                    (
+                        "\u{25cf}",
+                        "Connected",
+                        Style::default()
+                            .fg(theme::GREEN)
+                            .add_modifier(Modifier::BOLD),
+                    )
                 } else {
-                    ("\u{2718} Disconnected", Style::default().fg(theme::RED))
+                    ("\u{25cb}", "Disconnected", Style::default().fg(theme::RED))
                 };
                 ListItem::new(Line::from(vec![
+                    Span::styled(format!("  {indicator} "), style),
                     Span::styled(
-                        format!("  {:<20}", truncate(&s.name, 19)),
-                        Style::default().fg(theme::CYAN),
+                        format!("{:<19}", widgets::truncate(&s.name, 18)),
+                        Style::default()
+                            .fg(theme::TEXT_PRIMARY)
+                            .add_modifier(Modifier::BOLD),
                     ),
-                    Span::styled(format!(" {:<14}", badge), style),
-                    Span::styled(format!(" {}", s.tool_count), theme::dim_style()),
+                    Span::styled(format!(" {:<16}", label), style),
+                    Span::styled(format!("{} tools", s.tool_count), theme::dim_style()),
                 ]))
             })
             .collect();
 
-        let list = List::new(items)
-            .highlight_style(theme::selected_style())
-            .highlight_symbol("> ");
+        let list = widgets::themed_list(items);
         f.render_stateful_widget(list, chunks[1], &mut state.mcp_list);
     }
 
     f.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(
-            "  [\u{2191}\u{2193}] Navigate  [r] Refresh",
-            theme::hint_style(),
-        )])),
+        widgets::hint_bar("  [\u{2191}\u{2193}] Navigate  [r] Refresh"),
         chunks[2],
     );
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!(
-            "{}\u{2026}",
-            librefang_types::truncate_str(s, max.saturating_sub(1))
-        )
-    }
 }
 
 fn format_count(n: u64) -> String {

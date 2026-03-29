@@ -92,9 +92,7 @@ impl PairingManager {
         }
 
         // Generate secure random token (32 bytes = 64 hex chars)
-        let mut token_bytes = [0u8; 32];
-        use rand::RngCore;
-        rand::rng().fill_bytes(&mut token_bytes);
+        let token_bytes: [u8; 32] = rand::random();
         let token = hex::encode(token_bytes);
 
         let now = chrono::Utc::now();

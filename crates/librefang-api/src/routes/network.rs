@@ -1277,6 +1277,7 @@ pub async fn comms_task(
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn remove_toml_section(content: &str, section: &str) -> String {
     let header = format!("[{}]", section);
     let mut result = String::new();

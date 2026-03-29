@@ -159,6 +159,7 @@ use crate::types;
         routes::delete_provider_key,
         routes::test_provider,
         routes::set_provider_url,
+        routes::set_default_provider,
         routes::copilot_oauth_start,
         routes::copilot_oauth_poll,
         routes::catalog_update,

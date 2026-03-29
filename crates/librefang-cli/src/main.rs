@@ -2386,32 +2386,37 @@ fn launch_desktop_app(_librefang_dir: &std::path::Path) {
 }
 
 /// Auto-detect the best available provider.
+///
+/// Delegates to the runtime's `detect_available_provider()` which probes 13+
+/// providers (OpenAI, Anthropic, Gemini, Groq, DeepSeek, OpenRouter, Mistral,
+/// Together, Fireworks, xAI, Perplexity, Cohere, Azure OpenAI) plus the
+/// GOOGLE_API_KEY alias.  Falls back to local Ollama, then the interactive
+/// free-provider TUI guide.
 fn detect_best_provider() -> (String, String, String) {
-    let providers = provider_list();
-
-    for (p, env_var, display) in &providers {
-        if std::env::var(*env_var).is_ok() {
-            ui::success(&i18n::t_args(
-                "detected-provider",
-                &[("display", *display), ("env_var", *env_var)],
-            ));
-            return (
-                (*p).to_string(),
-                (*env_var).to_string(),
-                default_model_for_provider(p),
-            );
-        }
-    }
-    // Also check GOOGLE_API_KEY
-    if std::env::var("GOOGLE_API_KEY").is_ok() {
-        ui::success(&i18n::t("detected-gemini"));
+    // 1. Check all cloud provider API keys via the runtime registry
+    if let Some((provider, _model, env_var)) =
+        librefang_runtime::drivers::detect_available_provider()
+    {
+        // Capitalize provider name for display (e.g. "groq" → "Groq")
+        let display_name = {
+            let mut c = provider.chars();
+            match c.next() {
+                None => String::new(),
+                Some(first) => first.to_uppercase().to_string() + c.as_str(),
+            }
+        };
+        ui::success(&i18n::t_args(
+            "detected-provider",
+            &[("display", &display_name), ("env_var", env_var)],
+        ));
         return (
-            "gemini".to_string(),
-            "GOOGLE_API_KEY".to_string(),
-            default_model_for_provider("gemini"),
+            provider.to_string(),
+            env_var.to_string(),
+            default_model_for_provider(provider),
         );
     }
-    // Check if Ollama is running locally (no API key needed)
+
+    // 2. Check if Ollama is running locally (no API key needed)
     if check_ollama_available() {
         ui::success(&i18n::t("detected-ollama"));
         return (
@@ -2420,26 +2425,40 @@ fn detect_best_provider() -> (String, String, String) {
             default_model_for_provider("ollama"),
         );
     }
+
+    // 3. No API key found — launch TUI guide to pick a free provider
+    {
+        if let Some(result) = guide_free_provider_setup() {
+            return result;
+        }
+    }
+
+    // 4. Non-interactive fallback: just print hints
     ui::hint(&i18n::t("hint-no-api-keys"));
     ui::hint(&i18n::t("hint-groq-free"));
+    ui::hint(&i18n::t("hint-gemini-free"));
+    ui::hint(&i18n::t("hint-deepseek-free"));
     ui::hint(&i18n::t("hint-ollama-local"));
     (
-        "openrouter".to_string(),
-        "OPENROUTER_API_KEY".to_string(),
-        default_model_for_provider("openrouter"),
+        "groq".to_string(),
+        "GROQ_API_KEY".to_string(),
+        default_model_for_provider("groq"),
     )
 }
 
-/// Static list of supported providers: (id, env_var, display_name).
-fn provider_list() -> Vec<(&'static str, &'static str, &'static str)> {
-    vec![
-        ("groq", "GROQ_API_KEY", "Groq"),
-        ("gemini", "GEMINI_API_KEY", "Gemini"),
-        ("deepseek", "DEEPSEEK_API_KEY", "DeepSeek"),
-        ("anthropic", "ANTHROPIC_API_KEY", "Anthropic"),
-        ("openai", "OPENAI_API_KEY", "OpenAI"),
-        ("openrouter", "OPENROUTER_API_KEY", "OpenRouter"),
-    ]
+/// Interactive TUI guide: help user pick a free LLM provider and set up an API key.
+/// Returns `Some((provider, env_var, model))` on success, `None` if user cancels.
+fn guide_free_provider_setup() -> Option<(String, String, String)> {
+    use tui::screens::free_provider_guide::{self, GuideResult};
+
+    match free_provider_guide::run() {
+        GuideResult::Completed { provider, env_var } => {
+            ui::success(&i18n::t_args("config-saved-key", &[("env_var", &env_var)]));
+            let model = default_model_for_provider(&provider);
+            Some((provider, env_var, model))
+        }
+        GuideResult::Skipped => None,
+    }
 }
 
 /// Quick probe to check if Ollama is running on localhost.
@@ -3866,7 +3885,7 @@ fn cmd_doctor(json: bool, repair: bool) {
         let set = std::env::var(env_var).is_ok();
         if set {
             // --- Check 9: Live key validation ---
-            let valid = test_api_key(provider_id, env_var);
+            let valid = test_api_key(provider_id, &std::env::var(env_var).unwrap_or_default());
             if valid {
                 if !json {
                     ui::provider_status(name, env_var, true);
@@ -6382,11 +6401,10 @@ fn provider_to_env_var(provider: &str) -> String {
 ///
 /// Returns true if the key is accepted (status != 401/403).
 /// Returns true on timeout/network errors (best-effort — don't block setup).
-pub(crate) fn test_api_key(provider: &str, env_var: &str) -> bool {
-    let key = match std::env::var(env_var) {
-        Ok(k) => k,
-        Err(_) => return false,
-    };
+pub(crate) fn test_api_key(provider: &str, key: &str) -> bool {
+    if key.is_empty() {
+        return false;
+    }
 
     let client = match crate::http_client::client_builder()
         .timeout(std::time::Duration::from_secs(10))
@@ -6399,16 +6417,16 @@ pub(crate) fn test_api_key(provider: &str, env_var: &str) -> bool {
     let result = match provider.to_lowercase().as_str() {
         "groq" => client
             .get("https://api.groq.com/openai/v1/models")
-            .bearer_auth(&key)
+            .bearer_auth(key)
             .send(),
         "anthropic" => client
             .get("https://api.anthropic.com/v1/models")
-            .header("x-api-key", &key)
+            .header("x-api-key", key)
             .header("anthropic-version", "2023-06-01")
             .send(),
         "openai" => client
             .get("https://api.openai.com/v1/models")
-            .bearer_auth(&key)
+            .bearer_auth(key)
             .send(),
         "gemini" | "google" => client
             .get(format!(
@@ -6417,11 +6435,11 @@ pub(crate) fn test_api_key(provider: &str, env_var: &str) -> bool {
             .send(),
         "deepseek" => client
             .get("https://api.deepseek.com/models")
-            .bearer_auth(&key)
+            .bearer_auth(key)
             .send(),
         "openrouter" => client
             .get("https://openrouter.ai/api/v1/models")
-            .bearer_auth(&key)
+            .bearer_auth(key)
             .send(),
         _ => return true, // unknown provider — skip test
     };
@@ -6805,7 +6823,7 @@ fn cmd_config_set_key(provider: &str) {
             // Test the key
             print!("  Testing key... ");
             io::stdout().flush().unwrap();
-            if test_api_key(provider, &env_var) {
+            if test_api_key(provider, &key) {
                 println!("{}", "OK".bright_green());
             } else {
                 println!("{}", "could not verify (may still work)".bright_yellow());
@@ -6856,7 +6874,7 @@ fn cmd_config_test_key(provider: &str) {
 
     print!("  Testing {provider} ({env_var})... ");
     io::stdout().flush().unwrap();
-    if test_api_key(provider, &env_var) {
+    if test_api_key(provider, &std::env::var(&env_var).unwrap_or_default()) {
         println!("{}", "OK".bright_green());
     } else {
         println!("{}", "FAILED (401/403)".bright_red());

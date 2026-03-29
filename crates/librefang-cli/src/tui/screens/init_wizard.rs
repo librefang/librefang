@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::tui::theme;
+use crate::tui::widgets;
 use librefang_runtime::model_catalog::ModelCatalog;
 use librefang_types::model_catalog::ModelTier;
 
@@ -411,6 +412,18 @@ impl State {
             Step::Model => "5 of 7",
             Step::Routing => "6 of 7",
             Step::Complete => "7 of 7",
+        }
+    }
+
+    fn step_index(&self) -> usize {
+        match self.step {
+            Step::Welcome => 0,
+            Step::Migration => 1,
+            Step::Provider => 2,
+            Step::ApiKey => 3,
+            Step::Model => 4,
+            Step::Routing => 5,
+            Step::Complete => 6,
         }
     }
 
@@ -822,13 +835,10 @@ pub fn run() -> InitResult {
                                         .provider()
                                         .map(|p| p.name.to_string())
                                         .unwrap_or_default();
-                                    let env_var = state
-                                        .provider()
-                                        .map(|p| p.env_var.to_string())
-                                        .unwrap_or_default();
+                                    let key_value = state.api_key_input.clone();
                                     let tx = test_tx.clone();
                                     std::thread::spawn(move || {
-                                        let ok = crate::test_api_key(&provider_name, &env_var);
+                                        let ok = crate::test_api_key(&provider_name, &key_value);
                                         let _ = tx.send(ok);
                                     });
                                 }
@@ -1235,6 +1245,7 @@ fn draw(f: &mut Frame, area: Rect, state: &mut State) {
     let chunks = Layout::vertical([
         Constraint::Length(1), // top pad
         Constraint::Length(1), // header
+        Constraint::Length(1), // progress bar
         Constraint::Length(1), // separator
         Constraint::Min(1),    // step content
     ])
@@ -1253,23 +1264,45 @@ fn draw(f: &mut Frame, area: Rect, state: &mut State) {
     ]);
     f.render_widget(Paragraph::new(header), chunks[1]);
 
+    // Progress bar: ●──●──●──○──○──○──○
+    let step_idx = state.step_index();
+    let mut progress_spans: Vec<Span> = Vec::new();
+    for i in 0..7 {
+        if i > 0 {
+            let line_style = if i <= step_idx {
+                Style::default().fg(theme::ACCENT)
+            } else {
+                Style::default().fg(theme::BORDER)
+            };
+            progress_spans.push(Span::styled("\u{2500}\u{2500}", line_style));
+        }
+        if i < step_idx {
+            progress_spans.push(Span::styled("\u{25cf}", Style::default().fg(theme::ACCENT)));
+        } else if i == step_idx {
+            progress_spans.push(Span::styled(
+                "\u{25cf}",
+                Style::default()
+                    .fg(theme::ACCENT)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        } else {
+            progress_spans.push(Span::styled("\u{25cb}", Style::default().fg(theme::BORDER)));
+        }
+    }
+    f.render_widget(Paragraph::new(Line::from(progress_spans)), chunks[2]);
+
     // Separator
-    let sep_w = content.width.min(60) as usize;
-    let sep = Line::from(vec![Span::styled(
-        "\u{2500}".repeat(sep_w),
-        Style::default().fg(theme::BORDER),
-    )]);
-    f.render_widget(Paragraph::new(sep), chunks[2]);
+    f.render_widget(widgets::separator(content.width.min(60)), chunks[3]);
 
     // Step content (full remaining area)
     match state.step {
-        Step::Welcome => draw_welcome(f, chunks[3]),
-        Step::Migration => draw_migration(f, chunks[3], state),
-        Step::Provider => draw_provider(f, chunks[3], state),
-        Step::ApiKey => draw_api_key(f, chunks[3], state),
-        Step::Model => draw_model(f, chunks[3], state),
-        Step::Routing => draw_routing(f, chunks[3], state),
-        Step::Complete => draw_complete(f, chunks[3], state),
+        Step::Welcome => draw_welcome(f, chunks[4]),
+        Step::Migration => draw_migration(f, chunks[4], state),
+        Step::Provider => draw_provider(f, chunks[4], state),
+        Step::ApiKey => draw_api_key(f, chunks[4], state),
+        Step::Model => draw_model(f, chunks[4], state),
+        Step::Routing => draw_routing(f, chunks[4], state),
+        Step::Complete => draw_complete(f, chunks[4], state),
     }
 }
 
@@ -1310,11 +1343,7 @@ fn draw_welcome(f: &mut Frame, area: Rect) {
     .alignment(Alignment::Center);
     f.render_widget(tagline, chunks[2]);
 
-    let sep = Paragraph::new(Line::from(vec![Span::styled(
-        "\u{2500}".repeat(area.width.saturating_sub(2) as usize),
-        Style::default().fg(theme::BORDER),
-    )]));
-    f.render_widget(sep, chunks[3]);
+    f.render_widget(widgets::separator(area.width.saturating_sub(2)), chunks[3]);
 
     let sec1 = Paragraph::new(Line::from(vec![
         Span::styled("  \u{1f6e1} ", Style::default().fg(theme::GREEN)),
@@ -1340,11 +1369,7 @@ fn draw_welcome(f: &mut Frame, area: Rect) {
     ]));
     f.render_widget(sec4, chunks[8]);
 
-    let sep2 = Paragraph::new(Line::from(vec![Span::styled(
-        "\u{2500}".repeat(area.width.saturating_sub(2) as usize),
-        Style::default().fg(theme::BORDER),
-    )]));
-    f.render_widget(sep2, chunks[10]);
+    f.render_widget(widgets::separator(area.width.saturating_sub(2)), chunks[10]);
 
     let resp1 = Paragraph::new(Line::from(vec![Span::styled(
         "  Agents can execute code, access the network, and act",
@@ -1364,11 +1389,10 @@ fn draw_welcome(f: &mut Frame, area: Rect) {
     ]));
     f.render_widget(resp2, chunks[13]);
 
-    let hints = Paragraph::new(Line::from(vec![Span::styled(
-        "  [Enter] I understand    [Esc] Cancel",
-        theme::hint_style(),
-    )]));
-    f.render_widget(hints, chunks[15]);
+    f.render_widget(
+        widgets::hint_bar("  [Enter] I understand    [Esc] Cancel"),
+        chunks[15],
+    );
 }
 
 fn draw_migration(f: &mut Frame, area: Rect, state: &mut State) {
@@ -1587,10 +1611,7 @@ fn draw_migration_offer(f: &mut Frame, area: Rect, state: &mut State) {
     }
 
     f.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(
-            "  [\u{2191}\u{2193}] Navigate  [Enter] Select  [Esc] Skip",
-            theme::hint_style(),
-        )])),
+        widgets::hint_bar("  [\u{2191}\u{2193}] Navigate  [Enter] Select  [Esc] Skip"),
         chunks[9],
     );
 }
@@ -1818,11 +1839,10 @@ fn draw_provider(f: &mut Frame, area: Rect, state: &mut State) {
         .highlight_symbol("\u{25b8} ");
     f.render_stateful_widget(list, chunks[1], &mut state.provider_list);
 
-    let hints = Paragraph::new(Line::from(vec![Span::styled(
-        "  [\u{2191}\u{2193}/jk] Navigate  [Enter] Select  [Esc] Cancel",
-        theme::hint_style(),
-    )]));
-    f.render_widget(hints, chunks[2]);
+    f.render_widget(
+        widgets::hint_bar("  [\u{2191}\u{2193}/jk] Navigate  [Enter] Select  [Esc] Cancel"),
+        chunks[2],
+    );
 }
 
 fn draw_api_key(f: &mut Frame, area: Rect, state: &mut State) {
@@ -1911,10 +1931,7 @@ fn draw_api_key(f: &mut Frame, area: Rect, state: &mut State) {
     }
 
     f.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(
-            "  [Enter] Confirm  [Esc] Back",
-            theme::hint_style(),
-        )])),
+        widgets::hint_bar("  [Enter] Confirm  [Esc] Back"),
         chunks[5],
     );
 }
@@ -1948,10 +1965,9 @@ fn draw_model(f: &mut Frame, area: Rect, state: &mut State) {
     f.render_stateful_widget(list, chunks[1], &mut state.model_list);
 
     f.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(
+        widgets::hint_bar(
             "  [\u{2191}\u{2193}/jk] Navigate  [Enter] Select  [Esc] Back    * = default",
-            theme::hint_style(),
-        )])),
+        ),
         chunks[2],
     );
 }
@@ -2013,13 +2029,7 @@ fn draw_routing_choice(f: &mut Frame, area: Rect, state: &mut State) {
         chunks[3],
     );
 
-    f.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(
-            "\u{2500}".repeat(area.width.saturating_sub(2) as usize),
-            Style::default().fg(theme::BORDER),
-        )])),
-        chunks[5],
-    );
+    f.render_widget(widgets::separator(area.width.saturating_sub(2)), chunks[5]);
 
     let options = [
         ("Yes", "pick 3 models (fast / balanced / frontier)"),
@@ -2051,10 +2061,7 @@ fn draw_routing_choice(f: &mut Frame, area: Rect, state: &mut State) {
     }
 
     f.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(
-            "  [\u{2191}\u{2193}] Navigate  [Enter] Select  [Esc] Back",
-            theme::hint_style(),
-        )])),
+        widgets::hint_bar("  [\u{2191}\u{2193}] Navigate  [Enter] Select  [Esc] Back"),
         chunks[10],
     );
 }
@@ -2137,10 +2144,7 @@ fn draw_routing_pick(f: &mut Frame, area: Rect, state: &mut State, tier: usize) 
     f.render_stateful_widget(list, chunks[3], &mut state.routing_tier_list);
 
     f.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(
-            "  [\u{2191}\u{2193}/jk] Navigate  [Enter] Select  [Esc] Back",
-            theme::hint_style(),
-        )])),
+        widgets::hint_bar("  [\u{2191}\u{2193}/jk] Navigate  [Enter] Select  [Esc] Back"),
         chunks[4],
     );
 }
@@ -2400,10 +2404,7 @@ fn draw_complete(f: &mut Frame, area: Rect, state: &mut State) {
 
     // ── Bottom hints ──
     f.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(
-            "  [\u{2191}\u{2193}/jk] Navigate  [Enter] Launch  [1/2/3] Quick select",
-            theme::hint_style(),
-        )])),
+        widgets::hint_bar("  [\u{2191}\u{2193}/jk] Navigate  [Enter] Launch  [1/2/3] Quick select"),
         chunks[15],
     );
 }

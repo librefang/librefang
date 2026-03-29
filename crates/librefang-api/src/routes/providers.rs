@@ -43,9 +43,12 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
             axum::routing::put(set_provider_url),
         )
         .route("/providers/{name}", axum::routing::get(get_provider))
+        .route(
+            "/providers/{name}/default",
+            axum::routing::post(set_default_provider),
+        )
 }
 
-use super::network::remove_toml_section;
 use super::skills::{remove_secret_env, write_secret_env};
 use super::AppState;
 use axum::extract::{Path, Query, State};
@@ -515,11 +518,12 @@ pub async fn add_custom_model(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+    let default_provider = state.kernel.config_ref().default_model.provider.clone();
     let provider = body
         .get("provider")
         .and_then(|v| v.as_str())
-        .unwrap_or("openrouter")
-        .to_string();
+        .map(|s| s.to_string())
+        .unwrap_or(default_provider);
     let context_window = body
         .get("context_window")
         .and_then(|v| v.as_u64())
@@ -719,20 +723,8 @@ pub async fn set_provider_key(
         if let Some(model_id) = default_model {
             // Update config.toml to persist the switch
             let config_path = state.kernel.home_dir().join("config.toml");
-            let update_toml = format!(
-                "\n[default_model]\nprovider = \"{}\"\nmodel = \"{}\"\napi_key_env = \"{}\"\n",
-                name, model_id, env_var
-            );
-            if let Ok(existing) = std::fs::read_to_string(&config_path) {
-                // Remove existing [default_model] section if present, then append
-                let cleaned = remove_toml_section(&existing, "default_model");
-                if let Err(e) =
-                    std::fs::write(&config_path, format!("{}\n{}", cleaned.trim(), update_toml))
-                {
-                    tracing::warn!("Failed to write config file: {e}");
-                }
-            } else if let Err(e) = std::fs::write(&config_path, update_toml) {
-                tracing::warn!("Failed to write config file: {e}");
+            if let Err(e) = persist_default_model(&config_path, &name, &model_id, &env_var) {
+                tracing::warn!("Failed to persist default_model to config.toml: {e}");
             }
 
             // Hot-update the in-memory default model override so resolve_driver()
@@ -1008,7 +1000,16 @@ pub async fn test_provider(
 
     let latency_ms = start.elapsed().as_millis();
 
-    if status_code == 401 || status_code == 403 {
+    if (200..300).contains(&status_code) {
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "status": "ok",
+                "provider": name,
+                "latency_ms": latency_ms,
+            })),
+        )
+    } else if status_code == 401 || status_code == 403 {
         (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -1017,22 +1018,22 @@ pub async fn test_provider(
                 "error": format!("Authentication failed (HTTP {})", status_code),
             })),
         )
-    } else if status_code >= 500 {
+    } else if status_code == 429 {
         (
             StatusCode::OK,
             Json(serde_json::json!({
                 "status": "error",
                 "provider": name,
-                "error": format!("Server error (HTTP {})", status_code),
+                "error": format!("Rate limited (HTTP 429)"),
             })),
         )
     } else {
         (
             StatusCode::OK,
             Json(serde_json::json!({
-                "status": "ok",
+                "status": "error",
                 "provider": name,
-                "latency_ms": latency_ms,
+                "error": format!("HTTP {}", status_code),
             })),
         )
     }
@@ -1103,6 +1104,123 @@ pub async fn set_provider_url(
     (StatusCode::OK, Json(resp))
 }
 
+/// POST /api/providers/{name}/default — Set a provider as the default model provider.
+///
+/// Looks up the best default model for the given provider and updates both
+/// the in-memory override and config.toml so it persists across restarts.
+#[utoipa::path(
+    post,
+    path = "/api/providers/{name}/default",
+    tag = "models",
+    params(("name" = String, Path, description = "Provider identifier")),
+    responses(
+        (status = 200, description = "Default provider updated", body = serde_json::Value),
+        (status = 400, description = "No model found for provider"),
+        (status = 404, description = "Provider not found")
+    )
+)]
+pub async fn set_default_provider(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    // Verify the provider exists in the catalog
+    let (default_model, env_var) = {
+        let catalog = state
+            .kernel
+            .model_catalog_ref()
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        let provider = match catalog.get_provider(&name) {
+            Some(p) => p.clone(),
+            None => {
+                return ApiErrorResponse::not_found(format!("Provider '{}' not found", name))
+                    .into_json_tuple();
+            }
+        };
+        let model_id = catalog.default_model_for_provider(&name);
+        (model_id, provider.api_key_env.clone())
+    };
+
+    let model_id = match default_model {
+        Some(id) => id,
+        None => {
+            return ApiErrorResponse::bad_request(format!(
+                "No models found for provider '{}'",
+                name
+            ))
+            .into_json_tuple();
+        }
+    };
+
+    // Update config.toml to persist the switch
+    let config_path = state.kernel.home_dir().join("config.toml");
+    let persisted = match persist_default_model(&config_path, &name, &model_id, &env_var) {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::warn!("Failed to persist default_model to config.toml: {e}");
+            false
+        }
+    };
+
+    // Hot-update the in-memory default model override
+    {
+        let new_dm = librefang_types::config::DefaultModelConfig {
+            provider: name.clone(),
+            model: model_id.clone(),
+            api_key_env: env_var.clone(),
+            base_url: None,
+        };
+        let mut guard = state
+            .kernel
+            .default_model_override_ref()
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        *guard = Some(new_dm);
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "updated",
+            "provider": name,
+            "model": model_id,
+            "api_key_env": env_var,
+            "persisted": persisted,
+        })),
+    )
+}
+
+/// Safely persist the `[default_model]` section into config.toml using proper
+/// TOML serialization (avoids format-string injection).
+fn persist_default_model(
+    config_path: &std::path::Path,
+    provider: &str,
+    model: &str,
+    api_key_env: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut dm_table = toml::map::Map::new();
+    dm_table.insert(
+        "provider".to_string(),
+        toml::Value::String(provider.to_string()),
+    );
+    dm_table.insert("model".to_string(), toml::Value::String(model.to_string()));
+    dm_table.insert(
+        "api_key_env".to_string(),
+        toml::Value::String(api_key_env.to_string()),
+    );
+
+    let content = std::fs::read_to_string(config_path).unwrap_or_default();
+    let mut doc: toml::Value = if content.trim().is_empty() {
+        toml::Value::Table(toml::map::Map::new())
+    } else {
+        toml::from_str(&content)?
+    };
+    let root = doc.as_table_mut().ok_or("Config is not a TOML table")?;
+    root.insert("default_model".to_string(), toml::Value::Table(dm_table));
+    std::fs::write(config_path, toml::to_string_pretty(&doc)?)?;
+    Ok(())
+}
+
 /// Upsert a provider URL in the `[provider_urls]` section of config.toml.
 fn upsert_provider_url(
     config_path: &std::path::Path,
@@ -1116,12 +1234,11 @@ fn upsert_provider_url(
         )
         .into());
     }
-    if config_path.components().any(|c| {
-        matches!(
-            c,
-            std::path::Component::ParentDir | std::path::Component::Prefix(_)
-        )
-    }) {
+    // Block path-traversal (`..`) but allow Windows drive-letter prefixes
+    if config_path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!("unsafe config path '{}'", config_path.display()),

@@ -825,7 +825,7 @@ async function startConnection() {
           const phone = telMatch ? telMatch[1].trim() : '';
           return `${name}${phone ? ' ' + phone : ''}`;
         });
-        innerMsg._overrideMediaText = `[Contatti condivisi: ${parsed.join(', ')}]`;
+        innerMsg._overrideMediaText = `[Shared contacts: ${parsed.join(', ')}]`;
       }
 
       // Skip if there's nothing to process

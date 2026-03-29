@@ -470,9 +470,13 @@ pub async fn run_daemon(
     // Track background task handles for graceful shutdown
     let mut bg_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
-    // Config file hot-reload watcher (polls every 30 seconds)
+    let (app, state) = build_router(kernel.clone(), addr).await;
+
+    // Config file hot-reload watcher (polls every 30 seconds).
+    // Spawned after `build_router` so it can access `AppState` for bridge reload.
     {
         let k = kernel.clone();
+        let st = state.clone();
         let config_path = kernel.config_ref().home_dir.join("config.toml");
         bg_tasks.push(tokio::spawn(async move {
             let mut last_modified = std::fs::metadata(&config_path)
@@ -493,6 +497,25 @@ pub async fn run_daemon(
                             } else {
                                 tracing::debug!("Config hot-reload: no actionable changes");
                             }
+                            // Restart channel bridge if channel config changed
+                            if plan.hot_actions.contains(
+                                &librefang_kernel::config_reload::HotAction::ReloadChannels,
+                            ) {
+                                match crate::channel_bridge::reload_channels_from_disk(&st).await {
+                                    Ok(names) => {
+                                        tracing::info!(
+                                            "Hot-reload: restarted channel bridge with {} adapter(s): {:?}",
+                                            names.len(),
+                                            names,
+                                        );
+                                    }
+                                    Err(e) => {
+                                        tracing::error!(
+                                            "Hot-reload: failed to restart channel bridge: {e}"
+                                        );
+                                    }
+                                }
+                            }
                         }
                         Err(e) => tracing::warn!("Config hot-reload failed: {e}"),
                     }
@@ -500,8 +523,6 @@ pub async fn run_daemon(
             }
         }));
     }
-
-    let (app, state) = build_router(kernel.clone(), addr).await;
 
     // Write daemon info file
     if let Some(info_path) = daemon_info_path {
