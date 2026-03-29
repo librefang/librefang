@@ -248,6 +248,8 @@ jobs:
             patchelf
       - name: Build tests (throttled to reduce peak memory)
         run: cargo nextest run --workspace --no-run -j 2
+      - name: Check disk and memory before tests
+        run: df -h / && free -h && du -sh target/ 2>/dev/null || true
       - name: Run affected crate tests
         run: |
           CRATES="${{ needs.changes.outputs.crates }}"
