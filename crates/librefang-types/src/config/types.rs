@@ -226,9 +226,11 @@ pub enum SearchProvider {
     Tavily,
     /// Perplexity AI search.
     Perplexity,
+    /// Jina AI search.
+    Jina,
     /// DuckDuckGo HTML (no API key needed).
     DuckDuckGo,
-    /// Auto-select based on available API keys (Tavily → Brave → Perplexity → DuckDuckGo).
+    /// Auto-select based on available API keys (Tavily → Brave → Jina → Perplexity → DuckDuckGo).
     #[default]
     Auto,
 }
@@ -247,6 +249,8 @@ pub struct WebConfig {
     pub tavily: TavilySearchConfig,
     /// Perplexity Search configuration.
     pub perplexity: PerplexitySearchConfig,
+    /// Jina Search configuration.
+    pub jina: JinaSearchConfig,
     /// Web fetch configuration.
     pub fetch: WebFetchConfig,
 }
@@ -259,6 +263,7 @@ impl Default for WebConfig {
             brave: BraveSearchConfig::default(),
             tavily: TavilySearchConfig::default(),
             perplexity: PerplexitySearchConfig::default(),
+            jina: JinaSearchConfig::default(),
             fetch: WebFetchConfig::default(),
         }
     }
@@ -332,6 +337,37 @@ impl Default for PerplexitySearchConfig {
         Self {
             api_key_env: "PERPLEXITY_API_KEY".to_string(),
             model: "sonar".to_string(),
+        }
+    }
+}
+
+/// Jina Search API configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct JinaSearchConfig {
+    /// Env var name holding the API key.
+    pub api_key_env: String,
+    /// Maximum results to return.
+    pub max_results: usize,
+    /// Country/region code for geolocation (e.g., "US").
+    pub country: String,
+    /// Language code (e.g., "en").
+    pub language: String,
+    /// Use EU endpoint (https://eu.s.jina.ai/) instead of global.
+    pub use_eu_endpoint: bool,
+    /// Disable Jina server-side cache.
+    pub no_cache: bool,
+}
+
+impl Default for JinaSearchConfig {
+    fn default() -> Self {
+        Self {
+            api_key_env: "JINA_API_KEY".to_string(),
+            max_results: 5,
+            country: String::new(),
+            language: String::new(),
+            use_eu_endpoint: false,
+            no_cache: false,
         }
     }
 }

@@ -6745,6 +6745,9 @@ system_prompt = "You are a helpful assistant."
                 librefang_types::config::SearchProvider::Perplexity => {
                     Some(("Perplexity", cfg.web.perplexity.api_key_env.clone()))
                 }
+                librefang_types::config::SearchProvider::Jina => {
+                    Some(("Jina", self.config.web.jina.api_key_env.clone()))
+                }
                 _ => None,
             };
             if let Some((name, env_var)) = search_env {

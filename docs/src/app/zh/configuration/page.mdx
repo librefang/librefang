@@ -2,8 +2,6 @@
 
 `config.toml` 的完整参考文档，涵盖 LibreFang Agent OS 中每一个可配置字段。
 
-> **子页面：** [核心配置](/zh/configuration/core) | [通道配置](/zh/configuration/channels) | [功能配置](/zh/configuration/features) | [安全配置](/zh/configuration/security)
-
 ---
 
 ## 目录
@@ -12,13 +10,53 @@
 - [配置文件包含机制](#配置文件包含机制)
 - [最小配置](#最小配置)
 - [完整配置示例](#完整配置示例)
-- **各节详解**
-  - [核心配置参考](/zh/configuration/core) -- 顶层字段, [default\_model], [memory], [network], [web], [media], [links]
-  - [通道配置](/zh/configuration/channels) -- [channels], 通道行为覆盖, [[sidecar\_channels]]
-  - [功能配置](/zh/configuration/features) -- [[mcp\_servers]], [a2a], [[fallback\_providers]], [[users]], [browser], [reload], [exec\_policy], [approval], [budget], [thinking], [tts], [docker], [canvas], [auto\_reply], [broadcast], [inbox], [[bindings]], [pairing], [extensions], [vault], [webhook\_triggers], [proxy], [session], [queue]
-  - [安全与认证配置](/zh/configuration/security) -- [external\_auth], [vertex\_ai], [oauth], [auth\_profiles], [tool\_policy], [proactive\_memory], [context\_engine], [audit], [health\_check], [plugins], [prompt\_intelligence], 环境变量
+- [各节详解](#各节详解)
+  - [顶层字段](#顶层字段)
+  - [\[default\_model\]](#default_model)
+  - [\[memory\]](#memory)
+  - [\[network\]](#network)
+  - [\[web\]](#web)
+  - [\[media\]](#media)
+  - [\[links\]](#links)
+  - [\[channels\]](#channels)
+  - [\[\[mcp\_servers\]\]](#mcp_servers)
+  - [\[a2a\]](#a2a)
+  - [\[\[fallback\_providers\]\]](#fallback_providers)
+  - [\[\[users\]\]](#users)
+  - [通道行为覆盖](#通道行为覆盖)
+  - [\[browser\]](#browser)
+  - [\[reload\]](#reload)
+  - [\[exec\_policy\]](#exec_policy)
+  - [\[approval\]](#approval)
+  - [\[budget\]](#budget)
+  - [\[thinking\]](#thinking)
+  - [\[tts\]](#tts)
+  - [\[docker\]](#docker)
+  - [\[canvas\]](#canvas)
+  - [\[auto\_reply\]](#auto_reply)
+  - [\[broadcast\]](#broadcast)
+  - [\[inbox\]](#inbox)
+  - [\[\[bindings\]\]](#bindings)
+  - [\[pairing\]](#pairing)
+  - [\[extensions\]](#extensions)
+  - [\[vault\]](#vault)
+  - [\[webhook\_triggers\]](#webhook_triggers)
+  - [\[proxy\]](#proxy)
+  - [\[\[sidecar\_channels\]\]](#sidecar_channels)
+  - [\[session\]](#session)
+  - [\[queue\]](#queue)
+  - [\[external\_auth\]](#external_auth)
+  - [\[vertex\_ai\]](#vertex_ai)
+  - [\[oauth\]](#oauth)
+  - [\[auth\_profiles\]](#auth_profiles)
+  - [\[tool\_policy\]](#tool_policy)
+  - [\[proactive\_memory\]](#proactive_memory)
+  - [\[context\_engine\]](#context_engine)
+  - [\[audit\]](#audit)
+  - [\[health\_check\]](#health_check)
+  - [\[plugins\]](#plugins)
+- [环境变量](#环境变量)
 - [配置校验](#配置校验)
-- [相关配置](#相关配置)
 
 ---
 
@@ -162,7 +200,7 @@ shared_secret = ""                    # network_enabled = true 时必填
 
 # --- 网页工具 ---
 [web]
-search_provider = "auto"              # auto | brave | tavily | perplexity | duckduckgo
+search_provider = "auto"              # auto | brave | jina | tavily | perplexity | duckduckgo
 cache_ttl_minutes = 15
 
 [web.brave]
@@ -177,6 +215,10 @@ api_key_env = "TAVILY_API_KEY"
 search_depth = "basic"                # basic | advanced
 max_results = 5
 include_answer = true
+
+[web.jina]
+api_key_env = "JINA_API_KEY"
+max_results = 5
 
 [web.perplexity]
 api_key_env = "PERPLEXITY_API_KEY"
@@ -418,14 +460,2272 @@ plugin_registries = []
 
 ---
 
-## 配置字段参考
+## 各节详解
 
-配置参考已拆分为以下子页面：
+### 顶层字段
 
-- [**核心配置**](/zh/configuration/core) — 顶层字段、默认模型、内存、网络、Web、媒体、链接
-- [**通道配置**](/zh/configuration/channels) — 通道适配器、覆盖配置、Sidecar 通道
-- [**功能配置**](/zh/configuration/features) — MCP 服务器、A2A、备用供应商、用户、浏览器、重载、执行策略、审批、预算、思考、TTS、Docker、画布、自动回复、广播、收件箱、绑定、配对、扩展、保险库、Webhook 触发器、代理、会话、队列
-- [**安全与认证配置**](/zh/configuration/security) — 外部认证、Vertex AI、OAuth、认证配置文件、工具策略、主动记忆、上下文引擎、审计、健康检查、插件、提示智能、环境变量
+以下字段位于 `config.toml` 的根层级（不在任何 `[section]` 内部）。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `home_dir` | path | `~/.librefang` | LibreFang 主目录，存储配置、Agent、技能等。 |
+| `data_dir` | path | `~/.librefang/data` | SQLite 数据库和持久化数据的目录。 |
+| `log_level` | string | `"info"` | 日志级别。可选值：`trace`、`debug`、`info`、`warn`、`error`。 |
+| `api_listen` | string | `"127.0.0.1:4545"` | HTTP/WebSocket/SSE API 服务器的绑定地址。别名：`listen_addr`。 |
+| `network_enabled` | bool | `false` | 启用 OFP 点对点网络层。 |
+| `api_key` | string | `""`（空） | API 认证密钥。设置后，除 `/api/health` 外的所有端点均需要 `Authorization: Bearer <key>` 请求头。空值表示不需要认证（仅限本地开发使用）。 |
+| `cors_origin` | list of strings | `[]` | 除 localhost 外额外允许的 CORS 来源。例如 `["https://dash.example.com"]`。 |
+| `mode` | string | `"default"` | 内核运行模式。见下表。 |
+| `language` | string | `"en"` | CLI 输出和系统消息的语言/区域代码。 |
+| `usage_footer` | string | `"full"` | 控制附加到回复末尾的用量信息。见下表。 |
+| `prompt_caching` | bool | `true` | 启用 LLM 提供商的提示词缓存。会在系统提示中添加缓存提示（Anthropic 使用 `cache_control`，OpenAI 自动前缀缓存）。 |
+| `stable_prefix_mode` | bool | `false` | 启用后，避免每轮对话都会变化的系统提示内容（如回忆记忆、标准上下文），从而提高提供商端的提示词缓存命中率。 |
+| `max_cron_jobs` | usize | `500` | 所有 Agent 的全局最大定时任务数。 |
+| `workspaces_dir` | path 或 null | `null` | Agent 工作区的根目录。默认为 `~/.librefang/workspaces`。包含 Agent 工作目录和 `hands/` 子目录（用于用户自定义 hands）。 |
+| `include` | list of strings | `[]` | 配置文件包含列表（相对路径）。详见[配置文件包含机制](#配置文件包含机制)。 |
+| `provider_urls` | map of string->string | `{}` | 提供商基础 URL 覆盖。将提供商 ID 映射到自定义基础 URL（例如 `ollama = "http://192.168.1.100:11434/v1"`）。适用于自托管或代理端点。 |
+| `provider_api_keys` | map of string->string | `{}` | 提供商 API Key 环境变量覆盖。将提供商 ID 映射到存放密钥的环境变量名称（例如 `nvidia = "NVIDIA_API_KEY"`）。未设置时，默认使用 `{PROVIDER_UPPER}_API_KEY` 的命名约定。 |
+| `provider_regions` | map of string->string | `{}` | 提供商区域选择。将提供商 ID 映射到提供商注册 TOML 中定义的区域名称（例如 `qwen = "intl"`）。覆盖提供商的基础 URL，并可选择性覆盖其 API Key 环境变量。在 `provider_urls` 之前生效（优先级较低）。 |
+
+**`mode` 值说明：**
+
+| 值 | 行为 |
+|----|------|
+| `stable` | 保守模式：不自动更新，锁定模型版本，冻结技能注册表。使用 `FallbackDriver`。 |
+| `default` | 均衡模式：标准运行。 |
+| `dev` | 开发者模式：启用实验性功能。 |
+
+**`usage_footer` 值说明：**
+
+| 值 | 行为 |
+|----|------|
+| `off` | 不显示用量信息。 |
+| `tokens` | 仅显示 Token 数量。 |
+| `cost` | 仅显示预估费用。 |
+| `full` | 同时显示 Token 数量和预估费用（默认）。 |
+
+---
+
+### `[default_model]`
+
+配置 Agent 未指定自有模型时使用的主 LLM 提供商。
+
+```toml
+[default_model]
+provider = "anthropic"
+model = "claude-sonnet-4-20250514"
+api_key_env = "ANTHROPIC_API_KEY"
+# base_url = "https://api.anthropic.com"
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `provider` | string | `"anthropic"` | 提供商名称。支持：`anthropic`、`gemini`、`openai`、`groq`、`openrouter`、`deepseek`、`together`、`mistral`、`fireworks`、`ollama`、`vllm`、`lmstudio`、`perplexity`、`cohere`、`ai21`、`cerebras`、`sambanova`、`huggingface`、`xai`、`replicate`。 |
+| `model` | string | `"claude-sonnet-4-20250514"` | 模型标识符。别名（如 `sonnet`、`haiku`、`gpt-4o`、`gemini-flash`）由模型目录自动解析。 |
+| `api_key_env` | string | `"ANTHROPIC_API_KEY"` | 存放 API Key 的环境变量名称。实际密钥在运行时从该环境变量读取，绝不存储在配置文件中。 |
+| `base_url` | string 或 null | `null` | 覆盖 API 基础 URL。适用于代理或自托管端点。为 `null` 时，使用模型目录中提供商的默认 URL。 |
+
+---
+
+### `[memory]`
+
+配置基于 SQLite 的记忆基础设施，包括向量嵌入和记忆衰减。
+
+```toml
+[memory]
+# sqlite_path = "/custom/path/librefang.db"
+embedding_model = "all-MiniLM-L6-v2"
+consolidation_threshold = 10000
+decay_rate = 0.1
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `sqlite_path` | path 或 null | `null` | SQLite 数据库文件的显式路径。为 `null` 时，默认为 `{data_dir}/librefang.db`。 |
+| `embedding_model` | string | `"all-MiniLM-L6-v2"` | 用于生成语义记忆搜索向量嵌入的模型名称。 |
+| `embedding_provider` | string 或 null | `null` | 嵌入提供商（例如 `"openai"`、`"ollama"`）。为 `null` 时自动检测。 |
+| `embedding_api_key_env` | string 或 null | `null` | 存放嵌入提供商 API Key 的环境变量名称。 |
+| `consolidation_threshold` | u64 | `10000` | 触发自动整合（合并和清理旧条目）的存储记忆数量阈值。 |
+| `consolidation_interval_hours` | u64 | `24` | 记忆整合的运行间隔（小时）。`0` = 禁用。 |
+| `decay_rate` | f32 | `0.1` | 记忆置信度衰减率。`0.0` = 无衰减（记忆永不消退），`1.0` = 快速衰减。取值范围 0.0 到 1.0。 |
+
+---
+
+### `[network]`
+
+配置 OFP（LibreFang 协议）点对点网络层，使用 HMAC-SHA256 双向认证。
+
+```toml
+[network]
+listen_addresses = ["/ip4/0.0.0.0/tcp/0"]
+bootstrap_peers = []
+mdns_enabled = true
+max_peers = 50
+shared_secret = "my-cluster-secret"
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `listen_addresses` | list of strings | `["/ip4/0.0.0.0/tcp/0"]` | 监听的 libp2p 多地址。端口 `0` 表示自动分配。 |
+| `bootstrap_peers` | list of strings | `[]` | 用于 DHT 发现的引导节点多地址。 |
+| `mdns_enabled` | bool | `true` | 启用 mDNS 以自动发现本地网络中的对等节点。 |
+| `max_peers` | u32 | `50` | 最大同时连接的对等节点数。 |
+| `shared_secret` | string | `""`（空） | OFP HMAC-SHA256 双向认证的预共享密钥。当 `network_enabled = true` 时**必填**。通信双方必须使用相同的密钥。日志中会脱敏处理。 |
+
+---
+
+### `[web]`
+
+配置 Agent 工具使用的网页搜索和网页抓取能力。
+
+```toml
+[web]
+search_provider = "auto"
+cache_ttl_minutes = 15
+timeout_secs = 15
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `search_provider` | string | `"auto"` | 使用的搜索引擎。见下表。 |
+| `cache_ttl_minutes` | u64 | `15` | 搜索/抓取结果的缓存时长（分钟）。`0` = 禁用缓存。 |
+| `timeout_secs` | u64 | `15` | 所有网页搜索请求的 HTTP 超时时间（秒）。建议：大多数提供商使用 15，Jina 建议使用 30 以上。 |
+
+**`search_provider` 值说明：**
+
+| 值 | 说明 |
+|----|------|
+| `auto` | 级联回退：根据可用的 API Key，依次尝试 Tavily、Brave、Jina、Perplexity、DuckDuckGo。 |
+| `brave` | Brave Search API。需要 `BRAVE_API_KEY`。 |
+| `jina` | Jina AI 搜索与信息定位。需要 `JINA_API_KEY`。 |
+| `tavily` | Tavily AI 原生搜索。需要 `TAVILY_API_KEY`。 |
+| `perplexity` | Perplexity AI 搜索。需要 `PERPLEXITY_API_KEY`。 |
+| `duckduckgo` | DuckDuckGo HTML 抓取。无需 API Key。 |
+
+#### `[web.brave]`
+
+```toml
+[web.brave]
+api_key_env = "BRAVE_API_KEY"
+max_results = 5
+country = ""
+search_lang = ""
+freshness = ""
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `api_key_env` | string | `"BRAVE_API_KEY"` | 存放 Brave Search API Key 的环境变量名称。 |
+| `max_results` | usize | `5` | 返回的最大搜索结果数。 |
+| `country` | string | `""` | 用于本地化结果的国家代码（例如 `"US"`、`"GB"`）。空值 = 不过滤。 |
+| `search_lang` | string | `""` | 语言代码（例如 `"en"`、`"fr"`）。空值 = 不过滤。 |
+| `freshness` | string | `""` | 时效性过滤。`"pd"` = 过去一天，`"pw"` = 过去一周，`"pm"` = 过去一月。空值 = 不过滤。 |
+
+#### `[web.tavily]`
+
+```toml
+[web.tavily]
+api_key_env = "TAVILY_API_KEY"
+search_depth = "basic"
+max_results = 5
+include_answer = true
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `api_key_env` | string | `"TAVILY_API_KEY"` | 存放 Tavily API Key 的环境变量名称。 |
+| `search_depth` | string | `"basic"` | 搜索深度：`"basic"` 快速返回结果，`"advanced"` 进行更深入的分析。 |
+| `max_results` | usize | `5` | 返回的最大搜索结果数。 |
+| `include_answer` | bool | `true` | 是否在结果中包含 Tavily 的 AI 生成答案摘要。 |
+
+#### `[web.jina]`
+
+```toml
+[web.jina]
+api_key_env = "JINA_API_KEY"
+max_results = 5
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `api_key_env` | string | `"JINA_API_KEY"` | 存放 Jina AI API Key 的环境变量名称。 |
+| `max_results` | usize | `5` | 返回的最大搜索结果数。 |
+
+#### `[web.perplexity]`
+
+```toml
+[web.perplexity]
+api_key_env = "PERPLEXITY_API_KEY"
+model = "sonar"
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `api_key_env` | string | `"PERPLEXITY_API_KEY"` | 存放 Perplexity API Key 的环境变量名称。 |
+| `model` | string | `"sonar"` | 用于搜索查询的 Perplexity 模型。 |
+
+#### `[web.fetch]`
+
+```toml
+[web.fetch]
+max_chars = 50000
+max_response_bytes = 10485760
+timeout_secs = 30
+readability = true
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `max_chars` | usize | `50000` | 抓取内容返回的最大字符数。超出部分将被截断。 |
+| `max_response_bytes` | usize | `10485760`（10 MB） | HTTP 响应体的最大大小（字节）。 |
+| `timeout_secs` | u64 | `30` | HTTP 请求超时时间（秒）。 |
+| `readability` | bool | `true` | 启用 HTML 到 Markdown 的可读性提取。开启后，抓取的 HTML 会被转换为干净的 Markdown 格式。 |
+
+---
+
+### `[media]`
+
+配置媒体理解能力（图片描述、音频转录、视频描述），用于处理包含附件的消息。
+
+```toml
+[media]
+image_description = true
+audio_transcription = true
+video_description = false
+max_concurrency = 2
+# image_provider = "openai"   # 省略则自动检测
+# audio_provider = "openai"   # 省略则自动检测
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `image_description` | bool | `true` | 启用对传入图片附件的自动描述。 |
+| `audio_transcription` | bool | `true` | 启用对传入音频附件的自动转录。 |
+| `video_description` | bool | `false` | 启用视频描述。默认禁用（耗费大且速度慢）。 |
+| `max_concurrency` | usize | `2` | 并发媒体处理任务的最大数量。 |
+| `image_provider` | string 或 null | `null` | 首选的图片描述提供商。为 `null` 时根据可用提供商自动检测。 |
+| `audio_provider` | string 或 null | `null` | 首选的音频转录提供商。为 `null` 时根据可用提供商自动检测。 |
+
+---
+
+### `[links]`
+
+配置自动链接理解功能——自动抓取并总结传入消息中的 URL。
+
+```toml
+[links]
+enabled = false
+max_links = 3
+max_content_bytes = 102400
+timeout_secs = 10
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | `false` | 启用自动链接理解。开启后，消息中的 URL 会被抓取并总结其内容，然后再交给 Agent 处理。 |
+| `max_links` | usize | `3` | 每条消息处理的最大链接数。多余的链接会被忽略。 |
+| `max_content_bytes` | usize | `102400`（100 KB） | 每个链接抓取的最大内容大小（字节）。超出部分将被截断。 |
+| `timeout_secs` | u64 | `10` | 每个链接的抓取超时时间（秒）。 |
+
+---
+
+### `[channels]`
+
+所有 45 个通道适配器均在 `[channels.<name>]` 下配置。每个通道采用 `Option<T>` 类型——省略该节将完全禁用该适配器。即使只写了节头（内容为空），也会以默认值启用该适配器。
+
+**通用通道字段：** 每个通道适配器除了自身特有的字段外，还支持以下通用字段：
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `default_agent` | string 或 null | `null` | 默认将消息路由到的 Agent 名称。 |
+| `account_id` | string 或 null | `null` | 当前 Bot 实例的唯一标识符。用于通过 `[[bindings]]` 匹配规则进行多 Bot 路由。 |
+| `overrides` | object | （默认值） | 每个通道的行为覆盖配置。详见[通道行为覆盖](#通道行为覆盖)。 |
+
+#### `[channels.telegram]`
+
+```toml
+[channels.telegram]
+bot_token_env = "TELEGRAM_BOT_TOKEN"
+allowed_users = []
+# default_agent = "assistant"
+poll_interval_secs = 1
+# api_url = "https://api.telegram.org"  # 覆盖用于本地 Bot API 服务器
+# account_id = "my-telegram-bot"
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `bot_token_env` | string | `"TELEGRAM_BOT_TOKEN"` | 存放 Telegram Bot API 令牌的环境变量。 |
+| `allowed_users` | list of i64 | `[]` | 允许交互的 Telegram 用户 ID 列表。空列表 = 允许所有人。 |
+| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+| `poll_interval_secs` | u64 | `1` | 长轮询间隔（秒）。 |
+| `account_id` | string 或 null | `null` | 用于多 Bot 路由的唯一 Bot 实例标识符。 |
+| `api_url` | string 或 null | `null` | 覆盖 Telegram Bot API 基础 URL。适用于本地 Bot API 服务器实例。默认为 `https://api.telegram.org`。 |
+| `overrides` | object | （默认值） | 每个通道的行为覆盖配置。详见[通道行为覆盖](#通道行为覆盖)。 |
+
+#### `[channels.discord]`
+
+```toml
+[channels.discord]
+bot_token_env = "DISCORD_BOT_TOKEN"
+allowed_guilds = []
+# default_agent = "assistant"
+intents = 37376
+ignore_bots = true
+# account_id = "my-discord-bot"
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `bot_token_env` | string | `"DISCORD_BOT_TOKEN"` | 存放 Discord Bot 令牌的环境变量。 |
+| `allowed_guilds` | list of u64 | `[]` | 允许的服务器（Guild）ID 列表。空列表 = 允许所有。 |
+| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+| `allowed_users` | list of strings | `[]` | 允许交互的 Discord 用户 ID 列表。空列表 = 允许所有。 |
+| `intents` | u64 | `37376` | Gateway Intents 位掩码。默认 = `GUILD_MESSAGES \| DIRECT_MESSAGES \| MESSAGE_CONTENT`（37376）。 |
+| `ignore_bots` | bool | `true` | 为 `true` 时，忽略来自其他 Bot 的消息。 |
+| `account_id` | string 或 null | `null` | 用于多 Bot 路由的唯一 Bot 实例标识符。 |
+| `overrides` | object | （默认值） | 每个通道的行为覆盖配置。详见[通道行为覆盖](#通道行为覆盖)。 |
+
+#### `[channels.slack]`
+
+```toml
+[channels.slack]
+app_token_env = "SLACK_APP_TOKEN"
+bot_token_env = "SLACK_BOT_TOKEN"
+allowed_channels = []
+# account_id = "my-slack-bot"
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `app_token_env` | string | `"SLACK_APP_TOKEN"` | 存放 Slack 应用级令牌（`xapp-`）的环境变量，用于 Socket Mode。 |
+| `bot_token_env` | string | `"SLACK_BOT_TOKEN"` | 存放 Slack Bot 令牌（`xoxb-`）的环境变量，用于 REST API。 |
+| `allowed_channels` | list of strings | `[]` | 允许的频道 ID 列表。空列表 = 允许所有。 |
+| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+| `account_id` | string 或 null | `null` | 用于多 Bot 路由的唯一 Bot 实例标识符。 |
+| `overrides` | object | （默认值） | 每个通道的行为覆盖配置。详见[通道行为覆盖](#通道行为覆盖)。 |
+
+#### `[channels.whatsapp]`
+
+```toml
+[channels.whatsapp]
+access_token_env = "WHATSAPP_ACCESS_TOKEN"
+verify_token_env = "WHATSAPP_VERIFY_TOKEN"
+phone_number_id = ""
+webhook_port = 8443
+allowed_users = []
+# gateway_url_env = "WHATSAPP_WEB_GATEWAY_URL"  # 用于 QR/Web 模式
+# account_id = "my-whatsapp-bot"
+# owner_numbers = []   # 可选的管理员手机号
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `access_token_env` | string | `"WHATSAPP_ACCESS_TOKEN"` | 存放 WhatsApp Cloud API 访问令牌的环境变量。 |
+| `verify_token_env` | string | `"WHATSAPP_VERIFY_TOKEN"` | 存放 Webhook 验证令牌的环境变量。 |
+| `phone_number_id` | string | `""` | WhatsApp Business 手机号 ID。 |
+| `webhook_port` | u16 | `8443` | 监听 Webhook 回调的端口。 |
+| `gateway_url_env` | string | `"WHATSAPP_WEB_GATEWAY_URL"` | 存放 WhatsApp Web 网关 URL 的环境变量。设置后，发送消息将通过 QR/Web 网关而非 Cloud API 路由。 |
+| `allowed_users` | list of strings | `[]` | 允许的手机号列表。空列表 = 允许所有。 |
+| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+| `account_id` | string 或 null | `null` | 用于多 Bot 路由的唯一 Bot 实例标识符。 |
+| `owner_numbers` | list of strings | `[]` | 对此 Bot 实例拥有管理权限的手机号列表。 |
+| `overrides` | object | （默认值） | 每个通道的行为覆盖配置。详见[通道行为覆盖](#通道行为覆盖)。 |
+
+#### `[channels.signal]`
+
+```toml
+[channels.signal]
+api_url = "http://localhost:8080"
+phone_number = ""
+allowed_users = []
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `api_url` | string | `"http://localhost:8080"` | signal-cli REST API 的 URL。 |
+| `phone_number` | string | `""` | Bot 注册的手机号。 |
+| `allowed_users` | list of strings | `[]` | 允许的手机号列表。空列表 = 允许所有。 |
+| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+
+#### `[channels.matrix]`
+
+```toml
+[channels.matrix]
+homeserver_url = "https://matrix.org"
+user_id = "@librefang:matrix.org"
+access_token_env = "MATRIX_ACCESS_TOKEN"
+allowed_rooms = []
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `homeserver_url` | string | `"https://matrix.org"` | Matrix 家服务器 URL。 |
+| `user_id` | string | `""` | Bot 用户 ID（例如 `"@librefang:matrix.org"`）。 |
+| `access_token_env` | string | `"MATRIX_ACCESS_TOKEN"` | 存放 Matrix 访问令牌的环境变量。 |
+| `allowed_rooms` | list of strings | `[]` | 监听的房间 ID 列表。空列表 = 所有已加入的房间。 |
+| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+
+#### `[channels.email]`
+
+```toml
+[channels.email]
+imap_host = "imap.gmail.com"
+imap_port = 993
+smtp_host = "smtp.gmail.com"
+smtp_port = 587
+username = "bot@example.com"
+password_env = "EMAIL_PASSWORD"
+poll_interval_secs = 30
+folders = ["INBOX"]
+allowed_senders = []
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `imap_host` | string | `""` | IMAP 服务器主机名。 |
+| `imap_port` | u16 | `993` | IMAP 服务器端口（993 用于 TLS）。 |
+| `smtp_host` | string | `""` | SMTP 服务器主机名。 |
+| `smtp_port` | u16 | `587` | SMTP 服务器端口（587 用于 STARTTLS）。 |
+| `username` | string | `""` | 用于 IMAP 和 SMTP 的邮箱地址。 |
+| `password_env` | string | `"EMAIL_PASSWORD"` | 存放邮箱密码或应用专用密码的环境变量。 |
+| `poll_interval_secs` | u64 | `30` | IMAP 轮询间隔（秒）。 |
+| `folders` | list of strings | `["INBOX"]` | 监控的 IMAP 文件夹。 |
+| `allowed_senders` | list of strings | `[]` | 仅处理来自这些发件人的邮件。空列表 = 全部处理。 |
+| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+
+#### `[channels.teams]`
+
+```toml
+[channels.teams]
+app_id = ""
+app_password_env = "TEAMS_APP_PASSWORD"
+webhook_port = 3978
+allowed_tenants = []
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `app_id` | string | `""` | Azure Bot 应用 ID。 |
+| `app_password_env` | string | `"TEAMS_APP_PASSWORD"` | 存放 Azure Bot Framework 应用密码的环境变量。 |
+| `webhook_port` | u16 | `3978` | Bot Framework 入站 Webhook 端口。 |
+| `allowed_tenants` | list of strings | `[]` | 允许的 Azure AD 租户 ID 列表。空列表 = 允许所有。 |
+| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+
+#### `[channels.mattermost]`
+
+```toml
+[channels.mattermost]
+server_url = "https://mattermost.example.com"
+token_env = "MATTERMOST_TOKEN"
+allowed_channels = []
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `server_url` | string | `""` | Mattermost 服务器 URL。 |
+| `token_env` | string | `"MATTERMOST_TOKEN"` | 存放 Mattermost Bot 令牌的环境变量。 |
+| `allowed_channels` | list of strings | `[]` | 监听的频道 ID 列表。空列表 = 所有频道。 |
+| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+
+#### `[channels.irc]`
+
+```toml
+[channels.irc]
+server = "irc.libera.chat"
+port = 6667
+nick = "librefang"
+# password_env = "IRC_PASSWORD"
+channels = ["#librefang"]
+use_tls = false
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `server` | string | `"irc.libera.chat"` | IRC 服务器主机名。 |
+| `port` | u16 | `6667` | IRC 服务器端口。 |
+| `nick` | string | `"librefang"` | Bot 昵称。 |
+| `password_env` | string 或 null | `null` | 存放服务器密码的环境变量（可选）。 |
+| `channels` | list of strings | `[]` | 要加入的 IRC 频道（例如 `["#librefang", "#general"]`）。 |
+| `use_tls` | bool | `false` | 是否使用 TLS 连接。 |
+| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+
+#### `[channels.google_chat]`
+
+```toml
+[channels.google_chat]
+service_account_env = "GOOGLE_CHAT_SERVICE_ACCOUNT"
+space_ids = []
+webhook_port = 8444
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `service_account_env` | string | `"GOOGLE_CHAT_SERVICE_ACCOUNT"` | 存放服务账号 JSON 密钥的环境变量。 |
+| `space_ids` | list of strings | `[]` | 监听的 Google Chat 聊天室 ID 列表。 |
+| `webhook_port` | u16 | `8444` | 入站 Webhook 端口。 |
+| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+
+#### `[channels.twitch]`
+
+```toml
+[channels.twitch]
+oauth_token_env = "TWITCH_OAUTH_TOKEN"
+channels = ["mychannel"]
+nick = "librefang"
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `oauth_token_env` | string | `"TWITCH_OAUTH_TOKEN"` | 存放 Twitch OAuth 令牌的环境变量。 |
+| `channels` | list of strings | `[]` | 要加入的 Twitch 频道（不带 `#` 前缀）。 |
+| `nick` | string | `"librefang"` | 在 Twitch 聊天中的 Bot 昵称。 |
+| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+
+#### `[channels.rocketchat]`
+
+```toml
+[channels.rocketchat]
+server_url = "https://rocketchat.example.com"
+token_env = "ROCKETCHAT_TOKEN"
+user_id = ""
+allowed_channels = []
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `server_url` | string | `""` | Rocket.Chat 服务器 URL。 |
+| `token_env` | string | `"ROCKETCHAT_TOKEN"` | 存放 Rocket.Chat 认证令牌的环境变量。 |
+| `user_id` | string | `""` | Bot 用户 ID。 |
+| `allowed_channels` | list of strings | `[]` | 监听的频道 ID 列表。空列表 = 所有频道。 |
+| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+
+#### `[channels.zulip]`
+
+```toml
+[channels.zulip]
+server_url = "https://zulip.example.com"
+bot_email = "bot@zulip.example.com"
+api_key_env = "ZULIP_API_KEY"
+streams = []
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `server_url` | string | `""` | Zulip 服务器 URL。 |
+| `bot_email` | string | `""` | 在 Zulip 中注册的 Bot 邮箱地址。 |
+| `api_key_env` | string | `"ZULIP_API_KEY"` | 存放 Zulip API Key 的环境变量。 |
+| `streams` | list of strings | `[]` | 监听的 Stream 名称列表。空列表 = 所有 Stream。 |
+| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+
+#### `[channels.xmpp]`
+
+```toml
+[channels.xmpp]
+jid = "bot@jabber.org"
+password_env = "XMPP_PASSWORD"
+server = ""
+port = 5222
+rooms = []
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `jid` | string | `""` | XMPP JID（例如 `"bot@jabber.org"`）。 |
+| `password_env` | string | `"XMPP_PASSWORD"` | 存放 XMPP 密码的环境变量。 |
+| `server` | string | `""` | XMPP 服务器主机名。为空时默认使用 JID 的域名。 |
+| `port` | u16 | `5222` | XMPP 服务器端口。 |
+| `rooms` | list of strings | `[]` | 要加入的 MUC（多人聊天）房间。 |
+| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+
+#### `[channels.line]`
+
+```toml
+[channels.line]
+channel_secret_env = "LINE_CHANNEL_SECRET"
+access_token_env = "LINE_CHANNEL_ACCESS_TOKEN"
+webhook_port = 8450
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `channel_secret_env` | string | `"LINE_CHANNEL_SECRET"` | 存放 LINE Channel Secret 的环境变量。 |
+| `access_token_env` | string | `"LINE_CHANNEL_ACCESS_TOKEN"` | 存放 LINE Channel Access Token 的环境变量。 |
+| `webhook_port` | u16 | `8450` | 入站 Webhook 端口。 |
+| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+
+#### `[channels.viber]`
+
+```toml
+[channels.viber]
+auth_token_env = "VIBER_AUTH_TOKEN"
+webhook_url = ""
+webhook_port = 8451
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `auth_token_env` | string | `"VIBER_AUTH_TOKEN"` | 存放 Viber Bot 认证令牌的环境变量。 |
+| `webhook_url` | string | `""` | Viber Webhook 端点的公网 URL。 |
+| `webhook_port` | u16 | `8451` | 入站 Webhook 端口。 |
+| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+
+#### `[channels.messenger]`
+
+```toml
+[channels.messenger]
+page_token_env = "MESSENGER_PAGE_TOKEN"
+verify_token_env = "MESSENGER_VERIFY_TOKEN"
+webhook_port = 8452
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `page_token_env` | string | `"MESSENGER_PAGE_TOKEN"` | 存放 Facebook 页面访问令牌的环境变量。 |
+| `verify_token_env` | string | `"MESSENGER_VERIFY_TOKEN"` | 存放 Webhook 验证令牌的环境变量。 |
+| `webhook_port` | u16 | `8452` | 入站 Webhook 端口。 |
+| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+
+#### `[channels.reddit]`
+
+```toml
+[channels.reddit]
+client_id = ""
+client_secret_env = "REDDIT_CLIENT_SECRET"
+username = ""
+password_env = "REDDIT_PASSWORD"
+subreddits = []
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `client_id` | string | `""` | Reddit 应用客户端 ID。 |
+| `client_secret_env` | string | `"REDDIT_CLIENT_SECRET"` | 存放 Reddit 客户端密钥的环境变量。 |
+| `username` | string | `""` | Reddit Bot 用户名。 |
+| `password_env` | string | `"REDDIT_PASSWORD"` | 存放 Reddit Bot 密码的环境变量。 |
+| `subreddits` | list of strings | `[]` | 要监控的子版块名称。 |
+| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+
+#### `[channels.mastodon]`
+
+```toml
+[channels.mastodon]
+instance_url = "https://mastodon.social"
+access_token_env = "MASTODON_ACCESS_TOKEN"
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `instance_url` | string | `""` | Mastodon 实例 URL（例如 `"https://mastodon.social"`）。 |
+| `access_token_env` | string | `"MASTODON_ACCESS_TOKEN"` | 存放 Mastodon 访问令牌的环境变量。 |
+| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+
+#### `[channels.bluesky]`
+
+```toml
+[channels.bluesky]
+identifier = "mybot.bsky.social"
+app_password_env = "BLUESKY_APP_PASSWORD"
+service_url = "https://bsky.social"
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `identifier` | string | `""` | Bluesky 用户名或 DID。 |
+| `app_password_env` | string | `"BLUESKY_APP_PASSWORD"` | 存放 Bluesky 应用密码的环境变量。 |
+| `service_url` | string | `"https://bsky.social"` | PDS（个人数据服务器）URL。 |
+| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+
+#### `[channels.feishu]`
+
+```toml
+[channels.feishu]
+app_id = ""
+app_secret_env = "FEISHU_APP_SECRET"
+webhook_port = 8453
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `app_id` | string | `""` | 飞书/Lark 应用 ID。 |
+| `app_secret_env` | string | `"FEISHU_APP_SECRET"` | 存放飞书应用密钥的环境变量。 |
+| `webhook_port` | u16 | `8453` | 入站 Webhook 端口。 |
+| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+
+#### `[channels.revolt]`
+
+```toml
+[channels.revolt]
+bot_token_env = "REVOLT_BOT_TOKEN"
+api_url = "https://api.revolt.chat"
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `bot_token_env` | string | `"REVOLT_BOT_TOKEN"` | 存放 Revolt Bot 令牌的环境变量。 |
+| `api_url` | string | `"https://api.revolt.chat"` | Revolt API 基础 URL。 |
+| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+
+#### `[channels.nextcloud]`
+
+```toml
+[channels.nextcloud]
+server_url = "https://nextcloud.example.com"
+token_env = "NEXTCLOUD_TOKEN"
+allowed_rooms = []
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `server_url` | string | `""` | Nextcloud 服务器 URL。 |
+| `token_env` | string | `"NEXTCLOUD_TOKEN"` | 存放 Nextcloud Talk 认证令牌的环境变量。 |
+| `allowed_rooms` | list of strings | `[]` | 监听的房间令牌列表。空列表 = 所有房间。 |
+| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+
+#### `[channels.guilded]`
+
+```toml
+[channels.guilded]
+bot_token_env = "GUILDED_BOT_TOKEN"
+server_ids = []
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `bot_token_env` | string | `"GUILDED_BOT_TOKEN"` | 存放 Guilded Bot 令牌的环境变量。 |
+| `server_ids` | list of strings | `[]` | 监听的服务器 ID 列表。空列表 = 所有服务器。 |
+| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+
+#### `[channels.keybase]`
+
+```toml
+[channels.keybase]
+username = ""
+paperkey_env = "KEYBASE_PAPERKEY"
+allowed_teams = []
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `username` | string | `""` | Keybase 用户名。 |
+| `paperkey_env` | string | `"KEYBASE_PAPERKEY"` | 存放 Keybase 纸钥匙的环境变量。 |
+| `allowed_teams` | list of strings | `[]` | 监听的团队名称列表。空列表 = 仅私聊。 |
+| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+
+#### `[channels.threema]`
+
+```toml
+[channels.threema]
+threema_id = ""
+secret_env = "THREEMA_SECRET"
+webhook_port = 8454
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `threema_id` | string | `""` | Threema Gateway ID。 |
+| `secret_env` | string | `"THREEMA_SECRET"` | 存放 Threema API 密钥的环境变量。 |
+| `webhook_port` | u16 | `8454` | 入站 Webhook 端口。 |
+| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+
+#### `[channels.nostr]`
+
+```toml
+[channels.nostr]
+private_key_env = "NOSTR_PRIVATE_KEY"
+relays = ["wss://relay.damus.io"]
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `private_key_env` | string | `"NOSTR_PRIVATE_KEY"` | 存放 Nostr 私钥（nsec 或十六进制格式）的环境变量。 |
+| `relays` | list of strings | `["wss://relay.damus.io"]` | 要连接的 Nostr 中继 WebSocket URL 列表。 |
+| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+
+#### `[channels.webex]`
+
+```toml
+[channels.webex]
+bot_token_env = "WEBEX_BOT_TOKEN"
+allowed_rooms = []
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `bot_token_env` | string | `"WEBEX_BOT_TOKEN"` | 存放 Webex Bot 令牌的环境变量。 |
+| `allowed_rooms` | list of strings | `[]` | 监听的房间 ID 列表。空列表 = 所有房间。 |
+| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+
+#### `[channels.pumble]`
+
+```toml
+[channels.pumble]
+bot_token_env = "PUMBLE_BOT_TOKEN"
+webhook_port = 8455
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `bot_token_env` | string | `"PUMBLE_BOT_TOKEN"` | 存放 Pumble Bot 令牌的环境变量。 |
+| `webhook_port` | u16 | `8455` | 入站 Webhook 端口。 |
+| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+
+#### `[channels.flock]`
+
+```toml
+[channels.flock]
+bot_token_env = "FLOCK_BOT_TOKEN"
+webhook_port = 8456
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `bot_token_env` | string | `"FLOCK_BOT_TOKEN"` | 存放 Flock Bot 令牌的环境变量。 |
+| `webhook_port` | u16 | `8456` | 入站 Webhook 端口。 |
+| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+
+#### `[channels.twist]`
+
+```toml
+[channels.twist]
+token_env = "TWIST_TOKEN"
+workspace_id = ""
+allowed_channels = []
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `token_env` | string | `"TWIST_TOKEN"` | 存放 Twist API 令牌的环境变量。 |
+| `workspace_id` | string | `""` | Twist 工作区 ID。 |
+| `allowed_channels` | list of strings | `[]` | 监听的频道 ID 列表。空列表 = 所有频道。 |
+| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+
+#### `[channels.mumble]`
+
+```toml
+[channels.mumble]
+host = "mumble.example.com"
+port = 64738
+username = "librefang"
+password_env = "MUMBLE_PASSWORD"
+channel = ""
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `host` | string | `""` | Mumble 服务器主机名。 |
+| `port` | u16 | `64738` | Mumble 服务器端口。 |
+| `username` | string | `"librefang"` | Bot 在 Mumble 中的用户名。 |
+| `password_env` | string | `"MUMBLE_PASSWORD"` | 存放 Mumble 服务器密码的环境变量。 |
+| `channel` | string | `""` | 要加入的 Mumble 频道。 |
+| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+
+#### `[channels.dingtalk]`
+
+支持两种模式：**stream**（默认，推荐）和 **webhook**（传统）。
+
+```toml
+# Stream 模式（推荐 — 无需公网 IP）
+[channels.dingtalk]
+receive_mode = "stream"
+app_key_env = "DINGTALK_APP_KEY"
+app_secret_env = "DINGTALK_APP_SECRET"
+
+# Webhook 模式（传统）
+[channels.dingtalk]
+receive_mode = "webhook"
+access_token_env = "DINGTALK_ACCESS_TOKEN"
+secret_env = "DINGTALK_SECRET"
+webhook_port = 8457
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `receive_mode` | string | `"stream"` | 连接模式：`"stream"` 或 `"webhook"`。 |
+| `app_key_env` | string | `"DINGTALK_APP_KEY"` | 存放钉钉 App Key 的环境变量（stream 模式）。 |
+| `app_secret_env` | string | `"DINGTALK_APP_SECRET"` | 存放钉钉 App Secret 的环境变量（stream 模式）。 |
+| `access_token_env` | string | `"DINGTALK_ACCESS_TOKEN"` | 存放钉钉 Webhook 访问令牌的环境变量（webhook 模式）。 |
+| `secret_env` | string | `"DINGTALK_SECRET"` | 存放钉钉签名密钥的环境变量（webhook 模式）。 |
+| `webhook_port` | u16 | `8457` | 入站 Webhook 端口（仅 webhook 模式）。 |
+| `robot_code` | string 或 null | `null` | Stream 模式回复使用的机器人编码（默认使用 app_key）。 |
+| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+
+#### `[channels.discourse]`
+
+```toml
+[channels.discourse]
+base_url = "https://forum.example.com"
+api_key_env = "DISCOURSE_API_KEY"
+api_username = "system"
+categories = []
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `base_url` | string | `""` | Discourse 论坛基础 URL。 |
+| `api_key_env` | string | `"DISCOURSE_API_KEY"` | 存放 Discourse API Key 的环境变量。 |
+| `api_username` | string | `"system"` | Discourse API 用户名。 |
+| `categories` | list of strings | `[]` | 要监控的分类标识（slug）。 |
+| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+
+#### `[channels.gitter]`
+
+```toml
+[channels.gitter]
+token_env = "GITTER_TOKEN"
+room_id = ""
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `token_env` | string | `"GITTER_TOKEN"` | 存放 Gitter 认证令牌的环境变量。 |
+| `room_id` | string | `""` | 监听的 Gitter 房间 ID。 |
+| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+
+#### `[channels.ntfy]`
+
+```toml
+[channels.ntfy]
+server_url = "https://ntfy.sh"
+topic = "my-agent-topic"
+token_env = "NTFY_TOKEN"
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `server_url` | string | `"https://ntfy.sh"` | ntfy 服务器 URL。支持自托管。 |
+| `topic` | string | `""` | 要订阅/发布的主题。 |
+| `token_env` | string | `"NTFY_TOKEN"` | 存放认证令牌的环境变量。公共主题可选。 |
+| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+
+#### `[channels.gotify]`
+
+```toml
+[channels.gotify]
+server_url = "https://gotify.example.com"
+app_token_env = "GOTIFY_APP_TOKEN"
+client_token_env = "GOTIFY_CLIENT_TOKEN"
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `server_url` | string | `""` | Gotify 服务器 URL。 |
+| `app_token_env` | string | `"GOTIFY_APP_TOKEN"` | 存放 Gotify 应用令牌（用于发送消息）的环境变量。 |
+| `client_token_env` | string | `"GOTIFY_CLIENT_TOKEN"` | 存放 Gotify 客户端令牌（通过 WebSocket 接收消息）的环境变量。 |
+| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+
+#### `[channels.webhook]`
+
+```toml
+[channels.webhook]
+secret_env = "WEBHOOK_SECRET"
+listen_port = 8460
+# callback_url = "https://example.com/webhook"
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `secret_env` | string | `"WEBHOOK_SECRET"` | 存放用于验证入站 Webhook 的 HMAC 签名密钥的环境变量。 |
+| `listen_port` | u16 | `8460` | 监听入站 Webhook 请求的端口。 |
+| `callback_url` | string 或 null | `null` | 发送出站消息的 POST 目标 URL。 |
+| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+
+#### `[channels.linkedin]`
+
+```toml
+[channels.linkedin]
+access_token_env = "LINKEDIN_ACCESS_TOKEN"
+organization_id = ""
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `access_token_env` | string | `"LINKEDIN_ACCESS_TOKEN"` | 存放 LinkedIn OAuth2 访问令牌的环境变量。 |
+| `organization_id` | string | `""` | LinkedIn 组织 ID，用于消息收发。 |
+| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+
+#### `[channels.qq]`
+
+使用 QQ 机器人开放平台官方 API 的 QQ Bot 通道适配器。
+
+```toml
+[channels.qq]
+app_id = "your-app-id"
+app_secret_env = "QQ_BOT_APP_SECRET"
+allowed_users = []
+# default_agent = "assistant"
+# account_id = "my-qq-bot"
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `app_id` | string | `""` | 在 QQ 开放平台注册的 QQ Bot 应用 ID。 |
+| `app_secret_env` | string | `"QQ_BOT_APP_SECRET"` | 存放 QQ Bot 应用密钥的环境变量。实际密钥绝不存储在配置中。 |
+| `allowed_users` | list of strings | `[]` | 允许交互的 QQ 用户 ID 列表。空列表 = 允许所有。 |
+| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+| `account_id` | string 或 null | `null` | 用于多 Bot 路由的唯一 Bot 实例标识符。 |
+| `overrides` | object | （默认值） | 每个通道的行为覆盖配置。详见[通道行为覆盖](#通道行为覆盖)。 |
+
+#### `[channels.wecom]`
+
+企业微信（WeCom）智能机器人通道适配器。通过 WebSocket 连接到 `wss://openws.work.weixin.qq.com`。
+
+```toml
+[channels.wecom]
+bot_id = "YOUR_BOT_ID"
+secret_env = "WECOM_BOT_SECRET"
+# account_id = "my-wecom-bot"
+# default_agent = "assistant"
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `bot_id` | string | `""` | 企业微信管理后台的智能机器人 Bot ID。 |
+| `secret_env` | string | `"WECOM_BOT_SECRET"` | 存放机器人密钥的环境变量。 |
+| `account_id` | string 或 null | `null` | 用于多 Bot 路由的唯一 Bot 实例标识符。 |
+| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+| `overrides` | object | （默认值） | 每个通道的行为覆盖配置。详见[通道行为覆盖](#通道行为覆盖)。 |
+
+#### `[channels.wechat]`
+
+微信个人账号通道适配器，使用腾讯的 iLink Bot API。通过扫码登录连接，无需 API Key 或开发者账号。
+
+```toml
+[channels.wechat]
+# bot_token_env = "WECHAT_BOT_TOKEN"  # 可选：上次会话的持久化令牌
+allowed_users = []
+# default_agent = "assistant"
+# account_id = "my-wechat-bot"
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `bot_token_env` | string | `"WECHAT_BOT_TOKEN"` | 存放上次二维码登录会话持久化令牌的环境变量。设置后可在重启时跳过二维码登录。 |
+| `allowed_users` | list of strings | `[]` | 允许交互的微信用户 ID（格式：`hash@im.wechat`）。空列表 = 允许所有。 |
+| `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+| `account_id` | string 或 null | `null` | 用于多 Bot 路由的唯一 Bot 实例标识符。 |
+| `overrides` | object | （默认值） | 每个通道的行为覆盖配置。详见[通道行为覆盖](#通道行为覆盖)。 |
+
+---
+
+### `[[mcp_servers]]`
+
+MCP（模型上下文协议）服务器连接提供外部工具集成。每个条目是 `[[mcp_servers]]` 数组中的一个独立元素。
+
+```toml
+[[mcp_servers]]
+name = "filesystem"
+timeout_secs = 30
+env = []
+
+[mcp_servers.transport]
+type = "stdio"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/home/user/docs"]
+```
+
+```toml
+[[mcp_servers]]
+name = "remote-api"
+timeout_secs = 60
+env = ["GITHUB_PERSONAL_ACCESS_TOKEN"]
+
+[mcp_servers.transport]
+type = "sse"
+url = "https://mcp.example.com/sse"
+```
+
+```toml
+[[mcp_servers]]
+name = "my-http-backend"
+timeout_secs = 30
+
+[mcp_servers.transport]
+type = "http_compat"
+base_url = "https://tools.example.com"
+headers = [{name = "Authorization", value_env = "MY_API_KEY"}]
+
+[[mcp_servers.transport.tools]]
+name = "search"
+description = "Search documents"
+path = "/search"
+method = "post"
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `name` | string | *必填* | MCP 服务器的显示名称。工具以 `mcp_{name}_{tool}` 的命名空间注册。 |
+| `timeout_secs` | u64 | `30` | 请求超时时间（秒）。 |
+| `env` | list of strings | `[]` | 传递给子进程的环境变量名称（仅 stdio 传输方式）。 |
+
+**传输方式变体**（基于 `type` 的标记联合体）：
+
+| `type` | 字段 | 说明 |
+|--------|------|------|
+| `stdio` | `command`（string）、`args`（list of strings，默认 `[]`） | 启动子进程，通过 stdin/stdout 上的 JSON-RPC 通信。 |
+| `sse` | `url`（string） | 连接到 HTTP Server-Sent Events 端点。 |
+| `http_compat` | `base_url`（string）、`headers`（header 配置列表）、`tools`（工具配置列表） | 内置兼容适配器，用于没有原生 MCP 服务器的纯 HTTP/JSON 工具后端。每个工具映射到一个 HTTP 端点。 |
+
+**`http_compat` header 配置：**
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `name` | string | HTTP 请求头名称（例如 `"Authorization"`）。 |
+| `value` | string 或 null | 静态请求头值。 |
+| `value_env` | string 或 null | 用作请求头值的环境变量名称（密钥推荐使用此方式）。 |
+
+**`http_compat` 工具配置：**
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `name` | string | *必填* | 暴露给 LLM 的工具名称。 |
+| `description` | string | `""` | 展示给 LLM 的工具描述。 |
+| `path` | string | *必填* | HTTP 路径（例如 `"/search"`）。 |
+| `method` | string | `"post"` | HTTP 方法：`get`、`post`、`put`、`patch`、`delete`。 |
+| `request_mode` | string | `"json_body"` | 参数发送方式：`json_body`、`query`、`none`。 |
+| `response_mode` | string | `"json"` | 响应解析方式：`json`、`text`。 |
+| `input_schema` | object | `{"type":"object"}` | 工具输入参数的 JSON Schema。 |
+
+---
+
+### `[a2a]`
+
+Agent 间协议（A2A）配置，实现跨 LibreFang 实例的 Agent 间通信。
+
+```toml
+[a2a]
+enabled = true
+name = "LibreFang Agent OS"
+description = "My production agent OS"
+listen_path = "/a2a"
+
+[[a2a.external_agents]]
+name = "research-agent"
+url = "https://agent.example.com/.well-known/agent.json"
+
+[[a2a.external_agents]]
+name = "code-reviewer"
+url = "https://reviewer.example.com/.well-known/agent.json"
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | `false` | 是否启用 A2A 协议。 |
+| `name` | string | `"LibreFang Agent OS"` | 在 well-known Agent 名片中展示的服务级显示名称。 |
+| `description` | string | `""` | 在 well-known Agent 名片中展示的服务级描述。 |
+| `listen_path` | string | `"/a2a"` | A2A 端点的 URL 路径前缀。 |
+| `external_agents` | list of objects | `[]` | 要发现和交互的外部 A2A Agent 列表。 |
+
+**`external_agents` 条目：**
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `name` | string | 外部 Agent 的显示名称。 |
+| `url` | string | Agent 名片端点 URL（通常为 `/.well-known/agent.json`）。 |
+
+---
+
+### `[[fallback_providers]]`
+
+后备提供商链。当主 LLM 提供商（`[default_model]`）失败时，按顺序尝试这些后备提供商。
+
+```toml
+[[fallback_providers]]
+provider = "ollama"
+model = "llama3.2:latest"
+api_key_env = ""
+# base_url = "http://localhost:11434"
+
+[[fallback_providers]]
+provider = "groq"
+model = "llama-3.3-70b-versatile"
+api_key_env = "GROQ_API_KEY"
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `provider` | string | `""` | 提供商名称（例如 `"ollama"`、`"groq"`、`"openai"`）。 |
+| `model` | string | `""` | 该提供商的模型标识符。 |
+| `api_key_env` | string | `""` | API Key 的环境变量名称。本地提供商（ollama、vllm、lmstudio）留空。 |
+| `base_url` | string 或 null | `null` | 基础 URL 覆盖。为 null 时使用模型目录默认值。 |
+
+---
+
+### `[[users]]`
+
+RBAC 多用户配置。用户可以被分配角色，并绑定到各通道平台的身份标识。
+
+```toml
+[[users]]
+name = "Alice"
+role = "owner"
+api_key_hash = "sha256_hash_of_api_key"
+
+[users.channel_bindings]
+telegram = "123456"
+discord = "987654321"
+slack = "U0ABCDEFG"
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `name` | string | *必填* | 用户显示名称。 |
+| `role` | string | `"user"` | 用户在 RBAC 层级中的角色。 |
+| `channel_bindings` | map of string to string | `{}` | 将通道平台名称映射到平台特定用户 ID，实现跨通道的用户身份绑定。 |
+| `api_key_hash` | string 或 null | `null` | 用户个人 API Key 的 SHA256 哈希值，用于认证 API 访问。 |
+
+**角色层级**（从最高到最低权限）：
+
+| 角色 | 说明 |
+|------|------|
+| `owner` | 完全管理权限。可以管理所有 Agent、用户和配置。 |
+| `admin` | 可以管理 Agent 和大多数设置。无法修改 owner 账户。 |
+| `user` | 可以与 Agent 交互。管理能力有限。 |
+| `viewer` | 只读访问。可以查看 Agent 回复，但无法发送消息。 |
+
+---
+
+### 通道行为覆盖
+
+每个通道适配器都支持 `[channels.<name>.overrides]` 子表，用于按通道自定义 Agent 行为。
+
+```toml
+[channels.telegram.overrides]
+model = "claude-haiku-4-5-20251001"
+system_prompt = "You are a concise Telegram assistant."
+dm_policy = "respond"
+group_policy = "mention_only"
+rate_limit_per_minute = 0
+rate_limit_per_user = 10
+threading = true
+output_format = "telegram_html"
+usage_footer = "tokens"
+typing_mode = "instant"
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `model` | string 或 null | `null` | 该通道的模型覆盖。为 null 时使用 Agent 的默认模型。 |
+| `system_prompt` | string 或 null | `null` | 该通道的系统提示词覆盖。 |
+| `dm_policy` | string | `"respond"` | Bot 处理私聊消息的方式。见下表。 |
+| `group_policy` | string | `"mention_only"` | Bot 处理群组消息的方式。见下表。 |
+| `rate_limit_per_minute` | u32 | `0` | 该通道的全局速率限制（每分钟消息数）。`0` = 无限制。 |
+| `rate_limit_per_user` | u32 | `0` | 每个用户每分钟的最大消息数。`0` = 无限制。 |
+| `threading` | bool | `false` | 启用线程回复（在支持的平台上）。 |
+| `output_format` | string 或 null | `null` | 覆盖输出格式。见下表。 |
+| `usage_footer` | string 或 null | `null` | 覆盖该通道的用量页脚模式。可选值：`off`、`tokens`、`cost`、`full`。 |
+| `typing_mode` | string 或 null | `null` | 输入状态指示器行为。见下表。默认为 `instant`。 |
+
+**`dm_policy` 值说明：**
+
+| 值 | 说明 |
+|----|------|
+| `respond` | 回复所有私聊消息（默认）。 |
+| `allowed_only` | 仅回复允许列表中用户的私聊消息。 |
+| `ignore` | 忽略所有私聊消息。 |
+
+**`group_policy` 值说明：**
+
+| 值 | 说明 |
+|----|------|
+| `all` | 回复群聊中的所有消息。 |
+| `mention_only` | 仅在被 @ 提及时回复（默认）。 |
+| `commands_only` | 仅回复斜杠命令。 |
+| `ignore` | 忽略所有群组消息。 |
+
+**`output_format` 值说明：**
+
+| 值 | 说明 |
+|----|------|
+| `markdown` | 标准 Markdown（默认）。 |
+| `telegram_html` | Telegram HTML 子集（`<b>`、`<i>`、`<code>` 等）。 |
+| `slack_mrkdwn` | Slack mrkdwn 格式（`*bold*`、`_italic_`、`` `code` ``）。 |
+| `plain_text` | 无格式标记。 |
+
+**`typing_mode` 值说明：**
+
+| 值 | 说明 |
+|----|------|
+| `instant` | 收到消息后立即发送输入状态指示（默认）。 |
+| `message` | 仅在 LLM 返回第一个文本增量时发送输入状态指示。 |
+| `thinking` | 仅在 LLM 推理/思考阶段发送输入状态指示。 |
+| `never` | 从不发送输入状态指示。 |
+
+---
+
+### `[browser]`
+
+配置 Agent 工具 `browser_*` 使用的无头浏览器自动化引擎。
+
+```toml
+[browser]
+headless = true
+viewport_width = 1280
+viewport_height = 720
+timeout_secs = 30
+idle_timeout_secs = 300
+max_sessions = 5
+# chromium_path = "/usr/bin/chromium"
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `headless` | bool | `true` | 以无头模式运行浏览器（不显示窗口）。 |
+| `viewport_width` | u32 | `1280` | 浏览器视口宽度（像素）。 |
+| `viewport_height` | u32 | `720` | 浏览器视口高度（像素）。 |
+| `timeout_secs` | u64 | `30` | 每个操作的超时时间（秒）。 |
+| `idle_timeout_secs` | u64 | `300` | 浏览器会话闲置超过此秒数后自动关闭。 |
+| `max_sessions` | usize | `5` | 最大并发浏览器会话数。 |
+| `chromium_path` | string 或 null | `null` | Chromium/Chrome 二进制文件路径。为 null 时自动检测。 |
+
+---
+
+### `[reload]`
+
+控制配置文件的自动监控和热重载。
+
+```toml
+[reload]
+mode = "hybrid"
+debounce_ms = 500
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `mode` | string | `"hybrid"` | 重载模式。见下表。 |
+| `debounce_ms` | u64 | `500` | 检测到文件变更后，重载前的防抖窗口时长（毫秒）。 |
+
+**`mode` 值说明：**
+
+| 值 | 说明 |
+|----|------|
+| `off` | 不自动重载。更改需手动重启。 |
+| `restart` | 任何配置变更都进行完整守护进程重启。 |
+| `hot` | 仅对安全的部分进行热重载（通道、技能、心跳）。 |
+| `hybrid` | 尽可能热重载；对需要重启的部分标记提示（默认）。 |
+
+---
+
+### `[exec_policy]`
+
+控制 Agent 通过 `exec` 和 `shell` 工具允许执行的 Shell 命令。
+
+```toml
+[exec_policy]
+mode = "allowlist"
+allowed_commands = ["git", "python3", "node"]
+timeout_secs = 30
+max_output_bytes = 102400
+no_output_timeout_secs = 30
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `mode` | string | `"allowlist"` | 安全模式。见下表。 |
+| `safe_bins` | list of strings | `["sleep","true","false","cat","sort","uniq","cut","tr","head","tail","wc","date","echo","printf","basename","dirname","pwd","env"]` | 始终绕过白名单检查的命令（仅标准输入的 POSIX 工具）。 |
+| `allowed_commands` | list of strings | `[]` | 当 `mode = "allowlist"` 时额外允许的命令。 |
+| `timeout_secs` | u64 | `30` | 每条命令的最大挂钟执行时间（秒）。 |
+| `max_output_bytes` | usize | `102400` | stdout+stderr 合并输出的最大大小（字节）。默认 100 KB。 |
+| `no_output_timeout_secs` | u64 | `30` | 进程在此秒数内无输出则被终止。`0` = 禁用。 |
+
+**`mode` 值说明：**
+
+| 值 | 别名 | 说明 |
+|----|------|------|
+| `deny` | `none`、`disabled` | 阻止所有 Shell 执行。 |
+| `allowlist` | `restricted` | 仅允许 `safe_bins` 或 `allowed_commands` 中的命令（默认）。 |
+| `full` | `allow`、`all`、`unrestricted` | 允许所有命令。不安全——仅限开发使用。 |
+
+---
+
+### `[approval]`
+
+配置哪些工具在执行前需要明确的人工批准。引用 `ApprovalPolicy` 类型。
+
+```toml
+[approval]
+require_approval = ["shell_exec"]
+timeout_secs = 60
+auto_approve_autonomous = false
+auto_approve = false
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `require_approval` | list of strings | `["shell_exec"]` | 需要暂停执行并等待人工批准的工具名称列表。 |
+| `timeout_secs` | u64 | `60` | 审批请求的超时时间（秒）。 |
+| `auto_approve_autonomous` | bool | `false` | Agent 处于自主模式时自动批准工具执行。 |
+| `auto_approve` | bool | `false` | 自动批准所有工具执行（不安全，仅限开发使用）。 |
+
+---
+
+### `[budget]`
+
+设置 LLM API 费用的全局支出限制。所有限制默认为 `0.0`（无限制）。
+
+```toml
+[budget]
+max_hourly_usd = 1.00
+max_daily_usd = 10.00
+max_monthly_usd = 50.00
+alert_threshold = 0.8
+default_max_llm_tokens_per_hour = 0
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `max_hourly_usd` | f64 | `0.0` | 所有 Agent 每小时的最大 LLM 费用（美元）。`0.0` = 无限制。 |
+| `max_daily_usd` | f64 | `0.0` | 所有 Agent 每天的最大 LLM 费用（美元）。`0.0` = 无限制。 |
+| `max_monthly_usd` | f64 | `0.0` | 所有 Agent 每月的最大 LLM 费用（美元）。`0.0` = 无限制。 |
+| `alert_threshold` | f64 | `0.8` | 各限额的告警阈值（0.0-1.0 的比例）。设为 0.8 时，达到限额 80% 即记录告警日志。 |
+| `default_max_llm_tokens_per_hour` | u64 | `0` | 全局覆盖每个 Agent 的每小时 Token 预算。大于 `0` 时覆盖所有 Agent 自身的 Token 限制。`0` = 保持各 Agent 自身的限制。 |
+
+---
+
+### `[thinking]`
+
+配置支持扩展思维（思维链推理）的模型（例如启用了 `thinking` 模式的 Claude 3.7 Sonnet）。
+
+```toml
+[thinking]
+budget_tokens = 10000
+stream_thinking = false
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `budget_tokens` | u32 | `10000` | 分配给思维/推理阶段的最大 Token 数。 |
+| `stream_thinking` | bool | `false` | 是否将思维 Token 流式传输给客户端（在 API 响应流中可见）。 |
+
+---
+
+### `[tts]`
+
+配置语音合成（Text-to-Speech）功能。
+
+```toml
+[tts]
+enabled = false
+provider = "openai"          # openai | elevenlabs
+max_text_length = 4096
+timeout_secs = 30
+
+[tts.openai]
+voice = "alloy"
+model = "tts-1"
+format = "mp3"
+speed = 1.0
+
+[tts.elevenlabs]
+voice_id = "21m00Tcm4TlvDq8ikWAM"
+model_id = "eleven_monolingual_v1"
+stability = 0.5
+similarity_boost = 0.75
+```
+
+**`[tts]` 字段：**
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | `false` | 启用 TTS 合成。 |
+| `provider` | string 或 null | `null` | 默认 TTS 提供商：`"openai"` 或 `"elevenlabs"`。 |
+| `max_text_length` | usize | `4096` | 单次 TTS 请求的最大文本长度（字符数）。 |
+| `timeout_secs` | u64 | `30` | 每次 TTS 调用的请求超时时间（秒）。 |
+
+**`[tts.openai]` 字段：**
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `voice` | string | `"alloy"` | 语音名称。可选：`alloy`、`echo`、`fable`、`onyx`、`nova`、`shimmer`。 |
+| `model` | string | `"tts-1"` | TTS 模型：`"tts-1"`（快速）或 `"tts-1-hd"`（高质量）。 |
+| `format` | string | `"mp3"` | 输出格式：`mp3`、`opus`、`aac`、`flac`。 |
+| `speed` | f32 | `1.0` | 语速倍率（0.25 到 4.0）。 |
+
+**`[tts.elevenlabs]` 字段：**
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `voice_id` | string | `"21m00Tcm4TlvDq8ikWAM"` | ElevenLabs 语音 ID（默认：Rachel）。 |
+| `model_id` | string | `"eleven_monolingual_v1"` | ElevenLabs 模型 ID。 |
+| `stability` | f32 | `0.5` | 语音稳定性（0.0-1.0）。越高越稳定，但表现力越低。 |
+| `similarity_boost` | f32 | `0.75` | 语音相似度增强（0.0-1.0）。 |
+
+---
+
+### `[docker]`
+
+配置用于隔离代码执行的 Docker 容器沙箱。
+
+```toml
+[docker]
+enabled = false
+image = "python:3.12-slim"
+container_prefix = "librefang-sandbox"
+workdir = "/workspace"
+network = "none"
+memory_limit = "512m"
+cpu_limit = 1.0
+timeout_secs = 60
+read_only_root = true
+mode = "off"
+scope = "session"
+reuse_cool_secs = 300
+idle_timeout_secs = 86400
+max_age_secs = 604800
+blocked_mounts = []
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | `false` | 启用 Docker 沙箱用于代码执行。 |
+| `image` | string | `"python:3.12-slim"` | 沙箱容器使用的 Docker 镜像。 |
+| `container_prefix` | string | `"librefang-sandbox"` | 容器名称前缀。 |
+| `workdir` | string | `"/workspace"` | 容器内的工作目录。 |
+| `network` | string | `"none"` | 网络模式：`"none"`（隔离）、`"bridge"` 或自定义网络名称。 |
+| `memory_limit` | string | `"512m"` | 内存限制（例如 `"256m"`、`"1g"`）。 |
+| `cpu_limit` | f64 | `1.0` | CPU 限制（例如 `0.5`、`1.0`、`2.0`）。 |
+| `timeout_secs` | u64 | `60` | 每条命令的最大执行时间（秒）。 |
+| `read_only_root` | bool | `true` | 将根文件系统挂载为只读。 |
+| `mode` | string | `"off"` | 激活模式。见下表。 |
+| `scope` | string | `"session"` | 容器生命周期范围。见下表。 |
+| `reuse_cool_secs` | u64 | `300` | 释放的容器在此秒数冷却后才可重用。 |
+| `idle_timeout_secs` | u64 | `86400` | 容器闲置超过此秒数后被销毁（默认 24 小时）。 |
+| `max_age_secs` | u64 | `604800` | 容器最大存活时间，超时后强制销毁（默认 7 天）。 |
+| `blocked_mounts` | list of strings | `[]` | 禁止绑定挂载到容器的宿主机路径。 |
+| `cap_add` | list of strings | `[]` | 添加到容器的 Linux 能力（例如 `["NET_ADMIN"]`）。请谨慎使用。 |
+| `tmpfs` | list of strings | `["/tmp:size=64m"]` | 容器内的 tmpfs 挂载。每个条目格式为 `"path:options"`（例如 `"/tmp:size=128m"`）。 |
+| `pids_limit` | u32 | `100` | 容器内的最大进程数。防止 Fork 炸弹。 |
+
+**`mode` 值说明：**
+
+| 值 | 说明 |
+|----|------|
+| `off` | 禁用 Docker 沙箱（默认）。 |
+| `non_main` | 仅对非主（子）Agent 使用 Docker。 |
+| `all` | 对所有 Agent 使用 Docker。 |
+
+**`scope` 值说明：**
+
+| 值 | 说明 |
+|----|------|
+| `session` | 每个会话一个容器，会话结束时销毁（默认）。 |
+| `agent` | 每个 Agent 一个容器，跨会话重用。 |
+| `shared` | 所有 Agent 共享容器池。 |
+
+---
+
+### `[canvas]`
+
+配置 Canvas（Agent 到 UI）工具，允许 Agent 在仪表盘中渲染 HTML。
+
+```toml
+[canvas]
+enabled = false
+max_html_bytes = 524288
+allowed_tags = []
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | `false` | 启用 Canvas 工具。 |
+| `max_html_bytes` | usize | `524288` | HTML 负载的最大大小（字节）。默认 512 KB。 |
+| `allowed_tags` | list of strings | `[]` | 用于净化的允许 HTML 标签名称。空列表 = 允许所有安全标签。 |
+
+---
+
+### `[auto_reply]`
+
+配置后台自动回复引擎，可以在无需人工交互的情况下自动回复传入消息。
+
+```toml
+[auto_reply]
+enabled = false
+max_concurrent = 3
+timeout_secs = 120
+suppress_patterns = ["/stop", "/pause"]
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | `false` | 启用自动回复引擎。 |
+| `max_concurrent` | usize | `3` | 最大并发自动回复任务数。 |
+| `timeout_secs` | u64 | `120` | 每个自动回复任务的默认超时时间（秒）。 |
+| `suppress_patterns` | list of strings | `["/stop", "/pause"]` | 抑制自动回复的传入消息匹配模式。 |
+
+---
+
+### `[broadcast]`
+
+配置消息广播，将单条传入消息同时路由到多个 Agent。
+
+```toml
+[broadcast]
+strategy = "parallel"
+routes = { "announcement-channel" = ["agent-a", "agent-b", "agent-c"] }
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `strategy` | string | `"parallel"` | 投递策略。`"parallel"` = 同时发送给所有 Agent；`"sequential"` = 按顺序逐个发送。 |
+| `routes` | map of string to list of strings | `{}` | 将对等方/通道标识符映射到接收消息的 Agent 名称列表。 |
+
+---
+
+### `[inbox]`
+
+基于文件的异步外部命令输入收件箱。将文本文件放入监控目录后，文件内容会作为消息分发给 Agent。已处理的文件会被移动到 `processed/` 子目录以避免重复投递。
+
+```toml
+[inbox]
+enabled = true
+directory = "~/.librefang/inbox/"
+poll_interval_secs = 5
+default_agent = "assistant"
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | `false` | 启用收件箱目录监控。 |
+| `directory` | string 或 null | `null` | 监控的目录。默认为 `$HOME_DIR/inbox/`。支持 `~` 展开。 |
+| `poll_interval_secs` | u64 | `5` | 扫描目录新文件的间隔（秒）。最小值 1。 |
+| `default_agent` | string 或 null | `null` | 文件中未找到 `agent:` 指令时路由到的 Agent 名称。 |
+
+**文件格式：** 纯文本文件（`.txt`、`.md`、`.json`、`.py` 等）。第一行可以包含 `agent:<name>` 指令以指定目标 Agent；其余部分作为消息正文发送。没有指令的文件使用 `default_agent`。
+
+**安全限制：** 大于 1 MB 的文件会被跳过。二进制文件（非文本扩展名）会被跳过。空文件会被移动到 `processed/` 但不发送。
+
+**使用示例：**
+
+指定目标 Agent：
+
+```bash
+cat > ~/.librefang/inbox/task.txt << 'EOF'
+agent:code-reviewer
+Please review this code for security issues:
+
+def login(user, password):
+    query = f"SELECT * FROM users WHERE name='{user}' AND pass='{password}'"
+    return db.execute(query)
+EOF
+```
+
+发送到默认 Agent：
+
+```bash
+echo "Summarize today's system logs" > ~/.librefang/inbox/summarize.txt
+```
+
+定时任务：
+
+```bash
+# crontab -e
+0 9 * * * grep ERROR /var/log/app.log > ~/.librefang/inbox/daily_errors.txt
+```
+
+CI/CD 构建后处理：
+
+```bash
+echo "agent:devops
+Build failed, please analyze:
+$(tail -100 build.log)" > ~/.librefang/inbox/build_$(date +%s).txt
+```
+
+批量处理：
+
+```bash
+for doc in ~/reports/*.md; do
+  cp "$doc" ~/.librefang/inbox/
+done
+```
+
+检查收件箱状态：
+
+```bash
+curl -s http://127.0.0.1:4545/api/inbox/status
+# {"enabled":true,"pending_count":3,"processed_count":12,...}
+```
+
+---
+
+### `[[bindings]]`
+
+Agent 绑定将特定的通道/账号/对等方组合路由到特定的 Agent。更具体的绑定（非空字段越多）优先级越高。
+
+```toml
+[[bindings]]
+agent = "support-agent"
+[bindings.match_rule]
+channel = "telegram"
+guild_id = "123456"
+
+[[bindings]]
+agent = "vip-agent"
+[bindings.match_rule]
+channel = "discord"
+peer_id = "987654321"
+roles = ["premium"]
+```
+
+**顶层字段：**
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `agent` | string | 匹配的消息路由到的目标 Agent 名称或 ID。 |
+| `match_rule` | object | 匹配条件。所有指定的（非空）字段必须全部匹配。 |
+
+**`match_rule` 字段：**
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `channel` | string 或 null | `null` | 要匹配的通道类型（例如 `"discord"`、`"telegram"`、`"slack"`）。 |
+| `account_id` | string 或 null | `null` | 通道内特定的 Bot 账号 ID（用于多 Bot 场景）。 |
+| `peer_id` | string 或 null | `null` | 用于私聊路由的用户/对等方 ID。 |
+| `guild_id` | string 或 null | `null` | 服务器/Guild ID（Discord/Slack）。 |
+| `roles` | list of strings | `[]` | 基于角色的路由；用户必须拥有其中至少一个角色。 |
+
+**具体度评分**（分值越高越先匹配）：`peer_id`（+8）> `guild_id`（+4）> `roles`（+2）= `account_id`（+2）> `channel`（+1）。
+
+---
+
+### `[pairing]`
+
+配置 LibreFang 移动端伴侣应用的设备配对和推送通知。
+
+```toml
+[pairing]
+enabled = false
+max_devices = 10
+token_expiry_secs = 300
+push_provider = "ntfy"
+ntfy_url = "https://ntfy.sh"
+ntfy_topic = "my-librefang-notifications"
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | `false` | 启用设备配对。 |
+| `max_devices` | usize | `10` | 最大配对设备数。 |
+| `token_expiry_secs` | u64 | `300` | 配对令牌有效期（秒）。默认 5 分钟。 |
+| `push_provider` | string | `"none"` | 推送通知提供商：`"none"`、`"ntfy"` 或 `"gotify"`。 |
+| `ntfy_url` | string 或 null | `null` | ntfy 服务器 URL（当 `push_provider = "ntfy"` 时使用）。 |
+| `ntfy_topic` | string 或 null | `null` | 推送通知的 ntfy 主题。 |
+
+---
+
+### `[extensions]`
+
+配置 MCP 服务器的重连行为和健康监控。
+
+```toml
+[extensions]
+auto_reconnect = true
+reconnect_max_attempts = 10
+reconnect_max_backoff_secs = 300
+health_check_interval_secs = 60
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `auto_reconnect` | bool | `true` | MCP 服务器断开连接时自动重连。 |
+| `reconnect_max_attempts` | u32 | `10` | 放弃前的最大重连尝试次数。 |
+| `reconnect_max_backoff_secs` | u64 | `300` | 重连尝试之间的最大退避时间（秒）。 |
+| `health_check_interval_secs` | u64 | `60` | 已连接扩展的健康检查间隔（秒）。 |
+
+---
+
+### `[vault]`
+
+配置用于存储敏感密钥的加密凭据库。
+
+```toml
+[vault]
+enabled = true
+# path = "~/.librefang/vault.enc"
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | `true` | 启用凭据库。如果 `vault.enc` 已存在则自动检测。 |
+| `path` | path 或 null | `null` | 自定义凭据库文件路径。默认为 `~/.librefang/vault.enc`。 |
+
+---
+
+### `[webhook_triggers]`
+
+允许外部系统通过经过认证的 HTTP Webhook 在 `/hooks/wake` 和 `/hooks/agent` 端点触发 Agent 操作。
+
+```toml
+[webhook_triggers]
+enabled = true
+token_env = "LIBREFANG_WEBHOOK_TOKEN"
+max_payload_bytes = 65536
+rate_limit_per_minute = 30
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | `false` | 启用 Webhook 触发器端点。 |
+| `token_env` | string | `"LIBREFANG_WEBHOOK_TOKEN"` | 存放 Bearer 令牌的环境变量名称（不是令牌本身）。令牌长度必须大于等于 32 个字符。`enabled = true` 时必填。 |
+| `max_payload_bytes` | usize | `65536` | 入站负载的最大大小（字节）。默认 64 KB。 |
+| `rate_limit_per_minute` | u32 | `30` | 每个来源 IP 每分钟的最大 Webhook 请求数。 |
+
+---
+
+### `[proxy]`
+
+配置所有出站连接（LLM API、网页搜索、MCP 服务器等）使用的 HTTP 代理。环境变量 `HTTP_PROXY`、`HTTPS_PROXY` 和 `NO_PROXY` 也作为后备选项被识别。
+
+```toml
+[proxy]
+http_proxy = "http://proxy.corp.example:8080"
+https_proxy = "http://proxy.corp.example:8080"
+no_proxy = "localhost,127.0.0.1,.internal.corp"
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `http_proxy` | string 或 null | `null` | HTTP 代理 URL。回退到 `HTTP_PROXY` / `http_proxy` 环境变量。URL 中的凭据在日志中会被脱敏。 |
+| `https_proxy` | string 或 null | `null` | HTTPS 代理 URL。回退到 `HTTPS_PROXY` / `https_proxy` 环境变量。 |
+| `no_proxy` | string 或 null | `null` | 绕过代理的主机/域名逗号分隔列表。回退到 `NO_PROXY` / `no_proxy` 环境变量。 |
+
+---
+
+### `[[sidecar_channels]]`
+
+Sidecar 通道适配器允许外部进程（使用任何编程语言编写）充当通道适配器。通过 stdin/stdout 上的换行分隔 JSON 进行通信。
+
+```toml
+[[sidecar_channels]]
+name = "my-custom-channel"
+command = "python3"
+args = ["adapters/my_adapter.py"]
+channel_type = "custom_platform"
+[sidecar_channels.env]
+MY_API_TOKEN = "secret"
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `name` | string | *必填* | 此适配器的显示名称。 |
+| `command` | string | *必填* | 要运行的可执行文件（例如 `"python3"`、`"/usr/local/bin/my-adapter"`）。 |
+| `args` | list of strings | `[]` | 传递给命令的参数。 |
+| `env` | map of string to string | `{}` | 传递给子进程的额外环境变量。 |
+| `channel_type` | string 或 null | `null` | 通道类型标识符。为 null 时默认为 `Custom(<name>)`。 |
+
+---
+
+### `[session]`
+
+配置空闲或多余会话的自动清理。
+
+```toml
+[session]
+retention_days = 30
+max_sessions_per_agent = 100
+cleanup_interval_hours = 24
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `retention_days` | u32 | `0` | 空闲会话在自动清理前的最大保留天数。`0` = 无限制。 |
+| `max_sessions_per_agent` | u32 | `0` | 每个 Agent 的最大会话数（最旧的优先清理）。`0` = 无限制。 |
+| `cleanup_interval_hours` | u32 | `24` | 后台清理任务的运行间隔（小时）。 |
+
+---
+
+### `[queue]`
+
+配置 Agent 命令队列，包括深度限制、TTL 和分通道并发度。
+
+```toml
+[queue]
+max_depth_per_agent = 100
+max_depth_global = 1000
+task_ttl_secs = 3600
+
+[queue.concurrency]
+main_lane = 3
+cron_lane = 2
+subagent_lane = 3
+```
+
+**`[queue]` 字段：**
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `max_depth_per_agent` | u32 | `0` | 每个 Agent 的最大排队任务数。队列满时新任务被拒绝。`0` = 无限制。 |
+| `max_depth_global` | u32 | `0` | 所有 Agent 的最大排队任务总数。`0` = 无限制。 |
+| `task_ttl_secs` | u64 | `3600` | 未处理的任务在此秒数后过期。`0` = 无限制。 |
+
+**`[queue.concurrency]` 字段：**
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `main_lane` | usize | `3` | 并发用户消息任务数。 |
+| `cron_lane` | usize | `2` | 并发定时任务数。 |
+| `subagent_lane` | usize | `3` | 并发子 Agent 调用任务数。 |
+
+---
+
+### `[external_auth]`
+
+配置 OAuth2/OIDC 外部认证，允许用户通过 Google、GitHub、Okta、Auth0 或 Keycloak 等身份提供商登录。
+
+```toml
+[external_auth]
+enabled = true
+issuer_url = "https://accounts.google.com"
+client_id = "your-client-id.apps.googleusercontent.com"
+client_secret_env = "LIBREFANG_OAUTH_CLIENT_SECRET"
+redirect_url = "http://127.0.0.1:4545/api/auth/callback"
+scopes = ["openid", "profile", "email"]
+allowed_domains = ["example.com"]
+session_ttl_secs = 86400
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | `false` | 启用外部认证。 |
+| `issuer_url` | string | `""` | OIDC 发行者 URL，用于在 `{issuer_url}/.well-known/openid-configuration` 进行提供商发现。 |
+| `client_id` | string | `""` | 在身份提供商注册的 OAuth2 客户端 ID。 |
+| `client_secret_env` | string | `"LIBREFANG_OAUTH_CLIENT_SECRET"` | 存放 OAuth2 客户端密钥的环境变量名称。 |
+| `redirect_url` | string | `"http://127.0.0.1:4545/api/auth/callback"` | OAuth2 授权码流程的回调 URL。 |
+| `scopes` | list of strings | `["openid","profile","email"]` | 请求的 OAuth2 权限范围。 |
+| `allowed_domains` | list of strings | `[]` | 限制登录到这些邮箱域名。空列表 = 允许所有。 |
+| `audience` | string | `""` | 要验证的 JWT audience 声明。为空时默认使用 `client_id`。 |
+| `session_ttl_secs` | u64 | `86400` | 会话令牌有效期（秒）。默认 24 小时。 |
+| `providers` | list of objects | `[]` | 多个 OIDC/OAuth2 提供商。配置后优先于上述单提供商字段。 |
+
+对于多提供商配置，使用 `[[external_auth.providers]]`，支持以下字段：`id`、`display_name`、`issuer_url`、`auth_url`、`token_url`、`userinfo_url`、`jwks_uri`、`client_id`、`client_secret_env`、`redirect_url`、`scopes`、`allowed_domains`、`audience`。
+
+---
+
+### `[vertex_ai]`
+
+配置 Google Cloud Vertex AI 作为 LLM 提供商。
+
+```toml
+[vertex_ai]
+project_id = "my-gcp-project"
+region = "us-central1"
+credentials_path = "/path/to/service-account.json"
+```
+
+凭据按以下顺序解析：
+1. 配置中的 `credentials_path`（JSON 字符串或文件路径）
+2. `VERTEX_AI_SERVICE_ACCOUNT_JSON` 环境变量
+3. `GOOGLE_APPLICATION_CREDENTIALS` 环境变量（文件路径）
+4. `gcloud auth print-access-token` CLI 后备
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `project_id` | string 或 null | `null` | GCP 项目 ID。回退到 `VERTEX_AI_PROJECT_ID`、`GOOGLE_CLOUD_PROJECT`，或服务账号 JSON 中的 `project_id` 字段。 |
+| `region` | string 或 null | `null` | Vertex AI 端点的 GCP 区域。回退到 `VERTEX_AI_REGION` 或 `GOOGLE_CLOUD_REGION` 环境变量。默认：`"us-central1"`。 |
+| `credentials_path` | string 或 null | `null` | GCP 服务账号 JSON 密钥文件的路径，或原始 JSON 字符串。 |
+
+---
+
+### `[oauth]`
+
+配置仪表盘使用的 PKCE（Proof Key for Code Exchange）流程的 OAuth 客户端 ID。
+
+```toml
+[oauth]
+google_client_id = "your-google-client-id.apps.googleusercontent.com"
+github_client_id = "your-github-app-client-id"
+microsoft_client_id = "your-azure-app-client-id"
+slack_client_id = "your-slack-app-client-id"
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `google_client_id` | string 或 null | `null` | 用于 PKCE 流程的 Google OAuth2 客户端 ID。 |
+| `github_client_id` | string 或 null | `null` | 用于 PKCE 流程的 GitHub OAuth 应用客户端 ID。 |
+| `microsoft_client_id` | string 或 null | `null` | Microsoft（Entra ID / Azure AD）OAuth 应用客户端 ID。 |
+| `slack_client_id` | string 或 null | `null` | Slack OAuth 应用客户端 ID。 |
+
+---
+
+### `[auth_profiles]`
+
+为每个提供商配置多个 API Key 配置文件，以实现当某个 Key 被限速或用尽时的轮换。
+
+```toml
+[auth_profiles]
+anthropic = [
+  {name = "primary", api_key_env = "ANTHROPIC_API_KEY_1", priority = 0},
+  {name = "secondary", api_key_env = "ANTHROPIC_API_KEY_2", priority = 1},
+]
+openai = [
+  {name = "main", api_key_env = "OPENAI_API_KEY", priority = 0},
+]
+```
+
+值是从提供商名称到 `AuthProfile` 对象列表的映射：
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `name` | string | *必填* | 配置文件名称（例如 `"primary"`、`"secondary"`）。 |
+| `api_key_env` | string | *必填* | 存放该配置文件 API Key 的环境变量名称。 |
+| `priority` | u32 | `0` | Key 选择优先级。值越小越优先。 |
+
+---
+
+### `[tool_policy]`
+
+配置全局工具访问规则、分组和递归深度限制。引用 `ToolPolicy` 类型。
+
+```toml
+[tool_policy]
+subagent_max_depth = 10
+subagent_max_concurrent = 5
+
+[[tool_policy.global_rules]]
+pattern = "shell_*"
+effect = "deny"
+
+[[tool_policy.groups]]
+name = "web_tools"
+tools = ["web_search", "web_fetch"]
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `agent_rules` | list of ToolPolicyRule | `[]` | 每个 Agent 的工具规则（最高优先级，最先检查）。 |
+| `global_rules` | list of ToolPolicyRule | `[]` | 应用于所有 Agent 的全局工具规则（在 agent 规则之后检查）。 |
+| `groups` | list of ToolGroup | `[]` | 命名工具组，便于在规则中重用。 |
+| `subagent_max_depth` | u32 | `10` | 子 Agent 最大生成深度。 |
+| `subagent_max_concurrent` | u32 | `5` | 最大并发子 Agent 数。 |
+
+**ToolPolicyRule 字段：**
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `pattern` | string | 匹配工具名称的 Glob 模式（例如 `"shell_*"`、`"web_*"`、`"mcp_github_*"`）。 |
+| `effect` | string | `"allow"` 或 `"deny"`。拒绝优先：只要有任何 deny 规则匹配，该工具就会被阻止，无论是否有 allow 规则。 |
+
+**ToolGroup 字段：**
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `name` | string | 组名（例如 `"web_tools"`、`"code_tools"`）。 |
+| `tools` | list of strings | 包含在该组中的工具名称模式。 |
+
+---
+
+### `[proactive_memory]`
+
+配置主动记忆提取（mem0 风格的自动记忆管理）。引用 `ProactiveMemoryConfig` 类型。
+
+```toml
+[proactive_memory]
+enabled = true
+auto_memorize = true
+auto_retrieve = true
+max_retrieve = 10
+extraction_threshold = 0.7
+# extraction_model = "gpt-4o-mini"  # 可选，启用 LLM 驱动的提取
+extract_categories = ["user_preference", "important_fact", "task_context", "relationship"]
+session_ttl_hours = 24
+duplicate_threshold = 0.5
+confidence_decay_rate = 0.01
+max_memories_per_agent = 1000
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | `true` | 主开关——为 `false` 时整个主动记忆子系统被禁用。 |
+| `auto_memorize` | bool | `true` | 每次 Agent 执行后自动提取并存储记忆。 |
+| `auto_retrieve` | bool | `true` | 每次 Agent 执行前自动检索相关记忆。 |
+| `max_retrieve` | usize | `10` | 每次查询检索的最大记忆数。 |
+| `extraction_threshold` | f32 | `0.7` | 近似重复检测的置信度阈值（0.0-1.0）。 |
+| `extraction_model` | string 或 null | `null` | 用于提取的 LLM 模型。为 `null` 时使用基于规则的提取。 |
+| `extract_categories` | list of strings | `["user_preference", "important_fact", "task_context", "relationship"]` | 从对话中提取的类别。 |
+| `session_ttl_hours` | u32 | `24` | 会话记忆的 TTL（小时）。超过此时间的记忆在每次 Agent 执行前被清理。 |
+| `duplicate_threshold` | f32 | `0.5` | 重复检测的相似度阈值（0.0-1.0）。有嵌入向量时使用余弦相似度，否则回退到 Jaccard 词重叠。 |
+| `confidence_decay_rate` | f64 | `0.01` | 每天的置信度衰减率。遵循指数衰减：`conf x e^(-rate x days)`。默认 `0.01` 约 70 天减半。 |
+| `max_memories_per_agent` | usize | `1000` | 每个 Agent 的最大记忆数。超出时淘汰最旧/置信度最低的条目。`0` = 无上限。 |
+
+---
+
+### `[context_engine]`
+
+配置可插拔的上下文组装引擎，控制 Agent 记忆如何被召回并组装到提示词中。
+
+```toml
+[context_engine]
+engine = "default"
+# plugin = "qdrant-recall"    # 解析为 ~/.librefang/plugins/qdrant-recall/
+
+[context_engine.hooks]
+# ingest = "~/.librefang/scripts/my_recall.py"
+# after_turn = "~/.librefang/scripts/my_indexer.py"
+
+[[context_engine.plugin_registries]]
+name = "Official"
+github_repo = "librefang/librefang-registry"
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `engine` | string | `"default"` | 内置引擎名称。目前仅支持 `"default"`。 |
+| `plugin` | string 或 null | `null` | 插件名称。解析为 `~/.librefang/plugins/<name>/plugin.toml`。设置时优先于手动 `hooks`。 |
+| `hooks.ingest` | string 或 null | `null` | `ingest` 钩子的 Python 脚本路径（在收到新用户消息时调用）。 |
+| `hooks.after_turn` | string 或 null | `null` | `after_turn` 钩子的 Python 脚本路径（在每轮对话完成后调用）。 |
+| `plugin_registries` | list of objects | 官方注册表 | 插件注册表（GitHub `owner/repo`），用于浏览可安装的插件。 |
+
+---
+
+### `[audit]`
+
+配置审计日志保留策略。
+
+```toml
+[audit]
+retention_days = 90
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `retention_days` | u32 | `90` | 审计日志条目的保留天数。`0` = 无限期保留。 |
+
+---
+
+### `[health_check]`
+
+配置 LLM 提供商的定期健康检查。
+
+```toml
+[health_check]
+health_check_interval_secs = 60
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `health_check_interval_secs` | u64 | `60` | 提供商健康检查的间隔（秒）。 |
+
+---
+
+### `[plugins]`
+
+配置额外的插件注册表，用于搜索可安装的上下文引擎插件。
+
+```toml
+[plugins]
+plugin_registries = ["acme-corp/librefang-plugins"]
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `plugin_registries` | list of strings | `[]` | 额外的 GitHub `owner/repo` 插件注册表。与 `context_engine.plugin_registries` 合并。 |
+
+---
+
+### `[prompt_intelligence]`
+
+配置 Prompt 版本管理和 A/B 实验功能。启用后，LibreFang 自动追踪 prompt 版本历史，支持运行 A/B 实验对比不同 prompt 变体。详细文档见 [Prompt 智能指南](/zh/prompt-intelligence)。
+
+```toml
+[prompt_intelligence]
+enabled = false
+hash_prompts = true
+max_versions_per_agent = 50
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | `false` | 总开关。关闭时不追踪 prompt 版本，不运行实验 |
+| `hash_prompts` | bool | `true` | 计算 prompt 内容哈希用于去重 |
+| `max_versions_per_agent` | u32 | `50` | 每个 agent 最大 prompt 版本数，超出后自动清理最旧的非活跃版本 |
+
+---
+
+## 环境变量
+
+以下是配置中引用的所有环境变量的完整表格。这些变量不由配置文件本身读取——它们在运行时由内核和通道适配器读取。
+
+### LLM 提供商密钥
+
+| 变量 | 使用者 | 说明 |
+|------|--------|------|
+| `ANTHROPIC_API_KEY` | `[default_model]` | Anthropic API Key（Claude 系列模型）。 |
+| `GEMINI_API_KEY` | Gemini 驱动 | Google Gemini API Key。别名：`GOOGLE_API_KEY`。 |
+| `OPENAI_API_KEY` | OpenAI 兼容驱动 | OpenAI API Key。 |
+| `GROQ_API_KEY` | Groq 提供商 | Groq API Key（快速 Llama 推理）。 |
+| `DEEPSEEK_API_KEY` | DeepSeek 提供商 | DeepSeek API Key。 |
+| `PERPLEXITY_API_KEY` | Perplexity 提供商 / 网页搜索 | Perplexity API Key。 |
+| `OPENROUTER_API_KEY` | OpenRouter 提供商 | OpenRouter API Key。 |
+| `TOGETHER_API_KEY` | Together AI 提供商 | Together AI API Key。 |
+| `MISTRAL_API_KEY` | Mistral 提供商 | Mistral AI API Key。 |
+| `FIREWORKS_API_KEY` | Fireworks 提供商 | Fireworks AI API Key。 |
+| `COHERE_API_KEY` | Cohere 提供商 | Cohere API Key。 |
+| `AI21_API_KEY` | AI21 提供商 | AI21 Labs API Key。 |
+| `CEREBRAS_API_KEY` | Cerebras 提供商 | Cerebras API Key。 |
+| `SAMBANOVA_API_KEY` | SambaNova 提供商 | SambaNova API Key。 |
+| `HUGGINGFACE_API_KEY` | Hugging Face 提供商 | Hugging Face Inference API Key。 |
+| `XAI_API_KEY` | xAI 提供商 | xAI (Grok) API Key。 |
+| `REPLICATE_API_KEY` | Replicate 提供商 | Replicate API Key。 |
+
+### 网页搜索密钥
+
+| 变量 | 使用者 | 说明 |
+|------|--------|------|
+| `BRAVE_API_KEY` | `[web.brave]` | Brave Search API Key。 |
+| `JINA_API_KEY` | `[web.jina]` | Jina AI Search API Key。 |
+| `TAVILY_API_KEY` | `[web.tavily]` | Tavily Search API Key。 |
+| `PERPLEXITY_API_KEY` | `[web.perplexity]` | Perplexity Search API Key（与 LLM 提供商共用）。 |
+
+### 通道令牌
+
+| 变量 | 通道 | 说明 |
+|------|------|------|
+| `TELEGRAM_BOT_TOKEN` | Telegram | 从 @BotFather 获取的 Bot API 令牌。 |
+| `DISCORD_BOT_TOKEN` | Discord | Discord Bot 令牌。 |
+| `SLACK_APP_TOKEN` | Slack | Slack 应用级令牌（`xapp-`），用于 Socket Mode。 |
+| `SLACK_BOT_TOKEN` | Slack | Slack Bot 令牌（`xoxb-`），用于 REST API。 |
+| `WHATSAPP_ACCESS_TOKEN` | WhatsApp | WhatsApp Cloud API 访问令牌。 |
+| `WHATSAPP_VERIFY_TOKEN` | WhatsApp | Webhook 验证令牌。 |
+| `MATRIX_ACCESS_TOKEN` | Matrix | Matrix 家服务器访问令牌。 |
+| `EMAIL_PASSWORD` | Email | 邮箱密码或应用专用密码。 |
+| `TEAMS_APP_PASSWORD` | Teams | Azure Bot Framework 应用密码。 |
+| `MATTERMOST_TOKEN` | Mattermost | Mattermost Bot 令牌。 |
+| `TWITCH_OAUTH_TOKEN` | Twitch | Twitch OAuth 令牌。 |
+| `ROCKETCHAT_TOKEN` | Rocket.Chat | Rocket.Chat 认证令牌。 |
+| `ZULIP_API_KEY` | Zulip | Zulip Bot API Key。 |
+| `XMPP_PASSWORD` | XMPP | XMPP 账号密码。 |
+| `GOOGLE_CHAT_SERVICE_ACCOUNT` | Google Chat | 服务账号 JSON 密钥。 |
+| `LINE_CHANNEL_SECRET` | LINE | LINE Channel Secret。 |
+| `LINE_CHANNEL_ACCESS_TOKEN` | LINE | LINE Channel Access Token。 |
+| `VIBER_AUTH_TOKEN` | Viber | Viber Bot 认证令牌。 |
+| `MESSENGER_PAGE_TOKEN` | Messenger | Facebook 页面访问令牌。 |
+| `MESSENGER_VERIFY_TOKEN` | Messenger | Webhook 验证令牌。 |
+| `REDDIT_CLIENT_SECRET` | Reddit | Reddit 应用客户端密钥。 |
+| `REDDIT_PASSWORD` | Reddit | Reddit Bot 账号密码。 |
+| `MASTODON_ACCESS_TOKEN` | Mastodon | Mastodon 访问令牌。 |
+| `BLUESKY_APP_PASSWORD` | Bluesky | Bluesky 应用密码。 |
+| `FEISHU_APP_SECRET` | Feishu | 飞书/Lark 应用密钥。 |
+| `REVOLT_BOT_TOKEN` | Revolt | Revolt Bot 令牌。 |
+| `NEXTCLOUD_TOKEN` | Nextcloud | Nextcloud Talk 认证令牌。 |
+| `GUILDED_BOT_TOKEN` | Guilded | Guilded Bot 令牌。 |
+| `KEYBASE_PAPERKEY` | Keybase | Keybase 纸钥匙。 |
+| `THREEMA_SECRET` | Threema | Threema Gateway API 密钥。 |
+| `NOSTR_PRIVATE_KEY` | Nostr | Nostr 私钥（nsec 或十六进制格式）。 |
+| `WEBEX_BOT_TOKEN` | Webex | Webex Bot 令牌。 |
+| `PUMBLE_BOT_TOKEN` | Pumble | Pumble Bot 令牌。 |
+| `FLOCK_BOT_TOKEN` | Flock | Flock Bot 令牌。 |
+| `TWIST_TOKEN` | Twist | Twist API 令牌。 |
+| `MUMBLE_PASSWORD` | Mumble | Mumble 服务器密码。 |
+| `DINGTALK_APP_KEY` | DingTalk | 钉钉 App Key / Client ID（stream 模式）。 |
+| `DINGTALK_APP_SECRET` | DingTalk | 钉钉 App Secret / Client Secret（stream 模式）。 |
+| `DINGTALK_ACCESS_TOKEN` | DingTalk | 钉钉 Webhook 访问令牌（webhook 模式）。 |
+| `DINGTALK_SECRET` | DingTalk | 钉钉签名密钥（webhook 模式）。 |
+| `DISCOURSE_API_KEY` | Discourse | Discourse API Key。 |
+| `GITTER_TOKEN` | Gitter | Gitter 认证令牌。 |
+| `NTFY_TOKEN` | ntfy | ntfy 认证令牌（公共主题可选）。 |
+| `GOTIFY_APP_TOKEN` | Gotify | Gotify 应用令牌（发送）。 |
+| `GOTIFY_CLIENT_TOKEN` | Gotify | Gotify 客户端令牌（接收）。 |
+| `WEBHOOK_SECRET` | Webhook | 用于 Webhook 验证的 HMAC 签名密钥。 |
+| `LINKEDIN_ACCESS_TOKEN` | LinkedIn | LinkedIn OAuth2 访问令牌。 |
 
 ---
 
@@ -483,6 +2783,7 @@ plugin_registries = []
 | 提供商 | 检查的环境变量 |
 |--------|----------------|
 | `brave` | `web.brave.api_key_env` |
+| `jina` | `web.jina.api_key_env` |
 | `tavily` | `web.tavily.api_key_env` |
 | `perplexity` | `web.perplexity.api_key_env` |
 | `duckduckgo` | （无需检查——不需要 API Key） |

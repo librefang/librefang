@@ -567,6 +567,17 @@ impl KernelConfig {
                     ));
                 }
             }
+            SearchProvider::Jina => {
+                if std::env::var(&self.web.jina.api_key_env)
+                    .unwrap_or_default()
+                    .is_empty()
+                {
+                    warnings.push(format!(
+                        "Jina search selected but {} is not set",
+                        self.web.jina.api_key_env
+                    ));
+                }
+            }
             SearchProvider::DuckDuckGo | SearchProvider::Auto => {}
         }
 

@@ -48,7 +48,7 @@ max_retrieve = 10               # Max memories per retrieval
 
 # ── Web Tools ────────────────────────────────────────────────
 [web]
-search_provider = "auto"        # Tavily → Brave → DuckDuckGo (auto-detect)
+search_provider = "auto"        # Tavily → Brave → Jina → Perplexity → DuckDuckGo (auto-detect)
 # cache_ttl_minutes = 15
 
 [web.fetch]
