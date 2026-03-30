@@ -5,6 +5,55 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
+## [2026.3.30] - 2026-03-30
+
+### Added
+
+- Add configurable IMAP email reader (#1322) (@devatsecure)
+- Add message debounce with shutdown flush (#1684) (@Chukwuebuka-2003)
+- Convert markdown to WhatsApp formatting (#1733) (@f-liva)
+- Add WeCom callback mode UI (#1773) (@houko)
+- Add AGENTS.md for AI assistant context (#1779) (@houko)
+- Add password change support (#1780) (@houko)
+- Add registry_mirror for faster marketplace access in China (#1783) (@houko)
+- Add wildcard pattern support for tool capabilities (#1801) (@houko)
+- Add voice channel adapter with WebSocket server (#1802) (@houko)
+- Add DingTalk stream mode support (#1804) (@houko)
+- Auto-init config and copy example on first just dev (#1808) (@houko)
+- Add Streamable HTTP transport, custom headers, and browser.enabled config (#1809) (@houko)
+
+### Fixed
+
+- Auth bootstrap for protected sessions (#1687) (@TechWizard9999)
+- Allow Windows absolute paths in secrets.env and config.toml writes (#1770) (@SenZhangAI)
+- Load full workflow detail after template instantiation (#1772) (@SenZhangAI)
+- Add event_id dedup to feishu adapter (#1776) (@houko)
+- Skip disabled agents during background startup (#1777) (@houko)
+- Stop hiding hand agents from chat sidebar (#1778) (@houko)
+- Align probe result fields with dashboard (#1781) (@houko)
+- Handle all HTTP error codes in provider test (#1782) (@houko)
+- Refresh provider catalog in-place after registry write (#1784) (@houko)
+- Add versioned migration flow with best-effort fallback (#1785) (@houko)
+- Improve NO_REPLY detection, raise history limit, preserve user messages (#1787) (@f-liva)
+- Don't cancel in-progress runs on main branch (#1788) (@houko)
+- Use per-SHA concurrency group on main to prevent SIGTERM (#1794) (@houko)
+- Install npm in runtime image (#1799) (@j5bart)
+- Route Telegram messages to correct agent (#1803) (@houko)
+- Throttle Ubuntu test to prevent OOM SIGTERM (#1805) (@houko)
+- Limit nextest to 1 concurrent test binary on Ubuntu (#1807) (@houko)
+- Respect default_agent in channel message routing (#1810) (@houko)
+- Propagate group context and @mention detection (#1811) (@houko)
+- Complete group chat support (P1-P3) (#1812) (@houko)
+- Use mutable default for non-exhaustive config struct (#1814) (@houko)
+- Add missing PromptContext fields from WhatsApp group PR (#1816) (@houko)
+- Re-apply provider URLs after runtime catalog sync (#1818) (@leszek3737)
+- Remove duplicate is_group/was_mentioned in PromptContext (#1820) (@houko)
+
+### Other
+
+- Update dashboard image in markdown (#1746) (@Jengro777)
+
+
 ## [2026.3.28] - 2026-03-28
 
 ### Added
