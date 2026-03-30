@@ -2368,17 +2368,40 @@ pub async fn start_channel_bridge_with_config(
     // DingTalk
     #[cfg(feature = "channel-dingtalk")]
     for dt_config in config.dingtalk.iter() {
-        if let Some(token) = read_token(&dt_config.access_token_env, "DingTalk") {
-            let secret = read_token(&dt_config.secret_env, "DingTalk (secret)").unwrap_or_default();
-            let adapter = Arc::new(
-                DingTalkAdapter::new(token, secret, dt_config.webhook_port)
-                    .with_account_id(dt_config.account_id.clone()),
-            );
-            adapters.push((
-                adapter,
-                dt_config.default_agent.clone(),
-                dt_config.account_id.clone(),
-            ));
+        use librefang_types::config::DingTalkReceiveMode;
+        match dt_config.receive_mode {
+            DingTalkReceiveMode::Stream => {
+                if let Some(client_id) = read_token(&dt_config.app_key_env, "DingTalk (app_key)") {
+                    let client_secret =
+                        read_token(&dt_config.app_secret_env, "DingTalk (app_secret)")
+                            .unwrap_or_default();
+                    let adapter = Arc::new(
+                        DingTalkAdapter::new_stream(client_id, client_secret)
+                            .with_account_id(dt_config.account_id.clone())
+                            .with_robot_code(dt_config.robot_code.clone()),
+                    );
+                    adapters.push((
+                        adapter,
+                        dt_config.default_agent.clone(),
+                        dt_config.account_id.clone(),
+                    ));
+                }
+            }
+            DingTalkReceiveMode::Webhook => {
+                if let Some(token) = read_token(&dt_config.access_token_env, "DingTalk") {
+                    let secret =
+                        read_token(&dt_config.secret_env, "DingTalk (secret)").unwrap_or_default();
+                    let adapter = Arc::new(
+                        DingTalkAdapter::new(token, secret, dt_config.webhook_port)
+                            .with_account_id(dt_config.account_id.clone()),
+                    );
+                    adapters.push((
+                        adapter,
+                        dt_config.default_agent.clone(),
+                        dt_config.account_id.clone(),
+                    ));
+                }
+            }
         }
     }
 

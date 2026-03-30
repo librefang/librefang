@@ -4568,16 +4568,45 @@ impl Default for MumbleConfig {
     }
 }
 
+/// How the DingTalk adapter receives inbound events.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DingTalkReceiveMode {
+    /// HTTP webhook server (requires public IP / reverse proxy).
+    Webhook,
+    /// Long-lived WebSocket connection via DingTalk Stream protocol (default).
+    #[default]
+    Stream,
+}
+
 /// DingTalk Robot API channel adapter configuration.
+///
+/// Supports two receive modes:
+/// - **Stream** (default): Uses `app_key` / `app_secret` to open a long-lived
+///   WebSocket connection via the DingTalk Stream protocol. No public IP needed.
+/// - **Webhook** (legacy): HTTP server that receives callback POST requests.
+///   Requires `access_token` and `secret` for HMAC-SHA256 verification.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DingTalkConfig {
+    /// How to receive inbound messages (stream or webhook).
+    pub receive_mode: DingTalkReceiveMode,
+    // -- Stream mode credentials --
+    /// Env var name holding the DingTalk app key (stream mode).
+    pub app_key_env: String,
+    /// Env var name holding the DingTalk app secret (stream mode).
+    pub app_secret_env: String,
+    // -- Webhook mode credentials (legacy) --
     /// Env var name holding the webhook access token.
     pub access_token_env: String,
     /// Env var name holding the signing secret.
     pub secret_env: String,
-    /// Port for the incoming webhook.
+    /// Port for the incoming webhook (webhook mode only).
     pub webhook_port: u16,
+    /// Robot code for sending messages via the Open API (stream mode).
+    /// If empty, falls back to app_key.
+    #[serde(default)]
+    pub robot_code: Option<String>,
     /// Unique identifier for this bot instance (used for multi-bot routing).
     #[serde(default)]
     pub account_id: Option<String>,
@@ -4591,9 +4620,13 @@ pub struct DingTalkConfig {
 impl Default for DingTalkConfig {
     fn default() -> Self {
         Self {
+            receive_mode: DingTalkReceiveMode::default(),
+            app_key_env: "DINGTALK_APP_KEY".to_string(),
+            app_secret_env: "DINGTALK_APP_SECRET".to_string(),
             access_token_env: "DINGTALK_ACCESS_TOKEN".to_string(),
             secret_env: "DINGTALK_SECRET".to_string(),
             webhook_port: 8457,
+            robot_code: None,
             account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),

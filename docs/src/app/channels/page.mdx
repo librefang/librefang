@@ -1650,11 +1650,42 @@ The Nostr adapter connects to the configured relays via WebSocket using the NIP-
 
 ## DingTalk
 
+Supports two modes:
+- **Stream mode** (default, recommended): WebSocket long-connection via the DingTalk Stream protocol. No public IP or port required.
+- **Webhook mode** (legacy): HTTP callback server. Requires a public-facing URL.
+
 ### Prerequisites
 
-- A DingTalk (Ding Talk) custom robot with webhook access (from the [DingTalk Open Platform](https://open.dingtalk.com/document/))
+- A DingTalk application from the [DingTalk Open Platform](https://open.dingtalk.com/document/)
+- For **stream mode**: App Key and App Secret from your DingTalk application
+- For **webhook mode**: A custom robot with webhook access token and signing secret
 
-### Setup
+### Setup (Stream Mode — Recommended)
+
+1. Go to the [DingTalk Open Platform](https://open.dingtalk.com/), create an application (or use an existing one).
+2. Enable the **Robot** capability and note the **App Key** (Client ID) and **App Secret** (Client Secret).
+3. Set environment variables:
+
+```bash
+export DINGTALK_APP_KEY=your-app-key          # Environment variable
+export DINGTALK_APP_SECRET=your-app-secret
+librefang vault set DINGTALK_APP_KEY          # Encrypted vault (recommended)
+librefang vault set DINGTALK_APP_SECRET
+```
+
+4. Add to config:
+
+```toml
+[channels.dingtalk]
+receive_mode = "stream"
+app_key_env = "DINGTALK_APP_KEY"
+app_secret_env = "DINGTALK_APP_SECRET"
+default_agent = "assistant"
+```
+
+5. Restart the daemon.
+
+### Setup (Webhook Mode)
 
 1. In DingTalk, open a group chat and go to **Group Settings > Smart Group Assistant > Add Robot**.
 2. Choose **Custom Robot** and enable the **Security Setting** (sign mode recommended).
@@ -1666,14 +1697,13 @@ export DINGTALK_ACCESS_TOKEN=your-token       # Environment variable
 export DINGTALK_SECRET=your-signing-secret
 librefang vault set DINGTALK_ACCESS_TOKEN     # Encrypted vault (recommended)
 librefang vault set DINGTALK_SECRET
-librefang config set-key dingtalk             # .env file
-# Or set via dashboard "Set API Key" button   # secrets.env
 ```
 
 5. Add to config:
 
 ```toml
 [channels.dingtalk]
+receive_mode = "webhook"
 access_token_env = "DINGTALK_ACCESS_TOKEN"
 secret_env = "DINGTALK_SECRET"
 default_agent = "assistant"
@@ -1683,7 +1713,9 @@ default_agent = "assistant"
 
 ### How It Works
 
-The DingTalk adapter receives messages via webhook callbacks from the DingTalk Robot API. Each request is verified using the HMAC-SHA256 signature with the configured secret. Responses are sent back through the DingTalk webhook URL with a signed timestamp.
+In **stream mode**, the adapter registers with the DingTalk gateway API (`/v1.0/gateway/connections/open`) to obtain a WebSocket endpoint and ticket. It then maintains a persistent WebSocket connection, receiving bot message callbacks and responding with ACK frames. Heartbeat ping/pong is handled automatically.
+
+In **webhook mode**, the adapter receives messages via HTTP callback from the DingTalk Robot API. Each request is verified using HMAC-SHA256 signature with the configured secret. Responses are sent back through the DingTalk webhook URL with a signed timestamp.
 
 ---
 
