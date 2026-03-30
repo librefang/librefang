@@ -1,13 +1,28 @@
 #!/usr/bin/env python3
-"""Read latest email from a given sender via IMAP, searching multiple folders."""
+"""Read latest email from a given sender via IMAP, searching multiple folders.
+
+Environment variables:
+  EMAIL_USERNAME  - IMAP login username (required)
+  EMAIL_PASSWORD  - IMAP login password (required)
+  IMAP_SERVER     - IMAP server hostname (default: imap.gmail.com)
+  IMAP_PORT       - IMAP server port (default: 993)
+
+Non-Gmail servers will only match INBOX, Promotions, and Updates folders;
+Gmail-specific folders like [Gmail]/All Mail are skipped gracefully.
+"""
 import imaplib
 import email
 import os
+import re
 import sys
 from email.header import decode_header
 
 IMAP_SERVER = os.environ.get("IMAP_SERVER", "imap.gmail.com")
-IMAP_PORT = int(os.environ.get("IMAP_PORT", "993"))
+try:
+    IMAP_PORT = int(os.environ.get("IMAP_PORT", "993"))
+except ValueError:
+    print("ERROR: IMAP_PORT must be an integer", file=sys.stderr)
+    sys.exit(1)
 
 
 def decode_str(s, enc=None):
@@ -32,7 +47,6 @@ def get_body(msg):
             if ct == "text/html" and "attachment" not in cd:
                 payload = part.get_payload(decode=True)
                 if payload:
-                    import re
                     text = payload.decode("utf-8", errors="ignore")
                     text = re.sub(r'<[^>]+>', ' ', text)
                     text = re.sub(r'\s+', ' ', text).strip()
@@ -64,8 +78,12 @@ def main():
     password = os.environ.get("EMAIL_PASSWORD", "")
     username = os.environ.get("EMAIL_USERNAME", "")
 
+    if not username:
+        print("ERROR: EMAIL_USERNAME not set", file=sys.stderr)
+        sys.exit(1)
+
     if not password:
-        print("ERROR: EMAIL_PASSWORD not set")
+        print("ERROR: EMAIL_PASSWORD not set", file=sys.stderr)
         sys.exit(1)
 
     try:
