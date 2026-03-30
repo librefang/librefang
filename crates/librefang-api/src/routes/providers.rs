@@ -1456,6 +1456,16 @@ pub async fn catalog_update(State(state): State<Arc<AppState>>) -> impl IntoResp
                     .write()
                     .unwrap_or_else(|e| e.into_inner());
                 catalog.load_cached_catalog_for(state.kernel.home_dir());
+                let cfg = state.kernel.config_ref();
+                if !cfg.provider_regions.is_empty() {
+                    let region_urls = catalog.resolve_region_urls(&cfg.provider_regions);
+                    if !region_urls.is_empty() {
+                        catalog.apply_url_overrides(&region_urls);
+                    }
+                }
+                if !cfg.provider_urls.is_empty() {
+                    catalog.apply_url_overrides(&cfg.provider_urls);
+                }
                 catalog.detect_auth();
             }
             (

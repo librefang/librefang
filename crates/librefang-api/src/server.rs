@@ -773,7 +773,18 @@ pub async fn run_daemon(
                             result.files_downloaded
                         );
                         if let Ok(mut catalog) = kernel.model_catalog_ref().write() {
-                            catalog.load_cached_catalog_for(&kernel.config_ref().home_dir);
+                            let cfg = kernel.config_ref();
+                            catalog.load_cached_catalog_for(&cfg.home_dir);
+                            if !cfg.provider_regions.is_empty() {
+                                let region_urls =
+                                    catalog.resolve_region_urls(&cfg.provider_regions);
+                                if !region_urls.is_empty() {
+                                    catalog.apply_url_overrides(&region_urls);
+                                }
+                            }
+                            if !cfg.provider_urls.is_empty() {
+                                catalog.apply_url_overrides(&cfg.provider_urls);
+                            }
                             catalog.detect_auth();
                         }
                     }
