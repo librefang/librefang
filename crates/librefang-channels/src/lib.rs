@@ -91,6 +91,8 @@ pub mod twist;
 pub mod twitch;
 #[cfg(feature = "channel-viber")]
 pub mod viber;
+#[cfg(feature = "channel-voice")]
+pub mod voice;
 #[cfg(feature = "channel-webex")]
 pub mod webex;
 #[cfg(feature = "channel-webhook")]

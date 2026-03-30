@@ -203,6 +203,8 @@ use librefang_channels::teams::TeamsAdapter;
 use librefang_channels::telegram::TelegramAdapter;
 #[cfg(feature = "channel-twitch")]
 use librefang_channels::twitch::TwitchAdapter;
+#[cfg(feature = "channel-voice")]
+use librefang_channels::voice::VoiceAdapter;
 #[cfg(feature = "channel-webhook")]
 use librefang_channels::webhook::WebhookAdapter;
 #[cfg(feature = "channel-whatsapp")]
@@ -1263,6 +1265,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             "ntfy" => find_overrides!(ntfy),
             "gotify" => find_overrides!(gotify),
             "webhook" => find_overrides!(webhook),
+            "voice" => find_overrides!(voice),
             "linkedin" => find_overrides!(linkedin),
             "wechat" => find_overrides!(wechat),
             "wecom" => find_overrides!(wecom),
@@ -1582,6 +1585,7 @@ pub async fn start_channel_bridge_with_config(
     check_channel!(ntfy, "channel-ntfy", "ntfy");
     check_channel!(gotify, "channel-gotify", "Gotify");
     check_channel!(webhook, "channel-webhook", "Webhook");
+    check_channel!(voice, "channel-voice", "Voice");
     check_channel!(linkedin, "channel-linkedin", "LinkedIn");
 
     // Sidecar channels (always available, not feature-gated)
@@ -2492,6 +2496,29 @@ pub async fn start_channel_bridge_with_config(
                 adapter,
                 wh_config.default_agent.clone(),
                 wh_config.account_id.clone(),
+            ));
+        }
+    }
+
+    // Voice (WebSocket + STT/TTS)
+    #[cfg(feature = "channel-voice")]
+    for voice_config in config.voice.iter() {
+        if let Some(api_key) = read_token(&voice_config.api_key_env, "Voice") {
+            let adapter = Arc::new(
+                VoiceAdapter::new(
+                    voice_config.listen_port,
+                    api_key,
+                    voice_config.stt_url.clone(),
+                    voice_config.tts_url.clone(),
+                    voice_config.tts_voice.clone(),
+                    voice_config.buffer_threshold,
+                )
+                .with_account_id(voice_config.account_id.clone()),
+            );
+            adapters.push((
+                adapter,
+                voice_config.default_agent.clone(),
+                voice_config.account_id.clone(),
             ));
         }
     }

@@ -3147,6 +3147,8 @@ pub struct ChannelsConfig {
     pub gotify: OneOrMany<GotifyConfig>,
     /// Generic webhook configuration(s).
     pub webhook: OneOrMany<WebhookConfig>,
+    /// Voice channel (WebSocket + STT/TTS) configuration(s).
+    pub voice: OneOrMany<VoiceConfig>,
     /// LinkedIn messaging configuration(s).
     pub linkedin: OneOrMany<LinkedInConfig>,
     /// WeChat personal account (iLink) configuration(s).
@@ -4794,6 +4796,60 @@ impl Default for WebhookConfig {
             secret_env: "WEBHOOK_SECRET".to_string(),
             listen_port: 8460,
             callback_url: None,
+            account_id: None,
+            default_agent: None,
+            overrides: ChannelOverrides::default(),
+        }
+    }
+}
+
+/// Voice channel adapter configuration.
+///
+/// Runs a WebSocket server that accepts audio streams, transcribes via STT,
+/// sends text to the agent, and returns synthesized speech via TTS.
+///
+/// ```toml
+/// [channels.voice]
+/// listen_port = 4546
+/// api_key_env = "OPENAI_API_KEY"
+/// stt_url = "https://api.openai.com"
+/// tts_url = "https://api.openai.com"
+/// tts_voice = "alloy"
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VoiceConfig {
+    /// WebSocket server listen port (default: 4546).
+    pub listen_port: u16,
+    /// Env var name holding the API key for STT/TTS services.
+    pub api_key_env: String,
+    /// Base URL for the STT (Speech-to-Text) API.
+    pub stt_url: String,
+    /// Base URL for the TTS (Text-to-Speech) API.
+    pub tts_url: String,
+    /// TTS voice name (default: "alloy").
+    pub tts_voice: String,
+    /// Audio buffer threshold in bytes before triggering STT (default: 32768).
+    pub buffer_threshold: usize,
+    /// Unique identifier for this voice instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
+    /// Default agent name to route voice messages to.
+    pub default_agent: Option<String>,
+    /// Per-channel behavior overrides.
+    #[serde(default)]
+    pub overrides: ChannelOverrides,
+}
+
+impl Default for VoiceConfig {
+    fn default() -> Self {
+        Self {
+            listen_port: 4546,
+            api_key_env: "OPENAI_API_KEY".to_string(),
+            stt_url: "https://api.openai.com".to_string(),
+            tts_url: "https://api.openai.com".to_string(),
+            tts_voice: "alloy".to_string(),
+            buffer_threshold: 32768,
             account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
