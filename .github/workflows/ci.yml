@@ -247,5 +247,7 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev \
             patchelf
+      - name: Build tests (throttled to reduce peak memory)
+        run: cargo nextest run --workspace --no-run -j 2
       - name: Run tests
-        run: cargo nextest run --workspace --no-fail-fast
+        run: cargo nextest run --workspace --no-fail-fast --test-threads 2
