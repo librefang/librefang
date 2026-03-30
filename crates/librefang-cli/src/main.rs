@@ -2613,7 +2613,20 @@ fn spawn_detached_daemon(
         .map_err(|e| format!("spawn detached daemon: {e}"))
 }
 
+/// Ensure LibreFang is initialized (config.toml exists). Auto-runs quick init on first run.
+fn ensure_initialized(config: &Option<PathBuf>) {
+    if config.is_none() {
+        let home = cli_librefang_home();
+        if !home.join("config.toml").exists() {
+            ui::hint("First run detected — running quick setup...");
+            cmd_init(true);
+        }
+    }
+}
+
 fn cmd_start(config: Option<PathBuf>, tail: bool, spawned: bool, foreground: bool) {
+    ensure_initialized(&config);
+
     let daemon = daemon_config_context(config.as_deref());
     if let Some(base) = find_daemon_in_home(&daemon.home_dir) {
         ui::error_with_fix(
@@ -3192,6 +3205,7 @@ fn cmd_agent_list(config: Option<PathBuf>, json: bool) {
 }
 
 fn cmd_agent_chat(config: Option<PathBuf>, agent_id_str: &str) {
+    ensure_initialized(&config);
     tui::chat_runner::run_chat_tui(config, Some(agent_id_str.to_string()));
 }
 
@@ -6902,6 +6916,7 @@ fn cmd_config_test_key(provider: &str) {
 // ---------------------------------------------------------------------------
 
 fn cmd_quick_chat(config: Option<PathBuf>, agent: Option<String>) {
+    ensure_initialized(&config);
     tui::chat_runner::run_chat_tui(config, agent);
 }
 
