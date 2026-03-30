@@ -247,11 +247,14 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev \
             patchelf
-      - name: Expand swap (runner only has 7GB RAM)
+      - name: Run tests (split to avoid runner SIGTERM)
         run: |
-          sudo fallocate -l 8G /mnt/swapfile2
-          sudo chmod 600 /mnt/swapfile2
-          sudo mkswap /mnt/swapfile2
-          sudo swapon /mnt/swapfile2
-      - name: Run tests
-        run: cargo nextest run --workspace --no-fail-fast
+          # Runner gets SIGTERM at ~test 2350 regardless of parallelism or memory.
+          # Split into per-crate runs to isolate the issue and ensure completion.
+          CRATES=$(cargo metadata --no-deps --format-version 1 | \
+            python3 -c "import sys,json; print(' '.join(p['name'] for p in json.load(sys.stdin)['packages']))")
+          for crate in $CRATES; do
+            echo "::group::Testing $crate"
+            cargo nextest run -p "$crate" --no-fail-fast || exit 1
+            echo "::endgroup::"
+          done
