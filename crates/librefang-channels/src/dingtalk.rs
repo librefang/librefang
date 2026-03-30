@@ -75,8 +75,6 @@ pub struct DingTalkAdapter {
     client_id: Zeroizing<String>,
     /// SECURITY: Client Secret (AppSecret) for stream mode.
     client_secret: Zeroizing<String>,
-    /// Robot code for sending messages via the Open API (stream mode).
-    robot_code: Option<String>,
     /// HTTP client for outbound requests.
     client: reqwest::Client,
     /// Optional account identifier for multi-bot routing.
@@ -102,7 +100,6 @@ impl DingTalkAdapter {
             webhook_port,
             client_id: Zeroizing::new(String::new()),
             client_secret: Zeroizing::new(String::new()),
-            robot_code: None,
             client: crate::http_client::new_client(),
             account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
@@ -124,7 +121,6 @@ impl DingTalkAdapter {
             webhook_port: 0,
             client_id: Zeroizing::new(client_id),
             client_secret: Zeroizing::new(client_secret),
-            robot_code: None,
             client: crate::http_client::new_client(),
             account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
@@ -135,12 +131,6 @@ impl DingTalkAdapter {
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
     pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
         self.account_id = account_id;
-        self
-    }
-
-    /// Set the robot_code for stream mode replies. Returns self for builder chaining.
-    pub fn with_robot_code(mut self, robot_code: Option<String>) -> Self {
-        self.robot_code = robot_code;
         self
     }
 
@@ -553,7 +543,10 @@ impl DingTalkAdapter {
                 info!("DingTalk stream: registered, connecting to WebSocket");
 
                 // Step 2: Build WebSocket URL with ticket as query param.
-                let ws_url = format!("{}?ticket={}", endpoint, ticket);
+                // URL-encode the ticket — it may contain base64 chars like `+`, `=`.
+                let encoded_ticket =
+                    url::form_urlencoded::byte_serialize(ticket.as_bytes()).collect::<String>();
+                let ws_url = format!("{}?ticket={}", endpoint, encoded_ticket);
 
                 let ws_stream = match tokio_tungstenite::connect_async(&ws_url).await {
                     Ok((stream, _)) => stream,
@@ -778,13 +771,15 @@ impl ChannelAdapter for DingTalkAdapter {
             }
 
             let result: serde_json::Value = resp.json().await?;
-            // Webhook mode uses errcode; stream session webhook may not.
-            if self.mode == DingTalkMode::Webhook && result["errcode"].as_i64() != Some(0) {
-                return Err(format!(
-                    "DingTalk error: {}",
-                    result["errmsg"].as_str().unwrap_or("unknown")
-                )
-                .into());
+            // Both webhook and stream session-webhook replies use errcode.
+            if let Some(errcode) = result["errcode"].as_i64() {
+                if errcode != 0 {
+                    return Err(format!(
+                        "DingTalk error (errcode={errcode}): {}",
+                        result["errmsg"].as_str().unwrap_or("unknown")
+                    )
+                    .into());
+                }
             }
 
             // Rate limit: small delay between chunks
