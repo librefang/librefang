@@ -1,4 +1,0 @@
-# SPA fallback — serve index.html for all routes
-/deploy/* /index.html 200
-/changelog/* /index.html 200
-/* /index.html 200
