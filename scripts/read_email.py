@@ -90,7 +90,7 @@ def main():
         mail = imaplib.IMAP4_SSL(IMAP_SERVER, IMAP_PORT)
         mail.login(username, password)
     except Exception as e:
-        print(f"ERROR: IMAP login failed: {e}")
+        print(f"ERROR: IMAP login failed: {e}", file=sys.stderr)
         sys.exit(1)
 
     # Search across multiple folders
@@ -124,11 +124,12 @@ def main():
         _, data = mail.fetch(found_ids[-1], "(RFC822)")
         msg = email.message_from_bytes(data[0][1])
     except Exception as e:
-        print(f"ERROR: fetch failed: {e}")
+        print(f"ERROR: fetch failed: {e}", file=sys.stderr)
         mail.logout()
         sys.exit(1)
 
-    subject_raw, enc = decode_header(msg["Subject"])[0]
+    raw_subject = msg["Subject"] or ""
+    subject_raw, enc = decode_header(raw_subject)[0]
     subject = decode_str(subject_raw, enc)
     body = get_body(msg)
 
