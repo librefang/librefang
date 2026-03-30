@@ -1603,6 +1603,10 @@ impl LibreFangKernel {
                 config.provider_api_keys.entry(provider).or_insert(env_var);
             }
         }
+        // Load cached catalog from remote sync (overrides builtins)
+        model_catalog.load_cached_catalog_for(&config.home_dir);
+        // Apply provider URL overrides from config.toml AFTER loading cached catalog
+        // so that user-provided URLs always take precedence over catalog defaults.
         if !config.provider_urls.is_empty() {
             model_catalog.apply_url_overrides(&config.provider_urls);
             info!(
@@ -1610,8 +1614,6 @@ impl LibreFangKernel {
                 config.provider_urls.len()
             );
         }
-        // Load cached catalog from remote sync (overrides builtins)
-        model_catalog.load_cached_catalog_for(&config.home_dir);
         // Load user's custom models from ~/.librefang/custom_models.json (highest priority)
         let custom_models_path = config.home_dir.join("custom_models.json");
         model_catalog.load_custom_models(&custom_models_path);
