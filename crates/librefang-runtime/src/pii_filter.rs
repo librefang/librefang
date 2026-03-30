@@ -116,6 +116,7 @@ impl PiiFilter {
                 user_id: REDACTED_PLACEHOLDER.to_string(),
                 display_name: REDACTED_PLACEHOLDER.to_string(),
                 is_group: sender.is_group,
+                was_mentioned: sender.was_mentioned,
                 thread_id: sender.thread_id.clone(),
                 account_id: sender
                     .account_id
@@ -130,6 +131,7 @@ impl PiiFilter {
                     user_id: pseudo_id,
                     display_name: pseudo_name,
                     is_group: sender.is_group,
+                    was_mentioned: sender.was_mentioned,
                     thread_id: sender.thread_id.clone(),
                     account_id: sender
                         .account_id
@@ -349,6 +351,7 @@ mod tests {
             user_id: "12345".to_string(),
             display_name: "Alice Smith".to_string(),
             is_group: false,
+            was_mentioned: false,
             thread_id: None,
             account_id: Some("acct-1".to_string()),
         };
@@ -369,6 +372,7 @@ mod tests {
             user_id: "uid-999".to_string(),
             display_name: "Bob".to_string(),
             is_group: true,
+            was_mentioned: false,
             thread_id: Some("thread-1".to_string()),
             account_id: None,
         };
@@ -389,6 +393,7 @@ mod tests {
             user_id: "U123".to_string(),
             display_name: "Charlie".to_string(),
             is_group: false,
+            was_mentioned: false,
             thread_id: None,
             account_id: None,
         };

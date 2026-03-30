@@ -165,6 +165,12 @@ pub struct MessageRequest {
     /// Optional channel type (e.g. "whatsapp", "telegram").
     #[serde(default)]
     pub channel_type: Option<String>,
+    /// Whether this message originated from a group chat (vs DM).
+    #[serde(default)]
+    pub is_group: bool,
+    /// Whether the bot was @mentioned in a group message.
+    #[serde(default)]
+    pub was_mentioned: bool,
     /// If true, this is an ephemeral "side question" (`/btw`).
     /// The message is answered using the agent's system prompt but WITHOUT
     /// loading or saving session history — the real conversation is untouched.

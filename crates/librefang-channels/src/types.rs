@@ -176,6 +176,9 @@ pub struct SenderContext {
     /// Whether the message came from a group chat (vs DM).
     #[serde(default)]
     pub is_group: bool,
+    /// Whether the bot was @mentioned in this message.
+    #[serde(default)]
+    pub was_mentioned: bool,
     /// Thread ID for threaded conversations (platform-specific).
     #[serde(default)]
     pub thread_id: Option<String>,

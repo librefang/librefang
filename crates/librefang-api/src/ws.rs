@@ -557,6 +557,7 @@ async fn handle_text_message(
                 user_id: client_ip.to_string(),
                 display_name: "Web UI".to_string(),
                 is_group: false,
+                was_mentioned: false,
                 thread_id: None,
                 account_id: None,
             };

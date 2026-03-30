@@ -41,6 +41,10 @@ pub struct PromptContext {
     pub sender_display_name: Option<String>,
     /// Sender's platform user ID (from channel message).
     pub sender_user_id: Option<String>,
+    /// Whether the current message originated from a group chat.
+    pub is_group: bool,
+    /// Whether the bot was @mentioned in a group message.
+    pub was_mentioned: bool,
     /// Whether this agent was spawned as a subagent.
     pub is_subagent: bool,
     /// Whether this agent has autonomous config.
@@ -160,6 +164,8 @@ pub fn build_system_prompt(ctx: &PromptContext) -> String {
                 channel,
                 ctx.sender_display_name.as_deref(),
                 ctx.sender_user_id.as_deref(),
+                ctx.is_group,
+                ctx.was_mentioned,
             ));
         }
     }
@@ -428,6 +434,8 @@ fn build_channel_section(
     channel: &str,
     sender_name: Option<&str>,
     sender_id: Option<&str>,
+    is_group: bool,
+    was_mentioned: bool,
 ) -> String {
     let (limit, hints) = match channel {
         "telegram" => (
@@ -476,6 +484,12 @@ fn build_channel_section(
             section.push_str(&format!("\nThe current message is from platform ID: {id}."));
         }
         (None, None) => {}
+    }
+    if is_group {
+        section.push_str("\nThis message is from a group chat.");
+        if was_mentioned {
+            section.push_str(" You were @mentioned directly.");
+        }
     }
     section
 }
@@ -935,30 +949,44 @@ mod tests {
 
     #[test]
     fn test_channel_telegram() {
-        let section = build_channel_section("telegram", None, None);
+        let section = build_channel_section("telegram", None, None, false, false);
         assert!(section.contains("4096"));
         assert!(section.contains("Telegram"));
     }
 
     #[test]
     fn test_channel_discord() {
-        let section = build_channel_section("discord", None, None);
+        let section = build_channel_section("discord", None, None, false, false);
         assert!(section.contains("2000"));
         assert!(section.contains("Discord"));
     }
 
     #[test]
     fn test_channel_irc() {
-        let section = build_channel_section("irc", None, None);
+        let section = build_channel_section("irc", None, None, false, false);
         assert!(section.contains("512"));
         assert!(section.contains("plain text"));
     }
 
     #[test]
     fn test_channel_unknown_gets_default() {
-        let section = build_channel_section("smoke_signal", None, None);
+        let section = build_channel_section("smoke_signal", None, None, false, false);
         assert!(section.contains("4096"));
         assert!(section.contains("smoke_signal"));
+    }
+
+    #[test]
+    fn test_channel_group_chat_context() {
+        let section = build_channel_section("whatsapp", Some("Alice"), None, true, false);
+        assert!(section.contains("group chat"));
+        assert!(!section.contains("@mentioned"));
+    }
+
+    #[test]
+    fn test_channel_group_mentioned() {
+        let section = build_channel_section("whatsapp", Some("Bob"), None, true, true);
+        assert!(section.contains("group chat"));
+        assert!(section.contains("@mentioned"));
     }
 
     #[test]

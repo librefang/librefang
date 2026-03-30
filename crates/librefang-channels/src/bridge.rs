@@ -750,6 +750,11 @@ fn build_sender_context(message: &ChannelMessage) -> SenderContext {
         user_id: sender_user_id(message).to_string(),
         display_name: message.sender.display_name.clone(),
         is_group: message.is_group,
+        was_mentioned: message
+            .metadata
+            .get("was_mentioned")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
         thread_id: message.thread_id.clone(),
         account_id: message
             .metadata

@@ -3285,6 +3285,8 @@ system_prompt = "You are a helpful assistant."
                 channel_type: sender_context.map(|s| s.channel.clone()),
                 sender_user_id: sender_context.map(|s| s.user_id.clone()),
                 sender_display_name: sender_context.map(|s| s.display_name.clone()),
+                is_group: sender_context.map(|s| s.is_group).unwrap_or(false),
+                was_mentioned: sender_context.map(|s| s.was_mentioned).unwrap_or(false),
                 is_subagent: manifest
                     .metadata
                     .get("is_subagent")
@@ -4221,6 +4223,8 @@ system_prompt = "You are a helpful assistant."
                 channel_type: sender_context.map(|s| s.channel.clone()),
                 sender_display_name: sender_context.map(|s| s.display_name.clone()),
                 sender_user_id: sender_context.map(|s| s.user_id.clone()),
+                is_group: sender_context.map(|s| s.is_group).unwrap_or(false),
+                was_mentioned: sender_context.map(|s| s.was_mentioned).unwrap_or(false),
                 is_subagent: manifest
                     .metadata
                     .get("is_subagent")
@@ -10507,6 +10511,7 @@ mod tests {
             user_id: "user-123".to_string(),
             display_name: "Alice".to_string(),
             is_group: true,
+            was_mentioned: false,
             thread_id: Some("thread-9".to_string()),
             account_id: None,
         };
