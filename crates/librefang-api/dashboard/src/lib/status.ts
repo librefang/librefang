@@ -10,3 +10,9 @@ export function getStatusVariant(status?: string): BadgeVariant {
   if (value === "error" || value === "crashed") return "error";
   return "default";
 }
+
+/** Check if a provider auth_status indicates the provider is usable.
+ *  Mirrors the Rust AuthStatus::is_available() variants. */
+export function isProviderAvailable(status?: string): boolean {
+  return status === "configured" || status === "not_required" || status === "configured_cli";
+}

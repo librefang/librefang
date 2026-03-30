@@ -1730,41 +1730,36 @@ The QQ adapter connects to the QQ Bot API via WebSocket for real-time message de
 
 ### Prerequisites
 
-- A WeCom (WeChat Work) enterprise account with a self-built application (from the [WeCom Developer Portal](https://developer.work.weixin.qq.com/document/))
+- A WeCom (WeChat Work) enterprise account with an **intelligent bot** (智能机器人) created from the [WeCom Admin Console](https://work.weixin.qq.com/)
 
 ### Setup
 
-1. In the WeCom admin console, go to **App Management > Self-Built Apps** and create a new application.
-2. Note the Corp ID, Agent ID, and Secret.
-3. Configure the receiving message API callback URL in the app settings.
-4. Set environment variables:
+1. In the WeCom admin console, go to **Apps > Create App** and select **Intelligent Bot** (智能机器人).
+2. Note the **Bot ID** and **Secret** from the bot settings page.
+3. Set the secret environment variable:
 
 ```bash
-export WECOM_CORP_ID=your-corp-id             # Environment variable
-export WECOM_AGENT_ID=your-agent-id
-export WECOM_SECRET=your-app-secret
-librefang vault set WECOM_CORP_ID             # Encrypted vault (recommended)
-librefang vault set WECOM_AGENT_ID
-librefang vault set WECOM_SECRET
+export WECOM_BOT_SECRET=your-bot-secret       # Environment variable
+librefang vault set WECOM_BOT_SECRET          # Encrypted vault (recommended)
 librefang config set-key wecom                # .env file
 # Or set via dashboard "Set API Key" button   # secrets.env
 ```
 
-5. Add to config:
+4. Add to config:
 
 ```toml
 [channels.wecom]
-corp_id_env = "WECOM_CORP_ID"
-agent_id_env = "WECOM_AGENT_ID"
-secret_env = "WECOM_SECRET"
-default_agent = "assistant"
+bot_id = "YOUR_BOT_ID"
+secret_env = "WECOM_BOT_SECRET"
+# account_id = "my-bot"          # Optional: unique ID for multi-bot routing
+# default_agent = "assistant"    # Optional: route messages to specific agent
 ```
 
-6. Restart the daemon.
+5. Restart the daemon.
 
 ### How It Works
 
-The WeCom adapter uses the WeCom Enterprise API webhook protocol to receive message callbacks. It obtains an access token using the corp credentials and sends responses via the WeCom message sending API. Message payloads are encrypted and decrypted using the configured encoding AES key.
+The WeCom adapter connects to `wss://openws.work.weixin.qq.com` via a persistent WebSocket. It authenticates using the Bot ID and a signed token, then subscribes to incoming messages via `aibot_subscribe`. User messages arrive as `aibot_msg_callback` JSON frames and replies are sent back as `aibot_send_msg` frames. No public HTTP endpoint or AES encryption is required.
 
 ---
 

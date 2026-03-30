@@ -19,12 +19,7 @@ use tokio::sync::{mpsc, watch};
 use tracing::{debug, error, info, warn};
 use zeroize::Zeroizing;
 
-/// Maximum backoff duration on API failures.
-const MAX_BACKOFF: Duration = Duration::from_secs(60);
-/// Initial backoff duration on API failures.
-const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
-/// Telegram long-polling timeout (seconds) — sent as the `timeout` parameter to getUpdates.
-const LONG_POLL_TIMEOUT: u64 = 30;
+// Backoff and long-poll timeout are now configurable via TelegramConfig.
 
 /// Default Telegram Bot API base URL.
 const DEFAULT_API_URL: &str = "https://api.telegram.org";
@@ -50,6 +45,12 @@ pub struct TelegramAdapter {
     account_id: Option<String>,
     /// Thread-based agent routing: thread_id -> agent name.
     thread_routes: HashMap<String, String>,
+    /// Initial backoff on API failures.
+    initial_backoff: Duration,
+    /// Maximum backoff on API failures.
+    max_backoff: Duration,
+    /// Telegram long-polling timeout in seconds.
+    long_poll_timeout: u64,
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
 }
@@ -80,9 +81,25 @@ impl TelegramAdapter {
             bot_username: Arc::new(tokio::sync::RwLock::new(None)),
             account_id: None,
             thread_routes: HashMap::new(),
+            initial_backoff: Duration::from_secs(1),
+            max_backoff: Duration::from_secs(60),
+            long_poll_timeout: 30,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
         }
+    }
+
+    /// Set backoff and long-poll timeout configuration. Returns self for builder chaining.
+    pub fn with_backoff(
+        mut self,
+        initial_backoff_secs: u64,
+        max_backoff_secs: u64,
+        long_poll_timeout_secs: u64,
+    ) -> Self {
+        self.initial_backoff = Duration::from_secs(initial_backoff_secs);
+        self.max_backoff = Duration::from_secs(max_backoff_secs);
+        self.long_poll_timeout = long_poll_timeout_secs;
+        self
     }
 
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
@@ -483,9 +500,11 @@ impl TelegramAdapter {
             self.api_base_url,
             self.token.as_str()
         );
+        let sanitized = sanitize_telegram_html(text);
         let mut body = serde_json::json!({
             "chat_id": chat_id,
-            "text": text,
+            "text": sanitized,
+            "parse_mode": "HTML",
         });
         if let Some(tid) = thread_id {
             body["message_thread_id"] = serde_json::json!(tid);
@@ -724,10 +743,13 @@ impl ChannelAdapter for TelegramAdapter {
         let account_id = self.account_id.clone();
         let thread_routes = self.thread_routes.clone();
         let mut shutdown = self.shutdown_rx.clone();
+        let initial_backoff = self.initial_backoff;
+        let max_backoff = self.max_backoff;
+        let long_poll_timeout = self.long_poll_timeout;
 
         tokio::spawn(async move {
             let mut offset: Option<i64> = None;
-            let mut backoff = INITIAL_BACKOFF;
+            let mut backoff = initial_backoff;
 
             loop {
                 // Check shutdown
@@ -738,7 +760,7 @@ impl ChannelAdapter for TelegramAdapter {
                 // Build getUpdates request
                 let url = format!("{}/bot{}/getUpdates", api_base_url, token.as_str());
                 let mut params = serde_json::json!({
-                    "timeout": LONG_POLL_TIMEOUT,
+                    "timeout": long_poll_timeout,
                     "allowed_updates": ["message", "edited_message", "callback_query"],
                 });
                 if let Some(off) = offset {
@@ -746,7 +768,7 @@ impl ChannelAdapter for TelegramAdapter {
                 }
 
                 // Make the request with a timeout slightly longer than the long-poll timeout
-                let request_timeout = Duration::from_secs(LONG_POLL_TIMEOUT + 10);
+                let request_timeout = Duration::from_secs(long_poll_timeout + 10);
                 let result = tokio::select! {
                     res = async {
                         client
@@ -766,7 +788,7 @@ impl ChannelAdapter for TelegramAdapter {
                     Err(e) => {
                         warn!("Telegram getUpdates network error: {e}, retrying in {backoff:?}");
                         tokio::time::sleep(backoff).await;
-                        backoff = (backoff * 2).min(MAX_BACKOFF);
+                        backoff = (backoff * 2).min(max_backoff);
                         continue;
                     }
                 };
@@ -788,7 +810,7 @@ impl ChannelAdapter for TelegramAdapter {
                 if status.as_u16() == 409 {
                     warn!("Telegram 409 Conflict — stale polling session, retrying in {backoff:?}");
                     tokio::time::sleep(backoff).await;
-                    backoff = (backoff * 2).min(MAX_BACKOFF);
+                    backoff = (backoff * 2).min(max_backoff);
                     continue;
                 }
 
@@ -796,7 +818,7 @@ impl ChannelAdapter for TelegramAdapter {
                     let body_text = resp.text().await.unwrap_or_default();
                     warn!("Telegram getUpdates failed ({status}): {body_text}, retrying in {backoff:?}");
                     tokio::time::sleep(backoff).await;
-                    backoff = (backoff * 2).min(MAX_BACKOFF);
+                    backoff = (backoff * 2).min(max_backoff);
                     continue;
                 }
 
@@ -806,13 +828,13 @@ impl ChannelAdapter for TelegramAdapter {
                     Err(e) => {
                         warn!("Telegram getUpdates parse error: {e}");
                         tokio::time::sleep(backoff).await;
-                        backoff = (backoff * 2).min(MAX_BACKOFF);
+                        backoff = (backoff * 2).min(max_backoff);
                         continue;
                     }
                 };
 
                 // Reset backoff on success
-                backoff = INITIAL_BACKOFF;
+                backoff = initial_backoff;
 
                 if body["ok"].as_bool() != Some(true) {
                     warn!("Telegram getUpdates returned ok=false");
@@ -1568,9 +1590,9 @@ fn check_mention_entities(message: &serde_json::Value, bot_username: &str) -> bo
     false
 }
 
-/// Calculate exponential backoff capped at MAX_BACKOFF.
-pub fn calculate_backoff(current: Duration) -> Duration {
-    (current * 2).min(MAX_BACKOFF)
+/// Calculate exponential backoff capped at the given maximum.
+pub fn calculate_backoff(current: Duration, max: Duration) -> Duration {
+    (current * 2).min(max)
 }
 
 /// Sanitize text for Telegram HTML parse mode.
@@ -1800,16 +1822,17 @@ mod tests {
 
     #[test]
     fn test_backoff_calculation() {
-        let b1 = calculate_backoff(Duration::from_secs(1));
+        let max = Duration::from_secs(60);
+        let b1 = calculate_backoff(Duration::from_secs(1), max);
         assert_eq!(b1, Duration::from_secs(2));
 
-        let b2 = calculate_backoff(Duration::from_secs(2));
+        let b2 = calculate_backoff(Duration::from_secs(2), max);
         assert_eq!(b2, Duration::from_secs(4));
 
-        let b3 = calculate_backoff(Duration::from_secs(32));
+        let b3 = calculate_backoff(Duration::from_secs(32), max);
         assert_eq!(b3, Duration::from_secs(60)); // capped
 
-        let b4 = calculate_backoff(Duration::from_secs(60));
+        let b4 = calculate_backoff(Duration::from_secs(60), max);
         assert_eq!(b4, Duration::from_secs(60)); // stays at cap
     }
 

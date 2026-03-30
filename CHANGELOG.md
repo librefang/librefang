@@ -5,6 +5,113 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
+## [2026.3.28] - 2026-03-28
+
+### Added
+
+- TUI guide for free provider setup on first run (#1731) (@houko)
+- Add set-as-default button to provider UI (#1753) (@houko)
+
+### Fixed
+
+- Use English for shared contacts label (#1732) (@f-liva)
+- Use live default model for provider auth checks (#1748) (@TechWizard9999)
+- Hot-reload Wecom channel config without restart (#1754) (@houko)
+- Use effective default provider instead of hardcoded OpenRouter (#1755) (@houko)
+- Add parse_mode and sanitization to streaming initial message (#1759) (@f-liva)
+- Avoid blocking_write panic in daemon on Termux/Android (#1765) (@houko)
+
+### Maintenance
+
+- Batch upgrade dependencies (#1752) (@houko)
+
+
+## [2026.3.26] - 2026-03-26
+
+### Added
+
+- Persist workflow run state to survive daemon restarts (#1657) (@houko)
+- Add nvidia/nim aliases for nvidia-nim provider (#1660) (@houko)
+- Sync and serve channel metadata from registry (#1661) (@houko)
+- Integrate goal system into agent loop and prompt builder (#1663) (@houko)
+- Migrate MCP stdio transport to rmcp SDK, fix env leak (#1667) (@houko)
+- Implement all missing hot-reload actions (#1679) (@houko)
+- Pluggable VectorStore backend with HTTP implementation (#1691) (@houko)
+- Multimodal memory schema foundation for image indexing (#1692) (@houko)
+- Add 5 operator-facing config fields (tool_timeout, upload_size, concurrency, call_depth, body_size) (#1709) (@houko)
+- Add /api/registry/schema endpoint for dashboard form generation (#1715) (@houko)
+- Add upgrade mode to librefang init (#1723) (@houko)
+- Replace WeCom app with intelligent bot WebSocket adapter (#1729) (@houko)
+
+### Fixed
+
+- Replace unsafe pointer mutation in budget config updates (#1637) (@houko)
+- Make metering quota check and usage record atomic (#1638) (@houko)
+- Add TTL-based expiration for A2A task store (#1639) (@houko)
+- Track background tasks for graceful shutdown (#1640) (@houko)
+- Use atomic DashMap entry API for agent registry name index (#1641) (@houko)
+- Replace production panics with error handling (#1642) (@houko)
+- Support multiple Hand instances with instance-scoped agent IDs (#1643) (@houko)
+- Auto-patch node-gyp on Termux/Android for better-sqlite3 native build (#1649) (@houko)
+- Use centralized http_client to avoid rustls-platform-verifier panic on Termux (#1650) (@houko)
+- Centralize registry sync to prevent parallel git clone races (#1651) (@houko)
+- Pin DNS resolution to prevent SSRF rebinding attacks (#1653) (@houko)
+- Add 8 missing fields to strict config validation (#1654) (@houko)
+- Log warnings for malformed LLM tool call arguments (#1655) (@houko)
+- Add per-trigger cooldown to prevent event storms (#1656) (@houko)
+- Resolve WhatsApp gateway config path from $HOME instead of hardcoded /data/ (#1658) (@houko)
+- Enforce workspace sandbox and tool capability checks (#1665) (@houko)
+- Dashboard auth dialog never shown when api_key is configured (#1666) (@houko)
+- Add dropped event monitoring to event bus (#1668) (@houko)
+- Docker symlink, memory merge, workflow conditions, config test (#1670) (@houko)
+- Enforce tool call and cost quotas in scheduler (#1671) (@houko)
+- Apply cache token discount and update model prices (#1672) (@houko)
+- Implement OAuth refresh token flow (#1673) (@houko)
+- Replace XOR obfuscation with Argon2 key wrapping (#1674) (@houko)
+- Make config hot-reload atomic with epoch counter (#1676) (@houko)
+- Remove dead client field from WebFetchEngine (#1678) (@houko)
+- Restore backward-compatible agent IDs for single-instance hands (#1680) (@houko)
+- Re-land SSRF DNS pinning to prevent TOCTOU rebinding attacks (#1681) (@houko)
+- Budget enforcement, complete API error migration, cache invalidation (#1683) (@houko)
+- Clippy warnings and rustfmt from recent merges (#1685) (@houko)
+- Update hand tests for legacy agent ID format (#1686) (@houko)
+- Sync workflow templates from registry on boot (#1688) (@houko)
+- Remove workflows from registry sync (kernel handles this separately) (#1689) (@houko)
+- Webchat responses silently dropped due to stream timeout and missing routing context (#1690) (@houko)
+- Resolve compilation errors from merged PR conflicts (#1712) (@houko)
+- Suppress clippy::manual_clamp in clamp_bounds (#1716) (@houko)
+- Remove dangling doc comment in ws.rs (#1717) (@houko)
+- Wrap load_templates_from_dir with block_in_place (#1719) (@houko)
+- Repair test failures from goal system merge (#1720) (@houko)
+- Recognize all available auth statuses for custom providers in WebUI (#1721) (@houko)
+- Correct test expectations for metering and workflow collect (#1722) (@houko)
+- Accept "Failed to resolve" error in Windows capability test (#1725) (@houko)
+- Auto-detect default LLM provider, fix WeChat QR flashing (#1727) (@houko)
+
+### Changed
+
+- Standardize API error response format (#1646) (@houko)
+- Deduplicate LLM driver request building and fix streaming (#1669) (@houko)
+- Deduplicate constants and auto-generate user-agent version (#1693) (@houko)
+- Remove pub const provider URLs, inline in driver registry (#1695) (@houko)
+- Extract registry cache TTL into configurable RegistryConfig (#1698) (@houko)
+- Extract API rate limiting constants into RateLimitConfig (#1701) (@houko)
+- Extract compaction constants into CompactionConfig (#1704) (@houko)
+- Extract trigger system constants into TriggersConfig (#1705) (@houko)
+- Extract channel timeout and polling constants into per-channel config (#1707) (@houko)
+- Move workflow template sync from kernel boot to registry_sync (#1713) (@houko)
+
+### Performance
+
+- Cache available_tools computation per agent (#1644) (@houko)
+
+### Maintenance
+
+- Extract build_agent_manifest_toml from tool_agent_spawn and test (#1648) (@aimlyo)
+- Remove bundled integration templates from source tree (#1659) (@houko)
+- Fix formatting issues caught by CI (#1714) (@houko)
+
+
 ## [2026.3.25] - 2026-03-25
 
 ### Added

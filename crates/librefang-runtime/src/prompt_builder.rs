@@ -59,6 +59,9 @@ pub struct PromptContext {
     pub peer_agents: Vec<(String, String, String)>,
     /// Current date/time string for temporal awareness.
     pub current_date: Option<String>,
+    /// Active goals (pending/in_progress) for the agent. Each entry is a
+    /// (title, status, progress%) tuple.
+    pub active_goals: Vec<(String, String, u8)>,
 }
 
 /// Build the complete system prompt from a `PromptContext`.
@@ -138,6 +141,11 @@ pub fn build_system_prompt(ctx: &PromptContext) -> String {
                 ));
             }
         }
+    }
+
+    // Section 7.6 — Active Goals (always present when goals exist)
+    if !ctx.active_goals.is_empty() {
+        sections.push(build_goals_section(&ctx.active_goals));
     }
 
     // Section 8 — User Personalization (skip for subagents)
@@ -276,7 +284,7 @@ pub fn build_canonical_context_message(ctx: &PromptContext) -> Option<String> {
     ctx.canonical_context
         .as_ref()
         .filter(|c| !c.is_empty())
-        .map(|c| format!("[Previous conversation context]\n{}", cap_str(c, 500)))
+        .map(|c| format!("[Previous conversation context]\n{}", cap_str(c, 2000)))
 }
 
 /// Build the memory section (Section 4).
@@ -472,6 +480,18 @@ fn build_channel_section(
     section
 }
 
+/// Build the active goals section (Section 7.6).
+fn build_goals_section(goals: &[(String, String, u8)]) -> String {
+    let mut out = String::from(
+        "## Active Goals\n\
+         You are working toward these goals. Use the `goal_update` tool to report progress.\n",
+    );
+    for (title, status, progress) in goals {
+        out.push_str(&format!("- [{status} {progress}%] {title}\n"));
+    }
+    out
+}
+
 fn build_peer_agents_section(self_name: &str, peers: &[(String, String, String)]) -> String {
     let mut out = String::from(
         "## Peer Agents\n\
@@ -536,6 +556,8 @@ pub fn tool_category(name: &str) -> &'static str {
         "image_describe" | "image_generate" | "audio_transcribe" | "tts_speak" => "Media",
 
         "docker_exec" | "docker_build" | "docker_run" => "Docker",
+
+        "goal_update" => "Goals",
 
         "cron_create" | "cron_list" | "cron_delete" => "Scheduling",
 
@@ -604,6 +626,9 @@ pub fn tool_hint(name: &str) -> &'static str {
         "docker_exec" => "run a command in a container",
         "docker_build" => "build a Docker image",
         "docker_run" => "start a Docker container",
+
+        // Goals
+        "goal_update" => "update a goal's status or progress",
 
         // Scheduling
         "cron_create" => "schedule a recurring task",
@@ -1032,5 +1057,47 @@ mod tests {
         assert_eq!(capitalize("files"), "Files");
         assert_eq!(capitalize(""), "");
         assert_eq!(capitalize("MCP"), "MCP");
+    }
+
+    #[test]
+    fn test_goals_section_present_when_active() {
+        let mut ctx = basic_ctx();
+        ctx.active_goals = vec![
+            ("Ship v1.0".to_string(), "in_progress".to_string(), 40),
+            ("Write docs".to_string(), "pending".to_string(), 0),
+        ];
+        let prompt = build_system_prompt(&ctx);
+        assert!(prompt.contains("## Active Goals"));
+        assert!(prompt.contains("[in_progress 40%] Ship v1.0"));
+        assert!(prompt.contains("[pending 0%] Write docs"));
+        assert!(prompt.contains("goal_update"));
+    }
+
+    #[test]
+    fn test_goals_section_omitted_when_empty() {
+        let ctx = basic_ctx();
+        let prompt = build_system_prompt(&ctx);
+        assert!(!prompt.contains("## Active Goals"));
+    }
+
+    #[test]
+    fn test_goals_section_present_for_subagents() {
+        let mut ctx = basic_ctx();
+        ctx.is_subagent = true;
+        ctx.active_goals = vec![("Sub-task".to_string(), "in_progress".to_string(), 50)];
+        let prompt = build_system_prompt(&ctx);
+        // Goals should still be visible to subagents
+        assert!(prompt.contains("## Active Goals"));
+        assert!(prompt.contains("[in_progress 50%] Sub-task"));
+    }
+
+    #[test]
+    fn test_goal_update_tool_category() {
+        assert_eq!(tool_category("goal_update"), "Goals");
+    }
+
+    #[test]
+    fn test_goal_update_tool_hint() {
+        assert!(!tool_hint("goal_update").is_empty());
     }
 }

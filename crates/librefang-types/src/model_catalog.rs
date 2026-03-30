@@ -4,70 +4,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 
-// ---------------------------------------------------------------------------
-// Canonical provider base URLs — single source of truth.
-// Referenced by librefang-runtime drivers, model catalog, and embedding modules.
-// ---------------------------------------------------------------------------
-
-pub const ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com";
-pub const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
-pub const GEMINI_BASE_URL: &str = "https://generativelanguage.googleapis.com";
-pub const DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com/v1";
-pub const GROQ_BASE_URL: &str = "https://api.groq.com/openai/v1";
-pub const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
-pub const MISTRAL_BASE_URL: &str = "https://api.mistral.ai/v1";
-pub const TOGETHER_BASE_URL: &str = "https://api.together.xyz/v1";
-pub const FIREWORKS_BASE_URL: &str = "https://api.fireworks.ai/inference/v1";
-pub const OLLAMA_BASE_URL: &str = "http://localhost:11434/v1";
-pub const VLLM_BASE_URL: &str = "http://localhost:8000/v1";
-pub const LMSTUDIO_BASE_URL: &str = "http://localhost:1234/v1";
-pub const LEMONADE_BASE_URL: &str = "http://localhost:8888/api/v1";
-pub const PERPLEXITY_BASE_URL: &str = "https://api.perplexity.ai";
-pub const COHERE_BASE_URL: &str = "https://api.cohere.com/v2";
-pub const AI21_BASE_URL: &str = "https://api.ai21.com/studio/v1";
-pub const CEREBRAS_BASE_URL: &str = "https://api.cerebras.ai/v1";
-pub const SAMBANOVA_BASE_URL: &str = "https://api.sambanova.ai/v1";
-pub const HUGGINGFACE_BASE_URL: &str = "https://api-inference.huggingface.co/v1";
-pub const XAI_BASE_URL: &str = "https://api.x.ai/v1";
-pub const REPLICATE_BASE_URL: &str = "https://api.replicate.com/v1";
-pub const VENICE_BASE_URL: &str = "https://api.venice.ai/api/v1";
-
-// ── GitHub Copilot ──────────────────────────────────────────────
-pub const GITHUB_COPILOT_BASE_URL: &str = "https://api.githubcopilot.com";
-
-// ── Chinese providers ─────────────────────────────────────────────
-pub const QWEN_BASE_URL: &str = "https://dashscope.aliyuncs.com/compatible-mode/v1";
-/// MiniMax International (minimax.io) — default base URL.
-pub const MINIMAX_BASE_URL: &str = "https://api.minimax.io/v1";
-pub const ZHIPU_BASE_URL: &str = "https://open.bigmodel.cn/api/paas/v4";
-pub const ZHIPU_CODING_BASE_URL: &str = "https://open.bigmodel.cn/api/coding/paas/v4";
-/// Z.AI domain aliases (same API, different domain).
-pub const ZAI_BASE_URL: &str = "https://api.z.ai/api/paas/v4";
-pub const ZAI_CODING_BASE_URL: &str = "https://api.z.ai/api/coding/paas/v4";
-pub const MOONSHOT_BASE_URL: &str = "https://api.moonshot.ai/v1";
-pub const KIMI_CODING_BASE_URL: &str = "https://api.kimi.com/coding";
-pub const QIANFAN_BASE_URL: &str = "https://qianfan.baidubce.com/v2";
-pub const VOLCENGINE_BASE_URL: &str = "https://ark.cn-beijing.volces.com/api/v3";
-pub const VOLCENGINE_CODING_BASE_URL: &str = "https://ark.cn-beijing.volces.com/api/coding/v3";
-
-// ── Chutes.ai ────────────────────────────────────────────────────
-pub const CHUTES_BASE_URL: &str = "https://llm.chutes.ai/v1";
-
-// ── ChatGPT (Session Auth / Codex Responses API) ─────────────────
-pub const CHATGPT_BASE_URL: &str = "https://chatgpt.com/backend-api";
-
-// ── AWS Bedrock ───────────────────────────────────────────────────
-pub const BEDROCK_BASE_URL: &str = "https://bedrock-runtime.us-east-1.amazonaws.com";
-
-// ── Google Cloud Vertex AI ───────────────────────────────────────
-pub const VERTEX_AI_BASE_URL: &str = "https://us-central1-aiplatform.googleapis.com";
-
-// ── DeepInfra ─────────────────────────────────────────────────
-pub const DEEPINFRA_BASE_URL: &str = "https://api.deepinfra.com/v1/openai";
-
-// ── NVIDIA NIM ──────────────────────────────────────────────────
-pub const NVIDIA_NIM_BASE_URL: &str = "https://integrate.api.nvidia.com/v1";
-
 /// A model's capability tier.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -163,10 +99,13 @@ pub struct ModelCatalogEntry {
     /// Cost per million output tokens (USD).
     pub output_cost_per_m: f64,
     /// Whether the model supports tool/function calling.
+    #[serde(default)]
     pub supports_tools: bool,
     /// Whether the model supports vision/image inputs.
+    #[serde(default)]
     pub supports_vision: bool,
     /// Whether the model supports streaming responses.
+    #[serde(default)]
     pub supports_streaming: bool,
     /// Aliases for this model (e.g. ["sonnet", "claude-sonnet"]).
     #[serde(default)]

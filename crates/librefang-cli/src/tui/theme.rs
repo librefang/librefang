@@ -1,34 +1,35 @@
 //! Color palette matching the LibreFang landing page design system.
 //!
 //! Core palette from globals.css + code syntax from constants.ts.
+//! Tuned for modern dark-mode TUI aesthetics with good contrast.
 
 #![allow(dead_code)] // Full palette — some colors reserved for future screens.
 
 use ratatui::style::{Color, Modifier, Style};
 
-// ── Core Palette (dark mode for terminal) ───────────────────────────────────
+// ── Core Palette (dark mode — matches docs site zinc + emerald design) ───────
 
-pub const ACCENT: Color = Color::Rgb(255, 92, 0); // #FF5C00 — LibreFang orange
-pub const ACCENT_DIM: Color = Color::Rgb(224, 82, 0); // #E05200
+pub const ACCENT: Color = Color::Rgb(52, 211, 153); // #34D399 — emerald-400 (site primary)
+pub const ACCENT_DIM: Color = Color::Rgb(16, 185, 129); // #10B981 — emerald-500
 
-pub const BG_PRIMARY: Color = Color::Rgb(15, 14, 14); // #0F0E0E — dark background
-pub const BG_CARD: Color = Color::Rgb(31, 29, 28); // #1F1D1C — dark surface
-pub const BG_HOVER: Color = Color::Rgb(42, 39, 37); // #2A2725 — dark hover
-pub const BG_CODE: Color = Color::Rgb(24, 22, 21); // #181615 — dark code block
+pub const BG_PRIMARY: Color = Color::Rgb(24, 24, 27); // #18181B — zinc-900
+pub const BG_CARD: Color = Color::Rgb(39, 39, 42); // #27272A — zinc-800
+pub const BG_HOVER: Color = Color::Rgb(52, 52, 56); // #343438 — zinc-700/800
+pub const BG_CODE: Color = Color::Rgb(30, 30, 33); // #1E1E21 — code block
 
-pub const TEXT_PRIMARY: Color = Color::Rgb(240, 239, 238); // #F0EFEE — light text on dark bg
-pub const TEXT_SECONDARY: Color = Color::Rgb(168, 162, 158); // #A8A29E — muted text
-pub const TEXT_TERTIARY: Color = Color::Rgb(120, 113, 108); // #78716C — dim text
+pub const TEXT_PRIMARY: Color = Color::Rgb(244, 244, 245); // #F4F4F5 — zinc-100
+pub const TEXT_SECONDARY: Color = Color::Rgb(161, 161, 170); // #A1A1AA — zinc-400
+pub const TEXT_TERTIARY: Color = Color::Rgb(113, 113, 122); // #71717A — zinc-500
 
-pub const BORDER: Color = Color::Rgb(63, 59, 56); // #3F3B38 — dark border
+pub const BORDER: Color = Color::Rgb(63, 63, 70); // #3F3F46 — zinc-700
 
-// ── Semantic Colors (brighter variants for dark background contrast) ────────
+// ── Semantic Colors ─────────────────────────────────────────────────────────
 
-pub const GREEN: Color = Color::Rgb(34, 197, 94); // #22C55E — success
-pub const BLUE: Color = Color::Rgb(59, 130, 246); // #3B82F6 — info
-pub const YELLOW: Color = Color::Rgb(234, 179, 8); // #EAB308 — warning
-pub const RED: Color = Color::Rgb(239, 68, 68); // #EF4444 — error
-pub const PURPLE: Color = Color::Rgb(168, 85, 247); // #A855F7 — decorators
+pub const GREEN: Color = Color::Rgb(52, 211, 153); // #34D399 — emerald-400
+pub const BLUE: Color = Color::Rgb(96, 165, 250); // #60A5FA — blue-400
+pub const YELLOW: Color = Color::Rgb(250, 204, 21); // #FACC15 — yellow-400
+pub const RED: Color = Color::Rgb(248, 113, 113); // #F87171 — red-400
+pub const PURPLE: Color = Color::Rgb(192, 132, 252); // #C084FC — purple-400
 
 // ── Backward-compat aliases ─────────────────────────────────────────────────
 
@@ -43,7 +44,10 @@ pub fn title_style() -> Style {
 }
 
 pub fn selected_style() -> Style {
-    Style::default().fg(ACCENT).bg(BG_HOVER)
+    Style::default()
+        .fg(TEXT_PRIMARY)
+        .bg(BG_HOVER)
+        .add_modifier(Modifier::BOLD)
 }
 
 pub fn dim_style() -> Style {
@@ -62,13 +66,17 @@ pub fn hint_style() -> Style {
 
 pub fn tab_active() -> Style {
     Style::default()
-        .fg(Color::White)
+        .fg(BG_PRIMARY)
         .bg(ACCENT)
         .add_modifier(Modifier::BOLD)
 }
 
+pub fn tab_separator() -> Style {
+    Style::default().fg(BORDER)
+}
+
 pub fn tab_inactive() -> Style {
-    Style::default().fg(TEXT_SECONDARY)
+    Style::default().fg(TEXT_TERTIARY)
 }
 
 // ── State badge styles ──────────────────────────────────────────────────────
@@ -97,17 +105,17 @@ pub fn badge_crashed() -> Style {
 pub fn state_badge(state: &str) -> (&'static str, Style) {
     let lower = state.to_lowercase();
     if lower.contains("run") {
-        ("[RUN]", badge_running())
+        ("\u{25cf} RUN", badge_running())
     } else if lower.contains("creat") || lower.contains("new") || lower.contains("idle") {
-        ("[NEW]", badge_created())
+        ("\u{25cb} NEW", badge_created())
     } else if lower.contains("sus") || lower.contains("paus") {
-        ("[SUS]", badge_suspended())
+        ("\u{25d4} SUS", badge_suspended())
     } else if lower.contains("term") || lower.contains("stop") || lower.contains("end") {
-        ("[END]", badge_terminated())
+        ("\u{25cb} END", badge_terminated())
     } else if lower.contains("err") || lower.contains("crash") || lower.contains("fail") {
-        ("[ERR]", badge_crashed())
+        ("\u{25cf} ERR", badge_crashed())
     } else {
-        ("[---]", dim_style())
+        ("\u{25cb} ---", dim_style())
     }
 }
 
@@ -115,8 +123,8 @@ pub fn state_badge(state: &str) -> (&'static str, Style) {
 
 pub fn table_header() -> Style {
     Style::default()
-        .fg(ACCENT)
-        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+        .fg(TEXT_SECONDARY)
+        .add_modifier(Modifier::BOLD)
 }
 
 pub fn channel_ready() -> Style {
@@ -134,6 +142,5 @@ pub fn channel_off() -> Style {
 // ── Spinner ─────────────────────────────────────────────────────────────────
 
 pub const SPINNER_FRAMES: &[&str] = &[
-    "\u{280b}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283c}", "\u{2834}", "\u{2826}", "\u{2827}",
-    "\u{2807}", "\u{280f}",
+    "\u{25dc}", "\u{25dd}", "\u{25de}", "\u{25df}", // ◜ ◝ ◞ ◟ rotating arc
 ];

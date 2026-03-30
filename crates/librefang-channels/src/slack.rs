@@ -19,8 +19,6 @@ use tracing::{debug, error, info, warn};
 use zeroize::Zeroizing;
 
 const SLACK_API_BASE: &str = "https://slack.com/api";
-const MAX_BACKOFF: Duration = Duration::from_secs(60);
-const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 const SLACK_MSG_LIMIT: usize = 3000;
 
 /// Slack Socket Mode adapter.
@@ -35,6 +33,10 @@ pub struct SlackAdapter {
     /// Whether to unfurl (expand previews for) links in sent messages.
     /// When `None`, Slack uses its own default behavior.
     unfurl_links: Option<bool>,
+    /// Initial backoff on WebSocket failures.
+    initial_backoff: Duration,
+    /// Maximum backoff on WebSocket failures.
+    max_backoff: Duration,
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
     /// Bot's own user ID (populated after auth.test).
@@ -53,6 +55,8 @@ impl SlackAdapter {
             allowed_channels,
             account_id: None,
             unfurl_links: None,
+            initial_backoff: Duration::from_secs(1),
+            max_backoff: Duration::from_secs(60),
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
             bot_user_id: Arc::new(RwLock::new(None)),
@@ -75,6 +79,13 @@ impl SlackAdapter {
     /// Set the unfurl_links option. Returns self for builder chaining.
     pub fn with_unfurl_links(mut self, unfurl_links: Option<bool>) -> Self {
         self.unfurl_links = unfurl_links;
+        self
+    }
+
+    /// Set backoff configuration. Returns self for builder chaining.
+    pub fn with_backoff(mut self, initial_backoff_secs: u64, max_backoff_secs: u64) -> Self {
+        self.initial_backoff = Duration::from_secs(initial_backoff_secs);
+        self.max_backoff = Duration::from_secs(max_backoff_secs);
         self
     }
 
@@ -277,9 +288,11 @@ impl ChannelAdapter for SlackAdapter {
         let account_id = self.account_id.clone();
         let client = self.client.clone();
         let mut shutdown = self.shutdown_rx.clone();
+        let initial_backoff = self.initial_backoff;
+        let max_backoff = self.max_backoff;
 
         tokio::spawn(async move {
-            let mut backoff = INITIAL_BACKOFF;
+            let mut backoff = initial_backoff;
 
             loop {
                 if *shutdown.borrow() {
@@ -295,7 +308,7 @@ impl ChannelAdapter for SlackAdapter {
                     Err(err_msg) => {
                         warn!("Slack: failed to get WebSocket URL: {err_msg}, retrying in {backoff:?}");
                         tokio::time::sleep(backoff).await;
-                        backoff = (backoff * 2).min(MAX_BACKOFF);
+                        backoff = (backoff * 2).min(max_backoff);
                         continue;
                     }
                 };
@@ -308,12 +321,12 @@ impl ChannelAdapter for SlackAdapter {
                     Err(e) => {
                         warn!("Slack WebSocket connection failed: {e}, retrying in {backoff:?}");
                         tokio::time::sleep(backoff).await;
-                        backoff = (backoff * 2).min(MAX_BACKOFF);
+                        backoff = (backoff * 2).min(max_backoff);
                         continue;
                     }
                 };
 
-                backoff = INITIAL_BACKOFF;
+                backoff = initial_backoff;
                 info!("Slack Socket Mode connected");
 
                 let (mut ws_tx, mut ws_rx) = ws_stream.split();
@@ -458,7 +471,7 @@ impl ChannelAdapter for SlackAdapter {
 
                 warn!("Slack: reconnecting in {backoff:?}");
                 tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(MAX_BACKOFF);
+                backoff = (backoff * 2).min(max_backoff);
             }
 
             info!("Slack Socket Mode loop stopped");

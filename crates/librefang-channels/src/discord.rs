@@ -17,8 +17,6 @@ use tracing::{debug, error, info, warn};
 use zeroize::Zeroizing;
 
 const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
-const MAX_BACKOFF: Duration = Duration::from_secs(60);
-const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 const DISCORD_MSG_LIMIT: usize = 2000;
 
 /// Discord Gateway opcodes.
@@ -46,6 +44,10 @@ pub struct DiscordAdapter {
     intents: u64,
     /// Optional account identifier for multi-bot routing.
     account_id: Option<String>,
+    /// Initial backoff on WebSocket failures.
+    initial_backoff: Duration,
+    /// Maximum backoff on WebSocket failures.
+    max_backoff: Duration,
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
     /// Bot's own user ID (populated after READY event).
@@ -75,6 +77,8 @@ impl DiscordAdapter {
             mention_patterns,
             intents,
             account_id: None,
+            initial_backoff: Duration::from_secs(1),
+            max_backoff: Duration::from_secs(60),
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
             bot_user_id: Arc::new(RwLock::new(None)),
@@ -85,6 +89,13 @@ impl DiscordAdapter {
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
     pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
         self.account_id = account_id;
+        self
+    }
+
+    /// Set backoff configuration. Returns self for builder chaining.
+    pub fn with_backoff(mut self, initial_backoff_secs: u64, max_backoff_secs: u64) -> Self {
+        self.initial_backoff = Duration::from_secs(initial_backoff_secs);
+        self.max_backoff = Duration::from_secs(max_backoff_secs);
         self
     }
 
@@ -182,9 +193,11 @@ impl ChannelAdapter for DiscordAdapter {
         let resume_url_store = self.resume_gateway_url.clone();
         let mut shutdown = self.shutdown_rx.clone();
         let account_id = self.account_id.clone();
+        let initial_backoff = self.initial_backoff;
+        let max_backoff = self.max_backoff;
 
         tokio::spawn(async move {
-            let mut backoff = INITIAL_BACKOFF;
+            let mut backoff = initial_backoff;
             let mut connect_url = gateway_url;
             // Sequence persists across reconnections for RESUME
             let sequence: Arc<RwLock<Option<u64>>> = Arc::new(RwLock::new(None));
@@ -202,12 +215,12 @@ impl ChannelAdapter for DiscordAdapter {
                     Err(e) => {
                         warn!("Discord gateway connection failed: {e}, retrying in {backoff:?}");
                         tokio::time::sleep(backoff).await;
-                        backoff = (backoff * 2).min(MAX_BACKOFF);
+                        backoff = (backoff * 2).min(max_backoff);
                         continue;
                     }
                 };
 
-                backoff = INITIAL_BACKOFF;
+                backoff = initial_backoff;
                 info!("Discord gateway connected");
 
                 let (mut ws_tx, mut ws_rx) = ws_stream.split();
@@ -423,7 +436,7 @@ impl ChannelAdapter for DiscordAdapter {
 
                 warn!("Discord: reconnecting in {backoff:?}");
                 tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(MAX_BACKOFF);
+                backoff = (backoff * 2).min(max_backoff);
             }
 
             info!("Discord gateway loop stopped");

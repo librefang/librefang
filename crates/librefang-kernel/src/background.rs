@@ -42,11 +42,24 @@ pub struct BackgroundExecutor {
 
 impl BackgroundExecutor {
     /// Create a new executor bound to the supervisor's shutdown signal.
+    ///
+    /// `max_concurrent` overrides the default [`MAX_CONCURRENT_BG_LLM`] when
+    /// provided (i.e. when it is > 0). Pass `0` to use the compiled default.
     pub fn new(shutdown_rx: watch::Receiver<bool>) -> Self {
+        Self::with_concurrency(shutdown_rx, MAX_CONCURRENT_BG_LLM)
+    }
+
+    /// Create a new executor with a custom concurrency limit for background LLM calls.
+    pub fn with_concurrency(shutdown_rx: watch::Receiver<bool>, max_concurrent: usize) -> Self {
+        let effective = if max_concurrent == 0 {
+            MAX_CONCURRENT_BG_LLM
+        } else {
+            max_concurrent
+        };
         Self {
             tasks: DashMap::new(),
             shutdown_rx,
-            llm_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_BG_LLM)),
+            llm_semaphore: Arc::new(tokio::sync::Semaphore::new(effective)),
             pause_flags: DashMap::new(),
         }
     }

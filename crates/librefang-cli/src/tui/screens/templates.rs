@@ -1,11 +1,11 @@
 //! Templates screen: browse agent templates and spawn with one click.
 
-use crate::tui::theme;
+use crate::tui::{theme, widgets};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Padding, Paragraph};
+use ratatui::widgets::{ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
 // ── Data types ──────────────────────────────────────────────────────────────
@@ -32,71 +32,71 @@ const BUILTIN_TEMPLATES: &[(&str, &str, &str, &str, &str)] = &[
         "General Assistant",
         "Versatile AI assistant for everyday tasks",
         "General",
-        "anthropic",
-        "claude-sonnet-4-20250514",
+        "default",
+        "default",
     ),
     (
         "Code Helper",
         "Programming assistant with code review and debugging",
         "Development",
-        "anthropic",
-        "claude-sonnet-4-20250514",
+        "default",
+        "default",
     ),
     (
         "Researcher",
         "Deep research and analysis with web search",
         "Research",
-        "anthropic",
-        "claude-sonnet-4-20250514",
+        "default",
+        "default",
     ),
     (
         "Writer",
         "Creative and technical writing assistant",
         "Writing",
-        "anthropic",
-        "claude-sonnet-4-20250514",
+        "default",
+        "default",
     ),
     (
         "Data Analyst",
         "Data analysis, visualization, and SQL queries",
         "Development",
-        "gemini",
-        "gemini-2.5-flash",
+        "default",
+        "default",
     ),
     (
         "DevOps Engineer",
         "Infrastructure, CI/CD, and deployment assistance",
         "Development",
-        "groq",
-        "llama-3.3-70b-versatile",
+        "default",
+        "default",
     ),
     (
         "Customer Support",
         "Professional customer service agent",
         "Business",
-        "groq",
-        "llama-3.3-70b-versatile",
+        "default",
+        "default",
     ),
     (
         "Tutor",
         "Patient educational assistant for learning any subject",
         "General",
-        "gemini",
-        "gemini-2.5-flash",
+        "default",
+        "default",
     ),
     (
         "API Designer",
         "REST/GraphQL API design and documentation",
         "Development",
-        "anthropic",
-        "claude-sonnet-4-20250514",
+        "default",
+        "default",
     ),
     (
         "Meeting Notes",
         "Meeting transcription, summary, and action items",
         "Business",
-        "groq",
-        "llama-3.3-70b-versatile",
+        "default",
+        "default",
     ),
 ];
 
@@ -237,17 +237,7 @@ impl TemplatesState {
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
 pub fn draw(f: &mut Frame, area: Rect, state: &mut TemplatesState) {
-    let block = Block::default()
-        .title(Line::from(vec![Span::styled(
-            " Templates ",
-            theme::title_style(),
-        )]))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::ACCENT))
-        .padding(Padding::horizontal(1));
-
-    let inner = block.inner(area);
-    f.render_widget(block, area);
+    let inner = widgets::render_screen_block(f, area, "\u{25a2} Templates");
 
     let chunks = Layout::vertical([
         Constraint::Length(2), // header + category filter
@@ -259,21 +249,25 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut TemplatesState) {
 
     // ── Category filter + header ──
     let active_cat = CATEGORIES[state.category_filter];
-    let cat_spans: Vec<Span> = CATEGORIES
-        .iter()
-        .map(|&c| {
-            if c == active_cat {
-                Span::styled(
-                    format!(" [{c}] "),
-                    Style::default()
-                        .fg(theme::ACCENT)
-                        .add_modifier(Modifier::BOLD),
-                )
-            } else {
-                Span::styled(format!(" {c} "), theme::dim_style())
-            }
-        })
-        .collect();
+    let mut cat_spans: Vec<Span> = vec![Span::raw("  ")];
+    for (i, &c) in CATEGORIES.iter().enumerate() {
+        if i > 0 {
+            cat_spans.push(Span::styled(
+                " \u{2502} ",
+                Style::default().fg(theme::BORDER),
+            ));
+        }
+        if c == active_cat {
+            cat_spans.push(Span::styled(
+                format!(" \u{25cf} {c} "),
+                Style::default()
+                    .fg(theme::ACCENT)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        } else {
+            cat_spans.push(Span::styled(format!(" \u{25cb} {c} "), theme::dim_style()));
+        }
+    }
     f.render_widget(
         Paragraph::new(vec![
             Line::from(cat_spans),
@@ -290,22 +284,12 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut TemplatesState) {
 
     // ── List ──
     if state.loading {
-        let spinner = theme::SPINNER_FRAMES[state.tick % theme::SPINNER_FRAMES.len()];
         f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(format!("  {spinner} "), Style::default().fg(theme::CYAN)),
-                Span::styled("Loading templates\u{2026}", theme::dim_style()),
-            ])),
+            widgets::spinner(state.tick, "Loading templates\u{2026}"),
             chunks[1],
         );
     } else if state.filtered.is_empty() {
-        f.render_widget(
-            Paragraph::new(Span::styled(
-                "  No templates in this category.",
-                theme::dim_style(),
-            )),
-            chunks[1],
-        );
+        f.render_widget(widgets::empty_state("No templates available."), chunks[1]);
     } else {
         let items: Vec<ListItem> = state
             .filtered
@@ -316,14 +300,14 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut TemplatesState) {
                 let auth_badge = if state.providers.is_empty() {
                     Span::raw("")
                 } else if configured {
-                    Span::styled(" \u{2714}", Style::default().fg(theme::GREEN))
+                    Span::styled(" \u{25cf}", Style::default().fg(theme::GREEN))
                 } else {
-                    Span::styled(" \u{2718}", Style::default().fg(theme::RED))
+                    Span::styled(" \u{25cb}", Style::default().fg(theme::RED))
                 };
-                let prov_model = format!("{}/{}", t.provider, truncate(&t.model, 12));
+                let prov_model = format!("{}/{}", t.provider, widgets::truncate(&t.model, 12));
                 ListItem::new(Line::from(vec![
                     Span::styled(
-                        format!("  {:<22}", truncate(&t.name, 21)),
+                        format!("  {:<22}", widgets::truncate(&t.name, 21)),
                         Style::default().fg(theme::CYAN),
                     ),
                     Span::styled(
@@ -331,21 +315,19 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut TemplatesState) {
                         Style::default().fg(theme::YELLOW),
                     ),
                     Span::styled(
-                        format!(" {:<16}", truncate(&prov_model, 15)),
+                        format!(" {:<16}", widgets::truncate(&prov_model, 15)),
                         Style::default().fg(theme::BLUE),
                     ),
                     auth_badge,
                     Span::styled(
-                        format!("  {}", truncate(&t.description, 28)),
+                        format!("  {}", widgets::truncate(&t.description, 28)),
                         theme::dim_style(),
                     ),
                 ]))
             })
             .collect();
 
-        let list = List::new(items)
-            .highlight_style(theme::selected_style())
-            .highlight_symbol("> ");
+        let list = widgets::themed_list(items);
         f.render_stateful_widget(list, chunks[1], &mut state.list_state);
     }
 
@@ -386,22 +368,8 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut TemplatesState) {
         );
     } else {
         f.render_widget(
-            Paragraph::new(Line::from(vec![Span::styled(
-                "  [\u{2191}\u{2193}] Navigate  [Enter] Spawn Agent  [f] Filter Category  [r] Refresh",
-                theme::hint_style(),
-            )])),
+            widgets::hint_bar("  [\u{2191}\u{2193}] Navigate  [Enter] Spawn Agent  [f] Filter Category  [r] Refresh"),
             chunks[3],
         );
-    }
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!(
-            "{}\u{2026}",
-            librefang_types::truncate_str(s, max.saturating_sub(1))
-        )
     }
 }

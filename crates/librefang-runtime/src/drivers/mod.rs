@@ -20,17 +20,6 @@ pub mod vertex_ai;
 
 use crate::llm_driver::{DriverConfig, LlmDriver, LlmError};
 use dashmap::DashMap;
-use librefang_types::model_catalog::{
-    AI21_BASE_URL, ANTHROPIC_BASE_URL, CEREBRAS_BASE_URL, CHATGPT_BASE_URL, CHUTES_BASE_URL,
-    COHERE_BASE_URL, DEEPINFRA_BASE_URL, DEEPSEEK_BASE_URL, FIREWORKS_BASE_URL, GEMINI_BASE_URL,
-    GITHUB_COPILOT_BASE_URL, GROQ_BASE_URL, HUGGINGFACE_BASE_URL, KIMI_CODING_BASE_URL,
-    LEMONADE_BASE_URL, LMSTUDIO_BASE_URL, MINIMAX_BASE_URL, MISTRAL_BASE_URL, MOONSHOT_BASE_URL,
-    NVIDIA_NIM_BASE_URL, OLLAMA_BASE_URL, OPENAI_BASE_URL, OPENROUTER_BASE_URL,
-    PERPLEXITY_BASE_URL, QIANFAN_BASE_URL, QWEN_BASE_URL, REPLICATE_BASE_URL, SAMBANOVA_BASE_URL,
-    TOGETHER_BASE_URL, VENICE_BASE_URL, VERTEX_AI_BASE_URL, VLLM_BASE_URL, VOLCENGINE_BASE_URL,
-    VOLCENGINE_CODING_BASE_URL, XAI_BASE_URL, ZAI_BASE_URL, ZAI_CODING_BASE_URL, ZHIPU_BASE_URL,
-    ZHIPU_CODING_BASE_URL,
-};
 use std::sync::Arc;
 
 // ── Driver Cache ────────────────────────────────────────────────
@@ -169,7 +158,7 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
     ProviderEntry {
         name: "anthropic",
         aliases: &[],
-        base_url: ANTHROPIC_BASE_URL,
+        base_url: "https://api.anthropic.com",
         api_key_env: "ANTHROPIC_API_KEY",
         key_required: true,
         api_format: ApiFormat::Anthropic,
@@ -179,7 +168,7 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
     ProviderEntry {
         name: "chatgpt",
         aliases: &[],
-        base_url: CHATGPT_BASE_URL,
+        base_url: "https://chatgpt.com/backend-api",
         api_key_env: "CHATGPT_SESSION_TOKEN",
         key_required: true,
         api_format: ApiFormat::ChatGpt,
@@ -189,7 +178,7 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
     ProviderEntry {
         name: "gemini",
         aliases: &["google"],
-        base_url: GEMINI_BASE_URL,
+        base_url: "https://generativelanguage.googleapis.com",
         api_key_env: "GEMINI_API_KEY",
         key_required: true,
         api_format: ApiFormat::Gemini,
@@ -199,7 +188,7 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
     ProviderEntry {
         name: "openai",
         aliases: &["codex", "openai-codex"],
-        base_url: OPENAI_BASE_URL,
+        base_url: "https://api.openai.com/v1",
         api_key_env: "OPENAI_API_KEY",
         key_required: true,
         api_format: ApiFormat::OpenAI,
@@ -209,7 +198,7 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
     ProviderEntry {
         name: "groq",
         aliases: &[],
-        base_url: GROQ_BASE_URL,
+        base_url: "https://api.groq.com/openai/v1",
         api_key_env: "GROQ_API_KEY",
         key_required: true,
         api_format: ApiFormat::OpenAI,
@@ -219,7 +208,7 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
     ProviderEntry {
         name: "openrouter",
         aliases: &[],
-        base_url: OPENROUTER_BASE_URL,
+        base_url: "https://openrouter.ai/api/v1",
         api_key_env: "OPENROUTER_API_KEY",
         key_required: true,
         api_format: ApiFormat::OpenAI,
@@ -229,7 +218,7 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
     ProviderEntry {
         name: "deepseek",
         aliases: &[],
-        base_url: DEEPSEEK_BASE_URL,
+        base_url: "https://api.deepseek.com/v1",
         api_key_env: "DEEPSEEK_API_KEY",
         key_required: true,
         api_format: ApiFormat::OpenAI,
@@ -239,7 +228,7 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
     ProviderEntry {
         name: "deepinfra",
         aliases: &[],
-        base_url: DEEPINFRA_BASE_URL,
+        base_url: "https://api.deepinfra.com/v1/openai",
         api_key_env: "DEEPINFRA_API_KEY",
         key_required: true,
         api_format: ApiFormat::OpenAI,
@@ -249,7 +238,7 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
     ProviderEntry {
         name: "together",
         aliases: &[],
-        base_url: TOGETHER_BASE_URL,
+        base_url: "https://api.together.xyz/v1",
         api_key_env: "TOGETHER_API_KEY",
         key_required: true,
         api_format: ApiFormat::OpenAI,
@@ -259,7 +248,7 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
     ProviderEntry {
         name: "mistral",
         aliases: &[],
-        base_url: MISTRAL_BASE_URL,
+        base_url: "https://api.mistral.ai/v1",
         api_key_env: "MISTRAL_API_KEY",
         key_required: true,
         api_format: ApiFormat::OpenAI,
@@ -269,7 +258,7 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
     ProviderEntry {
         name: "fireworks",
         aliases: &[],
-        base_url: FIREWORKS_BASE_URL,
+        base_url: "https://api.fireworks.ai/inference/v1",
         api_key_env: "FIREWORKS_API_KEY",
         key_required: true,
         api_format: ApiFormat::OpenAI,
@@ -279,7 +268,7 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
     ProviderEntry {
         name: "ollama",
         aliases: &[],
-        base_url: OLLAMA_BASE_URL,
+        base_url: "http://localhost:11434/v1",
         api_key_env: "OLLAMA_API_KEY",
         key_required: false,
         api_format: ApiFormat::OpenAI,
@@ -289,7 +278,7 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
     ProviderEntry {
         name: "vllm",
         aliases: &[],
-        base_url: VLLM_BASE_URL,
+        base_url: "http://localhost:8000/v1",
         api_key_env: "VLLM_API_KEY",
         key_required: false,
         api_format: ApiFormat::OpenAI,
@@ -299,7 +288,7 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
     ProviderEntry {
         name: "lmstudio",
         aliases: &[],
-        base_url: LMSTUDIO_BASE_URL,
+        base_url: "http://localhost:1234/v1",
         api_key_env: "LMSTUDIO_API_KEY",
         key_required: false,
         api_format: ApiFormat::OpenAI,
@@ -309,7 +298,7 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
     ProviderEntry {
         name: "lemonade",
         aliases: &[],
-        base_url: LEMONADE_BASE_URL,
+        base_url: "http://localhost:8888/api/v1",
         api_key_env: "LEMONADE_API_KEY",
         key_required: false,
         api_format: ApiFormat::OpenAI,
@@ -319,7 +308,7 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
     ProviderEntry {
         name: "perplexity",
         aliases: &[],
-        base_url: PERPLEXITY_BASE_URL,
+        base_url: "https://api.perplexity.ai",
         api_key_env: "PERPLEXITY_API_KEY",
         key_required: true,
         api_format: ApiFormat::OpenAI,
@@ -329,7 +318,7 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
     ProviderEntry {
         name: "cohere",
         aliases: &[],
-        base_url: COHERE_BASE_URL,
+        base_url: "https://api.cohere.com/v2",
         api_key_env: "COHERE_API_KEY",
         key_required: true,
         api_format: ApiFormat::OpenAI,
@@ -339,7 +328,7 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
     ProviderEntry {
         name: "ai21",
         aliases: &[],
-        base_url: AI21_BASE_URL,
+        base_url: "https://api.ai21.com/studio/v1",
         api_key_env: "AI21_API_KEY",
         key_required: true,
         api_format: ApiFormat::OpenAI,
@@ -349,7 +338,7 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
     ProviderEntry {
         name: "cerebras",
         aliases: &[],
-        base_url: CEREBRAS_BASE_URL,
+        base_url: "https://api.cerebras.ai/v1",
         api_key_env: "CEREBRAS_API_KEY",
         key_required: true,
         api_format: ApiFormat::OpenAI,
@@ -359,7 +348,7 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
     ProviderEntry {
         name: "sambanova",
         aliases: &[],
-        base_url: SAMBANOVA_BASE_URL,
+        base_url: "https://api.sambanova.ai/v1",
         api_key_env: "SAMBANOVA_API_KEY",
         key_required: true,
         api_format: ApiFormat::OpenAI,
@@ -369,7 +358,7 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
     ProviderEntry {
         name: "huggingface",
         aliases: &[],
-        base_url: HUGGINGFACE_BASE_URL,
+        base_url: "https://api-inference.huggingface.co/v1",
         api_key_env: "HF_API_KEY",
         key_required: true,
         api_format: ApiFormat::OpenAI,
@@ -379,7 +368,7 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
     ProviderEntry {
         name: "xai",
         aliases: &[],
-        base_url: XAI_BASE_URL,
+        base_url: "https://api.x.ai/v1",
         api_key_env: "XAI_API_KEY",
         key_required: true,
         api_format: ApiFormat::OpenAI,
@@ -389,7 +378,7 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
     ProviderEntry {
         name: "replicate",
         aliases: &[],
-        base_url: REPLICATE_BASE_URL,
+        base_url: "https://api.replicate.com/v1",
         api_key_env: "REPLICATE_API_TOKEN",
         key_required: true,
         api_format: ApiFormat::OpenAI,
@@ -399,7 +388,7 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
     ProviderEntry {
         name: "github-copilot",
         aliases: &["copilot"],
-        base_url: GITHUB_COPILOT_BASE_URL,
+        base_url: "https://api.githubcopilot.com",
         api_key_env: "GITHUB_TOKEN",
         key_required: true,
         api_format: ApiFormat::Copilot,
@@ -459,7 +448,7 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
     ProviderEntry {
         name: "moonshot",
         aliases: &["kimi", "kimi2"],
-        base_url: MOONSHOT_BASE_URL,
+        base_url: "https://api.moonshot.ai/v1",
         api_key_env: "MOONSHOT_API_KEY",
         key_required: true,
         api_format: ApiFormat::OpenAI,
@@ -469,7 +458,7 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
     ProviderEntry {
         name: "kimi_coding",
         aliases: &[],
-        base_url: KIMI_CODING_BASE_URL,
+        base_url: "https://api.kimi.com/coding",
         api_key_env: "KIMI_API_KEY",
         key_required: true,
         api_format: ApiFormat::Anthropic,
@@ -479,7 +468,7 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
     ProviderEntry {
         name: "qwen",
         aliases: &["dashscope", "model_studio"],
-        base_url: QWEN_BASE_URL,
+        base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1",
         api_key_env: "DASHSCOPE_API_KEY",
         key_required: true,
         api_format: ApiFormat::OpenAI,
@@ -489,7 +478,7 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
     ProviderEntry {
         name: "minimax",
         aliases: &[],
-        base_url: MINIMAX_BASE_URL,
+        base_url: "https://api.minimax.io/v1",
         api_key_env: "MINIMAX_API_KEY",
         key_required: true,
         api_format: ApiFormat::OpenAI,
@@ -499,7 +488,7 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
     ProviderEntry {
         name: "zhipu",
         aliases: &["glm"],
-        base_url: ZHIPU_BASE_URL,
+        base_url: "https://open.bigmodel.cn/api/paas/v4",
         api_key_env: "ZHIPU_API_KEY",
         key_required: true,
         api_format: ApiFormat::OpenAI,
@@ -509,7 +498,7 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
     ProviderEntry {
         name: "zhipu_coding",
         aliases: &["codegeex"],
-        base_url: ZHIPU_CODING_BASE_URL,
+        base_url: "https://open.bigmodel.cn/api/coding/paas/v4",
         api_key_env: "ZHIPU_API_KEY",
         key_required: true,
         api_format: ApiFormat::OpenAI,
@@ -519,7 +508,7 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
     ProviderEntry {
         name: "zai",
         aliases: &["z.ai"],
-        base_url: ZAI_BASE_URL,
+        base_url: "https://api.z.ai/api/paas/v4",
         api_key_env: "ZHIPU_API_KEY",
         key_required: true,
         api_format: ApiFormat::OpenAI,
@@ -529,7 +518,7 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
     ProviderEntry {
         name: "zai_coding",
         aliases: &[],
-        base_url: ZAI_CODING_BASE_URL,
+        base_url: "https://api.z.ai/api/coding/paas/v4",
         api_key_env: "ZHIPU_API_KEY",
         key_required: true,
         api_format: ApiFormat::OpenAI,
@@ -539,7 +528,7 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
     ProviderEntry {
         name: "qianfan",
         aliases: &["baidu"],
-        base_url: QIANFAN_BASE_URL,
+        base_url: "https://qianfan.baidubce.com/v2",
         api_key_env: "QIANFAN_API_KEY",
         key_required: true,
         api_format: ApiFormat::OpenAI,
@@ -549,7 +538,7 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
     ProviderEntry {
         name: "volcengine",
         aliases: &["doubao"],
-        base_url: VOLCENGINE_BASE_URL,
+        base_url: "https://ark.cn-beijing.volces.com/api/v3",
         api_key_env: "VOLCENGINE_API_KEY",
         key_required: true,
         api_format: ApiFormat::OpenAI,
@@ -559,7 +548,7 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
     ProviderEntry {
         name: "volcengine_coding",
         aliases: &[],
-        base_url: VOLCENGINE_CODING_BASE_URL,
+        base_url: "https://ark.cn-beijing.volces.com/api/coding/v3",
         api_key_env: "VOLCENGINE_API_KEY",
         key_required: true,
         api_format: ApiFormat::OpenAI,
@@ -569,7 +558,7 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
     ProviderEntry {
         name: "chutes",
         aliases: &[],
-        base_url: CHUTES_BASE_URL,
+        base_url: "https://llm.chutes.ai/v1",
         api_key_env: "CHUTES_API_KEY",
         key_required: true,
         api_format: ApiFormat::OpenAI,
@@ -579,7 +568,7 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
     ProviderEntry {
         name: "venice",
         aliases: &[],
-        base_url: VENICE_BASE_URL,
+        base_url: "https://api.venice.ai/api/v1",
         api_key_env: "VENICE_API_KEY",
         key_required: true,
         api_format: ApiFormat::OpenAI,
@@ -599,7 +588,7 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
     ProviderEntry {
         name: "vertex-ai",
         aliases: &["vertex", "vertex_ai"],
-        base_url: VERTEX_AI_BASE_URL,
+        base_url: "https://us-central1-aiplatform.googleapis.com",
         api_key_env: "GOOGLE_APPLICATION_CREDENTIALS",
         key_required: true, // Requires Google auth, but create_driver handles OAuth flows separately.
         api_format: ApiFormat::VertexAI,
@@ -609,7 +598,7 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
     ProviderEntry {
         name: "nvidia-nim",
         aliases: &["nvidia", "nim"],
-        base_url: NVIDIA_NIM_BASE_URL,
+        base_url: "https://integrate.api.nvidia.com/v1",
         api_key_env: "NVIDIA_API_KEY",
         key_required: true,
         api_format: ApiFormat::OpenAI,
@@ -830,56 +819,62 @@ pub fn create_driver(config: &DriverConfig) -> Result<Arc<dyn LlmDriver>, LlmErr
 ///
 /// Returns `(provider, model, api_key_env)` for the first provider that has a
 /// configured API key, checked in a user-friendly priority order.
+/// Note: `model` is always `""` — callers should resolve the default model
+/// via `ModelCatalog`.
 pub fn detect_available_provider() -> Option<(&'static str, &'static str, &'static str)> {
-    // Priority: popular cloud providers first, then niche, then local
-    const PROBE_ORDER: &[(&str, &str, &str)] = &[
-        ("openai", "gpt-4o", "OPENAI_API_KEY"),
-        ("anthropic", "claude-sonnet-4-20250514", "ANTHROPIC_API_KEY"),
-        ("gemini", "gemini-2.5-flash", "GEMINI_API_KEY"),
-        ("groq", "llama-3.3-70b-versatile", "GROQ_API_KEY"),
-        ("deepseek", "deepseek-chat", "DEEPSEEK_API_KEY"),
-        (
-            "openrouter",
-            "openrouter/google/gemini-2.5-flash",
-            "OPENROUTER_API_KEY",
-        ),
-        ("mistral", "mistral-large-latest", "MISTRAL_API_KEY"),
-        (
-            "together",
-            "meta-llama/Llama-3-70b-chat-hf",
-            "TOGETHER_API_KEY",
-        ),
-        (
-            "fireworks",
-            "accounts/fireworks/models/llama-v3p1-70b-instruct",
-            "FIREWORKS_API_KEY",
-        ),
-        ("xai", "grok-2", "XAI_API_KEY"),
-        (
-            "perplexity",
-            "llama-3.1-sonar-large-128k-online",
-            "PERPLEXITY_API_KEY",
-        ),
-        ("cohere", "command-r-plus", "COHERE_API_KEY"),
-        ("azure-openai", "gpt-4o", "AZURE_OPENAI_API_KEY"),
+    // Priority order: popular cloud providers are checked first so that
+    // users with multiple keys get the most common one by default.
+    const PRIORITY: &[&str] = &[
+        "openai",
+        "anthropic",
+        "gemini",
+        "groq",
+        "deepseek",
+        "openrouter",
+        "mistral",
+        "together",
+        "fireworks",
+        "xai",
+        "perplexity",
+        "cohere",
+        "azure-openai",
     ];
-    for &(provider, model, env_var) in PROBE_ORDER {
-        if std::env::var(env_var)
-            .ok()
-            .filter(|v| !v.is_empty())
-            .is_some()
-        {
-            return Some((provider, model, env_var));
+
+    let env_set =
+        |var: &str| -> bool { std::env::var(var).ok().filter(|v| !v.is_empty()).is_some() };
+
+    // Phase 1: check priority providers in order
+    for &name in PRIORITY {
+        if let Some(p) = PROVIDER_REGISTRY.iter().find(|p| p.name == name) {
+            if p.key_required && env_set(p.api_key_env) {
+                return Some((p.name, "", p.api_key_env));
+            }
+            if let Some(alt) = p.alt_api_key_env {
+                if env_set(alt) {
+                    return Some((p.name, "", alt));
+                }
+            }
         }
     }
-    // Also check GOOGLE_API_KEY as alias for Gemini
-    if std::env::var("GOOGLE_API_KEY")
-        .ok()
-        .filter(|v| !v.is_empty())
-        .is_some()
-    {
-        return Some(("gemini", "gemini-2.5-flash", "GOOGLE_API_KEY"));
+
+    // Phase 2: check remaining registry providers not in priority list
+    for p in PROVIDER_REGISTRY {
+        if p.hidden || !p.key_required {
+            continue;
+        }
+        if PRIORITY.contains(&p.name) {
+            continue;
+        }
+        if env_set(p.api_key_env) {
+            return Some((p.name, "", p.api_key_env));
+        }
+        if let Some(alt) = p.alt_api_key_env {
+            if env_set(alt) {
+                return Some((p.name, "", alt));
+            }
+        }
     }
+
     None
 }
 

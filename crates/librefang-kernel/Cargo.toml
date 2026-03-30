@@ -35,7 +35,7 @@ rand = { workspace = true }
 hex = { workspace = true }
 reqwest = { workspace = true }
 regex-lite = { workspace = true }
-cron = "0.15"
+cron = "0.16"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

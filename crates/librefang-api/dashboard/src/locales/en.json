@@ -11,7 +11,7 @@
   "common": {
     "refresh": "Refresh", "status": "Status", "daemon_online": "Daemon Online", "infrastructure": "Infrastructure",
     "toggle_theme": "Toggle theme", "change_language": "Change language", "delete": "Delete", "cancel": "Cancel",
-    "save": "Save", "saving": "Saving...", "edit": "Edit", "confirm": "Confirm", "loading": "Loading...", "search": "Search", "back": "Back", "retry": "Retry",
+    "save": "Save", "saving": "Saving...", "edit": "Edit", "confirm": "Confirm", "loading": "Loading...", "search": "Search", "back": "Back", "retry": "Retry", "create": "Create",
     "actions": "Actions", "clear": "Clear", "load": "Load", "active": "Active", "idle": "Idle", "running": "Running",
     "online": "Online", "offline": "Offline", "setup": "Setup", "ok": "OK", "config": "Config", "interact": "Interact",
     "never": "Never", "unknown": "Unknown", "no_data": "No data", "resume": "Resume", "close": "Close", "yes": "Yes", "no": "No", "details": "Details",
@@ -62,6 +62,10 @@
     "key_placeholder": "Enter API key...", "key_placeholder_existing": "Enter new key to replace...",
     "optional": "optional", "remove_key": "Remove Key",
     "base_url": "Base URL", "api_key": "API Key",
+    "set_as_default": "Set as Default",
+    "default_set": "Default provider updated",
+    "is_default": "Default",
+    "add": "Add Provider",
     "help": "Manage LLM provider connections. Test connectivity, configure API keys, and monitor provider health status."
   },
   "channels": {
@@ -297,6 +301,10 @@
     "theme": "Interface Theme", "language": "Language", "theme_light": "Light", "theme_dark": "Dark", "system_config": "System Configuration",
     "nav_layout": "Navigation Layout", "nav_grouped": "Grouped", "nav_collapsible": "Collapsible",
     "tools_title": "Tools", "tools_search": "Search tools...",
+    "change_password": "Change Password",
+    "pw_current": "Current Password", "pw_new": "New Password", "pw_confirm": "Confirm New Password",
+    "pw_submit": "Change Password", "pw_success": "Password changed. Redirecting to login...",
+    "pw_failed": "Failed to change password", "pw_mismatch": "New passwords do not match", "pw_empty": "New password cannot be empty", "pw_too_short": "Password must be at least 8 characters",
     "help": "Configure system preferences. Switch theme, language, navigation layout, and browse available tools."
   },
   "chat": {
@@ -326,6 +334,8 @@
   },
   "approvals": {
     "title": "Approvals", "subtitle": "Review and authorize critical agent actions.", "pending_review": "Pending Review", "approve": "Approve", "reject": "Reject",
+    "approvedToast": "Approved", "rejectedToast": "Rejected",
+    "status": { "pending": "Pending", "approved": "Approved", "rejected": "Rejected", "expired": "Expired" },
     "queue_clear": "Queue Clear", "queue_clear_desc": "No pending actions.",
     "help": "Review approval requests. When agents need human confirmation, requests appear here."
   },
@@ -387,5 +397,13 @@
     "scaffold_title": "Create New Plugin", "scaffold_desc": "What does this plugin do?", "create": "Create",
     "deps": "Deps",
     "help": "Install and manage plugins to extend agent capabilities. Add plugins from registries, local paths, or Git repositories."
+  },
+  "schema_form": {
+    "select_option": "Select...",
+    "comma_separated": "Comma-separated values",
+    "add_item": "Add",
+    "load_error": "Failed to load form schema",
+    "required_missing": "Please fill in all required fields",
+    "from_schema": "From Schema"
   }
 }

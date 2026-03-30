@@ -68,6 +68,10 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
             "/auth/dashboard-check",
             axum::routing::get(dashboard_auth_check),
         )
+        .route(
+            "/auth/change-password",
+            axum::routing::post(change_password),
+        )
         // OAuth/OIDC external authentication endpoints
         .route(
             "/auth/providers",
@@ -268,6 +272,168 @@ async fn dashboard_auth_check(
     }))
 }
 
+/// Request body for POST /api/auth/change-password.
+#[derive(serde::Deserialize)]
+struct ChangePasswordRequest {
+    current_password: String,
+    new_password: String,
+}
+
+/// Change the dashboard password.
+///
+/// Verifies the current password against the stored hash (or legacy plaintext),
+/// then hashes the new password with Argon2id and persists `dashboard_pass_hash`
+/// to config.toml. All existing sessions are invalidated on success.
+async fn change_password(
+    axum::extract::State(state): axum::extract::State<Arc<routes::AppState>>,
+    axum::Json(body): axum::Json<ChangePasswordRequest>,
+) -> axum::response::Response {
+    let cfg = state.kernel.config_ref();
+
+    let cfg_user = resolve_dashboard_credential(
+        &cfg.dashboard_user,
+        "LIBREFANG_DASHBOARD_USER",
+        &cfg.home_dir,
+    );
+    let cfg_user = cfg_user.trim().to_string();
+    let cfg_pass = resolve_dashboard_credential(
+        &cfg.dashboard_pass,
+        "LIBREFANG_DASHBOARD_PASS",
+        &cfg.home_dir,
+    );
+    let cfg_pass = cfg_pass.trim().to_string();
+    let pass_hash = cfg.dashboard_pass_hash.trim();
+
+    // Must have credential-based auth configured
+    let has_password = !pass_hash.is_empty() || !cfg_pass.is_empty();
+    if cfg_user.is_empty() || !has_password {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            axum::response::Json(serde_json::json!({
+                "ok": false,
+                "error": "Password authentication is not configured"
+            })),
+        )
+            .into_response();
+    }
+
+    // Verify current password (reuse existing verification logic)
+    let verify = crate::password_hash::verify_dashboard_password(
+        &cfg_user,
+        &body.current_password,
+        &cfg_user,
+        &cfg_pass,
+        pass_hash,
+    );
+    if matches!(verify, crate::password_hash::VerifyResult::Denied) {
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            axum::response::Json(serde_json::json!({
+                "ok": false,
+                "error": "Current password is incorrect"
+            })),
+        )
+            .into_response();
+    }
+
+    // Validate new password is not empty
+    if body.new_password.trim().is_empty() {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            axum::response::Json(serde_json::json!({
+                "ok": false,
+                "error": "New password cannot be empty"
+            })),
+        )
+            .into_response();
+    }
+
+    // Validate minimum password length
+    if body.new_password.len() < 8 {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            axum::response::Json(serde_json::json!({
+                "ok": false,
+                "error": "Password must be at least 8 characters"
+            })),
+        )
+            .into_response();
+    }
+
+    // Hash the new password with Argon2id
+    let new_hash = match crate::password_hash::hash_password(&body.new_password) {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::error!("Failed to hash new password: {e}");
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                axum::response::Json(serde_json::json!({
+                    "ok": false,
+                    "error": "Failed to hash new password"
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    // Persist to config.toml
+    let config_path = state.kernel.home_dir().join("config.toml");
+    let mut table: toml::value::Table = if config_path.exists() {
+        match std::fs::read_to_string(&config_path) {
+            Ok(content) => toml::from_str(&content).unwrap_or_default(),
+            Err(_) => toml::value::Table::new(),
+        }
+    } else {
+        toml::value::Table::new()
+    };
+    table.insert(
+        "dashboard_pass_hash".to_string(),
+        toml::Value::String(new_hash),
+    );
+    // Remove legacy plaintext password if present
+    table.remove("dashboard_pass");
+
+    let toml_string = match toml::to_string_pretty(&table) {
+        Ok(s) => s,
+        Err(e) => {
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                axum::response::Json(serde_json::json!({
+                    "ok": false,
+                    "error": format!("Failed to serialize config: {e}")
+                })),
+            )
+                .into_response();
+        }
+    };
+    if let Err(e) = std::fs::write(&config_path, &toml_string) {
+        return (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            axum::response::Json(serde_json::json!({
+                "ok": false,
+                "error": format!("Failed to write config: {e}")
+            })),
+        )
+            .into_response();
+    }
+
+    // Trigger config reload so the kernel picks up the new hash
+    if let Err(e) = state.kernel.reload_config() {
+        tracing::warn!("Config reload after password change failed: {e}");
+    }
+
+    // Invalidate all existing sessions to force re-login
+    state.active_sessions.write().await.clear();
+
+    tracing::info!("Dashboard password changed successfully");
+
+    axum::response::Json(serde_json::json!({
+        "ok": true,
+        "message": "Password changed successfully"
+    }))
+    .into_response()
+}
+
 /// Build the full API router with all routes, middleware, and state.
 ///
 /// This is extracted from `run_daemon()` so that embedders (e.g. librefang-desktop)
@@ -355,7 +521,11 @@ pub async fn build_router(
         api_key_lock: api_key_lock.clone(),
         active_sessions: active_sessions.clone(),
     };
-    let gcra_limiter = rate_limiter::create_rate_limiter();
+    let rl_cfg = &state.kernel.config_ref().rate_limit;
+    let gcra_limiter = rate_limiter::GcraState {
+        limiter: rate_limiter::create_rate_limiter(rl_cfg.api_requests_per_minute),
+        retry_after_secs: rl_cfg.retry_after_secs,
+    };
 
     // Build the versioned API routes. All /api/* endpoints are defined once
     // in api_v1_routes() and mounted at both /api and /api/v1 for backward
@@ -419,12 +589,28 @@ pub async fn build_router(
         .layer(axum::middleware::from_fn(middleware::api_version_headers))
         .layer(axum::middleware::from_fn(middleware::security_headers))
         .layer(axum::middleware::from_fn(middleware::request_logging))
-        .layer(RequestBodyLimitLayer::new(
-            crate::validation::MAX_REQUEST_BODY_BYTES,
-        ))
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http())
         .layer(cors);
+
+    // Split body-limit application: apply the global limit to the main app,
+    // then merge the upload route WITHOUT the limit.  The handler enforces its
+    // own configurable max_upload_size_bytes (default 10 MB).
+    let upload_routes = Router::new()
+        .route(
+            "/api/agents/{id}/upload",
+            axum::routing::post(routes::agents::upload_file),
+        )
+        .route(
+            "/api/v1/agents/{id}/upload",
+            axum::routing::post(routes::agents::upload_file),
+        );
+
+    let app = app
+        .layer(RequestBodyLimitLayer::new(
+            kernel.config_ref().max_request_body_bytes,
+        ))
+        .merge(upload_routes);
 
     // NOTE: HTTP metrics are recorded inside `request_logging` middleware via
     // `librefang_telemetry::metrics::record_http_request()`.  A separate metrics
@@ -466,9 +652,13 @@ pub async fn run_daemon(
     // Track background task handles for graceful shutdown
     let mut bg_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
-    // Config file hot-reload watcher (polls every 30 seconds)
+    let (app, state) = build_router(kernel.clone(), addr).await;
+
+    // Config file hot-reload watcher (polls every 30 seconds).
+    // Spawned after `build_router` so it can access `AppState` for bridge reload.
     {
         let k = kernel.clone();
+        let st = state.clone();
         let config_path = kernel.config_ref().home_dir.join("config.toml");
         bg_tasks.push(tokio::spawn(async move {
             let mut last_modified = std::fs::metadata(&config_path)
@@ -489,6 +679,25 @@ pub async fn run_daemon(
                             } else {
                                 tracing::debug!("Config hot-reload: no actionable changes");
                             }
+                            // Restart channel bridge if channel config changed
+                            if plan.hot_actions.contains(
+                                &librefang_kernel::config_reload::HotAction::ReloadChannels,
+                            ) {
+                                match crate::channel_bridge::reload_channels_from_disk(&st).await {
+                                    Ok(names) => {
+                                        tracing::info!(
+                                            "Hot-reload: restarted channel bridge with {} adapter(s): {:?}",
+                                            names.len(),
+                                            names,
+                                        );
+                                    }
+                                    Err(e) => {
+                                        tracing::error!(
+                                            "Hot-reload: failed to restart channel bridge: {e}"
+                                        );
+                                    }
+                                }
+                            }
                         }
                         Err(e) => tracing::warn!("Config hot-reload failed: {e}"),
                     }
@@ -496,8 +705,6 @@ pub async fn run_daemon(
             }
         }));
     }
-
-    let (app, state) = build_router(kernel.clone(), addr).await;
 
     // Write daemon info file
     if let Some(info_path) = daemon_info_path {
@@ -572,6 +779,7 @@ pub async fn run_daemon(
             loop {
                 match librefang_runtime::catalog_sync::sync_catalog_to(
                     &kernel.config_ref().home_dir,
+                    &kernel.config_ref().registry.registry_mirror,
                 )
                 .await
                 {

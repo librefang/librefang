@@ -37,10 +37,18 @@ pub fn operation_cost(method: &str, path: &str) -> NonZeroU32 {
 
 pub type KeyedRateLimiter = RateLimiter<IpAddr, DashMapStateStore<IpAddr>, DefaultClock>;
 
-/// 500 tokens per minute per IP.
-pub fn create_rate_limiter() -> Arc<KeyedRateLimiter> {
+/// Shared state for the GCRA rate limiting middleware layer.
+#[derive(Clone)]
+pub struct GcraState {
+    pub limiter: Arc<KeyedRateLimiter>,
+    pub retry_after_secs: u64,
+}
+
+/// Create a GCRA rate limiter with the given token budget per minute per IP.
+pub fn create_rate_limiter(tokens_per_minute: u32) -> Arc<KeyedRateLimiter> {
+    let quota = tokens_per_minute.max(1);
     Arc::new(RateLimiter::keyed(Quota::per_minute(
-        NonZeroU32::new(500).unwrap(),
+        NonZeroU32::new(quota).unwrap(),
     )))
 }
 
@@ -50,7 +58,7 @@ pub fn create_rate_limiter() -> Arc<KeyedRateLimiter> {
 /// requested operation, and checks the GCRA limiter. Returns 429 if the
 /// client has exhausted its token budget.
 pub async fn gcra_rate_limit(
-    axum::extract::State(limiter): axum::extract::State<Arc<KeyedRateLimiter>>,
+    axum::extract::State(state): axum::extract::State<GcraState>,
     request: Request<Body>,
     next: Next,
 ) -> Response<Body> {
@@ -64,12 +72,13 @@ pub async fn gcra_rate_limit(
     let path = request.uri().path().to_string();
     let cost = operation_cost(&method, &path);
 
-    if limiter.check_key_n(&ip, cost).is_err() {
+    if state.limiter.check_key_n(&ip, cost).is_err() {
         tracing::warn!(ip = %ip, cost = cost.get(), path = %path, "GCRA rate limit exceeded");
+        let retry_after = state.retry_after_secs.to_string();
         return Response::builder()
             .status(StatusCode::TOO_MANY_REQUESTS)
             .header("content-type", "application/json")
-            .header("retry-after", "60")
+            .header("retry-after", retry_after)
             .body(Body::from(
                 serde_json::json!({"error": "Rate limit exceeded"}).to_string(),
             ))

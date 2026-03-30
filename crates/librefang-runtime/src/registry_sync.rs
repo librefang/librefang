@@ -21,8 +21,9 @@ const REGISTRY_REPO: &str = "https://github.com/librefang/librefang-registry.git
 /// Prefix inside the tarball (GitHub convention: `{repo}-{branch}/`).
 const TARBALL_PREFIX: &str = "librefang-registry-main/";
 
-/// How long (in seconds) before we re-download the registry.
-const CACHE_MAX_AGE_SECS: u64 = 24 * 60 * 60; // 24 hours
+/// Default cache TTL: how long (in seconds) before we re-download the registry.
+/// Callers without access to `KernelConfig` can use this value directly.
+pub const DEFAULT_CACHE_TTL_SECS: u64 = 24 * 60 * 60; // 24 hours
 
 /// Sync all content from the registry to the local librefang home directory.
 ///
@@ -30,14 +31,23 @@ const CACHE_MAX_AGE_SECS: u64 = 24 * 60 * 60; // 24 hours
 /// that don't already exist on disk (preserves user customization).
 /// Tries git first (incremental pull, supports private forks), falls back to
 /// HTTP tarball download when git is unavailable (Docker, minimal VMs).
-pub fn sync_registry(home_dir: &Path) {
+///
+/// `cache_ttl_secs` controls how long the local cache is considered fresh
+/// before triggering a re-download. Pass [`DEFAULT_CACHE_TTL_SECS`] when
+/// no user-configured value is available.
+///
+/// `registry_mirror` is an optional proxy/mirror prefix for GitHub URLs.
+/// When non-empty, all GitHub URLs are prefixed with this value (e.g.
+/// `"https://ghproxy.cn"` rewrites `https://github.com/...` to
+/// `https://ghproxy.cn/https://github.com/...`).
+pub fn sync_registry(home_dir: &Path, cache_ttl_secs: u64, registry_mirror: &str) -> bool {
     let registry_cache = home_dir.join("registry");
 
-    if !should_refresh(&registry_cache) {
+    if !should_refresh(&registry_cache, cache_ttl_secs) {
         tracing::debug!("Registry cache is fresh, skipping download");
     } else {
         // Try git first (faster incremental updates, private fork support)
-        let git_ok = match git_clone_fallback(&registry_cache) {
+        let git_ok = match git_clone_fallback(&registry_cache, registry_mirror) {
             Ok(()) => true,
             Err(e) => {
                 tracing::debug!("Git sync unavailable: {e} — trying HTTP download");
@@ -47,10 +57,10 @@ pub fn sync_registry(home_dir: &Path) {
 
         // Fall back to HTTP tarball if git failed
         if !git_ok {
-            if let Err(e) = download_and_extract(&registry_cache) {
+            if let Err(e) = download_and_extract(&registry_cache, registry_mirror) {
                 tracing::warn!("HTTP registry download also failed: {e}");
                 if !registry_cache.exists() {
-                    return;
+                    return false;
                 }
             }
         }
@@ -85,12 +95,51 @@ pub fn sync_registry(home_dir: &Path) {
         }
     }
 
-    // Sync root-level files (aliases.toml, schema.toml)
-    for name in &["aliases.toml", "schema.toml"] {
-        let src = registry_cache.join(name);
-        let dest = home_dir.join(name);
-        if src.exists() && !dest.exists() {
-            let _ = std::fs::copy(&src, &dest);
+    // Pre-install workflow templates (always overwrite so updates land)
+    let workflows_src = registry_cache.join("workflows");
+    if workflows_src.is_dir() {
+        let workflows_dest = home_dir.join("workflows").join("templates");
+        let _ = std::fs::create_dir_all(&workflows_dest);
+        let mut installed = 0usize;
+        if let Ok(entries) = std::fs::read_dir(&workflows_src) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("toml") {
+                    if let Some(name) = path.file_name() {
+                        let dest = workflows_dest.join(name);
+                        if std::fs::copy(&path, &dest).is_ok() {
+                            installed += 1;
+                        }
+                    }
+                }
+            }
+        }
+        if installed > 0 {
+            tracing::info!("Pre-installed {installed} workflow template(s) from registry");
+        }
+    }
+
+    // Sync aliases (only on first run — user may customize)
+    let aliases_src = registry_cache.join("aliases.toml");
+    let aliases_dest = home_dir.join("aliases.toml");
+    if aliases_src.exists() && !aliases_dest.exists() {
+        let _ = std::fs::copy(&aliases_src, &aliases_dest);
+    }
+
+    // Sync schema — only overwrite when source is machine-parseable.
+    // The registry may still ship the old comment-based format; copying that
+    // would replace a valid schema the user (or a prior release) placed manually.
+    let schema_src = registry_cache.join("schema.toml");
+    let schema_dest = home_dir.join("schema.toml");
+    if schema_src.exists() {
+        let src_parseable = std::fs::read_to_string(&schema_src)
+            .ok()
+            .and_then(|c| {
+                toml::from_str::<librefang_types::registry_schema::RegistrySchema>(&c).ok()
+            })
+            .is_some_and(|s| !s.content_types.is_empty());
+        if src_parseable {
+            let _ = std::fs::copy(&schema_src, &schema_dest);
         }
     }
 
@@ -99,13 +148,14 @@ pub fn sync_registry(home_dir: &Path) {
     if workspaces_dir.exists() {
         cleanup_stale_dirs(&workspaces_dir);
     }
+    true
 }
 
 /// Check whether we should re-download the registry.
 ///
 /// Returns `false` if the cache exists and the marker file is younger than
-/// [`CACHE_MAX_AGE_SECS`].
-fn should_refresh(registry_cache: &Path) -> bool {
+/// `cache_ttl_secs`.
+fn should_refresh(registry_cache: &Path, cache_ttl_secs: u64) -> bool {
     let marker = registry_cache.join(".sync_marker");
     if !marker.exists() {
         return true;
@@ -119,7 +169,7 @@ fn should_refresh(registry_cache: &Path) -> bool {
     let Ok(age) = modified.elapsed() else {
         return true;
     };
-    age.as_secs() > CACHE_MAX_AGE_SECS
+    age.as_secs() > cache_ttl_secs
 }
 
 /// Touch (create/update) the sync marker file.
@@ -129,11 +179,27 @@ fn touch_marker(registry_cache: &Path) {
     let _ = std::fs::write(&marker, "");
 }
 
-/// Download the tarball via HTTP and extract it into `registry_cache`.
-fn download_and_extract(registry_cache: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    tracing::info!("Downloading registry from {REGISTRY_TARBALL_URL}");
+/// Prefix a URL with the mirror/proxy base when set.
+///
+/// E.g. `apply_mirror("https://ghproxy.cn", "https://github.com/foo")` →
+///      `"https://ghproxy.cn/https://github.com/foo"`
+fn apply_mirror(mirror: &str, url: &str) -> String {
+    if mirror.is_empty() {
+        url.to_string()
+    } else {
+        format!("{}/{}", mirror.trim_end_matches('/'), url)
+    }
+}
 
-    let resp = ureq::get(REGISTRY_TARBALL_URL).call()?;
+/// Download the tarball via HTTP and extract it into `registry_cache`.
+fn download_and_extract(
+    registry_cache: &Path,
+    registry_mirror: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let url = apply_mirror(registry_mirror, REGISTRY_TARBALL_URL);
+    tracing::info!("Downloading registry from {url}");
+
+    let resp = ureq::get(&url).call()?;
     let reader = resp.into_body().into_reader();
 
     // Decompress gzip
@@ -196,7 +262,10 @@ fn download_and_extract(registry_cache: &Path) -> Result<(), Box<dyn std::error:
 
 /// Fallback: clone the registry using git (for environments where HTTP tarball
 /// download fails but git is available).
-fn git_clone_fallback(registry_cache: &Path) -> Result<(), Box<dyn std::error::Error>> {
+fn git_clone_fallback(
+    registry_cache: &Path,
+    registry_mirror: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("Attempting git clone fallback");
 
     if registry_cache.join(".git").exists() {
@@ -213,13 +282,14 @@ fn git_clone_fallback(registry_cache: &Path) -> Result<(), Box<dyn std::error::E
         if registry_cache.exists() {
             std::fs::remove_dir_all(registry_cache)?;
         }
+        let repo_url = apply_mirror(registry_mirror, REGISTRY_REPO);
         let status = Command::new("git")
             .args([
                 "clone",
                 "--depth",
                 "1",
                 "-q",
-                REGISTRY_REPO,
+                &repo_url,
                 &registry_cache.display().to_string(),
             ])
             .status()?;
@@ -256,7 +326,7 @@ pub fn resolve_home_dir_for_tests() -> std::path::PathBuf {
                 .map(|d| d.count() == 0)
                 .unwrap_or(true)
         {
-            sync_registry(&home);
+            sync_registry(&home, DEFAULT_CACHE_TTL_SECS, "");
         }
         home
     })
@@ -484,7 +554,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cache = tmp.path().join("registry");
         std::fs::create_dir_all(&cache).unwrap();
-        assert!(super::should_refresh(&cache));
+        assert!(super::should_refresh(&cache, super::DEFAULT_CACHE_TTL_SECS));
     }
 
     #[test]
@@ -493,7 +563,10 @@ mod tests {
         let cache = tmp.path().join("registry");
         std::fs::create_dir_all(&cache).unwrap();
         super::touch_marker(&cache);
-        assert!(!super::should_refresh(&cache));
+        assert!(!super::should_refresh(
+            &cache,
+            super::DEFAULT_CACHE_TTL_SECS
+        ));
     }
 
     #[test]

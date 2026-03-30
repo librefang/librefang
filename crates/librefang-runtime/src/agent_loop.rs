@@ -18,7 +18,7 @@ use crate::web_search::WebToolsContext;
 use librefang_memory::session::Session;
 use librefang_memory::{MemorySubstrate, ProactiveMemoryHooks};
 use librefang_skills::registry::SkillRegistry;
-use librefang_types::agent::AgentManifest;
+use librefang_types::agent::{AgentManifest, STABLE_PREFIX_MODE_METADATA_KEY};
 use librefang_types::error::{LibreFangError, LibreFangResult};
 use librefang_types::memory::{Memory, MemoryFilter, MemorySource};
 use librefang_types::memory::{MemoryFragment, MemoryId};
@@ -51,9 +51,17 @@ const TOOL_TIMEOUT_SECS: u64 = 120;
 const MAX_CONTINUATIONS: u32 = 5;
 
 /// Maximum message history size before auto-trimming to prevent context overflow.
-const MAX_HISTORY_MESSAGES: usize = 20;
+/// With tool calls each user turn can consume 4-6 messages, so 40 gives roughly
+/// 7-10 real conversation turns instead of the previous 3-5.
+const MAX_HISTORY_MESSAGES: usize = 40;
 
-const STABLE_PREFIX_MODE_METADATA_KEY: &str = "stable_prefix_mode";
+/// Check if a response is a NO_REPLY.  Matches:
+/// - Exact `"NO_REPLY"` (original behaviour)
+/// - Text ending with `NO_REPLY` on its own line (model sometimes adds context before it)
+fn is_no_reply(text: &str) -> bool {
+    let t = text.trim();
+    t == "NO_REPLY" || t.ends_with("\nNO_REPLY") || t.ends_with("\n\nNO_REPLY")
+}
 
 /// Safely trim message history to `MAX_HISTORY_MESSAGES`, cutting at
 /// conversation-turn boundaries so ToolUse/ToolResult pairs are never split.
@@ -363,6 +371,9 @@ fn proactive_item_to_fragment(
         accessed_at: chrono::Utc::now(),
         access_count: 0,
         scope: item.level.scope_str().to_string(),
+        image_url: None,
+        image_embedding: None,
+        modality: Default::default(),
     }
 }
 
@@ -883,7 +894,7 @@ pub async fn run_agent_loop(
                 let text = cleaned_text;
 
                 // NO_REPLY: agent intentionally chose not to reply
-                if text.trim() == "NO_REPLY" || parsed_directives.silent {
+                if is_no_reply(&text) || parsed_directives.silent {
                     debug!(agent = %manifest.name, "Agent chose NO_REPLY/silent — silent completion");
                     session
                         .messages
@@ -1262,10 +1273,13 @@ pub async fn run_agent_loop(
                     let effective_exec_policy = manifest.exec_policy.as_ref();
 
                     // Timeout-wrapped execution with timing for decision trace
+                    let tool_timeout = kernel
+                        .as_ref()
+                        .map_or(TOOL_TIMEOUT_SECS, |k| k.tool_timeout_secs());
                     let trace_start = Instant::now();
                     let trace_timestamp = chrono::Utc::now();
                     let result = match tokio::time::timeout(
-                        Duration::from_secs(TOOL_TIMEOUT_SECS),
+                        Duration::from_secs(tool_timeout),
                         tool_runner::execute_tool(
                             &tool_call.id,
                             &tool_call.name,
@@ -1297,12 +1311,12 @@ pub async fn run_agent_loop(
                     {
                         Ok(result) => result,
                         Err(_) => {
-                            warn!(tool = %tool_call.name, "Tool execution timed out after {}s", TOOL_TIMEOUT_SECS);
+                            warn!(tool = %tool_call.name, "Tool execution timed out after {}s", tool_timeout);
                             librefang_types::tool::ToolResult {
                                 tool_use_id: tool_call.id.clone(),
                                 content: format!(
                                     "Tool '{}' timed out after {}s.",
-                                    tool_call.name, TOOL_TIMEOUT_SECS
+                                    tool_call.name, tool_timeout
                                 ),
                                 is_error: true,
                             }
@@ -2362,7 +2376,7 @@ pub async fn run_agent_loop_streaming(
                 let text = cleaned_text_s;
 
                 // NO_REPLY: agent intentionally chose not to reply
-                if text.trim() == "NO_REPLY" || parsed_directives_s.silent {
+                if is_no_reply(&text) || parsed_directives_s.silent {
                     debug!(agent = %manifest.name, "Agent chose NO_REPLY/silent (streaming) — silent completion");
                     session
                         .messages
@@ -2735,10 +2749,13 @@ pub async fn run_agent_loop_streaming(
                     let effective_exec_policy = manifest.exec_policy.as_ref();
 
                     // Timeout-wrapped execution with timing for decision trace
+                    let tool_timeout = kernel
+                        .as_ref()
+                        .map_or(TOOL_TIMEOUT_SECS, |k| k.tool_timeout_secs());
                     let trace_start = Instant::now();
                     let trace_timestamp = chrono::Utc::now();
                     let result = match tokio::time::timeout(
-                        Duration::from_secs(TOOL_TIMEOUT_SECS),
+                        Duration::from_secs(tool_timeout),
                         tool_runner::execute_tool(
                             &tool_call.id,
                             &tool_call.name,
@@ -2770,12 +2787,12 @@ pub async fn run_agent_loop_streaming(
                     {
                         Ok(result) => result,
                         Err(_) => {
-                            warn!(tool = %tool_call.name, "Tool execution timed out after {}s (streaming)", TOOL_TIMEOUT_SECS);
+                            warn!(tool = %tool_call.name, "Tool execution timed out after {}s (streaming)", tool_timeout);
                             librefang_types::tool::ToolResult {
                                 tool_use_id: tool_call.id.clone(),
                                 content: format!(
                                     "Tool '{}' timed out after {}s.",
-                                    tool_call.name, TOOL_TIMEOUT_SECS
+                                    tool_call.name, tool_timeout
                                 ),
                                 is_error: true,
                             }
@@ -3888,7 +3905,7 @@ mod tests {
 
     #[test]
     fn test_max_history_messages() {
-        assert_eq!(MAX_HISTORY_MESSAGES, 20);
+        assert_eq!(MAX_HISTORY_MESSAGES, 40);
     }
 
     #[test]
@@ -4437,7 +4454,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_max_history_messages_constant() {
-        assert_eq!(MAX_HISTORY_MESSAGES, 20);
+        assert_eq!(MAX_HISTORY_MESSAGES, 40);
     }
 
     #[tokio::test]

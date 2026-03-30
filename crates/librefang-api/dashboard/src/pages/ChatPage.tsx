@@ -256,15 +256,29 @@ function useChatMessages(agentId: string | null, agents: any[] = []) {
     if (wsConnected && ws.current && ws.current.readyState === WebSocket.OPEN) {
       try {
         let responded = false;
+        let fallbackTimer: ReturnType<typeof setTimeout> | null = null;
+
+        const resetFallbackTimer = () => {
+          if (fallbackTimer) clearTimeout(fallbackTimer);
+          fallbackTimer = setTimeout(() => {
+            if (!responded) {
+              cleanup();
+              sendViaHttp();
+            }
+          }, 180000);
+        };
 
         const cleanup = () => {
           responded = true;
+          if (fallbackTimer) { clearTimeout(fallbackTimer); fallbackTimer = null; }
           onDropRef.current = null;
           ws.current?.removeEventListener("message", handleMessage);
         };
 
         // Set up message handler for this response
         const handleMessage = (event: MessageEvent) => {
+          // Reset inactivity timeout on every event
+          resetFallbackTimer();
           try {
             const data = JSON.parse(event.data as string);
             if (data.type === "text_delta") {
@@ -328,13 +342,8 @@ function useChatMessages(agentId: string | null, agents: any[] = []) {
         ws.current.addEventListener("message", handleMessage);
         ws.current.send(JSON.stringify({ type: "message", content: trimmed }));
 
-        // Timeout: if no response in 60s, fall back to HTTP
-        setTimeout(() => {
-          if (!responded) {
-            cleanup();
-            sendViaHttp();
-          }
-        }, 60000);
+        // Start inactivity timeout — resets on every received event
+        resetFallbackTimer();
 
         return;
       } catch {
@@ -698,7 +707,7 @@ export function ChatPage() {
   }, [navigate]);
 
   const agentsQuery = useQuery({ queryKey: ["agents", "list", "chat"], queryFn: listAgents, staleTime: 30000 });
-  const agents = useMemo(() => [...(agentsQuery.data ?? [])].filter(a => !a.name.includes("-hand") && !a.name.includes(":")).sort((a, b) => {
+  const agents = useMemo(() => [...(agentsQuery.data ?? [])].filter(a => !a.name.endsWith("-hand")).sort((a, b) => {
     // Auth missing → sort to bottom
     const aNoAuth = isAuthUnavailable(a.auth_status) ? 1 : 0;
     const bNoAuth = isAuthUnavailable(b.auth_status) ? 1 : 0;

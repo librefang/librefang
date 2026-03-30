@@ -95,7 +95,10 @@ export interface ChannelField {
   has_value?: boolean;
   env_var?: string | null;
   placeholder?: string | null;
-  value?: unknown;
+  value?: string;
+  options?: string[];
+  show_when?: string;
+  readonly?: boolean;
 }
 
 export interface ChannelItem {
@@ -781,6 +784,10 @@ export async function setProviderUrl(providerId: string, baseUrl: string): Promi
   return put<ApiActionResponse>(`/api/providers/${encodeURIComponent(providerId)}/url`, { base_url: baseUrl });
 }
 
+export async function setDefaultProvider(providerId: string): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>(`/api/providers/${encodeURIComponent(providerId)}/default`, {});
+}
+
 // ── Media generation API ──────────────────────────────────────────────
 
 export async function listMediaProviders(): Promise<MediaProvider[]> {
@@ -798,7 +805,7 @@ export async function synthesizeSpeech(req: { text: string; provider?: string; m
     headers: buildHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(req),
   });
-  if (!resp.ok) throw new Error(`TTS failed: ${resp.status}`);
+  if (!resp.ok) throw await parseError(resp);
   return resp.blob();
 }
 
@@ -816,7 +823,7 @@ export async function generateMusic(req: { prompt?: string; lyrics?: string; pro
     headers: buildHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(req),
   });
-  if (!resp.ok) throw new Error(`Music generation failed: ${resp.status}`);
+  if (!resp.ok) throw await parseError(resp);
   return resp.blob();
 }
 
@@ -1742,26 +1749,11 @@ export async function getA2ATaskStatus(taskId: string): Promise<A2ATaskStatus> {
   return get<A2ATaskStatus>(`/api/a2a/tasks/${encodeURIComponent(taskId)}/status`);
 }
 
-// ── Auth check ───────────────────────────────────────
-
-export async function checkAuthRequired(): Promise<boolean> {
-  // Retry a few times in case daemon is still booting
-  for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      const response = await fetch("/api/status", {
-        headers: buildHeaders(),
-      });
-      return response.status === 401;
-    } catch {
-      // Network error — daemon may not be up yet, wait and retry
-      await new Promise((r) => setTimeout(r, 1000));
-    }
-  }
-  return false;
-}
-
 export function setApiKey(key: string) {
   localStorage.setItem("librefang-api-key", key);
+  // Reset the 401-fired guard so future unauthorized responses
+  // (e.g. after token expiry) can re-trigger the login dialog.
+  _unauthorizedFired = false;
 }
 
 export function clearApiKey() {
@@ -1971,4 +1963,71 @@ export async function completeExperiment(experimentId: string): Promise<ApiActio
 
 export async function getExperimentMetrics(experimentId: string): Promise<ExperimentVariantMetrics[]> {
   return get<ExperimentVariantMetrics[]>(`/api/prompts/experiments/${encodeURIComponent(experimentId)}/metrics`);
+}
+
+// ---------------------------------------------------------------------------
+// Registry Schema
+// ---------------------------------------------------------------------------
+
+export interface RegistrySchemaField {
+  type: string;
+  required?: boolean;
+  description?: string;
+  example?: unknown;
+  default?: unknown;
+  options?: string[];
+  item_type?: string;
+}
+
+export interface RegistrySchemaSection {
+  description?: string;
+  repeatable?: boolean;
+  fields?: Record<string, RegistrySchemaField>;
+  sections?: Record<string, RegistrySchemaSection>;
+}
+
+export interface RegistrySchema {
+  description?: string;
+  file_pattern?: string;
+  fields?: Record<string, RegistrySchemaField>;
+  sections?: Record<string, RegistrySchemaSection>;
+}
+
+export async function fetchAllRegistrySchemas(): Promise<Record<string, RegistrySchema>> {
+  return get<Record<string, RegistrySchema>>("/api/registry/schema");
+}
+
+export async function fetchRegistrySchema(contentType: string): Promise<RegistrySchema> {
+  return get<RegistrySchema>(`/api/registry/schema/${encodeURIComponent(contentType)}`);
+}
+
+export interface CreateRegistryContentResponse {
+  ok: boolean;
+  content_type: string;
+  identifier: string;
+  path: string;
+}
+
+export async function createRegistryContent(
+  contentType: string,
+  values: Record<string, unknown>,
+): Promise<CreateRegistryContentResponse> {
+  return post<CreateRegistryContentResponse>(
+    `/api/registry/content/${encodeURIComponent(contentType)}`,
+    values,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Auth — change password
+// ---------------------------------------------------------------------------
+
+export async function changePassword(
+  currentPassword: string,
+  newPassword: string,
+): Promise<{ ok: boolean; error?: string; message?: string }> {
+  return post<{ ok: boolean; error?: string; message?: string }>(
+    "/api/auth/change-password",
+    { current_password: currentPassword, new_password: newPassword },
+  );
 }

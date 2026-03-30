@@ -16,6 +16,7 @@ use std::sync::Arc;
 use tracing::{debug, warn};
 
 /// Maximum inter-agent call depth to prevent infinite recursion (A->B->C->...).
+#[allow(dead_code)]
 const MAX_AGENT_CALL_DEPTH: u32 = 5;
 
 /// Check if a shell command should be blocked by taint tracking.
@@ -230,23 +231,12 @@ pub async fn execute_tool(
             }
         }
 
-        // Shell tool — metacharacter check + exec policy + taint check
+        // Shell tool — exec policy + metacharacter check + taint check
         "shell_exec" => {
             let command = input["command"].as_str().unwrap_or("");
 
-            // SECURITY: Always check for shell metacharacters, even in Full mode.
-            // These enable command injection regardless of exec policy.
-            if let Some(reason) = crate::subprocess_sandbox::contains_shell_metacharacters(command)
-            {
-                return ToolResult {
-                    tool_use_id: tool_use_id.to_string(),
-                    content: format!(
-                        "shell_exec blocked: command contains {reason}. \
-                         Shell metacharacters are never allowed."
-                    ),
-                    is_error: true,
-                };
-            }
+            let is_full_exec = exec_policy
+                .is_some_and(|p| p.mode == librefang_types::config::ExecSecurityMode::Full);
 
             // Exec policy enforcement (allowlist / deny / full)
             if let Some(policy) = exec_policy {
@@ -264,9 +254,25 @@ pub async fn execute_tool(
                     };
                 }
             }
+
+            // SECURITY: Check for shell metacharacters in non-full modes.
+            // Full mode explicitly trusts the agent — skip metacharacter checks.
+            if !is_full_exec {
+                if let Some(reason) =
+                    crate::subprocess_sandbox::contains_shell_metacharacters(command)
+                {
+                    return ToolResult {
+                        tool_use_id: tool_use_id.to_string(),
+                        content: format!(
+                            "shell_exec blocked: command contains {reason}. \
+                             Shell metacharacters are not allowed in allowlist mode."
+                        ),
+                        is_error: true,
+                    };
+                }
+            }
+
             // Skip heuristic taint patterns for Full exec policy (e.g. hand agents that need curl)
-            let is_full_exec = exec_policy
-                .is_some_and(|p| p.mode == librefang_types::config::ExecSecurityMode::Full);
             if !is_full_exec {
                 if let Some(violation) = check_taint_shell_exec(command) {
                     return ToolResult {
@@ -287,7 +293,7 @@ pub async fn execute_tool(
 
         // Inter-agent tools (require kernel handle)
         "agent_send" => tool_agent_send(input, kernel).await,
-        "agent_spawn" => tool_agent_spawn(input, kernel, caller_agent_id).await,
+        "agent_spawn" => tool_agent_spawn(input, kernel, caller_agent_id, allowed_tools).await,
         "agent_list" => tool_agent_list(kernel),
         "agent_kill" => tool_agent_kill(input, kernel),
 
@@ -368,6 +374,9 @@ pub async fn execute_tool(
         // A2A outbound tools (cross-instance agent communication)
         "a2a_discover" => tool_a2a_discover(input).await,
         "a2a_send" => tool_a2a_send(input, kernel).await,
+
+        // Goal tracking tool
+        "goal_update" => tool_goal_update(input, kernel),
 
         // Browser automation tools
         "browser_navigate" => {
@@ -477,6 +486,23 @@ pub async fn execute_tool(
         other => {
             // Fallback 1: MCP tools (mcp_{server}_{tool} prefix)
             if mcp::is_mcp_tool(other) {
+                // SECURITY: Verify MCP tool is in the agent's allowed_tools list.
+                // The primary check at the top of execute_tool covers this when
+                // allowed_tools is Some, but we add an explicit guard here to
+                // ensure MCP tools are never dispatched without authorization,
+                // even if called from a context that omits allowed_tools.
+                if let Some(allowed) = allowed_tools {
+                    if !allowed.iter().any(|t| t == other) {
+                        warn!(tool = other, "MCP tool not in agent's allowed_tools list");
+                        return ToolResult {
+                            tool_use_id: tool_use_id.to_string(),
+                            content: format!(
+                                "Permission denied: MCP tool '{other}' is not in the agent's allowed tools list"
+                            ),
+                            is_error: true,
+                        };
+                    }
+                }
                 if let Some(mcp_conns) = mcp_connections {
                     let mut conns = mcp_conns.lock().await;
                     let server_name =
@@ -664,7 +690,7 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                 "properties": {
                     "name": {
                         "type": "string",
-                        "description": "The name of the new agent"
+                        "description": "Unique name for the new agent. Ensure it does not conflict with existing agents."
                     },
                     "system_prompt": {
                         "type": "string",
@@ -673,7 +699,7 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                     "tools": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "List of tools to enable for the new agent, The full tool name must be used"
+                        "description": "Select from all available tools, including MCP tools. Use the full tool names only"
                     },
                     "network": {
                         "type": "boolean",
@@ -682,7 +708,7 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                     "shell": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "List of allowed shell commands for the new agent (requires shell_exec in tools, e.g., [\"uv *\", \"git *\", \"cargo *\"])"
+                        "description": "Preset necessary shell commands based on the agent's task (e.g., [\"uv *\", \"pnpm *\"]). "
                     }
                 },
                 "required": ["name", "system_prompt"]
@@ -1324,6 +1350,20 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                 "properties": {}
             }),
         },
+        // --- Goal tracking tool ---
+        ToolDefinition {
+            name: "goal_update".to_string(),
+            description: "Update a goal's status and/or progress. Use this to autonomously track your progress toward assigned goals.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "goal_id": { "type": "string", "description": "The goal's UUID to update" },
+                    "status": { "type": "string", "enum": ["pending", "in_progress", "completed", "cancelled"], "description": "New status for the goal (optional)" },
+                    "progress": { "type": "integer", "description": "Progress percentage 0-100 (optional)" }
+                },
+                "required": ["goal_id"]
+            }),
+        },
         // --- System time tool ---
         ToolDefinition {
             name: "system_time".to_string(),
@@ -1364,14 +1404,17 @@ fn validate_path(path: &str) -> Result<&str, String> {
     Ok(path)
 }
 
-/// Resolve a file path through the workspace sandbox (if available) or legacy validation.
+/// Resolve a file path through the workspace sandbox.
+///
+/// SECURITY: Returns an error when `workspace_root` is `None` to prevent
+/// unrestricted filesystem access. All file operations MUST be confined
+/// to the agent's workspace directory.
 fn resolve_file_path(raw_path: &str, workspace_root: Option<&Path>) -> Result<PathBuf, String> {
-    if let Some(root) = workspace_root {
-        crate::workspace_sandbox::resolve_sandbox_path(raw_path, root)
-    } else {
-        let _ = validate_path(raw_path)?;
-        Ok(PathBuf::from(raw_path))
-    }
+    let root = workspace_root.ok_or(
+        "Workspace sandbox not configured: file operations are disabled. \
+         Set a workspace_root in the agent manifest or kernel config to enable file tools.",
+    )?;
+    crate::workspace_sandbox::resolve_sandbox_path(raw_path, root)
 }
 
 async fn tool_file_read(
@@ -1703,12 +1746,13 @@ async fn tool_agent_send(
         .ok_or("Missing 'message' parameter")?;
 
     // Check + increment inter-agent call depth
+    let max_depth = kh.max_agent_call_depth();
     let current_depth = AGENT_CALL_DEPTH.try_with(|d| d.get()).unwrap_or(0);
-    if current_depth >= MAX_AGENT_CALL_DEPTH {
+    if current_depth >= max_depth {
         return Err(format!(
             "Inter-agent call depth exceeded (max {}). \
              A->B->C chain is too deep. Use the task queue instead.",
-            MAX_AGENT_CALL_DEPTH
+            max_depth
         ));
     }
 
@@ -1719,42 +1763,21 @@ async fn tool_agent_send(
         .await
 }
 
-async fn tool_agent_spawn(
-    input: &serde_json::Value,
-    kernel: Option<&Arc<dyn KernelHandle>>,
-    parent_id: Option<&str>,
+/// Build agent manifest TOML from parsed parameters.
+fn build_agent_manifest_toml(
+    name: &str,
+    system_prompt: &str,
+    tools: Vec<String>,
+    shell: Vec<String>,
+    network: bool,
 ) -> Result<String, String> {
-    let kh = require_kernel(kernel)?;
+    let mut tools = tools;
+    let has_shell = !shell.is_empty();
 
-    // Parse input parameters
-    let name = input["name"].as_str().ok_or("Missing 'name' parameter")?;
-    let system_prompt = input["system_prompt"]
-        .as_str()
-        .ok_or("Missing 'system_prompt' parameter")?;
-
-    // Parse optional parameters
-    let tools: Vec<String> = input["tools"]
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let network = input["network"].as_bool().unwrap_or(false);
-
-    let shell: Vec<String> = input["shell"]
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    // Build the manifest using a simplified intermediate structure
-    let has_shell = tools.iter().any(|t| t == "shell_exec") && !shell.is_empty();
+    // Auto-add shell_exec to tools if shell is specified (without duplicates)
+    if has_shell && !tools.iter().any(|t| t == "shell_exec") {
+        tools.push("shell_exec".to_string());
+    }
 
     let mut capabilities = serde_json::json!({
         "tools": tools,
@@ -1774,10 +1797,107 @@ async fn tool_agent_spawn(
         "capabilities": capabilities,
     });
 
-    let manifest_toml = toml::to_string(&manifest_json)
-        .map_err(|e| format!("Failed to serialize to TOML: {}", e))?;
+    toml::to_string(&manifest_json).map_err(|e| format!("Failed to serialize to TOML: {}", e))
+}
 
-    let (id, agent_name) = kh.spawn_agent(&manifest_toml, parent_id).await?;
+/// Expand a list of tool names into full `Capability` grants for the parent.
+///
+/// Tool names at the `execute_tool` level (e.g. `"file_read"`, `"shell_exec"`)
+/// are `ToolInvoke` capabilities. But a child manifest may also request
+/// resource-level capabilities (`NetConnect`, `ShellExec`, `AgentSpawn`, etc.)
+/// that are *implied* by tool names. Without expanding, `validate_capability_inheritance`
+/// would reject legitimate child capabilities because `ToolInvoke("web_fetch")`
+/// cannot cover a child's `NetConnect("*")` — they are different enum variants.
+///
+/// This mirrors the `ToolProfile::implied_capabilities()` logic in agent.rs.
+fn tools_to_parent_capabilities(tools: &[String]) -> Vec<librefang_types::capability::Capability> {
+    use librefang_types::capability::Capability;
+
+    let mut caps: Vec<Capability> = tools
+        .iter()
+        .map(|t| Capability::ToolInvoke(t.clone()))
+        .collect();
+
+    let has_net = tools.iter().any(|t| t.starts_with("web_") || t == "*");
+    let has_shell = tools.iter().any(|t| t == "shell_exec" || t == "*");
+    let has_agent_spawn = tools.iter().any(|t| t == "agent_spawn" || t == "*");
+    let has_agent_msg = tools.iter().any(|t| t.starts_with("agent_") || t == "*");
+    let has_memory = tools.iter().any(|t| t.starts_with("memory_") || t == "*");
+
+    if has_net {
+        caps.push(Capability::NetConnect("*".into()));
+    }
+    if has_shell {
+        caps.push(Capability::ShellExec("*".into()));
+    }
+    if has_agent_spawn {
+        caps.push(Capability::AgentSpawn);
+    }
+    if has_agent_msg {
+        caps.push(Capability::AgentMessage("*".into()));
+    }
+    if has_memory {
+        caps.push(Capability::MemoryRead("*".into()));
+        caps.push(Capability::MemoryWrite("*".into()));
+    }
+
+    caps
+}
+
+async fn tool_agent_spawn(
+    input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+    parent_id: Option<&str>,
+    parent_allowed_tools: Option<&[String]>,
+) -> Result<String, String> {
+    let kh = require_kernel(kernel)?;
+
+    let name = input["name"].as_str().ok_or("Missing 'name' parameter")?;
+    let system_prompt = input["system_prompt"]
+        .as_str()
+        .ok_or("Missing 'system_prompt' parameter")?;
+
+    let tools: Vec<String> = input["tools"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let network = input["network"].as_bool().unwrap_or(false);
+    let shell: Vec<String> = input["shell"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let manifest_toml = build_agent_manifest_toml(name, system_prompt, tools, shell, network)?;
+    // Build parent capabilities from the parent's allowed tools list.
+    // This prevents a sub-agent from escalating privileges beyond what
+    // its parent is permitted to use (capability inheritance enforcement).
+    //
+    // Tool names imply resource-level capabilities (matching implied_capabilities
+    // logic in ToolProfile): e.g. "web_fetch" implies NetConnect("*"),
+    // "shell_exec" implies ShellExec("*"), "agent_spawn" implies AgentSpawn.
+    // Without this expansion, validate_capability_inheritance would reject
+    // legitimate child capabilities because ToolInvoke("web_fetch") cannot
+    // cover a child's NetConnect("*") — they are different Capability variants.
+    let parent_caps: Vec<librefang_types::capability::Capability> =
+        if let Some(tools) = parent_allowed_tools {
+            tools_to_parent_capabilities(tools)
+        } else {
+            // No allowed_tools means unrestricted parent — grant ToolAll
+            vec![librefang_types::capability::Capability::ToolAll]
+        };
+
+    let (id, agent_name) = kh
+        .spawn_agent_checked(&manifest_toml, parent_id, &parent_caps)
+        .await?;
     Ok(format!(
         "Agent spawned successfully.\n  ID: {id}\n  Name: {agent_name}"
     ))
@@ -1951,6 +2071,39 @@ async fn tool_event_publish(
         .unwrap_or(serde_json::json!({}));
     kh.publish_event(event_type, payload).await?;
     Ok(format!("Event '{event_type}' published successfully."))
+}
+
+// ---------------------------------------------------------------------------
+// Goal tracking tools
+// ---------------------------------------------------------------------------
+
+fn tool_goal_update(
+    input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+) -> Result<String, String> {
+    // Validate input before touching the kernel
+    let goal_id = input["goal_id"]
+        .as_str()
+        .ok_or("Missing 'goal_id' parameter")?;
+    let status = input["status"].as_str();
+    let progress = input["progress"].as_u64().map(|p| p.min(100) as u8);
+
+    if status.is_none() && progress.is_none() {
+        return Err("At least one of 'status' or 'progress' must be provided".to_string());
+    }
+
+    if let Some(s) = status {
+        if !["pending", "in_progress", "completed", "cancelled"].contains(&s) {
+            return Err(format!(
+                "Invalid status '{}'. Must be: pending, in_progress, completed, or cancelled",
+                s
+            ));
+        }
+    }
+
+    let kh = require_kernel(kernel)?;
+    let updated = kh.goal_update(goal_id, status, progress)?;
+    Ok(serde_json::to_string_pretty(&updated).unwrap_or_else(|_| updated.to_string()))
 }
 
 // ---------------------------------------------------------------------------
@@ -3886,8 +4039,8 @@ mod tests {
     fn test_builtin_tool_definitions() {
         let tools = builtin_tool_definitions();
         assert!(
-            tools.len() >= 39,
-            "Expected at least 39 tools, got {}",
+            tools.len() >= 40,
+            "Expected at least 40 tools, got {}",
             tools.len()
         );
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
@@ -3949,6 +4102,8 @@ mod tests {
         assert!(names.contains(&"text_to_speech"));
         assert!(names.contains(&"speech_to_text"));
         assert!(names.contains(&"docker_exec"));
+        // Goal tracking tool
+        assert!(names.contains(&"goal_update"));
         // Canvas tool
         assert!(names.contains(&"canvas_present"));
     }
@@ -3985,13 +4140,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_file_read_missing() {
-        let bad_path = std::env::temp_dir()
-            .join("librefang_test_nonexistent_99999")
-            .join("file.txt");
+        let workspace = tempfile::tempdir().expect("tempdir");
         let result = execute_tool(
             "test-id",
             "file_read",
-            &serde_json::json!({"path": bad_path.to_str().unwrap()}),
+            &serde_json::json!({"path": "nonexistent_99999/file.txt"}),
             None,
             None,
             None,
@@ -4000,7 +4153,7 @@ mod tests {
             None,
             None,
             None,
-            None,
+            Some(workspace.path()),
             None, // media_engine
             None, // media_drivers
             None, // exec_policy
@@ -4020,6 +4173,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_file_read_path_traversal_blocked() {
+        let workspace = tempfile::tempdir().expect("tempdir");
         let result = execute_tool(
             "test-id",
             "file_read",
@@ -4032,7 +4186,7 @@ mod tests {
             None,
             None,
             None,
-            None,
+            Some(workspace.path()),
             None, // media_engine
             None, // media_drivers
             None, // exec_policy
@@ -4049,6 +4203,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_file_write_path_traversal_blocked() {
+        let workspace = tempfile::tempdir().expect("tempdir");
         let result = execute_tool(
             "test-id",
             "file_write",
@@ -4061,7 +4216,7 @@ mod tests {
             None,
             None,
             None,
-            None,
+            Some(workspace.path()),
             None, // media_engine
             None, // media_drivers
             None, // exec_policy
@@ -4078,6 +4233,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_file_list_path_traversal_blocked() {
+        let workspace = tempfile::tempdir().expect("tempdir");
         let result = execute_tool(
             "test-id",
             "file_list",
@@ -4090,7 +4246,7 @@ mod tests {
             None,
             None,
             None,
-            None,
+            Some(workspace.path()),
             None, // media_engine
             None, // media_drivers
             None, // exec_policy
@@ -4224,15 +4380,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_capability_enforcement_allowed() {
+        let workspace = tempfile::tempdir().expect("tempdir");
         let allowed = vec!["file_read".to_string()];
-        // Use a cross-platform nonexistent path
-        let bad_path = std::env::temp_dir()
-            .join("librefang_test_nonexistent_12345")
-            .join("file.txt");
         let result = execute_tool(
             "test-id",
             "file_read",
-            &serde_json::json!({"path": bad_path.to_str().unwrap()}),
+            &serde_json::json!({"path": "nonexistent_12345/file.txt"}),
             None,
             Some(&allowed),
             None,
@@ -4241,7 +4394,7 @@ mod tests {
             None,
             None,
             None,
-            None,
+            Some(workspace.path()),
             None, // media_engine
             None, // media_drivers
             None, // exec_policy
@@ -4252,17 +4405,24 @@ mod tests {
             None, // channel
         )
         .await;
-        // Should fail for file-not-found, NOT for permission denied
+        // Should fail for path resolution, NOT for permission denied
         assert!(
             result.is_error,
             "Expected error but got: {}",
             result.content
         );
         assert!(
+            !result.content.contains("Permission denied"),
+            "Unexpected permission denied: {}",
+            result.content
+        );
+        assert!(
             result.content.contains("Failed to read")
+                || result.content.contains("Failed to resolve")
                 || result.content.contains("not found")
-                || result.content.contains("No such file"),
-            "Unexpected error: {}",
+                || result.content.contains("No such file")
+                || result.content.contains("does not exist"),
+            "Expected file-not-found error, got: {}",
             result.content
         );
     }
@@ -4731,5 +4891,626 @@ mod tests {
         assert_eq!(output["title"], "Test");
         // Cleanup
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_agent_spawn_manifest_all_cases() {
+        let mut toml;
+
+        // Case 1: Minimal - only name and system_prompt
+        toml = build_agent_manifest_toml("test-agent", "You are helpful.", vec![], vec![], false)
+            .unwrap();
+        assert!(toml.contains("name = \"test-agent\""));
+        assert!(toml.contains("system_prompt = \"You are helpful.\""));
+        assert!(toml.contains("tools = []"));
+        assert!(!toml.contains("network"));
+        assert!(!toml.contains("shell = ["));
+
+        // Case 2: With tools (no network)
+        toml = build_agent_manifest_toml(
+            "coder",
+            "You are a coder.",
+            vec!["file_read".to_string(), "file_write".to_string()],
+            vec![],
+            false,
+        )
+        .unwrap();
+        assert!(toml.contains("tools = [\"file_read\", \"file_write\"]"));
+        assert!(!toml.contains("network"));
+
+        // Case 3: network explicitly enabled
+        toml = build_agent_manifest_toml(
+            "web-agent",
+            "You browse the web.",
+            vec!["web_fetch".to_string()],
+            vec![],
+            true,
+        )
+        .unwrap();
+        assert!(toml.contains("web_fetch"));
+        assert!(toml.contains("network = [\"*\"]"));
+
+        // Case 4: shell without shell_exec - should auto-add shell_exec to tools
+        toml = build_agent_manifest_toml(
+            "shell-test",
+            "You run commands.",
+            vec!["git".to_string()],
+            vec!["uv *".to_string()],
+            false,
+        )
+        .unwrap();
+        assert!(toml.contains("shell = [\"uv *\"]"));
+        assert!(toml.contains("shell_exec")); // auto-added
+
+        // Case 5: shell with explicit shell_exec (should not duplicate)
+        toml = build_agent_manifest_toml(
+            "shell-test",
+            "You run commands.",
+            vec!["shell_exec".to_string(), "git".to_string()],
+            vec!["uv *".to_string(), "cargo *".to_string()],
+            false,
+        )
+        .unwrap();
+        assert!(toml.contains("shell = [\"uv *\", \"cargo *\"]"));
+        // shell_exec should only appear once
+        let shell_exec_count = toml.matches("shell_exec").count();
+        assert_eq!(shell_exec_count, 1);
+
+        // Case 6: Special chars in strings
+        toml = build_agent_manifest_toml(
+            "agent-with\"quotes",
+            "He said \"hello\" and '''goodbye'''.",
+            vec![],
+            vec![],
+            false,
+        )
+        .unwrap();
+        assert!(toml.contains("agent-with\"quotes"));
+
+        // Case 7: Multiple tools with web_fetch and shell (auto-adds shell_exec)
+        toml = build_agent_manifest_toml(
+            "multi-agent",
+            "You do everything.",
+            vec!["web_fetch".to_string(), "git".to_string()],
+            vec!["ls *".to_string()],
+            true,
+        )
+        .unwrap();
+        assert!(toml.contains("web_fetch"));
+        assert!(toml.contains("network = [\"*\"]"));
+        assert!(toml.contains("shell = [\"ls *\"]"));
+        assert!(toml.contains("shell_exec")); // auto-added
+    }
+
+    // -----------------------------------------------------------------------
+    // Security fix tests (#1652)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_file_read_no_workspace_root_returns_error() {
+        // SECURITY: file_read must fail when workspace_root is None
+        let result = execute_tool(
+            "test-id",
+            "file_read",
+            &serde_json::json!({"path": "/etc/passwd"}),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None, // workspace_root = None
+            None, // media_engine
+            None, // media_drivers
+            None, // exec_policy
+            None, // tts_engine
+            None, // docker_config
+            None, // process_manager
+            None, // sender_id
+            None, // channel
+        )
+        .await;
+        assert!(
+            result.is_error,
+            "Expected error when workspace_root is None"
+        );
+        assert!(
+            result.content.contains("Workspace sandbox not configured"),
+            "Expected workspace sandbox error, got: {}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn test_file_write_no_workspace_root_returns_error() {
+        // SECURITY: file_write must fail when workspace_root is None
+        let result = execute_tool(
+            "test-id",
+            "file_write",
+            &serde_json::json!({"path": "/tmp/test.txt", "content": "pwned"}),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None, // workspace_root = None
+            None, // media_engine
+            None, // media_drivers
+            None, // exec_policy
+            None, // tts_engine
+            None, // docker_config
+            None, // process_manager
+            None, // sender_id
+            None, // channel
+        )
+        .await;
+        assert!(
+            result.is_error,
+            "Expected error when workspace_root is None"
+        );
+        assert!(
+            result.content.contains("Workspace sandbox not configured"),
+            "Expected workspace sandbox error, got: {}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn test_file_list_no_workspace_root_returns_error() {
+        // SECURITY: file_list must fail when workspace_root is None
+        let result = execute_tool(
+            "test-id",
+            "file_list",
+            &serde_json::json!({"path": "/etc"}),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None, // workspace_root = None
+            None, // media_engine
+            None, // media_drivers
+            None, // exec_policy
+            None, // tts_engine
+            None, // docker_config
+            None, // process_manager
+            None, // sender_id
+            None, // channel
+        )
+        .await;
+        assert!(
+            result.is_error,
+            "Expected error when workspace_root is None"
+        );
+        assert!(
+            result.content.contains("Workspace sandbox not configured"),
+            "Expected workspace sandbox error, got: {}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn test_agent_spawn_capability_escalation_denied() {
+        // SECURITY: sub-agent cannot request tools the parent doesn't have.
+        // Parent only has file_read, but child requests shell_exec.
+        let kernel: Arc<dyn KernelHandle> = Arc::new(SpawnCheckKernel {
+            should_fail_escalation: true,
+        });
+        let parent_allowed = vec!["file_read".to_string(), "agent_spawn".to_string()];
+        let result = execute_tool(
+            "test-id",
+            "agent_spawn",
+            &serde_json::json!({
+                "name": "escalated-child",
+                "system_prompt": "You are a test agent.",
+                "tools": ["shell_exec", "file_read"]
+            }),
+            Some(&kernel),
+            Some(&parent_allowed),
+            Some("parent-agent-id"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None, // media_engine
+            None, // media_drivers
+            None, // exec_policy
+            None, // tts_engine
+            None, // docker_config
+            None, // process_manager
+            None, // sender_id
+            None, // channel
+        )
+        .await;
+        assert!(
+            result.is_error,
+            "Expected escalation to be denied, got: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains("escalation") || result.content.contains("denied"),
+            "Expected escalation denial message, got: {}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn test_agent_spawn_subset_capabilities_allowed() {
+        // Sub-agent requests only capabilities the parent has — should succeed.
+        let kernel: Arc<dyn KernelHandle> = Arc::new(SpawnCheckKernel {
+            should_fail_escalation: false,
+        });
+        let parent_allowed = vec![
+            "file_read".to_string(),
+            "file_write".to_string(),
+            "agent_spawn".to_string(),
+        ];
+        let result = execute_tool(
+            "test-id",
+            "agent_spawn",
+            &serde_json::json!({
+                "name": "good-child",
+                "system_prompt": "You are a test agent.",
+                "tools": ["file_read"]
+            }),
+            Some(&kernel),
+            Some(&parent_allowed),
+            Some("parent-agent-id"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None, // media_engine
+            None, // media_drivers
+            None, // exec_policy
+            None, // tts_engine
+            None, // docker_config
+            None, // process_manager
+            None, // sender_id
+            None, // channel
+        )
+        .await;
+        assert!(
+            !result.is_error,
+            "Expected spawn to succeed, got error: {}",
+            result.content
+        );
+        assert!(result.content.contains("spawned successfully"));
+    }
+
+    #[test]
+    fn test_tools_to_parent_capabilities_expands_resource_caps() {
+        use librefang_types::capability::Capability;
+
+        let tools = vec![
+            "file_read".to_string(),
+            "web_fetch".to_string(),
+            "shell_exec".to_string(),
+            "agent_spawn".to_string(),
+            "memory_store".to_string(),
+        ];
+        let caps = tools_to_parent_capabilities(&tools);
+
+        // Should have ToolInvoke for each tool name
+        assert!(caps.contains(&Capability::ToolInvoke("file_read".into())));
+        assert!(caps.contains(&Capability::ToolInvoke("web_fetch".into())));
+        assert!(caps.contains(&Capability::ToolInvoke("shell_exec".into())));
+        assert!(caps.contains(&Capability::ToolInvoke("agent_spawn".into())));
+        assert!(caps.contains(&Capability::ToolInvoke("memory_store".into())));
+
+        // Should also have implied resource-level capabilities
+        assert!(
+            caps.contains(&Capability::NetConnect("*".into())),
+            "web_fetch should imply NetConnect"
+        );
+        assert!(
+            caps.contains(&Capability::ShellExec("*".into())),
+            "shell_exec should imply ShellExec"
+        );
+        assert!(
+            caps.contains(&Capability::AgentSpawn),
+            "agent_spawn should imply AgentSpawn"
+        );
+        assert!(
+            caps.contains(&Capability::AgentMessage("*".into())),
+            "agent_spawn should imply AgentMessage"
+        );
+        assert!(
+            caps.contains(&Capability::MemoryRead("*".into())),
+            "memory_store should imply MemoryRead"
+        );
+        assert!(
+            caps.contains(&Capability::MemoryWrite("*".into())),
+            "memory_store should imply MemoryWrite"
+        );
+    }
+
+    #[test]
+    fn test_tools_to_parent_capabilities_no_false_expansion() {
+        use librefang_types::capability::Capability;
+
+        // Only file_read — should NOT imply any resource caps
+        let tools = vec!["file_read".to_string()];
+        let caps = tools_to_parent_capabilities(&tools);
+        assert_eq!(caps.len(), 1);
+        assert!(caps.contains(&Capability::ToolInvoke("file_read".into())));
+    }
+
+    #[tokio::test]
+    async fn test_mcp_tool_blocked_by_allowed_tools() {
+        // SECURITY: MCP tools not in allowed_tools must be blocked.
+        let allowed = vec!["file_read".to_string(), "mcp_server1_tool_a".to_string()];
+        let result = execute_tool(
+            "test-id",
+            "mcp_server1_tool_b", // Not in allowed list
+            &serde_json::json!({"param": "value"}),
+            None,
+            Some(&allowed),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None, // media_engine
+            None, // media_drivers
+            None, // exec_policy
+            None, // tts_engine
+            None, // docker_config
+            None, // process_manager
+            None, // sender_id
+            None, // channel
+        )
+        .await;
+        assert!(result.is_error);
+        assert!(
+            result.content.contains("Permission denied"),
+            "Expected permission denied for MCP tool, got: {}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mcp_tool_allowed_passes_check() {
+        // MCP tool in the allowed list should pass the capability check
+        // (may still fail due to no MCP connections, but not permission denied)
+        let allowed = vec!["file_read".to_string(), "mcp_myserver_mytool".to_string()];
+        let result = execute_tool(
+            "test-id",
+            "mcp_myserver_mytool", // In allowed list
+            &serde_json::json!({"param": "value"}),
+            None,
+            Some(&allowed),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None, // media_engine
+            None, // media_drivers
+            None, // exec_policy
+            None, // tts_engine
+            None, // docker_config
+            None, // process_manager
+            None, // sender_id
+            None, // channel
+        )
+        .await;
+        // Should fail for "MCP not available", not "Permission denied"
+        assert!(result.is_error);
+        assert!(
+            result.content.contains("MCP not available") || result.content.contains("MCP"),
+            "Expected MCP availability error (not permission denied), got: {}",
+            result.content
+        );
+        assert!(
+            !result.content.contains("Permission denied"),
+            "Should not get permission denied for allowed MCP tool, got: {}",
+            result.content
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Goal system tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_goal_update_tool_definition_schema() {
+        let tools = builtin_tool_definitions();
+        let tool = tools
+            .iter()
+            .find(|t| t.name == "goal_update")
+            .expect("goal_update tool should be registered");
+        assert_eq!(tool.input_schema["type"], "object");
+        let required = tool.input_schema["required"].as_array().unwrap();
+        assert!(required.contains(&serde_json::json!("goal_id")));
+        let props = tool.input_schema["properties"].as_object().unwrap();
+        assert!(props.contains_key("goal_id"));
+        assert!(props.contains_key("status"));
+        assert!(props.contains_key("progress"));
+    }
+
+    #[test]
+    fn test_goal_update_missing_kernel() {
+        let input = serde_json::json!({
+            "goal_id": "some-uuid",
+            "status": "in_progress",
+            "progress": 50
+        });
+        let result = tool_goal_update(&input, None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Kernel handle"));
+    }
+
+    #[test]
+    fn test_goal_update_missing_goal_id() {
+        let input = serde_json::json!({
+            "status": "in_progress"
+        });
+        let result = tool_goal_update(&input, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_goal_update_no_fields() {
+        let input = serde_json::json!({
+            "goal_id": "some-uuid"
+        });
+        let result = tool_goal_update(&input, None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("At least one"));
+    }
+
+    #[test]
+    fn test_goal_update_invalid_status() {
+        let input = serde_json::json!({
+            "goal_id": "some-uuid",
+            "status": "done"
+        });
+        let result = tool_goal_update(&input, None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Invalid status"));
+    }
+
+    /// Mock kernel that validates capability inheritance in spawn_agent_checked.
+    struct SpawnCheckKernel {
+        should_fail_escalation: bool,
+    }
+
+    #[async_trait]
+    impl KernelHandle for SpawnCheckKernel {
+        async fn spawn_agent(
+            &self,
+            _manifest_toml: &str,
+            _parent_id: Option<&str>,
+        ) -> Result<(String, String), String> {
+            Ok(("test-id-123".to_string(), "test-agent".to_string()))
+        }
+
+        async fn spawn_agent_checked(
+            &self,
+            manifest_toml: &str,
+            _parent_id: Option<&str>,
+            parent_caps: &[librefang_types::capability::Capability],
+        ) -> Result<(String, String), String> {
+            if self.should_fail_escalation {
+                // Parse child manifest to extract capabilities, mimicking real kernel behavior
+                let manifest: librefang_types::agent::AgentManifest =
+                    toml::from_str(manifest_toml).map_err(|e| format!("Invalid manifest: {e}"))?;
+                let child_caps: Vec<librefang_types::capability::Capability> = manifest
+                    .capabilities
+                    .tools
+                    .iter()
+                    .map(|t| librefang_types::capability::Capability::ToolInvoke(t.clone()))
+                    .collect();
+                librefang_types::capability::validate_capability_inheritance(
+                    parent_caps,
+                    &child_caps,
+                )?;
+            }
+            Ok(("test-id-456".to_string(), "good-child".to_string()))
+        }
+
+        async fn send_to_agent(&self, _agent_id: &str, _message: &str) -> Result<String, String> {
+            Err("not used".to_string())
+        }
+
+        fn list_agents(&self) -> Vec<AgentInfo> {
+            vec![]
+        }
+
+        fn kill_agent(&self, _agent_id: &str) -> Result<(), String> {
+            Err("not used".to_string())
+        }
+
+        fn memory_store(&self, _key: &str, _value: serde_json::Value) -> Result<(), String> {
+            Err("not used".to_string())
+        }
+
+        fn memory_recall(&self, _key: &str) -> Result<Option<serde_json::Value>, String> {
+            Err("not used".to_string())
+        }
+
+        fn memory_list(&self) -> Result<Vec<String>, String> {
+            Err("not used".to_string())
+        }
+
+        fn find_agents(&self, _query: &str) -> Vec<AgentInfo> {
+            vec![]
+        }
+
+        async fn task_post(
+            &self,
+            _title: &str,
+            _description: &str,
+            _assigned_to: Option<&str>,
+            _created_by: Option<&str>,
+        ) -> Result<String, String> {
+            Err("not used".to_string())
+        }
+
+        async fn task_claim(&self, _agent_id: &str) -> Result<Option<serde_json::Value>, String> {
+            Err("not used".to_string())
+        }
+
+        async fn task_complete(&self, _task_id: &str, _result: &str) -> Result<(), String> {
+            Err("not used".to_string())
+        }
+
+        async fn task_list(&self, _status: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
+            Err("not used".to_string())
+        }
+
+        async fn task_delete(&self, _task_id: &str) -> Result<bool, String> {
+            Err("not used".to_string())
+        }
+
+        async fn task_retry(&self, _task_id: &str) -> Result<bool, String> {
+            Err("not used".to_string())
+        }
+
+        async fn publish_event(
+            &self,
+            _event_type: &str,
+            _payload: serde_json::Value,
+        ) -> Result<(), String> {
+            Err("not used".to_string())
+        }
+
+        async fn knowledge_add_entity(
+            &self,
+            _entity: librefang_types::memory::Entity,
+        ) -> Result<String, String> {
+            Err("not used".to_string())
+        }
+
+        async fn knowledge_add_relation(
+            &self,
+            _relation: librefang_types::memory::Relation,
+        ) -> Result<String, String> {
+            Err("not used".to_string())
+        }
+
+        async fn knowledge_query(
+            &self,
+            _pattern: librefang_types::memory::GraphPattern,
+        ) -> Result<Vec<librefang_types::memory::GraphMatch>, String> {
+            Err("not used".to_string())
+        }
     }
 }

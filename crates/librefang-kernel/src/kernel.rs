@@ -150,8 +150,6 @@ impl PromptMetadataCache {
     }
 }
 
-const STABLE_PREFIX_MODE_METADATA_KEY: &str = "stable_prefix_mode";
-
 /// The main LibreFang kernel — coordinates all subsystems.
 /// Stub LLM driver used when no providers are configured.
 /// Returns a helpful error so the dashboard still boots and users can configure providers.
@@ -944,6 +942,13 @@ impl LibreFangKernel {
         &self.model_catalog
     }
 
+    /// Invalidate all cached LLM drivers so the next request rebuilds them
+    /// with current provider URLs / API keys.
+    #[inline]
+    pub fn clear_driver_cache(&self) {
+        self.driver_cache.clear();
+    }
+
     /// Skill registry (RwLock — hot-reload on install/uninstall).
     #[inline]
     pub fn skill_registry_ref(
@@ -1279,14 +1284,71 @@ impl LibreFangKernel {
             .sqlite_path
             .clone()
             .unwrap_or_else(|| config.data_dir.join("librefang.db"));
-        let memory = Arc::new(
-            MemorySubstrate::open_with_chunking(
-                &db_path,
-                config.memory.decay_rate,
-                config.memory.chunking.clone(),
-            )
-            .map_err(|e| KernelError::BootFailed(format!("Memory init failed: {e}")))?,
-        );
+        let mut substrate = MemorySubstrate::open_with_chunking(
+            &db_path,
+            config.memory.decay_rate,
+            config.memory.chunking.clone(),
+        )
+        .map_err(|e| KernelError::BootFailed(format!("Memory init failed: {e}")))?;
+
+        // Optionally attach an external vector store backend.
+        if let Some(ref backend) = config.memory.vector_backend {
+            match backend.as_str() {
+                "http" => {
+                    let url = config.memory.vector_store_url.as_deref().ok_or_else(|| {
+                        KernelError::BootFailed(
+                            "vector_backend = \"http\" requires vector_store_url".into(),
+                        )
+                    })?;
+                    let store = std::sync::Arc::new(librefang_memory::HttpVectorStore::new(url));
+                    substrate.set_vector_store(store);
+                    tracing::info!("Vector store backend: http ({})", url);
+                }
+                "sqlite" | "" => { /* default — no external backend */ }
+                other => {
+                    return Err(KernelError::BootFailed(format!(
+                        "Unknown vector_backend: {other:?}"
+                    )));
+                }
+            }
+        }
+
+        let memory = Arc::new(substrate);
+
+        // Resolve "auto" provider: scan environment for the first available API key.
+        if config.default_model.provider == "auto" || config.default_model.provider.is_empty() {
+            if let Some((provider, model_hint, env_var)) = drivers::detect_available_provider() {
+                // model_hint may be empty if detected from the registry fallback;
+                // resolve a sensible default from the model catalog.
+                let model = if model_hint.is_empty() {
+                    librefang_runtime::model_catalog::ModelCatalog::default()
+                        .default_model_for_provider(provider)
+                        .unwrap_or_else(|| "default".to_string())
+                } else {
+                    model_hint.to_string()
+                };
+                info!(
+                    provider = %provider,
+                    model = %model,
+                    env_var = %env_var,
+                    "Auto-detected default provider from environment"
+                );
+                config.default_model.provider = provider.to_string();
+                config.default_model.model = model;
+                config.default_model.api_key_env = env_var.to_string();
+            } else {
+                warn!("No API keys detected in environment — defaulting to ollama (local)");
+                config.default_model.provider = "ollama".to_string();
+                config.default_model.model = "llama3.2".to_string();
+                config.default_model.api_key_env = String::new();
+                if !config.provider_urls.contains_key("ollama") {
+                    config.provider_urls.insert(
+                        "ollama".to_string(),
+                        "http://localhost:11434/v1".to_string(),
+                    );
+                }
+            }
+        }
 
         // Create LLM driver.
         // For the API key, try: 1) explicit api_key_env from config, 2) provider_api_keys
@@ -1386,7 +1448,16 @@ impl LibreFangKernel {
                         "Primary LLM driver init failed — trying auto-detect"
                     );
                     // Auto-detect: scan env for any configured provider key
-                    if let Some((provider, model, env_var)) = drivers::detect_available_provider() {
+                    if let Some((provider, model_hint, env_var)) =
+                        drivers::detect_available_provider()
+                    {
+                        let model = if model_hint.is_empty() {
+                            librefang_runtime::model_catalog::ModelCatalog::default()
+                                .default_model_for_provider(provider)
+                                .unwrap_or_else(|| "default".to_string())
+                        } else {
+                            model_hint.to_string()
+                        };
                         let auto_config = DriverConfig {
                             provider: provider.to_string(),
                             api_key: std::env::var(env_var).ok(),
@@ -1406,7 +1477,7 @@ impl LibreFangKernel {
                                 driver_chain.push(d);
                                 // Update the running config so agents get the right model
                                 config.default_model.provider = provider.to_string();
-                                config.default_model.model = model.to_string();
+                                config.default_model.model = model;
                                 config.default_model.api_key_env = env_var.to_string();
                             }
                             Err(e2) => {
@@ -1486,7 +1557,10 @@ impl LibreFangKernel {
             .map_err(|e| KernelError::BootFailed(format!("Prompt store init failed: {e}")))?;
 
         let supervisor = Supervisor::new();
-        let background = BackgroundExecutor::new(supervisor.subscribe());
+        let background = BackgroundExecutor::with_concurrency(
+            supervisor.subscribe(),
+            config.max_concurrent_bg_llm,
+        );
 
         // Initialize WASM sandbox engine (shared across all WASM agents)
         let wasm_sandbox = WasmSandbox::new()
@@ -1504,7 +1578,11 @@ impl LibreFangKernel {
         // Auto-sync registry content on first boot or after upgrade when
         // Sync registry: downloads if cache is stale, pre-installs providers/agents/integrations.
         // Skips download if cache is fresh; skips copy if files already exist.
-        librefang_runtime::registry_sync::sync_registry(&config.home_dir);
+        librefang_runtime::registry_sync::sync_registry(
+            &config.home_dir,
+            config.registry.cache_ttl_secs,
+            &config.registry.registry_mirror,
+        );
 
         // Initialize model catalog, detect provider auth, and apply URL overrides
         let mut model_catalog =
@@ -1852,6 +1930,7 @@ impl LibreFangKernel {
             context_window_tokens: 200_000, // default, overridden per-agent at call time
             stable_prefix_mode: config.stable_prefix_mode,
             max_recall_results: 5,
+            compaction: Some(config.compaction.clone()),
         };
         let context_engine: Option<Box<dyn librefang_runtime::context_engine::ContextEngine>> = {
             let emb_arc: Option<
@@ -1867,6 +1946,7 @@ impl LibreFangKernel {
         };
 
         let workflow_home_dir = config.home_dir.clone();
+        let trigger_config = config.triggers.clone();
         let kernel = Self {
             config,
             registry: AgentRegistry::new(),
@@ -1879,7 +1959,7 @@ impl LibreFangKernel {
             supervisor,
             workflows: WorkflowEngine::new_with_persistence(&workflow_home_dir),
             template_registry: WorkflowTemplateRegistry::new(),
-            triggers: TriggerEngine::new(),
+            triggers: TriggerEngine::with_config(&trigger_config),
             background,
             audit_log: Arc::new(AuditLog::with_db(memory.usage_conn())),
             metering,
@@ -2225,37 +2305,13 @@ system_prompt = "You are a helpful assistant."
             }
         }
 
-        // Pre-install built-in workflow templates, then load
+        // Load workflow templates
         {
-            let registry_dir = kernel.config.home_dir.join("registry").join("workflows");
             let user_dir = kernel.config.home_dir.join("workflows").join("templates");
-
-            tokio::task::block_in_place(|| {
-                // Sync built-in templates to user directory (always overwrite)
-                let mut installed = 0usize;
-                if registry_dir.is_dir() {
-                    let _ = std::fs::create_dir_all(&user_dir);
-                    if let Ok(entries) = std::fs::read_dir(&registry_dir) {
-                        for entry in entries.flatten() {
-                            let path = entry.path();
-                            if path.extension().and_then(|e| e.to_str()) == Some("toml") {
-                                let dest = user_dir.join(path.file_name().unwrap());
-                                if std::fs::copy(&path, &dest).is_ok() {
-                                    installed += 1;
-                                }
-                            }
-                        }
-                    }
-                }
-                if installed > 0 {
-                    info!("Pre-installed {installed} workflow template(s) from registry");
-                }
-
-                let loaded = kernel.template_registry.load_templates_from_dir(&user_dir);
-                if loaded > 0 {
-                    info!("Loaded {loaded} workflow template(s)");
-                }
-            });
+            let loaded = kernel.template_registry.load_templates_from_dir(&user_dir);
+            if loaded > 0 {
+                info!("Loaded {loaded} workflow template(s)");
+            }
         }
 
         // Validate routing configs against model catalog
@@ -2697,6 +2753,7 @@ system_prompt = "You are a helpful assistant."
                         .format("%A, %B %d, %Y (%Y-%m-%d %H:%M %Z)")
                         .to_string(),
                 ),
+                active_goals: self.active_goals_for_prompt(Some(agent_id)),
             };
             manifest.model.system_prompt =
                 librefang_runtime::prompt_builder::build_system_prompt(&prompt_ctx);
@@ -3098,7 +3155,7 @@ system_prompt = "You are a helpful assistant."
                 estimate_token_count, needs_compaction as check_compact,
                 needs_compaction_by_tokens, CompactionConfig,
             };
-            let config = CompactionConfig::default();
+            let config = CompactionConfig::from_toml(&self.config.compaction);
             let by_messages = check_compact(&session, &config);
             let estimated = estimate_token_count(
                 &session.messages,
@@ -3245,6 +3302,7 @@ system_prompt = "You are a helpful assistant."
                         .format("%A, %B %d, %Y (%Y-%m-%d %H:%M %Z)")
                         .to_string(),
                 ),
+                active_goals: self.active_goals_for_prompt(Some(agent_id)),
             };
             manifest.model.system_prompt =
                 librefang_runtime::prompt_builder::build_system_prompt(&prompt_ctx);
@@ -3503,7 +3561,7 @@ system_prompt = "You are a helpful assistant."
                         use librefang_runtime::compactor::{
                             estimate_token_count, needs_compaction_by_tokens, CompactionConfig,
                         };
-                        let config = CompactionConfig::default();
+                        let config = CompactionConfig::from_toml(&kernel_clone.config.compaction);
                         let estimated = estimate_token_count(&session.messages, None, None);
                         if needs_compaction_by_tokens(estimated, &config) {
                             let kc = kernel_clone.clone();
@@ -4180,6 +4238,7 @@ system_prompt = "You are a helpful assistant."
                         .format("%A, %B %d, %Y (%Y-%m-%d %H:%M %Z)")
                         .to_string(),
                 ),
+                active_goals: self.active_goals_for_prompt(Some(agent_id)),
             };
             manifest.model.system_prompt =
                 librefang_runtime::prompt_builder::build_system_prompt(&prompt_ctx);
@@ -5373,7 +5432,7 @@ system_prompt = "You are a helpful assistant."
                 label: None,
             });
 
-        let config = CompactionConfig::default();
+        let config = CompactionConfig::from_toml(&self.config.compaction);
 
         if !needs_compaction(&session, &config) {
             return Ok(format!(
@@ -6281,14 +6340,14 @@ system_prompt = "You are a helpful assistant."
     ///
     /// Any matching triggers will dispatch messages to the subscribing agents.
     /// Returns the list of (agent_id, message) pairs that were triggered.
-    /// Includes depth limiting to prevent circular trigger chains (max 5 levels).
+    /// Includes depth limiting to prevent circular trigger chains.
     pub async fn publish_event(&self, event: Event) -> Vec<(AgentId, String)> {
         // Depth guard: prevent circular trigger chains
         static TRIGGER_DEPTH: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        const MAX_TRIGGER_DEPTH: u32 = 5;
+        let max_trigger_depth = self.config.triggers.max_depth as u32;
 
         let depth = TRIGGER_DEPTH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if depth >= MAX_TRIGGER_DEPTH {
+        if depth >= max_trigger_depth {
             TRIGGER_DEPTH.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
             warn!(
                 depth,
@@ -6446,16 +6505,16 @@ system_prompt = "You are a helpful assistant."
         };
 
         // SECURITY: Global workflow timeout to prevent runaway execution.
-        const MAX_WORKFLOW_SECS: u64 = 3600; // 1 hour
+        let max_workflow_secs = self.config.triggers.max_workflow_secs;
 
         let output = tokio::time::timeout(
-            std::time::Duration::from_secs(MAX_WORKFLOW_SECS),
+            std::time::Duration::from_secs(max_workflow_secs),
             self.workflows.execute_run(run_id, resolver, send_message),
         )
         .await
         .map_err(|_| {
             KernelError::LibreFang(LibreFangError::Internal(format!(
-                "Workflow timed out after {MAX_WORKFLOW_SECS}s"
+                "Workflow timed out after {max_workflow_secs}s"
             )))
         })?
         .map_err(|e| {
@@ -6665,7 +6724,8 @@ system_prompt = "You are a helpful assistant."
             Vec::new();
 
         for entry in &agents {
-            if matches!(entry.manifest.schedule, ScheduleMode::Reactive) {
+            if matches!(entry.manifest.schedule, ScheduleMode::Reactive) || !entry.manifest.enabled
+            {
                 continue;
             }
             bg_agents.push((
@@ -8306,6 +8366,43 @@ system_prompt = "You are a helpful assistant."
         metadata
     }
 
+    /// Load active goals (pending/in_progress) as (title, status, progress) tuples
+    /// for injection into the agent system prompt.
+    fn active_goals_for_prompt(&self, agent_id: Option<AgentId>) -> Vec<(String, String, u8)> {
+        let shared_id = shared_memory_agent_id();
+        let goals: Vec<serde_json::Value> =
+            match self.memory.structured_get(shared_id, "__librefang_goals") {
+                Ok(Some(serde_json::Value::Array(arr))) => arr,
+                _ => return Vec::new(),
+            };
+        goals
+            .into_iter()
+            .filter(|g| {
+                let status = g["status"].as_str().unwrap_or("");
+                let is_active = status == "pending" || status == "in_progress";
+                if !is_active {
+                    return false;
+                }
+                match agent_id {
+                    Some(aid) => {
+                        // Include goals assigned to this agent OR unassigned goals
+                        match g["agent_id"].as_str() {
+                            Some(gid) => gid == aid.to_string(),
+                            None => true,
+                        }
+                    }
+                    None => true,
+                }
+            })
+            .map(|g| {
+                let title = g["title"].as_str().unwrap_or("").to_string();
+                let status = g["status"].as_str().unwrap_or("pending").to_string();
+                let progress = g["progress"].as_u64().unwrap_or(0) as u8;
+                (title, status, progress)
+            })
+            .collect()
+    }
+
     /// Build a compact skill summary for the system prompt so the agent knows
     /// what extra capabilities are installed.
     fn build_skill_summary(&self, skill_allowlist: &[String]) -> String {
@@ -9758,6 +9855,84 @@ impl KernelHandle for LibreFangKernel {
             Ok(false) => Ok(()),
             Err(e) => Err(format!("Failed to auto-track prompt version: {e}")),
         }
+    }
+
+    fn tool_timeout_secs(&self) -> u64 {
+        self.config.tool_timeout_secs
+    }
+
+    fn max_agent_call_depth(&self) -> u32 {
+        self.config.max_agent_call_depth
+    }
+
+    fn goal_list_active(
+        &self,
+        agent_id_filter: Option<&str>,
+    ) -> Result<Vec<serde_json::Value>, String> {
+        let shared_id = shared_memory_agent_id();
+        let goals: Vec<serde_json::Value> =
+            match self.memory.structured_get(shared_id, "__librefang_goals") {
+                Ok(Some(serde_json::Value::Array(arr))) => arr,
+                Ok(_) => return Ok(Vec::new()),
+                Err(e) => return Err(format!("Failed to load goals: {e}")),
+            };
+        let active: Vec<serde_json::Value> = goals
+            .into_iter()
+            .filter(|g| {
+                let status = g["status"].as_str().unwrap_or("");
+                let is_active = status == "pending" || status == "in_progress";
+                if !is_active {
+                    return false;
+                }
+                match agent_id_filter {
+                    Some(aid) => g["agent_id"].as_str() == Some(aid),
+                    None => true,
+                }
+            })
+            .collect();
+        Ok(active)
+    }
+
+    fn goal_update(
+        &self,
+        goal_id: &str,
+        status: Option<&str>,
+        progress: Option<u8>,
+    ) -> Result<serde_json::Value, String> {
+        let shared_id = shared_memory_agent_id();
+        let mut goals: Vec<serde_json::Value> =
+            match self.memory.structured_get(shared_id, "__librefang_goals") {
+                Ok(Some(serde_json::Value::Array(arr))) => arr,
+                Ok(_) => return Err(format!("Goal '{}' not found", goal_id)),
+                Err(e) => return Err(format!("Failed to load goals: {e}")),
+            };
+
+        let mut updated_goal = None;
+        for g in goals.iter_mut() {
+            if g["id"].as_str() == Some(goal_id) {
+                if let Some(s) = status {
+                    g["status"] = serde_json::Value::String(s.to_string());
+                }
+                if let Some(p) = progress {
+                    g["progress"] = serde_json::json!(p);
+                }
+                g["updated_at"] = serde_json::Value::String(chrono::Utc::now().to_rfc3339());
+                updated_goal = Some(g.clone());
+                break;
+            }
+        }
+
+        let result = updated_goal.ok_or_else(|| format!("Goal '{}' not found", goal_id))?;
+
+        self.memory
+            .structured_set(
+                shared_id,
+                "__librefang_goals",
+                serde_json::Value::Array(goals),
+            )
+            .map_err(|e| format!("Failed to save goals: {e}"))?;
+
+        Ok(result)
     }
 }
 

@@ -1615,7 +1615,12 @@ pub async fn start_channel_bridge_with_config(
                     tg_config.api_url.clone(),
                 )
                 .with_account_id(tg_config.account_id.clone())
-                .with_thread_routes(tg_config.thread_routes.clone()),
+                .with_thread_routes(tg_config.thread_routes.clone())
+                .with_backoff(
+                    tg_config.initial_backoff_secs,
+                    tg_config.max_backoff_secs,
+                    tg_config.long_poll_timeout_secs,
+                ),
             );
             adapters.push((
                 adapter,
@@ -1638,7 +1643,8 @@ pub async fn start_channel_bridge_with_config(
                     dc_config.mention_patterns.clone(),
                     dc_config.intents,
                 )
-                .with_account_id(dc_config.account_id.clone()),
+                .with_account_id(dc_config.account_id.clone())
+                .with_backoff(dc_config.initial_backoff_secs, dc_config.max_backoff_secs),
             );
             adapters.push((
                 adapter,
@@ -1657,7 +1663,8 @@ pub async fn start_channel_bridge_with_config(
                     SlackAdapter::new(app_token, bot_token, sl_config.allowed_channels.clone())
                         .with_account_id(sl_config.account_id.clone())
                         .with_force_flat_replies(sl_config.force_flat_replies.unwrap_or(false))
-                        .with_unfurl_links(sl_config.unfurl_links),
+                        .with_unfurl_links(sl_config.unfurl_links)
+                        .with_backoff(sl_config.initial_backoff_secs, sl_config.max_backoff_secs),
                 );
                 adapters.push((
                     adapter,
@@ -1709,7 +1716,8 @@ pub async fn start_channel_bridge_with_config(
                     sig_config.phone_number.clone(),
                     sig_config.allowed_users.clone(),
                 )
-                .with_account_id(sig_config.account_id.clone()),
+                .with_account_id(sig_config.account_id.clone())
+                .with_poll_interval(sig_config.poll_interval_secs),
             );
             adapters.push((
                 adapter,
@@ -1733,7 +1741,8 @@ pub async fn start_channel_bridge_with_config(
                     mx_config.allowed_rooms.clone(),
                     mx_config.auto_accept_invites,
                 )
-                .with_account_id(mx_config.account_id.clone()),
+                .with_account_id(mx_config.account_id.clone())
+                .with_backoff(mx_config.initial_backoff_secs, mx_config.max_backoff_secs),
             );
             adapters.push((
                 adapter,
@@ -1800,7 +1809,8 @@ pub async fn start_channel_bridge_with_config(
                     token,
                     mm_config.allowed_channels.clone(),
                 )
-                .with_account_id(mm_config.account_id.clone()),
+                .with_account_id(mm_config.account_id.clone())
+                .with_backoff(mm_config.initial_backoff_secs, mm_config.max_backoff_secs),
             );
             adapters.push((
                 adapter,
@@ -1827,7 +1837,8 @@ pub async fn start_channel_bridge_with_config(
                     irc_config.channels.clone(),
                     irc_config.use_tls,
                 )
-                .with_account_id(irc_config.account_id.clone()),
+                .with_account_id(irc_config.account_id.clone())
+                .with_backoff(irc_config.initial_backoff_secs, irc_config.max_backoff_secs),
             );
             adapters.push((
                 adapter,
@@ -2123,7 +2134,8 @@ pub async fn start_channel_bridge_with_config(
         }
         let adapter = Arc::new(
             WeChatAdapter::new(bot_token, wx_config.allowed_users.clone())
-                .with_account_id(wx_config.account_id.clone()),
+                .with_account_id(wx_config.account_id.clone())
+                .with_backoff(wx_config.initial_backoff_secs, wx_config.max_backoff_secs),
         );
         adapters.push((
             adapter,
@@ -2132,27 +2144,37 @@ pub async fn start_channel_bridge_with_config(
         ));
     }
 
-    // WeCom/WeChat Work
+    // WeCom intelligent bot (WebSocket or callback mode)
     #[cfg(feature = "channel-wecom")]
     for wc_config in config.wecom.iter() {
-        if let Some(secret) = read_token(&wc_config.secret_env, "WeCom") {
-            let adapter = Arc::new(
-                WeComAdapter::with_verification(
-                    wc_config.corp_id.clone(),
-                    wc_config.agent_id.clone(),
-                    secret,
-                    wc_config.webhook_port,
-                    wc_config
-                        .encoding_aes_key_env
-                        .as_ref()
-                        .and_then(|e| std::env::var(e).ok()),
-                    wc_config
+        if let Some(secret) = read_token(&wc_config.secret_env, "WeCom Bot") {
+            use librefang_types::config::WeComMode;
+            let adapter: Arc<WeComAdapter> = match wc_config.mode {
+                WeComMode::Websocket => Arc::new(
+                    WeComAdapter::new(wc_config.bot_id.clone(), secret)
+                        .with_account_id(wc_config.account_id.clone()),
+                ),
+                WeComMode::Callback => {
+                    let token = wc_config
                         .token_env
                         .as_ref()
-                        .and_then(|e| std::env::var(e).ok()),
-                )
-                .with_account_id(wc_config.account_id.clone()),
-            );
+                        .and_then(|env| std::env::var(env).ok());
+                    let encoding_aes_key = wc_config
+                        .encoding_aes_key_env
+                        .as_ref()
+                        .and_then(|env| std::env::var(env).ok());
+                    Arc::new(
+                        WeComAdapter::new_callback(
+                            wc_config.bot_id.clone(),
+                            secret,
+                            wc_config.webhook_port,
+                            token,
+                            encoding_aes_key,
+                        )
+                        .with_account_id(wc_config.account_id.clone()),
+                    )
+                }
+            };
             adapters.push((
                 adapter,
                 wc_config.default_agent.clone(),

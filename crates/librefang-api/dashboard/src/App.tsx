@@ -1,48 +1,34 @@
 import { Link, Outlet } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Globe, Sun, Moon, Search, ChevronLeft, ChevronRight, ChevronDown, Menu, Home, Layers, MessageCircle, Clock, CheckCircle, Calendar, Shield, Users, Server, Network, Bell, Hand, BarChart3, Database, Activity, FileText, Settings, Puzzle, Cpu, Lock, Share2, Gauge } from "lucide-react";
+import { Globe, Sun, Moon, Search, ChevronLeft, ChevronRight, ChevronDown, Menu, Home, Layers, MessageCircle, Clock, CheckCircle, Calendar, Shield, Users, User, Server, Network, Bell, Hand, BarChart3, Database, Activity, FileText, Settings, Puzzle, Cpu, Lock, Share2, Gauge } from "lucide-react";
 import { useUIStore } from "./lib/store";
 import { CommandPalette, useCommandPalette } from "./components/ui/CommandPalette";
 import { checkDashboardAuthMode, dashboardLogin, getVersionInfo, setApiKey, setOnUnauthorized, verifyStoredAuth, type AuthMode } from "./api";
 
-function AuthDialog({ authMode, onAuthenticated }: { authMode: AuthMode; onAuthenticated: () => void }) {
+function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated: () => void }) {
   const { t } = useTranslation();
   const [key, setKey] = useState("");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
-  const [errorKey, setErrorKey] = useState<"invalid" | "invalid_api_key" | "invalid_credentials" | null>(null);
+  const [errorKey, setErrorKey] = useState<"invalid_api_key" | "invalid_credentials" | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
-  async function handleSubmit(e: React.FormEvent) {
+  async function handleApiKeySubmit(e: React.FormEvent) {
     e.preventDefault();
     setSubmitting(true);
     setErrorKey(null);
 
     try {
-      if (authMode === "credentials") {
-        if (!username.trim() || !password) {
-          setErrorKey("invalid_credentials");
-          return;
-        }
-
-        const result = await dashboardLogin(username.trim(), password);
-        if (!result.ok) {
-          setErrorKey("invalid_credentials");
-          return;
-        }
-      } else {
-        if (!key.trim()) {
-          setErrorKey("invalid_api_key");
-          return;
-        }
-
-        setApiKey(key.trim());
+      if (!key.trim()) {
+        setErrorKey("invalid_api_key");
+        return;
       }
 
+      setApiKey(key.trim());
       const isAuthenticated = await verifyStoredAuth();
       if (!isAuthenticated) {
-        setErrorKey(authMode === "credentials" ? "invalid_credentials" : "invalid_api_key");
+        setErrorKey("invalid_api_key");
         return;
       }
 
@@ -52,23 +38,47 @@ function AuthDialog({ authMode, onAuthenticated }: { authMode: AuthMode; onAuthe
     }
   }
 
+  async function handleCredentialsSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setSubmitting(true);
+    setErrorKey(null);
+
+    try {
+      if (!username.trim() || !password) {
+        setErrorKey("invalid_credentials");
+        return;
+      }
+
+      const result = await dashboardLogin(username.trim(), password);
+      if (!result.ok) {
+        setErrorKey("invalid_credentials");
+        return;
+      }
+
+      // The login response already proves the credential path succeeded.
+      // Avoid immediately probing session-backed auth before the new session
+      // is fully visible server-side.
+      onAuthenticated();
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  const isCredentials = mode === "credentials";
+
   return (
     <div className="fixed inset-0 z-200 flex items-center justify-center bg-black/70 backdrop-blur-md">
       <div className="w-full max-w-md mx-4 animate-fade-in-scale">
         <div className="rounded-2xl border border-border-subtle bg-surface shadow-2xl p-8">
           <div className="flex flex-col items-center mb-6">
             <div className="w-14 h-14 rounded-2xl bg-brand/10 flex items-center justify-center mb-4 ring-2 ring-brand/20">
-              <Lock className="h-7 w-7 text-brand" />
+              {isCredentials ? <User className="h-7 w-7 text-brand" /> : <Lock className="h-7 w-7 text-brand" />}
             </div>
-            <h2 className="text-xl font-black tracking-tight">
-              {authMode === "credentials" ? t("auth.credentials_title") : t("auth.title")}
-            </h2>
-            <p className="text-sm text-text-dim mt-1">
-              {authMode === "credentials" ? t("auth.credentials_description") : t("auth.description")}
-            </p>
+            <h2 className="text-xl font-black tracking-tight">{t(isCredentials ? "auth.credentials_title" : "auth.title")}</h2>
+            <p className="text-sm text-text-dim mt-1">{t(isCredentials ? "auth.credentials_description" : "auth.description")}</p>
           </div>
-          <form onSubmit={handleSubmit} className="space-y-4">
-            {authMode === "credentials" ? (
+          <form onSubmit={isCredentials ? handleCredentialsSubmit : handleApiKeySubmit} className="space-y-4">
+            {isCredentials ? (
               <>
                 <input
                   type="text"
@@ -113,7 +123,7 @@ function AuthDialog({ authMode, onAuthenticated }: { authMode: AuthMode; onAuthe
             )}
             <button
               type="submit"
-              disabled={submitting || (authMode === "credentials" ? !username.trim() || !password : !key.trim())}
+              disabled={submitting || (isCredentials ? !username.trim() || !password : !key.trim())}
               className="w-full rounded-xl bg-brand py-3 text-sm font-bold text-white hover:bg-brand/90 transition-colors shadow-lg shadow-brand/20"
             >
               {t("auth.submit")}
@@ -145,19 +155,22 @@ export function App() {
   const [appVersion, setAppVersion] = useState("");
   const [hostname, setHostname] = useState("");
 
-  // Check auth on mount
+  // Wire up global 401 handler so any failed request re-shows login
   useEffect(() => {
     let cancelled = false;
 
     setOnUnauthorized(() => {
-      if (cancelled) {
-        return;
-      }
-      setAuthNeeded(true);
-      setAuthChecked(true);
+      checkDashboardAuthMode().then((mode) => {
+        if (cancelled) {
+          return;
+        }
+        setAuthMode(mode === "none" ? "api_key" : mode);
+        setAuthNeeded(true);
+        setAuthChecked(true);
+      });
     });
 
-    (async () => {
+    const checkAuth = async () => {
       const mode = await checkDashboardAuthMode();
       if (cancelled) {
         return;
@@ -177,8 +190,9 @@ export function App() {
 
       setAuthNeeded(!authenticated);
       setAuthChecked(true);
-    })();
+    };
 
+    void checkAuth();
     getVersionInfo().then((v) => {
       setAppVersion(v.version ?? "");
       setHostname(v.hostname ?? "");
@@ -433,8 +447,8 @@ export function App() {
       </div>
 
       <CommandPalette isOpen={isPaletteOpen} onClose={() => setPaletteOpen(false)} />
-      {authChecked && authNeeded && authMode !== "none" && (
-        <AuthDialog authMode={authMode} onAuthenticated={() => { setAuthNeeded(false); window.location.hash = "#/overview"; }} />
+      {authChecked && authNeeded && (
+        <AuthDialog mode={authMode} onAuthenticated={() => { setAuthNeeded(false); window.location.hash = "#/overview"; }} />
       )}
     </div>
   );

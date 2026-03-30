@@ -324,10 +324,8 @@ allowed_channels = []
 # app_secret_env = "QQ_BOT_APP_SECRET"
 
 # [channels.wecom]
-# corp_id = "your-corp-id"
-# agent_id = "your-agent-id"
-# secret_env = "WECOM_SECRET"
-# webhook_port = 8454
+# bot_id = "YOUR_BOT_ID"
+# secret_env = "WECOM_BOT_SECRET"
 
 # [channels.wechat]
 # bot_token_env = "WECHAT_BOT_TOKEN"   # optional: skip QR login on restart
@@ -1437,30 +1435,22 @@ allowed_users = []
 
 #### `[channels.wecom]`
 
-WeCom (formerly WeChat Work / Enterprise WeChat) channel adapter.
+WeCom (formerly WeChat Work / Enterprise WeChat) intelligent bot adapter. Connects via WebSocket to `wss://openws.work.weixin.qq.com`.
 
 ```toml
 [channels.wecom]
-corp_id = "your-corp-id"
-agent_id = "your-agent-id"
-secret_env = "WECOM_SECRET"
-webhook_port = 8454
-# token_env = "WECOM_TOKEN"
-# encoding_aes_key_env = "WECOM_AES_KEY"
-# default_agent = "assistant"
+bot_id = "YOUR_BOT_ID"
+secret_env = "WECOM_BOT_SECRET"
 # account_id = "my-wecom-bot"
+# default_agent = "assistant"
 ```
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `corp_id` | string | `""` | WeCom corporation ID. |
-| `agent_id` | string | `""` | WeCom application agent ID. |
-| `secret_env` | string | `"WECOM_SECRET"` | Env var holding the WeCom application secret. |
-| `webhook_port` | u16 | `8454` | Port for the incoming webhook. |
-| `token_env` | string or null | `null` | Env var holding the callback verification token. Required for verifying incoming messages. |
-| `encoding_aes_key_env` | string or null | `null` | Env var holding the encoding AES key for message encryption/decryption. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
+| `bot_id` | string | `""` | Bot ID from the WeCom admin console (intelligent bot). |
+| `secret_env` | string | `"WECOM_BOT_SECRET"` | Env var holding the bot secret. |
 | `account_id` | string or null | `null` | Unique bot instance identifier for multi-bot routing. |
+| `default_agent` | string or null | `null` | Agent name to route messages to. |
 | `overrides` | object | (defaults) | Per-channel behavior overrides. See [Channel Overrides](#channel-overrides). |
 
 #### `[channels.wechat]`
@@ -2775,15 +2765,28 @@ For **web search providers**, the validator checks:
 
 Some subsystems have their own configuration that is not part of `config.toml` but is worth noting:
 
-### Session Compaction (runtime)
+### Session Compaction
 
-Configured internally via `CompactionConfig` (not currently exposed in `config.toml`):
+Configured via the `[compaction]` section in `config.toml`:
+
+```toml
+[compaction]
+threshold_messages = 30       # Compact when message count exceeds this
+keep_recent = 10              # Recent messages preserved verbatim
+max_summary_tokens = 1024     # Max tokens for the LLM summary
+token_threshold_ratio = 0.7   # Trigger at this fraction of context window
+max_chunk_chars = 80000       # Max chars per summarization chunk
+max_retries = 3               # Max LLM summarization retries
+```
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `threshold` | `80` | Compact when session message count exceeds this. |
-| `keep_recent` | `20` | Number of recent messages preserved verbatim after compaction. |
+| `threshold_messages` | `30` | Compact when session message count exceeds this. |
+| `keep_recent` | `10` | Number of recent messages preserved verbatim after compaction. |
 | `max_summary_tokens` | `1024` | Maximum tokens for the LLM summary of compacted messages. |
+| `token_threshold_ratio` | `0.7` | Trigger compaction when estimated tokens exceed this fraction of the context window. |
+| `max_chunk_chars` | `80000` | Maximum characters per summarization chunk. |
+| `max_retries` | `3` | Maximum retries for LLM summarization. |
 
 ### WASM Sandbox (runtime)
 

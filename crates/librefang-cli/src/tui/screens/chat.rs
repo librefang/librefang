@@ -1,6 +1,7 @@
 //! Chat screen: scrollable message history, streaming output, tool spinners, input.
 
 use crate::tui::theme;
+use crate::tui::widgets;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -399,6 +400,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut ChatState) {
             theme::dim_style(),
         )]))
         .borders(Borders::ALL)
+        .border_set(ratatui::symbols::border::ROUNDED)
         .border_style(Style::default().fg(theme::BORDER))
         .padding(Padding::horizontal(1));
 
@@ -418,12 +420,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut ChatState) {
     draw_messages(f, chunks[0], state);
 
     // ── Separator ────────────────────────────────────────────────────────────
-    let sep_line = "\u{2500}".repeat(chunks[1].width as usize);
-    let sep = Paragraph::new(Line::from(vec![Span::styled(
-        sep_line,
-        Style::default().fg(theme::BORDER),
-    )]));
-    f.render_widget(sep, chunks[1]);
+    f.render_widget(widgets::separator(chunks[1].width), chunks[1]);
 
     // ── Input ────────────────────────────────────────────────────────────────
     let input_line = if state.is_streaming {
@@ -466,8 +463,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut ChatState) {
     } else {
         "    [Enter] Send  [Ctrl+M] Models  [\u{2191}\u{2193}] Scroll  [Esc] Back"
     };
-    let hints = Paragraph::new(Line::from(vec![Span::styled(hints, theme::hint_style())]));
-    f.render_widget(hints, chunks[3]);
+    f.render_widget(widgets::hint_bar(hints), chunks[3]);
 
     // ── Model picker overlay ────────────────────────────────────────────────
     if state.show_model_picker {
@@ -497,6 +493,7 @@ fn draw_model_picker(f: &mut Frame, area: Rect, state: &ChatState) {
             theme::title_style(),
         )]))
         .borders(Borders::ALL)
+        .border_set(ratatui::symbols::border::ROUNDED)
         .border_style(Style::default().fg(theme::ACCENT))
         .padding(Padding::horizontal(1));
 
@@ -528,13 +525,7 @@ fn draw_model_picker(f: &mut Frame, area: Rect, state: &ChatState) {
     let total = filtered.len();
 
     if total == 0 {
-        f.render_widget(
-            Paragraph::new(Line::from(vec![Span::styled(
-                " No models match",
-                theme::dim_style(),
-            )])),
-            chunks[1],
-        );
+        f.render_widget(widgets::empty_state("No models match"), chunks[1]);
         return;
     }
 
@@ -603,22 +594,50 @@ fn draw_messages(f: &mut Frame, area: Rect, state: &ChatState) {
 
     let mut lines: Vec<Line> = Vec::new();
 
-    // Empty state: show welcome message when no messages yet
+    // Empty state: centered welcome with suggestions
     if state.messages.is_empty() && state.streaming_text.is_empty() && !state.thinking {
-        let blank_lines = area.height.saturating_sub(4) / 2;
+        let blank_lines = area.height.saturating_sub(8) / 3;
         for _ in 0..blank_lines {
             lines.push(Line::from(""));
         }
         lines.push(Line::from(vec![Span::styled(
-            "  Send a message to start chatting.",
-            theme::dim_style(),
+            "  \u{25b8} Ready to chat",
+            Style::default()
+                .fg(theme::ACCENT)
+                .add_modifier(Modifier::BOLD),
         )]));
+        lines.push(Line::from(""));
         lines.push(Line::from(vec![Span::styled(
-            "  Type /help for available commands.",
+            "  Try asking:",
             theme::dim_style(),
         )]));
-        let para = Paragraph::new(lines);
-        f.render_widget(para, area);
+        lines.push(Line::from(vec![
+            Span::styled("    \u{25e6} ", Style::default().fg(theme::BORDER)),
+            Span::styled(
+                "\"Explain this codebase\"",
+                Style::default().fg(theme::TEXT_SECONDARY),
+            ),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("    \u{25e6} ", Style::default().fg(theme::BORDER)),
+            Span::styled(
+                "\"Write a unit test for...\"",
+                Style::default().fg(theme::TEXT_SECONDARY),
+            ),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("    \u{25e6} ", Style::default().fg(theme::BORDER)),
+            Span::styled(
+                "\"What does this function do?\"",
+                Style::default().fg(theme::TEXT_SECONDARY),
+            ),
+        ]));
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![Span::styled(
+            "  Type /help for commands  \u{2022}  Ctrl+M to switch models",
+            theme::hint_style(),
+        )]));
+        f.render_widget(Paragraph::new(lines), area);
         return;
     }
 
@@ -671,11 +690,11 @@ fn draw_messages(f: &mut Frame, area: Rect, state: &ChatState) {
                     };
                     let icon_color = if is_err { theme::RED } else { theme::GREEN };
 
-                    // Header: ┌─ ✔ tool_name ────────
+                    // Header: ╭─ ✔ tool_name ────────
                     let header_rest = width.saturating_sub(6 + info.name.len());
                     let fill = "\u{2500}".repeat(header_rest);
                     lines.push(Line::from(vec![
-                        Span::styled("  \u{250c}\u{2500} ", Style::default().fg(border_color)),
+                        Span::styled("  \u{256d}\u{2500} ", Style::default().fg(border_color)),
                         Span::styled(format!("{icon} "), Style::default().fg(icon_color)),
                         Span::styled(
                             info.name.clone(),
@@ -688,7 +707,7 @@ fn draw_messages(f: &mut Frame, area: Rect, state: &ChatState) {
 
                     // Input line (skip if empty)
                     if !info.input.is_empty() {
-                        let val = truncate_line(&info.input, max_val);
+                        let val = widgets::truncate(&info.input, max_val);
                         lines.push(Line::from(vec![
                             Span::styled("  \u{2502} ", Style::default().fg(border_color)),
                             Span::styled("input: ", theme::dim_style()),
@@ -708,14 +727,14 @@ fn draw_messages(f: &mut Frame, area: Rect, state: &ChatState) {
                             ),
                         ]));
                     } else if is_err {
-                        let val = truncate_line(&info.result, max_val);
+                        let val = widgets::truncate(&info.result, max_val);
                         lines.push(Line::from(vec![
                             Span::styled("  \u{2502} ", Style::default().fg(border_color)),
                             Span::styled("error: ", Style::default().fg(theme::RED)),
                             Span::raw(val),
                         ]));
                     } else {
-                        let val = truncate_line(&info.result, max_val);
+                        let val = widgets::truncate(&info.result, max_val);
                         lines.push(Line::from(vec![
                             Span::styled("  \u{2502} ", Style::default().fg(border_color)),
                             Span::styled("result: ", theme::dim_style()),
@@ -723,10 +742,10 @@ fn draw_messages(f: &mut Frame, area: Rect, state: &ChatState) {
                         ]));
                     }
 
-                    // Footer: └───────────
+                    // Footer: ╰───────────
                     let footer_fill = "\u{2500}".repeat(width.saturating_sub(4));
                     lines.push(Line::from(vec![Span::styled(
-                        format!("  \u{2514}{footer_fill}"),
+                        format!("  \u{2570}{footer_fill}"),
                         Style::default().fg(border_color),
                     )]));
                 } else {
@@ -751,10 +770,10 @@ fn draw_messages(f: &mut Frame, area: Rect, state: &ChatState) {
 
     // Add "thinking..." spinner while waiting for first token
     if state.thinking {
-        let spinner = theme::SPINNER_FRAMES[state.spinner_frame];
+        let frame = theme::SPINNER_FRAMES[state.spinner_frame % theme::SPINNER_FRAMES.len()];
         lines.push(Line::from(vec![
-            Span::styled(format!("  {spinner} "), Style::default().fg(theme::CYAN)),
-            Span::styled("thinking\u{2026}", Style::default().fg(theme::DIM)),
+            Span::styled(format!("  {frame} "), Style::default().fg(theme::CYAN)),
+            Span::styled("thinking\u{2026}", theme::dim_style()),
         ]));
     }
 
@@ -879,16 +898,4 @@ fn sanitize_function_tags(text: &str) -> String {
     }
     out.push_str(rest);
     out
-}
-
-/// Truncate a string to `max_len` chars, appending `…` if truncated.
-fn truncate_line(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        s.to_string()
-    } else {
-        format!(
-            "{}\u{2026}",
-            librefang_types::truncate_str(s, max_len.saturating_sub(1))
-        )
-    }
 }

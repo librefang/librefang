@@ -8,10 +8,6 @@
 
 use async_trait::async_trait;
 use hmac::{Hmac, Mac};
-use librefang_types::model_catalog::{
-    FIREWORKS_BASE_URL, GROQ_BASE_URL, LMSTUDIO_BASE_URL, MISTRAL_BASE_URL, OLLAMA_BASE_URL,
-    OPENAI_BASE_URL, TOGETHER_BASE_URL, VLLM_BASE_URL,
-};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::{debug, warn};
@@ -30,6 +26,8 @@ pub enum EmbeddingError {
     Parse(String),
     #[error("Missing API key: {0}")]
     MissingApiKey(String),
+    #[error("Unsupported: {0}")]
+    Unsupported(String),
 }
 
 /// Configuration for creating an embedding driver.
@@ -65,6 +63,21 @@ pub trait EmbeddingDriver: Send + Sync {
 
     /// Return the dimensionality of embeddings produced by this driver.
     fn dimensions(&self) -> usize;
+
+    /// Compute an embedding vector for raw image data.
+    ///
+    /// Returns `Err(EmbeddingError::Unsupported)` by default — drivers that
+    /// support vision/multimodal models should override this.
+    async fn embed_image(&self, _image_data: &[u8]) -> Result<Vec<f32>, EmbeddingError> {
+        Err(EmbeddingError::Unsupported(
+            "Image embeddings not supported by this driver".into(),
+        ))
+    }
+
+    /// Whether this driver supports image embeddings.
+    fn supports_images(&self) -> bool {
+        false
+    }
 }
 
 /// OpenAI-compatible embedding driver.
@@ -480,14 +493,14 @@ pub fn create_embedding_driver(
             }
         })
         .unwrap_or_else(|| match provider {
-            "openai" => OPENAI_BASE_URL.to_string(),
-            "groq" => GROQ_BASE_URL.to_string(),
-            "together" => TOGETHER_BASE_URL.to_string(),
-            "fireworks" => FIREWORKS_BASE_URL.to_string(),
-            "mistral" => MISTRAL_BASE_URL.to_string(),
-            "ollama" => OLLAMA_BASE_URL.to_string(),
-            "vllm" => VLLM_BASE_URL.to_string(),
-            "lmstudio" => LMSTUDIO_BASE_URL.to_string(),
+            "openai" => "https://api.openai.com/v1".to_string(),
+            "groq" => "https://api.groq.com/openai/v1".to_string(),
+            "together" => "https://api.together.xyz/v1".to_string(),
+            "fireworks" => "https://api.fireworks.ai/inference/v1".to_string(),
+            "mistral" => "https://api.mistral.ai/v1".to_string(),
+            "ollama" => "http://localhost:11434/v1".to_string(),
+            "vllm" => "http://localhost:8000/v1".to_string(),
+            "lmstudio" => "http://localhost:1234/v1".to_string(),
             other => {
                 warn!("Unknown embedding provider '{other}', using OpenAI-compatible format");
                 format!("https://{other}/v1")

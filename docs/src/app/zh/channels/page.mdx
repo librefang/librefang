@@ -1730,41 +1730,36 @@ QQ 适配器通过 WebSocket 连接到 QQ Bot API 接收实时消息。它使用
 
 ### 前置条件
 
-- 具有自建应用的企业微信账户（从[企业微信开发者文档](https://developer.work.weixin.qq.com/document/)获取）
+- 具有**智能机器人**的企业微信账户（从[企业微信管理后台](https://work.weixin.qq.com/)创建）
 
 ### 设置步骤
 
-1. 在企业微信管理后台，前往 **应用管理 > 自建应用**，创建新应用。
-2. 记录 Corp ID、Agent ID 和 Secret。
-3. 在应用设置中配置接收消息 API 的回调 URL。
-4. 设置环境变量：
+1. 在企业微信管理后台，前往 **应用管理 > 创建应用**，选择**智能机器人**。
+2. 记录 **Bot ID** 和 **Secret**。
+3. 设置密钥环境变量：
 
 ```bash
-export WECOM_CORP_ID=your-corp-id             # 环境变量
-export WECOM_AGENT_ID=your-agent-id
-export WECOM_SECRET=your-app-secret
-librefang vault set WECOM_CORP_ID             # 加密金库（推荐）
-librefang vault set WECOM_AGENT_ID
-librefang vault set WECOM_SECRET
+export WECOM_BOT_SECRET=your-bot-secret       # 环境变量
+librefang vault set WECOM_BOT_SECRET          # 加密金库（推荐）
 librefang config set-key wecom                # .env 文件
 # 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
 ```
 
-5. 添加到配置文件：
+4. 添加到配置文件：
 
 ```toml
 [channels.wecom]
-corp_id_env = "WECOM_CORP_ID"
-agent_id_env = "WECOM_AGENT_ID"
-secret_env = "WECOM_SECRET"
-default_agent = "assistant"
+bot_id = "YOUR_BOT_ID"
+secret_env = "WECOM_BOT_SECRET"
+# account_id = "my-bot"          # 可选：多 Bot 路由的唯一标识
+# default_agent = "assistant"    # 可选：将消息路由到指定 Agent
 ```
 
-6. 重启守护进程。
+5. 重启守护进程。
 
 ### 工作原理
 
-企业微信适配器使用企业微信 API 的 webhook 协议接收消息回调。它使用企业凭证获取 access token，并通过企业微信消息发送 API 发送响应。消息负载使用配置的 EncodingAESKey 进行加解密。
+企业微信适配器通过持久 WebSocket 连接到 `wss://openws.work.weixin.qq.com`。使用 Bot ID 和签名令牌认证后，通过 `aibot_subscribe` 订阅消息。用户消息以 `aibot_msg_callback` JSON 帧到达，回复通过 `aibot_send_msg` 帧发送。无需公网 HTTP 端点或 AES 加解密。
 
 ---
 

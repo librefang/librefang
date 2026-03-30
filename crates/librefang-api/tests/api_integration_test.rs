@@ -192,7 +192,11 @@ async fn start_full_router(api_key: &str) -> FullRouterHarness {
 
     // Sync registry content into the temp home_dir so the kernel boots
     // with a populated model catalog.
-    librefang_runtime::registry_sync::sync_registry(tmp.path());
+    librefang_runtime::registry_sync::sync_registry(
+        tmp.path(),
+        librefang_runtime::registry_sync::DEFAULT_CACHE_TTL_SECS,
+        "",
+    );
 
     let config = KernelConfig {
         home_dir: tmp.path().to_path_buf(),
