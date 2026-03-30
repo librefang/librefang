@@ -34,14 +34,43 @@ Windows (PowerShell):
 irm https://librefang.ai/install.ps1 | iex
 ```
 
-The script auto-detects platform and architecture, downloads the binary, verifies SHA256 checksums, configures PATH, and starts the daemon.
+The script auto-detects platform and architecture, downloads the binary, verifies SHA256 checksums, configures PATH, runs `librefang init`, and starts the daemon.
 
 Environment variables:
 - `LIBREFANG_INSTALL_DIR` — install directory (default: `~/.librefang/bin`)
 - `LIBREFANG_VERSION` — specific version (default: latest)
 - `LIBREFANG_AUTO_START` — auto-start daemon (default: 1)
 
-**Homebrew**
+**Windows EXE (Manual)**
+
+If you prefer manual installation or the script doesn't work in your environment:
+
+1. Download `librefang-x86_64-pc-windows-msvc.zip` (or `aarch64` for ARM) from [GitHub Releases](https://github.com/librefang/librefang/releases/latest)
+2. Extract `librefang.exe` to a folder, e.g. `C:\Users\<you>\.librefang\bin\`
+3. Add that folder to your system PATH:
+   - Settings → System → About → Advanced system settings → Environment Variables
+   - Edit `Path` under User variables → Add the folder path
+4. Open a **new** terminal and run:
+
+```powershell
+# Initialize configuration
+librefang init
+
+# Start the daemon
+librefang start
+
+# Open dashboard in browser: http://127.0.0.1:4545/
+# Chat with the default agent
+librefang chat
+```
+
+<Note>
+`librefang init` creates `~/.librefang/config.toml` with a setup wizard.
+You must run `init` before `start` — otherwise the daemon has no configuration.
+On first run, if `init` has not been run, `start` and `chat` will auto-initialize.
+</Note>
+
+**Homebrew (macOS / Linux)**
 
 ```bash
 brew tap librefang/tap
@@ -58,17 +87,24 @@ npm install -g @librefang/cli@next             # Latest pre-release (Beta or RC)
 npm install -g @librefang/cli@2026.3.25-rc1    # Specific version
 ```
 
+**pip**
+
+```bash
+pip install librefang-cli                      # Stable
+pip install librefang-cli --pre                # Latest pre-release
+```
+
 **Cargo**
 
 ```bash
 cargo install --git https://github.com/librefang/librefang librefang-cli
 ```
 
-Or build from source:
+Or build from source (requires [just](https://github.com/casey/just)):
 ```bash
 git clone https://github.com/librefang/librefang.git
 cd librefang
-cargo install --path crates/librefang-cli
+just install
 ```
 
 **Docker**
