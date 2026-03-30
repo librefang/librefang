@@ -196,6 +196,11 @@ fn validate_tool_name(name: &str, label: &str) -> Result<(), String> {
             "{label} may only contain alphanumeric characters, underscores, and '*': \"{name}\""
         ));
     }
+    if name.chars().filter(|&c| c == '*').count() > 1 {
+        return Err(format!(
+            "{label} may contain at most one '*' wildcard: \"{name}\""
+        ));
+    }
     Ok(())
 }
 
@@ -1125,5 +1130,29 @@ mod tests {
             denied_tools: vec!["shell_*".into()],
         };
         assert!(rule.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_multiple_wildcards() {
+        let mut policy = valid_policy();
+
+        // Patterns with more than one '*' should be rejected
+        policy.require_approval = vec!["*_*".into()];
+        let err = policy.validate().unwrap_err();
+        assert!(err.contains("at most one '*' wildcard"), "got: {err}");
+
+        policy.require_approval = vec!["**".into()];
+        let err = policy.validate().unwrap_err();
+        assert!(err.contains("at most one '*' wildcard"), "got: {err}");
+
+        // Channel rules should also reject multiple wildcards
+        let mut policy = valid_policy();
+        policy.channel_rules = vec![ChannelToolRule {
+            channel: "telegram".into(),
+            allowed_tools: vec!["*_*".into()],
+            denied_tools: vec![],
+        }];
+        let err = policy.validate().unwrap_err();
+        assert!(err.contains("at most one '*' wildcard"), "got: {err}");
     }
 }
