@@ -17,7 +17,7 @@ import { useUIStore } from "../lib/store";
 import {
   Server, Zap, Clock, Key, Globe, CheckCircle2, XCircle, Loader2, AlertCircle, Search,
   SortAsc, SortDesc, CheckSquare, Square, ChevronRight, X, Grid3X3, List, Filter,
-  ExternalLink, Activity, Cpu, Cloud, Bot, Globe2, Sparkles, Plus, Star
+  ExternalLink, Activity, Cpu, Cloud, Bot, Globe2, Sparkles, Plus, Star, Pencil, Trash2
 } from "lucide-react";
 
 const REFRESH_MS = 30000;
@@ -84,10 +84,12 @@ interface ProviderCardProps {
   onSetDefault: (id: string) => void;
   onViewDetails: (provider: Provider) => void;
   onQuickConfig: (provider: Provider) => void;
+  onEdit: (provider: Provider) => void;
+  onDelete: (provider: Provider) => void;
   t: (key: string) => string;
 }
 
-function ProviderCard({ provider: p, isSelected, isDefault, pendingId, viewMode, onSelect, onTest, onSetDefault, onViewDetails, onQuickConfig, t }: ProviderCardProps) {
+function ProviderCard({ provider: p, isSelected, isDefault, pendingId, viewMode, onSelect, onTest, onSetDefault, onViewDetails, onQuickConfig, onEdit, onDelete, t }: ProviderCardProps) {
   const isConfigured = isProviderAvailable(p.auth_status);
 
   if (viewMode === "list") {
@@ -160,6 +162,16 @@ function ProviderCard({ provider: p, isSelected, isDefault, pendingId, viewMode,
           {isConfigured && !isDefault && (
             <Button variant="ghost" size="sm" onClick={() => onSetDefault(p.id)} leftIcon={<Star className="w-3 h-3" />}>
               <span className="hidden sm:inline">{t("providers.set_as_default")}</span>
+            </Button>
+          )}
+          {isConfigured && (
+            <Button variant="ghost" size="sm" onClick={() => onEdit(p)} leftIcon={<Pencil className="w-3 h-3" />}>
+              <span className="hidden sm:inline">{t("common.edit")}</span>
+            </Button>
+          )}
+          {isConfigured && (
+            <Button variant="ghost" size="sm" onClick={() => onDelete(p)} leftIcon={<Trash2 className="w-3 h-3 text-error" />}>
+              <span className="hidden sm:inline text-error">{t("common.delete")}</span>
             </Button>
           )}
           <Button
@@ -312,6 +324,16 @@ function ProviderCard({ provider: p, isSelected, isDefault, pendingId, viewMode,
           {isConfigured && !isDefault && (
             <Button variant="ghost" size="sm" onClick={() => onSetDefault(p.id)} leftIcon={<Star className="w-3 h-3" />} className="flex-1">
               {t("providers.set_as_default")}
+            </Button>
+          )}
+          {isConfigured && (
+            <Button variant="ghost" size="sm" onClick={() => onEdit(p)} leftIcon={<Pencil className="w-3 h-3" />}>
+              {t("common.edit")}
+            </Button>
+          )}
+          {isConfigured && (
+            <Button variant="ghost" size="sm" onClick={() => onDelete(p)} leftIcon={<Trash2 className="w-3 h-3 text-error" />}>
+              {t("common.delete")}
             </Button>
           )}
           <Button
@@ -506,6 +528,9 @@ export function ProvidersPage() {
   const [urlInput, setUrlInput] = useState("");
   const [keySaving, setKeySaving] = useState(false);
   const [keyError, setKeyError] = useState<string | null>(null);
+  const [keyTesting, setKeyTesting] = useState(false);
+  const [keyTestResult, setKeyTestResult] = useState<{ ok: boolean; message: string } | null>(null);
+  const [deleteConfirmProvider, setDeleteConfirmProvider] = useState<Provider | null>(null);
   const addToast = useUIStore((s) => s.addToast);
 
   const providersQuery = useQuery({ queryKey: ["providers", "list"], queryFn: listProviders, refetchInterval: REFRESH_MS });
@@ -631,6 +656,7 @@ export function ProvidersPage() {
     setKeyInput("");
     setUrlInput(provider.base_url || "");
     setKeyError(null);
+    setKeyTestResult(null);
   };
 
   const handleSaveKey = async () => {
@@ -666,6 +692,48 @@ export function ProvidersPage() {
       setKeyError(e?.message || String(e));
     } finally {
       setKeySaving(false);
+    }
+  };
+
+  const handleEdit = (provider: Provider) => {
+    setConfigProvider(provider);
+    setKeyInput("");
+    setUrlInput(provider.base_url || "");
+    setKeyError(null);
+    setKeyTestResult(null);
+  };
+
+  const handleDeleteConfirm = async () => {
+    if (!deleteConfirmProvider) return;
+    setKeySaving(true);
+    try {
+      await deleteProviderKey(deleteConfirmProvider.id);
+      await providersQuery.refetch();
+      setDeleteConfirmProvider(null);
+      addToast(t("providers.key_removed"), "success");
+    } catch (e: any) {
+      addToast(e?.message || t("common.error"), "error");
+    } finally {
+      setKeySaving(false);
+    }
+  };
+
+  const handleTestKey = async () => {
+    if (!configProvider) return;
+    setKeyTesting(true);
+    setKeyTestResult(null);
+    try {
+      const result = await testMutation.mutateAsync(configProvider.id);
+      if (result.status === "error") {
+        setKeyTestResult({ ok: false, message: String(result.error_message || result.error || t("providers.unreachable")) });
+      } else {
+        setKeyTestResult({ ok: true, message: t("providers.reachable") });
+      }
+      await providersQuery.refetch();
+    } catch (e: any) {
+      setKeyTestResult({ ok: false, message: e?.message || t("common.error") });
+    } finally {
+      setKeyTesting(false);
     }
   };
 
@@ -851,6 +919,8 @@ export function ProvidersPage() {
                 onSetDefault={handleSetDefault}
                 onViewDetails={setDetailsProvider}
                 onQuickConfig={handleQuickConfig}
+                onEdit={handleEdit}
+                onDelete={setDeleteConfirmProvider}
                 t={t}
               />
             ))}
@@ -918,17 +988,64 @@ export function ProvidersPage() {
                 </div>
               )}
 
+              {keyTestResult && (
+                <div className={`flex items-center gap-2 text-xs p-3 rounded-xl ${keyTestResult.ok ? "bg-success/10 border border-success/20 text-success" : "bg-error/10 border border-error/20 text-error"}`}>
+                  {keyTestResult.ok ? <CheckCircle2 className="w-4 h-4 shrink-0" /> : <XCircle className="w-4 h-4 shrink-0" />}
+                  {keyTestResult.message}
+                </div>
+              )}
+
               <div className="flex gap-2 pt-2">
-                <Button variant="primary" className="flex-1" onClick={handleSaveKey} disabled={keySaving || (!keyInput.trim() && urlInput === (configProvider.base_url || ""))}>
+                <Button variant="primary" className="flex-1" onClick={handleSaveKey} disabled={keySaving || keyTesting || (!keyInput.trim() && urlInput === (configProvider.base_url || ""))}>
                   {keySaving ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Key className="w-4 h-4 mr-1" />}
                   {t("common.save")}
                 </Button>
+                <Button variant="secondary" onClick={handleTestKey} disabled={keySaving || keyTesting || !isProviderAvailable(configProvider.auth_status)}>
+                  {keyTesting ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Zap className="w-4 h-4 mr-1" />}
+                  {t("providers.test")}
+                </Button>
                 {configProvider.auth_status === "configured" && (
-                  <Button variant="secondary" onClick={handleDeleteKey} disabled={keySaving}>
+                  <Button variant="secondary" onClick={handleDeleteKey} disabled={keySaving || keyTesting}>
                     <XCircle className="w-4 h-4 mr-1 text-error" />
                     {t("providers.remove_key")}
                   </Button>
                 )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Confirmation Modal */}
+      {deleteConfirmProvider && (
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/30 backdrop-blur-sm" onClick={() => setDeleteConfirmProvider(null)}>
+          <div className="bg-surface rounded-2xl shadow-2xl border border-border-subtle w-[400px] max-w-[90vw] animate-fade-in-scale" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-5 py-3 border-b border-border-subtle">
+              <div className="flex items-center gap-2">
+                <Trash2 className="w-4 h-4 text-error" />
+                <h3 className="text-sm font-bold">{t("providers.delete_confirm_title")}</h3>
+              </div>
+              <button onClick={() => setDeleteConfirmProvider(null)} className="p-1 rounded hover:bg-main"><X className="w-4 h-4" /></button>
+            </div>
+            <div className="p-5 space-y-4">
+              <div className="flex items-center gap-3 p-3 rounded-xl bg-main">
+                <div className="w-10 h-10 rounded-xl bg-error/10 flex items-center justify-center">
+                  {providerIcons[deleteConfirmProvider.id] || <Server className="w-5 h-5 text-error" />}
+                </div>
+                <div>
+                  <p className="text-sm font-bold">{deleteConfirmProvider.display_name || deleteConfirmProvider.id}</p>
+                  <p className="text-[10px] text-text-dim font-mono">{deleteConfirmProvider.id}</p>
+                </div>
+              </div>
+              <p className="text-sm text-text-dim">{t("providers.delete_confirm_message")}</p>
+              <div className="flex gap-2 pt-2">
+                <Button variant="ghost" className="flex-1" onClick={() => setDeleteConfirmProvider(null)}>
+                  {t("common.cancel")}
+                </Button>
+                <Button variant="primary" className="flex-1 !bg-error hover:!bg-error/80" onClick={handleDeleteConfirm} disabled={keySaving}>
+                  {keySaving ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Trash2 className="w-4 h-4 mr-1" />}
+                  {t("common.delete")}
+                </Button>
               </div>
             </div>
           </div>

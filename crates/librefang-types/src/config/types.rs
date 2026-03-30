@@ -2939,6 +2939,15 @@ pub struct DefaultModelConfig {
     pub api_key_env: String,
     /// Optional base URL override.
     pub base_url: Option<String>,
+    /// Message timeout in seconds for CLI-based providers (e.g. Claude Code).
+    /// The timeout is inactivity-based: the process is killed only after this
+    /// many seconds of silence on stdout, not wall-clock time.
+    #[serde(default = "default_message_timeout_secs")]
+    pub message_timeout_secs: u64,
+}
+
+fn default_message_timeout_secs() -> u64 {
+    300
 }
 
 impl Default for DefaultModelConfig {
@@ -2948,6 +2957,7 @@ impl Default for DefaultModelConfig {
             model: String::new(),
             api_key_env: String::new(),
             base_url: None,
+            message_timeout_secs: default_message_timeout_secs(),
         }
     }
 }

@@ -68,6 +68,8 @@
     "default_set": "Default provider updated",
     "is_default": "Default",
     "add": "Add Provider",
+    "delete_confirm_title": "Remove Provider Key",
+    "delete_confirm_message": "Are you sure you want to remove the API key for this provider? The provider will become unconfigured.",
     "help": "Manage LLM provider connections. Test connectivity, configure API keys, and monitor provider health status."
   },
   "channels": {

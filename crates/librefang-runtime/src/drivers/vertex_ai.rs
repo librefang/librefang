@@ -954,6 +954,7 @@ mod tests {
             vertex_ai: librefang_types::config::VertexAiConfig::default(),
             azure_openai: librefang_types::config::AzureOpenAiConfig::default(),
             skip_permissions: true,
+            message_timeout_secs: 300,
         };
         let region = resolve_region(&config);
         assert_eq!(region, "us-central1");
@@ -971,6 +972,7 @@ mod tests {
             },
             azure_openai: librefang_types::config::AzureOpenAiConfig::default(),
             skip_permissions: true,
+            message_timeout_secs: 300,
         };
         let region = resolve_region(&config);
         assert_eq!(region, "europe-west4");

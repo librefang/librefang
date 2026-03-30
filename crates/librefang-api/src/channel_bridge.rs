@@ -292,6 +292,7 @@ fn start_stream_text_bridge(
     >,
 ) -> mpsc::Receiver<String> {
     let (tx, rx) = mpsc::channel::<String>(64);
+    let error_tx = tx.clone();
 
     let bridge_handle = tokio::spawn(async move {
         // Buffer text per iteration. Some providers emit tool call syntax
@@ -339,9 +340,15 @@ fn start_stream_text_bridge(
     });
 
     tokio::spawn(async move {
-        match kernel_handle.await {
-            Err(e) => error!("Streaming kernel task panicked: {e}"),
-            Ok(Err(e)) => error!("Streaming kernel task returned error: {e}"),
+        let error_msg = match kernel_handle.await {
+            Err(e) => {
+                error!("Streaming kernel task panicked: {e}");
+                Some(format!("Task failed: {e}. Please try again."))
+            }
+            Ok(Err(e)) => {
+                error!("Streaming kernel task returned error: {e}");
+                Some(format!("Task failed: {e}. Please try again."))
+            }
             Ok(Ok(result)) => {
                 debug!(
                     input_tokens = result.total_usage.input_tokens,
@@ -349,8 +356,18 @@ fn start_stream_text_bridge(
                     iterations = result.iterations,
                     "Streaming kernel task completed"
                 );
+                None
             }
+        };
+        // Send error notification to the user through the channel before
+        // awaiting bridge_handle (which drops the original tx). The rx end
+        // stays open as long as at least one sender exists, so error_tx can
+        // still deliver here even if the bridge task already finished.
+        if let Some(msg) = error_msg {
+            let _ = error_tx.send(msg).await;
         }
+        // Drop error_tx so rx will close once bridge_handle also finishes.
+        drop(error_tx);
         if let Err(e) = bridge_handle.await {
             error!("Streaming bridge task panicked: {e}");
         }

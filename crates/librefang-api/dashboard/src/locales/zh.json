@@ -68,6 +68,8 @@
     "default_set": "默认供应商已更新",
     "is_default": "默认",
     "add": "添加供应商",
+    "delete_confirm_title": "移除供应商密钥",
+    "delete_confirm_message": "确定要移除此供应商的 API Key 吗？移除后该供应商将变为未配置状态。",
     "help": "管理大模型供应商连接。测试连通性、配置 API Key，监控供应商健康状态。"
   },
   "channels": {
