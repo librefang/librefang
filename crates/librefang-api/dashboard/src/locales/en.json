@@ -33,7 +33,8 @@
     "version": "Version", "telemetry": "Service Telemetry", "pro_tip": "Pro Tip", "pro_tip_text": "Use the Canvas to orchestrate agents across multiple channels.",
     "no_active_agents": "No active agents configured", "no_telemetry": "No telemetry data available",
     "active_sessions": "Active Sessions", "agent_count": "Agent Count",
-    "health_checks": "Health Checks", "pro_tip_shortcut": "Use ⌘K to quick search · Press ← to collapse sidebar"
+    "health_checks": "Health Checks", "pro_tip_shortcut": "Use ⌘K to quick search · Press ← to collapse sidebar",
+    "setup_title": "Setup Required", "setup_description": "No configuration file detected. Click to auto-detect your LLM provider and generate a default config.", "setup_button": "Initialize", "setup_running": "Initializing..."
   },
   "agents": {
     "title": "Agents", "subtitle": "Active autonomous units managed by the LibreFang kernel.",

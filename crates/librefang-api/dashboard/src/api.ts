@@ -21,6 +21,7 @@ export interface StatusResponse {
   log_level?: string;
   network_enabled?: boolean;
   session_count?: number;
+  config_exists?: boolean;
 }
 
 export interface VersionResponse {
@@ -690,6 +691,10 @@ async function getText(path: string): Promise<string> {
     throw await parseError(response);
   }
   return response.text();
+}
+
+export async function postQuickInit(): Promise<{ status: string; provider?: string; model?: string; message?: string }> {
+  return post("/api/init", {});
 }
 
 export async function loadDashboardSnapshot(): Promise<DashboardSnapshot> {

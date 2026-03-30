@@ -33,7 +33,8 @@
     "version": "版本", "telemetry": "服务监控", "pro_tip": "小贴士", "pro_tip_text": "使用画布设计跨通道的智能体工作流。",
     "no_active_agents": "暂未配置活跃智能体", "no_telemetry": "暂无监控数据",
     "active_sessions": "活跃会话", "agent_count": "Agent 数量",
-    "health_checks": "健康检查", "pro_tip_shortcut": "使用 ⌘K 快速搜索 · 按 ← 折叠侧边栏"
+    "health_checks": "健康检查", "pro_tip_shortcut": "使用 ⌘K 快速搜索 · 按 ← 折叠侧边栏",
+    "setup_title": "需要初始化", "setup_description": "未检测到配置文件，点击自动检测 LLM 供应商并生成默认配置。", "setup_button": "初始化", "setup_running": "初始化中..."
   },
   "agents": {
     "title": "智能体", "subtitle": "内核管理的智能体。",

@@ -32,6 +32,7 @@ use crate::types;
         routes::config_schema,
         routes::config_set,
         routes::config_reload,
+        routes::quick_init,
         routes::security_status,
         routes::shutdown,
         routes::migrate_detect,

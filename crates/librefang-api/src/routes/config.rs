@@ -19,6 +19,7 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
         .route("/migrate/scan", axum::routing::post(migrate_scan))
         .route("/migrate", axum::routing::post(run_migrate))
         .route("/shutdown", axum::routing::post(shutdown))
+        .route("/init", axum::routing::post(quick_init))
 }
 use crate::types::*;
 use axum::extract::State;
@@ -131,7 +132,80 @@ pub async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         "home_dir": state.kernel.home_dir().display().to_string(),
         "log_level": state.kernel.config_ref().log_level,
         "network_enabled": state.kernel.config_ref().network_enabled,
+        "config_exists": state.kernel.home_dir().join("config.toml").exists(),
         "agents": agents,
+    }))
+}
+
+/// POST /api/init — Quick initialization (detect provider, write config, reload).
+///
+/// Skips if config.toml already exists. Returns the detected provider/model.
+#[utoipa::path(
+    post,
+    path = "/api/init",
+    tag = "system",
+    responses(
+        (status = 200, description = "Quick init result", body = serde_json::Value)
+    )
+)]
+pub async fn quick_init(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let home = state.kernel.home_dir();
+    let config_path = home.join("config.toml");
+
+    if config_path.exists() {
+        return Json(serde_json::json!({
+            "status": "already_initialized",
+            "message": "config.toml already exists"
+        }));
+    }
+
+    // Ensure directories exist
+    let _ = std::fs::create_dir_all(&home);
+    let _ = std::fs::create_dir_all(home.join("data"));
+
+    // Detect best available provider
+    let (provider, api_key_env) = if let Some((p, _model, env_var)) =
+        librefang_runtime::drivers::detect_available_provider()
+    {
+        (p.to_string(), env_var.to_string())
+    } else {
+        ("groq".to_string(), "GROQ_API_KEY".to_string())
+    };
+
+    // Resolve default model from catalog
+    let model = librefang_runtime::model_catalog::ModelCatalog::default()
+        .default_model_for_provider(&provider)
+        .unwrap_or_else(|| "auto".to_string());
+
+    // Write minimal config.toml
+    let config_content = format!(
+        r#"# LibreFang configuration (auto-generated)
+# Run `librefang init --upgrade` for full annotated config.
+
+log_level = "info"
+api_listen = "0.0.0.0:4545"
+
+[default_model]
+provider = "{provider}"
+model = "{model}"
+api_key_env = "{api_key_env}"
+"#
+    );
+
+    if let Err(e) = std::fs::write(&config_path, &config_content) {
+        return Json(serde_json::json!({
+            "status": "error",
+            "message": format!("Failed to write config: {e}")
+        }));
+    }
+
+    // Reload config so kernel picks up new settings
+    let _ = state.kernel.reload_config();
+
+    Json(serde_json::json!({
+        "status": "initialized",
+        "provider": provider,
+        "model": model,
     }))
 }
 
