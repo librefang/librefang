@@ -137,10 +137,6 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             "/agents/{id}/deliveries",
             axum::routing::get(get_agent_deliveries),
         )
-        .route(
-            "/agents/{id}/upload",
-            axum::routing::post(upload_file),
-        )
         .route("/agents/{id}/ws", axum::routing::get(crate::ws::agent_ws))
         .route(
             "/uploads/{file_id}",
@@ -738,6 +734,13 @@ fn enrich_agent_json(
     })
 }
 
+pub(crate) fn effective_default_model(
+    base: &librefang_types::config::DefaultModelConfig,
+    override_dm: Option<&librefang_types::config::DefaultModelConfig>,
+) -> librefang_types::config::DefaultModelConfig {
+    override_dm.cloned().unwrap_or_else(|| base.clone())
+}
+
 /// GET /api/agents — List agents with optional filtering, pagination, and sorting.
 ///
 /// Query parameters (all optional — omitting them returns all agents):
@@ -768,7 +771,17 @@ pub async fn list_agents(
     Query(params): Query<AgentListQuery>,
 ) -> impl IntoResponse {
     let catalog = state.kernel.model_catalog_ref().read().ok();
-    let dm = &state.kernel.config_ref().default_model;
+    let dm = {
+        let dm_override = state
+            .kernel
+            .default_model_override_ref()
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        effective_default_model(
+            &state.kernel.config_ref().default_model,
+            dm_override.as_ref(),
+        )
+    };
 
     let mut agents: Vec<librefang_types::agent::AgentEntry> = state.kernel.agent_registry().list();
 
@@ -839,7 +852,7 @@ pub async fn list_agents(
 
     let items: Vec<serde_json::Value> = agents
         .iter()
-        .map(|e| enrich_agent_json(e, dm, &catalog))
+        .map(|e| enrich_agent_json(e, &dm, &catalog))
         .collect();
 
     Json(PaginatedResponse {
@@ -1079,7 +1092,17 @@ pub async fn send_message(
     {
         let registry = state.kernel.agent_registry();
         if let Some(entry) = registry.get(agent_id) {
-            let dm = &state.kernel.config_ref().default_model;
+            let dm = {
+                let dm_override = state
+                    .kernel
+                    .default_model_override_ref()
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner());
+                effective_default_model(
+                    &state.kernel.config_ref().default_model,
+                    dm_override.as_ref(),
+                )
+            };
             let provider = if entry.manifest.model.provider.is_empty()
                 || entry.manifest.model.provider == "default"
             {
@@ -1713,6 +1736,14 @@ pub async fn send_message_stream(
             Json(serde_json::json!({"error": err_not_found})),
         )
             .into_response();
+    }
+
+    // Resolve file attachments into image content blocks (same as non-streaming)
+    if !req.attachments.is_empty() {
+        let image_blocks = resolve_attachments(&req.attachments);
+        if !image_blocks.is_empty() {
+            inject_attachments_into_session(&state.kernel, agent_id, image_blocks);
+        }
     }
 
     let kernel_handle: Arc<dyn KernelHandle> = state.kernel.clone() as Arc<dyn KernelHandle>;
@@ -4402,6 +4433,44 @@ mod tests {
         assert_eq!(sender.user_id, "u-123");
         assert_eq!(sender.display_name, "u-123");
         assert_eq!(sender.channel, "api");
+    }
+
+    #[test]
+    fn test_effective_default_model_prefers_override() {
+        let base = librefang_types::config::DefaultModelConfig {
+            provider: "openai".to_string(),
+            model: "gpt-4.1".to_string(),
+            api_key_env: "OPENAI_API_KEY".to_string(),
+            base_url: None,
+        };
+        let override_dm = librefang_types::config::DefaultModelConfig {
+            provider: "deepseek".to_string(),
+            model: "deepseek-chat".to_string(),
+            api_key_env: "DEEPSEEK_API_KEY".to_string(),
+            base_url: None,
+        };
+
+        let effective = effective_default_model(&base, Some(&override_dm));
+
+        assert_eq!(effective.provider, "deepseek");
+        assert_eq!(effective.model, "deepseek-chat");
+        assert_eq!(effective.api_key_env, "DEEPSEEK_API_KEY");
+    }
+
+    #[test]
+    fn test_effective_default_model_falls_back_to_base() {
+        let base = librefang_types::config::DefaultModelConfig {
+            provider: "openai".to_string(),
+            model: "gpt-4.1".to_string(),
+            api_key_env: "OPENAI_API_KEY".to_string(),
+            base_url: None,
+        };
+
+        let effective = effective_default_model(&base, None);
+
+        assert_eq!(effective.provider, "openai");
+        assert_eq!(effective.model, "gpt-4.1");
+        assert_eq!(effective.api_key_env, "OPENAI_API_KEY");
     }
 }
 

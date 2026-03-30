@@ -144,20 +144,33 @@ pub async fn agent_ws(
             })
         };
 
-        let header_auth = headers
+        let header_token = headers
             .get("authorization")
             .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "))
-            .map(&matches_any)
-            .unwrap_or(false);
+            .and_then(|v| v.strip_prefix("Bearer "));
 
-        let query_auth = uri
+        let query_token = uri
             .query()
-            .and_then(|q| q.split('&').find_map(|pair| pair.strip_prefix("token=")))
-            .map(&matches_any)
-            .unwrap_or(false);
+            .and_then(|q| q.split('&').find_map(|pair| pair.strip_prefix("token=")));
 
-        if !header_auth && !query_auth {
+        let header_auth = header_token.map(&matches_any).unwrap_or(false);
+        let query_auth = query_token.map(&matches_any).unwrap_or(false);
+
+        let mut session_auth = false;
+        let provided_token = header_token.or(query_token);
+        if let Some(token_str) = provided_token {
+            let mut sessions = state.active_sessions.write().await;
+            sessions.retain(|_, st| {
+                !crate::password_hash::is_token_expired(
+                    st,
+                    crate::password_hash::DEFAULT_SESSION_TTL_SECS,
+                )
+            });
+            session_auth = sessions.contains_key(token_str);
+            drop(sessions);
+        }
+
+        if !header_auth && !query_auth && !session_auth {
             warn!("WebSocket upgrade rejected: invalid auth");
             return axum::http::StatusCode::UNAUTHORIZED.into_response();
         }
@@ -432,7 +445,17 @@ async fn handle_text_message(
             {
                 let registry = state.kernel.agent_registry();
                 if let Some(entry) = registry.get(agent_id) {
-                    let dm = &state.kernel.config_ref().default_model;
+                    let dm = {
+                        let dm_override = state
+                            .kernel
+                            .default_model_override_ref()
+                            .read()
+                            .unwrap_or_else(|e| e.into_inner());
+                        crate::routes::agents::effective_default_model(
+                            &state.kernel.config_ref().default_model,
+                            dm_override.as_ref(),
+                        )
+                    };
                     let provider = if entry.manifest.model.provider.is_empty()
                         || entry.manifest.model.provider == "default"
                     {

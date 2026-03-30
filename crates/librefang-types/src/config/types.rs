@@ -51,33 +51,81 @@ pub enum OutputFormat {
 }
 
 /// Per-channel behavior overrides.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ChannelOverrides {
     /// Model override (uses agent's default if None).
+    #[serde(default)]
     pub model: Option<String>,
     /// System prompt override.
+    #[serde(default)]
     pub system_prompt: Option<String>,
     /// DM policy.
+    #[serde(default)]
     pub dm_policy: DmPolicy,
     /// Group message policy.
+    #[serde(default)]
     pub group_policy: GroupPolicy,
     /// Regex patterns that can trigger a reply in group chats when
     /// `group_policy` is `mention_only`.
     #[serde(default)]
     pub group_trigger_patterns: Vec<String>,
     /// Global rate limit for this channel (messages per minute, 0 = unlimited).
+    #[serde(default)]
     pub rate_limit_per_minute: u32,
     /// Per-user rate limit (messages per minute, 0 = unlimited).
+    #[serde(default)]
     pub rate_limit_per_user: u32,
     /// Enable thread replies.
+    #[serde(default)]
     pub threading: bool,
     /// Output format override.
+    #[serde(default)]
     pub output_format: Option<OutputFormat>,
     /// Usage footer mode override.
+    #[serde(default)]
     pub usage_footer: Option<UsageFooterMode>,
     /// Typing indicator mode override.
+    #[serde(default)]
     pub typing_mode: Option<TypingMode>,
+    /// Message debounce window in milliseconds. Default: 0 (disabled).
+    #[serde(default)]
+    pub message_debounce_ms: u64,
+    /// Maximum time to buffer messages before forcing a dispatch. Default: 30000ms.
+    #[serde(default = "default_message_debounce_max_ms")]
+    pub message_debounce_max_ms: u64,
+    /// Maximum number of messages to buffer per sender before forcing dispatch. Default: 64.
+    #[serde(default = "default_message_debounce_max_buffer")]
+    pub message_debounce_max_buffer: usize,
+}
+
+impl Default for ChannelOverrides {
+    fn default() -> Self {
+        Self {
+            model: None,
+            system_prompt: None,
+            dm_policy: DmPolicy::default(),
+            group_policy: GroupPolicy::default(),
+            group_trigger_patterns: Vec::new(),
+            rate_limit_per_minute: 0,
+            rate_limit_per_user: 0,
+            threading: false,
+            output_format: None,
+            usage_footer: None,
+            typing_mode: None,
+            message_debounce_ms: 0,
+            message_debounce_max_ms: 30000,
+            message_debounce_max_buffer: 64,
+        }
+    }
+}
+
+fn default_message_debounce_max_ms() -> u64 {
+    30000
+}
+
+fn default_message_debounce_max_buffer() -> usize {
+    64
 }
 
 /// Controls what usage info appears in response footers.
@@ -1500,6 +1548,10 @@ impl Default for TriggersConfig {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct KernelConfig {
+    /// Configuration schema version for automatic migration.
+    /// Old configs without this field default to 1 (via `default_config_version`).
+    #[serde(default = "super::version::default_config_version")]
+    pub config_version: u32,
     /// LibreFang home directory (default: ~/.librefang).
     pub home_dir: PathBuf,
     /// Data directory for databases (default: ~/.librefang/data).
@@ -2392,6 +2444,11 @@ impl Default for HeartbeatTomlConfig {
 /// ```toml
 /// [registry]
 /// cache_ttl_secs = 86400
+/// # Optional: proxy/mirror prefix for users behind the GFW.
+/// # All GitHub URLs are prefixed with this value, e.g.
+/// #   registry_mirror = "https://ghproxy.cn"
+/// # turns "https://github.com/..." into "https://ghproxy.cn/https://github.com/..."
+/// registry_mirror = ""
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -2400,6 +2457,15 @@ pub struct RegistryConfig {
     /// The registry is re-downloaded when the local cache is older than this.
     #[serde(default = "default_registry_cache_ttl_secs")]
     pub cache_ttl_secs: u64,
+    /// Mirror/proxy prefix for GitHub URLs. When non-empty, all outbound
+    /// GitHub requests (tarball downloads, git clones, raw content fetches)
+    /// are prefixed with this URL. Useful for users in China Mainland where
+    /// direct GitHub access is slow or blocked.
+    ///
+    /// Example: `"https://ghproxy.cn"` rewrites
+    /// `https://github.com/...` → `https://ghproxy.cn/https://github.com/...`
+    #[serde(default)]
+    pub registry_mirror: String,
 }
 
 fn default_registry_cache_ttl_secs() -> u64 {
@@ -2410,6 +2476,7 @@ impl Default for RegistryConfig {
     fn default() -> Self {
         Self {
             cache_ttl_secs: default_registry_cache_ttl_secs(),
+            registry_mirror: String::new(),
         }
     }
 }
@@ -2621,6 +2688,7 @@ impl Default for KernelConfig {
     fn default() -> Self {
         let home_dir = librefang_home_dir();
         Self {
+            config_version: super::version::CONFIG_VERSION,
             data_dir: home_dir.join("data"),
             home_dir,
             log_level: "info".to_string(),
@@ -3138,6 +3206,8 @@ pub struct ChannelsConfig {
     pub gotify: OneOrMany<GotifyConfig>,
     /// Generic webhook configuration(s).
     pub webhook: OneOrMany<WebhookConfig>,
+    /// Voice channel (WebSocket + STT/TTS) configuration(s).
+    pub voice: OneOrMany<VoiceConfig>,
     /// LinkedIn messaging configuration(s).
     pub linkedin: OneOrMany<LinkedInConfig>,
     /// WeChat personal account (iLink) configuration(s).
@@ -4101,21 +4171,36 @@ impl Default for FeishuConfig {
     }
 }
 
-/// WeCom/WeChat Work channel adapter configuration.
+/// Connection mode for the WeCom intelligent bot adapter.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WeComMode {
+    /// WebSocket long-connection (no public endpoint required).
+    #[default]
+    Websocket,
+    /// URL callback (requires a publicly reachable HTTP endpoint).
+    Callback,
+}
+
+/// WeCom intelligent bot adapter configuration.
+///
+/// Supports two connection modes:
+/// - `websocket` (default): connects to `wss://openws.work.weixin.qq.com`
+/// - `callback`: starts an HTTP server to receive message callbacks
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WeComConfig {
-    /// WeCom corp ID.
-    pub corp_id: String,
-    /// WeCom application agent ID.
-    pub agent_id: String,
-    /// Env var name holding the application secret.
+    /// Bot ID obtained from the WeCom admin console.
+    pub bot_id: String,
+    /// Env var name holding the bot secret.
     pub secret_env: String,
-    /// Port for the incoming webhook.
+    /// Connection mode: "websocket" (default) or "callback".
+    pub mode: WeComMode,
+    /// Port for the callback HTTP server (only used in callback mode).
     pub webhook_port: u16,
-    /// Env var name holding the callback verification token (optional).
+    /// Env var name holding the callback verification token (callback mode only).
     pub token_env: Option<String>,
-    /// Env var name holding the encoding AES key (optional).
+    /// Env var name holding the EncodingAESKey (callback mode only).
     pub encoding_aes_key_env: Option<String>,
     /// Unique identifier for this bot instance (used for multi-bot routing).
     #[serde(default)]
@@ -4130,9 +4215,9 @@ pub struct WeComConfig {
 impl Default for WeComConfig {
     fn default() -> Self {
         Self {
-            corp_id: String::new(),
-            agent_id: String::new(),
-            secret_env: "WECOM_SECRET".to_string(),
+            bot_id: String::new(),
+            secret_env: "WECOM_BOT_SECRET".to_string(),
+            mode: WeComMode::default(),
             webhook_port: 8454,
             token_env: None,
             encoding_aes_key_env: None,
@@ -4544,16 +4629,45 @@ impl Default for MumbleConfig {
     }
 }
 
+/// How the DingTalk adapter receives inbound events.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DingTalkReceiveMode {
+    /// HTTP webhook server (requires public IP / reverse proxy).
+    Webhook,
+    /// Long-lived WebSocket connection via DingTalk Stream protocol (default).
+    #[default]
+    Stream,
+}
+
 /// DingTalk Robot API channel adapter configuration.
+///
+/// Supports two receive modes:
+/// - **Stream** (default): Uses `app_key` / `app_secret` to open a long-lived
+///   WebSocket connection via the DingTalk Stream protocol. No public IP needed.
+/// - **Webhook** (legacy): HTTP server that receives callback POST requests.
+///   Requires `access_token` and `secret` for HMAC-SHA256 verification.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DingTalkConfig {
+    /// How to receive inbound messages (stream or webhook).
+    pub receive_mode: DingTalkReceiveMode,
+    // -- Stream mode credentials --
+    /// Env var name holding the DingTalk app key (stream mode).
+    pub app_key_env: String,
+    /// Env var name holding the DingTalk app secret (stream mode).
+    pub app_secret_env: String,
+    // -- Webhook mode credentials (legacy) --
     /// Env var name holding the webhook access token.
     pub access_token_env: String,
     /// Env var name holding the signing secret.
     pub secret_env: String,
-    /// Port for the incoming webhook.
+    /// Port for the incoming webhook (webhook mode only).
     pub webhook_port: u16,
+    /// Robot code for sending messages via the Open API (stream mode).
+    /// If empty, falls back to app_key.
+    #[serde(default)]
+    pub robot_code: Option<String>,
     /// Unique identifier for this bot instance (used for multi-bot routing).
     #[serde(default)]
     pub account_id: Option<String>,
@@ -4567,9 +4681,13 @@ pub struct DingTalkConfig {
 impl Default for DingTalkConfig {
     fn default() -> Self {
         Self {
+            receive_mode: DingTalkReceiveMode::default(),
+            app_key_env: "DINGTALK_APP_KEY".to_string(),
+            app_secret_env: "DINGTALK_APP_SECRET".to_string(),
             access_token_env: "DINGTALK_ACCESS_TOKEN".to_string(),
             secret_env: "DINGTALK_SECRET".to_string(),
             webhook_port: 8457,
+            robot_code: None,
             account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
@@ -4770,6 +4888,60 @@ impl Default for WebhookConfig {
             secret_env: "WEBHOOK_SECRET".to_string(),
             listen_port: 8460,
             callback_url: None,
+            account_id: None,
+            default_agent: None,
+            overrides: ChannelOverrides::default(),
+        }
+    }
+}
+
+/// Voice channel adapter configuration.
+///
+/// Runs a WebSocket server that accepts audio streams, transcribes via STT,
+/// sends text to the agent, and returns synthesized speech via TTS.
+///
+/// ```toml
+/// [channels.voice]
+/// listen_port = 4546
+/// api_key_env = "OPENAI_API_KEY"
+/// stt_url = "https://api.openai.com"
+/// tts_url = "https://api.openai.com"
+/// tts_voice = "alloy"
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VoiceConfig {
+    /// WebSocket server listen port (default: 4546).
+    pub listen_port: u16,
+    /// Env var name holding the API key for STT/TTS services.
+    pub api_key_env: String,
+    /// Base URL for the STT (Speech-to-Text) API.
+    pub stt_url: String,
+    /// Base URL for the TTS (Text-to-Speech) API.
+    pub tts_url: String,
+    /// TTS voice name (default: "alloy").
+    pub tts_voice: String,
+    /// Audio buffer threshold in bytes before triggering STT (default: 32768).
+    pub buffer_threshold: usize,
+    /// Unique identifier for this voice instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
+    /// Default agent name to route voice messages to.
+    pub default_agent: Option<String>,
+    /// Per-channel behavior overrides.
+    #[serde(default)]
+    pub overrides: ChannelOverrides,
+}
+
+impl Default for VoiceConfig {
+    fn default() -> Self {
+        Self {
+            listen_port: 4546,
+            api_key_env: "OPENAI_API_KEY".to_string(),
+            stt_url: "https://api.openai.com".to_string(),
+            tts_url: "https://api.openai.com".to_string(),
+            tts_voice: "alloy".to_string(),
+            buffer_threshold: 32768,
             account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),

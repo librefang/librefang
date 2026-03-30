@@ -284,7 +284,7 @@ pub fn build_canonical_context_message(ctx: &PromptContext) -> Option<String> {
     ctx.canonical_context
         .as_ref()
         .filter(|c| !c.is_empty())
-        .map(|c| format!("[Previous conversation context]\n{}", cap_str(c, 500)))
+        .map(|c| format!("[Previous conversation context]\n{}", cap_str(c, 2000)))
 }
 
 /// Build the memory section (Section 4).

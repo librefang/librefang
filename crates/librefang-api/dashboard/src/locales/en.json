@@ -62,6 +62,9 @@
     "key_placeholder": "Enter API key...", "key_placeholder_existing": "Enter new key to replace...",
     "optional": "optional", "remove_key": "Remove Key",
     "base_url": "Base URL", "api_key": "API Key",
+    "set_as_default": "Set as Default",
+    "default_set": "Default provider updated",
+    "is_default": "Default",
     "add": "Add Provider",
     "help": "Manage LLM provider connections. Test connectivity, configure API keys, and monitor provider health status."
   },
@@ -298,6 +301,10 @@
     "theme": "Interface Theme", "language": "Language", "theme_light": "Light", "theme_dark": "Dark", "system_config": "System Configuration",
     "nav_layout": "Navigation Layout", "nav_grouped": "Grouped", "nav_collapsible": "Collapsible",
     "tools_title": "Tools", "tools_search": "Search tools...",
+    "change_password": "Change Password",
+    "pw_current": "Current Password", "pw_new": "New Password", "pw_confirm": "Confirm New Password",
+    "pw_submit": "Change Password", "pw_success": "Password changed. Redirecting to login...",
+    "pw_failed": "Failed to change password", "pw_mismatch": "New passwords do not match", "pw_empty": "New password cannot be empty", "pw_too_short": "Password must be at least 8 characters",
     "help": "Configure system preferences. Switch theme, language, navigation layout, and browse available tools."
   },
   "chat": {
@@ -327,6 +334,8 @@
   },
   "approvals": {
     "title": "Approvals", "subtitle": "Review and authorize critical agent actions.", "pending_review": "Pending Review", "approve": "Approve", "reject": "Reject",
+    "approvedToast": "Approved", "rejectedToast": "Rejected",
+    "status": { "pending": "Pending", "approved": "Approved", "rejected": "Rejected", "expired": "Expired" },
     "queue_clear": "Queue Clear", "queue_clear_desc": "No pending actions.",
     "help": "Review approval requests. When agents need human confirmation, requests appear here."
   },
@@ -347,13 +356,15 @@
   "auth": {
     "title": "API Key Required",
     "description": "This instance requires authentication to access.",
+    "credentials_title": "Sign In Required",
+    "credentials_description": "Enter your dashboard username and password to continue.",
     "placeholder": "Enter API key...",
+    "username_placeholder": "Enter username...",
+    "password_placeholder": "Enter password...",
     "submit": "Authenticate",
-    "invalid": "Invalid API key. Please try again.",
-    "credentials_title": "Login Required",
-    "credentials_description": "Enter your dashboard credentials to continue.",
-    "username_placeholder": "Username",
-    "password_placeholder": "Password"
+    "invalid": "Authentication failed. Please try again.",
+    "invalid_api_key": "Invalid API key. Please try again.",
+    "invalid_credentials": "Invalid username or password. Please try again."
   },
   "network": {
     "section": "OFP Network", "title": "Network", "subtitle": "Open Federation Protocol network status and connected peers.",

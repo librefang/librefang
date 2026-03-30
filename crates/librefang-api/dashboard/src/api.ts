@@ -95,7 +95,10 @@ export interface ChannelField {
   has_value?: boolean;
   env_var?: string | null;
   placeholder?: string | null;
-  value?: unknown;
+  value?: string;
+  options?: string[];
+  show_when?: string;
+  readonly?: boolean;
 }
 
 export interface ChannelItem {
@@ -546,14 +549,37 @@ export function setOnUnauthorized(fn: (() => void) | null) {
   _unauthorizedFired = false;
 }
 
+export function getStoredApiKey(): string {
+  return localStorage.getItem("librefang-api-key") || "";
+}
+
 function authHeader(): HeadersInit {
   const lang = localStorage.getItem("i18nextLng") || navigator.language || "en";
-  const token = localStorage.getItem("librefang-api-key") || "";
+  const token = getStoredApiKey();
   const headers: HeadersInit = { "Accept-Language": lang };
   if (token) {
     headers["Authorization"] = `Bearer ${token}`;
   }
   return headers;
+}
+
+function buildHeaders(headers?: HeadersInit): Headers {
+  const merged = new Headers(headers);
+  const auth = new Headers(authHeader());
+  auth.forEach((value, key) => {
+    merged.set(key, value);
+  });
+  return merged;
+}
+
+export function buildAuthenticatedWebSocketUrl(path: string): string {
+  const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+  const url = new URL(`${proto}//${window.location.host}${path}`);
+  const token = getStoredApiKey();
+  if (token) {
+    url.searchParams.set("token", token);
+  }
+  return url.toString();
 }
 
 async function parseError(response: Response): Promise<Error> {
@@ -578,10 +604,9 @@ async function parseError(response: Response): Promise<Error> {
 
 async function get<T>(path: string): Promise<T> {
   const response = await fetch(path, {
-    headers: {
+    headers: buildHeaders({
       "Content-Type": "application/json",
-      ...authHeader()
-    }
+    })
   });
   if (!response.ok) {
     throw await parseError(response);
@@ -596,10 +621,9 @@ async function post<T>(path: string, body: unknown, timeout = DEFAULT_POST_TIMEO
   try {
     const response = await fetch(path, {
       method: "POST",
-      headers: {
+      headers: buildHeaders({
         "Content-Type": "application/json",
-        ...authHeader()
-      },
+      }),
       body: JSON.stringify(body),
       signal: controller.signal
     });
@@ -620,10 +644,23 @@ async function post<T>(path: string, body: unknown, timeout = DEFAULT_POST_TIMEO
 async function put<T>(path: string, body: unknown): Promise<T> {
   const response = await fetch(path, {
     method: "PUT",
-    headers: {
+    headers: buildHeaders({
       "Content-Type": "application/json",
-      ...authHeader()
-    },
+    }),
+    body: JSON.stringify(body)
+  });
+  if (!response.ok) {
+    throw await parseError(response);
+  }
+  return (await response.json()) as T;
+}
+
+async function patch<T>(path: string, body: unknown): Promise<T> {
+  const response = await fetch(path, {
+    method: "PATCH",
+    headers: buildHeaders({
+      "Content-Type": "application/json",
+    }),
     body: JSON.stringify(body)
   });
   if (!response.ok) {
@@ -635,15 +672,24 @@ async function put<T>(path: string, body: unknown): Promise<T> {
 async function del<T>(path: string): Promise<T> {
   const response = await fetch(path, {
     method: "DELETE",
-    headers: {
+    headers: buildHeaders({
       "Content-Type": "application/json",
-      ...authHeader()
-    }
+    })
   });
   if (!response.ok) {
     throw await parseError(response);
   }
   return (await response.json()) as T;
+}
+
+async function getText(path: string): Promise<string> {
+  const response = await fetch(path, {
+    headers: buildHeaders(),
+  });
+  if (!response.ok) {
+    throw await parseError(response);
+  }
+  return response.text();
 }
 
 export async function loadDashboardSnapshot(): Promise<DashboardSnapshot> {
@@ -738,6 +784,10 @@ export async function setProviderUrl(providerId: string, baseUrl: string): Promi
   return put<ApiActionResponse>(`/api/providers/${encodeURIComponent(providerId)}/url`, { base_url: baseUrl });
 }
 
+export async function setDefaultProvider(providerId: string): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>(`/api/providers/${encodeURIComponent(providerId)}/default`, {});
+}
+
 // ── Media generation API ──────────────────────────────────────────────
 
 export async function listMediaProviders(): Promise<MediaProvider[]> {
@@ -752,7 +802,7 @@ export async function generateImage(req: { prompt: string; provider?: string; mo
 export async function synthesizeSpeech(req: { text: string; provider?: string; model?: string; voice?: string; format?: string }): Promise<Blob> {
   const resp = await fetch("/api/media/speech", {
     method: "POST",
-    headers: { "Content-Type": "application/json", ...authHeader() },
+    headers: buildHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(req),
   });
   if (!resp.ok) throw await parseError(resp);
@@ -770,7 +820,7 @@ export async function pollVideo(taskId: string): Promise<MediaVideoStatus> {
 export async function generateMusic(req: { prompt?: string; lyrics?: string; provider?: string; model?: string; instrumental?: boolean }): Promise<Blob> {
   const resp = await fetch("/api/media/music", {
     method: "POST",
-    headers: { "Content-Type": "application/json", ...authHeader() },
+    headers: buildHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(req),
   });
   if (!resp.ok) throw await parseError(resp);
@@ -819,6 +869,11 @@ export async function wechatQrStatus(qrCode: string): Promise<QrStatusResponse> 
 export async function listSkills(): Promise<SkillItem[]> {
   const data = await get<SkillsResponse>("/api/skills");
   return data.skills ?? [];
+}
+
+export async function listTools(): Promise<any[]> {
+  const data = await get<any>("/api/tools");
+  return data.tools ?? data ?? [];
 }
 
 export async function installSkill(name: string): Promise<ApiActionResponse> {
@@ -1147,6 +1202,40 @@ export interface TaskQueueItem {
 
 export async function getHealthDetail(): Promise<HealthDetailResponse> {
   return get<HealthDetailResponse>("/api/health/detail");
+}
+
+export interface MemoryConfigResponse {
+  embedding_provider?: string;
+  embedding_model?: string;
+  embedding_api_key_env?: string;
+  decay_rate?: number;
+  proactive_memory?: {
+    enabled?: boolean;
+    auto_memorize?: boolean;
+    auto_retrieve?: boolean;
+    extraction_model?: string;
+    max_retrieve?: number;
+  };
+}
+
+export async function getMemoryConfig(): Promise<MemoryConfigResponse> {
+  return get<MemoryConfigResponse>("/api/memory/config");
+}
+
+export async function updateMemoryConfig(payload: {
+  embedding_provider?: string;
+  embedding_model?: string;
+  embedding_api_key_env?: string;
+  decay_rate?: number;
+  proactive_memory?: {
+    enabled?: boolean;
+    auto_memorize?: boolean;
+    auto_retrieve?: boolean;
+    extraction_model?: string;
+    max_retrieve?: number;
+  };
+}): Promise<ApiActionResponse> {
+  return patch<ApiActionResponse>("/api/memory/config", payload);
 }
 
 export async function getSecurityStatus(): Promise<SecurityStatusResponse> {
@@ -1660,42 +1749,6 @@ export async function getA2ATaskStatus(taskId: string): Promise<A2ATaskStatus> {
   return get<A2ATaskStatus>(`/api/a2a/tasks/${encodeURIComponent(taskId)}/status`);
 }
 
-// ── Auth check ───────────────────────────────────────
-
-export async function checkAuthRequired(): Promise<boolean> {
-  // Ask the server what auth mode is configured instead of probing a
-  // public endpoint (the old /api/status check always returned 200).
-  for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      const mode = await checkDashboardAuthMode();
-      if (mode === "none") return false;
-      // Auth is configured — if we hold a stored key/token, verify it
-      // is actually valid by probing an auth-protected endpoint.
-      if (hasApiKey()) {
-        return !(await verifyStoredKey());
-      }
-      return true;
-    } catch {
-      // Network error — daemon may not be up yet, wait and retry
-      await new Promise((r) => setTimeout(r, 1000));
-    }
-  }
-  return false;
-}
-
-/** Probe an auth-protected endpoint to confirm the stored key is valid. */
-async function verifyStoredKey(): Promise<boolean> {
-  try {
-    const resp = await fetch("/api/peers", {
-      headers: { ...authHeader() },
-    });
-    return resp.ok || resp.status !== 401;
-  } catch {
-    // Network error — treat as valid to avoid blocking the UI.
-    return true;
-  }
-}
-
 export function setApiKey(key: string) {
   localStorage.setItem("librefang-api-key", key);
   // Reset the 401-fired guard so future unauthorized responses
@@ -1708,7 +1761,7 @@ export function clearApiKey() {
 }
 
 export function hasApiKey(): boolean {
-  const key = localStorage.getItem("librefang-api-key");
+  const key = getStoredApiKey();
   return !!key && key.length > 0;
 }
 
@@ -1740,6 +1793,33 @@ export async function dashboardLogin(username: string, password: string): Promis
   } catch (e: any) {
     return { ok: false, error: e.message || "Network error" };
   }
+}
+
+export async function verifyStoredAuth(): Promise<boolean> {
+  if (!hasApiKey()) {
+    return false;
+  }
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const response = await fetch("/api/security", {
+        headers: buildHeaders(),
+      });
+      if (response.status === 401) {
+        clearApiKey();
+        return false;
+      }
+      return response.ok;
+    } catch {
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+  }
+
+  return false;
+}
+
+export async function getMetricsText(): Promise<string> {
+  return getText("/api/metrics");
 }
 
 // ── Plugins ──────────────────────────────────────────
@@ -1935,5 +2015,19 @@ export async function createRegistryContent(
   return post<CreateRegistryContentResponse>(
     `/api/registry/content/${encodeURIComponent(contentType)}`,
     values,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Auth — change password
+// ---------------------------------------------------------------------------
+
+export async function changePassword(
+  currentPassword: string,
+  newPassword: string,
+): Promise<{ ok: boolean; error?: string; message?: string }> {
+  return post<{ ok: boolean; error?: string; message?: string }>(
+    "/api/auth/change-password",
+    { current_password: currentPassword, new_password: newPassword },
   );
 }

@@ -942,6 +942,13 @@ impl LibreFangKernel {
         &self.model_catalog
     }
 
+    /// Invalidate all cached LLM drivers so the next request rebuilds them
+    /// with current provider URLs / API keys.
+    #[inline]
+    pub fn clear_driver_cache(&self) {
+        self.driver_cache.clear();
+    }
+
     /// Skill registry (RwLock — hot-reload on install/uninstall).
     #[inline]
     pub fn skill_registry_ref(
@@ -1310,7 +1317,16 @@ impl LibreFangKernel {
 
         // Resolve "auto" provider: scan environment for the first available API key.
         if config.default_model.provider == "auto" || config.default_model.provider.is_empty() {
-            if let Some((provider, model, env_var)) = drivers::detect_available_provider() {
+            if let Some((provider, model_hint, env_var)) = drivers::detect_available_provider() {
+                // model_hint may be empty if detected from the registry fallback;
+                // resolve a sensible default from the model catalog.
+                let model = if model_hint.is_empty() {
+                    librefang_runtime::model_catalog::ModelCatalog::default()
+                        .default_model_for_provider(provider)
+                        .unwrap_or_else(|| "default".to_string())
+                } else {
+                    model_hint.to_string()
+                };
                 info!(
                     provider = %provider,
                     model = %model,
@@ -1318,7 +1334,7 @@ impl LibreFangKernel {
                     "Auto-detected default provider from environment"
                 );
                 config.default_model.provider = provider.to_string();
-                config.default_model.model = model.to_string();
+                config.default_model.model = model;
                 config.default_model.api_key_env = env_var.to_string();
             } else {
                 warn!("No API keys detected in environment — defaulting to ollama (local)");
@@ -1432,7 +1448,16 @@ impl LibreFangKernel {
                         "Primary LLM driver init failed — trying auto-detect"
                     );
                     // Auto-detect: scan env for any configured provider key
-                    if let Some((provider, model, env_var)) = drivers::detect_available_provider() {
+                    if let Some((provider, model_hint, env_var)) =
+                        drivers::detect_available_provider()
+                    {
+                        let model = if model_hint.is_empty() {
+                            librefang_runtime::model_catalog::ModelCatalog::default()
+                                .default_model_for_provider(provider)
+                                .unwrap_or_else(|| "default".to_string())
+                        } else {
+                            model_hint.to_string()
+                        };
                         let auto_config = DriverConfig {
                             provider: provider.to_string(),
                             api_key: std::env::var(env_var).ok(),
@@ -1452,7 +1477,7 @@ impl LibreFangKernel {
                                 driver_chain.push(d);
                                 // Update the running config so agents get the right model
                                 config.default_model.provider = provider.to_string();
-                                config.default_model.model = model.to_string();
+                                config.default_model.model = model;
                                 config.default_model.api_key_env = env_var.to_string();
                             }
                             Err(e2) => {
@@ -1556,6 +1581,7 @@ impl LibreFangKernel {
         librefang_runtime::registry_sync::sync_registry(
             &config.home_dir,
             config.registry.cache_ttl_secs,
+            &config.registry.registry_mirror,
         );
 
         // Initialize model catalog, detect provider auth, and apply URL overrides
@@ -2279,12 +2305,10 @@ system_prompt = "You are a helpful assistant."
             }
         }
 
-        // Load workflow templates (sync handled by registry_sync)
+        // Load workflow templates
         {
             let user_dir = kernel.config.home_dir.join("workflows").join("templates");
-            let loaded = tokio::task::block_in_place(|| {
-                kernel.template_registry.load_templates_from_dir(&user_dir)
-            });
+            let loaded = kernel.template_registry.load_templates_from_dir(&user_dir);
             if loaded > 0 {
                 info!("Loaded {loaded} workflow template(s)");
             }
@@ -6700,7 +6724,8 @@ system_prompt = "You are a helpful assistant."
             Vec::new();
 
         for entry in &agents {
-            if matches!(entry.manifest.schedule, ScheduleMode::Reactive) {
+            if matches!(entry.manifest.schedule, ScheduleMode::Reactive) || !entry.manifest.enabled
+            {
                 continue;
             }
             bg_agents.push((

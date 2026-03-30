@@ -37,6 +37,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     python3-venv \
     nodejs \
+    npm \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /usr/local/bin/librefang /usr/local/bin/
 COPY --from=builder /build/agents /opt/librefang/agents

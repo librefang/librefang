@@ -1,11 +1,12 @@
 //! Channels screen: list all 40 adapters, setup wizards, test & toggle.
 
 use crate::tui::theme;
+use crate::tui::widgets;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Padding, Paragraph};
+use ratatui::widgets::{ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
 // ── Data types ──────────────────────────────────────────────────────────────
@@ -199,8 +200,13 @@ const CHANNEL_DEFS: &[ChannelDef] = &[
         name: "dingtalk",
         display_name: "DingTalk",
         category: "Enterprise",
-        env_vars: &["DINGTALK_ACCESS_TOKEN", "DINGTALK_SECRET"],
-        description: "DingTalk Robot API adapter",
+        env_vars: &[
+            "DINGTALK_APP_KEY",
+            "DINGTALK_APP_SECRET",
+            "DINGTALK_ACCESS_TOKEN",
+            "DINGTALK_SECRET",
+        ],
+        description: "DingTalk Robot API adapter (webhook or stream mode)",
     },
     ChannelDef {
         name: "pumble",
@@ -315,6 +321,13 @@ const CHANNEL_DEFS: &[ChannelDef] = &[
         category: "Notifications",
         env_vars: &["WEBHOOK_SECRET"],
         description: "Generic webhook adapter",
+    },
+    ChannelDef {
+        name: "voice",
+        display_name: "Voice",
+        category: "Media",
+        env_vars: &["OPENAI_API_KEY"],
+        description: "Voice channel via WebSocket with STT/TTS",
     },
     ChannelDef {
         name: "mumble",
@@ -617,16 +630,9 @@ impl ChannelState {
 pub fn draw(f: &mut Frame, area: Rect, state: &mut ChannelState) {
     let ready = state.ready_count();
     let total = state.channels.len();
-    let title = format!(" Channels ({ready}/{total} ready) ");
+    let title = format!("\u{25c8} Channels ({ready}/{total} ready)");
 
-    let block = Block::default()
-        .title(Line::from(vec![Span::styled(title, theme::title_style())]))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::ACCENT))
-        .padding(Padding::horizontal(1));
-
-    let inner = block.inner(area);
-    f.render_widget(block, area);
+    let inner = widgets::render_screen_block(f, area, &title);
 
     match state.sub {
         ChannelSubScreen::List => draw_list(f, inner, state),
@@ -638,29 +644,24 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut ChannelState) {
 fn draw_list(f: &mut Frame, area: Rect, state: &mut ChannelState) {
     let chunks = Layout::vertical([
         Constraint::Length(1), // category tabs
-        Constraint::Length(2), // header
+        Constraint::Length(1), // spacer
+        Constraint::Length(1), // header
         Constraint::Min(3),    // list
         Constraint::Length(1), // hints
     ])
     .split(area);
 
-    // Category tabs
-    let cat_spans: Vec<Span> = CATEGORIES
-        .iter()
-        .enumerate()
-        .map(|(i, cat)| {
-            if i == state.category_idx {
-                Span::styled(
-                    format!(" [{cat}] "),
-                    Style::default()
-                        .fg(theme::CYAN)
-                        .add_modifier(Modifier::BOLD),
-                )
-            } else {
-                Span::styled(format!("  {cat}  "), theme::dim_style())
-            }
-        })
-        .collect();
+    // Category tabs — use tab_active/tab_inactive for modern look
+    let mut cat_spans: Vec<Span> = vec![Span::raw("  ")];
+    for (i, cat) in CATEGORIES.iter().enumerate() {
+        let style = if i == state.category_idx {
+            theme::tab_active()
+        } else {
+            theme::tab_inactive()
+        };
+        cat_spans.push(Span::styled(format!(" {cat} "), style));
+        cat_spans.push(Span::raw(" "));
+    }
     f.render_widget(Paragraph::new(Line::from(cat_spans)), chunks[0]);
 
     // Header
@@ -672,64 +673,87 @@ fn draw_list(f: &mut Frame, area: Rect, state: &mut ChannelState) {
             ),
             theme::table_header(),
         )])),
-        chunks[1],
+        chunks[2],
     );
 
     if state.loading {
-        let spinner = theme::SPINNER_FRAMES[state.tick % theme::SPINNER_FRAMES.len()];
         f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(format!("  {spinner} "), Style::default().fg(theme::CYAN)),
-                Span::styled("Loading channels\u{2026}", theme::dim_style()),
-            ])),
-            chunks[2],
+            widgets::spinner(state.tick, "Loading channels\u{2026}"),
+            chunks[3],
         );
     } else {
         let filtered = state.filtered_channels();
-        let items: Vec<ListItem> = filtered
-            .iter()
-            .map(|ch| {
-                let (badge, badge_style) = match ch.status {
-                    ChannelStatus::Ready => ("[Ready]", theme::channel_ready()),
-                    ChannelStatus::MissingEnv => ("[Missing env]", theme::channel_missing()),
-                    ChannelStatus::NotConfigured => ("[Not configured]", theme::channel_off()),
-                };
-                let env_summary: String = ch
-                    .env_vars
-                    .iter()
-                    .map(|(v, set)| {
-                        if *set {
-                            format!("\u{2714}{v}")
-                        } else {
-                            format!("\u{2718}{v}")
+        if filtered.is_empty() {
+            f.render_widget(
+                widgets::empty_state("No channels configured. Add messaging integrations here."),
+                chunks[3],
+            );
+        } else {
+            let items: Vec<ListItem> = filtered
+                .iter()
+                .map(|ch| {
+                    let (indicator, indicator_style) = match ch.status {
+                        ChannelStatus::Ready => (
+                            "\u{25cf}",
+                            Style::default()
+                                .fg(theme::GREEN)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        ChannelStatus::MissingEnv => {
+                            ("\u{25cf}", Style::default().fg(theme::YELLOW))
                         }
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                let cat_display = format!("{:<14}", ch.category);
-                ListItem::new(Line::from(vec![
-                    Span::styled(
-                        format!("  {:<18}", ch.display_name),
-                        Style::default().fg(theme::CYAN),
-                    ),
-                    Span::styled(cat_display, theme::dim_style()),
-                    Span::styled(format!(" {:<16}", badge), badge_style),
-                    Span::styled(format!(" {env_summary}"), theme::dim_style()),
-                ]))
-            })
-            .collect();
+                        ChannelStatus::NotConfigured => {
+                            ("\u{25cb}", Style::default().fg(theme::RED))
+                        }
+                    };
+                    let status_label = match ch.status {
+                        ChannelStatus::Ready => "Ready",
+                        ChannelStatus::MissingEnv => "Missing env",
+                        ChannelStatus::NotConfigured => "Not configured",
+                    };
+                    let env_summary: String = ch
+                        .env_vars
+                        .iter()
+                        .map(|(v, set)| {
+                            if *set {
+                                format!("\u{25cf} {v}")
+                            } else {
+                                format!("\u{25cb} {v}")
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join("  ");
+                    ListItem::new(Line::from(vec![
+                        Span::styled(format!("  {indicator} "), indicator_style),
+                        Span::styled(
+                            format!("{:<16}", ch.display_name),
+                            Style::default()
+                                .fg(theme::TEXT_PRIMARY)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(format!("{:<14}", ch.category), theme::dim_style()),
+                        Span::styled(
+                            format!("{:<16}", status_label),
+                            match ch.status {
+                                ChannelStatus::Ready => theme::channel_ready(),
+                                ChannelStatus::MissingEnv => theme::channel_missing(),
+                                ChannelStatus::NotConfigured => theme::channel_off(),
+                            },
+                        ),
+                        Span::styled(env_summary, theme::dim_style()),
+                    ]))
+                })
+                .collect();
 
-        let list = List::new(items)
-            .highlight_style(theme::selected_style())
-            .highlight_symbol("> ");
-        f.render_stateful_widget(list, chunks[2], &mut state.list_state);
+            let list = widgets::themed_list(items);
+            f.render_stateful_widget(list, chunks[3], &mut state.list_state);
+        }
     }
 
-    let hints = Paragraph::new(Line::from(vec![Span::styled(
-        "  [\u{2191}\u{2193}] Navigate  [Tab] Category  [Enter] Setup  [t] Test  [e/d] Enable/Disable  [r] Refresh",
-        theme::hint_style(),
-    )]));
-    f.render_widget(hints, chunks[3]);
+    f.render_widget(
+        widgets::hint_bar("  [\u{2191}\u{2193}] Navigate  [Tab] Category  [Enter] Setup  [t] Test  [e/d] Enable/Disable  [r] Refresh"),
+        chunks[4],
+    );
 }
 
 fn draw_setup(f: &mut Frame, area: Rect, state: &ChannelState) {
@@ -774,11 +798,7 @@ fn draw_setup(f: &mut Frame, area: Rect, state: &ChannelState) {
     );
 
     // Separator
-    let sep = "\u{2500}".repeat(chunks[1].width as usize);
-    f.render_widget(
-        Paragraph::new(Span::styled(sep, theme::dim_style())),
-        chunks[1],
-    );
+    f.render_widget(widgets::separator(chunks[1].width), chunks[1]);
 
     // Current field
     if env_vars.is_empty() {
@@ -847,10 +867,7 @@ fn draw_setup(f: &mut Frame, area: Rect, state: &ChannelState) {
 
     // Hints
     f.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(
-            "  [Enter] Next field / Save  [Esc] Back",
-            theme::hint_style(),
-        )])),
+        widgets::hint_bar("  [Enter] Next field / Save  [Esc] Back"),
         chunks[5],
     );
 }
@@ -885,12 +902,8 @@ fn draw_testing(f: &mut Frame, area: Rect, state: &ChannelState) {
 
     match &state.test_result {
         None => {
-            let spinner = theme::SPINNER_FRAMES[state.tick % theme::SPINNER_FRAMES.len()];
             f.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::styled(format!("  {spinner} "), Style::default().fg(theme::CYAN)),
-                    Span::styled("Checking credentials\u{2026}", theme::dim_style()),
-                ])),
+                widgets::spinner(state.tick, "Checking credentials\u{2026}"),
                 chunks[1],
             );
         }
@@ -923,11 +936,5 @@ fn draw_testing(f: &mut Frame, area: Rect, state: &ChannelState) {
         }
     }
 
-    f.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(
-            "  [Enter/Esc] Back",
-            theme::hint_style(),
-        )])),
-        chunks[2],
-    );
+    f.render_widget(widgets::hint_bar("  [Enter/Esc] Back"), chunks[2]);
 }

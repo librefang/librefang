@@ -35,14 +35,19 @@ pub const DEFAULT_CACHE_TTL_SECS: u64 = 24 * 60 * 60; // 24 hours
 /// `cache_ttl_secs` controls how long the local cache is considered fresh
 /// before triggering a re-download. Pass [`DEFAULT_CACHE_TTL_SECS`] when
 /// no user-configured value is available.
-pub fn sync_registry(home_dir: &Path, cache_ttl_secs: u64) -> bool {
+///
+/// `registry_mirror` is an optional proxy/mirror prefix for GitHub URLs.
+/// When non-empty, all GitHub URLs are prefixed with this value (e.g.
+/// `"https://ghproxy.cn"` rewrites `https://github.com/...` to
+/// `https://ghproxy.cn/https://github.com/...`).
+pub fn sync_registry(home_dir: &Path, cache_ttl_secs: u64, registry_mirror: &str) -> bool {
     let registry_cache = home_dir.join("registry");
 
     if !should_refresh(&registry_cache, cache_ttl_secs) {
         tracing::debug!("Registry cache is fresh, skipping download");
     } else {
         // Try git first (faster incremental updates, private fork support)
-        let git_ok = match git_clone_fallback(&registry_cache) {
+        let git_ok = match git_clone_fallback(&registry_cache, registry_mirror) {
             Ok(()) => true,
             Err(e) => {
                 tracing::debug!("Git sync unavailable: {e} — trying HTTP download");
@@ -52,7 +57,7 @@ pub fn sync_registry(home_dir: &Path, cache_ttl_secs: u64) -> bool {
 
         // Fall back to HTTP tarball if git failed
         if !git_ok {
-            if let Err(e) = download_and_extract(&registry_cache) {
+            if let Err(e) = download_and_extract(&registry_cache, registry_mirror) {
                 tracing::warn!("HTTP registry download also failed: {e}");
                 if !registry_cache.exists() {
                     return false;
@@ -174,11 +179,27 @@ fn touch_marker(registry_cache: &Path) {
     let _ = std::fs::write(&marker, "");
 }
 
-/// Download the tarball via HTTP and extract it into `registry_cache`.
-fn download_and_extract(registry_cache: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    tracing::info!("Downloading registry from {REGISTRY_TARBALL_URL}");
+/// Prefix a URL with the mirror/proxy base when set.
+///
+/// E.g. `apply_mirror("https://ghproxy.cn", "https://github.com/foo")` →
+///      `"https://ghproxy.cn/https://github.com/foo"`
+fn apply_mirror(mirror: &str, url: &str) -> String {
+    if mirror.is_empty() {
+        url.to_string()
+    } else {
+        format!("{}/{}", mirror.trim_end_matches('/'), url)
+    }
+}
 
-    let resp = ureq::get(REGISTRY_TARBALL_URL).call()?;
+/// Download the tarball via HTTP and extract it into `registry_cache`.
+fn download_and_extract(
+    registry_cache: &Path,
+    registry_mirror: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let url = apply_mirror(registry_mirror, REGISTRY_TARBALL_URL);
+    tracing::info!("Downloading registry from {url}");
+
+    let resp = ureq::get(&url).call()?;
     let reader = resp.into_body().into_reader();
 
     // Decompress gzip
@@ -241,7 +262,10 @@ fn download_and_extract(registry_cache: &Path) -> Result<(), Box<dyn std::error:
 
 /// Fallback: clone the registry using git (for environments where HTTP tarball
 /// download fails but git is available).
-fn git_clone_fallback(registry_cache: &Path) -> Result<(), Box<dyn std::error::Error>> {
+fn git_clone_fallback(
+    registry_cache: &Path,
+    registry_mirror: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("Attempting git clone fallback");
 
     if registry_cache.join(".git").exists() {
@@ -258,13 +282,14 @@ fn git_clone_fallback(registry_cache: &Path) -> Result<(), Box<dyn std::error::E
         if registry_cache.exists() {
             std::fs::remove_dir_all(registry_cache)?;
         }
+        let repo_url = apply_mirror(registry_mirror, REGISTRY_REPO);
         let status = Command::new("git")
             .args([
                 "clone",
                 "--depth",
                 "1",
                 "-q",
-                REGISTRY_REPO,
+                &repo_url,
                 &registry_cache.display().to_string(),
             ])
             .status()?;
@@ -301,7 +326,7 @@ pub fn resolve_home_dir_for_tests() -> std::path::PathBuf {
                 .map(|d| d.count() == 0)
                 .unwrap_or(true)
         {
-            sync_registry(&home, DEFAULT_CACHE_TTL_SECS);
+            sync_registry(&home, DEFAULT_CACHE_TTL_SECS, "");
         }
         home
     })

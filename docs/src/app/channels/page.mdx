@@ -1650,11 +1650,42 @@ The Nostr adapter connects to the configured relays via WebSocket using the NIP-
 
 ## DingTalk
 
+Supports two modes:
+- **Stream mode** (default, recommended): WebSocket long-connection via the DingTalk Stream protocol. No public IP or port required.
+- **Webhook mode** (legacy): HTTP callback server. Requires a public-facing URL.
+
 ### Prerequisites
 
-- A DingTalk (Ding Talk) custom robot with webhook access (from the [DingTalk Open Platform](https://open.dingtalk.com/document/))
+- A DingTalk application from the [DingTalk Open Platform](https://open.dingtalk.com/document/)
+- For **stream mode**: App Key and App Secret from your DingTalk application
+- For **webhook mode**: A custom robot with webhook access token and signing secret
 
-### Setup
+### Setup (Stream Mode — Recommended)
+
+1. Go to the [DingTalk Open Platform](https://open.dingtalk.com/), create an application (or use an existing one).
+2. Enable the **Robot** capability and note the **App Key** (Client ID) and **App Secret** (Client Secret).
+3. Set environment variables:
+
+```bash
+export DINGTALK_APP_KEY=your-app-key          # Environment variable
+export DINGTALK_APP_SECRET=your-app-secret
+librefang vault set DINGTALK_APP_KEY          # Encrypted vault (recommended)
+librefang vault set DINGTALK_APP_SECRET
+```
+
+4. Add to config:
+
+```toml
+[channels.dingtalk]
+receive_mode = "stream"
+app_key_env = "DINGTALK_APP_KEY"
+app_secret_env = "DINGTALK_APP_SECRET"
+default_agent = "assistant"
+```
+
+5. Restart the daemon.
+
+### Setup (Webhook Mode)
 
 1. In DingTalk, open a group chat and go to **Group Settings > Smart Group Assistant > Add Robot**.
 2. Choose **Custom Robot** and enable the **Security Setting** (sign mode recommended).
@@ -1666,14 +1697,13 @@ export DINGTALK_ACCESS_TOKEN=your-token       # Environment variable
 export DINGTALK_SECRET=your-signing-secret
 librefang vault set DINGTALK_ACCESS_TOKEN     # Encrypted vault (recommended)
 librefang vault set DINGTALK_SECRET
-librefang config set-key dingtalk             # .env file
-# Or set via dashboard "Set API Key" button   # secrets.env
 ```
 
 5. Add to config:
 
 ```toml
 [channels.dingtalk]
+receive_mode = "webhook"
 access_token_env = "DINGTALK_ACCESS_TOKEN"
 secret_env = "DINGTALK_SECRET"
 default_agent = "assistant"
@@ -1683,7 +1713,9 @@ default_agent = "assistant"
 
 ### How It Works
 
-The DingTalk adapter receives messages via webhook callbacks from the DingTalk Robot API. Each request is verified using the HMAC-SHA256 signature with the configured secret. Responses are sent back through the DingTalk webhook URL with a signed timestamp.
+In **stream mode**, the adapter registers with the DingTalk gateway API (`/v1.0/gateway/connections/open`) to obtain a WebSocket endpoint and ticket. It then maintains a persistent WebSocket connection, receiving bot message callbacks and responding with ACK frames. Heartbeat ping/pong is handled automatically.
+
+In **webhook mode**, the adapter receives messages via HTTP callback from the DingTalk Robot API. Each request is verified using HMAC-SHA256 signature with the configured secret. Responses are sent back through the DingTalk webhook URL with a signed timestamp.
 
 ---
 
@@ -1730,41 +1762,36 @@ The QQ adapter connects to the QQ Bot API via WebSocket for real-time message de
 
 ### Prerequisites
 
-- A WeCom (WeChat Work) enterprise account with a self-built application (from the [WeCom Developer Portal](https://developer.work.weixin.qq.com/document/))
+- A WeCom (WeChat Work) enterprise account with an **intelligent bot** (智能机器人) created from the [WeCom Admin Console](https://work.weixin.qq.com/)
 
 ### Setup
 
-1. In the WeCom admin console, go to **App Management > Self-Built Apps** and create a new application.
-2. Note the Corp ID, Agent ID, and Secret.
-3. Configure the receiving message API callback URL in the app settings.
-4. Set environment variables:
+1. In the WeCom admin console, go to **Apps > Create App** and select **Intelligent Bot** (智能机器人).
+2. Note the **Bot ID** and **Secret** from the bot settings page.
+3. Set the secret environment variable:
 
 ```bash
-export WECOM_CORP_ID=your-corp-id             # Environment variable
-export WECOM_AGENT_ID=your-agent-id
-export WECOM_SECRET=your-app-secret
-librefang vault set WECOM_CORP_ID             # Encrypted vault (recommended)
-librefang vault set WECOM_AGENT_ID
-librefang vault set WECOM_SECRET
+export WECOM_BOT_SECRET=your-bot-secret       # Environment variable
+librefang vault set WECOM_BOT_SECRET          # Encrypted vault (recommended)
 librefang config set-key wecom                # .env file
 # Or set via dashboard "Set API Key" button   # secrets.env
 ```
 
-5. Add to config:
+4. Add to config:
 
 ```toml
 [channels.wecom]
-corp_id_env = "WECOM_CORP_ID"
-agent_id_env = "WECOM_AGENT_ID"
-secret_env = "WECOM_SECRET"
-default_agent = "assistant"
+bot_id = "YOUR_BOT_ID"
+secret_env = "WECOM_BOT_SECRET"
+# account_id = "my-bot"          # Optional: unique ID for multi-bot routing
+# default_agent = "assistant"    # Optional: route messages to specific agent
 ```
 
-6. Restart the daemon.
+5. Restart the daemon.
 
 ### How It Works
 
-The WeCom adapter uses the WeCom Enterprise API webhook protocol to receive message callbacks. It obtains an access token using the corp credentials and sends responses via the WeCom message sending API. Message payloads are encrypted and decrypted using the configured encoding AES key.
+The WeCom adapter connects to `wss://openws.work.weixin.qq.com` via a persistent WebSocket. It authenticates using the Bot ID and a signed token, then subscribes to incoming messages via `aibot_subscribe`. User messages arrive as `aibot_msg_callback` JSON frames and replies are sent back as `aibot_send_msg` frames. No public HTTP endpoint or AES encryption is required.
 
 ---
 

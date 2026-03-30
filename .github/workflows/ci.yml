@@ -9,10 +9,11 @@ on:
 permissions:
   contents: read
 
-# Prevent multiple CI runs from competing for runner resources
+# On PRs: only one run per branch, cancel stale runs.
+# On main: each push gets its own group (by SHA) so parallel runs never interfere.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.ref == 'refs/heads/main' && format('{0}-{1}', github.workflow, github.sha) || format('{0}-{1}', github.workflow, github.ref) }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -33,7 +34,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      - uses: dorny/paths-filter@v3
+      - uses: dorny/paths-filter@v4
         id: filter
         with:
           filters: |
@@ -226,6 +227,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -246,19 +248,17 @@ jobs:
             librsvg2-dev \
             patchelf
       - name: Build tests (throttled to reduce peak memory)
-        run: cargo nextest run --workspace --no-run -j 2
-      - name: Run affected crate tests
+        run: cargo test --workspace --no-run -j 2
+      - name: Run tests per crate
         env:
           RUST_TEST_THREADS: "2"
         run: |
           CRATES="${{ needs.changes.outputs.crates }}"
           if [ -z "$CRATES" ]; then
-            echo "No affected crates detected, running all"
-            cargo nextest run --workspace --no-fail-fast
-          else
-            for crate in $CRATES; do
-              echo "::group::Testing $crate"
-              cargo nextest run -p "$crate" --no-fail-fast && echo "✓ $crate" || exit 1
-              echo "::endgroup::"
-            done
+            CRATES="librefang-types librefang-wire librefang-telemetry librefang-memory librefang-channels librefang-skills librefang-hands librefang-extensions librefang-kernel librefang-api librefang-runtime librefang-migrate librefang-testing librefang-cli librefang-desktop xtask"
           fi
+          for crate in $CRATES; do
+            echo "::group::Testing $crate"
+            cargo test -p "$crate" && echo "✓ $crate" || exit 1
+            echo "::endgroup::"
+          done

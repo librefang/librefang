@@ -39,6 +39,14 @@ pub struct ChannelUser {
     pub librefang_user: Option<String>,
 }
 
+/// Typing indicator event from a channel.
+#[derive(Debug, Clone)]
+pub struct TypingEvent {
+    pub channel: ChannelType,
+    pub sender: ChannelUser,
+    pub is_typing: bool,
+}
+
 /// A single interactive button in a message.
 ///
 /// Platform-agnostic representation used by Telegram inline keyboards,
@@ -383,6 +391,11 @@ pub trait ChannelAdapter: Send + Sync {
     /// Get the current health status of this adapter (optional — default returns disconnected).
     fn status(&self) -> ChannelStatus {
         ChannelStatus::default()
+    }
+
+    /// Get a stream of typing indicator events (optional — default returns None).
+    fn typing_events(&self) -> Option<mpsc::Receiver<TypingEvent>> {
+        None
     }
 
     /// Send a response as a thread reply (optional — default falls back to `send()`).

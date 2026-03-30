@@ -5,7 +5,7 @@ import rehypeKatex from "rehype-katex";
 import remarkMath from "remark-math";
 import { useTranslation } from "react-i18next";
 import { useNavigate, useSearch } from "@tanstack/react-router";
-import { listAgents, sendAgentMessage, loadAgentSession, listPendingApprovals, resolveApproval } from "../api";
+import { buildAuthenticatedWebSocketUrl, listAgents, sendAgentMessage, loadAgentSession, listPendingApprovals, resolveApproval } from "../api";
 import type { ApprovalItem } from "../api";
 import { normalizeToolOutput } from "../lib/chat";
 import { MessageCircle, Send, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, Zap, ShieldAlert, CheckCircle, XCircle } from "lucide-react";
@@ -55,9 +55,7 @@ function useWebSocket(agentId: string | null) {
       return;
     }
 
-    const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const host = window.location.host;
-    const url = `${proto}//${host}/api/agents/${encodeURIComponent(agentId)}/ws`;
+    const url = buildAuthenticatedWebSocketUrl(`/api/agents/${encodeURIComponent(agentId)}/ws`);
 
     function connect() {
       try {
@@ -709,7 +707,7 @@ export function ChatPage() {
   }, [navigate]);
 
   const agentsQuery = useQuery({ queryKey: ["agents", "list", "chat"], queryFn: listAgents, staleTime: 30000 });
-  const agents = useMemo(() => [...(agentsQuery.data ?? [])].filter(a => !a.name.includes("-hand") && !a.name.includes(":")).sort((a, b) => {
+  const agents = useMemo(() => [...(agentsQuery.data ?? [])].filter(a => !a.name.endsWith("-hand")).sort((a, b) => {
     // Auth missing → sort to bottom
     const aNoAuth = isAuthUnavailable(a.auth_status) ? 1 : 0;
     const bNoAuth = isAuthUnavailable(b.auth_status) ? 1 : 0;

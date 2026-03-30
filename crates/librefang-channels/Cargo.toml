@@ -31,6 +31,7 @@ default = [
     "channel-reddit",
     "channel-revolt",
     "channel-viber",
+    "channel-voice",
     "channel-flock",
     "channel-guilded",
     "channel-keybase",
@@ -77,6 +78,7 @@ all-channels = [
     "channel-reddit",
     "channel-revolt",
     "channel-viber",
+    "channel-voice",
     "channel-flock",
     "channel-guilded",
     "channel-keybase",
@@ -124,6 +126,7 @@ channel-messenger = []
 channel-reddit = []
 channel-revolt = []
 channel-viber = []
+channel-voice = []
 channel-flock = []
 channel-guilded = []
 channel-keybase = []
@@ -142,7 +145,7 @@ channel-mumble = []
 channel-ntfy = []
 channel-qq = []
 channel-wechat = []
-channel-wecom = ["dep:roxmltree", "dep:aes", "dep:cbc"]
+channel-wecom = ["dep:aes", "dep:cbc", "dep:roxmltree"]
 channel-mqtt = ["dep:rumqttc"]
 
 [dependencies]

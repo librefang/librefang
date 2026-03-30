@@ -51,7 +51,17 @@ const TOOL_TIMEOUT_SECS: u64 = 120;
 const MAX_CONTINUATIONS: u32 = 5;
 
 /// Maximum message history size before auto-trimming to prevent context overflow.
-const MAX_HISTORY_MESSAGES: usize = 20;
+/// With tool calls each user turn can consume 4-6 messages, so 40 gives roughly
+/// 7-10 real conversation turns instead of the previous 3-5.
+const MAX_HISTORY_MESSAGES: usize = 40;
+
+/// Check if a response is a NO_REPLY.  Matches:
+/// - Exact `"NO_REPLY"` (original behaviour)
+/// - Text ending with `NO_REPLY` on its own line (model sometimes adds context before it)
+fn is_no_reply(text: &str) -> bool {
+    let t = text.trim();
+    t == "NO_REPLY" || t.ends_with("\nNO_REPLY") || t.ends_with("\n\nNO_REPLY")
+}
 
 /// Safely trim message history to `MAX_HISTORY_MESSAGES`, cutting at
 /// conversation-turn boundaries so ToolUse/ToolResult pairs are never split.
@@ -884,7 +894,7 @@ pub async fn run_agent_loop(
                 let text = cleaned_text;
 
                 // NO_REPLY: agent intentionally chose not to reply
-                if text.trim() == "NO_REPLY" || parsed_directives.silent {
+                if is_no_reply(&text) || parsed_directives.silent {
                     debug!(agent = %manifest.name, "Agent chose NO_REPLY/silent — silent completion");
                     session
                         .messages
@@ -2366,7 +2376,7 @@ pub async fn run_agent_loop_streaming(
                 let text = cleaned_text_s;
 
                 // NO_REPLY: agent intentionally chose not to reply
-                if text.trim() == "NO_REPLY" || parsed_directives_s.silent {
+                if is_no_reply(&text) || parsed_directives_s.silent {
                     debug!(agent = %manifest.name, "Agent chose NO_REPLY/silent (streaming) — silent completion");
                     session
                         .messages
@@ -3895,7 +3905,7 @@ mod tests {
 
     #[test]
     fn test_max_history_messages() {
-        assert_eq!(MAX_HISTORY_MESSAGES, 20);
+        assert_eq!(MAX_HISTORY_MESSAGES, 40);
     }
 
     #[test]
@@ -4444,7 +4454,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_max_history_messages_constant() {
-        assert_eq!(MAX_HISTORY_MESSAGES, 20);
+        assert_eq!(MAX_HISTORY_MESSAGES, 40);
     }
 
     #[tokio::test]

@@ -3,7 +3,9 @@
 //! Supports config includes: the `include` field specifies additional TOML files
 //! to load and deep-merge before the root config (root overrides includes).
 
-use librefang_types::config::KernelConfig;
+use librefang_types::config::{
+    default_config_version, run_migrations, KernelConfig, CONFIG_VERSION,
+};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use tracing::info;
@@ -50,32 +52,42 @@ pub fn load_config(path: Option<&Path>) -> KernelConfig {
                         tbl.remove("include");
                     }
 
-                    // Migrate misplaced api_key/api_listen from [api] section to root level.
-                    // The old config schema incorrectly grouped these under [api], so many
-                    // users have them in the wrong place. Move them up if not already at root.
-                    if let toml::Value::Table(ref mut tbl) = root_value {
-                        if let Some(toml::Value::Table(api_section)) = tbl.get("api").cloned() {
-                            for key in &["api_key", "api_listen", "log_level"] {
-                                if !tbl.contains_key(*key) {
-                                    if let Some(val) = api_section.get(*key) {
-                                        tracing::info!(
-                                            key,
-                                            "Migrating misplaced config field from [api] to root level"
-                                        );
-                                        tbl.insert(key.to_string(), val.clone());
-                                    }
-                                }
+                    // --- Versioned config migration ---
+                    // Keep a clone of the pre-migration value for best-effort fallback.
+                    let original_value = root_value.clone();
+
+                    let file_version = root_value
+                        .as_table()
+                        .and_then(|t| t.get("config_version"))
+                        .and_then(|v| v.as_integer())
+                        .map(|v| v as u32)
+                        .unwrap_or_else(default_config_version);
+
+                    let mut migrated = file_version >= CONFIG_VERSION;
+                    if file_version < CONFIG_VERSION {
+                        match run_migrations(&mut root_value, file_version) {
+                            Ok(_) => {
+                                info!(
+                                    from = file_version,
+                                    to = CONFIG_VERSION,
+                                    "Config migrated successfully"
+                                );
+                                migrated = true;
                             }
-                            // Remove the legacy [api] section after migration so that
-                            // unknown-field detection does not flag it.
-                            tbl.remove("api");
+                            Err(e) => {
+                                tracing::error!(
+                                    error = %e,
+                                    from = file_version,
+                                    to = CONFIG_VERSION,
+                                    "Config migration failed, attempting best-effort load of original config"
+                                );
+                                // Fall back to original value
+                                root_value = original_value.clone();
+                            }
                         }
                     }
 
                     // Detect unknown top-level fields before deserialization.
-                    // Re-insert "include" temporarily into the known set is not
-                    // needed because it was already removed above and is in the
-                    // known_top_level_fields list.
                     let unknown_fields = KernelConfig::detect_unknown_fields(&root_value);
 
                     // Check if strict_config is set in the raw TOML (before
@@ -106,6 +118,32 @@ pub fn load_config(path: Option<&Path>) -> KernelConfig {
 
                     match root_value.try_into::<KernelConfig>() {
                         Ok(config) => {
+                            // Write migrated config back to disk so future loads skip migration
+                            if migrated && file_version < CONFIG_VERSION {
+                                let toml_str = toml::to_string_pretty(&config);
+                                match toml_str {
+                                    Ok(s) => {
+                                        if let Err(e) = std::fs::write(&config_path, &s) {
+                                            tracing::warn!(
+                                                error = %e,
+                                                path = %config_path.display(),
+                                                "Failed to write migrated config back to disk"
+                                            );
+                                        } else {
+                                            info!(
+                                                path = %config_path.display(),
+                                                "Wrote migrated config to disk"
+                                            );
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            error = %e,
+                                            "Failed to serialize migrated config"
+                                        );
+                                    }
+                                }
+                            }
                             info!(path = %config_path.display(), "Loaded configuration");
                             return config;
                         }
@@ -558,5 +596,55 @@ mod tests {
         let config = load_config(Some(&root));
         assert_eq!(config.log_level, "error");
         assert!(!config.strict_config);
+    }
+
+    #[test]
+    fn test_load_config_migrates_v1_api_section() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("config.toml");
+
+        // v1 config with [api] section (no config_version field)
+        let mut f = std::fs::File::create(&root).unwrap();
+        writeln!(f, "[api]").unwrap();
+        writeln!(f, "api_key = \"my-secret\"").unwrap();
+        writeln!(f, "api_listen = \"0.0.0.0:9999\"").unwrap();
+        drop(f);
+
+        let config = load_config(Some(&root));
+        assert_eq!(config.api_key, "my-secret");
+        assert_eq!(config.api_listen, "0.0.0.0:9999");
+        assert_eq!(config.config_version, CONFIG_VERSION);
+
+        // Verify the migrated file was written back
+        let contents = std::fs::read_to_string(&root).unwrap();
+        assert!(
+            contents.contains("config_version"),
+            "migrated file should contain config_version"
+        );
+        assert!(
+            !contents.contains("[api]"),
+            "migrated file should not contain [api] section"
+        );
+    }
+
+    #[test]
+    fn test_load_config_v2_skips_migration() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("config.toml");
+
+        let mut f = std::fs::File::create(&root).unwrap();
+        writeln!(f, "config_version = 2").unwrap();
+        writeln!(f, "log_level = \"debug\"").unwrap();
+        drop(f);
+
+        let config = load_config(Some(&root));
+        assert_eq!(config.log_level, "debug");
+        assert_eq!(config.config_version, 2);
+    }
+
+    #[test]
+    fn test_load_config_default_has_current_version() {
+        let config = KernelConfig::default();
+        assert_eq!(config.config_version, CONFIG_VERSION);
     }
 }

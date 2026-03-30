@@ -881,7 +881,7 @@
     "connectionFailed": "Connection failed",
     "copilotAuthenticated": "GitHub Copilot authenticated successfully!",
     "customModelIdPlaceholder": "e.g. my-org/my-model",
-    "customModelProviderPlaceholder": "openrouter",
+    "customModelProviderPlaceholder": "e.g. openai, groq, anthropic",
     "deleteCustomModelConfirm": "Delete custom model \"{model}\"?",
     "deleteFailed": "Failed to delete: {message}",
     "deviceCodeExpired": "Device code expired. Please try again.",

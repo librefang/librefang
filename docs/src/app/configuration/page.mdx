@@ -324,10 +324,8 @@ allowed_channels = []
 # app_secret_env = "QQ_BOT_APP_SECRET"
 
 # [channels.wecom]
-# corp_id = "your-corp-id"
-# agent_id = "your-agent-id"
-# secret_env = "WECOM_SECRET"
-# webhook_port = 8454
+# bot_id = "YOUR_BOT_ID"
+# secret_env = "WECOM_BOT_SECRET"
 
 # [channels.wechat]
 # bot_token_env = "WECHAT_BOT_TOKEN"   # optional: skip QR login on restart
@@ -1305,8 +1303,18 @@ channel = ""
 
 #### `[channels.dingtalk]`
 
+Supports two modes: **stream** (default, recommended) and **webhook** (legacy).
+
 ```toml
+# Stream mode (recommended — no public IP needed)
 [channels.dingtalk]
+receive_mode = "stream"
+app_key_env = "DINGTALK_APP_KEY"
+app_secret_env = "DINGTALK_APP_SECRET"
+
+# Webhook mode (legacy)
+[channels.dingtalk]
+receive_mode = "webhook"
 access_token_env = "DINGTALK_ACCESS_TOKEN"
 secret_env = "DINGTALK_SECRET"
 webhook_port = 8457
@@ -1314,9 +1322,13 @@ webhook_port = 8457
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `access_token_env` | string | `"DINGTALK_ACCESS_TOKEN"` | Env var holding the DingTalk webhook access token. |
-| `secret_env` | string | `"DINGTALK_SECRET"` | Env var holding the DingTalk signing secret. |
-| `webhook_port` | u16 | `8457` | Port for the incoming webhook. |
+| `receive_mode` | string | `"stream"` | Connection mode: `"stream"` or `"webhook"`. |
+| `app_key_env` | string | `"DINGTALK_APP_KEY"` | Env var holding the DingTalk App Key (stream mode). |
+| `app_secret_env` | string | `"DINGTALK_APP_SECRET"` | Env var holding the DingTalk App Secret (stream mode). |
+| `access_token_env` | string | `"DINGTALK_ACCESS_TOKEN"` | Env var holding the DingTalk webhook access token (webhook mode). |
+| `secret_env` | string | `"DINGTALK_SECRET"` | Env var holding the DingTalk signing secret (webhook mode). |
+| `webhook_port` | u16 | `8457` | Port for the incoming webhook (webhook mode only). |
+| `robot_code` | string or null | `null` | Robot code for stream mode replies (defaults to app_key). |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
 
 #### `[channels.discourse]`
@@ -1437,30 +1449,22 @@ allowed_users = []
 
 #### `[channels.wecom]`
 
-WeCom (formerly WeChat Work / Enterprise WeChat) channel adapter.
+WeCom (formerly WeChat Work / Enterprise WeChat) intelligent bot adapter. Connects via WebSocket to `wss://openws.work.weixin.qq.com`.
 
 ```toml
 [channels.wecom]
-corp_id = "your-corp-id"
-agent_id = "your-agent-id"
-secret_env = "WECOM_SECRET"
-webhook_port = 8454
-# token_env = "WECOM_TOKEN"
-# encoding_aes_key_env = "WECOM_AES_KEY"
-# default_agent = "assistant"
+bot_id = "YOUR_BOT_ID"
+secret_env = "WECOM_BOT_SECRET"
 # account_id = "my-wecom-bot"
+# default_agent = "assistant"
 ```
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `corp_id` | string | `""` | WeCom corporation ID. |
-| `agent_id` | string | `""` | WeCom application agent ID. |
-| `secret_env` | string | `"WECOM_SECRET"` | Env var holding the WeCom application secret. |
-| `webhook_port` | u16 | `8454` | Port for the incoming webhook. |
-| `token_env` | string or null | `null` | Env var holding the callback verification token. Required for verifying incoming messages. |
-| `encoding_aes_key_env` | string or null | `null` | Env var holding the encoding AES key for message encryption/decryption. |
-| `default_agent` | string or null | `null` | Agent name to route messages to. |
+| `bot_id` | string | `""` | Bot ID from the WeCom admin console (intelligent bot). |
+| `secret_env` | string | `"WECOM_BOT_SECRET"` | Env var holding the bot secret. |
 | `account_id` | string or null | `null` | Unique bot instance identifier for multi-bot routing. |
+| `default_agent` | string or null | `null` | Agent name to route messages to. |
 | `overrides` | object | (defaults) | Per-channel behavior overrides. See [Channel Overrides](#channel-overrides). |
 
 #### `[channels.wechat]`
@@ -2691,8 +2695,10 @@ Complete table of all environment variables referenced by the configuration. Non
 | `FLOCK_BOT_TOKEN` | Flock | Flock bot token. |
 | `TWIST_TOKEN` | Twist | Twist API token. |
 | `MUMBLE_PASSWORD` | Mumble | Mumble server password. |
-| `DINGTALK_ACCESS_TOKEN` | DingTalk | DingTalk webhook access token. |
-| `DINGTALK_SECRET` | DingTalk | DingTalk signing secret. |
+| `DINGTALK_APP_KEY` | DingTalk | DingTalk App Key / Client ID (stream mode). |
+| `DINGTALK_APP_SECRET` | DingTalk | DingTalk App Secret / Client Secret (stream mode). |
+| `DINGTALK_ACCESS_TOKEN` | DingTalk | DingTalk webhook access token (webhook mode). |
+| `DINGTALK_SECRET` | DingTalk | DingTalk signing secret (webhook mode). |
 | `DISCOURSE_API_KEY` | Discourse | Discourse API key. |
 | `GITTER_TOKEN` | Gitter | Gitter auth token. |
 | `NTFY_TOKEN` | ntfy | ntfy auth token (optional for public topics). |
@@ -2744,7 +2750,7 @@ For every **enabled channel** (i.e., its config section is present in the TOML),
 | Flock | `bot_token_env` |
 | Twist | `token_env` |
 | Mumble | `password_env` |
-| DingTalk | `access_token_env` |
+| DingTalk | `app_key_env` (stream) or `access_token_env` (webhook) |
 | Discourse | `api_key_env` |
 | Gitter | `token_env` |
 | ntfy | `token_env` (only if `token_env` is non-empty; public topics are OK without auth) |
