@@ -106,7 +106,11 @@ impl Default for SessionConfig {
 }
 
 /// Shared state for the WebSocket handler.
+///
+/// TTS fields are populated at construction time for use in the response path
+/// (agent reply -> synthesize_speech -> WebSocket binary frame).
 #[derive(Clone)]
+#[allow(dead_code)]
 struct VoiceState {
     /// Channel for forwarding transcribed messages into the bridge.
     msg_tx: Arc<mpsc::Sender<ChannelMessage>>,
@@ -295,6 +299,7 @@ async fn transcribe_audio(
 ///
 /// Sends text to an OpenAI-compatible `/v1/audio/speech` endpoint.
 /// Returns raw audio bytes (PCM or Opus depending on configuration).
+#[allow(dead_code)]
 async fn synthesize_speech(
     client: &reqwest::Client,
     tts_url: &str,
