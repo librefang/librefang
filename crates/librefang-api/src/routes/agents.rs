@@ -4464,12 +4464,14 @@ mod tests {
             model: "gpt-4.1".to_string(),
             api_key_env: "OPENAI_API_KEY".to_string(),
             base_url: None,
+            message_timeout_secs: 300,
         };
         let override_dm = librefang_types::config::DefaultModelConfig {
             provider: "deepseek".to_string(),
             model: "deepseek-chat".to_string(),
             api_key_env: "DEEPSEEK_API_KEY".to_string(),
             base_url: None,
+            message_timeout_secs: 300,
         };
 
         let effective = effective_default_model(&base, Some(&override_dm));
@@ -4486,6 +4488,7 @@ mod tests {
             model: "gpt-4.1".to_string(),
             api_key_env: "OPENAI_API_KEY".to_string(),
             base_url: None,
+            message_timeout_secs: 300,
         };
 
         let effective = effective_default_model(&base, None);

@@ -80,6 +80,7 @@ async fn start_test_server_with_provider(
             model: model.to_string(),
             api_key_env: api_key_env.to_string(),
             base_url: None,
+            message_timeout_secs: 300,
         },
         ..KernelConfig::default()
     };
@@ -207,6 +208,7 @@ async fn start_full_router(api_key: &str) -> FullRouterHarness {
             model: "test-model".to_string(),
             api_key_env: "OLLAMA_API_KEY".to_string(),
             base_url: None,
+            message_timeout_secs: 300,
         },
         ..KernelConfig::default()
     };
@@ -1350,6 +1352,7 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
             model: "test-model".to_string(),
             api_key_env: "OLLAMA_API_KEY".to_string(),
             base_url: None,
+            message_timeout_secs: 300,
         },
         ..KernelConfig::default()
     };

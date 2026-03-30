@@ -115,6 +115,7 @@ fn test_config(tmp: &tempfile::TempDir) -> KernelConfig {
             model: "test".to_string(),
             api_key_env: "OLLAMA_API_KEY".to_string(),
             base_url: None,
+            message_timeout_secs: 300,
         },
         ..KernelConfig::default()
     }

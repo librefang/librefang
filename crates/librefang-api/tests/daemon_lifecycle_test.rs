@@ -98,6 +98,7 @@ async fn test_full_daemon_lifecycle() {
             model: "test".to_string(),
             api_key_env: "OLLAMA_API_KEY".to_string(),
             base_url: None,
+            message_timeout_secs: 300,
         },
         ..KernelConfig::default()
     };
@@ -233,6 +234,7 @@ async fn test_server_immediate_responsiveness() {
             model: "test".to_string(),
             api_key_env: "OLLAMA_API_KEY".to_string(),
             base_url: None,
+            message_timeout_secs: 300,
         },
         ..KernelConfig::default()
     };
