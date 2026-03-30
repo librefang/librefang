@@ -21,7 +21,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY xtask ./xtask
-COPY agents ./agents
 COPY packages ./packages
 COPY --from=dashboard-builder /build/static/react ./crates/librefang-api/static/react
 
@@ -40,7 +39,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     npm \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /usr/local/bin/librefang /usr/local/bin/
-COPY --from=builder /build/agents /opt/librefang/agents
 COPY --from=builder /build/packages /opt/librefang/packages
 COPY deploy/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
