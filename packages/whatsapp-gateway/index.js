@@ -875,8 +875,20 @@ async function startConnection() {
       const isOwner = OWNER_JIDS.size > 0 && (OWNER_JIDS.has(sender) || (senderPnJid && OWNER_JIDS.has(senderPnJid)));
       const isStranger = !isGroup && OWNER_JIDS.size > 0 && !isOwner;
 
-      // Rate limiting for strangers
-      if (isStranger && isRateLimited(sender)) {
+      // Detect @mention: check if our JID is in the mentionedJid list
+      let wasMentioned = false;
+      if (isGroup && ownJid) {
+        const mentionedJids = innerMsg.extendedTextMessage?.contextInfo?.mentionedJid
+          || innerMsg.imageMessage?.contextInfo?.mentionedJid
+          || innerMsg.videoMessage?.contextInfo?.mentionedJid
+          || [];
+        // ownJid is normalized like "1234567890@s.whatsapp.net"
+        const ownNumber = ownJid.replace(/@.*$/, '');
+        wasMentioned = mentionedJids.some(jid => jid.replace(/@.*$/, '') === ownNumber);
+      }
+
+      // Rate limiting for strangers and group messages
+      if ((isStranger || isGroup) && isRateLimited(sender)) {
         console.log(`[gateway] Rate limited: ${pushName} (${phone}) — dropping message`);
         continue;
       }
@@ -987,6 +999,9 @@ async function startConnection() {
       });
       dbUpdateLastSeen(sender, msgTimestamp);
 
+      // Send read receipt (blue ticks) immediately
+      await sock.readMessages([msg.key]);
+
       // Forward to LibreFang agent
       try {
         // Track stranger messages
@@ -999,7 +1014,8 @@ async function startConnection() {
         let systemPrefix = '';
 
         if (isGroup) {
-          messageToSend = messageText;
+          // Include sender identity so the LLM knows who is talking in the group
+          messageToSend = `[Group message from ${pushName || phone}]\n${messageText}`;
         } else if (isStranger) {
           const strangerContext = buildStrangerContext(pushName, phone, sender);
           messageToSend = strangerContext + messageText;
@@ -1011,7 +1027,7 @@ async function startConnection() {
           messageToSend = messageText;
         }
 
-        const response = await forwardToLibreFang(messageToSend, systemPrefix, phone, pushName, isOwner, attachments);
+        const response = await forwardToLibreFang(messageToSend, systemPrefix, phone, pushName, isOwner, attachments, { isGroup, wasMentioned });
 
         if (response && sock) {
           if (isStranger) {
@@ -1418,7 +1434,7 @@ function buildRelaySystemInstruction() {
 // ---------------------------------------------------------------------------
 const MAX_FORWARD_RETRIES = 1;
 
-async function forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, attachments, retryCount = 0) {
+async function forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, attachments, { isGroup = false, wasMentioned = false } = {}, retryCount = 0) {
   // Resolve agent UUID if not cached (or if invalidated on reconnect)
   if (!cachedAgentId) {
     try {
@@ -1436,6 +1452,8 @@ async function forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, 
     channel_type: 'whatsapp',
     sender_id: phone,
     sender_name: pushName,
+    is_group: isGroup,
+    was_mentioned: wasMentioned,
   };
 
   // Include attachments if present
@@ -1470,7 +1488,7 @@ async function forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, 
               console.log('[gateway] Agent UUID stale (404), re-resolving...');
               cachedAgentId = null;
               resolveAgentId()
-                .then(() => forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, attachments, retryCount + 1))
+                .then(() => forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, attachments, { isGroup, wasMentioned }, retryCount + 1))
                 .then(resolve)
                 .catch(reject);
               return;
@@ -1532,15 +1550,16 @@ async function runCatchUpSweep() {
       const isOwner = OWNER_JIDS.size > 0 && (OWNER_JIDS.has(msg.jid) || (senderPnJid && OWNER_JIDS.has(senderPnJid)));
 
       // Simple re-forward: send the stored text to the agent without full context rebuild
+      const isCatchupGroup = msg.jid && msg.jid.endsWith('@g.us');
       const prefix = isOwner ? '' : `[CATCHUP_REDELIVERY from ${msg.push_name || msg.phone || msg.jid}]\n`;
-      const response = await forwardToLibreFang(prefix + (msg.text || ''), '', msg.phone || '', msg.push_name || '', isOwner, []);
+      const response = await forwardToLibreFang(prefix + (msg.text || ''), '', msg.phone || '', msg.push_name || '', isOwner, [], { isGroup: isCatchupGroup, wasMentioned: false });
 
       // Mark as processed
       dbMarkProcessed(msg.id, 1);
       console.log(`[gateway][catchup] Re-forwarded message ${msg.id} from ${msg.push_name || msg.jid}`);
 
-      // If there's a response and it's a stranger, try to send it back
-      if (response && !isOwner && msg.jid && !msg.jid.endsWith('@g.us')) {
+      // If there's a response, try to send it back (strangers and groups)
+      if (response && !isOwner && msg.jid) {
         try {
           const formatted = markdownToWhatsApp(response);
           await sock.sendMessage(msg.jid, { text: formatted });
@@ -1584,8 +1603,9 @@ async function sendMessage(to, text) {
     throw new Error('WhatsApp not connected');
   }
 
-  // Normalize phone → JID: "+1234567890" → "1234567890@s.whatsapp.net"
-  const jid = to.replace(/^\+/, '').replace(/@.*$/, '') + '@s.whatsapp.net';
+  // Preserve group JIDs (@g.us) as-is; normalize phone → JID for individuals
+  const jid = to.includes('@g.us') ? to
+    : to.replace(/^\+/, '').replace(/@.*$/, '') + '@s.whatsapp.net';
 
   const formatted = markdownToWhatsApp(text);
   const sent = await sock.sendMessage(jid, { text: formatted });
@@ -1609,7 +1629,9 @@ async function sendImage(to, imageUrl, caption) {
     throw new Error('WhatsApp not connected');
   }
 
-  const jid = to.replace(/^\+/, '').replace(/@.*$/, '') + '@s.whatsapp.net';
+  // Preserve group JIDs (@g.us) as-is; normalize phone → JID for individuals
+  const jid = to.includes('@g.us') ? to
+    : to.replace(/^\+/, '').replace(/@.*$/, '') + '@s.whatsapp.net';
 
   // Fetch image into buffer (Baileys needs buffer or local file)
   const buffer = await new Promise((resolve, reject) => {

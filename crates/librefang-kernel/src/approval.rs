@@ -5,6 +5,7 @@ use dashmap::DashMap;
 use librefang_types::approval::{
     ApprovalDecision, ApprovalPolicy, ApprovalRequest, ApprovalResponse, RiskLevel,
 };
+use librefang_types::capability::glob_matches;
 use std::collections::VecDeque;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
@@ -44,9 +45,15 @@ impl ApprovalManager {
     }
 
     /// Check if a tool requires approval based on current policy.
+    ///
+    /// Entries in the `require_approval` list support wildcard patterns
+    /// (e.g. `"file_*"` matches `"file_read"`, `"file_write"`, etc.).
     pub fn requires_approval(&self, tool_name: &str) -> bool {
         let policy = self.policy.read().unwrap_or_else(|e| e.into_inner());
-        policy.require_approval.iter().any(|t| t == tool_name)
+        policy
+            .require_approval
+            .iter()
+            .any(|pattern| glob_matches(pattern, tool_name))
     }
 
     /// Check whether a tool is hard-denied in the current sender/channel context.
@@ -120,7 +127,10 @@ impl ApprovalManager {
         }
 
         // Fall back to default require_approval list.
-        policy.require_approval.iter().any(|t| t == tool_name)
+        policy
+            .require_approval
+            .iter()
+            .any(|pattern| glob_matches(pattern, tool_name))
     }
 
     /// Submit an approval request. Returns a future that resolves when approved/denied/timed out.
@@ -691,5 +701,77 @@ mod tests {
         // No sender/channel context: behaves like requires_approval()
         assert!(mgr.requires_approval_with_context("shell_exec", None, None));
         assert!(!mgr.requires_approval_with_context("file_read", None, None));
+    }
+
+    // -----------------------------------------------------------------------
+    // Wildcard support in require_approval
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_requires_approval_wildcard_prefix() {
+        let policy = ApprovalPolicy {
+            require_approval: vec!["file_*".to_string()],
+            ..Default::default()
+        };
+        let mgr = ApprovalManager::new(policy);
+
+        assert!(mgr.requires_approval("file_read"));
+        assert!(mgr.requires_approval("file_write"));
+        assert!(mgr.requires_approval("file_delete"));
+        assert!(!mgr.requires_approval("shell_exec"));
+        assert!(!mgr.requires_approval("web_fetch"));
+    }
+
+    #[test]
+    fn test_requires_approval_wildcard_star_all() {
+        let policy = ApprovalPolicy {
+            require_approval: vec!["*".to_string()],
+            ..Default::default()
+        };
+        let mgr = ApprovalManager::new(policy);
+
+        assert!(mgr.requires_approval("file_read"));
+        assert!(mgr.requires_approval("shell_exec"));
+        assert!(mgr.requires_approval("anything"));
+    }
+
+    #[test]
+    fn test_requires_approval_wildcard_suffix() {
+        let policy = ApprovalPolicy {
+            require_approval: vec!["*_exec".to_string()],
+            ..Default::default()
+        };
+        let mgr = ApprovalManager::new(policy);
+
+        assert!(mgr.requires_approval("shell_exec"));
+        assert!(!mgr.requires_approval("shell_read"));
+        assert!(!mgr.requires_approval("file_write"));
+    }
+
+    #[test]
+    fn test_requires_approval_with_context_wildcard() {
+        let policy = ApprovalPolicy {
+            require_approval: vec!["file_*".to_string()],
+            ..Default::default()
+        };
+        let mgr = ApprovalManager::new(policy);
+
+        assert!(mgr.requires_approval_with_context("file_write", None, None));
+        assert!(mgr.requires_approval_with_context("file_delete", None, None));
+        assert!(!mgr.requires_approval_with_context("shell_exec", None, None));
+    }
+
+    #[test]
+    fn test_requires_approval_mixed_wildcard_and_exact() {
+        let policy = ApprovalPolicy {
+            require_approval: vec!["shell_exec".to_string(), "file_*".to_string()],
+            ..Default::default()
+        };
+        let mgr = ApprovalManager::new(policy);
+
+        assert!(mgr.requires_approval("shell_exec"));
+        assert!(mgr.requires_approval("file_read"));
+        assert!(mgr.requires_approval("file_write"));
+        assert!(!mgr.requires_approval("web_fetch"));
     }
 }

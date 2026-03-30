@@ -89,6 +89,9 @@ pub enum McpTransportTemplate {
     Sse {
         url: String,
     },
+    Http {
+        url: String,
+    },
 }
 
 /// An environment variable required by an integration.

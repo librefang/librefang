@@ -1,5 +1,6 @@
 use crate::common::repo_root;
 use clap::Parser;
+use std::path::PathBuf;
 use std::process::Command;
 
 #[derive(Parser, Debug)]
@@ -42,6 +43,30 @@ pub fn run(args: DevArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     if !binary.exists() {
         return Err(format!("Binary not found: {}", binary.display()).into());
+    }
+
+    // Auto-init if config.toml does not exist
+    let config_dir = librefang_home();
+    let config_path = config_dir.join("config.toml");
+    if !config_path.exists() {
+        println!("No config.toml found — running `librefang init --quick`...");
+        let init_status = Command::new(&binary).args(["init", "--quick"]).status()?;
+        if !init_status.success() {
+            eprintln!("Warning: init --quick failed, continuing with defaults");
+        }
+    }
+
+    // Copy config.example.toml to the config directory if it doesn't exist
+    let example_dest = config_dir.join("config.example.toml");
+    if !example_dest.exists() {
+        let example_src = root.join("crates/librefang-cli/templates/init_default_config.toml");
+        if example_src.exists() {
+            if let Err(e) = std::fs::copy(&example_src, &example_dest) {
+                eprintln!("Warning: could not copy config.example.toml: {e}");
+            } else {
+                println!("Copied config.example.toml to {}", example_dest.display());
+            }
+        }
     }
 
     // Start dashboard dev server in background (if dashboard exists)
@@ -152,4 +177,15 @@ fn reqwest_probe(url: &str) -> bool {
         .output()
         .map(|o| !o.stdout.is_empty() && o.stdout != b"000")
         .unwrap_or(false)
+}
+
+/// Resolve the LibreFang home directory (mirrors kernel logic).
+fn librefang_home() -> PathBuf {
+    if let Ok(home) = std::env::var("LIBREFANG_HOME") {
+        return PathBuf::from(home);
+    }
+    let home = std::env::var("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| std::env::temp_dir());
+    home.join(".librefang")
 }

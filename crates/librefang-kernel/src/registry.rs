@@ -101,9 +101,11 @@ impl AgentRegistry {
         Ok(entry)
     }
 
-    /// List all agents.
+    /// List all agents, sorted by name for deterministic ordering.
     pub fn list(&self) -> Vec<AgentEntry> {
-        self.agents.iter().map(|e| e.value().clone()).collect()
+        let mut entries: Vec<AgentEntry> = self.agents.iter().map(|e| e.value().clone()).collect();
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
+        entries
     }
 
     /// Add a child agent ID to a parent's children list.
@@ -489,5 +491,17 @@ mod tests {
             !updated.manifest.tools_disabled,
             "updating tool filters should re-enable tool resolution"
         );
+    }
+
+    #[test]
+    fn test_list_returns_deterministic_order() {
+        let registry = AgentRegistry::new();
+        // Insert in reverse alphabetical order
+        registry.register(test_entry("zeta")).unwrap();
+        registry.register(test_entry("alpha")).unwrap();
+        registry.register(test_entry("mu")).unwrap();
+
+        let names: Vec<String> = registry.list().iter().map(|e| e.name.clone()).collect();
+        assert_eq!(names, vec!["alpha", "mu", "zeta"]);
     }
 }

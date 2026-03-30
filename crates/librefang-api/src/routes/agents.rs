@@ -137,10 +137,6 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             "/agents/{id}/deliveries",
             axum::routing::get(get_agent_deliveries),
         )
-        .route(
-            "/agents/{id}/upload",
-            axum::routing::post(upload_file),
-        )
         .route("/agents/{id}/ws", axum::routing::get(crate::ws::agent_ws))
         .route(
             "/uploads/{file_id}",
@@ -1245,7 +1241,8 @@ fn request_sender_context(req: &MessageRequest) -> Option<SenderContext> {
             .unwrap_or_else(|| "api".to_string()),
         user_id: sender_id.clone(),
         display_name: req.sender_name.clone().unwrap_or_else(|| sender_id.clone()),
-        is_group: false,
+        is_group: req.is_group,
+        was_mentioned: req.was_mentioned,
         thread_id: None,
         account_id: None,
     })
@@ -1740,6 +1737,14 @@ pub async fn send_message_stream(
             Json(serde_json::json!({"error": err_not_found})),
         )
             .into_response();
+    }
+
+    // Resolve file attachments into image content blocks (same as non-streaming)
+    if !req.attachments.is_empty() {
+        let image_blocks = resolve_attachments(&req.attachments);
+        if !image_blocks.is_empty() {
+            inject_attachments_into_session(&state.kernel, agent_id, image_blocks);
+        }
     }
 
     let kernel_handle: Arc<dyn KernelHandle> = state.kernel.clone() as Arc<dyn KernelHandle>;
@@ -4410,6 +4415,8 @@ mod tests {
             sender_id: None,
             sender_name: None,
             channel_type: Some("whatsapp".to_string()),
+            is_group: false,
+            was_mentioned: false,
             ephemeral: false,
         };
         assert!(request_sender_context(&req).is_none());
@@ -4423,12 +4430,31 @@ mod tests {
             sender_id: Some("u-123".to_string()),
             sender_name: None,
             channel_type: None,
+            is_group: false,
+            was_mentioned: false,
             ephemeral: false,
         };
         let sender = request_sender_context(&req).expect("sender context");
         assert_eq!(sender.user_id, "u-123");
         assert_eq!(sender.display_name, "u-123");
         assert_eq!(sender.channel, "api");
+    }
+
+    #[test]
+    fn test_request_sender_context_propagates_group_and_mention() {
+        let req = MessageRequest {
+            message: "hello".to_string(),
+            attachments: Vec::new(),
+            sender_id: Some("u-456".to_string()),
+            sender_name: Some("Alice".to_string()),
+            channel_type: Some("whatsapp".to_string()),
+            is_group: true,
+            was_mentioned: true,
+            ephemeral: false,
+        };
+        let sender = request_sender_context(&req).expect("sender context");
+        assert!(sender.is_group);
+        assert!(sender.was_mentioned);
     }
 
     #[test]

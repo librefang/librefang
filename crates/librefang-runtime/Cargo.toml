@@ -41,6 +41,7 @@ ureq = { workspace = true }
 flate2 = { workspace = true }
 tar = { workspace = true }
 rmcp = { workspace = true }
+http = "1"
 shlex = "1"
 toml = { workspace = true }
 url = { workspace = true }

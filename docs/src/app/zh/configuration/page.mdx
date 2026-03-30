@@ -1302,8 +1302,18 @@ channel = ""
 
 #### `[channels.dingtalk]`
 
+支持两种模式：**stream**（默认，推荐）和 **webhook**（传统）。
+
 ```toml
+# Stream 模式（推荐 — 无需公网 IP）
 [channels.dingtalk]
+receive_mode = "stream"
+app_key_env = "DINGTALK_APP_KEY"
+app_secret_env = "DINGTALK_APP_SECRET"
+
+# Webhook 模式（传统）
+[channels.dingtalk]
+receive_mode = "webhook"
 access_token_env = "DINGTALK_ACCESS_TOKEN"
 secret_env = "DINGTALK_SECRET"
 webhook_port = 8457
@@ -1311,9 +1321,13 @@ webhook_port = 8457
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `access_token_env` | string | `"DINGTALK_ACCESS_TOKEN"` | 存放钉钉 Webhook 访问令牌的环境变量。 |
-| `secret_env` | string | `"DINGTALK_SECRET"` | 存放钉钉签名密钥的环境变量。 |
-| `webhook_port` | u16 | `8457` | 入站 Webhook 端口。 |
+| `receive_mode` | string | `"stream"` | 连接模式：`"stream"` 或 `"webhook"`。 |
+| `app_key_env` | string | `"DINGTALK_APP_KEY"` | 存放钉钉 App Key 的环境变量（stream 模式）。 |
+| `app_secret_env` | string | `"DINGTALK_APP_SECRET"` | 存放钉钉 App Secret 的环境变量（stream 模式）。 |
+| `access_token_env` | string | `"DINGTALK_ACCESS_TOKEN"` | 存放钉钉 Webhook 访问令牌的环境变量（webhook 模式）。 |
+| `secret_env` | string | `"DINGTALK_SECRET"` | 存放钉钉签名密钥的环境变量（webhook 模式）。 |
+| `webhook_port` | u16 | `8457` | 入站 Webhook 端口（仅 webhook 模式）。 |
+| `robot_code` | string 或 null | `null` | Stream 模式回复使用的机器人编码（默认使用 app_key）。 |
 | `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
 
 #### `[channels.discourse]`
@@ -2680,8 +2694,10 @@ max_versions_per_agent = 50
 | `FLOCK_BOT_TOKEN` | Flock | Flock Bot 令牌。 |
 | `TWIST_TOKEN` | Twist | Twist API 令牌。 |
 | `MUMBLE_PASSWORD` | Mumble | Mumble 服务器密码。 |
-| `DINGTALK_ACCESS_TOKEN` | DingTalk | 钉钉 Webhook 访问令牌。 |
-| `DINGTALK_SECRET` | DingTalk | 钉钉签名密钥。 |
+| `DINGTALK_APP_KEY` | DingTalk | 钉钉 App Key / Client ID（stream 模式）。 |
+| `DINGTALK_APP_SECRET` | DingTalk | 钉钉 App Secret / Client Secret（stream 模式）。 |
+| `DINGTALK_ACCESS_TOKEN` | DingTalk | 钉钉 Webhook 访问令牌（webhook 模式）。 |
+| `DINGTALK_SECRET` | DingTalk | 钉钉签名密钥（webhook 模式）。 |
 | `DISCOURSE_API_KEY` | Discourse | Discourse API Key。 |
 | `GITTER_TOKEN` | Gitter | Gitter 认证令牌。 |
 | `NTFY_TOKEN` | ntfy | ntfy 认证令牌（公共主题可选）。 |
@@ -2733,7 +2749,7 @@ max_versions_per_agent = 50
 | Flock | `bot_token_env` |
 | Twist | `token_env` |
 | Mumble | `password_env` |
-| DingTalk | `access_token_env` |
+| DingTalk | `app_key_env`（stream）或 `access_token_env`（webhook） |
 | Discourse | `api_key_env` |
 | Gitter | `token_env` |
 | ntfy | `token_env`（仅当 `token_env` 非空时；公共主题无需认证） |

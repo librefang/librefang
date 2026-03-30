@@ -2521,6 +2521,15 @@ fn write_config_if_missing(
             &[("path", &config_path.display().to_string())],
         ));
     }
+
+    // Write config.example.toml with the full annotated template for reference
+    let example_path = librefang_dir.join("config.example.toml");
+    if !example_path.exists() {
+        let example_content = include_str!("../templates/init_default_config.toml");
+        if let Err(e) = std::fs::write(&example_path, example_content) {
+            ui::hint(&format!("Could not write config.example.toml: {e}"));
+        }
+    }
 }
 
 fn daemon_log_path_for_home(home_dir: &std::path::Path) -> PathBuf {
@@ -4118,7 +4127,8 @@ fn cmd_doctor(json: bool, repair: bool) {
                                         checks.push(serde_json::json!({"check": "mcp_server_config", "status": "warn", "name": server.name}));
                                     }
                                 }
-                                librefang_types::config::McpTransportEntry::Sse { url } => {
+                                librefang_types::config::McpTransportEntry::Sse { url }
+                                | librefang_types::config::McpTransportEntry::Http { url } => {
                                     if url.is_empty() {
                                         if !json {
                                             ui::check_warn(&format!(
