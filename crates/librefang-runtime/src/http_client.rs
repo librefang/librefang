@@ -53,21 +53,22 @@ pub fn tls_config() -> rustls::ClientConfig {
 /// Global proxy configuration, updated on boot and hot-reload.
 static GLOBAL_PROXY: RwLock<Option<ProxyConfig>> = RwLock::new(None);
 
-/// Initialise the global proxy configuration.
+/// Updates the global proxy configuration.
 ///
-/// Must be called once during daemon startup (before any HTTP client is built).
-/// Subsequent calls are silently ignored.
+/// Can be called multiple times (e.g. during hot-reload). Previous values
+/// are overwritten.
 ///
 /// Config-file values are also exported as environment variables so that
 /// crates which build their own `reqwest::Client` (and thus rely on reqwest's
 /// built-in env-var detection) automatically pick up the proxy settings.
+///
 /// # Thread safety
 ///
 /// This function calls `std::env::set_var` which is inherently racy in a
-/// multi-threaded process. It **must** be called exactly once during
+/// multi-threaded process. The initial call **should** happen during
 /// single-threaded daemon bootstrap, before the Tokio runtime spawns any
-/// worker threads. The `OnceLock::set` at the end guarantees that only the
-/// first call takes effect; subsequent calls are silently ignored.
+/// worker threads. Subsequent calls (hot-reload) are guarded by the
+/// config-reload `RwLock` so they are serialised with readers.
 pub fn init_proxy(cfg: ProxyConfig) {
     // Export config values as env vars for crates that build reqwest clients
     // without going through our builder (e.g. librefang-channels).

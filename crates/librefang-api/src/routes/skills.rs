@@ -745,12 +745,7 @@ pub async fn skillhub_search(
         }
     }
 
-    let cache_dir = state
-        .kernel
-        .config_ref()
-        .home_dir
-        .join(".cache")
-        .join("skillhub");
+    let cache_dir = state.kernel.home_dir().join(".cache").join("skillhub");
     let client = librefang_skills::skillhub::SkillhubClient::with_defaults(cache_dir);
 
     match client.search(&query, limit).await {
@@ -814,12 +809,7 @@ pub async fn skillhub_browse(
         }
     }
 
-    let cache_dir = state
-        .kernel
-        .config_ref()
-        .home_dir
-        .join(".cache")
-        .join("skillhub");
+    let cache_dir = state.kernel.home_dir().join(".cache").join("skillhub");
     let client = librefang_skills::skillhub::SkillhubClient::with_defaults(cache_dir);
 
     match client.browse(sort, limit).await {

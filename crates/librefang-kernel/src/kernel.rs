@@ -396,7 +396,7 @@ pub struct LibreFangKernel {
     self_handle: OnceLock<Weak<LibreFangKernel>>,
     /// Whether we've already logged the "no provider" audit entry (prevents spam).
     pub(crate) provider_unconfigured_logged: std::sync::atomic::AtomicBool,
-    /// Config reload barrier — write-locked during `apply_hot_actions` to prevent
+    /// Config reload barrier — write-locked during `apply_hot_actions_inner` to prevent
     /// concurrent readers from seeing a half-updated configuration (e.g. new provider
     /// URLs but old default model). Read-locked in message hot paths so multiple
     /// requests proceed in parallel but block briefly during a reload.

@@ -640,8 +640,8 @@ pub async fn run_daemon(
     // Initialize OpenTelemetry OTLP tracing when telemetry feature is compiled
     // in and the config has `telemetry.enabled = true`.
     #[cfg(feature = "telemetry")]
-    if kernel.config_ref().telemetry.enabled {
-        let cfg = kernel.config_ref();
+    let cfg = kernel.config_ref();
+    if cfg.telemetry.enabled {
         if let Err(e) = crate::telemetry::init_otel_tracing(
             &cfg.telemetry.otlp_endpoint,
             &cfg.telemetry.service_name,
