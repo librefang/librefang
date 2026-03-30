@@ -19,7 +19,7 @@ use librefang_types::message::ContentBlock;
 use regex::RegexSet;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, error, info, warn};
 
@@ -377,7 +377,6 @@ impl MessageDebouncer {
         pending: PendingMessage,
         buffers: &mut HashMap<String, SenderBuffer>,
     ) {
-        use std::time::Duration;
         let debounce_dur = Duration::from_millis(self.debounce_ms);
         let max_dur = Duration::from_millis(self.debounce_max_ms);
 
@@ -421,7 +420,6 @@ impl MessageDebouncer {
     }
 
     fn on_typing(&self, key: &str, is_typing: bool, buffers: &mut HashMap<String, SenderBuffer>) {
-        use std::time::Duration;
         let Some(buf) = buffers.get_mut(key) else {
             return;
         };
@@ -453,10 +451,12 @@ impl MessageDebouncer {
         &self,
         key: &str,
         buffers: &mut HashMap<String, SenderBuffer>,
-    ) -> Option<(ChannelMessage, Option<Vec<ContentBlock>>)> {
-        let buf = buffers.remove(key)?;
+    ) -> Vec<(ChannelMessage, Option<Vec<ContentBlock>>)> {
+        let Some(buf) = buffers.remove(key) else {
+            return Vec::new();
+        };
         if buf.messages.is_empty() {
-            return None;
+            return Vec::new();
         }
 
         if let Some(handle) = buf.max_timer_handle {
@@ -469,91 +469,97 @@ impl MessageDebouncer {
         let mut messages = buf.messages;
         if messages.len() == 1 {
             let pm = messages.remove(0);
-            return Some((pm.message, pm.image_blocks));
+            return vec![(pm.message, pm.image_blocks)];
         }
 
+        // Check if all messages are the same content type
+        let first_content_type = std::mem::discriminant(&messages[0].message.content);
+        let all_same_type = messages
+            .iter()
+            .all(|pm| std::mem::discriminant(&pm.message.content) == first_content_type);
+
+        // Commands with different names must NOT be merged — each is a distinct action.
+        // Mixed content types (command + text, etc.) are also dispatched individually.
+        let has_commands = messages
+            .iter()
+            .any(|pm| matches!(pm.message.content, ChannelContent::Command { .. }));
+
+        if has_commands {
+            if all_same_type {
+                // All commands — check if same name
+                let first_name =
+                    if let ChannelContent::Command { name, .. } = &messages[0].message.content {
+                        Some(name.clone())
+                    } else {
+                        None
+                    };
+                let all_same_command = first_name.as_ref().is_some_and(|first| {
+                    messages.iter().all(|pm| {
+                        matches!(&pm.message.content, ChannelContent::Command { name, .. } if name == first)
+                    })
+                });
+
+                if all_same_command {
+                    // Same command name — merge args
+                    let command_name = first_name.unwrap();
+                    let first = messages.remove(0);
+                    let mut merged_msg = first.message;
+                    let mut all_blocks: Vec<ContentBlock> = Vec::new();
+                    if let Some(blocks) = first.image_blocks {
+                        all_blocks.extend(blocks);
+                    }
+                    let mut cmd_args: Vec<String> = Vec::new();
+                    if let ChannelContent::Command { args, .. } = &merged_msg.content {
+                        cmd_args.extend(args.clone());
+                    }
+                    for pm in messages {
+                        if let ChannelContent::Command { args, .. } = pm.message.content {
+                            cmd_args.extend(args);
+                        }
+                        if let Some(blocks) = pm.image_blocks {
+                            all_blocks.extend(blocks);
+                        }
+                    }
+                    merged_msg.content = ChannelContent::Command {
+                        name: command_name,
+                        args: cmd_args,
+                    };
+                    let blocks = if all_blocks.is_empty() {
+                        None
+                    } else {
+                        Some(all_blocks)
+                    };
+                    return vec![(merged_msg, blocks)];
+                }
+            }
+            // Different commands or mixed types — dispatch each individually
+            return messages
+                .into_iter()
+                .map(|pm| (pm.message, pm.image_blocks))
+                .collect();
+        }
+
+        // No commands — merge text-like content
         let first = messages.remove(0);
         let mut merged_msg = first.message;
         let mut all_blocks: Vec<ContentBlock> = Vec::new();
-
         if let Some(blocks) = first.image_blocks {
             all_blocks.extend(blocks);
         }
-
-        let first_content_type = std::mem::discriminant(&merged_msg.content);
-        let mut all_same_type = true;
-        let mut all_commands_same_name: Option<String> = None;
-
-        if matches!(merged_msg.content, ChannelContent::Command { .. }) {
-            if let ChannelContent::Command { name, .. } = &merged_msg.content {
-                all_commands_same_name = Some(name.clone());
+        let mut text_parts = vec![content_to_text(&merged_msg.content)];
+        for pm in messages {
+            text_parts.push(content_to_text(&pm.message.content));
+            if let Some(blocks) = pm.image_blocks {
+                all_blocks.extend(blocks);
             }
         }
-
-        for pm in &messages {
-            if std::mem::discriminant(&pm.message.content) != first_content_type {
-                all_same_type = false;
-                break;
-            }
-            if let Some(name) = &all_commands_same_name {
-                if let ChannelContent::Command { name: n, .. } = &pm.message.content {
-                    if n != name {
-                        all_commands_same_name = None;
-                        break;
-                    }
-                } else {
-                    all_commands_same_name = None;
-                    break;
-                }
-            }
-        }
-
-        if all_same_type {
-            if let Some(command_name) = all_commands_same_name {
-                let mut cmd_args: Vec<String> = Vec::new();
-                if let ChannelContent::Command { args, .. } = &merged_msg.content {
-                    cmd_args.extend(args.clone());
-                }
-                for pm in messages {
-                    if let ChannelContent::Command { args, .. } = pm.message.content {
-                        cmd_args.extend(args);
-                    }
-                    if let Some(blocks) = pm.image_blocks {
-                        all_blocks.extend(blocks);
-                    }
-                }
-                merged_msg.content = ChannelContent::Command {
-                    name: command_name,
-                    args: cmd_args,
-                };
-            } else {
-                let mut text_parts = vec![content_to_text(&merged_msg.content)];
-                for pm in messages {
-                    text_parts.push(content_to_text(&pm.message.content));
-                    if let Some(blocks) = pm.image_blocks {
-                        all_blocks.extend(blocks);
-                    }
-                }
-                merged_msg.content = ChannelContent::Text(text_parts.join("\n"));
-            }
-        } else {
-            let mut text_parts = vec![content_to_text(&merged_msg.content)];
-            for pm in messages {
-                text_parts.push(content_to_text(&pm.message.content));
-                if let Some(blocks) = pm.image_blocks {
-                    all_blocks.extend(blocks);
-                }
-            }
-            merged_msg.content = ChannelContent::Text(text_parts.join("\n"));
-        }
-
+        merged_msg.content = ChannelContent::Text(text_parts.join("\n"));
         let blocks = if all_blocks.is_empty() {
             None
         } else {
             Some(all_blocks)
         };
-
-        Some((merged_msg, blocks))
+        vec![(merged_msg, blocks)]
     }
 }
 
@@ -600,121 +606,44 @@ fn content_to_text(content: &ChannelContent) -> String {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Shared context for flushing debounced messages, avoiding excessive parameter lists.
+struct FlushContext {
+    handle: Arc<dyn ChannelBridgeHandle>,
+    router: Arc<AgentRouter>,
+    adapter: Arc<dyn ChannelAdapter>,
+    rate_limiter: ChannelRateLimiter,
+    sanitizer: Arc<InputSanitizer>,
+    semaphore: Arc<tokio::sync::Semaphore>,
+}
+
 fn flush_debounced(
     debouncer: &MessageDebouncer,
     key: &str,
     buffers: &mut HashMap<String, SenderBuffer>,
-    handle: &Arc<dyn ChannelBridgeHandle>,
-    router: &Arc<AgentRouter>,
-    adapter: &Arc<dyn ChannelAdapter>,
-    rate_limiter: &ChannelRateLimiter,
-    sanitizer: &Arc<InputSanitizer>,
-    semaphore: &Arc<tokio::sync::Semaphore>,
-) -> Option<tokio::task::JoinHandle<()>> {
-    let (merged_msg, blocks) = debouncer.drain(key, buffers)?;
+    ctx: &FlushContext,
+) -> Vec<tokio::task::JoinHandle<()>> {
+    let drained = debouncer.drain(key, buffers);
+    if drained.is_empty() {
+        return Vec::new();
+    }
 
-    let channel_handle = (*handle).clone();
-    let router = router.clone();
-    let adapter = adapter.clone();
-    let rate_limiter = rate_limiter.clone();
-    let sanitizer = Arc::clone(sanitizer);
-    let sem = semaphore.clone();
+    let mut handles = Vec::with_capacity(drained.len());
+    for (merged_msg, _blocks) in drained {
+        // Always route through dispatch_message so that sanitization, rate limiting,
+        // and DM/group policy checks are applied uniformly. dispatch_message handles
+        // Image content by downloading and calling dispatch_with_blocks internally.
+        let channel_handle = ctx.handle.clone();
+        let router = ctx.router.clone();
+        let adapter = ctx.adapter.clone();
+        let rate_limiter = ctx.rate_limiter.clone();
+        let sanitizer = Arc::clone(&ctx.sanitizer);
+        let sem = ctx.semaphore.clone();
 
-    let join_handle = tokio::spawn(async move {
-        let _permit = match sem.acquire().await {
-            Ok(p) => p,
-            Err(_) => return,
-        };
-
-        if let Some(mut blocks) = blocks {
-            let text = content_to_text(&merged_msg.content);
-            if !text.is_empty() {
-                blocks.insert(
-                    0,
-                    ContentBlock::Text {
-                        text,
-                        provider_metadata: None,
-                    },
-                );
-            }
-
-            let ct_str = channel_type_str(&merged_msg.channel);
-
-            // --- Input sanitization (prompt injection detection) ---
-            if !sanitizer.is_off() {
-                let text_to_check: Option<&str> = match &merged_msg.content {
-                    ChannelContent::Text(t) => Some(t.as_str()),
-                    ChannelContent::Image { caption, .. } => caption.as_deref(),
-                    ChannelContent::Voice { caption, .. } => caption.as_deref(),
-                    ChannelContent::Video { caption, .. } => caption.as_deref(),
-                    _ => None,
-                };
-                if let Some(text) = text_to_check {
-                    match sanitizer.check(text) {
-                        SanitizeResult::Clean => {}
-                        SanitizeResult::Warned(reason) => {
-                            warn!(
-                                channel = ct_str,
-                                user = %merged_msg.sender.display_name,
-                                reason = reason.as_str(),
-                                "Suspicious channel input (warn mode, allowing through)"
-                            );
-                        }
-                        SanitizeResult::Blocked(reason) => {
-                            warn!(
-                                channel = ct_str,
-                                user = %merged_msg.sender.display_name,
-                                reason = reason.as_str(),
-                                "Blocked channel input (prompt injection detected)"
-                            );
-                            let _ = adapter
-                                .send(
-                                    &merged_msg.sender,
-                                    ChannelContent::Text(
-                                        "Your message could not be processed.".to_string(),
-                                    ),
-                                )
-                                .await;
-                            return;
-                        }
-                    }
-                }
-            }
-
-            let overrides = channel_handle
-                .channel_overrides(
-                    ct_str,
-                    merged_msg
-                        .metadata
-                        .get("account_id")
-                        .and_then(|v| v.as_str()),
-                )
-                .await;
-            let channel_default_format = default_output_format_for_channel(ct_str);
-            let output_format = overrides
-                .as_ref()
-                .and_then(|o| o.output_format)
-                .unwrap_or(channel_default_format);
-            let threading_enabled = overrides.as_ref().map(|o| o.threading).unwrap_or(false);
-            let thread_id = if threading_enabled {
-                merged_msg.thread_id.as_deref()
-            } else {
-                None
+        handles.push(tokio::spawn(async move {
+            let _permit = match sem.acquire().await {
+                Ok(p) => p,
+                Err(_) => return,
             };
-
-            dispatch_with_blocks(
-                blocks,
-                &merged_msg,
-                &channel_handle,
-                &router,
-                adapter.as_ref(),
-                ct_str,
-                thread_id,
-                output_format,
-            )
-            .await;
-        } else {
             dispatch_message(
                 &merged_msg,
                 &channel_handle,
@@ -724,9 +653,9 @@ fn flush_debounced(
                 &sanitizer,
             )
             .await;
-        }
-    });
-    Some(join_handle)
+        }));
+    }
+    handles
 }
 
 /// Owns all running channel adapters and dispatches messages to agents.
@@ -869,9 +798,23 @@ impl BridgeManager {
 
             let mut typing_rx = adapter_clone.typing_events();
 
+            let ctx = FlushContext {
+                handle,
+                router,
+                adapter: adapter_clone.clone(),
+                rate_limiter,
+                sanitizer,
+                semaphore,
+            };
+
             let task = tokio::spawn(async move {
                 let mut stream = std::pin::pin!(stream);
+                // Track in-flight dispatch handles so we can await them on shutdown/stream-end.
+                let mut in_flight: Vec<tokio::task::JoinHandle<()>> = Vec::new();
                 loop {
+                    // Reap completed handles to avoid unbounded growth.
+                    in_flight.retain(|h| !h.is_finished());
+
                     tokio::select! {
                         msg = stream.next() => {
                             match msg {
@@ -881,28 +824,21 @@ impl BridgeManager {
                                         channel_type_str(&message.channel),
                                         message.sender.platform_id
                                     );
-
-                                    let image_blocks = if let ChannelContent::Image {
-                                        ref url, ref caption, ref mime_type
-                                    } = message.content {
-                                        match download_image_to_blocks(url, caption.as_deref(), mime_type.as_deref()).await {
-                                            blocks if blocks.iter().any(|b| matches!(b, ContentBlock::Image { .. })) => Some(blocks),
-                                            _ => None,
-                                        }
-                                    } else {
-                                        None
-                                    };
-
-                                    let pending = PendingMessage { message, image_blocks };
+                                    // No pre-download of images here — dispatch_message
+                                    // handles Image content (download + dispatch_with_blocks)
+                                    // with full sanitization and policy checks.
+                                    let pending = PendingMessage { message, image_blocks: None };
                                     debouncer.push(&sender_key, pending, &mut buffers);
                                 }
                                 None => {
+                                    // Stream ended — flush all pending buffers and await.
                                     let keys: Vec<String> = buffers.keys().cloned().collect();
                                     let mut handles = Vec::new();
                                     for key in keys {
-                                        if let Some(handle) = flush_debounced(&debouncer, &key, &mut buffers, &handle, &router, &adapter_clone, &rate_limiter, &sanitizer, &semaphore) {
-                                            handles.push(handle);
-                                        }
+                                        handles.extend(flush_debounced(&debouncer, &key, &mut buffers, &ctx));
+                                    }
+                                    for handle in in_flight.drain(..) {
+                                        let _ = handle.await;
                                     }
                                     for handle in handles {
                                         let _ = handle.await;
@@ -922,16 +858,17 @@ impl BridgeManager {
                             debouncer.on_typing(&sender_key, event.is_typing, &mut buffers);
                         }
                         Some(key) = flush_rx.recv() => {
-                            let _ = flush_debounced(&debouncer, &key, &mut buffers, &handle, &router, &adapter_clone, &rate_limiter, &sanitizer, &semaphore);
+                            in_flight.extend(flush_debounced(&debouncer, &key, &mut buffers, &ctx));
                         }
                         _ = shutdown.changed() => {
                             if *shutdown.borrow() {
                                 let keys: Vec<String> = buffers.keys().cloned().collect();
                                 let mut handles = Vec::new();
                                 for key in keys {
-                                    if let Some(handle) = flush_debounced(&debouncer, &key, &mut buffers, &handle, &router, &adapter_clone, &rate_limiter, &sanitizer, &semaphore) {
-                                        handles.push(handle);
-                                    }
+                                    handles.extend(flush_debounced(&debouncer, &key, &mut buffers, &ctx));
+                                }
+                                for handle in in_flight.drain(..) {
+                                    let _ = handle.await;
                                 }
                                 for handle in handles {
                                     let _ = handle.await;
@@ -3282,8 +3219,8 @@ mod tests {
             debouncer.push("discord:user123", pending, &mut buffers);
 
             let result = debouncer.drain("discord:user123", &mut buffers);
-            assert!(result.is_some());
-            let (drained_msg, blocks) = result.unwrap();
+            assert_eq!(result.len(), 1);
+            let (drained_msg, blocks) = &result[0];
             assert_content_eq(&drained_msg.content, "hello");
             assert!(blocks.is_none());
         }
@@ -3314,9 +3251,8 @@ mod tests {
             );
 
             let result = debouncer.drain("discord:user123", &mut buffers);
-            assert!(result.is_some());
-            let (drained_msg, _) = result.unwrap();
-            assert_content_eq(&drained_msg.content, "hello\nworld");
+            assert_eq!(result.len(), 1);
+            assert_content_eq(&result[0].0.content, "hello\nworld");
         }
 
         #[tokio::test]
@@ -3345,19 +3281,18 @@ mod tests {
             );
 
             let result = debouncer.drain("discord:user123", &mut buffers);
-            assert!(result.is_some());
-            let (drained_msg, _) = result.unwrap();
-            match drained_msg.content {
+            assert_eq!(result.len(), 1);
+            match &result[0].0.content {
                 ChannelContent::Command { name, args } => {
                     assert_eq!(name, "help");
-                    assert_eq!(args, vec!["list", "status"]);
+                    assert_eq!(args, &vec!["list".to_string(), "status".to_string()]);
                 }
                 _ => panic!("Expected Command content"),
             }
         }
 
         #[tokio::test]
-        async fn test_debouncer_different_commands_no_merge() {
+        async fn test_debouncer_different_commands_dispatched_individually() {
             let (debouncer, _rx) = MessageDebouncer::new(100, 5000, 10);
             let mut buffers: HashMap<String, SenderBuffer> = HashMap::new();
 
@@ -3381,19 +3316,52 @@ mod tests {
                 &mut buffers,
             );
 
+            // Different commands are returned individually, preserving semantics.
             let result = debouncer.drain("discord:user123", &mut buffers);
-            assert!(result.is_some());
-            let (drained_msg, _) = result.unwrap();
-            assert_content_eq(&drained_msg.content, "/help\n/status");
+            assert_eq!(result.len(), 2);
+            assert_content_eq(&result[0].0.content, "/help");
+            assert_content_eq(&result[1].0.content, "/status");
         }
 
         #[tokio::test]
-        async fn test_debouncer_empty_buffer_returns_none() {
+        async fn test_debouncer_mixed_command_and_text_dispatched_individually() {
+            let (debouncer, _rx) = MessageDebouncer::new(100, 5000, 10);
+            let mut buffers: HashMap<String, SenderBuffer> = HashMap::new();
+
+            let cmd = make_test_command("help", vec![]);
+            let msg = make_test_message("hello");
+
+            debouncer.push(
+                "discord:user123",
+                PendingMessage {
+                    message: cmd,
+                    image_blocks: None,
+                },
+                &mut buffers,
+            );
+            debouncer.push(
+                "discord:user123",
+                PendingMessage {
+                    message: msg,
+                    image_blocks: None,
+                },
+                &mut buffers,
+            );
+
+            // Mixed types with commands are returned individually.
+            let result = debouncer.drain("discord:user123", &mut buffers);
+            assert_eq!(result.len(), 2);
+            assert_content_eq(&result[0].0.content, "/help");
+            assert_content_eq(&result[1].0.content, "hello");
+        }
+
+        #[tokio::test]
+        async fn test_debouncer_empty_buffer_returns_empty() {
             let (debouncer, _rx) = MessageDebouncer::new(100, 5000, 10);
             let mut buffers: HashMap<String, SenderBuffer> = HashMap::new();
 
             let result = debouncer.drain("discord:user123", &mut buffers);
-            assert!(result.is_none());
+            assert!(result.is_empty());
         }
 
         #[tokio::test]
@@ -3424,10 +3392,10 @@ mod tests {
             let result1 = debouncer.drain("discord:user1", &mut buffers);
             let result2 = debouncer.drain("discord:user2", &mut buffers);
 
-            assert!(result1.is_some());
-            assert!(result2.is_some());
-            assert_content_eq(&result1.unwrap().0.content, "hello from user1");
-            assert_content_eq(&result2.unwrap().0.content, "hello from user2");
+            assert_eq!(result1.len(), 1);
+            assert_eq!(result2.len(), 1);
+            assert_content_eq(&result1[0].0.content, "hello from user1");
+            assert_content_eq(&result2[0].0.content, "hello from user2");
         }
 
         #[tokio::test]
@@ -3456,9 +3424,8 @@ mod tests {
             );
 
             let result = debouncer.drain("discord:user123", &mut buffers);
-            assert!(result.is_some());
-            let (drained_msg, _) = result.unwrap();
-            assert_content_eq(&drained_msg.content, "1\n2");
+            assert_eq!(result.len(), 1);
+            assert_content_eq(&result[0].0.content, "1\n2");
         }
     }
 }
