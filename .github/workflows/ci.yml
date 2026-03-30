@@ -250,4 +250,4 @@ jobs:
       - name: Build tests (throttled to reduce peak memory)
         run: cargo nextest run --workspace --no-run -j 2
       - name: Run tests
-        run: cargo nextest run --workspace --no-fail-fast --test-threads 2
+        run: cargo nextest run --workspace --no-fail-fast -j 1 --test-threads 4
