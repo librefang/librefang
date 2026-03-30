@@ -3903,6 +3903,14 @@ system_prompt = "You are a helpful assistant."
         }
         drop(entry);
 
+        // Skip auto-routing for channel messages. When a channel has
+        // `default_agent = "assistant"`, the user explicitly chose the
+        // assistant — keyword/semantic routing must not override that.
+        // Users can still switch agents via `/agent <name>`.
+        if sender_context.is_some() {
+            return Ok(agent_id);
+        }
+
         let route_key = Self::assistant_route_key(agent_id, sender_context);
 
         if Self::should_reuse_cached_route(message) {
