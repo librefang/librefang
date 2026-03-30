@@ -71,24 +71,6 @@ impl AudioFormat {
     }
 }
 
-/// STT provider backend.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SttProvider {
-    /// OpenAI Whisper API (default).
-    OpenAiWhisper,
-    /// Custom HTTP endpoint conforming to OpenAI-compatible transcription API.
-    Custom(String),
-}
-
-/// TTS provider backend.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TtsProvider {
-    /// OpenAI TTS API (default).
-    OpenAiTts,
-    /// Custom HTTP endpoint conforming to OpenAI-compatible speech API.
-    Custom(String),
-}
-
 /// Per-session audio configuration negotiated at connection time.
 #[derive(Debug, Clone)]
 struct SessionConfig {
@@ -105,26 +87,29 @@ impl Default for SessionConfig {
     }
 }
 
+/// Active WebSocket sessions keyed by session ID.
+///
+/// Used by `VoiceAdapter::send` to push agent responses back through the
+/// WebSocket connection that originated the voice session.
+type SessionMap = Arc<Mutex<HashMap<String, mpsc::Sender<String>>>>;
+
 /// Shared state for the WebSocket handler.
 ///
 /// TTS fields are populated at construction time for use in the response path
 /// (agent reply -> synthesize_speech -> WebSocket binary frame).
 #[derive(Clone)]
-#[allow(dead_code)]
 struct VoiceState {
     /// Channel for forwarding transcribed messages into the bridge.
     msg_tx: Arc<mpsc::Sender<ChannelMessage>>,
-    /// STT provider configuration.
-    stt_provider: SttProvider,
-    /// TTS provider configuration.
-    tts_provider: TtsProvider,
     /// OpenAI-compatible API key for STT/TTS.
     api_key: Arc<String>,
     /// STT API base URL.
     stt_url: Arc<String>,
-    /// TTS API base URL.
+    /// TTS API base URL (used when TTS audio synthesis is wired up).
+    #[allow(dead_code)]
     tts_url: Arc<String>,
-    /// TTS voice name.
+    /// TTS voice name (used when TTS audio synthesis is wired up).
+    #[allow(dead_code)]
     tts_voice: Arc<String>,
     /// HTTP client for STT/TTS API calls.
     client: reqwest::Client,
@@ -132,6 +117,8 @@ struct VoiceState {
     buffer_threshold: usize,
     /// Statistics.
     stats: Arc<VoiceStats>,
+    /// Active WebSocket sessions for sending responses back.
+    sessions: SessionMap,
 }
 
 struct VoiceStats {
@@ -159,10 +146,6 @@ impl Default for VoiceStats {
 pub struct VoiceAdapter {
     /// WebSocket listen port.
     listen_port: u16,
-    /// STT provider.
-    stt_provider: SttProvider,
-    /// TTS provider.
-    tts_provider: TtsProvider,
     /// API key for STT/TTS services.
     api_key: String,
     /// STT API base URL.
@@ -182,6 +165,8 @@ pub struct VoiceAdapter {
     stats: Arc<VoiceStats>,
     /// When the adapter was started.
     started_at: Mutex<Option<chrono::DateTime<Utc>>>,
+    /// Active WebSocket sessions for sending responses back.
+    sessions: SessionMap,
 }
 
 impl VoiceAdapter {
@@ -205,8 +190,6 @@ impl VoiceAdapter {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         Self {
             listen_port,
-            stt_provider: SttProvider::OpenAiWhisper,
-            tts_provider: TtsProvider::OpenAiTts,
             api_key,
             stt_url,
             tts_url,
@@ -217,24 +200,13 @@ impl VoiceAdapter {
             shutdown_rx,
             stats: Arc::new(VoiceStats::default()),
             started_at: Mutex::new(None),
+            sessions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
     /// Set the account_id for multi-bot routing. Builder pattern.
     pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
         self.account_id = account_id;
-        self
-    }
-
-    /// Set custom STT provider. Builder pattern.
-    pub fn with_stt_provider(mut self, provider: SttProvider) -> Self {
-        self.stt_provider = provider;
-        self
-    }
-
-    /// Set custom TTS provider. Builder pattern.
-    pub fn with_tts_provider(mut self, provider: TtsProvider) -> Self {
-        self.tts_provider = provider;
         self
     }
 }
@@ -249,6 +221,7 @@ async fn transcribe_audio(
     api_key: &str,
     audio_data: &[u8],
     format: AudioFormat,
+    sample_rate: u32,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let file_ext = match format {
         AudioFormat::Pcm => "wav",
@@ -261,7 +234,7 @@ async fn transcribe_audio(
 
     // For PCM, wrap in a minimal WAV header so the API can detect the format.
     let body_bytes = match format {
-        AudioFormat::Pcm => create_wav_bytes(audio_data, 16000, 1, 16),
+        AudioFormat::Pcm => create_wav_bytes(audio_data, sample_rate, 1, 16),
         AudioFormat::Opus => audio_data.to_vec(),
     };
 
@@ -374,14 +347,18 @@ fn create_wav_bytes(
 }
 
 /// Handle a single WebSocket voice session.
-async fn handle_voice_session(mut ws: WebSocket, state: VoiceState) {
+async fn handle_voice_session(ws: WebSocket, state: VoiceState) {
+    use futures::{SinkExt, StreamExt};
+
     state.stats.active_sessions.fetch_add(1, Ordering::Relaxed);
     let session_id = uuid::Uuid::new_v4().to_string();
     info!(session_id = %session_id, "Voice session connected");
 
+    let (mut ws_sink, mut ws_stream) = ws.split();
+
     // Send ready message
     let ready_msg = serde_json::json!({ "type": "ready", "session_id": session_id });
-    if ws
+    if ws_sink
         .send(WsMessage::Text(ready_msg.to_string().into()))
         .await
         .is_err()
@@ -390,11 +367,42 @@ async fn handle_voice_session(mut ws: WebSocket, state: VoiceState) {
         return;
     }
 
+    // Register this session so VoiceAdapter::send() can push responses back.
+    let (resp_tx, mut resp_rx) = mpsc::channel::<String>(64);
+    {
+        state
+            .sessions
+            .lock()
+            .await
+            .insert(session_id.clone(), resp_tx);
+    }
+
+    // Spawn a task that forwards agent responses from the channel to the WS sink.
+    let ws_sink = Arc::new(Mutex::new(ws_sink));
+    let sink_for_responses = Arc::clone(&ws_sink);
+    let sid_clone = session_id.clone();
+    let stats_clone = Arc::clone(&state.stats);
+    let response_task = tokio::spawn(async move {
+        while let Some(text) = resp_rx.recv().await {
+            let msg = serde_json::json!({ "type": "response", "text": text });
+            let mut sink = sink_for_responses.lock().await;
+            if sink
+                .send(WsMessage::Text(msg.to_string().into()))
+                .await
+                .is_err()
+            {
+                debug!(session_id = %sid_clone, "Failed to send response via WebSocket");
+                break;
+            }
+            stats_clone.messages_sent.fetch_add(1, Ordering::Relaxed);
+        }
+    });
+
     let mut session_config = SessionConfig::default();
     let mut audio_buffer: Vec<u8> = Vec::with_capacity(state.buffer_threshold);
 
     loop {
-        let msg = match ws.recv().await {
+        let msg = match ws_stream.next().await {
             Some(Ok(msg)) => msg,
             Some(Err(e)) => {
                 debug!(session_id = %session_id, error = %e, "WebSocket error");
@@ -420,7 +428,9 @@ async fn handle_voice_session(mut ws: WebSocket, state: VoiceState) {
                         // Send transcript back to client
                         let transcript_msg =
                             serde_json::json!({ "type": "transcript", "text": text });
-                        let _ = ws
+                        let _ = ws_sink
+                            .lock()
+                            .await
                             .send(WsMessage::Text(transcript_msg.to_string().into()))
                             .await;
 
@@ -472,7 +482,9 @@ async fn handle_voice_session(mut ws: WebSocket, state: VoiceState) {
                                 if let Some(text) = transcript {
                                     let transcript_msg =
                                         serde_json::json!({ "type": "transcript", "text": text });
-                                    let _ = ws
+                                    let _ = ws_sink
+                                        .lock()
+                                        .await
                                         .send(WsMessage::Text(transcript_msg.to_string().into()))
                                         .await;
 
@@ -506,12 +518,15 @@ async fn handle_voice_session(mut ws: WebSocket, state: VoiceState) {
                 break;
             }
             WsMessage::Ping(data) => {
-                let _ = ws.send(WsMessage::Pong(data)).await;
+                let _ = ws_sink.lock().await.send(WsMessage::Pong(data)).await;
             }
             WsMessage::Pong(_) => {}
         }
     }
 
+    // Unregister session and clean up
+    state.sessions.lock().await.remove(&session_id);
+    response_task.abort();
     state.stats.active_sessions.fetch_sub(1, Ordering::Relaxed);
     info!(session_id = %session_id, "Voice session ended");
 }
@@ -529,6 +544,7 @@ async fn process_audio_buffer(
         &state.api_key,
         audio_data,
         config.format,
+        config.sample_rate,
     )
     .await
     {
@@ -600,8 +616,6 @@ impl ChannelAdapter for VoiceAdapter {
 
         let state = VoiceState {
             msg_tx: Arc::new(tx),
-            stt_provider: self.stt_provider.clone(),
-            tts_provider: self.tts_provider.clone(),
             api_key: Arc::new(self.api_key.clone()),
             stt_url: Arc::new(self.stt_url.clone()),
             tts_url: Arc::new(self.tts_url.clone()),
@@ -609,6 +623,7 @@ impl ChannelAdapter for VoiceAdapter {
             client: crate::http_client::new_client(),
             buffer_threshold: self.buffer_threshold,
             stats: Arc::clone(&self.stats),
+            sessions: Arc::clone(&self.sessions),
         };
 
         self.stats.connected.store(true, Ordering::Relaxed);
@@ -656,23 +671,36 @@ impl ChannelAdapter for VoiceAdapter {
 
     async fn send(
         &self,
-        _user: &ChannelUser,
+        user: &ChannelUser,
         content: ChannelContent,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // For voice channel, outbound messages are handled differently:
-        // the WebSocket session manages its own response delivery.
-        // This method logs the response for observability but the actual
-        // audio delivery happens through the WebSocket connection.
         let text = match content {
             ChannelContent::Text(t) => t,
             _ => return Ok(()),
         };
 
-        self.stats.messages_sent.fetch_add(1, Ordering::Relaxed);
-        debug!(
-            text_len = text.len(),
-            "Voice adapter received outbound message"
-        );
+        // Derive the session_id from the platform_id ("voice-{session_id}").
+        let session_id = user
+            .platform_id
+            .strip_prefix("voice-")
+            .unwrap_or(&user.platform_id);
+
+        let sessions = self.sessions.lock().await;
+        if let Some(tx) = sessions.get(session_id) {
+            if let Err(e) = tx.try_send(text) {
+                warn!(
+                    session_id = %session_id,
+                    error = %e,
+                    "Failed to send response to voice session"
+                );
+            }
+        } else {
+            debug!(
+                session_id = %session_id,
+                text_len = text.len(),
+                "No active voice session for outbound message"
+            );
+        }
         Ok(())
     }
 
