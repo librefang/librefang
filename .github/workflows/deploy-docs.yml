@@ -11,6 +11,10 @@ on:
       - "docs/**"
   workflow_dispatch:
 
+concurrency:
+  group: deploy-docs-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
   deployments: write

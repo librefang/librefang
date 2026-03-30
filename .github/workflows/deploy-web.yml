@@ -11,6 +11,10 @@ on:
       - "web/**"
   workflow_dispatch:
 
+concurrency:
+  group: deploy-web-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
   deployments: write
