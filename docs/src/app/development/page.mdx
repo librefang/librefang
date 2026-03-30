@@ -8,9 +8,26 @@ LibreFang development environment setup and contribution guidelines.
 
 ### Prerequisites
 
-- **Rust** 1.75+
-- **Node.js** 18+ (for desktop app)
-- **pnpm** 8+ (for documentation site)
+- **Rust** 1.85+
+- **Node.js** 22+ (for dashboard and desktop app)
+- **pnpm** 10+ (for dashboard, docs, and web site)
+- **just** (command runner, [install guide](https://github.com/casey/just#installation))
+
+Install just:
+
+```bash
+# macOS
+brew install just
+
+# Windows
+winget install Casey.Just        # or: scoop install just
+
+# Linux (Debian/Ubuntu)
+sudo apt install just            # Ubuntu 24.04+, otherwise use cargo
+
+# Any platform with Rust installed
+cargo install just
+```
 
 ### Clone Repository
 
@@ -19,22 +36,84 @@ git clone https://github.com/librefang/librefang.git
 cd librefang
 ```
 
-### Build
+### Build with just (Recommended)
+
+The project uses [just](https://github.com/casey/just) as a command runner.
+Run `just` to list all available recipes.
 
 ```bash
-# Build entire workspace
+# Build + install CLI with dashboard (recommended for first-time setup)
+just install
+
+# Build workspace libraries only
+just build
+
+# Run all tests
+just test
+
+# Lint (must have zero clippy warnings)
+just lint
+
+# Local CI simulation: build + test + clippy + web lint
+just ci
+```
+
+`just install` automatically builds the React dashboard before compiling the CLI binary,
+so the dashboard will be fully functional on `http://127.0.0.1:4545/`.
+
+### Build without just
+
+```bash
+# Build entire workspace (dashboard assets are pre-committed, no extra step needed)
 cargo build --workspace
 
-# Build CLI
+# Build CLI only
 cargo build -p librefang-cli
 
 # Build desktop app
 cargo build -p librefang-desktop
+```
 
-# Build React dashboard (required for web UI)
-cd crates/librefang-api/dashboard-react
-npm install
-npm run build
+### First Run
+
+```bash
+# Initialize config (~/.librefang/config.toml)
+librefang init
+
+# Start the daemon
+librefang start
+
+# Open dashboard: http://127.0.0.1:4545/
+```
+
+### Dashboard Development
+
+The React dashboard build output is pre-committed in `crates/librefang-api/static/react/`.
+If you modify the dashboard source code, rebuild before compiling the Rust binary:
+
+```bash
+# Rebuild dashboard assets
+just dashboard-build
+
+# Or manually:
+cd crates/librefang-api/dashboard
+pnpm install --frozen-lockfile
+pnpm run build
+cd ../../..
+cargo build -p librefang-cli
+```
+
+For active development with hot reload:
+
+```bash
+# Option A: start daemon + dashboard dev server together
+just dev
+
+# Option B: manually
+librefang start                          # Terminal 1: backend daemon
+cd crates/librefang-api/dashboard        # Terminal 2: Vite dev server
+pnpm install && pnpm dev
+# Open http://localhost:5173/dashboard/  # Auto-proxies /api to 127.0.0.1:4545
 ```
 
 ### Test
@@ -387,14 +466,59 @@ RUST_LOG=debug cargo run
 RUST_LOG=librefang_kernel=trace cargo run
 ```
 
+### Dashboard Debugging
+
+The dashboard is a React SPA embedded into the binary at compile time via `include_dir!`.
+Asset files are served at `/dashboard/*`.
+
+**Blank page / assets 404:**
+
+```bash
+# 1. Check that the daemon is running and healthy
+curl -s http://127.0.0.1:4545/api/health
+
+# 2. Verify the HTML is served (should return <!doctype html>...)
+curl -s http://127.0.0.1:4545/ | head -5
+
+# 3. Test a specific asset path (pick from the <script> tag in the HTML)
+curl -sI http://127.0.0.1:4545/dashboard/assets/index-DVRukrPy.js
+# 200 = OK, 404 = assets not embedded
+
+# 4. If assets 404, verify the build output exists before compiling
+ls crates/librefang-api/static/react/index.html
+ls crates/librefang-api/static/react/assets/
+
+# 5. Rebuild: embed fresh assets into the binary
+cargo xtask build-web --dashboard
+cargo build -p librefang-cli --release
+```
+
+**Dashboard shows but data is empty:**
+
+```bash
+# Check API endpoints directly
+curl -s http://127.0.0.1:4545/api/status | python3 -m json.tool
+curl -s http://127.0.0.1:4545/api/agents | python3 -m json.tool
+
+# Check browser console for CORS or auth errors (F12 → Console)
+# Default install has no auth — if api_key is set, pass it:
+curl -s -H "Authorization: Bearer YOUR_KEY" http://127.0.0.1:4545/api/status
+```
+
+**Dashboard dev server can't reach API:**
+
+```bash
+# Vite proxies /api to http://127.0.0.1:4545 — make sure daemon is running
+librefang status
+# If not running:
+librefang start
+```
+
 ### Performance Profiling
 
 ```bash
 # CPU profiling
 cargo flamegraph --bin librefang-cli -- start
-
-# Memory profiling
-cargo leptos --bin librefang-cli -- start
 ```
 
 ---
