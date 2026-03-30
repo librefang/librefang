@@ -29,3 +29,27 @@ test("loads dashboard shell", async ({ page }) => {
   await page.getByRole("link", { name: "Goals" }).click();
   await expect(page.getByRole("heading", { level: 1, name: "Goals" })).toBeVisible();
 });
+
+test("shows the sign-in dialog when dashboard credentials are required", async ({ page }) => {
+  await page.route("**/api/auth/dashboard-check", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ mode: "credentials" }),
+    });
+  });
+
+  await page.route("**/api/version", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ version: "test", hostname: "devbox" }),
+    });
+  });
+
+  await page.goto("/");
+
+  await expect(page.getByText("Sign In Required")).toBeVisible();
+  await expect(page.getByPlaceholder("Enter username...")).toBeVisible();
+  await expect(page.getByPlaceholder("Enter password...")).toBeVisible();
+});
