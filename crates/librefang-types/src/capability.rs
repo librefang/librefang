@@ -117,7 +117,7 @@ pub fn capability_matches(granted: &Capability, required: &Capability) -> bool {
             glob_matches(pattern, host)
         }
         (Capability::ToolInvoke(granted_id), Capability::ToolInvoke(required_id)) => {
-            granted_id == required_id || granted_id == "*"
+            glob_matches(granted_id, required_id)
         }
         (Capability::LlmQuery(pattern), Capability::LlmQuery(model)) => {
             glob_matches(pattern, model)
@@ -187,7 +187,14 @@ pub fn validate_capability_inheritance(
 }
 
 /// Simple glob pattern matching supporting '*' as wildcard.
-fn glob_matches(pattern: &str, value: &str) -> bool {
+///
+/// Pattern rules:
+/// - `"*"` matches anything
+/// - `"prefix*"` matches values starting with `prefix`
+/// - `"*suffix"` matches values ending with `suffix`
+/// - `"prefix*suffix"` matches values starting with `prefix` and ending with `suffix`
+/// - Exact string matches itself
+pub fn glob_matches(pattern: &str, value: &str) -> bool {
     if pattern == "*" {
         return true;
     }
@@ -312,5 +319,44 @@ mod tests {
             Capability::ShellExec("*".to_string()),
         ];
         assert!(validate_capability_inheritance(&parent, &child).is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // glob_matches (pub) — tool name style patterns
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_glob_matches_tool_prefix_wildcard() {
+        assert!(glob_matches("file_*", "file_read"));
+        assert!(glob_matches("file_*", "file_write"));
+        assert!(glob_matches("file_*", "file_delete"));
+        assert!(!glob_matches("file_*", "shell_exec"));
+        assert!(!glob_matches("file_*", "web_fetch"));
+    }
+
+    #[test]
+    fn test_glob_matches_tool_suffix_wildcard() {
+        assert!(glob_matches("*_exec", "shell_exec"));
+        assert!(!glob_matches("*_exec", "shell_read"));
+    }
+
+    #[test]
+    fn test_glob_matches_tool_star_all() {
+        assert!(glob_matches("*", "file_read"));
+        assert!(glob_matches("*", "shell_exec"));
+        assert!(glob_matches("*", "anything"));
+    }
+
+    #[test]
+    fn test_glob_matches_tool_exact() {
+        assert!(glob_matches("file_read", "file_read"));
+        assert!(!glob_matches("file_read", "file_write"));
+    }
+
+    #[test]
+    fn test_glob_matches_mcp_prefix() {
+        assert!(glob_matches("mcp_*", "mcp_server1_tool_a"));
+        assert!(glob_matches("mcp_*", "mcp_myserver_mytool"));
+        assert!(!glob_matches("mcp_*", "file_read"));
     }
 }

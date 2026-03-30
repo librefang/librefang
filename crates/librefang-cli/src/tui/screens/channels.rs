@@ -318,6 +318,13 @@ const CHANNEL_DEFS: &[ChannelDef] = &[
         description: "Generic webhook adapter",
     },
     ChannelDef {
+        name: "voice",
+        display_name: "Voice",
+        category: "Media",
+        env_vars: &["OPENAI_API_KEY"],
+        description: "Voice channel via WebSocket with STT/TTS",
+    },
+    ChannelDef {
         name: "mumble",
         display_name: "Mumble",
         category: "Notifications",
