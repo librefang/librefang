@@ -248,6 +248,17 @@ jobs:
             librsvg2-dev \
             patchelf
       - name: Build tests (throttled to reduce peak memory)
-        run: cargo nextest run --workspace --no-run -j 2
-      - name: Run tests
-        run: cargo nextest run --workspace --no-fail-fast --test-threads 2
+        run: cargo test --workspace --no-run -j 2
+      - name: Run tests per crate
+        env:
+          RUST_TEST_THREADS: "2"
+        run: |
+          CRATES="${{ needs.changes.outputs.crates }}"
+          if [ -z "$CRATES" ]; then
+            CRATES="librefang-types librefang-wire librefang-telemetry librefang-memory librefang-channels librefang-skills librefang-hands librefang-extensions librefang-kernel librefang-api librefang-runtime librefang-migrate librefang-testing librefang-cli librefang-desktop xtask"
+          fi
+          for crate in $CRATES; do
+            echo "::group::Testing $crate"
+            cargo test -p "$crate" && echo "✓ $crate" || exit 1
+            echo "::endgroup::"
+          done
