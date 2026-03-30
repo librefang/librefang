@@ -15,7 +15,7 @@
 
 use librefang_types::config::ProxyConfig;
 use reqwest::Proxy;
-use std::sync::OnceLock;
+use std::sync::{OnceLock, RwLock};
 
 // ── TLS configuration ──────────────────────────────────────────────────
 
@@ -50,8 +50,8 @@ pub fn tls_config() -> rustls::ClientConfig {
 
 // ── Proxy configuration ────────────────────────────────────────────────
 
-/// Global proxy configuration, set once at kernel boot.
-static GLOBAL_PROXY: OnceLock<ProxyConfig> = OnceLock::new();
+/// Global proxy configuration, updated on boot and hot-reload.
+static GLOBAL_PROXY: RwLock<Option<ProxyConfig>> = RwLock::new(None);
 
 /// Initialise the global proxy configuration.
 ///
@@ -103,7 +103,9 @@ pub fn init_proxy(cfg: ProxyConfig) {
             std::env::set_var("no_proxy", no);
         }
     }
-    let _ = GLOBAL_PROXY.set(cfg);
+    if let Ok(mut guard) = GLOBAL_PROXY.write() {
+        *guard = Some(cfg);
+    }
 }
 
 /// Check if a proxy URL has a valid scheme.
@@ -115,13 +117,12 @@ fn is_valid_proxy_url(url: &str) -> bool {
 }
 
 /// Return the active proxy config (global or default-empty).
-fn active_proxy() -> &'static ProxyConfig {
-    static EMPTY: ProxyConfig = ProxyConfig {
-        http_proxy: None,
-        https_proxy: None,
-        no_proxy: None,
-    };
-    GLOBAL_PROXY.get().unwrap_or(&EMPTY)
+fn active_proxy() -> ProxyConfig {
+    GLOBAL_PROXY
+        .read()
+        .ok()
+        .and_then(|g| g.clone())
+        .unwrap_or_default()
 }
 
 // ── Client builders ────────────────────────────────────────────────────
@@ -136,7 +137,7 @@ fn active_proxy() -> &'static ProxyConfig {
 /// - `init_proxy()` also exports config values as env vars, ensuring consistency
 ///   for crates that don't use this builder (e.g. `librefang-channels`).
 pub fn proxied_client_builder() -> reqwest::ClientBuilder {
-    build_http_client(active_proxy())
+    build_http_client(&active_proxy())
 }
 
 /// Convenience: build a ready-to-use proxy-aware [`reqwest::Client`].

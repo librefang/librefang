@@ -6114,32 +6114,33 @@ system_prompt = "You are a helpful assistant."
         let plan = build_reload_plan(&old_cfg, &new_config);
         plan.log_summary();
 
-        // Apply hot actions if the reload mode allows it
+        // Apply hot actions + store new config atomically under the same
+        // write lock.  This prevents message handlers from seeing side effects
+        // (cleared caches, updated overrides) while config_ref() still returns
+        // the old config.
+        //
+        // Only store the new config when hot-reload is active (Hot / Hybrid).
+        // In Off / Restart modes the user expects no runtime changes — they
+        // must restart to pick up the new config.
         if should_apply_hot(old_cfg.reload.mode, &plan) {
-            self.apply_hot_actions(&plan, &new_config);
+            let _write_guard = self.config_reload_lock.blocking_write();
+            self.apply_hot_actions_inner(&plan, &new_config);
+            self.config.store(std::sync::Arc::new(new_config));
         }
-
-        // Store the new config atomically
-        self.config.store(std::sync::Arc::new(new_config));
 
         Ok(plan)
     }
 
     /// Apply hot-reload actions to the running kernel.
     ///
-    /// Holds a write lock on `config_reload_lock` for the entire duration so
-    /// that concurrent message handlers (which hold a read lock) cannot observe
-    /// a half-updated configuration.
-    fn apply_hot_actions(
+    /// **Caller must hold `config_reload_lock` write guard** so that the
+    /// config swap and side effects are atomic with respect to message handlers.
+    fn apply_hot_actions_inner(
         &self,
         plan: &crate::config_reload::ReloadPlan,
         new_config: &librefang_types::config::KernelConfig,
     ) {
         use crate::config_reload::HotAction;
-
-        // Acquire exclusive lock — blocks new message handlers from reading
-        // config-derived state until all actions are applied atomically.
-        let _write_guard = self.config_reload_lock.blocking_write();
 
         for action in &plan.hot_actions {
             match action {
