@@ -123,9 +123,13 @@ pub async fn execute_tool(
     // (e.g. "fs-write" → "file_write") resolve to the canonical LibreFang name.
     let tool_name = normalize_tool_name(tool_name);
 
-    // Capability enforcement: reject tools not in the allowed list
+    // Capability enforcement: reject tools not in the allowed list.
+    // Entries support wildcard patterns (e.g. "file_*" matches "file_read").
     if let Some(allowed) = allowed_tools {
-        if !allowed.iter().any(|t| t == tool_name) {
+        if !allowed
+            .iter()
+            .any(|pattern| librefang_types::capability::glob_matches(pattern, tool_name))
+        {
             warn!(tool_name, "Capability denied: tool not in allowed list");
             return ToolResult {
                 tool_use_id: tool_use_id.to_string(),
@@ -492,7 +496,10 @@ pub async fn execute_tool(
                 // ensure MCP tools are never dispatched without authorization,
                 // even if called from a context that omits allowed_tools.
                 if let Some(allowed) = allowed_tools {
-                    if !allowed.iter().any(|t| t == other) {
+                    if !allowed
+                        .iter()
+                        .any(|pattern| librefang_types::capability::glob_matches(pattern, other))
+                    {
                         warn!(tool = other, "MCP tool not in agent's allowed_tools list");
                         return ToolResult {
                             tool_use_id: tool_use_id.to_string(),
@@ -5321,6 +5328,183 @@ mod tests {
         assert!(
             !result.content.contains("Permission denied"),
             "Should not get permission denied for allowed MCP tool, got: {}",
+            result.content
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Wildcard allowed_tools tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_allowed_tools_wildcard_prefix_match() {
+        // "file_*" should allow file_read
+        let allowed = vec!["file_*".to_string()];
+        let result = execute_tool(
+            "test-id",
+            "file_read",
+            &serde_json::json!({"path": "/tmp/test.txt"}),
+            None,
+            Some(&allowed),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None, // media_engine
+            None, // media_drivers
+            None, // exec_policy
+            None, // tts_engine
+            None, // docker_config
+            None, // process_manager
+            None, // sender_id
+            None, // channel
+        )
+        .await;
+        // Should NOT be a permission-denied error
+        assert!(
+            !result.content.contains("Permission denied"),
+            "Wildcard 'file_*' should allow 'file_read', got: {}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn test_allowed_tools_wildcard_blocks_non_matching() {
+        // "file_*" should NOT allow shell_exec
+        let allowed = vec!["file_*".to_string()];
+        let result = execute_tool(
+            "test-id",
+            "shell_exec",
+            &serde_json::json!({"command": "ls"}),
+            None,
+            Some(&allowed),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None, // media_engine
+            None, // media_drivers
+            None, // exec_policy
+            None, // tts_engine
+            None, // docker_config
+            None, // process_manager
+            None, // sender_id
+            None, // channel
+        )
+        .await;
+        assert!(result.is_error);
+        assert!(
+            result.content.contains("Permission denied"),
+            "Wildcard 'file_*' should block 'shell_exec', got: {}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn test_allowed_tools_star_allows_everything() {
+        // "*" should allow any tool
+        let allowed = vec!["*".to_string()];
+        let result = execute_tool(
+            "test-id",
+            "file_read",
+            &serde_json::json!({"path": "/tmp/test.txt"}),
+            None,
+            Some(&allowed),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None, // media_engine
+            None, // media_drivers
+            None, // exec_policy
+            None, // tts_engine
+            None, // docker_config
+            None, // process_manager
+            None, // sender_id
+            None, // channel
+        )
+        .await;
+        assert!(
+            !result.content.contains("Permission denied"),
+            "Wildcard '*' should allow everything, got: {}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn test_allowed_tools_mixed_wildcard_and_exact() {
+        // Mix of exact and wildcard entries
+        let allowed = vec!["shell_exec".to_string(), "file_*".to_string()];
+        let result = execute_tool(
+            "test-id",
+            "file_write",
+            &serde_json::json!({"path": "/tmp/test.txt", "content": "hi"}),
+            None,
+            Some(&allowed),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None, // media_engine
+            None, // media_drivers
+            None, // exec_policy
+            None, // tts_engine
+            None, // docker_config
+            None, // process_manager
+            None, // sender_id
+            None, // channel
+        )
+        .await;
+        assert!(
+            !result.content.contains("Permission denied"),
+            "Wildcard 'file_*' should allow 'file_write', got: {}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mcp_tool_wildcard_allowed() {
+        // "mcp_*" should allow any MCP tool
+        let allowed = vec!["mcp_*".to_string()];
+        let result = execute_tool(
+            "test-id",
+            "mcp_server1_tool_a",
+            &serde_json::json!({"param": "value"}),
+            None,
+            Some(&allowed),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None, // media_engine
+            None, // media_drivers
+            None, // exec_policy
+            None, // tts_engine
+            None, // docker_config
+            None, // process_manager
+            None, // sender_id
+            None, // channel
+        )
+        .await;
+        // Should fail for "MCP not available", not "Permission denied"
+        assert!(
+            !result.content.contains("Permission denied"),
+            "Wildcard 'mcp_*' should allow MCP tools, got: {}",
             result.content
         );
     }

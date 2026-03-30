@@ -177,7 +177,10 @@ pub struct ApprovalResponse {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Validate a tool name field with a contextual label.
+/// Validate a tool name or wildcard pattern with a contextual label.
+///
+/// Accepts alphanumeric characters, underscores, and a single `*` wildcard
+/// for glob matching (e.g. `"file_*"`, `"*_read"`, `"*"`).
 fn validate_tool_name(name: &str, label: &str) -> Result<(), String> {
     if name.is_empty() {
         return Err(format!("{label} must not be empty"));
@@ -185,9 +188,12 @@ fn validate_tool_name(name: &str, label: &str) -> Result<(), String> {
     if name.len() > MAX_TOOL_NAME_LEN {
         return Err(format!("{label} too long (max {MAX_TOOL_NAME_LEN} chars)"));
     }
-    if !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+    if !name
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '_' || c == '*')
+    {
         return Err(format!(
-            "{label} may only contain alphanumeric characters and underscores: \"{name}\""
+            "{label} may only contain alphanumeric characters, underscores, and '*': \"{name}\""
         ));
     }
     Ok(())
@@ -251,14 +257,27 @@ impl ChannelToolRule {
     ///
     /// Returns `Some(true)` if explicitly allowed, `Some(false)` if explicitly
     /// denied, and `None` if the rule does not apply to this tool.
+    ///
+    /// Tool names in allow/deny lists support wildcard patterns (e.g. `"file_*"`
+    /// matches `"file_read"`, `"file_write"`, etc.).
     pub fn check_tool(&self, tool_name: &str) -> Option<bool> {
-        // Deny-wins: if tool is in denied list, always deny.
-        if self.denied_tools.iter().any(|t| t == tool_name) {
+        use crate::capability::glob_matches;
+
+        // Deny-wins: if tool matches any denied pattern, always deny.
+        if self
+            .denied_tools
+            .iter()
+            .any(|pattern| glob_matches(pattern, tool_name))
+        {
             return Some(false);
         }
-        // If there is an allow-list, tool must be in it.
+        // If there is an allow-list, tool must match at least one pattern.
         if !self.allowed_tools.is_empty() {
-            return Some(self.allowed_tools.iter().any(|t| t == tool_name));
+            return Some(
+                self.allowed_tools
+                    .iter()
+                    .any(|pattern| glob_matches(pattern, tool_name)),
+            );
         }
         // Rule has no opinion on this tool.
         None
@@ -1026,5 +1045,85 @@ mod tests {
         let policy: ApprovalPolicy = serde_json::from_str("{}").unwrap();
         assert!(policy.trusted_senders.is_empty());
         assert!(policy.channel_rules.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Wildcard support
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn validate_tool_name_with_wildcard() {
+        // Wildcard patterns should pass validation
+        let mut policy = valid_policy();
+        policy.require_approval = vec!["file_*".into()];
+        assert!(policy.validate().is_ok());
+
+        policy.require_approval = vec!["*".into()];
+        assert!(policy.validate().is_ok());
+
+        policy.require_approval = vec!["*_exec".into()];
+        assert!(policy.validate().is_ok());
+    }
+
+    #[test]
+    fn channel_rule_wildcard_deny() {
+        let rule = ChannelToolRule {
+            channel: "telegram".into(),
+            allowed_tools: vec![],
+            denied_tools: vec!["file_*".into()],
+        };
+        // file_read and file_write match the pattern "file_*"
+        assert_eq!(rule.check_tool("file_read"), Some(false));
+        assert_eq!(rule.check_tool("file_write"), Some(false));
+        // shell_exec does not match
+        assert_eq!(rule.check_tool("shell_exec"), None);
+    }
+
+    #[test]
+    fn channel_rule_wildcard_allow() {
+        let rule = ChannelToolRule {
+            channel: "discord".into(),
+            allowed_tools: vec!["file_*".into()],
+            denied_tools: vec![],
+        };
+        assert_eq!(rule.check_tool("file_read"), Some(true));
+        assert_eq!(rule.check_tool("file_write"), Some(true));
+        // shell_exec doesn't match the wildcard
+        assert_eq!(rule.check_tool("shell_exec"), Some(false));
+    }
+
+    #[test]
+    fn channel_rule_wildcard_star_matches_all() {
+        let rule = ChannelToolRule {
+            channel: "admin".into(),
+            allowed_tools: vec!["*".into()],
+            denied_tools: vec![],
+        };
+        assert_eq!(rule.check_tool("file_read"), Some(true));
+        assert_eq!(rule.check_tool("shell_exec"), Some(true));
+        assert_eq!(rule.check_tool("anything"), Some(true));
+    }
+
+    #[test]
+    fn channel_rule_wildcard_deny_wins_over_wildcard_allow() {
+        let rule = ChannelToolRule {
+            channel: "restricted".into(),
+            allowed_tools: vec!["file_*".into()],
+            denied_tools: vec!["file_delete".into()],
+        };
+        // file_delete is explicitly denied — deny wins
+        assert_eq!(rule.check_tool("file_delete"), Some(false));
+        // file_read matches allow wildcard
+        assert_eq!(rule.check_tool("file_read"), Some(true));
+    }
+
+    #[test]
+    fn channel_rule_validate_wildcard_tool_name() {
+        let rule = ChannelToolRule {
+            channel: "telegram".into(),
+            allowed_tools: vec!["file_*".into()],
+            denied_tools: vec!["shell_*".into()],
+        };
+        assert!(rule.validate().is_ok());
     }
 }
