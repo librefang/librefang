@@ -1187,6 +1187,13 @@ complex_threshold = 500
         }
     }
 
+    // Write config.example.toml with the full annotated template for reference
+    let example_path = librefang_dir.join("config.example.toml");
+    if !example_path.exists() {
+        let example_content = include_str!("../../../templates/init_default_config.toml");
+        let _ = std::fs::write(&example_path, example_content);
+    }
+
     state.saving_done = true;
 
     // Auto-start the daemon so all launch options work immediately.

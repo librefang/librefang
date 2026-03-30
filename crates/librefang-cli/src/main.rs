@@ -2521,6 +2521,15 @@ fn write_config_if_missing(
             &[("path", &config_path.display().to_string())],
         ));
     }
+
+    // Write config.example.toml with the full annotated template for reference
+    let example_path = librefang_dir.join("config.example.toml");
+    if !example_path.exists() {
+        let example_content = include_str!("../templates/init_default_config.toml");
+        if let Err(e) = std::fs::write(&example_path, example_content) {
+            ui::hint(&format!("Could not write config.example.toml: {e}"));
+        }
+    }
 }
 
 fn daemon_log_path_for_home(home_dir: &std::path::Path) -> PathBuf {
