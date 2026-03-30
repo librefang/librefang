@@ -10332,6 +10332,7 @@ mod tests {
             model: "Qwen3.5-4B-MLX-4bit".to_string(),
             api_key_env: String::new(),
             base_url: Some("http://127.0.0.1:11434/v1".to_string()),
+            message_timeout_secs: 300,
         });
 
         let agent_id = kernel
