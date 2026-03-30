@@ -3,6 +3,7 @@ import { formatCompact } from "../lib/format";
 import { formatUptime } from "../lib/datetime";
 import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
+import { getMetricsText } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
 import { Card } from "../components/ui/Card";
 import { CardSkeleton } from "../components/ui/Skeleton";
@@ -154,14 +155,7 @@ function parseMetrics(text: string): ParsedMetrics {
 // ── Component ────────────────────────────────────────────────────────
 
 async function fetchMetrics(): Promise<string> {
-  const token = localStorage.getItem("librefang-api-key") || "";
-  const headers: Record<string, string> = {};
-  if (token) {
-    headers["Authorization"] = `Bearer ${token}`;
-  }
-  const res = await fetch("/api/metrics", { headers });
-  if (!res.ok) throw new Error("Failed to fetch metrics");
-  return res.text();
+  return getMetricsText();
 }
 
 export function TelemetryPage() {
