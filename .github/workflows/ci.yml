@@ -247,11 +247,11 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev \
             patchelf
-      - name: Create swap space (runner only has 7GB RAM)
+      - name: Expand swap (runner only has 7GB RAM)
         run: |
-          sudo fallocate -l 8G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
+          sudo fallocate -l 8G /mnt/swapfile2
+          sudo chmod 600 /mnt/swapfile2
+          sudo mkswap /mnt/swapfile2
+          sudo swapon /mnt/swapfile2
       - name: Run tests
         run: cargo nextest run --workspace --no-fail-fast
