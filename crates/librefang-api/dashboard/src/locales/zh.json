@@ -322,6 +322,8 @@
   },
   "approvals": {
     "title": "审批", "subtitle": "在执行前审查并授权关键操作。", "pending_review": "等待审查", "approve": "批准", "reject": "拒绝",
+    "approvedToast": "已批准", "rejectedToast": "已拒绝",
+    "status": { "pending": "待审批", "approved": "已批准", "rejected": "已拒绝", "expired": "已过期" },
     "queue_clear": "队列清空", "queue_clear_desc": "没有需要您审批的操作。",
     "help": "审批人工审核请求。当智能体需要人类确认时，请求会出现在这里。"
   },
