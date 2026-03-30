@@ -736,6 +736,7 @@ pub async fn set_provider_key(
                     model: model_id,
                     api_key_env: env_var.clone(),
                     base_url: None,
+                    message_timeout_secs: 300,
                 };
                 let mut guard = state
                     .kernel
@@ -1170,6 +1171,7 @@ pub async fn set_default_provider(
             model: model_id.clone(),
             api_key_env: env_var.clone(),
             base_url: None,
+            message_timeout_secs: 300,
         };
         let mut guard = state
             .kernel
