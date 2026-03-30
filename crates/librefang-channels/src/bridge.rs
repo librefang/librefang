@@ -946,6 +946,89 @@ async fn handle_send_error<F, Fut>(
         .await;
 }
 
+/// Resolve the target agent for an incoming message using thread routing, binding
+/// context, and fallback logic. Returns `Some(agent_id)` or `None` if no agents exist.
+///
+/// Shared by `dispatch_message` and `dispatch_with_blocks` to ensure consistent routing.
+async fn resolve_or_fallback(
+    message: &ChannelMessage,
+    handle: &Arc<dyn ChannelBridgeHandle>,
+    router: &Arc<AgentRouter>,
+) -> Option<AgentId> {
+    // Thread-based agent routing: if the adapter tagged this message with a
+    // thread_route_agent, resolve that agent name first.
+    let thread_route_agent_id = if let Some(agent_name) = message
+        .metadata
+        .get("thread_route_agent")
+        .and_then(|v| v.as_str())
+    {
+        match handle.find_agent_by_name(agent_name).await {
+            Ok(Some(id)) => Some(id),
+            Ok(None) => {
+                warn!(
+                    "Thread route agent '{agent_name}' not found, falling back to default routing"
+                );
+                None
+            }
+            Err(e) => {
+                warn!("Thread route agent lookup failed for '{agent_name}': {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // Route to agent — use resolve_with_context to support account_id, guild_id, etc.
+    let agent_id = if let Some(id) = thread_route_agent_id {
+        Some(id)
+    } else {
+        let ctx = crate::router::BindingContext {
+            channel: std::borrow::Cow::Borrowed(crate::router::channel_type_to_str(
+                &message.channel,
+            )),
+            account_id: message
+                .metadata
+                .get("account_id")
+                .and_then(|v| v.as_str())
+                .map(std::borrow::Cow::Borrowed),
+            peer_id: std::borrow::Cow::Borrowed(&message.sender.platform_id),
+            guild_id: message
+                .metadata
+                .get("guild_id")
+                .and_then(|v| v.as_str())
+                .map(std::borrow::Cow::Borrowed),
+            roles: smallvec::SmallVec::new(),
+        };
+        router.resolve_with_context(
+            &message.channel,
+            &message.sender.platform_id,
+            message.sender.librefang_user.as_deref(),
+            &ctx,
+        )
+    };
+
+    if let Some(id) = agent_id {
+        return Some(id);
+    }
+
+    // Fallback: try "assistant" agent, then first available agent
+    let fallback = handle.find_agent_by_name("assistant").await.ok().flatten();
+    let fallback = match fallback {
+        Some(id) => Some(id),
+        None => handle
+            .list_agents()
+            .await
+            .ok()
+            .and_then(|agents| agents.first().map(|(id, _)| *id)),
+    };
+    if let Some(id) = fallback {
+        // Auto-set this as the user's default so future messages route directly
+        router.set_user_default(message.sender.platform_id.clone(), id);
+    }
+    fallback
+}
+
 /// Dispatch a single incoming message — handles bot commands or routes to an agent.
 ///
 /// Applies per-channel policies (DM/group filtering, rate limiting, formatting, threading).
@@ -1063,7 +1146,15 @@ async fn dispatch_message(
 
     // Handle commands first (early return)
     if let ChannelContent::Command { ref name, ref args } = message.content {
-        let result = handle_command(name, args, handle, router, &message.sender).await;
+        let result = handle_command(
+            name,
+            args,
+            handle,
+            router,
+            &message.sender,
+            &message.channel,
+        )
+        .await;
         send_response(adapter, &message.sender, result, thread_id, output_format).await;
         return;
     }
@@ -1204,7 +1295,15 @@ async fn dispatch_message(
                 | "peers"
                 | "a2a"
         ) {
-            let result = handle_command(cmd, &args, handle, router, &message.sender).await;
+            let result = handle_command(
+                cmd,
+                &args,
+                handle,
+                router,
+                &message.sender,
+                &message.channel,
+            )
+            .await;
             send_response(adapter, &message.sender, result, thread_id, output_format).await;
             return;
         }
@@ -1289,94 +1388,22 @@ async fn dispatch_message(
         }
     }
 
-    // Thread-based agent routing: if the adapter tagged this message with a
-    // thread_route_agent, resolve that agent name before falling through to
-    // the standard router. This allows Telegram forum threads (and similar)
-    // to route to different agents based on config.
-    let thread_route_agent_id = if let Some(agent_name) = message
-        .metadata
-        .get("thread_route_agent")
-        .and_then(|v| v.as_str())
-    {
-        match handle.find_agent_by_name(agent_name).await {
-            Ok(Some(id)) => Some(id),
-            Ok(None) => {
-                warn!(
-                    "Thread route agent '{agent_name}' not found, falling back to default routing"
-                );
-                None
-            }
-            Err(e) => {
-                warn!("Thread route agent lookup failed for '{agent_name}': {e}");
-                None
-            }
-        }
-    } else {
-        None
-    };
-
-    // Route to agent (standard path) — use resolve_with_context to support account_id
-    let agent_id = if let Some(id) = thread_route_agent_id {
-        Some(id)
-    } else {
-        let ctx = crate::router::BindingContext {
-            channel: std::borrow::Cow::Borrowed(crate::router::channel_type_to_str(
-                &message.channel,
-            )),
-            account_id: message
-                .metadata
-                .get("account_id")
-                .and_then(|v| v.as_str())
-                .map(std::borrow::Cow::Borrowed),
-            peer_id: std::borrow::Cow::Borrowed(&message.sender.platform_id),
-            guild_id: message
-                .metadata
-                .get("guild_id")
-                .and_then(|v| v.as_str())
-                .map(std::borrow::Cow::Borrowed),
-            roles: smallvec::SmallVec::new(),
-        };
-        router.resolve_with_context(
-            &message.channel,
-            &message.sender.platform_id,
-            message.sender.librefang_user.as_deref(),
-            &ctx,
-        )
-    };
-    let channel_key = format!("{:?}", message.channel);
-
-    let agent_id = match agent_id {
+    let agent_id = match resolve_or_fallback(message, handle, router).await {
         Some(id) => id,
         None => {
-            // Fallback: try "assistant" agent, then first available agent
-            let fallback = handle.find_agent_by_name("assistant").await.ok().flatten();
-            let fallback = match fallback {
-                Some(id) => Some(id),
-                None => handle
-                    .list_agents()
-                    .await
-                    .ok()
-                    .and_then(|agents| agents.first().map(|(id, _)| *id)),
-            };
-            match fallback {
-                Some(id) => {
-                    // Auto-set this as the user's default so future messages route directly
-                    router.set_user_default(message.sender.platform_id.clone(), id);
-                    id
-                }
-                None => {
-                    send_response(
-                        adapter,
-                        &message.sender,
-                        "No agents available. Start the dashboard at http://127.0.0.1:4545 to create one.".to_string(),
-                        thread_id,
-                        output_format,
-                    ).await;
-                    return;
-                }
-            }
+            send_response(
+                adapter,
+                &message.sender,
+                "No agents available. Start the dashboard at http://127.0.0.1:4545 to create one."
+                    .to_string(),
+                thread_id,
+                output_format,
+            )
+            .await;
+            return;
         }
     };
+    let channel_key = format!("{:?}", message.channel);
 
     // RBAC: authorize the user before forwarding to agent
     if let Err(denied) = handle
@@ -1738,80 +1765,22 @@ async fn dispatch_with_blocks(
     thread_id: Option<&str>,
     output_format: OutputFormat,
 ) {
-    // Thread-based agent routing (same as text path)
-    let thread_route_agent_id = if let Some(agent_name) = message
-        .metadata
-        .get("thread_route_agent")
-        .and_then(|v| v.as_str())
-    {
-        match handle.find_agent_by_name(agent_name).await {
-            Ok(Some(id)) => Some(id),
-            _ => None,
-        }
-    } else {
-        None
-    };
-
-    // Route to agent (same logic as text path) — use resolve_with_context for account_id
-    let agent_id = if let Some(id) = thread_route_agent_id {
-        Some(id)
-    } else {
-        let ctx = crate::router::BindingContext {
-            channel: std::borrow::Cow::Borrowed(crate::router::channel_type_to_str(
-                &message.channel,
-            )),
-            account_id: message
-                .metadata
-                .get("account_id")
-                .and_then(|v| v.as_str())
-                .map(std::borrow::Cow::Borrowed),
-            peer_id: std::borrow::Cow::Borrowed(&message.sender.platform_id),
-            guild_id: message
-                .metadata
-                .get("guild_id")
-                .and_then(|v| v.as_str())
-                .map(std::borrow::Cow::Borrowed),
-            roles: smallvec::SmallVec::new(),
-        };
-        router.resolve_with_context(
-            &message.channel,
-            &message.sender.platform_id,
-            message.sender.librefang_user.as_deref(),
-            &ctx,
-        )
-    };
-    let channel_key = format!("{:?}", message.channel);
-
-    let agent_id = match agent_id {
+    let agent_id = match resolve_or_fallback(message, handle, router).await {
         Some(id) => id,
         None => {
-            let fallback = handle.find_agent_by_name("assistant").await.ok().flatten();
-            let fallback = match fallback {
-                Some(id) => Some(id),
-                None => handle
-                    .list_agents()
-                    .await
-                    .ok()
-                    .and_then(|agents| agents.first().map(|(id, _)| *id)),
-            };
-            match fallback {
-                Some(id) => {
-                    router.set_user_default(message.sender.platform_id.clone(), id);
-                    id
-                }
-                None => {
-                    send_response(
-                        adapter,
-                        &message.sender,
-                        "No agents available. Start the dashboard at http://127.0.0.1:4545 to create one.".to_string(),
-                        thread_id,
-                        output_format,
-                    ).await;
-                    return;
-                }
-            }
+            send_response(
+                adapter,
+                &message.sender,
+                "No agents available. Start the dashboard at http://127.0.0.1:4545 to create one."
+                    .to_string(),
+                thread_id,
+                output_format,
+            )
+            .await;
+            return;
         }
     };
+    let channel_key = format!("{:?}", message.channel);
 
     // RBAC check
     if let Err(denied) = handle
@@ -1893,6 +1862,7 @@ async fn handle_command(
     handle: &Arc<dyn ChannelBridgeHandle>,
     router: &Arc<AgentRouter>,
     sender: &ChannelUser,
+    channel_type: &crate::types::ChannelType,
 ) -> String {
     match name {
         "start" => {
@@ -1998,7 +1968,7 @@ async fn handle_command(
             }
             let question = args.join(" ");
             let agent_id = router.resolve(
-                &crate::types::ChannelType::CLI,
+                channel_type,
                 &sender.platform_id,
                 sender.librefang_user.as_deref(),
             );
@@ -2013,7 +1983,7 @@ async fn handle_command(
         "new" => {
             // Need to resolve the user's current agent
             let agent_id = router.resolve(
-                &crate::types::ChannelType::CLI,
+                channel_type,
                 &sender.platform_id,
                 sender.librefang_user.as_deref(),
             );
@@ -2027,7 +1997,7 @@ async fn handle_command(
         }
         "reboot" => {
             let agent_id = router.resolve(
-                &crate::types::ChannelType::CLI,
+                channel_type,
                 &sender.platform_id,
                 sender.librefang_user.as_deref(),
             );
@@ -2041,7 +2011,7 @@ async fn handle_command(
         }
         "compact" => {
             let agent_id = router.resolve(
-                &crate::types::ChannelType::CLI,
+                channel_type,
                 &sender.platform_id,
                 sender.librefang_user.as_deref(),
             );
@@ -2055,7 +2025,7 @@ async fn handle_command(
         }
         "model" => {
             let agent_id = router.resolve(
-                &crate::types::ChannelType::CLI,
+                channel_type,
                 &sender.platform_id,
                 sender.librefang_user.as_deref(),
             );
@@ -2079,7 +2049,7 @@ async fn handle_command(
         }
         "stop" => {
             let agent_id = router.resolve(
-                &crate::types::ChannelType::CLI,
+                channel_type,
                 &sender.platform_id,
                 sender.librefang_user.as_deref(),
             );
@@ -2093,7 +2063,7 @@ async fn handle_command(
         }
         "usage" => {
             let agent_id = router.resolve(
-                &crate::types::ChannelType::CLI,
+                channel_type,
                 &sender.platform_id,
                 sender.librefang_user.as_deref(),
             );
@@ -2107,7 +2077,7 @@ async fn handle_command(
         }
         "think" => {
             let agent_id = router.resolve(
-                &crate::types::ChannelType::CLI,
+                channel_type,
                 &sender.platform_id,
                 sender.librefang_user.as_deref(),
             );
@@ -2274,10 +2244,12 @@ mod tests {
             librefang_user: None,
         };
 
-        let result = handle_command("agents", &[], &handle, &router, &sender).await;
+        let result =
+            handle_command("agents", &[], &handle, &router, &sender, &ChannelType::CLI).await;
         assert!(result.contains("coder"));
 
-        let result = handle_command("help", &[], &handle, &router, &sender).await;
+        let result =
+            handle_command("help", &[], &handle, &router, &sender, &ChannelType::CLI).await;
         assert!(result.contains("/agents"));
     }
 
@@ -2295,8 +2267,15 @@ mod tests {
         };
 
         // Select existing agent
-        let result =
-            handle_command("agent", &["coder".to_string()], &handle, &router, &sender).await;
+        let result = handle_command(
+            "agent",
+            &["coder".to_string()],
+            &handle,
+            &router,
+            &sender,
+            &ChannelType::CLI,
+        )
+        .await;
         assert!(result.contains("Now talking to agent: coder"));
 
         // Verify router was updated
@@ -2593,7 +2572,7 @@ mod tests {
             librefang_user: None,
         };
 
-        let result = handle_command("btw", &[], &handle, &router, &sender).await;
+        let result = handle_command("btw", &[], &handle, &router, &sender, &ChannelType::CLI).await;
         assert!(result.contains("Usage:"));
     }
 
@@ -2617,6 +2596,7 @@ mod tests {
             &handle,
             &router,
             &sender,
+            &ChannelType::CLI,
         )
         .await;
         assert!(result.contains("No agent selected"));
@@ -2634,7 +2614,8 @@ mod tests {
             librefang_user: None,
         };
 
-        let result = handle_command("help", &[], &handle, &router, &sender).await;
+        let result =
+            handle_command("help", &[], &handle, &router, &sender, &ChannelType::CLI).await;
         assert!(result.contains("/btw"));
     }
 
