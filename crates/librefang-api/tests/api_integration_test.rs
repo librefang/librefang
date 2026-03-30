@@ -80,6 +80,7 @@ async fn start_test_server_with_provider(
             model: model.to_string(),
             api_key_env: api_key_env.to_string(),
             base_url: None,
+            message_timeout_secs: 300,
         },
         ..KernelConfig::default()
     };
@@ -207,6 +208,7 @@ async fn start_full_router(api_key: &str) -> FullRouterHarness {
             model: "test-model".to_string(),
             api_key_env: "OLLAMA_API_KEY".to_string(),
             base_url: None,
+            message_timeout_secs: 300,
         },
         ..KernelConfig::default()
     };
@@ -546,7 +548,7 @@ async fn test_run_migrate_uses_daemon_home_when_target_dir_is_empty() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_config_reload_reports_proxy_changes_require_restart() {
+async fn test_config_reload_hot_reloads_proxy_changes() {
     let server = start_test_server().await;
     let client = reqwest::Client::new();
 
@@ -583,16 +585,17 @@ async fn test_config_reload_reports_proxy_changes_require_restart() {
     assert_eq!(resp.status(), 200);
 
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["status"], "partial");
-    assert_eq!(body["restart_required"], true);
+    // Proxy is now hot-reloadable — should NOT require restart
+    assert_eq!(
+        body["restart_required"], false,
+        "proxy changes should be hot-reloaded, not require restart: {body}"
+    );
     assert!(
-        body["restart_reasons"]
+        body["hot_actions_applied"]
             .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|value| value.as_str())
-            .any(|reason| reason.contains("proxy config changed")),
-        "unexpected reload response: {body}"
+            .map(|a| a.iter().any(|v| v.as_str() == Some("ReloadProxy")))
+            .unwrap_or(false),
+        "ReloadProxy should be in hot_actions_applied: {body}"
     );
 }
 
@@ -1318,6 +1321,7 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
             model: "test-model".to_string(),
             api_key_env: "OLLAMA_API_KEY".to_string(),
             base_url: None,
+            message_timeout_secs: 300,
         },
         ..KernelConfig::default()
     };
