@@ -253,7 +253,7 @@ jobs:
         run: |
           CRATES="${{ needs.changes.outputs.crates }}"
           if [ -z "$CRATES" ]; then
-            CRATES="librefang-types librefang-wire librefang-telemetry librefang-memory librefang-channels librefang-skills librefang-hands librefang-extensions librefang-kernel librefang-api librefang-runtime librefang-migrate librefang-testing librefang-cli librefang-desktop"
+            CRATES="librefang-types librefang-wire librefang-telemetry librefang-memory librefang-channels librefang-skills librefang-hands librefang-extensions librefang-kernel librefang-api librefang-runtime librefang-migrate librefang-testing librefang-cli librefang-desktop xtask"
           fi
           for crate in $CRATES; do
             echo "::group::Testing $crate"
