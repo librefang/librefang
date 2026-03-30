@@ -51,7 +51,7 @@ dashboard-build:
 dash:
     cd crates/librefang-api/dashboard && pnpm install && pnpm dev
 
-# Build release CLI and install to ~/.librefang/bin
+# Build release CLI and install to ~/.librefang/bin (uses thin LTO to avoid OOM)
 install: dashboard-build
     cargo build --profile release-local -p librefang-cli
     target_dir := if os() == "windows" { env("USERPROFILE") + "/.librefang/bin" } else { "~/.librefang/bin" }
