@@ -247,7 +247,11 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev \
             patchelf
-      - name: Build tests (throttled to reduce peak memory)
-        run: cargo nextest run --workspace --no-run -j 2
+      - name: Create swap space (runner only has 7GB RAM)
+        run: |
+          sudo fallocate -l 8G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
       - name: Run tests
-        run: cargo nextest run --workspace --no-fail-fast -j 1
+        run: cargo nextest run --workspace --no-fail-fast
