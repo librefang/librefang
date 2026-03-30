@@ -779,14 +779,12 @@ impl ChannelAdapter for DingTalkAdapter {
 
             let result: serde_json::Value = resp.json().await?;
             // Webhook mode uses errcode; stream session webhook may not.
-            if self.mode == DingTalkMode::Webhook {
-                if result["errcode"].as_i64() != Some(0) {
-                    return Err(format!(
-                        "DingTalk error: {}",
-                        result["errmsg"].as_str().unwrap_or("unknown")
-                    )
-                    .into());
-                }
+            if self.mode == DingTalkMode::Webhook && result["errcode"].as_i64() != Some(0) {
+                return Err(format!(
+                    "DingTalk error: {}",
+                    result["errmsg"].as_str().unwrap_or("unknown")
+                )
+                .into());
             }
 
             // Rate limit: small delay between chunks
