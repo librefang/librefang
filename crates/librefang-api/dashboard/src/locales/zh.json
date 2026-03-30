@@ -322,6 +322,8 @@
   },
   "approvals": {
     "title": "审批", "subtitle": "在执行前审查并授权关键操作。", "pending_review": "等待审查", "approve": "批准", "reject": "拒绝",
+    "approvedToast": "已批准", "rejectedToast": "已拒绝",
+    "status": { "pending": "待审批", "approved": "已批准", "rejected": "已拒绝", "expired": "已过期" },
     "queue_clear": "队列清空", "queue_clear_desc": "没有需要您审批的操作。",
     "help": "审批人工审核请求。当智能体需要人类确认时，请求会出现在这里。"
   },
@@ -342,13 +344,15 @@
   "auth": {
     "title": "需要 API Key",
     "description": "此实例需要身份验证才能访问。",
-    "placeholder": "输入 API Key...",
-    "submit": "认证",
-    "invalid": "无效的 API Key，请重试。",
     "credentials_title": "需要登录",
-    "credentials_description": "请输入控制台凭据以继续。",
-    "username_placeholder": "用户名",
-    "password_placeholder": "密码"
+    "credentials_description": "请输入 Dashboard 用户名和密码以继续。",
+    "placeholder": "输入 API Key...",
+    "username_placeholder": "输入用户名...",
+    "password_placeholder": "输入密码...",
+    "submit": "认证",
+    "invalid": "认证失败，请重试。",
+    "invalid_api_key": "无效的 API Key，请重试。",
+    "invalid_credentials": "用户名或密码无效，请重试。"
   },
   "network": {
     "section": "OFP 网络", "title": "网络", "subtitle": "开放联邦协议网络状态和连接的节点。",

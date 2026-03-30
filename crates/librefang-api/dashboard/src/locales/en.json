@@ -334,6 +334,8 @@
   },
   "approvals": {
     "title": "Approvals", "subtitle": "Review and authorize critical agent actions.", "pending_review": "Pending Review", "approve": "Approve", "reject": "Reject",
+    "approvedToast": "Approved", "rejectedToast": "Rejected",
+    "status": { "pending": "Pending", "approved": "Approved", "rejected": "Rejected", "expired": "Expired" },
     "queue_clear": "Queue Clear", "queue_clear_desc": "No pending actions.",
     "help": "Review approval requests. When agents need human confirmation, requests appear here."
   },
@@ -354,13 +356,15 @@
   "auth": {
     "title": "API Key Required",
     "description": "This instance requires authentication to access.",
+    "credentials_title": "Sign In Required",
+    "credentials_description": "Enter your dashboard username and password to continue.",
     "placeholder": "Enter API key...",
+    "username_placeholder": "Enter username...",
+    "password_placeholder": "Enter password...",
     "submit": "Authenticate",
-    "invalid": "Invalid API key. Please try again.",
-    "credentials_title": "Login Required",
-    "credentials_description": "Enter your dashboard credentials to continue.",
-    "username_placeholder": "Username",
-    "password_placeholder": "Password"
+    "invalid": "Authentication failed. Please try again.",
+    "invalid_api_key": "Invalid API key. Please try again.",
+    "invalid_credentials": "Invalid username or password. Please try again."
   },
   "network": {
     "section": "OFP Network", "title": "Network", "subtitle": "Open Federation Protocol network status and connected peers.",

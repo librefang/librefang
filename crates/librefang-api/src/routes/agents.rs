@@ -137,10 +137,6 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             "/agents/{id}/deliveries",
             axum::routing::get(get_agent_deliveries),
         )
-        .route(
-            "/agents/{id}/upload",
-            axum::routing::post(upload_file),
-        )
         .route("/agents/{id}/ws", axum::routing::get(crate::ws::agent_ws))
         .route(
             "/uploads/{file_id}",
@@ -1740,6 +1736,14 @@ pub async fn send_message_stream(
             Json(serde_json::json!({"error": err_not_found})),
         )
             .into_response();
+    }
+
+    // Resolve file attachments into image content blocks (same as non-streaming)
+    if !req.attachments.is_empty() {
+        let image_blocks = resolve_attachments(&req.attachments);
+        if !image_blocks.is_empty() {
+            inject_attachments_into_session(&state.kernel, agent_id, image_blocks);
+        }
     }
 
     let kernel_handle: Arc<dyn KernelHandle> = state.kernel.clone() as Arc<dyn KernelHandle>;
