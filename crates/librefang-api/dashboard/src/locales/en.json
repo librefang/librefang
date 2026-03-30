@@ -6,7 +6,8 @@
     "workflows": "Workflows", "scheduler": "Scheduler", "goals": "Goals", "agents": "Agents",
     "providers": "Providers", "channels": "Channels", "skills": "Skills", "hands": "Hands", "plugins": "Plugins", "models": "Models",
     "analytics": "Analytics", "memory": "Memory", "comms": "Comms", "runtime": "Runtime", "logs": "Logs", "settings": "Settings",
-    "network": "Network", "a2a": "A2A", "telemetry": "Telemetry"
+    "network": "Network", "a2a": "A2A", "telemetry": "Telemetry",
+    "user_center": "User Center", "logout": "Logout"
   },
   "common": {
     "refresh": "Refresh", "status": "Status", "daemon_online": "Daemon Online", "infrastructure": "Infrastructure",

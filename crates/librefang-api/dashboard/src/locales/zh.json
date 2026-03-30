@@ -6,7 +6,8 @@
     "workflows": "工作流", "scheduler": "调度器", "goals": "目标", "agents": "智能体",
     "providers": "供应商", "channels": "通道", "skills": "技能", "hands": "Hands", "plugins": "插件", "models": "模型",
     "analytics": "分析", "memory": "记忆", "comms": "通信", "runtime": "运行时", "logs": "日志", "settings": "设置",
-    "network": "网络", "a2a": "A2A", "telemetry": "遥测"
+    "network": "网络", "a2a": "A2A", "telemetry": "遥测",
+    "user_center": "用户中心", "logout": "退出登录"
   },
   "common": {
     "refresh": "刷新", "status": "状态", "daemon_online": "守护进程在线", "infrastructure": "控制台",

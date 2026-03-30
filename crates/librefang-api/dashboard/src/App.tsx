@@ -1,10 +1,10 @@
 import { Link, Outlet } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Globe, Sun, Moon, Search, ChevronLeft, ChevronRight, ChevronDown, Menu, Home, Layers, MessageCircle, Clock, CheckCircle, Calendar, Shield, Users, User, Server, Network, Bell, Hand, BarChart3, Database, Activity, FileText, Settings, Puzzle, Cpu, Lock, Share2, Gauge } from "lucide-react";
+import { Globe, Sun, Moon, Search, ChevronLeft, ChevronRight, ChevronDown, Menu, Home, Layers, MessageCircle, Clock, CheckCircle, Calendar, Shield, Users, User, Server, Network, Bell, Hand, BarChart3, Database, Activity, FileText, Settings, Puzzle, Cpu, Lock, Share2, Gauge, LogOut, UserCircle } from "lucide-react";
 import { useUIStore } from "./lib/store";
 import { CommandPalette, useCommandPalette } from "./components/ui/CommandPalette";
-import { checkDashboardAuthMode, dashboardLogin, getVersionInfo, setApiKey, setOnUnauthorized, verifyStoredAuth, type AuthMode } from "./api";
+import { checkDashboardAuthMode, clearApiKey, dashboardLogin, getVersionInfo, setApiKey, setOnUnauthorized, verifyStoredAuth, type AuthMode } from "./api";
 
 function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated: () => void }) {
   const { t } = useTranslation();
@@ -154,6 +154,7 @@ export function App() {
   const [authMode, setAuthMode] = useState<AuthMode>("none");
   const [appVersion, setAppVersion] = useState("");
   const [hostname, setHostname] = useState("");
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
 
   // Wire up global 401 handler so any failed request re-shows login
   useEffect(() => {
@@ -414,13 +415,6 @@ export function App() {
             </div>
           </div>
           <div className="flex items-center gap-1">
-            <Link
-              to="/settings"
-              className="flex h-9 w-9 items-center justify-center rounded-xl text-text-dim hover:text-brand hover:bg-surface-hover transition-colors duration-200"
-              title={t("nav.settings")}
-            >
-              <Settings className="h-4 w-4" />
-            </Link>
             <button
               onClick={() => setLanguage(language === "en" ? "zh" : "en")}
               className="flex h-9 w-9 items-center justify-center rounded-xl text-text-dim hover:text-brand hover:bg-surface-hover transition-colors duration-200"
@@ -435,6 +429,39 @@ export function App() {
             >
               {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
             </button>
+            <div className="relative">
+              <button
+                onClick={() => setUserMenuOpen(!userMenuOpen)}
+                className="flex h-9 w-9 items-center justify-center rounded-xl text-text-dim hover:text-brand hover:bg-surface-hover transition-colors duration-200"
+                title={t("nav.user_center")}
+              >
+                <UserCircle className="h-5 w-5" />
+              </button>
+              {userMenuOpen && (
+                <>
+                  <div className="fixed inset-0 z-40" onClick={() => setUserMenuOpen(false)} />
+                  <div className="absolute right-0 top-full mt-1 z-50 w-48 rounded-xl border border-border-subtle bg-surface shadow-xl py-1">
+                    <Link
+                      to="/settings"
+                      onClick={() => setUserMenuOpen(false)}
+                      className="flex items-center gap-2.5 px-3 py-2 text-xs font-medium text-text-dim hover:text-brand hover:bg-surface-hover transition-colors"
+                    >
+                      <Settings className="h-3.5 w-3.5" />
+                      {t("nav.settings")}
+                    </Link>
+                    {authMode !== "none" && (
+                      <button
+                        onClick={() => { clearApiKey(); window.location.reload(); }}
+                        className="flex w-full items-center gap-2.5 px-3 py-2 text-xs font-medium text-text-dim hover:text-red-500 hover:bg-surface-hover transition-colors"
+                      >
+                        <LogOut className="h-3.5 w-3.5" />
+                        {t("nav.logout")}
+                      </button>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
           </div>
         </header>
 
