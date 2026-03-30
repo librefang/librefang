@@ -781,7 +781,7 @@ pub async fn run_daemon(
             loop {
                 let cfg = kernel.config_snapshot();
                 match librefang_runtime::catalog_sync::sync_catalog_to(
-                    &cfg.home_dir,
+                    kernel.home_dir(),
                     &cfg.registry.registry_mirror,
                 )
                 .await
