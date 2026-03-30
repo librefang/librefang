@@ -34,6 +34,7 @@ pub struct ThreemaAdapter {
     /// SECURITY: API secret is zeroized on drop.
     secret: Zeroizing<String>,
     /// Port for the inbound webhook HTTP listener.
+    #[allow(dead_code)]
     webhook_port: u16,
     /// HTTP client for outbound API calls.
     client: reqwest::Client,
@@ -41,6 +42,7 @@ pub struct ThreemaAdapter {
     account_id: Option<String>,
     /// Shutdown signal.
     shutdown_tx: Arc<watch::Sender<bool>>,
+    #[allow(dead_code)]
     shutdown_rx: watch::Receiver<bool>,
 }
 
@@ -192,138 +194,90 @@ impl ChannelAdapter for ThreemaAdapter {
         ChannelType::Custom("threema".to_string())
     }
 
-    async fn start(
+    async fn create_webhook_routes(
         &self,
-    ) -> Result<
+    ) -> Option<(
+        axum::Router,
         Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
-        Box<dyn std::error::Error + Send + Sync>,
-    > {
+    )> {
         // Validate credentials
-        let credits = self.validate().await?;
+        let credits = match self.validate().await {
+            Ok(c) => c,
+            Err(e) => {
+                warn!("Threema adapter validation failed: {e}");
+                return None;
+            }
+        };
         info!(
             "Threema Gateway adapter authenticated (ID: {}, credits: {credits})",
             self.threema_id
         );
 
         let (tx, rx) = mpsc::channel::<ChannelMessage>(256);
-        let port = self.webhook_port;
-        let own_id = self.threema_id.clone();
-        let mut shutdown_rx = self.shutdown_rx.clone();
-        let account_id = self.account_id.clone();
+        let tx_shared = Arc::new(tx);
+        let own_id = Arc::new(self.threema_id.clone());
+        let account_id = Arc::new(self.account_id.clone());
 
-        tokio::spawn(async move {
-            // Bind a webhook HTTP listener for inbound messages
-            let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
-            let listener = match tokio::net::TcpListener::bind(addr).await {
-                Ok(l) => l,
-                Err(e) => {
-                    warn!("Threema: failed to bind webhook on port {port}: {e}");
-                    return;
+        let app = axum::Router::new().route(
+            "/webhook",
+            axum::routing::post({
+                let tx = Arc::clone(&tx_shared);
+                let own_id = Arc::clone(&own_id);
+                let account_id = Arc::clone(&account_id);
+                move |headers: axum::http::HeaderMap, body: axum::body::Bytes| {
+                    let tx = Arc::clone(&tx);
+                    let own_id = Arc::clone(&own_id);
+                    let account_id = Arc::clone(&account_id);
+                    async move {
+                        // Parse the body based on content type
+                        let content_type = headers
+                            .get(axum::http::header::CONTENT_TYPE)
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or("");
+
+                        let payload: HashMap<String, String> =
+                            if content_type.contains("application/json") {
+                                // JSON payload
+                                serde_json::from_slice(&body).unwrap_or_default()
+                            } else {
+                                // Form-encoded payload
+                                url::form_urlencoded::parse(&body)
+                                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                                    .collect()
+                            };
+
+                        if let Some(mut msg) = parse_threema_webhook(&payload, &own_id) {
+                            // Inject account_id for multi-bot routing
+                            if let Some(ref aid) = *account_id {
+                                msg.metadata
+                                    .insert("account_id".to_string(), serde_json::json!(aid));
+                            }
+                            let _ = tx.send(msg).await;
+                        }
+
+                        axum::http::StatusCode::OK
+                    }
                 }
-            };
+            }),
+        );
 
-            info!("Threema webhook listener bound on {addr}");
+        info!("Threema adapter registered on shared server at /channels/threema/webhook");
 
-            loop {
-                let (stream, _peer) = tokio::select! {
-                    _ = shutdown_rx.changed() => {
-                        info!("Threema adapter shutting down");
-                        break;
-                    }
-                    result = listener.accept() => {
-                        match result {
-                            Ok(conn) => conn,
-                            Err(e) => {
-                                warn!("Threema: accept error: {e}");
-                                continue;
-                            }
-                        }
-                    }
-                };
+        Some((
+            app,
+            Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)),
+        ))
+    }
 
-                let tx = tx.clone();
-                let own_id = own_id.clone();
-                let account_id = account_id.clone();
-
-                tokio::spawn(async move {
-                    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
-
-                    let mut reader = tokio::io::BufReader::new(stream);
-
-                    // Read HTTP request line
-                    let mut request_line = String::new();
-                    if reader.read_line(&mut request_line).await.is_err() {
-                        return;
-                    }
-
-                    // Only accept POST requests
-                    if !request_line.starts_with("POST") {
-                        let resp = b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\n\r\n";
-                        let _ = reader.get_mut().write_all(resp).await;
-                        return;
-                    }
-
-                    // Read headers
-                    let mut content_length: usize = 0;
-                    let mut content_type = String::new();
-                    loop {
-                        let mut header = String::new();
-                        if reader.read_line(&mut header).await.is_err() {
-                            return;
-                        }
-                        let trimmed = header.trim();
-                        if trimmed.is_empty() {
-                            break;
-                        }
-                        let lower = trimmed.to_lowercase();
-                        if let Some(val) = lower.strip_prefix("content-length:") {
-                            if let Ok(len) = val.trim().parse::<usize>() {
-                                content_length = len;
-                            }
-                        }
-                        if let Some(val) = lower.strip_prefix("content-type:") {
-                            content_type = val.trim().to_string();
-                        }
-                    }
-
-                    // Read body (cap at 64KB)
-                    let read_len = content_length.min(65536);
-                    let mut body_buf = vec![0u8; read_len];
-                    if read_len > 0 && reader.read_exact(&mut body_buf[..read_len]).await.is_err() {
-                        return;
-                    }
-
-                    // Send 200 OK
-                    let resp = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
-                    let _ = reader.get_mut().write_all(resp).await;
-
-                    // Parse the body based on content type
-                    let body_str = String::from_utf8_lossy(&body_buf[..read_len]);
-                    let payload: HashMap<String, String> =
-                        if content_type.contains("application/json") {
-                            // JSON payload
-                            serde_json::from_str(&body_str).unwrap_or_default()
-                        } else {
-                            // Form-encoded payload
-                            url::form_urlencoded::parse(body_str.as_bytes())
-                                .map(|(k, v)| (k.to_string(), v.to_string()))
-                                .collect()
-                        };
-
-                    if let Some(mut msg) = parse_threema_webhook(&payload, &own_id) {
-                        // Inject account_id for multi-bot routing
-                        if let Some(ref aid) = account_id {
-                            msg.metadata
-                                .insert("account_id".to_string(), serde_json::json!(aid));
-                        }
-                        let _ = tx.send(msg).await;
-                    }
-                });
-            }
-
-            info!("Threema webhook loop stopped");
-        });
-
+    async fn start(
+        &self,
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
+        // When using the shared webhook server, create_webhook_routes() is called
+        // instead. This start() is only reached as a fallback.
+        let (_tx, rx) = mpsc::channel::<ChannelMessage>(1);
         Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
     }
 

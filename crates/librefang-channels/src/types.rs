@@ -388,6 +388,27 @@ pub trait ChannelAdapter: Send + Sync {
         false
     }
 
+    /// Build webhook routes for mounting on the shared HTTP server.
+    ///
+    /// Adapters that handle incoming messages via HTTP webhooks (e.g. Feishu,
+    /// Teams, DingTalk) should implement this method instead of spawning their
+    /// own HTTP server inside `start()`.
+    ///
+    /// Returns `(axum::Router, message_stream)`. The router will be nested
+    /// under `/channels/{adapter_name}` on the main API server. The stream
+    /// yields parsed `ChannelMessage` items exactly like `start()` does.
+    ///
+    /// When this method returns `Some`, `start()` should return an empty stream
+    /// (the BridgeManager will use the stream returned here instead).
+    async fn create_webhook_routes(
+        &self,
+    ) -> Option<(
+        axum::Router,
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+    )> {
+        None
+    }
+
     /// Stop the adapter and clean up resources.
     async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
 

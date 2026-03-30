@@ -369,7 +369,8 @@ enum Mode {
     Callback {
         /// HTTP client for response_url replies.
         client: reqwest::Client,
-        /// Port for the inbound webhook HTTP server.
+        /// Port for the inbound webhook HTTP server (kept for config compat).
+        #[allow(dead_code)]
         webhook_port: u16,
         /// Token for callback signature verification.
         token: Option<String>,
@@ -759,7 +760,7 @@ impl WeComAdapter {
 
     // ── Callback mode start ────────────────────────────────────────
 
-    #[allow(clippy::type_complexity)]
+    #[allow(clippy::type_complexity, dead_code)]
     fn start_callback(
         account_id: Arc<Option<String>>,
         mut shutdown_rx: watch::Receiver<bool>,
@@ -1044,6 +1045,265 @@ impl ChannelAdapter for WeComAdapter {
         ChannelType::Custom("wecom".to_string())
     }
 
+    async fn create_webhook_routes(
+        &self,
+    ) -> Option<(
+        axum::Router,
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+    )> {
+        // Only callback mode uses HTTP webhook routes.
+        // WebSocket mode connects outbound and does not need a local HTTP server.
+        let Mode::Callback {
+            token,
+            encoding_aes_key,
+            webhook_key,
+            ..
+        } = &self.mode
+        else {
+            return None;
+        };
+
+        let (tx, rx) = mpsc::channel::<ChannelMessage>(256);
+        let account_id = Arc::new(self.account_id.clone());
+
+        let token = Arc::new(token.clone());
+        let encoding_aes_key = Arc::new(encoding_aes_key.clone());
+        let tx = Arc::new(tx);
+        let webhook_key = Arc::clone(webhook_key);
+
+        let app = axum::Router::new().route(
+            "/webhook",
+            // GET: URL verification
+            axum::routing::get({
+                let encoding_aes_key = Arc::clone(&encoding_aes_key);
+                let token = Arc::clone(&token);
+                move |axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>| {
+                    let encoding_aes_key = Arc::clone(&encoding_aes_key);
+                    let token = Arc::clone(&token);
+                    async move {
+                        if let (Some(echostr), Some(msg_sig), Some(timestamp), Some(nonce)) = (
+                            params.get("echostr"),
+                            params.get("msg_signature"),
+                            params.get("timestamp"),
+                            params.get("nonce"),
+                        ) {
+                            let Some(token_str) = token.as_deref() else {
+                                return (
+                                    axum::http::StatusCode::BAD_REQUEST,
+                                    "missing WeCom callback token",
+                                )
+                                    .into_response();
+                            };
+
+                            if !is_valid_wecom_signature(
+                                token_str, timestamp, nonce, echostr, msg_sig,
+                            ) {
+                                return (
+                                    axum::http::StatusCode::FORBIDDEN,
+                                    "invalid WeCom callback signature",
+                                )
+                                    .into_response();
+                            }
+
+                            let body = match encoding_aes_key.as_deref() {
+                                Some(aes_key) if !aes_key.is_empty() => {
+                                    match decode_wecom_payload(aes_key, echostr) {
+                                        Ok(plain) => plain,
+                                        Err(err) => {
+                                            warn!(error = %err, "Failed to decrypt WeCom echostr");
+                                            return (
+                                                axum::http::StatusCode::BAD_REQUEST,
+                                                "invalid WeCom echostr",
+                                            )
+                                                .into_response();
+                                        }
+                                    }
+                                }
+                                _ => echostr.clone(),
+                            };
+
+                            return (
+                                axum::http::StatusCode::OK,
+                                [(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                                body,
+                            )
+                                .into_response();
+                        }
+                        (
+                            axum::http::StatusCode::BAD_REQUEST,
+                            "missing WeCom verification parameters",
+                        )
+                            .into_response()
+                    }
+                }
+            })
+            // POST: message callback (JSON protocol)
+            .post({
+                let token = Arc::clone(&token);
+                let encoding_aes_key = Arc::clone(&encoding_aes_key);
+                let tx = Arc::clone(&tx);
+                let webhook_key = Arc::clone(&webhook_key);
+                move |axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+                      body: String| {
+                    let token = Arc::clone(&token);
+                    let encoding_aes_key = Arc::clone(&encoding_aes_key);
+                    let tx = Arc::clone(&tx);
+                    let account_id = Arc::clone(&account_id);
+                    let webhook_key = Arc::clone(&webhook_key);
+                    async move {
+                        // Parse JSON body: {"encrypt": "BASE64_ENCRYPTED"}
+                        let body_json: serde_json::Value = match serde_json::from_str(&body) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                warn!("WeCom callback: invalid JSON body: {e}");
+                                return (axum::http::StatusCode::BAD_REQUEST, "invalid JSON")
+                                    .into_response();
+                            }
+                        };
+
+                        let encrypt = match body_json.get("encrypt").and_then(|v| v.as_str()) {
+                            Some(e) => e.to_string(),
+                            None => {
+                                warn!("WeCom callback: missing 'encrypt' field");
+                                return (axum::http::StatusCode::BAD_REQUEST, "missing encrypt field")
+                                    .into_response();
+                            }
+                        };
+
+                        // Verify signature
+                        if let Some(token_str) = token.as_deref() {
+                            let timestamp = params.get("timestamp").map(|s| s.as_str()).unwrap_or("");
+                            let nonce = params.get("nonce").map(|s| s.as_str()).unwrap_or("");
+                            let msg_sig = params.get("msg_signature").map(|s| s.as_str()).unwrap_or("");
+
+                            if !is_valid_wecom_signature(token_str, timestamp, nonce, &encrypt, msg_sig) {
+                                warn!("WeCom callback: invalid signature");
+                                return (axum::http::StatusCode::FORBIDDEN, "invalid signature")
+                                    .into_response();
+                            }
+                        }
+
+                        // Decrypt the payload
+                        let decrypted_json = match encoding_aes_key.as_deref() {
+                            Some(aes_key) if !aes_key.is_empty() => {
+                                match decode_wecom_payload(aes_key, &encrypt) {
+                                    Ok(plain) => plain,
+                                    Err(err) => {
+                                        warn!(error = %err, "WeCom callback: decrypt failed");
+                                        return (axum::http::StatusCode::BAD_REQUEST, "decrypt failed")
+                                            .into_response();
+                                    }
+                                }
+                            }
+                            _ => encrypt,
+                        };
+
+                        // Parse decrypted JSON message
+                        debug!(decrypted_json = %decrypted_json, "WeCom callback: decrypted payload");
+                        let msg: serde_json::Value = match serde_json::from_str(&decrypted_json) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                warn!(raw = %decrypted_json, "WeCom callback: invalid decrypted JSON: {e}");
+                                return (axum::http::StatusCode::OK, "").into_response();
+                            }
+                        };
+
+                        let msgtype = msg.get("msgtype").and_then(|v| v.as_str()).unwrap_or("");
+                        let user_id = msg
+                            .get("from")
+                            .and_then(|f| f.get("userid"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let chat_type = msg.get("chattype").and_then(|v| v.as_str()).unwrap_or("single");
+                        let is_group = chat_type == "group";
+                        let msg_id = msg.get("msgid").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        let response_url = msg.get("response_url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+                        info!(
+                            msgtype = msgtype,
+                            from_user = %user_id,
+                            chat_type = chat_type,
+                            "Received WeCom bot callback"
+                        );
+
+                        // Extract and cache webhook key from response_url
+                        if !response_url.is_empty() {
+                            if let Some(key) = response_url
+                                .split("key=")
+                                .nth(1)
+                                .map(|k| k.split('&').next().unwrap_or(k).to_string())
+                            {
+                                let mut guard = webhook_key.write().await;
+                                *guard = Some(key);
+                            }
+                        }
+
+                        // Handle event messages
+                        if msgtype == "event" {
+                            return (axum::http::StatusCode::OK, "").into_response();
+                        }
+
+                        // Handle text messages
+                        if msgtype == "text" {
+                            let content = msg
+                                .get("text")
+                                .and_then(|t| t.get("content"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+
+                            if !user_id.is_empty() && !content.is_empty() {
+                                let mut channel_msg = ChannelMessage {
+                                    channel: ChannelType::Custom("wecom".to_string()),
+                                    platform_message_id: msg_id,
+                                    sender: ChannelUser {
+                                        platform_id: user_id.clone(),
+                                        display_name: user_id.clone(),
+                                        librefang_user: None,
+                                    },
+                                    content: ChannelContent::Text(content),
+                                    target_agent: None,
+                                    timestamp: Utc::now(),
+                                    is_group,
+                                    thread_id: None,
+                                    metadata: HashMap::new(),
+                                };
+
+                                // Store response_url for async reply
+                                if !response_url.is_empty() {
+                                    channel_msg.metadata.insert(
+                                        "wecom_response_url".to_string(),
+                                        serde_json::json!(response_url),
+                                    );
+                                }
+
+                                if let Some(ref aid) = *account_id {
+                                    channel_msg.metadata.insert(
+                                        "account_id".to_string(),
+                                        serde_json::json!(aid),
+                                    );
+                                }
+
+                                let _ = tx.send(channel_msg).await;
+                            }
+                        }
+
+                        // Return empty response (passive reply not used — we reply async)
+                        (axum::http::StatusCode::OK, "").into_response()
+                    }
+                }
+            }),
+        );
+
+        info!("WeCom: registered webhook routes on shared server at /channels/wecom");
+
+        Some((
+            app,
+            Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)),
+        ))
+    }
+
     async fn start(
         &self,
     ) -> Result<
@@ -1065,20 +1325,12 @@ impl ChannelAdapter for WeComAdapter {
                 Arc::clone(ws_tx),
                 Arc::clone(pending_req_ids),
             )),
-            Mode::Callback {
-                webhook_port,
-                token,
-                encoding_aes_key,
-                webhook_key,
-                ..
-            } => Self::start_callback(
-                account_id,
-                shutdown_rx,
-                *webhook_port,
-                token.clone(),
-                encoding_aes_key.clone(),
-                Arc::clone(webhook_key),
-            ),
+            Mode::Callback { .. } => {
+                // Callback mode is handled by create_webhook_routes().
+                // If we reach here, return an empty stream as fallback.
+                let (_tx, rx) = mpsc::channel::<ChannelMessage>(1);
+                Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
+            }
         }
     }
 

@@ -80,7 +80,7 @@ async fn start_test_server_with_provider(
             model: model.to_string(),
             api_key_env: api_key_env.to_string(),
             base_url: None,
-            message_timeout_secs: 300,
+            message_timeout_secs: 120,
         },
         ..KernelConfig::default()
     };
@@ -109,6 +109,7 @@ async fn start_test_server_with_provider(
         #[cfg(feature = "telemetry")]
         prometheus_handle: None,
         media_drivers: librefang_runtime::media::MediaDriverCache::new(),
+        webhook_router: Arc::new(tokio::sync::RwLock::new(axum::Router::new())),
     });
 
     let app = Router::new()
@@ -208,7 +209,7 @@ async fn start_full_router(api_key: &str) -> FullRouterHarness {
             model: "test-model".to_string(),
             api_key_env: "OLLAMA_API_KEY".to_string(),
             base_url: None,
-            message_timeout_secs: 300,
+            message_timeout_secs: 120,
         },
         ..KernelConfig::default()
     };
@@ -1352,7 +1353,7 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
             model: "test-model".to_string(),
             api_key_env: "OLLAMA_API_KEY".to_string(),
             base_url: None,
-            message_timeout_secs: 300,
+            message_timeout_secs: 120,
         },
         ..KernelConfig::default()
     };
@@ -1381,6 +1382,7 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
         #[cfg(feature = "telemetry")]
         prometheus_handle: None,
         media_drivers: librefang_runtime::media::MediaDriverCache::new(),
+        webhook_router: Arc::new(tokio::sync::RwLock::new(axum::Router::new())),
     });
 
     let api_key_state = middleware::AuthState {

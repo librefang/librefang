@@ -446,7 +446,10 @@ pub async fn build_router(
     listen_addr: SocketAddr,
 ) -> (Router<()>, Arc<AppState>) {
     // Start channel bridges (Telegram, etc.)
-    let bridge = channel_bridge::start_channel_bridge(kernel.clone()).await;
+    // Webhook-based channels (Feishu, Teams, etc.) register their routes
+    // for mounting on this server instead of starting separate HTTP servers.
+    let (bridge, initial_webhook_router) =
+        channel_bridge::start_channel_bridge(kernel.clone()).await;
 
     // Initialize Prometheus metrics recorder if telemetry feature is enabled
     // and the config has prometheus_enabled = true.
@@ -460,6 +463,7 @@ pub async fn build_router(
 
     let channels_config = kernel.config_ref().channels.clone();
     let active_sessions = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+    let webhook_router = Arc::new(tokio::sync::RwLock::new(initial_webhook_router));
     let state = Arc::new(AppState {
         kernel: kernel.clone(),
         started_at: Instant::now(),
@@ -477,6 +481,7 @@ pub async fn build_router(
         media_drivers: librefang_runtime::media::MediaDriverCache::new_with_urls(
             kernel.config_ref().provider_urls.clone(),
         ),
+        webhook_router,
         #[cfg(feature = "telemetry")]
         prometheus_handle: prom_handle,
     });
@@ -615,6 +620,25 @@ pub async fn build_router(
     // NOTE: HTTP metrics are recorded inside `request_logging` middleware via
     // `librefang_telemetry::metrics::record_http_request()`.  A separate metrics
     // middleware layer is not needed (and would double-count requests).
+
+    // Mount channel webhook routes under /channels/{adapter_name}/*.
+    // These bypass auth/rate-limit layers since external platforms (Feishu,
+    // Teams, etc.) handle their own signature verification.
+    // The router is dynamic (behind RwLock) so hot-reload can swap routes.
+    let channel_webhook_state = state.webhook_router.clone();
+    let channel_routes = Router::new().fallback(move |req: axum::extract::Request| {
+        let wr = channel_webhook_state.clone();
+        async move {
+            use tower::ServiceExt;
+            let router = wr.read().await.clone();
+            router
+                .into_service()
+                .oneshot(req)
+                .await
+                .unwrap_or_else(|e| match e {})
+        }
+    });
+    let app = app.nest("/channels", channel_routes);
 
     let app = app.with_state(state.clone());
 

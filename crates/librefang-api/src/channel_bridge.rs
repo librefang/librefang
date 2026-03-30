@@ -1526,19 +1526,27 @@ fn read_token(env_var: &str, adapter_name: &str) -> Option<String> {
 ///
 /// Returns `Some(BridgeManager)` if any channels were configured and started,
 /// or `None` if no channels are configured.
-pub async fn start_channel_bridge(kernel: Arc<LibreFangKernel>) -> Option<BridgeManager> {
+/// Start channels and return `(BridgeManager, webhook_router)`.
+///
+/// The webhook router contains routes for all webhook-based channels
+/// (Feishu, Teams, DingTalk, etc.) and should be mounted under `/channels`
+/// on the main API server.
+pub async fn start_channel_bridge(
+    kernel: Arc<LibreFangKernel>,
+) -> (Option<BridgeManager>, axum::Router) {
     let channels = kernel.config_ref().channels.clone();
-    let (bridge, _names) = start_channel_bridge_with_config(kernel, &channels).await;
-    bridge
+    let (bridge, _names, webhook_router) =
+        start_channel_bridge_with_config(kernel, &channels).await;
+    (bridge, webhook_router)
 }
 
 /// Start channels from an explicit `ChannelsConfig` (used by hot-reload).
 ///
-/// Returns `(Option<BridgeManager>, Vec<started_channel_names>)`.
+/// Returns `(Option<BridgeManager>, Vec<started_channel_names>, webhook_router)`.
 pub async fn start_channel_bridge_with_config(
     kernel: Arc<LibreFangKernel>,
     config: &librefang_types::config::ChannelsConfig,
-) -> (Option<BridgeManager>, Vec<String>) {
+) -> (Option<BridgeManager>, Vec<String>, axum::Router) {
     // Check which channels have config — only consider enabled features
     #[allow(unused_mut)]
     let mut has_any = false;
@@ -1611,7 +1619,7 @@ pub async fn start_channel_bridge_with_config(
     }
 
     if !has_any {
-        return (None, Vec::new());
+        return (None, Vec::new(), axum::Router::new());
     }
 
     let handle = KernelBridgeAdapter {
@@ -2595,7 +2603,7 @@ pub async fn start_channel_bridge_with_config(
     }
 
     if adapters.is_empty() {
-        return (None, Vec::new());
+        return (None, Vec::new(), axum::Router::new());
     }
 
     // Resolve per-channel default agents AND set the first one as system-wide fallback
@@ -2678,10 +2686,12 @@ pub async fn start_channel_bridge_with_config(
         }
     }
 
+    let webhook_router = manager.take_webhook_router();
+
     if started_names.is_empty() {
-        (None, Vec::new())
+        (None, Vec::new(), webhook_router)
     } else {
-        (Some(manager), started_names)
+        (Some(manager), started_names, webhook_router)
     }
 }
 
@@ -2738,11 +2748,14 @@ pub async fn reload_channels_from_disk(
     *state.channels_config.write().await = fresh_config.channels.clone();
 
     // Start new bridge with fresh channel config
-    let (new_bridge, started) =
+    let (new_bridge, started, webhook_router) =
         start_channel_bridge_with_config(state.kernel.clone(), &fresh_config.channels).await;
 
     // Store the new bridge
     *state.bridge_manager.lock().await = new_bridge;
+
+    // Swap the webhook router so new routes take effect on the shared server
+    *state.webhook_router.write().await = webhook_router;
 
     info!(
         started = started.len(),
