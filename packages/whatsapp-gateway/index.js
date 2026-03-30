@@ -887,8 +887,8 @@ async function startConnection() {
         wasMentioned = mentionedJids.some(jid => jid.replace(/@.*$/, '') === ownNumber);
       }
 
-      // Rate limiting for strangers
-      if (isStranger && isRateLimited(sender)) {
+      // Rate limiting for strangers and group messages
+      if ((isStranger || isGroup) && isRateLimited(sender)) {
         console.log(`[gateway] Rate limited: ${pushName} (${phone}) — dropping message`);
         continue;
       }
@@ -1014,7 +1014,8 @@ async function startConnection() {
         let systemPrefix = '';
 
         if (isGroup) {
-          messageToSend = messageText;
+          // Include sender identity so the LLM knows who is talking in the group
+          messageToSend = `[Group message from ${pushName || phone}]\n${messageText}`;
         } else if (isStranger) {
           const strangerContext = buildStrangerContext(pushName, phone, sender);
           messageToSend = strangerContext + messageText;
@@ -1549,15 +1550,16 @@ async function runCatchUpSweep() {
       const isOwner = OWNER_JIDS.size > 0 && (OWNER_JIDS.has(msg.jid) || (senderPnJid && OWNER_JIDS.has(senderPnJid)));
 
       // Simple re-forward: send the stored text to the agent without full context rebuild
+      const isCatchupGroup = msg.jid && msg.jid.endsWith('@g.us');
       const prefix = isOwner ? '' : `[CATCHUP_REDELIVERY from ${msg.push_name || msg.phone || msg.jid}]\n`;
-      const response = await forwardToLibreFang(prefix + (msg.text || ''), '', msg.phone || '', msg.push_name || '', isOwner, []);
+      const response = await forwardToLibreFang(prefix + (msg.text || ''), '', msg.phone || '', msg.push_name || '', isOwner, [], { isGroup: isCatchupGroup, wasMentioned: false });
 
       // Mark as processed
       dbMarkProcessed(msg.id, 1);
       console.log(`[gateway][catchup] Re-forwarded message ${msg.id} from ${msg.push_name || msg.jid}`);
 
-      // If there's a response and it's a stranger, try to send it back
-      if (response && !isOwner && msg.jid && !msg.jid.endsWith('@g.us')) {
+      // If there's a response, try to send it back (strangers and groups)
+      if (response && !isOwner && msg.jid) {
         try {
           const formatted = markdownToWhatsApp(response);
           await sock.sendMessage(msg.jid, { text: formatted });
