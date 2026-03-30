@@ -75,6 +75,7 @@ channel-discord = ["librefang-channels/channel-discord"]
 channel-slack = ["librefang-channels/channel-slack"]
 channel-matrix = ["librefang-channels/channel-matrix"]
 channel-email = ["librefang-channels/channel-email"]
+channel-voice = ["librefang-channels/channel-voice"]
 channel-webhook = ["librefang-channels/channel-webhook"]
 channel-whatsapp = ["librefang-channels/channel-whatsapp"]
 channel-signal = ["librefang-channels/channel-signal"]
@@ -125,7 +126,7 @@ all-channels = [
     "channel-nostr", "channel-pumble", "channel-threema", "channel-twist",
     "channel-webex", "channel-dingtalk", "channel-discourse", "channel-gitter",
     "channel-gotify", "channel-linkedin", "channel-mumble", "channel-ntfy",
-    "channel-qq", "channel-wechat", "channel-wecom",
+    "channel-qq", "channel-voice", "channel-wechat", "channel-wecom",
 ]
 
 # Mini: 12 core channels

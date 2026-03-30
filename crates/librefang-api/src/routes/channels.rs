@@ -710,6 +710,24 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
         config_template: "[channels.webhook]\nsecret_env = \"WEBHOOK_SECRET\"",
     },
     ChannelMeta {
+        name: "voice", display_name: "Voice", icon: "VC",
+        description: "Voice channel via WebSocket with STT/TTS",
+        category: "media", difficulty: "Medium", setup_time: "~3 min",
+        quick_setup: "Set an OpenAI API key for Whisper STT and TTS",
+        setup_type: "form",
+        fields: &[
+            ChannelField { key: "api_key_env", label: "API Key (STT/TTS)", field_type: FieldType::Secret, env_var: Some("OPENAI_API_KEY"), required: true, placeholder: "sk-...", advanced: false, options: None, show_when: None, readonly: false },
+            ChannelField { key: "listen_port", label: "WebSocket Port", field_type: FieldType::Number, env_var: None, required: false, placeholder: "4546", advanced: false, options: None, show_when: None, readonly: false },
+            ChannelField { key: "stt_url", label: "STT API URL", field_type: FieldType::Text, env_var: None, required: false, placeholder: "https://api.openai.com", advanced: true, options: None, show_when: None, readonly: false },
+            ChannelField { key: "tts_url", label: "TTS API URL", field_type: FieldType::Text, env_var: None, required: false, placeholder: "https://api.openai.com", advanced: true, options: None, show_when: None, readonly: false },
+            ChannelField { key: "tts_voice", label: "TTS Voice", field_type: FieldType::Text, env_var: None, required: false, placeholder: "alloy", advanced: true, options: None, show_when: None, readonly: false },
+            ChannelField { key: "buffer_threshold", label: "Audio Buffer (bytes)", field_type: FieldType::Number, env_var: None, required: false, placeholder: "32768", advanced: true, options: None, show_when: None, readonly: false },
+            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
+        ],
+        setup_steps: &["Set OPENAI_API_KEY environment variable", "Optionally configure STT/TTS endpoints", "Connect via WebSocket at ws://host:4546/voice"],
+        config_template: "[channels.voice]\napi_key_env = \"OPENAI_API_KEY\"\nlisten_port = 4546",
+    },
+    ChannelMeta {
         name: "mumble", display_name: "Mumble", icon: "MB",
         description: "Mumble text chat adapter",
         category: "notifications", difficulty: "Easy", setup_time: "~2 min",
@@ -817,6 +835,7 @@ fn is_channel_configured(config: &librefang_types::config::ChannelsConfig, name:
         "ntfy" => config.ntfy.is_some(),
         "gotify" => config.gotify.is_some(),
         "webhook" => config.webhook.is_some(),
+        "voice" => config.voice.is_some(),
         "mumble" => config.mumble.is_some(),
         "wechat" => config.wechat.is_some(),
         "wecom" => config.wecom.is_some(),
@@ -1077,6 +1096,10 @@ fn channel_config_values(
             .and_then(|c| serde_json::to_value(c).ok()),
         "webhook" => config
             .webhook
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "voice" => config
+            .voice
             .as_ref()
             .and_then(|c| serde_json::to_value(c).ok()),
         "linkedin" => config
