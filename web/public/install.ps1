@@ -252,6 +252,12 @@ function Install-LibreFang {
     Write-Host "  and configuration."
     Write-Host ""
 
+    # Auto-initialize (sync registry, generate config)
+    Write-Host "  Initializing LibreFang..." -ForegroundColor Cyan
+    try {
+        & $installedExe init 2>&1 | Out-Null
+    } catch {}
+
     $autoStartRaw = if ($env:LIBREFANG_AUTO_START) { $env:LIBREFANG_AUTO_START } else { "1" }
     if (Test-Enabled $autoStartRaw) {
         Write-Host "  Starting daemon in background..." -ForegroundColor Cyan
