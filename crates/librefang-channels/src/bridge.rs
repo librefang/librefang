@@ -806,8 +806,8 @@ impl BridgeManager {
             self.webhook_routes.push((name, routes));
             stream
         } else {
-            warn!(
-                "Channel {} did not provide webhook routes, falling back to standalone mode",
+            debug!(
+                "Channel {} uses standalone start() (no webhook routes)",
                 adapter.name()
             );
             adapter.start().await?
