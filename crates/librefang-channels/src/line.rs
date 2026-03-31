@@ -14,7 +14,7 @@ use futures::Stream;
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::mpsc;
 use tracing::{info, warn};
 use zeroize::Zeroizing;
 
@@ -43,17 +43,10 @@ pub struct LineAdapter {
     channel_secret: Zeroizing<String>,
     /// SECURITY: Channel access token for outbound API calls, zeroized on drop.
     access_token: Zeroizing<String>,
-    /// Port on which the inbound webhook HTTP server listens.
-    #[allow(dead_code)]
-    webhook_port: u16,
     /// HTTP client for outbound API calls.
     client: reqwest::Client,
     /// Optional account identifier for multi-bot routing.
     account_id: Option<String>,
-    /// Shutdown signal.
-    shutdown_tx: Arc<watch::Sender<bool>>,
-    #[allow(dead_code)]
-    shutdown_rx: watch::Receiver<bool>,
 }
 
 impl LineAdapter {
@@ -63,16 +56,12 @@ impl LineAdapter {
     /// * `channel_secret` - Channel secret for HMAC-SHA256 signature verification.
     /// * `access_token` - Long-lived channel access token for sending messages.
     /// * `webhook_port` - Local port for the inbound webhook HTTP server.
-    pub fn new(channel_secret: String, access_token: String, webhook_port: u16) -> Self {
-        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    pub fn new(channel_secret: String, access_token: String, _webhook_port: u16) -> Self {
         Self {
             channel_secret: Zeroizing::new(channel_secret),
             access_token: Zeroizing::new(access_token),
-            webhook_port,
             client: crate::http_client::new_client(),
             account_id: None,
-            shutdown_tx: Arc::new(shutdown_tx),
-            shutdown_rx,
         }
     }
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
@@ -505,7 +494,6 @@ impl ChannelAdapter for LineAdapter {
     }
 
     async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let _ = self.shutdown_tx.send(true);
         Ok(())
     }
 }
@@ -526,7 +514,6 @@ mod tests {
             adapter.channel_type(),
             ChannelType::Custom("line".to_string())
         );
-        assert_eq!(adapter.webhook_port, 8080);
     }
 
     #[test]

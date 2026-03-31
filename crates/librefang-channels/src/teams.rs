@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, watch, RwLock};
+use tokio::sync::{mpsc, RwLock};
 use tracing::{info, warn};
 use zeroize::Zeroizing;
 
@@ -38,19 +38,12 @@ pub struct TeamsAdapter {
     app_id: String,
     /// SECURITY: App password is zeroized on drop to prevent memory disclosure.
     app_password: Zeroizing<String>,
-    /// Port on which the inbound webhook HTTP server listens.
-    #[allow(dead_code)]
-    webhook_port: u16,
     /// Restrict inbound activities to specific Azure AD tenant IDs (empty = allow all).
     allowed_tenants: Vec<String>,
     /// HTTP client for outbound API calls.
     client: reqwest::Client,
     /// Optional account identifier for multi-bot routing.
     account_id: Option<String>,
-    /// Shutdown signal.
-    shutdown_tx: Arc<watch::Sender<bool>>,
-    #[allow(dead_code)]
-    shutdown_rx: watch::Receiver<bool>,
     /// Cached OAuth2 bearer token and its expiry instant.
     cached_token: Arc<RwLock<Option<(String, Instant)>>>,
 }
@@ -60,24 +53,19 @@ impl TeamsAdapter {
     ///
     /// * `app_id` — Bot Framework application ID.
     /// * `app_password` — Bot Framework application password (client secret).
-    /// * `webhook_port` — Local port for the inbound webhook HTTP server.
     /// * `allowed_tenants` — Azure AD tenant IDs to accept (empty = accept all).
     pub fn new(
         app_id: String,
         app_password: String,
-        webhook_port: u16,
+        _webhook_port: u16,
         allowed_tenants: Vec<String>,
     ) -> Self {
-        let (shutdown_tx, shutdown_rx) = watch::channel(false);
         Self {
             app_id,
             app_password: Zeroizing::new(app_password),
-            webhook_port,
             allowed_tenants,
             client: crate::http_client::new_client(),
             account_id: None,
-            shutdown_tx: Arc::new(shutdown_tx),
-            shutdown_rx,
             cached_token: Arc::new(RwLock::new(None)),
         }
     }
@@ -410,7 +398,6 @@ impl ChannelAdapter for TeamsAdapter {
     }
 
     async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let _ = self.shutdown_tx.send(true);
         Ok(())
     }
 }

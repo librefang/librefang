@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::mpsc;
 use tracing::{info, warn};
 use zeroize::Zeroizing;
 
@@ -52,19 +52,12 @@ const MAX_MESSAGE_LEN: usize = 65535;
 pub struct WebhookAdapter {
     /// SECURITY: Shared secret for HMAC-SHA256 signatures (zeroized on drop).
     secret: Zeroizing<String>,
-    /// Port to listen on for incoming webhooks.
-    #[allow(dead_code)]
-    listen_port: u16,
     /// Optional callback URL for sending messages.
     callback_url: Option<String>,
     /// HTTP client for outbound requests.
     client: reqwest::Client,
     /// Optional account identifier for multi-bot routing.
     account_id: Option<String>,
-    /// Shutdown signal.
-    shutdown_tx: Arc<watch::Sender<bool>>,
-    #[allow(dead_code)]
-    shutdown_rx: watch::Receiver<bool>,
 }
 
 impl WebhookAdapter {
@@ -74,16 +67,12 @@ impl WebhookAdapter {
     /// * `secret` - Shared secret for HMAC-SHA256 signature verification.
     /// * `listen_port` - Port to listen for incoming webhook POST requests.
     /// * `callback_url` - Optional URL to POST outbound messages to.
-    pub fn new(secret: String, listen_port: u16, callback_url: Option<String>) -> Self {
-        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    pub fn new(secret: String, _listen_port: u16, callback_url: Option<String>) -> Self {
         Self {
             secret: Zeroizing::new(secret),
-            listen_port,
             callback_url,
             client: crate::http_client::new_client(),
             account_id: None,
-            shutdown_tx: Arc::new(shutdown_tx),
-            shutdown_rx,
         }
     }
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
@@ -367,7 +356,6 @@ impl ChannelAdapter for WebhookAdapter {
     }
 
     async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let _ = self.shutdown_tx.send(true);
         Ok(())
     }
 }

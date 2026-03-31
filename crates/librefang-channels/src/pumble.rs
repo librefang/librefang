@@ -14,7 +14,7 @@ use futures::Stream;
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::mpsc;
 use tracing::{info, warn};
 use zeroize::Zeroizing;
 
@@ -32,17 +32,10 @@ const MAX_MESSAGE_LEN: usize = 4000;
 pub struct PumbleAdapter {
     /// SECURITY: Bot token is zeroized on drop.
     bot_token: Zeroizing<String>,
-    /// Port for the inbound webhook HTTP listener.
-    #[allow(dead_code)]
-    webhook_port: u16,
     /// HTTP client for outbound API calls.
     client: reqwest::Client,
     /// Optional account identifier for multi-bot routing.
     account_id: Option<String>,
-    /// Shutdown signal.
-    shutdown_tx: Arc<watch::Sender<bool>>,
-    #[allow(dead_code)]
-    shutdown_rx: watch::Receiver<bool>,
 }
 
 impl PumbleAdapter {
@@ -50,16 +43,12 @@ impl PumbleAdapter {
     ///
     /// # Arguments
     /// * `bot_token` - Pumble Bot access token.
-    /// * `webhook_port` - Local port to bind the webhook listener on.
-    pub fn new(bot_token: String, webhook_port: u16) -> Self {
-        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    /// * `webhook_port` - Local port (accepted from config, unused with shared server).
+    pub fn new(bot_token: String, _webhook_port: u16) -> Self {
         Self {
             bot_token: Zeroizing::new(bot_token),
-            webhook_port,
             client: crate::http_client::new_client(),
             account_id: None,
-            shutdown_tx: Arc::new(shutdown_tx),
-            shutdown_rx,
         }
     }
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
@@ -368,7 +357,6 @@ impl ChannelAdapter for PumbleAdapter {
     }
 
     async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let _ = self.shutdown_tx.send(true);
         Ok(())
     }
 }
@@ -394,9 +382,10 @@ mod tests {
     }
 
     #[test]
-    fn test_pumble_webhook_port() {
+    fn test_pumble_accepts_webhook_port_param() {
+        // webhook_port is accepted in the constructor for config compat but not stored
         let adapter = PumbleAdapter::new("token".to_string(), 9999);
-        assert_eq!(adapter.webhook_port, 9999);
+        assert_eq!(adapter.name(), "pumble");
     }
 
     #[test]

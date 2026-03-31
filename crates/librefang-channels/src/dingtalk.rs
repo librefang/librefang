@@ -68,9 +68,6 @@ pub struct DingTalkAdapter {
     access_token: Zeroizing<String>,
     /// SECURITY: Signing secret for HMAC-SHA256 verification.
     secret: Zeroizing<String>,
-    /// Port for the incoming webhook HTTP server.
-    #[allow(dead_code)]
-    webhook_port: u16,
     // -- Stream mode fields --
     /// SECURITY: Client ID (AppKey) for stream mode.
     client_id: Zeroizing<String>,
@@ -82,7 +79,6 @@ pub struct DingTalkAdapter {
     account_id: Option<String>,
     /// Shutdown signal.
     shutdown_tx: Arc<watch::Sender<bool>>,
-    #[allow(dead_code)]
     shutdown_rx: watch::Receiver<bool>,
 }
 
@@ -93,13 +89,12 @@ impl DingTalkAdapter {
     /// * `access_token` - Robot access token from DingTalk.
     /// * `secret` - Signing secret for request verification.
     /// * `webhook_port` - Local port to listen for DingTalk callbacks.
-    pub fn new(access_token: String, secret: String, webhook_port: u16) -> Self {
+    pub fn new(access_token: String, secret: String, _webhook_port: u16) -> Self {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         Self {
             mode: DingTalkMode::Webhook,
             access_token: Zeroizing::new(access_token),
             secret: Zeroizing::new(secret),
-            webhook_port,
             client_id: Zeroizing::new(String::new()),
             client_secret: Zeroizing::new(String::new()),
             client: crate::http_client::new_client(),
@@ -120,7 +115,6 @@ impl DingTalkAdapter {
             mode: DingTalkMode::Stream,
             access_token: Zeroizing::new(String::new()),
             secret: Zeroizing::new(String::new()),
-            webhook_port: 0,
             client_id: Zeroizing::new(client_id),
             client_secret: Zeroizing::new(client_secret),
             client: crate::http_client::new_client(),

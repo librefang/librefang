@@ -42,7 +42,7 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::sync::{mpsc, watch, Mutex};
+use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, info, warn};
 
 /// Audio format used by the client.
@@ -144,9 +144,6 @@ impl Default for VoiceStats {
 /// Runs a WebSocket server that accepts audio streams, transcribes them via STT,
 /// sends the text to the agent bridge, and returns synthesized speech via TTS.
 pub struct VoiceAdapter {
-    /// WebSocket listen port.
-    #[allow(dead_code)]
-    listen_port: u16,
     /// API key for STT/TTS services.
     api_key: String,
     /// STT API base URL.
@@ -159,10 +156,6 @@ pub struct VoiceAdapter {
     buffer_threshold: usize,
     /// Optional account ID for multi-bot routing.
     account_id: Option<String>,
-    /// Shutdown signal.
-    shutdown_tx: Arc<watch::Sender<bool>>,
-    #[allow(dead_code)]
-    shutdown_rx: watch::Receiver<bool>,
     /// Statistics shared with WebSocket handlers.
     stats: Arc<VoiceStats>,
     /// When the adapter was started.
@@ -182,24 +175,20 @@ impl VoiceAdapter {
     /// * `tts_voice` - Voice name for TTS synthesis.
     /// * `buffer_threshold` - Audio buffer size before triggering STT (bytes).
     pub fn new(
-        listen_port: u16,
+        _listen_port: u16,
         api_key: String,
         stt_url: String,
         tts_url: String,
         tts_voice: String,
         buffer_threshold: usize,
     ) -> Self {
-        let (shutdown_tx, shutdown_rx) = watch::channel(false);
         Self {
-            listen_port,
             api_key,
             stt_url,
             tts_url,
             tts_voice,
             buffer_threshold,
             account_id: None,
-            shutdown_tx: Arc::new(shutdown_tx),
-            shutdown_rx,
             stats: Arc::new(VoiceStats::default()),
             started_at: Mutex::new(None),
             sessions: Arc::new(Mutex::new(HashMap::new())),
@@ -696,7 +685,6 @@ impl ChannelAdapter for VoiceAdapter {
     }
 
     async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let _ = self.shutdown_tx.send(true);
         self.stats.connected.store(false, Ordering::Relaxed);
         info!("Voice adapter stopped");
         Ok(())
@@ -735,7 +723,6 @@ mod tests {
             adapter.channel_type(),
             ChannelType::Custom("voice".to_string())
         );
-        assert_eq!(adapter.listen_port, 4546);
     }
 
     #[test]

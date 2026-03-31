@@ -92,9 +92,6 @@ pub struct GoogleChatAdapter {
     service_account_key: Zeroizing<String>,
     /// Space IDs to listen to (e.g., "spaces/AAAA").
     space_ids: Vec<String>,
-    /// Port for the inbound webhook HTTP listener (kept for backward compat).
-    #[allow(dead_code)]
-    webhook_port: u16,
     /// HTTP client for outbound API calls.
     client: reqwest::Client,
     /// Optional account identifier for multi-bot routing.
@@ -109,12 +106,11 @@ impl GoogleChatAdapter {
     /// # Arguments
     /// * `service_account_key` - JSON content of the Google service account key file.
     /// * `space_ids` - Google Chat space IDs to interact with.
-    /// * `webhook_port` - Local port to bind the inbound webhook listener on.
-    pub fn new(service_account_key: String, space_ids: Vec<String>, webhook_port: u16) -> Self {
+    /// * `webhook_port` - Local port (accepted from config, unused with shared server).
+    pub fn new(service_account_key: String, space_ids: Vec<String>, _webhook_port: u16) -> Self {
         Self {
             service_account_key: Zeroizing::new(service_account_key),
             space_ids,
-            webhook_port,
             client: crate::http_client::new_client(),
             account_id: None,
             cached_token: Arc::new(RwLock::new(None)),
@@ -553,7 +549,7 @@ mod tests {
     fn test_google_chat_invalid_key() {
         let adapter = GoogleChatAdapter::new("not-json".to_string(), vec![], 8092);
         // Can't call async get_access_token in sync test, but verify construction works
-        assert_eq!(adapter.webhook_port, 8092);
+        assert_eq!(adapter.name(), "google_chat");
     }
 
     #[test]

@@ -369,9 +369,6 @@ enum Mode {
     Callback {
         /// HTTP client for response_url replies.
         client: reqwest::Client,
-        /// Port for the inbound webhook HTTP server (kept for config compat).
-        #[allow(dead_code)]
-        webhook_port: u16,
         /// Token for callback signature verification.
         token: Option<String>,
         /// Encoding AES key for message encryption/decryption.
@@ -412,7 +409,7 @@ impl WeComAdapter {
     pub fn new_callback(
         bot_id: String,
         secret: String,
-        webhook_port: u16,
+        _webhook_port: u16,
         token: Option<String>,
         encoding_aes_key: Option<String>,
     ) -> Self {
@@ -425,7 +422,6 @@ impl WeComAdapter {
             shutdown_rx,
             mode: Mode::Callback {
                 client: crate::http_client::new_client(),
-                webhook_port,
                 token,
                 encoding_aes_key,
                 webhook_key: Arc::new(RwLock::new(None)),

@@ -141,9 +141,6 @@ pub struct FeishuAdapter {
     region: FeishuRegion,
     /// How to receive inbound events.
     receive_mode: FeishuReceiveMode,
-    /// Port on which the inbound webhook HTTP server listens (webhook mode only).
-    #[allow(dead_code)]
-    webhook_port: u16,
     /// Optional verification token for webhook event validation.
     verification_token: Option<String>,
     /// Optional encrypt key for webhook event decryption.
@@ -168,7 +165,7 @@ impl FeishuAdapter {
     pub fn new(
         app_id: String,
         app_secret: String,
-        webhook_port: u16,
+        _webhook_port: u16,
         region: FeishuRegion,
         receive_mode: FeishuReceiveMode,
     ) -> Self {
@@ -178,7 +175,6 @@ impl FeishuAdapter {
             app_secret: Zeroizing::new(app_secret),
             region,
             receive_mode,
-            webhook_port,
             verification_token: None,
             encrypt_key: None,
             client: crate::http_client::new_client(),
@@ -1491,7 +1487,6 @@ mod tests {
             adapter.channel_type(),
             ChannelType::Custom("feishu".to_string())
         );
-        assert_eq!(adapter.webhook_port, 9000);
         assert_eq!(adapter.region, FeishuRegion::Cn);
         assert_eq!(adapter.receive_mode, FeishuReceiveMode::Websocket);
     }

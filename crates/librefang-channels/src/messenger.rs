@@ -14,7 +14,7 @@ use futures::Stream;
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::mpsc;
 use tracing::{info, warn};
 use zeroize::Zeroizing;
 
@@ -37,17 +37,10 @@ pub struct MessengerAdapter {
     page_token: Zeroizing<String>,
     /// SECURITY: Verify token for webhook registration, zeroized on drop.
     verify_token: Zeroizing<String>,
-    /// Port on which the inbound webhook HTTP server listens.
-    #[allow(dead_code)]
-    webhook_port: u16,
     /// HTTP client for outbound API calls.
     client: reqwest::Client,
     /// Optional account identifier for multi-bot routing.
     account_id: Option<String>,
-    /// Shutdown signal.
-    shutdown_tx: Arc<watch::Sender<bool>>,
-    #[allow(dead_code)]
-    shutdown_rx: watch::Receiver<bool>,
 }
 
 impl MessengerAdapter {
@@ -56,17 +49,13 @@ impl MessengerAdapter {
     /// # Arguments
     /// * `page_token` - Facebook page access token for the Send API.
     /// * `verify_token` - Token used to verify the webhook during Facebook's setup.
-    /// * `webhook_port` - Local port for the inbound webhook HTTP server.
-    pub fn new(page_token: String, verify_token: String, webhook_port: u16) -> Self {
-        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    /// * `webhook_port` - Local port (accepted from config, unused with shared server).
+    pub fn new(page_token: String, verify_token: String, _webhook_port: u16) -> Self {
         Self {
             page_token: Zeroizing::new(page_token),
             verify_token: Zeroizing::new(verify_token),
-            webhook_port,
             client: crate::http_client::new_client(),
             account_id: None,
-            shutdown_tx: Arc::new(shutdown_tx),
-            shutdown_rx,
         }
     }
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
@@ -448,7 +437,6 @@ impl ChannelAdapter for MessengerAdapter {
     }
 
     async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let _ = self.shutdown_tx.send(true);
         Ok(())
     }
 }
@@ -469,7 +457,6 @@ mod tests {
             adapter.channel_type(),
             ChannelType::Custom("messenger".to_string())
         );
-        assert_eq!(adapter.webhook_port, 8080);
     }
 
     #[test]
