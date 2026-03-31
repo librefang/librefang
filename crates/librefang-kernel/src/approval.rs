@@ -250,7 +250,7 @@ impl ApprovalManager {
     pub fn classify_risk(tool_name: &str) -> RiskLevel {
         match tool_name {
             "shell_exec" => RiskLevel::Critical,
-            "file_write" | "file_delete" => RiskLevel::High,
+            "file_write" | "file_delete" | "apply_patch" => RiskLevel::High,
             "web_fetch" | "browser_navigate" => RiskLevel::Medium,
             _ => RiskLevel::Low,
         }

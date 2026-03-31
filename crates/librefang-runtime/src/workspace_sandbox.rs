@@ -5,6 +5,14 @@
 
 use std::path::{Path, PathBuf};
 
+/// Error prefix emitted when a `..` component is found in a user-supplied path.
+/// Used by `agent_loop` to identify sandbox rejections as soft (recoverable) failures.
+pub const ERR_PATH_TRAVERSAL: &str = "Path traversal denied";
+
+/// Error prefix emitted when a path canonicalizes to outside the workspace root.
+/// Used by `agent_loop` to identify sandbox rejections as soft (recoverable) failures.
+pub const ERR_SANDBOX_ESCAPE: &str = "resolves outside workspace";
+
 /// Resolve a user-supplied path within a workspace sandbox.
 ///
 /// - Rejects `..` components outright.

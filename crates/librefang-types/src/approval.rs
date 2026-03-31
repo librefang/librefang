@@ -333,6 +333,7 @@ impl Default for ApprovalPolicy {
                 "shell_exec".to_string(),
                 "file_write".to_string(),
                 "file_delete".to_string(),
+                "apply_patch".to_string(),
             ],
             timeout_secs: 60,
             auto_approve_autonomous: false,
@@ -367,6 +368,7 @@ where
                     "shell_exec".to_string(),
                     "file_write".to_string(),
                     "file_delete".to_string(),
+                    "apply_patch".to_string(),
                 ]
             } else {
                 vec![]
@@ -724,7 +726,7 @@ mod tests {
         assert!(policy.validate().is_ok());
         assert_eq!(
             policy.require_approval,
-            vec!["shell_exec", "file_write", "file_delete"]
+            vec!["shell_exec", "file_write", "file_delete", "apply_patch"]
         );
         assert_eq!(policy.timeout_secs, 60);
         assert!(!policy.auto_approve_autonomous);
@@ -738,7 +740,7 @@ mod tests {
         assert_eq!(policy.timeout_secs, 60);
         assert_eq!(
             policy.require_approval,
-            vec!["shell_exec", "file_write", "file_delete"]
+            vec!["shell_exec", "file_write", "file_delete", "apply_patch"]
         );
         assert!(!policy.auto_approve_autonomous);
     }
@@ -757,7 +759,7 @@ mod tests {
         let policy: ApprovalPolicy = serde_json::from_str(r#"{"require_approval": true}"#).unwrap();
         assert_eq!(
             policy.require_approval,
-            vec!["shell_exec", "file_write", "file_delete"]
+            vec!["shell_exec", "file_write", "file_delete", "apply_patch"]
         );
     }
 

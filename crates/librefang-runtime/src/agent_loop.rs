@@ -15,6 +15,7 @@ use crate::loop_guard::{LoopGuard, LoopGuardConfig, LoopGuardVerdict};
 use crate::mcp::McpConnection;
 use crate::tool_runner;
 use crate::web_search::WebToolsContext;
+use crate::workspace_sandbox::{ERR_PATH_TRAVERSAL, ERR_SANDBOX_ESCAPE};
 use librefang_memory::session::Session;
 use librefang_memory::{MemorySubstrate, ProactiveMemoryHooks};
 use librefang_skills::registry::SkillRegistry;
@@ -1384,8 +1385,8 @@ pub async fn run_agent_loop(
                         && (result
                             .content
                             .contains("requires human approval and was denied")
-                            || result.content.contains("Path traversal denied")
-                            || result.content.contains("resolves outside workspace"));
+                            || result.content.contains(ERR_PATH_TRAVERSAL)
+                            || result.content.contains(ERR_SANDBOX_ESCAPE));
                     if result.is_error && !is_soft_error {
                         warn!(
                             tool = %tool_call.name,
@@ -2877,8 +2878,8 @@ pub async fn run_agent_loop_streaming(
                         && (result
                             .content
                             .contains("requires human approval and was denied")
-                            || result.content.contains("Path traversal denied")
-                            || result.content.contains("resolves outside workspace"));
+                            || result.content.contains(ERR_PATH_TRAVERSAL)
+                            || result.content.contains(ERR_SANDBOX_ESCAPE));
                     if result.is_error && !is_soft_error {
                         warn!(
                             tool = %tool_call.name,
