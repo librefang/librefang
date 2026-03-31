@@ -40,17 +40,29 @@ pub fn resolve_sandbox_path(user_path: &str, workspace_root: &Path) -> Result<Pa
             .canonicalize()
             .map_err(|e| format!("Failed to resolve path: {e}"))?
     } else {
-        // For new files: canonicalize the parent and append the filename
+        // For new files: canonicalize the parent and append the filename.
+        // If the parent doesn't exist yet, return the joined path and let
+        // the caller create the directory structure.
         let parent = candidate
             .parent()
             .ok_or_else(|| "Invalid path: no parent directory".to_string())?;
         let filename = candidate
             .file_name()
             .ok_or_else(|| "Invalid path: no filename".to_string())?;
-        let canon_parent = parent
-            .canonicalize()
-            .map_err(|e| format!("Failed to resolve parent directory: {e}"))?;
-        canon_parent.join(filename)
+
+        if parent.exists() {
+            let canon_parent = parent
+                .canonicalize()
+                .map_err(|e| format!("Failed to resolve parent directory: {e}"))?;
+            canon_parent.join(filename)
+        } else {
+            // Parent doesn't exist yet; return the joined path.
+            // This is safe because:
+            // 1. We already rejected '..' components
+            // 2. candidate = workspace_root.join(path), so it's inside by construction
+            // 3. No symlinks can exist in non-existent parent directories
+            candidate
+        }
     };
 
     // Verify the canonical path is inside the workspace
@@ -128,6 +140,17 @@ mod tests {
         let resolved = result.unwrap();
         assert!(resolved.starts_with(dir.path().canonicalize().unwrap()));
         assert!(resolved.ends_with("new_file.txt"));
+    }
+
+    #[test]
+    fn test_nonexistent_file_with_nonexistent_parent() {
+        let dir = TempDir::new().unwrap();
+        // Parent directory doesn't exist yet
+        let result = resolve_sandbox_path("nested/deep/file.txt", dir.path());
+        assert!(result.is_ok());
+        let resolved = result.unwrap();
+        assert!(resolved.starts_with(dir.path()));
+        assert!(resolved.ends_with("file.txt"));
     }
 
     #[cfg(unix)]

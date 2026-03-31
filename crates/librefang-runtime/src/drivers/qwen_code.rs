@@ -245,6 +245,10 @@ impl QwenCodeDriver {
             "qwen3-coder" | "coder" => Some("qwen3-coder".to_string()),
             "qwen-coder-plus" | "coder-plus" => Some("qwen-coder-plus".to_string()),
             "qwq-32b" | "qwq" => Some("qwq-32b".to_string()),
+            // Qwen 3.5 series
+            "qwen3.5-flash" => Some("qwen3.5-flash".to_string()),
+            "qwen3.5-plus" => Some("qwen3.5-plus".to_string()),
+            "qwen3-max" => Some("qwen3-max".to_string()),
             _ => Some(stripped.to_string()),
         }
     }
@@ -644,6 +648,19 @@ mod tests {
         assert_eq!(
             QwenCodeDriver::model_flag("qwen-code/qwq-32b"),
             Some("qwq-32b".to_string())
+        );
+        // Qwen 3.5 series
+        assert_eq!(
+            QwenCodeDriver::model_flag("qwen-code/qwen3.5-flash"),
+            Some("qwen3.5-flash".to_string())
+        );
+        assert_eq!(
+            QwenCodeDriver::model_flag("qwen-code/qwen3.5-plus"),
+            Some("qwen3.5-plus".to_string())
+        );
+        assert_eq!(
+            QwenCodeDriver::model_flag("qwen-code/qwen3-max"),
+            Some("qwen3-max".to_string())
         );
         assert_eq!(
             QwenCodeDriver::model_flag("coder"),
