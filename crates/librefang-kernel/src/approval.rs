@@ -401,7 +401,8 @@ mod tests {
     fn test_update_policy() {
         let mgr = default_manager();
         assert!(mgr.requires_approval("shell_exec"));
-        assert!(!mgr.requires_approval("file_write"));
+        // file_write is now in the default require_approval list
+        assert!(mgr.requires_approval("file_write"));
 
         let new_policy = ApprovalPolicy {
             require_approval: vec!["file_write".to_string()],
