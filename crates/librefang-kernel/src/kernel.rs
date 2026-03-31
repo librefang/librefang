@@ -6746,7 +6746,7 @@ system_prompt = "You are a helpful assistant."
                     Some(("Perplexity", cfg.web.perplexity.api_key_env.clone()))
                 }
                 librefang_types::config::SearchProvider::Jina => {
-                    Some(("Jina", self.config.web.jina.api_key_env.clone()))
+                    Some(("Jina", cfg.web.jina.api_key_env.clone()))
                 }
                 _ => None,
             };
