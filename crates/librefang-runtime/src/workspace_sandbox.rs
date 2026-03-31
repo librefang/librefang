@@ -5,6 +5,14 @@
 
 use std::path::{Path, PathBuf};
 
+/// Error prefix emitted when a `..` component is found in a user-supplied path.
+/// Used by `agent_loop` to identify sandbox rejections as soft (recoverable) failures.
+pub const ERR_PATH_TRAVERSAL: &str = "Path traversal denied";
+
+/// Error prefix emitted when a path canonicalizes to outside the workspace root.
+/// Used by `agent_loop` to identify sandbox rejections as soft (recoverable) failures.
+pub const ERR_SANDBOX_ESCAPE: &str = "resolves outside workspace";
+
 /// Resolve a user-supplied path within a workspace sandbox.
 ///
 /// - Rejects `..` components outright.
@@ -18,7 +26,9 @@ pub fn resolve_sandbox_path(user_path: &str, workspace_root: &Path) -> Result<Pa
     // Reject any `..` components
     for component in path.components() {
         if matches!(component, std::path::Component::ParentDir) {
-            return Err("Path traversal denied: '..' components are forbidden".to_string());
+            return Err(format!(
+                "{ERR_PATH_TRAVERSAL}: '..' components are forbidden"
+            ));
         }
     }
 
@@ -56,7 +66,7 @@ pub fn resolve_sandbox_path(user_path: &str, workspace_root: &Path) -> Result<Pa
     // Verify the canonical path is inside the workspace
     if !canon_candidate.starts_with(&canon_root) {
         return Err(format!(
-            "Access denied: path '{}' resolves outside workspace. \
+            "Access denied: path '{}' {ERR_SANDBOX_ESCAPE}. \
              If you have an MCP filesystem server configured, use the \
              mcp_filesystem_* tools (e.g. mcp_filesystem_read_file, \
              mcp_filesystem_list_directory) to access files outside \

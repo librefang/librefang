@@ -792,6 +792,24 @@ pub async fn set_provider_key(
     // Trigger all active hands so they resume immediately
     state.kernel.trigger_all_hands();
 
+    // If default provider switched, update registry entries for agents that were
+    // using the old default so they immediately pick up the new provider/model.
+    if switched {
+        let new_dm = {
+            let guard = state
+                .kernel
+                .default_model_override_ref()
+                .read()
+                .unwrap_or_else(|e| e.into_inner());
+            guard
+                .clone()
+                .unwrap_or_else(|| state.kernel.config_ref().default_model.clone())
+        };
+        state
+            .kernel
+            .sync_default_model_agents(&current_provider, &new_dm);
+    }
+
     let mut resp = serde_json::json!({"status": "saved", "provider": name});
     if switched {
         resp["switched_default"] = serde_json::json!(true);
@@ -1164,22 +1182,40 @@ pub async fn set_default_provider(
         }
     };
 
+    // Read old default before updating, so sync_default_model_agents knows what to migrate
+    let old_provider = {
+        let guard = state
+            .kernel
+            .default_model_override_ref()
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        match guard.as_ref() {
+            Some(dm) => dm.provider.clone(),
+            None => state.kernel.config_ref().default_model.provider.clone(),
+        }
+    };
+
     // Hot-update the in-memory default model override
+    let new_dm = librefang_types::config::DefaultModelConfig {
+        provider: name.clone(),
+        model: model_id.clone(),
+        api_key_env: env_var.clone(),
+        base_url: None,
+        ..Default::default()
+    };
     {
-        let new_dm = librefang_types::config::DefaultModelConfig {
-            provider: name.clone(),
-            model: model_id.clone(),
-            api_key_env: env_var.clone(),
-            base_url: None,
-            ..Default::default()
-        };
         let mut guard = state
             .kernel
             .default_model_override_ref()
             .write()
             .unwrap_or_else(|e| e.into_inner());
-        *guard = Some(new_dm);
+        *guard = Some(new_dm.clone());
     }
+
+    // Update registry entries for agents that were tracking the old default
+    state
+        .kernel
+        .sync_default_model_agents(&old_provider, &new_dm);
 
     (
         StatusCode::OK,

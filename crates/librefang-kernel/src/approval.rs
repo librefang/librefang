@@ -250,7 +250,7 @@ impl ApprovalManager {
     pub fn classify_risk(tool_name: &str) -> RiskLevel {
         match tool_name {
             "shell_exec" => RiskLevel::Critical,
-            "file_write" | "file_delete" => RiskLevel::High,
+            "file_write" | "file_delete" | "apply_patch" => RiskLevel::High,
             "web_fetch" | "browser_navigate" => RiskLevel::Medium,
             _ => RiskLevel::Low,
         }
@@ -352,6 +352,10 @@ mod tests {
             RiskLevel::High
         );
         assert_eq!(
+            ApprovalManager::classify_risk("apply_patch"),
+            RiskLevel::High
+        );
+        assert_eq!(
             ApprovalManager::classify_risk("web_fetch"),
             RiskLevel::Medium
         );
@@ -397,7 +401,8 @@ mod tests {
     fn test_update_policy() {
         let mgr = default_manager();
         assert!(mgr.requires_approval("shell_exec"));
-        assert!(!mgr.requires_approval("file_write"));
+        // file_write is now in the default require_approval list
+        assert!(mgr.requires_approval("file_write"));
 
         let new_policy = ApprovalPolicy {
             require_approval: vec!["file_write".to_string()],
@@ -585,7 +590,10 @@ mod tests {
     fn test_policy_defaults() {
         let mgr = default_manager();
         let policy = mgr.policy();
-        assert_eq!(policy.require_approval, vec!["shell_exec".to_string()]);
+        assert_eq!(
+            policy.require_approval,
+            vec!["shell_exec", "file_write", "file_delete", "apply_patch"]
+        );
         assert_eq!(policy.timeout_secs, 60);
         assert!(!policy.auto_approve_autonomous);
     }

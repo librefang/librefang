@@ -2417,35 +2417,17 @@ system_prompt = "You are a helpful assistant."
         }
         info!(agent = %name, id = %agent_id, exec_mode = ?manifest.exec_policy.as_ref().map(|p| &p.mode), "Agent exec_policy resolved");
 
-        // Overlay kernel default_model onto agent if agent didn't explicitly choose.
-        // Treat empty or "default" as "use the kernel's configured default_model".
-        // This allows bundled agents to defer to the user's configured provider/model,
-        // even if the agent manifest specifies an api_key_env (which is just a hint
-        // about which env var to check, not a hard lock on provider/model).
+        // Normalize empty provider/model to "default" so the intent is preserved in DB.
+        // Resolution to concrete values happens at execute_llm_agent time, ensuring
+        // provider changes take effect immediately without re-spawning agents.
         {
             let is_default_provider =
                 manifest.model.provider.is_empty() || manifest.model.provider == "default";
             let is_default_model =
                 manifest.model.model.is_empty() || manifest.model.model == "default";
             if is_default_provider && is_default_model {
-                // Check hot-reloaded override first, fall back to boot-time config
-                let override_guard = self
-                    .default_model_override
-                    .read()
-                    .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
-                let dm = override_guard.as_ref().unwrap_or(&cfg.default_model);
-                if !dm.provider.is_empty() {
-                    manifest.model.provider = dm.provider.clone();
-                }
-                if !dm.model.is_empty() {
-                    manifest.model.model = dm.model.clone();
-                }
-                if !dm.api_key_env.is_empty() && manifest.model.api_key_env.is_none() {
-                    manifest.model.api_key_env = Some(dm.api_key_env.clone());
-                }
-                if dm.base_url.is_some() && manifest.model.base_url.is_none() {
-                    manifest.model.base_url.clone_from(&dm.base_url);
-                }
+                manifest.model.provider = "default".to_string();
+                manifest.model.model = "default".to_string();
             }
         }
 
@@ -4161,6 +4143,40 @@ system_prompt = "You are a helpful assistant."
 
         // Apply model routing if configured (disabled in Stable mode)
         let mut manifest = entry.manifest.clone();
+
+        // Resolve "default" provider/model to the current effective default.
+        // This covers three cases:
+        // 1. New agents stored as "default"/"default" (post-fix spawn behavior)
+        // 2. The auto-spawned "assistant" agent that may have a stale concrete
+        //    provider/model in DB from before a provider switch
+        // 3. TOML agents with provider="default" that got a concrete value baked in
+        {
+            let is_default_provider =
+                manifest.model.provider.is_empty() || manifest.model.provider == "default";
+            let is_default_model =
+                manifest.model.model.is_empty() || manifest.model.model == "default";
+            let is_auto_spawned =
+                entry.name == "assistant" && manifest.description == "General-purpose assistant";
+            if (is_default_provider && is_default_model) || is_auto_spawned {
+                let override_guard = self
+                    .default_model_override
+                    .read()
+                    .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
+                let dm = override_guard.as_ref().unwrap_or(&cfg.default_model);
+                if !dm.provider.is_empty() {
+                    manifest.model.provider = dm.provider.clone();
+                }
+                if !dm.model.is_empty() {
+                    manifest.model.model = dm.model.clone();
+                }
+                if !dm.api_key_env.is_empty() && manifest.model.api_key_env.is_none() {
+                    manifest.model.api_key_env = Some(dm.api_key_env.clone());
+                }
+                if dm.base_url.is_some() && manifest.model.base_url.is_none() {
+                    manifest.model.base_url.clone_from(&dm.base_url);
+                }
+            }
+        }
 
         // Backfill thinking config from global config if per-agent is not set
         if manifest.thinking.is_none() {
@@ -8955,6 +8971,59 @@ async fn cron_deliver_response(
 impl LibreFangKernel {
     /// Mark all active Hands' cron jobs as due-now so the next scheduler tick fires them.
     /// Called after a provider is first configured so Hands resume immediately.
+    /// Update registry entries for agents that should track the kernel default model.
+    /// Called after a provider switch so agents pick up the new provider without restart.
+    ///
+    /// Agents eligible for update:
+    /// - Any agent with provider="default" or "" (new spawn-time behavior)
+    /// - The auto-spawned "assistant" agent (may have stale concrete provider in DB)
+    /// - Dashboard-created agents (no source_toml_path, no custom api_key_env) whose
+    ///   stored provider matches `old_provider` — these were using the old default
+    pub fn sync_default_model_agents(
+        &self,
+        old_provider: &str,
+        dm: &librefang_types::config::DefaultModelConfig,
+    ) {
+        for entry in self.registry.list() {
+            let is_default_provider = entry.manifest.model.provider.is_empty()
+                || entry.manifest.model.provider == "default";
+            let is_default_model =
+                entry.manifest.model.model.is_empty() || entry.manifest.model.model == "default";
+            let is_auto_spawned = entry.name == "assistant"
+                && entry.manifest.description == "General-purpose assistant";
+            // Dashboard-created agents that were using the old default provider:
+            // no source TOML, no custom API key, and saved provider == old default
+            let is_stale_dashboard_default = entry.source_toml_path.is_none()
+                && entry.manifest.model.api_key_env.is_none()
+                && entry.manifest.model.base_url.is_none()
+                && entry.manifest.model.provider == old_provider;
+
+            if (is_default_provider && is_default_model)
+                || is_auto_spawned
+                || is_stale_dashboard_default
+            {
+                let _ = self.registry.update_model_and_provider(
+                    entry.id,
+                    dm.model.clone(),
+                    dm.provider.clone(),
+                );
+                if !dm.api_key_env.is_empty() {
+                    if let Some(mut e) = self.registry.get(entry.id) {
+                        if e.manifest.model.api_key_env.is_none() {
+                            e.manifest.model.api_key_env = Some(dm.api_key_env.clone());
+                        }
+                        if dm.base_url.is_some() && e.manifest.model.base_url.is_none() {
+                            e.manifest.model.base_url.clone_from(&dm.base_url);
+                        }
+                        let _ = self.memory.save_agent(&e);
+                    }
+                } else if let Some(e) = self.registry.get(entry.id) {
+                    let _ = self.memory.save_agent(&e);
+                }
+            }
+        }
+    }
+
     pub fn trigger_all_hands(&self) {
         let hand_agents: Vec<AgentId> = self
             .hand_registry
@@ -10417,16 +10486,13 @@ mod tests {
             .expect("agent should spawn with local model override");
 
         let entry = kernel.registry.get(agent_id).expect("agent registry entry");
-        assert_eq!(entry.manifest.model.provider, "ollama");
-        assert_eq!(entry.manifest.model.model, "Qwen3.5-4B-MLX-4bit");
-        assert_eq!(
-            entry.manifest.model.base_url.as_deref(),
-            Some("http://127.0.0.1:11434/v1")
-        );
-        assert!(
-            entry.manifest.model.api_key_env.is_none(),
-            "local model override should not require an API key env var"
-        );
+        // Spawn now stores "default"/"default" so provider changes propagate at
+        // execute time without re-spawning. Concrete resolution happens in
+        // execute_llm_agent, not at spawn.
+        assert_eq!(entry.manifest.model.provider, "default");
+        assert_eq!(entry.manifest.model.model, "default");
+        assert!(entry.manifest.model.base_url.is_none());
+        assert!(entry.manifest.model.api_key_env.is_none());
 
         kernel.shutdown();
     }

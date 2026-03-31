@@ -1655,6 +1655,7 @@ pub async fn get_agent(
             "model": {
                 "provider": entry.manifest.model.provider,
                 "model": entry.manifest.model.model,
+                "max_tokens": entry.manifest.model.max_tokens,
             },
             "capabilities": {
                 "tools": entry.manifest.capabilities.tools,
@@ -3010,6 +3011,8 @@ pub struct PatchAgentConfigRequest {
     pub provider: Option<String>,
     pub api_key_env: Option<String>,
     pub base_url: Option<String>,
+    /// Maximum tokens for LLM response. Controls conversation window size.
+    pub max_tokens: Option<u32>,
     #[schema(value_type = Option<Vec<serde_json::Value>>)]
     pub fallback_models: Option<Vec<librefang_types::agent::FallbackModel>>,
 }
@@ -3233,6 +3236,27 @@ pub async fn patch_agent_config(
                     );
                 }
             }
+        }
+    }
+
+    // Update max_tokens (response length / conversation window limit)
+    if let Some(max_tokens) = req.max_tokens {
+        if max_tokens == 0 {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "max_tokens must be greater than 0"})),
+            );
+        }
+        if state
+            .kernel
+            .agent_registry()
+            .update_max_tokens(agent_id, max_tokens)
+            .is_err()
+        {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+            );
         }
     }
 

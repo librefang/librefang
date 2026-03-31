@@ -1405,7 +1405,10 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
 fn validate_path(path: &str) -> Result<&str, String> {
     for component in std::path::Path::new(path).components() {
         if matches!(component, std::path::Component::ParentDir) {
-            return Err("Path traversal denied: '..' components are forbidden".to_string());
+            return Err(format!(
+                "{}: '..' components are forbidden",
+                crate::workspace_sandbox::ERR_PATH_TRAVERSAL
+            ));
         }
     }
     Ok(path)

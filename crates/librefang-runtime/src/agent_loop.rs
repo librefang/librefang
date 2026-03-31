@@ -15,6 +15,7 @@ use crate::loop_guard::{LoopGuard, LoopGuardConfig, LoopGuardVerdict};
 use crate::mcp::McpConnection;
 use crate::tool_runner;
 use crate::web_search::WebToolsContext;
+use crate::workspace_sandbox::{ERR_PATH_TRAVERSAL, ERR_SANDBOX_ESCAPE};
 use librefang_memory::session::Session;
 use librefang_memory::{MemorySubstrate, ProactiveMemoryHooks};
 use librefang_skills::registry::SkillRegistry;
@@ -1378,12 +1379,15 @@ pub async fn run_agent_loop(
                     });
 
                     // Stop executing remaining tool calls on failure (#948)
-                    // but not for approval denials — those should continue the loop
-                    let is_approval_denial = result.is_error
-                        && result
+                    // but not for approval denials or sandbox security rejections —
+                    // those should let the LLM recover and retry with a valid path (#1861)
+                    let is_soft_error = result.is_error
+                        && (result
                             .content
-                            .contains("requires human approval and was denied");
-                    if result.is_error && !is_approval_denial {
+                            .contains("requires human approval and was denied")
+                            || result.content.contains(ERR_PATH_TRAVERSAL)
+                            || result.content.contains(ERR_SANDBOX_ESCAPE));
+                    if result.is_error && !is_soft_error {
                         warn!(
                             tool = %tool_call.name,
                             "Tool execution failed — skipping remaining tool calls"
@@ -2868,12 +2872,15 @@ pub async fn run_agent_loop_streaming(
                     });
 
                     // Stop executing remaining tool calls on failure (#948)
-                    // but not for approval denials — those should continue the loop
-                    let is_approval_denial = result.is_error
-                        && result
+                    // but not for approval denials or sandbox security rejections —
+                    // those should let the LLM recover and retry with a valid path (#1861)
+                    let is_soft_error = result.is_error
+                        && (result
                             .content
-                            .contains("requires human approval and was denied");
-                    if result.is_error && !is_approval_denial {
+                            .contains("requires human approval and was denied")
+                            || result.content.contains(ERR_PATH_TRAVERSAL)
+                            || result.content.contains(ERR_SANDBOX_ESCAPE));
+                    if result.is_error && !is_soft_error {
                         warn!(
                             tool = %tool_call.name,
                             "Tool execution failed — skipping remaining tool calls (streaming)"

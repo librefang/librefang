@@ -1027,7 +1027,34 @@ async function startConnection() {
           messageToSend = messageText;
         }
 
-        const response = await forwardToLibreFang(messageToSend, systemPrefix, phone, pushName, isOwner, attachments, { isGroup, wasMentioned });
+        // --- Streaming: progressive message edits while LLM generates ---
+        let streamMsgKey = null; // key of the initial WhatsApp message we'll edit
+        const onProgress = async (partialText) => {
+          if (!sock) return;
+          const formatted = markdownToWhatsApp(partialText);
+          if (!streamMsgKey) {
+            const sent = await sock.sendMessage(sender, { text: formatted });
+            streamMsgKey = sent?.key;
+          } else {
+            await sock.sendMessage(sender, { text: formatted, edit: streamMsgKey });
+          }
+        };
+
+        const rawResponse = await forwardToLibreFangStreaming(
+          messageToSend, systemPrefix, phone, pushName, isOwner, attachments, onProgress,
+        );
+        const response = markdownToWhatsApp(rawResponse);
+
+        // Helper: send a new message or edit the streamed one for final delivery
+        const sendOrEdit = async (jid, finalText) => {
+          if (streamMsgKey && jid === sender) {
+            // Edit the message we've been streaming
+            await sock.sendMessage(jid, { text: finalText, edit: streamMsgKey });
+            return streamMsgKey;
+          }
+          // No streaming happened (fallback path) — send new message
+          return (await sock.sendMessage(jid, { text: finalText }))?.key;
+        };
 
         if (response && sock) {
           if (isStranger) {
@@ -1037,13 +1064,13 @@ async function startConnection() {
             // Send cleaned response to the stranger (format after tag extraction)
             if (cleanedText) {
               const formattedText = markdownToWhatsApp(cleanedText);
-              const sentReply = await sock.sendMessage(sender, { text: formattedText });
-              console.log(`[gateway] Replied to stranger ${pushName} (${phone})`);
+              const sentKey = await sendOrEdit(sender, formattedText);
+              console.log(`[gateway] Replied to stranger ${pushName} (${phone})${streamMsgKey ? ' (streamed)' : ''}`);
 
               // Track outbound message
               trackMessage(sender, pushName, phone, cleanedText, 'outbound');
               // Save outbound to DB
-              dbSaveMessage({ id: sentReply?.key?.id || randomUUID(), jid: sender, senderJid: ownJid, pushName: null, phone, text: cleanedText, direction: 'outbound', timestamp: Date.now(), processed: 1, rawType: 'text' });
+              dbSaveMessage({ id: sentKey?.id || randomUUID(), jid: sender, senderJid: ownJid, pushName: null, phone, text: cleanedText, direction: 'outbound', timestamp: Date.now(), processed: 1, rawType: 'text' });
             }
 
             // Step C + F: If NOTIFY_OWNER tags found, send notification to owner
@@ -1092,18 +1119,18 @@ async function startConnection() {
             }
 
             if (ownerReply) {
-              // Bug fix: Reply to the SENDER's JID, not always OWNER_JID[0]
               ownerReply = markdownToWhatsApp(ownerReply);
-              const sentOwner = await sock.sendMessage(sender, { text: ownerReply });
-              console.log(`[gateway] Replied to owner (${sender})`);
-              dbSaveMessage({ id: sentOwner?.key?.id || randomUUID(), jid: sender, senderJid: ownJid, pushName: null, phone, text: ownerReply, direction: 'outbound', timestamp: Date.now(), processed: 1, rawType: 'text' });
+              const sentKey = await sendOrEdit(sender, ownerReply);
+              console.log(`[gateway] Replied to owner (${sender})${streamMsgKey ? ' (streamed)' : ''}`);
+              dbSaveMessage({ id: sentKey?.id || randomUUID(), jid: sender, senderJid: ownJid, pushName: null, phone, text: ownerReply, direction: 'outbound', timestamp: Date.now(), processed: 1, rawType: 'text' });
             }
 
           } else {
             // Groups or no owner routing — reply directly
-            const sentGroup = await sock.sendMessage(sender, { text: markdownToWhatsApp(response) });
+            const finalText = markdownToWhatsApp(response);
+            const sentKey = await sendOrEdit(sender, finalText);
             console.log(`[gateway] Replied to ${pushName}`);
-            dbSaveMessage({ id: sentGroup?.key?.id || randomUUID(), jid: sender, senderJid: ownJid, pushName: null, phone, text: response, direction: 'outbound', timestamp: Date.now(), processed: 1, rawType: 'text' });
+            dbSaveMessage({ id: sentKey?.id || randomUUID(), jid: sender, senderJid: ownJid, pushName: null, phone, text: response, direction: 'outbound', timestamp: Date.now(), processed: 1, rawType: 'text' });
           }
         }
 
@@ -1512,6 +1539,182 @@ async function forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, 
     req.on('timeout', () => {
       req.destroy();
       reject(new Error('LibreFang API timeout'));
+    });
+    req.write(payloadStr);
+    req.end();
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Streaming forward — SSE version with progressive WhatsApp message edits
+// ---------------------------------------------------------------------------
+
+/** Minimum interval (ms) between WhatsApp message edits during streaming. */
+const STREAMING_EDIT_INTERVAL_MS = 2000;
+
+/**
+ * Forward a message to LibreFang using the SSE streaming endpoint.
+ * Calls `onProgress(accumulatedText)` periodically so the caller can
+ * edit the WhatsApp message in-place.  Returns the complete response text.
+ *
+ * Falls back to the non-streaming `forwardToLibreFang()` on any SSE error.
+ *
+ * @param {string} text
+ * @param {string} systemPrefix
+ * @param {string} phone
+ * @param {string} pushName
+ * @param {boolean} isOwner
+ * @param {object[]} attachments
+ * @param {(text: string) => Promise<void>} onProgress
+ * @returns {Promise<string>} complete response
+ */
+async function forwardToLibreFangStreaming(text, systemPrefix, phone, pushName, isOwner, attachments, onProgress) {
+  // Resolve agent UUID if not cached
+  if (!cachedAgentId) {
+    try {
+      await resolveAgentId();
+    } catch (err) {
+      console.error(`[gateway] Agent resolution failed: ${err.message}`);
+      throw err;
+    }
+  }
+
+  const fullMessage = systemPrefix ? systemPrefix + text : text;
+
+  const payload = {
+    message: fullMessage,
+    channel_type: 'whatsapp',
+    sender_id: phone,
+    sender_name: pushName,
+  };
+
+  if (attachments && attachments.length > 0) {
+    payload.attachments = attachments;
+  }
+
+  const payloadStr = JSON.stringify(payload);
+
+  return new Promise((resolve, reject) => {
+    const url = new URL(`${LIBREFANG_URL}/api/agents/${encodeURIComponent(cachedAgentId)}/message/stream`);
+
+    const req = http.request(
+      {
+        hostname: url.hostname,
+        port: url.port || 4545,
+        path: url.pathname,
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(payloadStr),
+          Accept: 'text/event-stream',
+        },
+        timeout: 180_000, // streaming can take longer
+      },
+      (res) => {
+        // Non-200 or non-SSE → fall back to non-streaming
+        const ct = res.headers['content-type'] || '';
+        if (res.statusCode !== 200 || !ct.includes('text/event-stream')) {
+          let body = '';
+          res.on('data', (chunk) => (body += chunk));
+          res.on('end', () => {
+            console.warn(`[gateway] SSE endpoint returned ${res.statusCode}, falling back to non-streaming`);
+            forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, attachments)
+              .then(resolve)
+              .catch(reject);
+          });
+          return;
+        }
+
+        let accumulated = '';
+        let lastEditTime = 0;
+        let pendingEdit = null;
+        let buf = '';
+
+        res.setEncoding('utf8');
+        res.on('data', (raw) => {
+          buf += raw;
+          // SSE frames are separated by double newlines
+          const parts = buf.split('\n\n');
+          buf = parts.pop(); // keep incomplete frame in buffer
+
+          for (const frame of parts) {
+            let eventType = 'message';
+            let dataStr = '';
+            for (const line of frame.split('\n')) {
+              if (line.startsWith('event:')) eventType = line.slice(6).trim();
+              else if (line.startsWith('data:')) dataStr += line.slice(5).trim();
+            }
+            if (!dataStr) continue;
+
+            if (eventType === 'phase') {
+              // Transient status (e.g. "still working..."). Show via onProgress
+              // but DON'T add to accumulated — next real chunk overwrites it.
+              try {
+                const parsed = JSON.parse(dataStr);
+                if (parsed.phase === 'long_running' && onProgress) {
+                  const status = parsed.detail || 'Still working...';
+                  const display = accumulated ? accumulated + '\n\n[' + status + ']' : '[' + status + ']';
+                  onProgress(display).catch(() => {});
+                }
+              } catch { /* ignore */ }
+            } else if (eventType === 'chunk') {
+              try {
+                const parsed = JSON.parse(dataStr);
+                if (parsed.content) {
+                  accumulated += parsed.content;
+
+                  // Throttle edits
+                  const now = Date.now();
+                  if (onProgress && now - lastEditTime >= STREAMING_EDIT_INTERVAL_MS) {
+                    lastEditTime = now;
+                    // Fire-and-forget; don't block the stream
+                    clearTimeout(pendingEdit);
+                    pendingEdit = null;
+                    onProgress(accumulated).catch((e) =>
+                      console.warn(`[gateway] Streaming edit failed: ${e.message}`)
+                    );
+                  } else if (onProgress && !pendingEdit) {
+                    // Schedule a trailing edit so the last chunk is always sent
+                    const remaining = STREAMING_EDIT_INTERVAL_MS - (now - lastEditTime);
+                    pendingEdit = setTimeout(() => {
+                      pendingEdit = null;
+                      lastEditTime = Date.now();
+                      onProgress(accumulated).catch((e) =>
+                        console.warn(`[gateway] Streaming trailing edit failed: ${e.message}`)
+                      );
+                    }, remaining);
+                  }
+                }
+              } catch { /* ignore malformed JSON */ }
+            }
+            // 'done' event → stream is over, handled by res.on('end')
+          }
+        });
+
+        res.on('end', () => {
+          clearTimeout(pendingEdit);
+          resolve(accumulated);
+        });
+
+        res.on('error', (err) => {
+          clearTimeout(pendingEdit);
+          console.warn(`[gateway] SSE stream error: ${err.message}, falling back`);
+          forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, attachments)
+            .then(resolve)
+            .catch(reject);
+        });
+      },
+    );
+
+    req.on('error', (err) => {
+      console.warn(`[gateway] SSE request error: ${err.message}, falling back`);
+      forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, attachments)
+        .then(resolve)
+        .catch(reject);
+    });
+    req.on('timeout', () => {
+      req.destroy();
+      reject(new Error('LibreFang SSE timeout'));
     });
     req.write(payloadStr);
     req.end();
