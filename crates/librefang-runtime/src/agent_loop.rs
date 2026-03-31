@@ -1378,12 +1378,15 @@ pub async fn run_agent_loop(
                     });
 
                     // Stop executing remaining tool calls on failure (#948)
-                    // but not for approval denials — those should continue the loop
-                    let is_approval_denial = result.is_error
-                        && result
+                    // but not for approval denials or sandbox security rejections —
+                    // those should let the LLM recover and retry with a valid path (#1861)
+                    let is_soft_error = result.is_error
+                        && (result
                             .content
-                            .contains("requires human approval and was denied");
-                    if result.is_error && !is_approval_denial {
+                            .contains("requires human approval and was denied")
+                            || result.content.contains("Path traversal denied")
+                            || result.content.contains("resolves outside workspace"));
+                    if result.is_error && !is_soft_error {
                         warn!(
                             tool = %tool_call.name,
                             "Tool execution failed — skipping remaining tool calls"
@@ -2868,12 +2871,15 @@ pub async fn run_agent_loop_streaming(
                     });
 
                     // Stop executing remaining tool calls on failure (#948)
-                    // but not for approval denials — those should continue the loop
-                    let is_approval_denial = result.is_error
-                        && result
+                    // but not for approval denials or sandbox security rejections —
+                    // those should let the LLM recover and retry with a valid path (#1861)
+                    let is_soft_error = result.is_error
+                        && (result
                             .content
-                            .contains("requires human approval and was denied");
-                    if result.is_error && !is_approval_denial {
+                            .contains("requires human approval and was denied")
+                            || result.content.contains("Path traversal denied")
+                            || result.content.contains("resolves outside workspace"));
+                    if result.is_error && !is_soft_error {
                         warn!(
                             tool = %tool_call.name,
                             "Tool execution failed — skipping remaining tool calls (streaming)"

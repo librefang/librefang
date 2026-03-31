@@ -297,11 +297,11 @@ impl ChannelToolRule {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ApprovalPolicy {
-    /// Tools that always require approval. Default: `["shell_exec"]`.
+    /// Tools that always require approval. Default: `["shell_exec", "file_write", "file_delete"]`.
     ///
     /// Accepts either a list of tool names or a boolean shorthand:
     /// - `require_approval = false` → empty list (no tools require approval)
-    /// - `require_approval = true`  → `["shell_exec"]` (the default set)
+    /// - `require_approval = true`  → `["shell_exec", "file_write", "file_delete"]` (the default set)
     #[serde(deserialize_with = "deserialize_require_approval")]
     pub require_approval: Vec<String>,
     /// Timeout in seconds. Default: 60, range: 10..=300.
@@ -329,7 +329,11 @@ pub struct ApprovalPolicy {
 impl Default for ApprovalPolicy {
     fn default() -> Self {
         Self {
-            require_approval: vec!["shell_exec".to_string()],
+            require_approval: vec![
+                "shell_exec".to_string(),
+                "file_write".to_string(),
+                "file_delete".to_string(),
+            ],
             timeout_secs: 60,
             auto_approve_autonomous: false,
             auto_approve: false,
@@ -359,7 +363,11 @@ where
 
         fn visit_bool<E: de::Error>(self, v: bool) -> Result<Self::Value, E> {
             Ok(if v {
-                vec!["shell_exec".to_string()]
+                vec![
+                    "shell_exec".to_string(),
+                    "file_write".to_string(),
+                    "file_delete".to_string(),
+                ]
             } else {
                 vec![]
             })
@@ -714,7 +722,10 @@ mod tests {
     fn policy_default_valid() {
         let policy = ApprovalPolicy::default();
         assert!(policy.validate().is_ok());
-        assert_eq!(policy.require_approval, vec!["shell_exec".to_string()]);
+        assert_eq!(
+            policy.require_approval,
+            vec!["shell_exec", "file_write", "file_delete"]
+        );
         assert_eq!(policy.timeout_secs, 60);
         assert!(!policy.auto_approve_autonomous);
         assert!(!policy.auto_approve);
@@ -725,7 +736,10 @@ mod tests {
         // An empty JSON object should deserialize to defaults via #[serde(default)].
         let policy: ApprovalPolicy = serde_json::from_str("{}").unwrap();
         assert_eq!(policy.timeout_secs, 60);
-        assert_eq!(policy.require_approval, vec!["shell_exec".to_string()]);
+        assert_eq!(
+            policy.require_approval,
+            vec!["shell_exec", "file_write", "file_delete"]
+        );
         assert!(!policy.auto_approve_autonomous);
     }
 
@@ -739,9 +753,12 @@ mod tests {
 
     #[test]
     fn policy_require_approval_bool_true() {
-        // require_approval = true → ["shell_exec"]
+        // require_approval = true → default set
         let policy: ApprovalPolicy = serde_json::from_str(r#"{"require_approval": true}"#).unwrap();
-        assert_eq!(policy.require_approval, vec!["shell_exec"]);
+        assert_eq!(
+            policy.require_approval,
+            vec!["shell_exec", "file_write", "file_delete"]
+        );
     }
 
     #[test]
