@@ -408,12 +408,7 @@ impl WebSearchEngine {
                     let results = data["data"].as_array().cloned().unwrap_or_default();
 
                     if results.is_empty() {
-                        let err = format!("No results found for '{query}' (Jina).");
-                        if attempts < 2 {
-                            warn!("{err} Retrying...");
-                            continue;
-                        }
-                        return Err(err);
+                        return Err(format!("No results found for '{query}' (Jina)."));
                     }
 
                     let mut output = format!("Search results for '{query}' (Jina):\n\n");
@@ -437,7 +432,10 @@ impl WebSearchEngine {
                 }
                 Ok(resp) => {
                     let status = resp.status();
-                    if attempts < 2 {
+                    // Only retry on transient errors: 429 (rate limit) or 5xx (server errors)
+                    let is_transient = status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                        || status.is_server_error();
+                    if is_transient && attempts < 2 {
                         warn!("Jina returned {status}, retrying...");
                         continue;
                     }

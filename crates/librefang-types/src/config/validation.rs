@@ -684,6 +684,13 @@ impl KernelConfig {
             self.web.fetch.timeout_secs = 120;
         }
 
+        // Web search timeout: min 5s, max 120s
+        if self.web.timeout_secs == 0 {
+            self.web.timeout_secs = 15;
+        } else if self.web.timeout_secs > 120 {
+            self.web.timeout_secs = 120;
+        }
+
         // Queue concurrency: min 1 per lane (0 would deadlock)
         if self.queue.concurrency.main_lane == 0 {
             self.queue.concurrency.main_lane = 1;
