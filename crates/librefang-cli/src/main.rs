@@ -1896,11 +1896,15 @@ fn cmd_init(quick: bool) {
 
     let librefang_dir = cli_librefang_home();
 
-    // Hint about --upgrade when config already exists (skip in quick/CI mode)
+    // When an existing config is detected in interactive mode, redirect to the
+    // upgrade path so user settings (channels, keys, etc.) are preserved.
+    // The interactive wizard unconditionally overwrites config.toml, which
+    // would silently delete channels and custom configuration (#1862).
     if !quick && librefang_dir.join("config.toml").exists() {
-        ui::hint(
-            "Existing installation detected. To upgrade in-place, run: librefang init --upgrade",
-        );
+        ui::hint("Existing installation detected — running upgrade to preserve your settings.");
+        ui::hint("To start fresh, remove ~/.librefang/config.toml and run `librefang init` again.");
+        cmd_init_upgrade();
+        return;
     }
 
     // --- Ensure directories exist ---
@@ -8910,6 +8914,14 @@ fn cmd_update(check: bool, version: Option<String>, channel_override: Option<Str
                 if let Some(installed) = installed_binary_version(&default_install) {
                     ui::kv("Installed", &installed);
                 }
+                // Merge any new config defaults added in the updated binary.
+                // Spawn the new binary rather than calling cmd_init_upgrade() here,
+                // because the current process still holds the old binary's template.
+                ui::blank();
+                ui::hint("Merging new config defaults...");
+                let _ = std::process::Command::new(&default_install)
+                    .args(["init", "--upgrade"])
+                    .status();
                 ui::hint("If the daemon is running, restart it with `librefang restart`.");
             }
             #[cfg(windows)]
