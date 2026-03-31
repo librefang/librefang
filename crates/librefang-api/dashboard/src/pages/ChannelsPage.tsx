@@ -239,6 +239,17 @@ function DetailsModal({ channel, onClose, onConfigure, t }: {
             </div>
           </div>
 
+          {/* Webhook Endpoint */}
+          {channel.webhook_endpoint && (
+            <div className="space-y-2">
+              <h3 className="text-xs font-black uppercase tracking-wider text-text-dim">Webhook Endpoint</h3>
+              <div className="p-3 rounded-lg bg-brand/5 border border-brand/20">
+                <code className="text-xs font-mono text-brand break-all select-all">{channel.webhook_endpoint}</code>
+                <p className="text-[10px] text-text-dim mt-1">Configure this path on the external platform. Port is the API listen port (default 4545).</p>
+              </div>
+            </div>
+          )}
+
           {/* Setup Steps */}
           {channel.setup_steps && channel.setup_steps.length > 0 && (
             <div className="space-y-3">

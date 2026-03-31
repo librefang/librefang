@@ -800,14 +800,14 @@ impl BridgeManager {
         let stream = if let Some((routes, stream)) = adapter.create_webhook_routes().await {
             let name = adapter.name().to_string();
             info!(
-                "Channel {} registered webhook routes on shared server at /channels/{}",
-                name, name
+                "Channel {name} webhook endpoint: /channels/{name}/webhook \
+                 (configure this URL on the external platform)"
             );
             self.webhook_routes.push((name, routes));
             stream
         } else {
-            debug!(
-                "Channel {} uses standalone start() (no webhook routes)",
+            warn!(
+                "Channel {} did not provide webhook routes, falling back to standalone mode",
                 adapter.name()
             );
             adapter.start().await?

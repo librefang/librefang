@@ -116,6 +116,8 @@ export interface ChannelItem {
   setup_type?: string;
   setup_steps?: string[];
   fields?: ChannelField[];
+  /** Webhook endpoint path on the shared server (e.g. "/channels/feishu/webhook"). */
+  webhook_endpoint?: string;
 }
 
 export interface SkillItem {
