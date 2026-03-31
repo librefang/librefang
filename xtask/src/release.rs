@@ -357,8 +357,8 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
         }
         if let Some(ref pt) = prev_tag {
             println!(
-                "  Review:  https://github.com/librefang/librefang/compare/{}...main",
-                pt
+                "  Review:  https://github.com/librefang/librefang/compare/{}...{}",
+                pt, tag
             );
         }
         println!();
