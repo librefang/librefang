@@ -717,6 +717,14 @@ export function ProvidersPage() {
     setKeyTesting(true);
     setKeyTestResult(null);
     try {
+      // Save any pending key/url input before testing so the backend uses the new value
+      if (keyInput.trim()) {
+        await setProviderKey(configProvider.id, keyInput.trim());
+        setKeyInput("");
+      }
+      if (urlInput.trim() && urlInput !== configProvider.base_url) {
+        await setProviderUrl(configProvider.id, urlInput.trim());
+      }
       const result = await testMutation.mutateAsync(configProvider.id);
       if (result.status === "error") {
         setKeyTestResult({ ok: false, message: String(result.error_message || result.error || t("providers.unreachable")) });
@@ -994,7 +1002,7 @@ export function ProvidersPage() {
                   {keySaving ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Key className="w-4 h-4 mr-1" />}
                   {t("common.save")}
                 </Button>
-                <Button variant="secondary" onClick={handleTestKey} disabled={keySaving || keyTesting || !isProviderAvailable(configProvider.auth_status)}>
+                <Button variant="secondary" onClick={handleTestKey} disabled={keySaving || keyTesting || (!isProviderAvailable(configProvider.auth_status) && !keyInput.trim())}>
                   {keyTesting ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Zap className="w-4 h-4 mr-1" />}
                   {t("providers.test")}
                 </Button>
