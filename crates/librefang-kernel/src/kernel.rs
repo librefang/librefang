@@ -13,7 +13,8 @@ use crate::scheduler::AgentScheduler;
 use crate::supervisor::Supervisor;
 use crate::triggers::{TriggerEngine, TriggerId, TriggerPattern};
 use crate::workflow::{
-    StepAgent, Workflow, WorkflowEngine, WorkflowId, WorkflowRunId, WorkflowTemplateRegistry,
+    DryRunStep, StepAgent, Workflow, WorkflowEngine, WorkflowId, WorkflowRunId,
+    WorkflowTemplateRegistry,
 };
 
 use librefang_memory::MemorySubstrate;
@@ -6577,6 +6578,41 @@ system_prompt = "You are a helpful assistant."
         })?;
 
         Ok((run_id, output))
+    }
+
+    /// Dry-run a workflow: resolve agents and expand prompts without making any LLM calls.
+    ///
+    /// Returns a per-step preview useful for validating a workflow before running it for real.
+    pub async fn dry_run_workflow(
+        &self,
+        workflow_id: WorkflowId,
+        input: String,
+    ) -> KernelResult<Vec<DryRunStep>> {
+        let resolver =
+            |agent_ref: &StepAgent| -> Option<(librefang_types::agent::AgentId, String, bool)> {
+                match agent_ref {
+                    StepAgent::ById { id } => {
+                        let agent_id: librefang_types::agent::AgentId = id.parse().ok()?;
+                        let entry = self.registry.get(agent_id)?;
+                        let inherit = entry.manifest.inherit_parent_context;
+                        Some((agent_id, entry.name.clone(), inherit))
+                    }
+                    StepAgent::ByName { name } => {
+                        let entry = self.registry.find_by_name(name)?;
+                        let inherit = entry.manifest.inherit_parent_context;
+                        Some((entry.id, entry.name.clone(), inherit))
+                    }
+                }
+            };
+
+        self.workflows
+            .dry_run(workflow_id, &input, resolver)
+            .await
+            .map_err(|e| {
+                KernelError::LibreFang(LibreFangError::Internal(format!(
+                    "Workflow dry-run failed: {e}"
+                )))
+            })
     }
 
     /// Start background loops for all non-reactive agents.
