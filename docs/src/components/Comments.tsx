@@ -11,8 +11,8 @@ export function Comments() {
 			<Giscus
 				repo="librefang/librefang"
 				repoId="R_kgDORkvylw"
-				category="General"
-				categoryId="DIC_kwDORkvyl84C4NIZ"
+				category="Docs"
+				categoryId="DIC_kwDORkvyl84C5qdk"
 				mapping="pathname"
 				strict="1"
 				reactionsEnabled="1"
