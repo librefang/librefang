@@ -2653,7 +2653,7 @@ pub async fn add_mcp_server(
     }
 
     // Trigger config reload
-    let reload_status = match state.kernel.reload_config() {
+    let reload_status = match state.kernel.reload_config().await {
         Ok(plan) => {
             if plan.restart_required {
                 "applied_partial"
@@ -2749,8 +2749,11 @@ pub async fn update_mcp_server(
         ))
         .into_json_tuple();
     }
+    // Drop ErrorTranslator before .await — FluentBundle is !Send and cannot
+    // be held across an async suspension point.
+    drop(t);
 
-    let reload_status = match state.kernel.reload_config() {
+    let reload_status = match state.kernel.reload_config().await {
         Ok(plan) => {
             if plan.restart_required {
                 "applied_partial"
@@ -2818,8 +2821,9 @@ pub async fn delete_mcp_server(
         ))
         .into_json_tuple();
     }
+    drop(t);
 
-    let reload_status = match state.kernel.reload_config() {
+    let reload_status = match state.kernel.reload_config().await {
         Ok(plan) => {
             if plan.restart_required {
                 "applied_partial"
