@@ -1,0 +1,256 @@
+# 供应商与模型 API
+
+浏览模型目录和管理 LLM 供应商配置的端点。
+
+## 模型目录端点
+
+LibreFang 内置了包含 49 个提供商的 130 多个模型的目录。这些端点允许你浏览可用模型、查看提供商认证状态以及解析模型别名。
+
+### GET /api/models
+
+列出完整的模型目录。返回所有已知模型及其提供商、层级、上下文窗口和定价信息。
+
+**响应** `200 OK`：
+
+```json
+{
+  "models": [
+    {
+      "id": "claude-sonnet-4-20250514",
+      "provider": "anthropic",
+      "display_name": "Claude Sonnet 4",
+      "tier": "frontier",
+      "context_window": 200000,
+      "input_cost_per_1m": 3.0,
+      "output_cost_per_1m": 15.0,
+      "supports_tools": true,
+      "supports_vision": true,
+      "supports_streaming": true
+    },
+    {
+      "id": "gemini-2.5-flash",
+      "provider": "gemini",
+      "display_name": "Gemini 2.5 Flash",
+      "tier": "smart",
+      "context_window": 1048576,
+      "input_cost_per_1m": 0.15,
+      "output_cost_per_1m": 0.6,
+      "supports_tools": true,
+      "supports_vision": true,
+      "supports_streaming": true
+    }
+  ],
+  "total": 130
+}
+```
+
+### GET /api/models/aliases
+
+列出所有模型别名。别名提供短名称，可解析为完整的模型 ID（例如 `sonnet` 解析为 `claude-sonnet-4-20250514`）。
+
+**响应** `200 OK`：
+
+```json
+{
+  "aliases": {
+    "sonnet": "claude-sonnet-4-20250514",
+    "opus": "claude-opus-4-20250514",
+    "haiku": "claude-3-5-haiku-20241022",
+    "flash": "gemini-2.5-flash",
+    "gpt4": "gpt-4o",
+    "llama": "llama-3.3-70b-versatile",
+    "deepseek": "deepseek-chat",
+    "grok": "grok-2",
+    "jamba": "jamba-1.5-large"
+  },
+  "total": 23
+}
+```
+
+### POST /api/models/aliases
+
+创建新的模型别名。
+
+**请求体**：
+
+```json
+{
+  "alias": "mymodel",
+  "model_id": "llama-3.3-70b-versatile"
+}
+```
+
+### DELETE /api/models/aliases/&lbrace;alias&rbrace;
+
+删除模型别名。
+
+### POST /api/models/custom
+
+注册自定义模型定义。
+
+**请求体**：
+
+```json
+{
+  "id": "my-local-model",
+  "provider": "ollama",
+  "display_name": "My Local LLM",
+  "context_window": 32768
+}
+```
+
+### DELETE /api/models/custom/&lbrace;id&rbrace;
+
+移除自定义模型定义。`id` 参数支持斜杠（例如 `ollama/my-model`）。
+
+### GET /api/models/&lbrace;id&rbrace;
+
+获取指定模型的详细信息。`id` 参数支持斜杠。
+
+**响应** `200 OK`：
+
+```json
+{
+  "id": "llama-3.3-70b-versatile",
+  "provider": "groq",
+  "display_name": "Llama 3.3 70B",
+  "tier": "fast",
+  "context_window": 131072,
+  "input_cost_per_1m": 0.59,
+  "output_cost_per_1m": 0.79,
+  "supports_tools": true,
+  "supports_vision": false,
+  "supports_streaming": true
+}
+```
+
+### POST /api/catalog/update
+
+从远程注册表触发模型目录更新。
+
+### GET /api/catalog/status
+
+获取当前目录版本、上次更新时间和可用更新。
+
+---
+
+## 提供商配置端点
+
+在运行时管理 LLM 提供商 API 密钥，无需编辑配置文件或重启守护进程。
+
+### GET /api/providers
+
+列出所有已知的 LLM 提供商及其认证状态。认证状态通过检查环境变量是否存在来判断（不会读取密钥值）。
+
+**响应** `200 OK`：
+
+```json
+{
+  "providers": [
+    {
+      "name": "anthropic",
+      "display_name": "Anthropic",
+      "auth_status": "configured",
+      "env_var": "ANTHROPIC_API_KEY",
+      "base_url": "https://api.anthropic.com",
+      "model_count": 3
+    },
+    {
+      "name": "groq",
+      "display_name": "Groq",
+      "auth_status": "configured",
+      "env_var": "GROQ_API_KEY",
+      "base_url": "https://api.groq.com/openai",
+      "model_count": 4
+    },
+    {
+      "name": "ollama",
+      "display_name": "Ollama",
+      "auth_status": "no_key_needed",
+      "base_url": "http://localhost:11434",
+      "model_count": 0
+    }
+  ],
+  "total": 28
+}
+```
+
+### GET /api/providers/ollama/detect
+
+自动检测本地运行的 Ollama 实例并枚举其可用模型。
+
+### POST /api/providers/github-copilot/oauth/start
+
+发起 GitHub Copilot 设备 OAuth 流程。返回 `device_code` 和 `user_code`，用户需在 `github.com/login/device` 输入。
+
+### GET /api/providers/github-copilot/oauth/poll/&lbrace;poll_id&rbrace;
+
+轮询 OAuth 设备流程状态。返回 `pending`、`authorized` 或 `expired`。
+
+### GET /api/providers/&lbrace;name&rbrace;
+
+获取指定提供商的配置和状态。
+
+### POST /api/providers/&lbrace;name&rbrace;/key
+
+为提供商设置 API 密钥。密钥会被安全存储并立即生效。
+
+**请求体**：
+
+```json
+{
+  "api_key": "sk-..."
+}
+```
+
+**响应** `200 OK`：
+
+```json
+{
+  "status": "configured",
+  "provider": "anthropic"
+}
+```
+
+### DELETE /api/providers/&lbrace;name&rbrace;/key
+
+移除提供商的 API 密钥。使用该提供商的 Agent 将回退到 FallbackDriver 或失败。
+
+**响应** `200 OK`：
+
+```json
+{
+  "status": "removed",
+  "provider": "anthropic"
+}
+```
+
+### POST /api/providers/&lbrace;name&rbrace;/test
+
+通过发起最小化 API 调用来测试提供商的连通性。验证已配置的 API 密钥是否有效以及提供商端点是否可达。
+
+**响应** `200 OK`：
+
+```json
+{
+  "status": "ok",
+  "provider": "anthropic",
+  "latency_ms": 245,
+  "model_tested": "claude-sonnet-4-20250514"
+}
+```
+
+### PUT /api/providers/&lbrace;name&rbrace;/url
+
+覆盖提供商的基础 URL（适用于自托管或代理端点）。
+
+**请求体**：
+
+```json
+{
+  "url": "https://my-openai-proxy.example.com/v1"
+}
+```
+
+---
+

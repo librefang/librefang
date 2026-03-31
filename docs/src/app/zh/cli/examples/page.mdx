@@ -1,0 +1,287 @@
+# CLI 示例与指南
+
+LibreFang CLI 的实用示例、迁移指南和集成说明。
+
+有关命令详情，请参阅 [CLI 命令参考](/zh/cli/commands)。有关概述和安装，请参阅 [CLI 参考](/zh/cli)。
+
+---
+
+## 迁移
+
+### librefang migrate
+
+从其他 Agent 框架迁移配置和 Agent。
+
+```
+librefang migrate --from <FRAMEWORK> [--source-dir <PATH>] [--dry-run]
+```
+
+**选项：**
+
+| 选项 | 说明 |
+|---|---|
+| `--from <FRAMEWORK>` | 源框架。可选值：`openfang`、`openclaw`、`langchain`、`autogpt`。 |
+| `--source-dir <PATH>` | 源工作空间路径。未设置时自动检测（如 `~/.openfang`、`~/.openclaw`、`~/.langchain`、`~/Auto-GPT`）。 |
+| `--dry-run` | 预览将导入的内容，不做实际更改。 |
+
+**行为：**
+
+- 将源框架的 Agent 配置、YAML 清单和设置转换为 LibreFang 格式。
+- 将导入的数据保存到 `~/.librefang/`。
+- 生成 `migration_report.md` 总结导入内容。
+
+**示例：**
+
+```bash
+# 从 OpenFang 迁移（自动检测 ~/.openfang）
+librefang migrate --from openfang
+
+# 从 OpenClaw 预览迁移
+librefang migrate --from openclaw --dry-run
+
+# 从 OpenClaw 迁移（自动检测源目录）
+librefang migrate --from openclaw
+
+# 从 LangChain 迁移，指定源目录
+librefang migrate --from langchain --source-dir /home/user/.langchain
+
+# 从 AutoGPT 迁移
+librefang migrate --from autogpt
+```
+
+---
+
+## MCP 服务器
+
+### librefang mcp
+
+通过 stdio 启动 MCP（Model Context Protocol）服务器。
+
+```
+librefang mcp
+```
+
+**行为：**
+
+- 通过 stdin/stdout 上的 JSON-RPC 2.0 协议（Content-Length 分帧）将运行中的 LibreFang Agent 暴露为 MCP 工具。
+- 每个 Agent 成为名为 `librefang_agent_<name>` 的可调用工具（连字符替换为下划线）。
+- 如果可用，通过 HTTP 连接到运行中的守护进程；否则启动进程内核。
+- 协议版本：`2024-11-05`。
+- 最大消息大小：10MB（安全限制）。
+
+**支持的 MCP 方法：**
+
+| 方法 | 说明 |
+|---|---|
+| `initialize` | 返回服务器能力和信息。 |
+| `tools/list` | 列出所有可用的 Agent 工具。 |
+| `tools/call` | 向 Agent 发送消息并返回响应。 |
+
+**工具输入模式：**
+
+每个 Agent 工具接受单个 `message`（字符串）参数。
+
+**与 Claude Desktop / 其他 MCP 客户端集成：**
+
+添加到 MCP 客户端配置：
+
+```json
+{
+  "mcpServers": {
+    "librefang": {
+      "command": "librefang",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+---
+
+## 使用示例
+
+### 首次设置
+
+```bash
+# 1. 设置 API 密钥
+export GROQ_API_KEY="gsk_your_key_here"
+
+# 2. 初始化 LibreFang
+librefang init --quick
+
+# 3. 启动守护进程
+librefang start
+```
+
+### 日常使用
+
+```bash
+# 快速聊天（需要时自动生成 Agent）
+librefang chat
+
+# 与指定 Agent 聊天
+librefang chat coder
+
+# 查看运行状态
+librefang status
+
+# 打开 Web 仪表板
+librefang dashboard
+```
+
+### Agent 管理
+
+```bash
+# 从模板生成
+librefang agent new assistant
+
+# 从自定义清单生成
+librefang agent spawn ./agents/custom-agent/agent.toml
+
+# 列出运行中的 Agent
+librefang agent list
+
+# 按 UUID 与 Agent 聊天
+librefang agent chat <UUID>
+
+# 终止 Agent
+librefang agent kill <UUID>
+```
+
+### 工作流自动化
+
+```bash
+# 创建工作流
+librefang workflow create ./review-pipeline.json
+
+# 列出工作流
+librefang workflow list
+
+# 运行工作流
+librefang workflow run <WORKFLOW_ID> "Review the latest PR"
+```
+
+### 事件触发器
+
+```bash
+# 创建在 Agent 生成时触发的触发器
+librefang trigger create <AGENT_ID> '{"agent_spawned":{"name_pattern":"*"}}' \
+  --prompt "New agent spawned: {{event}}" \
+  --max-fires 100
+
+# 列出所有触发器
+librefang trigger list
+
+# 列出指定 Agent 的触发器
+librefang trigger list --agent-id <AGENT_ID>
+
+# 删除触发器
+librefang trigger delete <TRIGGER_ID>
+```
+
+### 技能管理
+
+```bash
+# 搜索 FangHub
+librefang skill search "code review"
+
+# 安装技能
+librefang skill install code-reviewer
+
+# 列出已安装技能
+librefang skill list
+
+# 创建新技能
+librefang skill create
+
+# 移除技能
+librefang skill remove code-reviewer
+```
+
+### 通道设置
+
+```bash
+# 交互式通道选择器
+librefang channel setup
+
+# 直接设置通道
+librefang channel setup telegram
+
+# 查看通道状态
+librefang channel list
+
+# 测试通道
+librefang channel test telegram
+
+# 启用/禁用通道
+librefang channel enable discord
+librefang channel disable slack
+```
+
+### 配置管理
+
+```bash
+# 查看配置
+librefang config show
+
+# 获取指定值
+librefang config get default_model.provider
+
+# 更换提供商
+librefang config set default_model.provider anthropic
+librefang config set default_model.model claude-sonnet-4-20250514
+librefang config set default_model.api_key_env ANTHROPIC_API_KEY
+
+# 管理 API 密钥
+librefang config set-key anthropic
+librefang config test-key anthropic
+librefang config delete-key openai
+
+# 在编辑器中打开
+librefang config edit
+```
+
+### 从其他框架迁移
+
+```bash
+# 从 OpenFang 迁移（自动检测 ~/.openfang）
+librefang migrate --from openfang
+
+# 预览迁移
+librefang migrate --from openclaw --dry-run
+
+# 执行迁移
+librefang migrate --from openclaw
+
+# 从 LangChain 迁移
+librefang migrate --from langchain --source-dir ~/.langchain
+```
+
+### MCP 集成
+
+```bash
+# 启动 MCP 服务器，供 Claude Desktop 或其他 MCP 客户端使用
+librefang mcp
+```
+
+### 诊断
+
+```bash
+# 运行所有诊断检查
+librefang doctor
+
+# 自动修复问题
+librefang doctor --repair
+
+# 机器可读的诊断输出
+librefang doctor --json
+```
+
+### Shell 补全
+
+```bash
+# 为你的 Shell 生成并安装补全脚本
+librefang completion bash >> ~/.bashrc
+librefang completion zsh > "${fpath[1]}/_librefang"
+librefang completion fish > ~/.config/fish/completions/librefang.fish
+```

@@ -1,0 +1,257 @@
+# 核心配置参考
+
+LibreFang 核心配置节：顶层字段、默认模型、内存、网络、网页搜索、媒体处理和链接理解。
+
+---
+
+### 顶层字段
+
+以下字段位于 `config.toml` 的根层级（不在任何 `[section]` 内部）。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `home_dir` | path | `~/.librefang` | LibreFang 主目录，存储配置、Agent、技能等。 |
+| `data_dir` | path | `~/.librefang/data` | SQLite 数据库和持久化数据的目录。 |
+| `log_level` | string | `"info"` | 日志级别。可选值：`trace`、`debug`、`info`、`warn`、`error`。 |
+| `api_listen` | string | `"127.0.0.1:4545"` | HTTP/WebSocket/SSE API 服务器的绑定地址。别名：`listen_addr`。 |
+| `network_enabled` | bool | `false` | 启用 OFP 点对点网络层。 |
+| `api_key` | string | `""`（空） | API 认证密钥。设置后，除 `/api/health` 外的所有端点均需要 `Authorization: Bearer <key>` 请求头。空值表示不需要认证（仅限本地开发使用）。 |
+| `cors_origin` | list of strings | `[]` | 除 localhost 外额外允许的 CORS 来源。例如 `["https://dash.example.com"]`。 |
+| `mode` | string | `"default"` | 内核运行模式。见下表。 |
+| `language` | string | `"en"` | CLI 输出和系统消息的语言/区域代码。 |
+| `usage_footer` | string | `"full"` | 控制附加到回复末尾的用量信息。见下表。 |
+| `prompt_caching` | bool | `true` | 启用 LLM 提供商的提示词缓存。会在系统提示中添加缓存提示（Anthropic 使用 `cache_control`，OpenAI 自动前缀缓存）。 |
+| `stable_prefix_mode` | bool | `false` | 启用后，避免每轮对话都会变化的系统提示内容（如回忆记忆、标准上下文），从而提高提供商端的提示词缓存命中率。 |
+| `max_cron_jobs` | usize | `500` | 所有 Agent 的全局最大定时任务数。 |
+| `workspaces_dir` | path 或 null | `null` | Agent 工作区的根目录。默认为 `~/.librefang/workspaces`。包含 Agent 工作目录和 `hands/` 子目录（用于用户自定义 hands）。 |
+| `include` | list of strings | `[]` | 配置文件包含列表（相对路径）。详见[配置文件包含机制](#配置文件包含机制)。 |
+| `provider_urls` | map of string->string | `{}` | 提供商基础 URL 覆盖。将提供商 ID 映射到自定义基础 URL（例如 `ollama = "http://192.168.1.100:11434/v1"`）。适用于自托管或代理端点。 |
+| `provider_api_keys` | map of string->string | `{}` | 提供商 API Key 环境变量覆盖。将提供商 ID 映射到存放密钥的环境变量名称（例如 `nvidia = "NVIDIA_API_KEY"`）。未设置时，默认使用 `{PROVIDER_UPPER}_API_KEY` 的命名约定。 |
+| `provider_regions` | map of string->string | `{}` | 提供商区域选择。将提供商 ID 映射到提供商注册 TOML 中定义的区域名称（例如 `qwen = "intl"`）。覆盖提供商的基础 URL，并可选择性覆盖其 API Key 环境变量。在 `provider_urls` 之前生效（优先级较低）。 |
+
+**`mode` 值说明：**
+
+| 值 | 行为 |
+|----|------|
+| `stable` | 保守模式：不自动更新，锁定模型版本，冻结技能注册表。使用 `FallbackDriver`。 |
+| `default` | 均衡模式：标准运行。 |
+| `dev` | 开发者模式：启用实验性功能。 |
+
+**`usage_footer` 值说明：**
+
+| 值 | 行为 |
+|----|------|
+| `off` | 不显示用量信息。 |
+| `tokens` | 仅显示 Token 数量。 |
+| `cost` | 仅显示预估费用。 |
+| `full` | 同时显示 Token 数量和预估费用（默认）。 |
+
+---
+
+### `[default_model]`
+
+配置 Agent 未指定自有模型时使用的主 LLM 提供商。
+
+```toml
+[default_model]
+provider = "anthropic"
+model = "claude-sonnet-4-20250514"
+api_key_env = "ANTHROPIC_API_KEY"
+# base_url = "https://api.anthropic.com"
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `provider` | string | `"anthropic"` | 提供商名称。支持：`anthropic`、`gemini`、`openai`、`groq`、`openrouter`、`deepseek`、`together`、`mistral`、`fireworks`、`ollama`、`vllm`、`lmstudio`、`perplexity`、`cohere`、`ai21`、`cerebras`、`sambanova`、`huggingface`、`xai`、`replicate`。 |
+| `model` | string | `"claude-sonnet-4-20250514"` | 模型标识符。别名（如 `sonnet`、`haiku`、`gpt-4o`、`gemini-flash`）由模型目录自动解析。 |
+| `api_key_env` | string | `"ANTHROPIC_API_KEY"` | 存放 API Key 的环境变量名称。实际密钥在运行时从该环境变量读取，绝不存储在配置文件中。 |
+| `base_url` | string 或 null | `null` | 覆盖 API 基础 URL。适用于代理或自托管端点。为 `null` 时，使用模型目录中提供商的默认 URL。 |
+
+---
+
+### `[memory]`
+
+配置基于 SQLite 的记忆基础设施，包括向量嵌入和记忆衰减。
+
+```toml
+[memory]
+# sqlite_path = "/custom/path/librefang.db"
+embedding_model = "all-MiniLM-L6-v2"
+consolidation_threshold = 10000
+decay_rate = 0.1
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `sqlite_path` | path 或 null | `null` | SQLite 数据库文件的显式路径。为 `null` 时，默认为 `{data_dir}/librefang.db`。 |
+| `embedding_model` | string | `"all-MiniLM-L6-v2"` | 用于生成语义记忆搜索向量嵌入的模型名称。 |
+| `embedding_provider` | string 或 null | `null` | 嵌入提供商（例如 `"openai"`、`"ollama"`）。为 `null` 时自动检测。 |
+| `embedding_api_key_env` | string 或 null | `null` | 存放嵌入提供商 API Key 的环境变量名称。 |
+| `consolidation_threshold` | u64 | `10000` | 触发自动整合（合并和清理旧条目）的存储记忆数量阈值。 |
+| `consolidation_interval_hours` | u64 | `24` | 记忆整合的运行间隔（小时）。`0` = 禁用。 |
+| `decay_rate` | f32 | `0.1` | 记忆置信度衰减率。`0.0` = 无衰减（记忆永不消退），`1.0` = 快速衰减。取值范围 0.0 到 1.0。 |
+
+---
+
+### `[network]`
+
+配置 OFP（LibreFang 协议）点对点网络层，使用 HMAC-SHA256 双向认证。
+
+```toml
+[network]
+listen_addresses = ["/ip4/0.0.0.0/tcp/0"]
+bootstrap_peers = []
+mdns_enabled = true
+max_peers = 50
+shared_secret = "my-cluster-secret"
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `listen_addresses` | list of strings | `["/ip4/0.0.0.0/tcp/0"]` | 监听的 libp2p 多地址。端口 `0` 表示自动分配。 |
+| `bootstrap_peers` | list of strings | `[]` | 用于 DHT 发现的引导节点多地址。 |
+| `mdns_enabled` | bool | `true` | 启用 mDNS 以自动发现本地网络中的对等节点。 |
+| `max_peers` | u32 | `50` | 最大同时连接的对等节点数。 |
+| `shared_secret` | string | `""`（空） | OFP HMAC-SHA256 双向认证的预共享密钥。当 `network_enabled = true` 时**必填**。通信双方必须使用相同的密钥。日志中会脱敏处理。 |
+
+---
+
+### `[web]`
+
+配置 Agent 工具使用的网页搜索和网页抓取能力。
+
+```toml
+[web]
+search_provider = "auto"
+cache_ttl_minutes = 15
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `search_provider` | string | `"auto"` | 使用的搜索引擎。见下表。 |
+| `cache_ttl_minutes` | u64 | `15` | 搜索/抓取结果的缓存时长（分钟）。`0` = 禁用缓存。 |
+
+**`search_provider` 值说明：**
+
+| 值 | 说明 |
+|----|------|
+| `auto` | 级联回退：根据可用的 API Key，依次尝试 Tavily、Brave、Perplexity、DuckDuckGo。 |
+| `brave` | Brave Search API。需要 `BRAVE_API_KEY`。 |
+| `tavily` | Tavily AI 原生搜索。需要 `TAVILY_API_KEY`。 |
+| `perplexity` | Perplexity AI 搜索。需要 `PERPLEXITY_API_KEY`。 |
+| `duckduckgo` | DuckDuckGo HTML 抓取。无需 API Key。 |
+
+#### `[web.brave]`
+
+```toml
+[web.brave]
+api_key_env = "BRAVE_API_KEY"
+max_results = 5
+country = ""
+search_lang = ""
+freshness = ""
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `api_key_env` | string | `"BRAVE_API_KEY"` | 存放 Brave Search API Key 的环境变量名称。 |
+| `max_results` | usize | `5` | 返回的最大搜索结果数。 |
+| `country` | string | `""` | 用于本地化结果的国家代码（例如 `"US"`、`"GB"`）。空值 = 不过滤。 |
+| `search_lang` | string | `""` | 语言代码（例如 `"en"`、`"fr"`）。空值 = 不过滤。 |
+| `freshness` | string | `""` | 时效性过滤。`"pd"` = 过去一天，`"pw"` = 过去一周，`"pm"` = 过去一月。空值 = 不过滤。 |
+
+#### `[web.tavily]`
+
+```toml
+[web.tavily]
+api_key_env = "TAVILY_API_KEY"
+search_depth = "basic"
+max_results = 5
+include_answer = true
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `api_key_env` | string | `"TAVILY_API_KEY"` | 存放 Tavily API Key 的环境变量名称。 |
+| `search_depth` | string | `"basic"` | 搜索深度：`"basic"` 快速返回结果，`"advanced"` 进行更深入的分析。 |
+| `max_results` | usize | `5` | 返回的最大搜索结果数。 |
+| `include_answer` | bool | `true` | 是否在结果中包含 Tavily 的 AI 生成答案摘要。 |
+
+#### `[web.perplexity]`
+
+```toml
+[web.perplexity]
+api_key_env = "PERPLEXITY_API_KEY"
+model = "sonar"
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `api_key_env` | string | `"PERPLEXITY_API_KEY"` | 存放 Perplexity API Key 的环境变量名称。 |
+| `model` | string | `"sonar"` | 用于搜索查询的 Perplexity 模型。 |
+
+#### `[web.fetch]`
+
+```toml
+[web.fetch]
+max_chars = 50000
+max_response_bytes = 10485760
+timeout_secs = 30
+readability = true
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `max_chars` | usize | `50000` | 抓取内容返回的最大字符数。超出部分将被截断。 |
+| `max_response_bytes` | usize | `10485760`（10 MB） | HTTP 响应体的最大大小（字节）。 |
+| `timeout_secs` | u64 | `30` | HTTP 请求超时时间（秒）。 |
+| `readability` | bool | `true` | 启用 HTML 到 Markdown 的可读性提取。开启后，抓取的 HTML 会被转换为干净的 Markdown 格式。 |
+
+---
+
+### `[media]`
+
+配置媒体理解能力（图片描述、音频转录、视频描述），用于处理包含附件的消息。
+
+```toml
+[media]
+image_description = true
+audio_transcription = true
+video_description = false
+max_concurrency = 2
+# image_provider = "openai"   # 省略则自动检测
+# audio_provider = "openai"   # 省略则自动检测
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `image_description` | bool | `true` | 启用对传入图片附件的自动描述。 |
+| `audio_transcription` | bool | `true` | 启用对传入音频附件的自动转录。 |
+| `video_description` | bool | `false` | 启用视频描述。默认禁用（耗费大且速度慢）。 |
+| `max_concurrency` | usize | `2` | 并发媒体处理任务的最大数量。 |
+| `image_provider` | string 或 null | `null` | 首选的图片描述提供商。为 `null` 时根据可用提供商自动检测。 |
+| `audio_provider` | string 或 null | `null` | 首选的音频转录提供商。为 `null` 时根据可用提供商自动检测。 |
+
+---
+
+### `[links]`
+
+配置自动链接理解功能——自动抓取并总结传入消息中的 URL。
+
+```toml
+[links]
+enabled = false
+max_links = 3
+max_content_bytes = 102400
+timeout_secs = 10
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | `false` | 启用自动链接理解。开启后，消息中的 URL 会被抓取并总结其内容，然后再交给 Agent 处理。 |
+| `max_links` | usize | `3` | 每条消息处理的最大链接数。多余的链接会被忽略。 |
+| `max_content_bytes` | usize | `102400`（100 KB） | 每个链接抓取的最大内容大小（字节）。超出部分将被截断。 |
+| `timeout_secs` | u64 | `10` | 每个链接的抓取超时时间（秒）。 |
+
+---
+

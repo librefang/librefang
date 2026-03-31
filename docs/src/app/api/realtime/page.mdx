@@ -1,0 +1,309 @@
+# Real-time API
+
+WebSocket protocol, SSE streaming, and OpenAI-compatible API endpoints for real-time communication.
+
+## WebSocket Protocol
+
+### Connecting
+
+```
+GET /api/agents/&lbrace;id&rbrace;/ws
+```
+
+Upgrades to a WebSocket connection for real-time bidirectional chat with an agent. Returns `400` if the agent ID is invalid, or `404` if the agent does not exist.
+
+### Message Format
+
+All messages are JSON-encoded strings.
+
+### Client to Server
+
+**Send a message:**
+
+```json
+{
+  "type": "message",
+  "content": "What is the weather like?"
+}
+```
+
+Plain text (non-JSON) is also accepted and treated as a message.
+
+**Chat commands** (sent as messages with `/` prefix):
+
+| Command | Description |
+|---------|-------------|
+| `/new` | Start a new session (clear history) |
+| `/compact` | Trigger LLM session compaction |
+| `/model <name>` | Switch the agent's model |
+| `/stop` | Cancel current LLM run |
+| `/usage` | Show token usage and cost |
+| `/think` | Toggle extended thinking mode |
+| `/models` | List available models |
+| `/providers` | List LLM providers and auth status |
+
+**Ping:**
+
+```json
+{
+  "type": "ping"
+}
+```
+
+### Server to Client
+
+**Connection confirmed** (sent immediately on connect):
+
+```json
+{
+  "type": "connected",
+  "agent_id": "a1b2c3d4-..."
+}
+```
+
+**Thinking indicator** (sent when agent starts processing):
+
+```json
+{
+  "type": "thinking"
+}
+```
+
+**Text delta** (streaming token, sent as the LLM generates output):
+
+```json
+{
+  "type": "text_delta",
+  "content": "The weather"
+}
+```
+
+**Tool use started** (sent when the agent invokes a tool):
+
+```json
+{
+  "type": "tool_start",
+  "tool": "web_fetch"
+}
+```
+
+**Complete response** (sent when agent finishes, contains final aggregated response):
+
+```json
+{
+  "type": "response",
+  "content": "The weather today is sunny with a high of 72F.",
+  "input_tokens": 245,
+  "output_tokens": 32,
+  "iterations": 2,
+  "cost_usd": 0.0012
+}
+```
+
+**Error:**
+
+```json
+{
+  "type": "error",
+  "content": "Agent not found"
+}
+```
+
+**Agent list update** (sent every 5 seconds with current agent states):
+
+```json
+{
+  "type": "agents_updated",
+  "agents": [
+    {
+      "id": "a1b2c3d4-...",
+      "name": "hello-world",
+      "state": "Running",
+      "model_provider": "groq",
+      "model_name": "llama-3.3-70b-versatile"
+    }
+  ]
+}
+```
+
+**Pong** (response to ping):
+
+```json
+{
+  "type": "pong"
+}
+```
+
+### Connection Lifecycle
+
+1. Client connects to `ws://host:port/api/agents/&lbrace;id&rbrace;/ws`.
+2. Server sends `{"type": "connected"}`.
+3. Client sends `{"type": "message", "content": "..."}`.
+4. Server sends `{"type": "thinking"}`, then zero or more `{"type": "text_delta"}` events, then `{"type": "response"}`.
+5. Server periodically sends `{"type": "agents_updated"}` every 5 seconds.
+6. Client sends a Close frame or disconnects to end the session.
+
+---
+
+## SSE Streaming
+
+### POST /api/agents/&lbrace;id&rbrace;/message/stream
+
+Send a message and receive the response as a Server-Sent Events stream. This enables real-time token-by-token streaming.
+
+**Request Body** (JSON):
+
+```json
+{
+  "message": "Explain quantum computing"
+}
+```
+
+**SSE Event Stream:**
+
+```
+event: chunk
+data: {"content":"Quantum","done":false}
+
+event: chunk
+data: {"content":" computing","done":false}
+
+event: chunk
+data: {"content":" is a type","done":false}
+
+event: tool_use
+data: {"tool":"web_search"}
+
+event: tool_result
+data: {"tool":"web_search","input":{"query":"quantum computing basics"}}
+
+event: done
+data: {"done":true,"usage":{"input_tokens":150,"output_tokens":340}}
+```
+
+### SSE Event Types
+
+| Event Name | Description |
+|------------|-------------|
+| `chunk` | Text delta from the LLM. `"done": false` indicates more tokens are coming. |
+| `tool_use` | The agent is invoking a tool. Contains the tool name. |
+| `tool_result` | A tool invocation has completed. Contains the tool name and input. |
+| `done` | Final event. Contains `"done": true` and token usage statistics. |
+
+---
+
+## OpenAI-Compatible API
+
+LibreFang exposes an OpenAI-compatible API for drop-in integration with tools that support the OpenAI API format (Cursor, Continue, Open WebUI, etc.).
+
+### POST /v1/chat/completions
+
+Send a chat completion request using the OpenAI message format.
+
+**Request Body**:
+
+```json
+{
+  "model": "librefang:coder",
+  "messages": [
+    {"role": "system", "content": "You are a helpful assistant."},
+    {"role": "user", "content": "Hello!"}
+  ],
+  "stream": false,
+  "temperature": 0.7,
+  "max_tokens": 1024
+}
+```
+
+**Model resolution** (the `model` field maps to an LibreFang agent):
+
+| Format | Example | Behavior |
+|--------|---------|----------|
+| `librefang:<name>` | `librefang:coder` | Find agent by name |
+| UUID | `a1b2c3d4-...` | Find agent by ID |
+| Plain string | `coder` | Try as agent name |
+| Any other | `gpt-4o` | Falls back to first registered agent |
+
+**Image support** --- messages can include image content parts:
+
+```json
+{
+  "model": "librefang:analyst",
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {"type": "text", "text": "Describe this image"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBOR..."}}
+      ]
+    }
+  ]
+}
+```
+
+**Response (non-streaming)** `200 OK`:
+
+```json
+{
+  "id": "chatcmpl-a1b2c3d4-...",
+  "object": "chat.completion",
+  "created": 1708617600,
+  "model": "coder",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "Hello! How can I help you today?"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 25,
+    "completion_tokens": 12,
+    "total_tokens": 37
+  }
+}
+```
+
+**Streaming** --- Set `"stream": true` for SSE:
+
+```
+data: {"id":"chatcmpl-...","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"Hello"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-...","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"!"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-...","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":25,"completion_tokens":12,"total_tokens":37}}
+
+data: [DONE]
+```
+
+### GET /v1/models
+
+List available models (agents) in OpenAI format.
+
+**Response** `200 OK`:
+
+```json
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "librefang:coder",
+      "object": "model",
+      "created": 1708617600,
+      "owned_by": "librefang"
+    },
+    {
+      "id": "librefang:researcher",
+      "object": "model",
+      "created": 1708617600,
+      "owned_by": "librefang"
+    }
+  ]
+}
+```
+
+---
+

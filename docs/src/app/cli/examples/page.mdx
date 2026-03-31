@@ -1,0 +1,287 @@
+# CLI Examples & Guides
+
+Practical examples, migration guides, and integration instructions for the LibreFang CLI.
+
+For command details, see the [CLI Command Reference](/cli/commands). For an overview and installation, see the [CLI Reference](/cli).
+
+---
+
+## Migration
+
+### librefang migrate
+
+Migrate configuration and agents from another agent framework.
+
+```
+librefang migrate --from <FRAMEWORK> [--source-dir <PATH>] [--dry-run]
+```
+
+**Options:**
+
+| Option | Description |
+|---|---|
+| `--from <FRAMEWORK>` | Source framework. One of: `openfang`, `openclaw`, `langchain`, `autogpt`. |
+| `--source-dir <PATH>` | Path to the source workspace. Auto-detected if not set (e.g. `~/.openfang`, `~/.openclaw`, `~/.langchain`, `~/Auto-GPT`). |
+| `--dry-run` | Show what would be imported without making changes. |
+
+**Behavior:**
+
+- Converts agent configurations, YAML manifests, and settings from the source framework into LibreFang format.
+- Saves imported data to `~/.librefang/`.
+- Writes a `migration_report.md` summarizing what was imported.
+
+**Example:**
+
+```bash
+# Migrate from OpenFang (auto-detect ~/.openfang)
+librefang migrate --from openfang
+
+# Dry run migration from OpenClaw
+librefang migrate --from openclaw --dry-run
+
+# Migrate from OpenClaw (auto-detect source)
+librefang migrate --from openclaw
+
+# Migrate from LangChain with explicit source
+librefang migrate --from langchain --source-dir /home/user/.langchain
+
+# Migrate from AutoGPT
+librefang migrate --from autogpt
+```
+
+---
+
+## MCP Server
+
+### librefang mcp
+
+Start an MCP (Model Context Protocol) server over stdio.
+
+```
+librefang mcp
+```
+
+**Behavior:**
+
+- Exposes running LibreFang agents as MCP tools via JSON-RPC 2.0 over stdin/stdout with Content-Length framing.
+- Each agent becomes a callable tool named `librefang_agent_<name>` (hyphens replaced with underscores).
+- Connects to a running daemon via HTTP if available; otherwise boots an in-process kernel.
+- Protocol version: `2024-11-05`.
+- Maximum message size: 10MB (security limit).
+
+**Supported MCP methods:**
+
+| Method | Description |
+|---|---|
+| `initialize` | Returns server capabilities and info. |
+| `tools/list` | Lists all available agent tools. |
+| `tools/call` | Sends a message to an agent and returns the response. |
+
+**Tool input schema:**
+
+Each agent tool accepts a single `message` (string) argument.
+
+**Integration with Claude Desktop / other MCP clients:**
+
+Add to your MCP client configuration:
+
+```json
+{
+  "mcpServers": {
+    "librefang": {
+      "command": "librefang",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+---
+
+## Examples
+
+### First-time setup
+
+```bash
+# 1. Set your API key
+export GROQ_API_KEY="gsk_your_key_here"
+
+# 2. Initialize LibreFang
+librefang init --quick
+
+# 3. Start the daemon
+librefang start
+```
+
+### Daily usage
+
+```bash
+# Quick chat (auto-spawns agent if needed)
+librefang chat
+
+# Chat with a specific agent
+librefang chat coder
+
+# Check what's running
+librefang status
+
+# Open the web dashboard
+librefang dashboard
+```
+
+### Agent management
+
+```bash
+# Spawn from a template
+librefang agent new assistant
+
+# Spawn from a custom manifest
+librefang agent spawn ./agents/custom-agent/agent.toml
+
+# List running agents
+librefang agent list
+
+# Chat with an agent by UUID
+librefang agent chat <UUID>
+
+# Kill an agent
+librefang agent kill <UUID>
+```
+
+### Workflow automation
+
+```bash
+# Create a workflow
+librefang workflow create ./review-pipeline.json
+
+# List workflows
+librefang workflow list
+
+# Run a workflow
+librefang workflow run <WORKFLOW_ID> "Review the latest PR"
+```
+
+### Event triggers
+
+```bash
+# Create a trigger that fires on agent spawn
+librefang trigger create <AGENT_ID> '{"agent_spawned":{"name_pattern":"*"}}' \
+  --prompt "New agent spawned: {{event}}" \
+  --max-fires 100
+
+# List all triggers
+librefang trigger list
+
+# List triggers for a specific agent
+librefang trigger list --agent-id <AGENT_ID>
+
+# Delete a trigger
+librefang trigger delete <TRIGGER_ID>
+```
+
+### Skill management
+
+```bash
+# Search FangHub
+librefang skill search "code review"
+
+# Install a skill
+librefang skill install code-reviewer
+
+# List installed skills
+librefang skill list
+
+# Create a new skill
+librefang skill create
+
+# Remove a skill
+librefang skill remove code-reviewer
+```
+
+### Channel setup
+
+```bash
+# Interactive channel picker
+librefang channel setup
+
+# Direct channel setup
+librefang channel setup telegram
+
+# Check channel status
+librefang channel list
+
+# Test a channel
+librefang channel test telegram
+
+# Enable/disable channels
+librefang channel enable discord
+librefang channel disable slack
+```
+
+### Configuration
+
+```bash
+# View config
+librefang config show
+
+# Get a specific value
+librefang config get default_model.provider
+
+# Change provider
+librefang config set default_model.provider anthropic
+librefang config set default_model.model claude-sonnet-4-20250514
+librefang config set default_model.api_key_env ANTHROPIC_API_KEY
+
+# Manage API keys
+librefang config set-key anthropic
+librefang config test-key anthropic
+librefang config delete-key openai
+
+# Open in editor
+librefang config edit
+```
+
+### Migration from other frameworks
+
+```bash
+# Migrate from OpenFang (auto-detects ~/.openfang)
+librefang migrate --from openfang
+
+# Preview migration
+librefang migrate --from openclaw --dry-run
+
+# Run migration
+librefang migrate --from openclaw
+
+# Migrate from LangChain
+librefang migrate --from langchain --source-dir ~/.langchain
+```
+
+### MCP integration
+
+```bash
+# Start MCP server for Claude Desktop or other MCP clients
+librefang mcp
+```
+
+### Diagnostics
+
+```bash
+# Run all diagnostic checks
+librefang doctor
+
+# Auto-repair issues
+librefang doctor --repair
+
+# Machine-readable diagnostics
+librefang doctor --json
+```
+
+### Shell completions
+
+```bash
+# Generate and install completions for your shell
+librefang completion bash >> ~/.bashrc
+librefang completion zsh > "${fpath[1]}/_librefang"
+librefang completion fish > ~/.config/fish/completions/librefang.fish
+```

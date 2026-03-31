@@ -1,0 +1,902 @@
+# Channel Configuration
+
+Configuration for all 45 channel adapters, per-channel behavior overrides, and sidecar channel integration.
+
+---
+
+### `[channels]`
+
+All 45 channel adapters are configured under `[channels.<name>]`. Each channel is `Option<T>` -- omitting the section disables the adapter entirely. Including the section header (even empty) enables it with default values.
+
+**Universal channel fields:** Every channel adapter supports the following common fields in addition to its own specific fields:
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `default_agent` | string or null | `null` | Agent name to route messages to by default. |
+| `account_id` | string or null | `null` | Unique identifier for this bot instance. Used for multi-bot routing via `[[bindings]]` match rules. |
+| `overrides` | object | (defaults) | Per-channel behavior overrides. See [Channel Overrides](#channel-overrides). |
+
+#### `[channels.telegram]`
+
+```toml
+[channels.telegram]
+bot_token_env = "TELEGRAM_BOT_TOKEN"
+allowed_users = []
+# default_agent = "assistant"
+poll_interval_secs = 1
+# api_url = "https://api.telegram.org"  # override for local Bot API server
+# account_id = "my-telegram-bot"
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `bot_token_env` | string | `"TELEGRAM_BOT_TOKEN"` | Env var holding the Telegram Bot API token. |
+| `allowed_users` | list of i64 | `[]` | Telegram user IDs allowed to interact. Empty = allow all. |
+| `default_agent` | string or null | `null` | Agent name to route messages to. |
+| `poll_interval_secs` | u64 | `1` | Long-polling interval in seconds. |
+| `account_id` | string or null | `null` | Unique bot instance identifier for multi-bot routing. |
+| `api_url` | string or null | `null` | Override the Telegram Bot API base URL. Useful for local Bot API server instances. Defaults to `https://api.telegram.org`. |
+| `overrides` | object | (defaults) | Per-channel behavior overrides. See [Channel Overrides](#channel-overrides). |
+
+#### `[channels.discord]`
+
+```toml
+[channels.discord]
+bot_token_env = "DISCORD_BOT_TOKEN"
+allowed_guilds = []
+# default_agent = "assistant"
+intents = 37376
+ignore_bots = true
+# account_id = "my-discord-bot"
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `bot_token_env` | string | `"DISCORD_BOT_TOKEN"` | Env var holding the Discord bot token. |
+| `allowed_guilds` | list of u64 | `[]` | Guild (server) IDs allowed. Empty = allow all. |
+| `default_agent` | string or null | `null` | Agent name to route messages to. |
+| `allowed_users` | list of strings | `[]` | Discord user IDs allowed to interact. Empty = allow all. |
+| `intents` | u64 | `37376` | Gateway intents bitmask. Default = `GUILD_MESSAGES \| DIRECT_MESSAGES \| MESSAGE_CONTENT` (37376). |
+| `ignore_bots` | bool | `true` | When `true`, messages from other bots are ignored. |
+| `account_id` | string or null | `null` | Unique bot instance identifier for multi-bot routing. |
+| `overrides` | object | (defaults) | Per-channel behavior overrides. See [Channel Overrides](#channel-overrides). |
+
+#### `[channels.slack]`
+
+```toml
+[channels.slack]
+app_token_env = "SLACK_APP_TOKEN"
+bot_token_env = "SLACK_BOT_TOKEN"
+allowed_channels = []
+# account_id = "my-slack-bot"
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `app_token_env` | string | `"SLACK_APP_TOKEN"` | Env var holding the Slack app-level token (`xapp-`) for Socket Mode. |
+| `bot_token_env` | string | `"SLACK_BOT_TOKEN"` | Env var holding the Slack bot token (`xoxb-`) for REST API. |
+| `allowed_channels` | list of strings | `[]` | Channel IDs allowed. Empty = allow all. |
+| `default_agent` | string or null | `null` | Agent name to route messages to. |
+| `account_id` | string or null | `null` | Unique bot instance identifier for multi-bot routing. |
+| `overrides` | object | (defaults) | Per-channel behavior overrides. See [Channel Overrides](#channel-overrides). |
+
+#### `[channels.whatsapp]`
+
+```toml
+[channels.whatsapp]
+access_token_env = "WHATSAPP_ACCESS_TOKEN"
+verify_token_env = "WHATSAPP_VERIFY_TOKEN"
+phone_number_id = ""
+# webhook_port = 8443  # Deprecated: webhooks now share the API port
+allowed_users = []
+# gateway_url_env = "WHATSAPP_WEB_GATEWAY_URL"  # for QR/Web mode
+# account_id = "my-whatsapp-bot"
+# owner_numbers = []   # optional admin phone numbers
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `access_token_env` | string | `"WHATSAPP_ACCESS_TOKEN"` | Env var holding the WhatsApp Cloud API access token. |
+| `verify_token_env` | string | `"WHATSAPP_VERIFY_TOKEN"` | Env var holding the webhook verification token. |
+| `phone_number_id` | string | `""` | WhatsApp Business phone number ID. |
+| `webhook_port` | u16 | `8443` | **Deprecated.** Previously used for standalone webhook server; now ignored. All webhooks share the API port. |
+| `gateway_url_env` | string | `"WHATSAPP_WEB_GATEWAY_URL"` | Env var holding the WhatsApp Web gateway URL. When set, outgoing messages are routed through the QR/Web gateway instead of the Cloud API. |
+| `allowed_users` | list of strings | `[]` | Phone numbers allowed. Empty = allow all. |
+| `default_agent` | string or null | `null` | Agent name to route messages to. |
+| `account_id` | string or null | `null` | Unique bot instance identifier for multi-bot routing. |
+| `owner_numbers` | list of strings | `[]` | Phone numbers with administrative privileges for this bot instance. |
+| `overrides` | object | (defaults) | Per-channel behavior overrides. See [Channel Overrides](#channel-overrides). |
+
+#### `[channels.signal]`
+
+```toml
+[channels.signal]
+api_url = "http://localhost:8080"
+phone_number = ""
+allowed_users = []
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `api_url` | string | `"http://localhost:8080"` | URL of the signal-cli REST API. |
+| `phone_number` | string | `""` | Registered phone number for the bot. |
+| `allowed_users` | list of strings | `[]` | Allowed phone numbers. Empty = allow all. |
+| `default_agent` | string or null | `null` | Agent name to route messages to. |
+
+#### `[channels.matrix]`
+
+```toml
+[channels.matrix]
+homeserver_url = "https://matrix.org"
+user_id = "@librefang:matrix.org"
+access_token_env = "MATRIX_ACCESS_TOKEN"
+allowed_rooms = []
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `homeserver_url` | string | `"https://matrix.org"` | Matrix homeserver URL. |
+| `user_id` | string | `""` | Bot user ID (e.g., `"@librefang:matrix.org"`). |
+| `access_token_env` | string | `"MATRIX_ACCESS_TOKEN"` | Env var holding the Matrix access token. |
+| `allowed_rooms` | list of strings | `[]` | Room IDs to listen in. Empty = all joined rooms. |
+| `default_agent` | string or null | `null` | Agent name to route messages to. |
+
+#### `[channels.email]`
+
+```toml
+[channels.email]
+imap_host = "imap.gmail.com"
+imap_port = 993
+smtp_host = "smtp.gmail.com"
+smtp_port = 587
+username = "bot@example.com"
+password_env = "EMAIL_PASSWORD"
+poll_interval_secs = 30
+folders = ["INBOX"]
+allowed_senders = []
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `imap_host` | string | `""` | IMAP server hostname. |
+| `imap_port` | u16 | `993` | IMAP server port (993 for TLS). |
+| `smtp_host` | string | `""` | SMTP server hostname. |
+| `smtp_port` | u16 | `587` | SMTP server port (587 for STARTTLS). |
+| `username` | string | `""` | Email address for both IMAP and SMTP. |
+| `password_env` | string | `"EMAIL_PASSWORD"` | Env var holding the email password or app password. |
+| `poll_interval_secs` | u64 | `30` | IMAP polling interval in seconds. |
+| `folders` | list of strings | `["INBOX"]` | IMAP folders to monitor. |
+| `allowed_senders` | list of strings | `[]` | Only process emails from these senders. Empty = all. |
+| `default_agent` | string or null | `null` | Agent name to route messages to. |
+
+#### `[channels.teams]`
+
+```toml
+[channels.teams]
+app_id = ""
+app_password_env = "TEAMS_APP_PASSWORD"
+# webhook_port = 3978  # Deprecated: webhooks now share the API port
+allowed_tenants = []
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `app_id` | string | `""` | Azure Bot App ID. |
+| `app_password_env` | string | `"TEAMS_APP_PASSWORD"` | Env var holding the Azure Bot Framework app password. |
+| `webhook_port` | u16 | `3978` | **Deprecated.** Previously used for standalone webhook server; now ignored. All webhooks share the API port. |
+| `allowed_tenants` | list of strings | `[]` | Azure AD tenant IDs allowed. Empty = allow all. |
+| `default_agent` | string or null | `null` | Agent name to route messages to. |
+
+#### `[channels.mattermost]`
+
+```toml
+[channels.mattermost]
+server_url = "https://mattermost.example.com"
+token_env = "MATTERMOST_TOKEN"
+allowed_channels = []
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `server_url` | string | `""` | Mattermost server URL. |
+| `token_env` | string | `"MATTERMOST_TOKEN"` | Env var holding the Mattermost bot token. |
+| `allowed_channels` | list of strings | `[]` | Channel IDs to listen in. Empty = all. |
+| `default_agent` | string or null | `null` | Agent name to route messages to. |
+
+#### `[channels.irc]`
+
+```toml
+[channels.irc]
+server = "irc.libera.chat"
+port = 6667
+nick = "librefang"
+# password_env = "IRC_PASSWORD"
+channels = ["#librefang"]
+use_tls = false
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `server` | string | `"irc.libera.chat"` | IRC server hostname. |
+| `port` | u16 | `6667` | IRC server port. |
+| `nick` | string | `"librefang"` | Bot nickname. |
+| `password_env` | string or null | `null` | Env var holding the server password (optional). |
+| `channels` | list of strings | `[]` | IRC channels to join (e.g., `["#librefang", "#general"]`). |
+| `use_tls` | bool | `false` | Use TLS for the connection. |
+| `default_agent` | string or null | `null` | Agent name to route messages to. |
+
+#### `[channels.google_chat]`
+
+```toml
+[channels.google_chat]
+service_account_env = "GOOGLE_CHAT_SERVICE_ACCOUNT"
+space_ids = []
+# webhook_port = 8444  # Deprecated: webhooks now share the API port
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `service_account_env` | string | `"GOOGLE_CHAT_SERVICE_ACCOUNT"` | Env var holding the service account JSON key. |
+| `space_ids` | list of strings | `[]` | Google Chat space IDs to listen in. |
+| `webhook_port` | u16 | `8444` | **Deprecated.** Previously used for standalone webhook server; now ignored. All webhooks share the API port. |
+| `default_agent` | string or null | `null` | Agent name to route messages to. |
+
+#### `[channels.twitch]`
+
+```toml
+[channels.twitch]
+oauth_token_env = "TWITCH_OAUTH_TOKEN"
+channels = ["mychannel"]
+nick = "librefang"
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `oauth_token_env` | string | `"TWITCH_OAUTH_TOKEN"` | Env var holding the Twitch OAuth token. |
+| `channels` | list of strings | `[]` | Twitch channels to join (without `#` prefix). |
+| `nick` | string | `"librefang"` | Bot nickname in Twitch chat. |
+| `default_agent` | string or null | `null` | Agent name to route messages to. |
+
+#### `[channels.rocketchat]`
+
+```toml
+[channels.rocketchat]
+server_url = "https://rocketchat.example.com"
+token_env = "ROCKETCHAT_TOKEN"
+user_id = ""
+allowed_channels = []
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `server_url` | string | `""` | Rocket.Chat server URL. |
+| `token_env` | string | `"ROCKETCHAT_TOKEN"` | Env var holding the Rocket.Chat auth token. |
+| `user_id` | string | `""` | Bot user ID. |
+| `allowed_channels` | list of strings | `[]` | Channel IDs to listen in. Empty = all. |
+| `default_agent` | string or null | `null` | Agent name to route messages to. |
+
+#### `[channels.zulip]`
+
+```toml
+[channels.zulip]
+server_url = "https://zulip.example.com"
+bot_email = "bot@zulip.example.com"
+api_key_env = "ZULIP_API_KEY"
+streams = []
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `server_url` | string | `""` | Zulip server URL. |
+| `bot_email` | string | `""` | Bot email address registered in Zulip. |
+| `api_key_env` | string | `"ZULIP_API_KEY"` | Env var holding the Zulip API key. |
+| `streams` | list of strings | `[]` | Stream names to listen in. Empty = all. |
+| `default_agent` | string or null | `null` | Agent name to route messages to. |
+
+#### `[channels.xmpp]`
+
+```toml
+[channels.xmpp]
+jid = "bot@jabber.org"
+password_env = "XMPP_PASSWORD"
+server = ""
+port = 5222
+rooms = []
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `jid` | string | `""` | XMPP JID (e.g., `"bot@jabber.org"`). |
+| `password_env` | string | `"XMPP_PASSWORD"` | Env var holding the XMPP password. |
+| `server` | string | `""` | XMPP server hostname. Defaults to the JID domain if empty. |
+| `port` | u16 | `5222` | XMPP server port. |
+| `rooms` | list of strings | `[]` | MUC (multi-user chat) rooms to join. |
+| `default_agent` | string or null | `null` | Agent name to route messages to. |
+
+#### `[channels.line]`
+
+```toml
+[channels.line]
+channel_secret_env = "LINE_CHANNEL_SECRET"
+access_token_env = "LINE_CHANNEL_ACCESS_TOKEN"
+# webhook_port = 8450  # Deprecated: webhooks now share the API port
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `channel_secret_env` | string | `"LINE_CHANNEL_SECRET"` | Env var holding the LINE channel secret. |
+| `access_token_env` | string | `"LINE_CHANNEL_ACCESS_TOKEN"` | Env var holding the LINE channel access token. |
+| `webhook_port` | u16 | `8450` | **Deprecated.** Previously used for standalone webhook server; now ignored. All webhooks share the API port. |
+| `default_agent` | string or null | `null` | Agent name to route messages to. |
+
+#### `[channels.viber]`
+
+```toml
+[channels.viber]
+auth_token_env = "VIBER_AUTH_TOKEN"
+webhook_url = ""
+# webhook_port = 8451  # Deprecated: webhooks now share the API port
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `auth_token_env` | string | `"VIBER_AUTH_TOKEN"` | Env var holding the Viber Bot auth token. |
+| `webhook_url` | string | `""` | Public URL for the Viber webhook endpoint. |
+| `webhook_port` | u16 | `8451` | **Deprecated.** Previously used for standalone webhook server; now ignored. All webhooks share the API port. |
+| `default_agent` | string or null | `null` | Agent name to route messages to. |
+
+#### `[channels.messenger]`
+
+```toml
+[channels.messenger]
+page_token_env = "MESSENGER_PAGE_TOKEN"
+verify_token_env = "MESSENGER_VERIFY_TOKEN"
+# webhook_port = 8452  # Deprecated: webhooks now share the API port
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `page_token_env` | string | `"MESSENGER_PAGE_TOKEN"` | Env var holding the Facebook page access token. |
+| `verify_token_env` | string | `"MESSENGER_VERIFY_TOKEN"` | Env var holding the webhook verify token. |
+| `webhook_port` | u16 | `8452` | **Deprecated.** Previously used for standalone webhook server; now ignored. All webhooks share the API port. |
+| `default_agent` | string or null | `null` | Agent name to route messages to. |
+
+#### `[channels.reddit]`
+
+```toml
+[channels.reddit]
+client_id = ""
+client_secret_env = "REDDIT_CLIENT_SECRET"
+username = ""
+password_env = "REDDIT_PASSWORD"
+subreddits = []
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `client_id` | string | `""` | Reddit app client ID. |
+| `client_secret_env` | string | `"REDDIT_CLIENT_SECRET"` | Env var holding the Reddit client secret. |
+| `username` | string | `""` | Reddit bot username. |
+| `password_env` | string | `"REDDIT_PASSWORD"` | Env var holding the Reddit bot password. |
+| `subreddits` | list of strings | `[]` | Subreddit names to monitor. |
+| `default_agent` | string or null | `null` | Agent name to route messages to. |
+
+#### `[channels.mastodon]`
+
+```toml
+[channels.mastodon]
+instance_url = "https://mastodon.social"
+access_token_env = "MASTODON_ACCESS_TOKEN"
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `instance_url` | string | `""` | Mastodon instance URL (e.g., `"https://mastodon.social"`). |
+| `access_token_env` | string | `"MASTODON_ACCESS_TOKEN"` | Env var holding the Mastodon access token. |
+| `default_agent` | string or null | `null` | Agent name to route messages to. |
+
+#### `[channels.bluesky]`
+
+```toml
+[channels.bluesky]
+identifier = "mybot.bsky.social"
+app_password_env = "BLUESKY_APP_PASSWORD"
+service_url = "https://bsky.social"
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `identifier` | string | `""` | Bluesky handle or DID. |
+| `app_password_env` | string | `"BLUESKY_APP_PASSWORD"` | Env var holding the Bluesky app password. |
+| `service_url` | string | `"https://bsky.social"` | PDS (Personal Data Server) URL. |
+| `default_agent` | string or null | `null` | Agent name to route messages to. |
+
+#### `[channels.feishu]`
+
+```toml
+[channels.feishu]
+app_id = ""
+app_secret_env = "FEISHU_APP_SECRET"
+# webhook_port = 8453  # Deprecated: webhooks now share the API port
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `app_id` | string | `""` | Feishu/Lark app ID. |
+| `app_secret_env` | string | `"FEISHU_APP_SECRET"` | Env var holding the Feishu app secret. |
+| `webhook_port` | u16 | `8453` | **Deprecated.** Previously used for standalone webhook server; now ignored. All webhooks share the API port. |
+| `default_agent` | string or null | `null` | Agent name to route messages to. |
+
+#### `[channels.revolt]`
+
+```toml
+[channels.revolt]
+bot_token_env = "REVOLT_BOT_TOKEN"
+api_url = "https://api.revolt.chat"
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `bot_token_env` | string | `"REVOLT_BOT_TOKEN"` | Env var holding the Revolt bot token. |
+| `api_url` | string | `"https://api.revolt.chat"` | Revolt API base URL. |
+| `default_agent` | string or null | `null` | Agent name to route messages to. |
+
+#### `[channels.nextcloud]`
+
+```toml
+[channels.nextcloud]
+server_url = "https://nextcloud.example.com"
+token_env = "NEXTCLOUD_TOKEN"
+allowed_rooms = []
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `server_url` | string | `""` | Nextcloud server URL. |
+| `token_env` | string | `"NEXTCLOUD_TOKEN"` | Env var holding the Nextcloud Talk auth token. |
+| `allowed_rooms` | list of strings | `[]` | Room tokens to listen in. Empty = all. |
+| `default_agent` | string or null | `null` | Agent name to route messages to. |
+
+#### `[channels.guilded]`
+
+```toml
+[channels.guilded]
+bot_token_env = "GUILDED_BOT_TOKEN"
+server_ids = []
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `bot_token_env` | string | `"GUILDED_BOT_TOKEN"` | Env var holding the Guilded bot token. |
+| `server_ids` | list of strings | `[]` | Server IDs to listen in. Empty = all. |
+| `default_agent` | string or null | `null` | Agent name to route messages to. |
+
+#### `[channels.keybase]`
+
+```toml
+[channels.keybase]
+username = ""
+paperkey_env = "KEYBASE_PAPERKEY"
+allowed_teams = []
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `username` | string | `""` | Keybase username. |
+| `paperkey_env` | string | `"KEYBASE_PAPERKEY"` | Env var holding the Keybase paper key. |
+| `allowed_teams` | list of strings | `[]` | Team names to listen in. Empty = all DMs. |
+| `default_agent` | string or null | `null` | Agent name to route messages to. |
+
+#### `[channels.threema]`
+
+```toml
+[channels.threema]
+threema_id = ""
+secret_env = "THREEMA_SECRET"
+# webhook_port = 8454  # Deprecated: webhooks now share the API port
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `threema_id` | string | `""` | Threema Gateway ID. |
+| `secret_env` | string | `"THREEMA_SECRET"` | Env var holding the Threema API secret. |
+| `webhook_port` | u16 | `8454` | **Deprecated.** Previously used for standalone webhook server; now ignored. All webhooks share the API port. |
+| `default_agent` | string or null | `null` | Agent name to route messages to. |
+
+#### `[channels.nostr]`
+
+```toml
+[channels.nostr]
+private_key_env = "NOSTR_PRIVATE_KEY"
+relays = ["wss://relay.damus.io"]
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `private_key_env` | string | `"NOSTR_PRIVATE_KEY"` | Env var holding the Nostr private key (nsec or hex format). |
+| `relays` | list of strings | `["wss://relay.damus.io"]` | Nostr relay WebSocket URLs to connect to. |
+| `default_agent` | string or null | `null` | Agent name to route messages to. |
+
+#### `[channels.webex]`
+
+```toml
+[channels.webex]
+bot_token_env = "WEBEX_BOT_TOKEN"
+allowed_rooms = []
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `bot_token_env` | string | `"WEBEX_BOT_TOKEN"` | Env var holding the Webex bot token. |
+| `allowed_rooms` | list of strings | `[]` | Room IDs to listen in. Empty = all. |
+| `default_agent` | string or null | `null` | Agent name to route messages to. |
+
+#### `[channels.pumble]`
+
+```toml
+[channels.pumble]
+bot_token_env = "PUMBLE_BOT_TOKEN"
+# webhook_port = 8455  # Deprecated: webhooks now share the API port
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `bot_token_env` | string | `"PUMBLE_BOT_TOKEN"` | Env var holding the Pumble bot token. |
+| `webhook_port` | u16 | `8455` | **Deprecated.** Previously used for standalone webhook server; now ignored. All webhooks share the API port. |
+| `default_agent` | string or null | `null` | Agent name to route messages to. |
+
+#### `[channels.flock]`
+
+```toml
+[channels.flock]
+bot_token_env = "FLOCK_BOT_TOKEN"
+# webhook_port = 8456  # Deprecated: webhooks now share the API port
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `bot_token_env` | string | `"FLOCK_BOT_TOKEN"` | Env var holding the Flock bot token. |
+| `webhook_port` | u16 | `8456` | **Deprecated.** Previously used for standalone webhook server; now ignored. All webhooks share the API port. |
+| `default_agent` | string or null | `null` | Agent name to route messages to. |
+
+#### `[channels.twist]`
+
+```toml
+[channels.twist]
+token_env = "TWIST_TOKEN"
+workspace_id = ""
+allowed_channels = []
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `token_env` | string | `"TWIST_TOKEN"` | Env var holding the Twist API token. |
+| `workspace_id` | string | `""` | Twist workspace ID. |
+| `allowed_channels` | list of strings | `[]` | Channel IDs to listen in. Empty = all. |
+| `default_agent` | string or null | `null` | Agent name to route messages to. |
+
+#### `[channels.mumble]`
+
+```toml
+[channels.mumble]
+host = "mumble.example.com"
+port = 64738
+username = "librefang"
+password_env = "MUMBLE_PASSWORD"
+channel = ""
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `host` | string | `""` | Mumble server hostname. |
+| `port` | u16 | `64738` | Mumble server port. |
+| `username` | string | `"librefang"` | Bot username in Mumble. |
+| `password_env` | string | `"MUMBLE_PASSWORD"` | Env var holding the Mumble server password. |
+| `channel` | string | `""` | Mumble channel to join. |
+| `default_agent` | string or null | `null` | Agent name to route messages to. |
+
+#### `[channels.dingtalk]`
+
+Supports two modes: **stream** (default, recommended) and **webhook** (legacy).
+
+```toml
+# Stream mode (recommended — no public IP needed)
+[channels.dingtalk]
+receive_mode = "stream"
+app_key_env = "DINGTALK_APP_KEY"
+app_secret_env = "DINGTALK_APP_SECRET"
+
+# Webhook mode (legacy)
+[channels.dingtalk]
+receive_mode = "webhook"
+access_token_env = "DINGTALK_ACCESS_TOKEN"
+secret_env = "DINGTALK_SECRET"
+# webhook_port = 8457  # Deprecated: webhooks now share the API port
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `receive_mode` | string | `"stream"` | Connection mode: `"stream"` or `"webhook"`. |
+| `app_key_env` | string | `"DINGTALK_APP_KEY"` | Env var holding the DingTalk App Key (stream mode). |
+| `app_secret_env` | string | `"DINGTALK_APP_SECRET"` | Env var holding the DingTalk App Secret (stream mode). |
+| `access_token_env` | string | `"DINGTALK_ACCESS_TOKEN"` | Env var holding the DingTalk webhook access token (webhook mode). |
+| `secret_env` | string | `"DINGTALK_SECRET"` | Env var holding the DingTalk signing secret (webhook mode). |
+| `webhook_port` | u16 | `8457` | **Deprecated.** Previously used for standalone webhook server; now ignored. All webhooks share the API port. |
+| `robot_code` | string or null | `null` | Robot code for stream mode replies (defaults to app_key). |
+| `default_agent` | string or null | `null` | Agent name to route messages to. |
+
+#### `[channels.discourse]`
+
+```toml
+[channels.discourse]
+base_url = "https://forum.example.com"
+api_key_env = "DISCOURSE_API_KEY"
+api_username = "system"
+categories = []
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `base_url` | string | `""` | Discourse forum base URL. |
+| `api_key_env` | string | `"DISCOURSE_API_KEY"` | Env var holding the Discourse API key. |
+| `api_username` | string | `"system"` | Discourse API username. |
+| `categories` | list of strings | `[]` | Category slugs to monitor. |
+| `default_agent` | string or null | `null` | Agent name to route messages to. |
+
+#### `[channels.gitter]`
+
+```toml
+[channels.gitter]
+token_env = "GITTER_TOKEN"
+room_id = ""
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `token_env` | string | `"GITTER_TOKEN"` | Env var holding the Gitter auth token. |
+| `room_id` | string | `""` | Gitter room ID to listen in. |
+| `default_agent` | string or null | `null` | Agent name to route messages to. |
+
+#### `[channels.ntfy]`
+
+```toml
+[channels.ntfy]
+server_url = "https://ntfy.sh"
+topic = "my-agent-topic"
+token_env = "NTFY_TOKEN"
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `server_url` | string | `"https://ntfy.sh"` | ntfy server URL. Can be self-hosted. |
+| `topic` | string | `""` | Topic to subscribe/publish to. |
+| `token_env` | string | `"NTFY_TOKEN"` | Env var holding the auth token. Optional for public topics. |
+| `default_agent` | string or null | `null` | Agent name to route messages to. |
+
+#### `[channels.gotify]`
+
+```toml
+[channels.gotify]
+server_url = "https://gotify.example.com"
+app_token_env = "GOTIFY_APP_TOKEN"
+client_token_env = "GOTIFY_CLIENT_TOKEN"
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `server_url` | string | `""` | Gotify server URL. |
+| `app_token_env` | string | `"GOTIFY_APP_TOKEN"` | Env var holding the Gotify app token (for sending messages). |
+| `client_token_env` | string | `"GOTIFY_CLIENT_TOKEN"` | Env var holding the Gotify client token (for receiving messages via WebSocket). |
+| `default_agent` | string or null | `null` | Agent name to route messages to. |
+
+#### `[channels.webhook]`
+
+```toml
+[channels.webhook]
+secret_env = "WEBHOOK_SECRET"
+listen_port = 8460
+# callback_url = "https://example.com/webhook"
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `secret_env` | string | `"WEBHOOK_SECRET"` | Env var holding the HMAC signing secret for verifying incoming webhooks. |
+| `listen_port` | u16 | `8460` | Port to listen for incoming webhook requests. |
+| `callback_url` | string or null | `null` | URL to POST outgoing messages to. |
+| `default_agent` | string or null | `null` | Agent name to route messages to. |
+
+#### `[channels.voice]`
+
+WebSocket-based voice channel with STT (Speech-to-Text) and TTS (Text-to-Speech) support.
+
+```toml
+[channels.voice]
+api_key_env = "OPENAI_API_KEY"
+stt_url = "https://api.openai.com"
+tts_url = "https://api.openai.com"
+tts_voice = "alloy"
+# buffer_threshold = 32768
+# default_agent = "assistant"
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `api_key_env` | string | `"OPENAI_API_KEY"` | Env var holding the API key for STT/TTS services. |
+| `stt_url` | string | `"https://api.openai.com"` | Base URL for the STT API (OpenAI Whisper-compatible). |
+| `tts_url` | string | `"https://api.openai.com"` | Base URL for the TTS API. |
+| `tts_voice` | string | `"alloy"` | TTS voice name. Options: `alloy`, `echo`, `fable`, `onyx`, `nova`, `shimmer`. |
+| `buffer_threshold` | usize | `32768` | Audio buffer size in bytes before triggering STT. |
+| `default_agent` | string or null | `null` | Agent name to route voice messages to. |
+
+#### `[channels.linkedin]`
+
+```toml
+[channels.linkedin]
+access_token_env = "LINKEDIN_ACCESS_TOKEN"
+organization_id = ""
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `access_token_env` | string | `"LINKEDIN_ACCESS_TOKEN"` | Env var holding the LinkedIn OAuth2 access token. |
+| `organization_id` | string | `""` | LinkedIn organization ID for messaging. |
+| `default_agent` | string or null | `null` | Agent name to route messages to. |
+
+#### `[channels.qq]`
+
+QQ Bot channel adapter using the official QQ Bot Open Platform API.
+
+```toml
+[channels.qq]
+app_id = "your-app-id"
+app_secret_env = "QQ_BOT_APP_SECRET"
+allowed_users = []
+# default_agent = "assistant"
+# account_id = "my-qq-bot"
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `app_id` | string | `""` | QQ Bot application ID registered on the QQ Open Platform. |
+| `app_secret_env` | string | `"QQ_BOT_APP_SECRET"` | Env var holding the QQ Bot application secret. The actual secret is never stored in config. |
+| `allowed_users` | list of strings | `[]` | QQ user IDs allowed to interact. Empty = allow all. |
+| `default_agent` | string or null | `null` | Agent name to route messages to. |
+| `account_id` | string or null | `null` | Unique bot instance identifier for multi-bot routing. |
+| `overrides` | object | (defaults) | Per-channel behavior overrides. See [Channel Overrides](#channel-overrides). |
+
+#### `[channels.wecom]`
+
+WeCom (formerly WeChat Work / Enterprise WeChat) intelligent bot adapter. Connects via WebSocket to `wss://openws.work.weixin.qq.com`.
+
+```toml
+[channels.wecom]
+bot_id = "YOUR_BOT_ID"
+secret_env = "WECOM_BOT_SECRET"
+# account_id = "my-wecom-bot"
+# default_agent = "assistant"
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `bot_id` | string | `""` | Bot ID from the WeCom admin console (intelligent bot). |
+| `secret_env` | string | `"WECOM_BOT_SECRET"` | Env var holding the bot secret. |
+| `account_id` | string or null | `null` | Unique bot instance identifier for multi-bot routing. |
+| `default_agent` | string or null | `null` | Agent name to route messages to. |
+| `overrides` | object | (defaults) | Per-channel behavior overrides. See [Channel Overrides](#channel-overrides). |
+
+#### `[channels.wechat]`
+
+WeChat personal account channel adapter using Tencent's iLink Bot API. Connects via QR code scan — no API keys or developer accounts required.
+
+```toml
+[channels.wechat]
+# bot_token_env = "WECHAT_BOT_TOKEN"  # optional: persisted token from previous session
+allowed_users = []
+# default_agent = "assistant"
+# account_id = "my-wechat-bot"
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `bot_token_env` | string | `"WECHAT_BOT_TOKEN"` | Env var holding a persisted bot token from a previous QR login session. When set, skips QR login on restart. |
+| `allowed_users` | list of strings | `[]` | WeChat user IDs allowed to interact (format: `hash@im.wechat`). Empty = allow all. |
+| `default_agent` | string or null | `null` | Agent name to route messages to. |
+| `account_id` | string or null | `null` | Unique bot instance identifier for multi-bot routing. |
+| `overrides` | object | (defaults) | Per-channel behavior overrides. See [Channel Overrides](#channel-overrides). |
+
+---
+
+
+### Channel Overrides
+
+Every channel adapter supports an `[channels.<name>.overrides]` sub-table that customizes agent behavior per-channel.
+
+```toml
+[channels.telegram.overrides]
+model = "claude-haiku-4-5-20251001"
+system_prompt = "You are a concise Telegram assistant."
+dm_policy = "respond"
+group_policy = "mention_only"
+rate_limit_per_minute = 0
+rate_limit_per_user = 10
+threading = true
+output_format = "telegram_html"
+usage_footer = "tokens"
+typing_mode = "instant"
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `model` | string or null | `null` | Model override for this channel. Uses the agent's default model when null. |
+| `system_prompt` | string or null | `null` | System prompt override for this channel. |
+| `dm_policy` | string | `"respond"` | How the bot handles direct messages. See below. |
+| `group_policy` | string | `"mention_only"` | How the bot handles group messages. See below. |
+| `rate_limit_per_minute` | u32 | `0` | Global rate limit for this channel (messages per minute). `0` = unlimited. |
+| `rate_limit_per_user` | u32 | `0` | Maximum messages per user per minute. `0` = unlimited. |
+| `threading` | bool | `false` | Enable thread replies (where supported by the platform). |
+| `output_format` | string or null | `null` | Override output formatting. See below. |
+| `usage_footer` | string or null | `null` | Override usage footer mode for this channel. Values: `off`, `tokens`, `cost`, `full`. |
+| `typing_mode` | string or null | `null` | Typing indicator behavior. See below. Defaults to `instant`. |
+
+**`dm_policy` values:**
+
+| Value | Description |
+|-------|-------------|
+| `respond` | Respond to all direct messages (default). |
+| `allowed_only` | Only respond to DMs from users in the allowed list. |
+| `ignore` | Ignore all direct messages. |
+
+**`group_policy` values:**
+
+| Value | Description |
+|-------|-------------|
+| `all` | Respond to all messages in group chats. |
+| `mention_only` | Only respond when the bot is @mentioned (default). |
+| `commands_only` | Only respond to slash commands. |
+| `ignore` | Ignore all group messages. |
+
+**`output_format` values:**
+
+| Value | Description |
+|-------|-------------|
+| `markdown` | Standard Markdown (default). |
+| `telegram_html` | Telegram HTML subset (`<b>`, `<i>`, `<code>`, etc.). |
+| `slack_mrkdwn` | Slack mrkdwn format (`*bold*`, `_italic_`, `` `code` ``). |
+| `plain_text` | No formatting markup. |
+
+**`typing_mode` values:**
+
+| Value | Description |
+|-------|-------------|
+| `instant` | Send typing indicator immediately on message receipt (default). |
+| `message` | Send typing indicator only when the first text delta arrives from the LLM. |
+| `thinking` | Send typing indicator only during LLM reasoning/thinking phase. |
+| `never` | Never send typing indicators. |
+
+---
+
+
+### `[[sidecar_channels]]`
+
+Sidecar channel adapters allow external processes (written in any language) to act as channel adapters. Communication uses newline-delimited JSON over stdin/stdout.
+
+```toml
+[[sidecar_channels]]
+name = "my-custom-channel"
+command = "python3"
+args = ["adapters/my_adapter.py"]
+channel_type = "custom_platform"
+[sidecar_channels.env]
+MY_API_TOKEN = "secret"
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `name` | string | *required* | Display name for this adapter. |
+| `command` | string | *required* | Executable to run (e.g., `"python3"`, `"/usr/local/bin/my-adapter"`). |
+| `args` | list of strings | `[]` | Arguments to pass to the command. |
+| `env` | map of string to string | `{}` | Extra environment variables to pass to the subprocess. |
+| `channel_type` | string or null | `null` | Channel type identifier. Defaults to `Custom(<name>)` if null. |
+
+---
+
