@@ -792,7 +792,7 @@ allowed_channels = []
 access_token_env = "WHATSAPP_ACCESS_TOKEN"
 verify_token_env = "WHATSAPP_VERIFY_TOKEN"
 phone_number_id = ""
-webhook_port = 8443
+# webhook_port = 8443  # 已弃用：Webhook 现共享 API 端口
 allowed_users = []
 # gateway_url_env = "WHATSAPP_WEB_GATEWAY_URL"  # 用于 QR/Web 模式
 # account_id = "my-whatsapp-bot"
@@ -804,7 +804,7 @@ allowed_users = []
 | `access_token_env` | string | `"WHATSAPP_ACCESS_TOKEN"` | 存放 WhatsApp Cloud API 访问令牌的环境变量。 |
 | `verify_token_env` | string | `"WHATSAPP_VERIFY_TOKEN"` | 存放 Webhook 验证令牌的环境变量。 |
 | `phone_number_id` | string | `""` | WhatsApp Business 手机号 ID。 |
-| `webhook_port` | u16 | `8443` | 监听 Webhook 回调的端口。 |
+| `webhook_port` | u16 | `8443` | **已弃用。** 之前用于独立 Webhook 服务器，现已忽略。所有 Webhook 共享 API 端口。 |
 | `gateway_url_env` | string | `"WHATSAPP_WEB_GATEWAY_URL"` | 存放 WhatsApp Web 网关 URL 的环境变量。设置后，发送消息将通过 QR/Web 网关而非 Cloud API 路由。 |
 | `allowed_users` | list of strings | `[]` | 允许的手机号列表。空列表 = 允许所有。 |
 | `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
@@ -880,7 +880,7 @@ allowed_senders = []
 [channels.teams]
 app_id = ""
 app_password_env = "TEAMS_APP_PASSWORD"
-webhook_port = 3978
+# webhook_port = 3978  # 已弃用：Webhook 现共享 API 端口
 allowed_tenants = []
 ```
 
@@ -888,7 +888,7 @@ allowed_tenants = []
 |------|------|--------|------|
 | `app_id` | string | `""` | Azure Bot 应用 ID。 |
 | `app_password_env` | string | `"TEAMS_APP_PASSWORD"` | 存放 Azure Bot Framework 应用密码的环境变量。 |
-| `webhook_port` | u16 | `3978` | Bot Framework 入站 Webhook 端口。 |
+| `webhook_port` | u16 | `3978` | **已弃用。** 之前用于独立 Webhook 服务器，现已忽略。所有 Webhook 共享 API 端口。 |
 | `allowed_tenants` | list of strings | `[]` | 允许的 Azure AD 租户 ID 列表。空列表 = 允许所有。 |
 | `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
 
@@ -936,14 +936,14 @@ use_tls = false
 [channels.google_chat]
 service_account_env = "GOOGLE_CHAT_SERVICE_ACCOUNT"
 space_ids = []
-webhook_port = 8444
+# webhook_port = 8444  # 已弃用：Webhook 现共享 API 端口
 ```
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `service_account_env` | string | `"GOOGLE_CHAT_SERVICE_ACCOUNT"` | 存放服务账号 JSON 密钥的环境变量。 |
 | `space_ids` | list of strings | `[]` | 监听的 Google Chat 聊天室 ID 列表。 |
-| `webhook_port` | u16 | `8444` | 入站 Webhook 端口。 |
+| `webhook_port` | u16 | `8444` | **已弃用。** 之前用于独立 Webhook 服务器，现已忽略。所有 Webhook 共享 API 端口。 |
 | `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
 
 #### `[channels.twitch]`
@@ -1024,14 +1024,14 @@ rooms = []
 [channels.line]
 channel_secret_env = "LINE_CHANNEL_SECRET"
 access_token_env = "LINE_CHANNEL_ACCESS_TOKEN"
-webhook_port = 8450
+# webhook_port = 8450  # 已弃用：Webhook 现共享 API 端口
 ```
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `channel_secret_env` | string | `"LINE_CHANNEL_SECRET"` | 存放 LINE Channel Secret 的环境变量。 |
 | `access_token_env` | string | `"LINE_CHANNEL_ACCESS_TOKEN"` | 存放 LINE Channel Access Token 的环境变量。 |
-| `webhook_port` | u16 | `8450` | 入站 Webhook 端口。 |
+| `webhook_port` | u16 | `8450` | **已弃用。** 之前用于独立 Webhook 服务器，现已忽略。所有 Webhook 共享 API 端口。 |
 | `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
 
 #### `[channels.viber]`
@@ -1040,14 +1040,14 @@ webhook_port = 8450
 [channels.viber]
 auth_token_env = "VIBER_AUTH_TOKEN"
 webhook_url = ""
-webhook_port = 8451
+# webhook_port = 8451  # 已弃用：Webhook 现共享 API 端口
 ```
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `auth_token_env` | string | `"VIBER_AUTH_TOKEN"` | 存放 Viber Bot 认证令牌的环境变量。 |
 | `webhook_url` | string | `""` | Viber Webhook 端点的公网 URL。 |
-| `webhook_port` | u16 | `8451` | 入站 Webhook 端口。 |
+| `webhook_port` | u16 | `8451` | **已弃用。** 之前用于独立 Webhook 服务器，现已忽略。所有 Webhook 共享 API 端口。 |
 | `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
 
 #### `[channels.messenger]`
@@ -1056,14 +1056,14 @@ webhook_port = 8451
 [channels.messenger]
 page_token_env = "MESSENGER_PAGE_TOKEN"
 verify_token_env = "MESSENGER_VERIFY_TOKEN"
-webhook_port = 8452
+# webhook_port = 8452  # 已弃用：Webhook 现共享 API 端口
 ```
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `page_token_env` | string | `"MESSENGER_PAGE_TOKEN"` | 存放 Facebook 页面访问令牌的环境变量。 |
 | `verify_token_env` | string | `"MESSENGER_VERIFY_TOKEN"` | 存放 Webhook 验证令牌的环境变量。 |
-| `webhook_port` | u16 | `8452` | 入站 Webhook 端口。 |
+| `webhook_port` | u16 | `8452` | **已弃用。** 之前用于独立 Webhook 服务器，现已忽略。所有 Webhook 共享 API 端口。 |
 | `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
 
 #### `[channels.reddit]`
@@ -1122,14 +1122,14 @@ service_url = "https://bsky.social"
 [channels.feishu]
 app_id = ""
 app_secret_env = "FEISHU_APP_SECRET"
-webhook_port = 8453
+# webhook_port = 8453  # 已弃用：Webhook 现共享 API 端口
 ```
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `app_id` | string | `""` | 飞书/Lark 应用 ID。 |
 | `app_secret_env` | string | `"FEISHU_APP_SECRET"` | 存放飞书应用密钥的环境变量。 |
-| `webhook_port` | u16 | `8453` | 入站 Webhook 端口。 |
+| `webhook_port` | u16 | `8453` | **已弃用。** 之前用于独立 Webhook 服务器，现已忽略。所有 Webhook 共享 API 端口。 |
 | `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
 
 #### `[channels.revolt]`
@@ -1198,14 +1198,14 @@ allowed_teams = []
 [channels.threema]
 threema_id = ""
 secret_env = "THREEMA_SECRET"
-webhook_port = 8454
+# webhook_port = 8454  # 已弃用：Webhook 现共享 API 端口
 ```
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `threema_id` | string | `""` | Threema Gateway ID。 |
 | `secret_env` | string | `"THREEMA_SECRET"` | 存放 Threema API 密钥的环境变量。 |
-| `webhook_port` | u16 | `8454` | 入站 Webhook 端口。 |
+| `webhook_port` | u16 | `8454` | **已弃用。** 之前用于独立 Webhook 服务器，现已忽略。所有 Webhook 共享 API 端口。 |
 | `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
 
 #### `[channels.nostr]`
@@ -1241,13 +1241,13 @@ allowed_rooms = []
 ```toml
 [channels.pumble]
 bot_token_env = "PUMBLE_BOT_TOKEN"
-webhook_port = 8455
+# webhook_port = 8455  # 已弃用：Webhook 现共享 API 端口
 ```
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `bot_token_env` | string | `"PUMBLE_BOT_TOKEN"` | 存放 Pumble Bot 令牌的环境变量。 |
-| `webhook_port` | u16 | `8455` | 入站 Webhook 端口。 |
+| `webhook_port` | u16 | `8455` | **已弃用。** 之前用于独立 Webhook 服务器，现已忽略。所有 Webhook 共享 API 端口。 |
 | `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
 
 #### `[channels.flock]`
@@ -1255,13 +1255,13 @@ webhook_port = 8455
 ```toml
 [channels.flock]
 bot_token_env = "FLOCK_BOT_TOKEN"
-webhook_port = 8456
+# webhook_port = 8456  # 已弃用：Webhook 现共享 API 端口
 ```
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `bot_token_env` | string | `"FLOCK_BOT_TOKEN"` | 存放 Flock Bot 令牌的环境变量。 |
-| `webhook_port` | u16 | `8456` | 入站 Webhook 端口。 |
+| `webhook_port` | u16 | `8456` | **已弃用。** 之前用于独立 Webhook 服务器，现已忽略。所有 Webhook 共享 API 端口。 |
 | `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
 
 #### `[channels.twist]`
@@ -1316,7 +1316,7 @@ app_secret_env = "DINGTALK_APP_SECRET"
 receive_mode = "webhook"
 access_token_env = "DINGTALK_ACCESS_TOKEN"
 secret_env = "DINGTALK_SECRET"
-webhook_port = 8457
+# webhook_port = 8457  # 已弃用：Webhook 现共享 API 端口
 ```
 
 | 字段 | 类型 | 默认值 | 说明 |
@@ -1326,7 +1326,7 @@ webhook_port = 8457
 | `app_secret_env` | string | `"DINGTALK_APP_SECRET"` | 存放钉钉 App Secret 的环境变量（stream 模式）。 |
 | `access_token_env` | string | `"DINGTALK_ACCESS_TOKEN"` | 存放钉钉 Webhook 访问令牌的环境变量（webhook 模式）。 |
 | `secret_env` | string | `"DINGTALK_SECRET"` | 存放钉钉签名密钥的环境变量（webhook 模式）。 |
-| `webhook_port` | u16 | `8457` | 入站 Webhook 端口（仅 webhook 模式）。 |
+| `webhook_port` | u16 | `8457` | **已弃用。** 之前用于独立 Webhook 服务器，现已忽略。所有 Webhook 共享 API 端口。 |
 | `robot_code` | string 或 null | `null` | Stream 模式回复使用的机器人编码（默认使用 app_key）。 |
 | `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
 
@@ -1409,6 +1409,29 @@ listen_port = 8460
 | `listen_port` | u16 | `8460` | 监听入站 Webhook 请求的端口。 |
 | `callback_url` | string 或 null | `null` | 发送出站消息的 POST 目标 URL。 |
 | `default_agent` | string 或 null | `null` | 消息路由的目标 Agent 名称。 |
+
+#### `[channels.voice]`
+
+基于 WebSocket 的语音渠道，支持 STT（语音转文字）和 TTS（文字转语音）。
+
+```toml
+[channels.voice]
+api_key_env = "OPENAI_API_KEY"
+stt_url = "https://api.openai.com"
+tts_url = "https://api.openai.com"
+tts_voice = "alloy"
+# buffer_threshold = 32768
+# default_agent = "assistant"
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `api_key_env` | string | `"OPENAI_API_KEY"` | 存放 STT/TTS 服务 API key 的环境变量名。 |
+| `stt_url` | string | `"https://api.openai.com"` | STT API 基础 URL（兼容 OpenAI Whisper）。 |
+| `tts_url` | string | `"https://api.openai.com"` | TTS API 基础 URL。 |
+| `tts_voice` | string | `"alloy"` | TTS 语音名称。可选：`alloy`、`echo`、`fable`、`onyx`、`nova`、`shimmer`。 |
+| `buffer_threshold` | usize | `32768` | 触发 STT 的音频缓冲区大小（字节）。 |
+| `default_agent` | string 或 null | `null` | 语音消息路由到的默认 Agent 名称。 |
 
 #### `[channels.linkedin]`
 
