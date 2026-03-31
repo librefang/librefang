@@ -32,7 +32,7 @@ use librefang_runtime::sandbox::{SandboxConfig, WasmSandbox};
 use librefang_runtime::tool_runner::builtin_tool_definitions;
 use librefang_types::agent::*;
 use librefang_types::capability::Capability;
-use librefang_types::config::{AuthProfile, KernelConfig, OutputFormat};
+use librefang_types::config::{AuthProfile, KernelConfig};
 use librefang_types::error::LibreFangError;
 use librefang_types::event::*;
 use librefang_types::memory::Memory;
@@ -9505,16 +9505,18 @@ impl KernelHandle for LibreFangKernel {
             librefang_user: None,
         };
 
+        let default_format =
+            librefang_channels::formatter::default_output_format_for_channel(channel);
         let formatted = if channel == "wecom" {
             let output_format = cfg
                 .channels
                 .wecom
                 .as_ref()
                 .and_then(|c| c.overrides.output_format)
-                .unwrap_or(OutputFormat::PlainText);
+                .unwrap_or(default_format);
             librefang_channels::formatter::format_for_wecom(message, output_format)
         } else {
-            message.to_string()
+            librefang_channels::formatter::format_for_channel(message, default_format)
         };
 
         let content = librefang_channels::types::ChannelContent::Text(formatted);
