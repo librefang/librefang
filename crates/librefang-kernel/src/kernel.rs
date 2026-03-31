@@ -10470,16 +10470,13 @@ mod tests {
             .expect("agent should spawn with local model override");
 
         let entry = kernel.registry.get(agent_id).expect("agent registry entry");
-        assert_eq!(entry.manifest.model.provider, "ollama");
-        assert_eq!(entry.manifest.model.model, "Qwen3.5-4B-MLX-4bit");
-        assert_eq!(
-            entry.manifest.model.base_url.as_deref(),
-            Some("http://127.0.0.1:11434/v1")
-        );
-        assert!(
-            entry.manifest.model.api_key_env.is_none(),
-            "local model override should not require an API key env var"
-        );
+        // Spawn now stores "default"/"default" so provider changes propagate at
+        // execute time without re-spawning. Concrete resolution happens in
+        // execute_llm_agent, not at spawn.
+        assert_eq!(entry.manifest.model.provider, "default");
+        assert_eq!(entry.manifest.model.model, "default");
+        assert!(entry.manifest.model.base_url.is_none());
+        assert!(entry.manifest.model.api_key_env.is_none());
 
         kernel.shutdown();
     }
