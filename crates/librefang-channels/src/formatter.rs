@@ -15,7 +15,7 @@ pub fn default_output_format_for_channel(channel_type: &str) -> OutputFormat {
     match channel_type {
         "telegram" => OutputFormat::TelegramHtml,
         "slack" => OutputFormat::SlackMrkdwn,
-        "wecom" => OutputFormat::PlainText,
+        "wecom" => OutputFormat::Markdown,
         _ => OutputFormat::Markdown,
     }
 }
