@@ -196,7 +196,7 @@ impl ChannelAdapter for WebhookAdapter {
         let account_id = Arc::new(self.account_id.clone());
 
         let app = axum::Router::new().route(
-            "/incoming",
+            "/webhook",
             axum::routing::post({
                 let tx = Arc::clone(&tx);
                 let secret = Arc::clone(&secret);

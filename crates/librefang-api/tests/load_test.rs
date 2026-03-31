@@ -67,7 +67,7 @@ async fn start_test_server() -> TestServer {
         active_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         prometheus_handle: None,
         media_drivers: librefang_runtime::media::MediaDriverCache::new(),
-        webhook_router: Arc::new(tokio::sync::RwLock::new(axum::Router::new())),
+        webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
     });
 
     let app = Router::new()

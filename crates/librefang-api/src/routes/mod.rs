@@ -116,7 +116,7 @@ pub struct AppState {
     pub media_drivers: librefang_runtime::media::MediaDriverCache,
     /// Dynamic webhook router for channel webhook endpoints.
     /// Mounted under `/channels` on the main server. Updated on hot-reload.
-    pub webhook_router: Arc<tokio::sync::RwLock<axum::Router>>,
+    pub webhook_router: Arc<tokio::sync::RwLock<Arc<axum::Router>>>,
     /// Prometheus metrics handle (only set when `telemetry` feature + config enabled).
     #[cfg(feature = "telemetry")]
     pub prometheus_handle: Option<metrics_exporter_prometheus::PrometheusHandle>,

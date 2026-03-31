@@ -2755,7 +2755,7 @@ pub async fn reload_channels_from_disk(
     *state.bridge_manager.lock().await = new_bridge;
 
     // Swap the webhook router so new routes take effect on the shared server
-    *state.webhook_router.write().await = webhook_router;
+    *state.webhook_router.write().await = Arc::new(webhook_router);
 
     info!(
         started = started.len(),

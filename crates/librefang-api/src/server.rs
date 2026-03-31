@@ -463,7 +463,7 @@ pub async fn build_router(
 
     let channels_config = kernel.config_ref().channels.clone();
     let active_sessions = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
-    let webhook_router = Arc::new(tokio::sync::RwLock::new(initial_webhook_router));
+    let webhook_router = Arc::new(tokio::sync::RwLock::new(Arc::new(initial_webhook_router)));
     let state = Arc::new(AppState {
         kernel: kernel.clone(),
         started_at: Instant::now(),
@@ -630,12 +630,17 @@ pub async fn build_router(
         let wr = channel_webhook_state.clone();
         async move {
             use tower::ServiceExt;
-            let router = wr.read().await.clone();
-            router
+            let guard = wr.read().await;
+            let router: Arc<axum::Router> = Arc::clone(&guard);
+            drop(guard);
+            // Unwrap the Arc — if we hold the only reference we avoid a clone,
+            // otherwise Router::clone is needed (only during hot-reload overlap).
+            Arc::try_unwrap(router)
+                .unwrap_or_else(|arc| (*arc).clone())
                 .into_service()
                 .oneshot(req)
                 .await
-                .unwrap_or_else(|e| match e {})
+                .unwrap_or_else(|e: std::convert::Infallible| match e {})
         }
     });
     let app = app.nest("/channels", channel_routes);
