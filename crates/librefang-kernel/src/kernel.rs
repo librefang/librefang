@@ -32,7 +32,7 @@ use librefang_runtime::sandbox::{SandboxConfig, WasmSandbox};
 use librefang_runtime::tool_runner::builtin_tool_definitions;
 use librefang_types::agent::*;
 use librefang_types::capability::Capability;
-use librefang_types::config::{AuthProfile, KernelConfig, OutputFormat};
+use librefang_types::config::{AuthProfile, KernelConfig};
 use librefang_types::error::LibreFangError;
 use librefang_types::event::*;
 use librefang_types::memory::Memory;
@@ -6095,7 +6095,7 @@ system_prompt = "You are a helpful assistant."
 
     /// Reload configuration: read the config file, diff against current, and
     /// apply hot-reloadable actions. Returns the reload plan for API response.
-    pub fn reload_config(&self) -> Result<crate::config_reload::ReloadPlan, String> {
+    pub async fn reload_config(&self) -> Result<crate::config_reload::ReloadPlan, String> {
         let old_cfg = self.config.load();
         use crate::config_reload::{
             build_reload_plan, should_apply_hot, validate_config_for_reload,
@@ -6127,7 +6127,7 @@ system_prompt = "You are a helpful assistant."
         // In Off / Restart modes the user expects no runtime changes — they
         // must restart to pick up the new config.
         if should_apply_hot(old_cfg.reload.mode, &plan) {
-            let _write_guard = self.config_reload_lock.blocking_write();
+            let _write_guard = self.config_reload_lock.write().await;
             self.apply_hot_actions_inner(&plan, &new_config);
             self.config.store(std::sync::Arc::new(new_config));
         }
@@ -9508,16 +9508,18 @@ impl KernelHandle for LibreFangKernel {
             librefang_user: None,
         };
 
+        let default_format =
+            librefang_channels::formatter::default_output_format_for_channel(channel);
         let formatted = if channel == "wecom" {
             let output_format = cfg
                 .channels
                 .wecom
                 .as_ref()
                 .and_then(|c| c.overrides.output_format)
-                .unwrap_or(OutputFormat::PlainText);
+                .unwrap_or(default_format);
             librefang_channels::formatter::format_for_wecom(message, output_format)
         } else {
-            message.to_string()
+            librefang_channels::formatter::format_for_channel(message, default_format)
         };
 
         let content = librefang_channels::types::ChannelContent::Text(formatted);

@@ -201,7 +201,7 @@ api_key_env = "{api_key_env}"
     }
 
     // Reload config so kernel picks up new settings
-    let _ = state.kernel.reload_config();
+    let _ = state.kernel.reload_config().await;
 
     Json(serde_json::json!({
         "status": "initialized",
@@ -1374,7 +1374,7 @@ pub async fn config_reload(State(state): State<Arc<AppState>>) -> impl IntoRespo
         "config reload requested via API",
         "pending",
     );
-    match state.kernel.reload_config() {
+    match state.kernel.reload_config().await {
         Ok(plan) => {
             // If channel config changed, the kernel already cleared the adapter
             // registry — but we also need to stop the old BridgeManager and
@@ -1730,7 +1730,7 @@ pub async fn config_set(
     }
 
     // Trigger reload
-    let reload_status = match state.kernel.reload_config() {
+    let reload_status = match state.kernel.reload_config().await {
         Ok(plan) => {
             if plan.restart_required {
                 "applied_partial"

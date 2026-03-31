@@ -7,6 +7,19 @@
 
 use librefang_types::config::OutputFormat;
 
+/// Return the default [`OutputFormat`] for a channel type string.
+///
+/// Channels that support rich formatting get their native format;
+/// unknown channel types fall back to raw Markdown (pass-through).
+pub fn default_output_format_for_channel(channel_type: &str) -> OutputFormat {
+    match channel_type {
+        "telegram" => OutputFormat::TelegramHtml,
+        "slack" => OutputFormat::SlackMrkdwn,
+        "wecom" => OutputFormat::Markdown,
+        _ => OutputFormat::Markdown,
+    }
+}
+
 /// Format a message for a specific channel output format.
 #[inline]
 pub fn format_for_channel(text: &str, format: OutputFormat) -> String {
