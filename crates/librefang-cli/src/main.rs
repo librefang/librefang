@@ -2091,7 +2091,31 @@ fn cmd_init_upgrade() {
         }
     }
 
-    // 7. Summary
+    // 7. Warn users whose require_approval list predates the file_write default (#1861).
+    // The default was expanded to include file_write and file_delete, but users who
+    // had an explicit `require_approval = [...]` entry in their config won't pick up
+    // the new default automatically.
+    let approval_needs_update = existing
+        .get("approval")
+        .and_then(|a| a.get("require_approval"))
+        .and_then(|r| r.as_array())
+        .is_some_and(|list| {
+            let has_shell = list.iter().any(|v| v.as_str() == Some("shell_exec"));
+            let missing_file_write = !list.iter().any(|v| v.as_str() == Some("file_write"));
+            has_shell && missing_file_write
+        });
+    if approval_needs_update {
+        ui::blank();
+        ui::hint(
+            "Your require_approval list only contains \"shell_exec\". \
+             File operations (file_write, file_delete) now require approval by default.",
+        );
+        ui::hint(
+            "To enable: add \"file_write\" and \"file_delete\" to require_approval in config.toml",
+        );
+    }
+
+    // 8. Summary
     ui::blank();
     ui::success("Upgrade complete!");
     ui::kv("Backup", &backup_name);
