@@ -26,7 +26,9 @@ pub fn resolve_sandbox_path(user_path: &str, workspace_root: &Path) -> Result<Pa
     // Reject any `..` components
     for component in path.components() {
         if matches!(component, std::path::Component::ParentDir) {
-            return Err("Path traversal denied: '..' components are forbidden".to_string());
+            return Err(format!(
+                "{ERR_PATH_TRAVERSAL}: '..' components are forbidden"
+            ));
         }
     }
 
