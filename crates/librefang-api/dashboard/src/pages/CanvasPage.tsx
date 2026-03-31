@@ -1519,8 +1519,7 @@ function CanvasPageInner() {
       // Error: clear all state and edge animation
       setNodes(nds => nds.map(n => ({ ...n, data: { ...(n.data as any), _runState: undefined } })));
       setEdges(eds => eds.map(e => ({ ...e, animated: false })));
-      // Use the detail field from the backend error response when available
-      const detail = (e as any)?.detail || (e as any)?.message || String(e);
+      const detail = (e as any)?.message || String(e);
       showError(detail);
     } finally {
       setRunningWorkflowId(null);

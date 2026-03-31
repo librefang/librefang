@@ -596,7 +596,10 @@ async function parseError(response: Response): Promise<Error> {
   let message = response.statusText;
   try {
     const json = JSON.parse(text) as Json;
-    if (typeof json.error === "string") {
+    // Prefer the human-readable `detail` field over the machine-code `error` field
+    if (typeof (json as any).detail === "string") {
+      message = (json as any).detail;
+    } else if (typeof json.error === "string") {
       message = json.error;
     }
   } catch {

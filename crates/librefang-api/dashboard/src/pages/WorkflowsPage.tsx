@@ -425,9 +425,7 @@ export function WorkflowsPage() {
                       <p className="text-[10px] font-bold text-error">Run failed</p>
                     </div>
                     <p className="text-xs text-error/80">
-                      {(runMutation.error as any)?.detail
-                        || (runMutation.error as any)?.message
-                        || String(runMutation.error)}
+                      {(runMutation.error as any)?.message || String(runMutation.error)}
                     </p>
                   </div>
                 )}
