@@ -7,7 +7,7 @@
       "name": "Apache-2.0",
       "url": "https://www.apache.org/licenses/LICENSE-2.0"
     },
-    "version": "2026.3.25-rc6"
+    "version": "2026.3.31-beta4"
   },
   "paths": {
     "/.well-known/agent.json": {
@@ -4008,6 +4008,26 @@
         }
       }
     },
+    "/api/init": {
+      "post": {
+        "tags": [
+          "system"
+        ],
+        "summary": "POST /api/init — Quick initialization (detect provider, write config, reload).",
+        "description": "Skips if config.toml already exists. Returns the detected provider/model.",
+        "operationId": "quick_init",
+        "responses": {
+          "200": {
+            "description": "Quick init result",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/integrations": {
       "get": {
         "tags": [
@@ -5773,6 +5793,43 @@
         }
       }
     },
+    "/api/providers/{name}/default": {
+      "post": {
+        "tags": [
+          "models"
+        ],
+        "summary": "POST /api/providers/{name}/default — Set a provider as the default model provider.",
+        "description": "Looks up the best default model for the given provider and updates both\nthe in-memory override and config.toml so it persists across restarts.",
+        "operationId": "set_default_provider",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Provider identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default provider updated",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "No model found for provider"
+          },
+          "404": {
+            "description": "Provider not found"
+          }
+        }
+      }
+    },
     "/api/providers/{name}/key": {
       "post": {
         "tags": [
@@ -7293,6 +7350,10 @@
             "type": "boolean",
             "description": "If true, this is an ephemeral \"side question\" (`/btw`).\nThe message is answered using the agent's system prompt but WITHOUT\nloading or saving session history — the real conversation is untouched."
           },
+          "is_group": {
+            "type": "boolean",
+            "description": "Whether this message originated from a group chat (vs DM)."
+          },
           "message": {
             "type": "string"
           },
@@ -7309,6 +7370,10 @@
               "null"
             ],
             "description": "Optional sender display name."
+          },
+          "was_mentioned": {
+            "type": "boolean",
+            "description": "Whether the bot was @mentioned in a group message."
           }
         }
       },
@@ -7466,6 +7531,15 @@
               "string",
               "null"
             ]
+          },
+          "max_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Maximum tokens for LLM response. Controls conversation window size.",
+            "minimum": 0
           },
           "model": {
             "type": [

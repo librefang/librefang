@@ -34,6 +34,10 @@ impl TtsEngine {
         if std::env::var("ELEVENLABS_API_KEY").is_ok() {
             return Some("elevenlabs");
         }
+        if std::env::var("GOOGLE_API_KEY").is_ok() || std::env::var("GOOGLE_CLOUD_API_KEY").is_ok()
+        {
+            return Some("google_tts");
+        }
         None
     }
 
@@ -67,7 +71,7 @@ impl TtsEngine {
             .provider
             .as_deref()
             .or_else(|| Self::detect_provider())
-            .ok_or("No TTS provider configured. Set OPENAI_API_KEY or ELEVENLABS_API_KEY")?;
+            .ok_or("No TTS provider configured. Set OPENAI_API_KEY, ELEVENLABS_API_KEY, or GOOGLE_API_KEY")?;
 
         match provider {
             "openai" => {
@@ -75,6 +79,10 @@ impl TtsEngine {
                     .await
             }
             "elevenlabs" => self.synthesize_elevenlabs(text, voice_override).await,
+            "google_tts" => {
+                self.synthesize_google(text, voice_override, format_override)
+                    .await
+            }
             other => Err(format!("Unknown TTS provider: {other}")),
         }
     }
@@ -222,6 +230,94 @@ impl TtsEngine {
             duration_estimate_ms: duration_ms,
         })
     }
+
+    /// Synthesize via Google Cloud TTS API.
+    async fn synthesize_google(
+        &self,
+        text: &str,
+        voice_override: Option<&str>,
+        format_override: Option<&str>,
+    ) -> Result<TtsResult, String> {
+        let api_key = std::env::var("GOOGLE_API_KEY")
+            .or_else(|_| std::env::var("GOOGLE_CLOUD_API_KEY"))
+            .map_err(|_| "GOOGLE_API_KEY or GOOGLE_CLOUD_API_KEY not set")?;
+
+        let voice = voice_override.unwrap_or(&self.config.google.voice);
+        let language_code = &self.config.google.language_code;
+        let format = format_override.unwrap_or(&self.config.google.format);
+
+        let audio_encoding = match format {
+            "opus" | "ogg" => "OGG_OPUS",
+            "wav" | "pcm" => "LINEAR16",
+            _ => "MP3",
+        };
+
+        let body = serde_json::json!({
+            "input": { "text": text },
+            "voice": {
+                "languageCode": language_code,
+                "name": voice,
+            },
+            "audioConfig": {
+                "audioEncoding": audio_encoding,
+                "speakingRate": self.config.google.speaking_rate,
+                "pitch": self.config.google.pitch,
+            }
+        });
+
+        let url = format!(
+            "https://texttospeech.googleapis.com/v1/text:synthesize?key={}",
+            api_key
+        );
+
+        let client = crate::http_client::proxied_client();
+        let response = client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .timeout(std::time::Duration::from_secs(self.config.timeout_secs))
+            .send()
+            .await
+            .map_err(|e| format!("Google TTS request failed: {e}"))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let err = response.text().await.unwrap_or_default();
+            let truncated = crate::str_utils::safe_truncate_str(&err, 500);
+            return Err(format!("Google TTS failed (HTTP {status}): {truncated}"));
+        }
+
+        let resp_json: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse Google TTS response: {e}"))?;
+
+        let audio_b64 = resp_json["audioContent"]
+            .as_str()
+            .ok_or("Google TTS response missing audioContent field")?;
+
+        use base64::Engine;
+        let audio_data = base64::engine::general_purpose::STANDARD
+            .decode(audio_b64)
+            .map_err(|e| format!("Failed to decode Google TTS audio: {e}"))?;
+
+        if audio_data.len() > MAX_AUDIO_RESPONSE_BYTES {
+            return Err(format!(
+                "Audio data exceeds {}MB limit",
+                MAX_AUDIO_RESPONSE_BYTES / 1024 / 1024
+            ));
+        }
+
+        let word_count = text.split_whitespace().count();
+        let duration_ms = (word_count as u64 * 400).max(500);
+
+        Ok(TtsResult {
+            audio_data,
+            format: format.to_string(),
+            provider: "google_tts".to_string(),
+            duration_estimate_ms: duration_ms,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -250,6 +346,11 @@ mod tests {
         assert_eq!(config.openai.speed, 1.0);
         assert_eq!(config.elevenlabs.voice_id, "21m00Tcm4TlvDq8ikWAM");
         assert_eq!(config.elevenlabs.model_id, "eleven_monolingual_v1");
+        assert_eq!(config.google.voice, "en-US-Standard-F");
+        assert_eq!(config.google.language_code, "en-US");
+        assert_eq!(config.google.speaking_rate, 1.0);
+        assert_eq!(config.google.pitch, 0.0);
+        assert_eq!(config.google.format, "mp3");
     }
 
     #[tokio::test]
