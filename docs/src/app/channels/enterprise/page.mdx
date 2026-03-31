@@ -1,0 +1,422 @@
+# Enterprise Channels
+
+Enterprise collaboration platform integrations.
+
+---
+
+## Microsoft Teams
+
+### Prerequisites
+
+- A Microsoft Azure account with access to the [Azure Bot Service](https://learn.microsoft.com/en-us/microsoftteams/platform/)
+- A registered Azure AD application with a client ID and secret
+
+### Setup
+
+1. Go to the [Azure Portal](https://portal.azure.com/) and create a new **Bot Channels Registration** (or Azure Bot resource).
+2. Under **Configuration**, note the **Microsoft App ID**.
+3. Go to **Certificates & secrets** and create a new client secret. Copy it immediately.
+4. In the Teams Admin Center, enable your bot for the organization or upload a custom app manifest.
+5. Set environment variables:
+
+```bash
+export TEAMS_APP_ID=your-azure-app-id         # Environment variable
+export TEAMS_APP_SECRET=your-azure-client-secret
+librefang vault set TEAMS_APP_ID              # Encrypted vault (recommended)
+librefang vault set TEAMS_APP_SECRET
+librefang config set-key teams                # .env file
+# Or set via dashboard "Set API Key" button   # secrets.env
+```
+
+6. Add to config:
+
+```toml
+[channels.teams]
+app_id_env = "TEAMS_APP_ID"
+app_secret_env = "TEAMS_APP_SECRET"
+default_agent = "ops"
+```
+
+7. Configure the messaging endpoint in Azure to point to your LibreFang instance's public URL (e.g., `https://your-domain.com:4545/channels/teams/webhook`).
+8. Restart the daemon.
+
+### How It Works
+
+The Teams adapter uses the Microsoft Bot Framework v3 webhook protocol with OAuth2 token exchange. Incoming messages arrive via HTTPS POST to the shared API server at `/channels/teams/webhook`, and the adapter authenticates each request by validating the JWT bearer token against Azure AD. Responses are sent back through the Bot Framework REST API.
+
+---
+
+## Mattermost
+
+### Prerequisites
+
+- A Mattermost server (self-hosted or cloud) with admin access
+- A bot account or personal access token
+
+### Setup
+
+1. In Mattermost, go to **Integrations > Bot Accounts** and create a new bot, or go to **Account Settings > Security > Personal Access Tokens** and generate a token.
+2. Copy the token.
+3. Set environment variables:
+
+```bash
+export MATTERMOST_TOKEN=your-bot-token        # Environment variable
+export MATTERMOST_URL=https://mattermost.example.com
+librefang vault set MATTERMOST_TOKEN          # Encrypted vault (recommended)
+librefang vault set MATTERMOST_URL
+librefang config set-key mattermost           # .env file
+# Or set via dashboard "Set API Key" button   # secrets.env
+```
+
+4. Add to config:
+
+```toml
+[channels.mattermost]
+token_env = "MATTERMOST_TOKEN"
+url_env = "MATTERMOST_URL"
+default_agent = "ops"
+```
+
+5. Restart the daemon.
+
+### How It Works
+
+The Mattermost adapter connects to the Mattermost server via WebSocket for real-time event delivery and uses the REST v4 API for sending messages. It listens for new post events and routes them to the configured agent.
+
+---
+
+## Google Chat
+
+### Prerequisites
+
+- A Google Cloud project with the [Google Chat API](https://developers.google.com/workspace/chat/) enabled
+- A service account key file (JSON)
+
+### Setup
+
+1. In the [Google Cloud Console](https://console.cloud.google.com/), enable the Google Chat API.
+2. Create a service account and download the JSON key file.
+3. Configure a Chat app in the Google Chat API settings, selecting the **HTTP endpoint** connection type. Set the endpoint URL to your LibreFang instance (e.g., `https://your-domain.com:4545/channels/google_chat/webhook`).
+4. Set environment variables:
+
+```bash
+export GOOGLE_CHAT_SA_KEY=/path/to/sa-key.json  # Environment variable
+export GOOGLE_CHAT_SPACE=spaces/AAAA_BBBBBB
+librefang vault set GOOGLE_CHAT_SA_KEY        # Encrypted vault (recommended)
+librefang vault set GOOGLE_CHAT_SPACE
+librefang config set-key google_chat          # .env file
+# Or set via dashboard "Set API Key" button   # secrets.env
+```
+
+5. Add to config:
+
+```toml
+[channels.google_chat]
+sa_key_env = "GOOGLE_CHAT_SA_KEY"
+space_env = "GOOGLE_CHAT_SPACE"
+default_agent = "ops"
+```
+
+6. Restart the daemon.
+
+### How It Works
+
+The Google Chat adapter authenticates using a service account and receives messages via webhook callbacks on the shared API server at `/channels/google_chat/webhook`. Responses are sent back through the Google Chat REST API using the space and thread identifiers from the incoming message.
+
+---
+
+## Webex
+
+### Prerequisites
+
+- A Webex bot token (from the [Webex Developer Portal](https://developer.webex.com/docs/api/getting-started))
+
+### Setup
+
+1. Go to [developer.webex.com](https://developer.webex.com/) and sign in.
+2. Navigate to **My Webex Apps** and create a new Bot.
+3. Copy the bot access token.
+4. Set the environment variable:
+
+```bash
+export WEBEX_BOT_TOKEN=your-webex-bot-token   # Environment variable
+librefang vault set WEBEX_BOT_TOKEN           # Encrypted vault (recommended)
+librefang config set-key webex                # .env file
+# Or set via dashboard "Set API Key" button   # secrets.env
+```
+
+5. Add to config:
+
+```toml
+[channels.webex]
+token_env = "WEBEX_BOT_TOKEN"
+default_agent = "assistant"
+```
+
+6. Restart the daemon.
+
+### How It Works
+
+The Webex adapter registers a webhook with the Webex API to receive message events. Incoming messages are fetched via the Webex REST API using the message ID from the webhook payload, and responses are posted back through the messages endpoint.
+
+---
+
+## Feishu / Lark
+
+### Prerequisites
+
+- A Feishu (or Lark) custom app with Bot capabilities (from the [Feishu Open Platform](https://open.feishu.cn/document/))
+
+### Setup
+
+1. Go to the [Feishu Open Platform](https://open.feishu.cn/) and create a custom application.
+2. Enable **Bot** under the app's capabilities.
+3. Note the **App ID** and **App Secret** from the app credentials page.
+4. Configure event subscriptions to point to your LibreFang instance's webhook URL (e.g., `https://your-domain.com:4545/channels/feishu/webhook`).
+5. Set environment variables:
+
+```bash
+export FEISHU_APP_ID=your-app-id              # Environment variable
+export FEISHU_APP_SECRET=your-app-secret
+librefang vault set FEISHU_APP_ID             # Encrypted vault (recommended)
+librefang vault set FEISHU_APP_SECRET
+librefang config set-key feishu               # .env file
+# Or set via dashboard "Set API Key" button   # secrets.env
+```
+
+6. Add to config:
+
+```toml
+[channels.feishu]
+app_id_env = "FEISHU_APP_ID"
+app_secret_env = "FEISHU_APP_SECRET"
+default_agent = "assistant"
+```
+
+7. Restart the daemon.
+
+### How It Works
+
+The Feishu adapter receives message events via webhook callbacks on the shared API server at `/channels/feishu/webhook`. It obtains a tenant access token using the app credentials, then uses the Feishu REST API to send message replies. Event payloads are verified using the app's verification token.
+
+---
+
+## Rocket.Chat
+
+### Prerequisites
+
+- A Rocket.Chat server with admin access (from [Rocket.Chat](https://developer.rocket.chat/reference/api))
+- A bot user account or personal access token
+
+### Setup
+
+1. In Rocket.Chat, go to **Administration > Rooms** or create a bot user.
+2. Generate a personal access token via **My Account > Personal Access Tokens**.
+3. Set environment variables:
+
+```bash
+export ROCKETCHAT_TOKEN=your-access-token     # Environment variable
+export ROCKETCHAT_URL=https://chat.example.com
+librefang vault set ROCKETCHAT_TOKEN          # Encrypted vault (recommended)
+librefang vault set ROCKETCHAT_URL
+librefang config set-key rocketchat           # .env file
+# Or set via dashboard "Set API Key" button   # secrets.env
+```
+
+4. Add to config:
+
+```toml
+[channels.rocketchat]
+token_env = "ROCKETCHAT_TOKEN"
+url_env = "ROCKETCHAT_URL"
+default_agent = "assistant"
+```
+
+5. Restart the daemon.
+
+### How It Works
+
+The Rocket.Chat adapter polls the Rocket.Chat REST API for new messages at a regular interval. Incoming messages are routed to the configured agent, and responses are posted back through the REST API's chat endpoints.
+
+---
+
+## Zulip
+
+### Prerequisites
+
+- A Zulip server account (cloud or self-hosted)
+- A bot created in **Settings > Your bots** (see [Zulip API docs](https://zulip.com/api/))
+
+### Setup
+
+1. In Zulip, go to **Settings > Your bots** and click **Add a new bot**.
+2. Choose **Generic bot** and create it.
+3. Note the bot's email address and API key.
+4. Set environment variables:
+
+```bash
+export ZULIP_EMAIL=bot@example.zulipchat.com  # Environment variable
+export ZULIP_API_KEY=your-api-key
+export ZULIP_URL=https://example.zulipchat.com
+librefang vault set ZULIP_EMAIL               # Encrypted vault (recommended)
+librefang vault set ZULIP_API_KEY
+librefang vault set ZULIP_URL
+librefang config set-key zulip                # .env file
+# Or set via dashboard "Set API Key" button   # secrets.env
+```
+
+5. Add to config:
+
+```toml
+[channels.zulip]
+email_env = "ZULIP_EMAIL"
+api_key_env = "ZULIP_API_KEY"
+url_env = "ZULIP_URL"
+default_agent = "assistant"
+```
+
+6. Restart the daemon.
+
+### How It Works
+
+The Zulip adapter uses Zulip's event queue API for long-polling. It registers an event queue for message events, then continuously polls the queue for new messages. Responses are sent via the `messages` REST endpoint.
+
+---
+
+## Flock
+
+### Prerequisites
+
+- A Flock bot token (from the [Flock Developer Portal](https://docs.flock.com))
+
+### Setup
+
+1. Go to [docs.flock.com](https://docs.flock.com) and create a new bot.
+2. Copy the bot token.
+3. Set the environment variable:
+
+```bash
+export FLOCK_BOT_TOKEN=your-flock-bot-token   # Environment variable
+librefang vault set FLOCK_BOT_TOKEN           # Encrypted vault (recommended)
+librefang config set-key flock                # .env file
+# Or set via dashboard "Set API Key" button   # secrets.env
+```
+
+4. Add to config:
+
+```toml
+[channels.flock]
+token_env = "FLOCK_BOT_TOKEN"
+default_agent = "assistant"
+```
+
+5. Restart the daemon.
+
+### How It Works
+
+The Flock adapter receives messages via webhook callbacks on the shared API server at `/channels/flock/webhook`. Responses are sent back through the Flock REST API's `chat.sendMessage` endpoint.
+
+---
+
+## Twist
+
+### Prerequisites
+
+- A Twist account and integration token (from the [Twist Developer Portal](https://developer.twist.com/v3/))
+
+### Setup
+
+1. Go to [developer.twist.com](https://developer.twist.com/) and create a new integration.
+2. Copy the integration token.
+3. Set the environment variable:
+
+```bash
+export TWIST_TOKEN=your-twist-token           # Environment variable
+librefang vault set TWIST_TOKEN               # Encrypted vault (recommended)
+librefang config set-key twist                # .env file
+# Or set via dashboard "Set API Key" button   # secrets.env
+```
+
+4. Add to config:
+
+```toml
+[channels.twist]
+token_env = "TWIST_TOKEN"
+default_agent = "assistant"
+```
+
+5. Restart the daemon.
+
+### How It Works
+
+The Twist adapter polls the Twist REST API v3 for new messages in configured channels and threads. Responses are posted back via the API's comment or message endpoints.
+
+---
+
+## Pumble
+
+### Prerequisites
+
+- A Pumble workspace with bot integration support (see [Pumble Help](https://pumble.com/help))
+
+### Setup
+
+1. In Pumble, configure a bot integration for your workspace.
+2. Copy the bot token.
+3. Set the environment variable:
+
+```bash
+export PUMBLE_BOT_TOKEN=your-pumble-bot-token # Environment variable
+librefang vault set PUMBLE_BOT_TOKEN          # Encrypted vault (recommended)
+librefang config set-key pumble               # .env file
+# Or set via dashboard "Set API Key" button   # secrets.env
+```
+
+4. Add to config:
+
+```toml
+[channels.pumble]
+token_env = "PUMBLE_BOT_TOKEN"
+default_agent = "assistant"
+```
+
+5. Restart the daemon.
+
+### How It Works
+
+The Pumble adapter receives messages via webhook callbacks on the shared API server at `/channels/pumble/webhook`. Responses are sent back through the Pumble API.
+
+---
+
+## Guilded
+
+### Prerequisites
+
+- A Guilded bot token (from the [Guilded API documentation](https://www.guilded.gg/docs/api/))
+
+### Setup
+
+1. Go to your Guilded server settings and create a bot.
+2. Copy the bot token.
+3. Set the environment variable:
+
+```bash
+export GUILDED_BOT_TOKEN=your-guilded-token   # Environment variable
+librefang vault set GUILDED_BOT_TOKEN         # Encrypted vault (recommended)
+librefang config set-key guilded              # .env file
+# Or set via dashboard "Set API Key" button   # secrets.env
+```
+
+4. Add to config:
+
+```toml
+[channels.guilded]
+token_env = "GUILDED_BOT_TOKEN"
+default_agent = "assistant"
+```
+
+5. Restart the daemon.
+
+### How It Works
+
+The Guilded adapter connects to the Guilded API via WebSocket for real-time message events. Responses are sent through the Guilded REST API's channel message endpoints.

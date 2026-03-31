@@ -1,0 +1,418 @@
+# 企业协作渠道
+
+## Microsoft Teams
+
+### 前置条件
+
+- 拥有 [Azure Bot Service](https://learn.microsoft.com/en-us/microsoftteams/platform/) 访问权限的 Microsoft Azure 账户
+- 已注册的 Azure AD 应用，具备 Client ID 和 Secret
+
+### 设置步骤
+
+1. 前往 [Azure 门户](https://portal.azure.com/)，创建新的 **Bot Channels Registration**（或 Azure Bot 资源）。
+2. 在 **Configuration** 中记录 **Microsoft App ID**。
+3. 前往 **Certificates & secrets**，创建新的客户端密钥并立即复制。
+4. 在 Teams 管理中心为组织启用 Bot，或上传自定义应用 manifest。
+5. 设置环境变量：
+
+```bash
+export TEAMS_APP_ID=your-azure-app-id         # 环境变量
+export TEAMS_APP_SECRET=your-azure-client-secret
+librefang vault set TEAMS_APP_ID              # 加密金库（推荐）
+librefang vault set TEAMS_APP_SECRET
+librefang config set-key teams                # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+6. 添加到配置文件：
+
+```toml
+[channels.teams]
+app_id_env = "TEAMS_APP_ID"
+app_secret_env = "TEAMS_APP_SECRET"
+default_agent = "ops"
+```
+
+7. 在 Azure 中将消息端点配置为指向 LibreFang 实例的公网 URL（例如 `https://your-domain.com:4545/channels/teams/webhook`）。
+8. 重启守护进程。
+
+### 工作原理
+
+Teams 适配器使用 Microsoft Bot Framework v3 webhook 协议配合 OAuth2 令牌交换。传入消息通过 HTTPS POST webhook 到达，适配器通过验证 Azure AD 签发的 JWT Bearer Token 对每个请求进行认证。响应通过 Bot Framework REST API 发送。
+
+---
+
+## Mattermost
+
+### 前置条件
+
+- 一个 Mattermost 服务器（自托管或云版本），具备管理员权限
+- Bot 账户或个人访问令牌
+
+### 设置步骤
+
+1. 在 Mattermost 中，前往 **Integrations > Bot Accounts** 创建新 Bot，或前往 **Account Settings > Security > Personal Access Tokens** 生成令牌。
+2. 复制令牌。
+3. 设置环境变量：
+
+```bash
+export MATTERMOST_TOKEN=your-bot-token        # 环境变量
+export MATTERMOST_URL=https://mattermost.example.com
+librefang vault set MATTERMOST_TOKEN          # 加密金库（推荐）
+librefang vault set MATTERMOST_URL
+librefang config set-key mattermost           # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+4. 添加到配置文件：
+
+```toml
+[channels.mattermost]
+token_env = "MATTERMOST_TOKEN"
+url_env = "MATTERMOST_URL"
+default_agent = "ops"
+```
+
+5. 重启守护进程。
+
+### 工作原理
+
+Mattermost 适配器通过 WebSocket 连接到 Mattermost 服务器接收实时事件，并使用 REST v4 API 发送消息。它监听新帖子事件并路由到配置的 Agent。
+
+---
+
+## Google Chat
+
+### 前置条件
+
+- 已启用 [Google Chat API](https://developers.google.com/workspace/chat/) 的 Google Cloud 项目
+- 服务账户密钥文件（JSON）
+
+### 设置步骤
+
+1. 在 [Google Cloud 控制台](https://console.cloud.google.com/) 中启用 Google Chat API。
+2. 创建服务账户并下载 JSON 密钥文件。
+3. 在 Google Chat API 设置中配置 Chat 应用，选择 **HTTP endpoint** 连接类型。
+4. 设置环境变量：
+
+```bash
+export GOOGLE_CHAT_SA_KEY=/path/to/sa-key.json  # 环境变量
+export GOOGLE_CHAT_SPACE=spaces/AAAA_BBBBBB
+librefang vault set GOOGLE_CHAT_SA_KEY        # 加密金库（推荐）
+librefang vault set GOOGLE_CHAT_SPACE
+librefang config set-key google_chat          # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+5. 添加到配置文件：
+
+```toml
+[channels.google_chat]
+sa_key_env = "GOOGLE_CHAT_SA_KEY"
+space_env = "GOOGLE_CHAT_SPACE"
+default_agent = "ops"
+```
+
+6. 重启守护进程。
+
+### 工作原理
+
+Google Chat 适配器使用服务账户进行认证，通过 Google Chat 的 webhook 回调接收消息。响应通过 Google Chat REST API 使用传入消息中的 space 和 thread 标识符发送。
+
+---
+
+## Webex
+
+### 前置条件
+
+- Webex Bot 令牌（从 [Webex 开发者门户](https://developer.webex.com/docs/api/getting-started) 获取）
+
+### 设置步骤
+
+1. 前往 [developer.webex.com](https://developer.webex.com/) 并登录。
+2. 导航到 **My Webex Apps** 并创建新 Bot。
+3. 复制 Bot 访问令牌。
+4. 设置环境变量：
+
+```bash
+export WEBEX_BOT_TOKEN=your-webex-bot-token   # 环境变量
+librefang vault set WEBEX_BOT_TOKEN           # 加密金库（推荐）
+librefang config set-key webex                # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+5. 添加到配置文件：
+
+```toml
+[channels.webex]
+token_env = "WEBEX_BOT_TOKEN"
+default_agent = "assistant"
+```
+
+6. 重启守护进程。
+
+### 工作原理
+
+Webex 适配器向 Webex API 注册 webhook 以接收消息事件。传入消息通过 webhook 负载中的消息 ID 使用 Webex REST API 获取，响应通过 messages 端点发送。
+
+---
+
+## 飞书 / Lark
+
+### 前置条件
+
+- 具备 Bot 能力的飞书（或 Lark）自建应用（从[飞书开放平台](https://open.feishu.cn/document/)创建）
+
+### 设置步骤
+
+1. 前往[飞书开放平台](https://open.feishu.cn/)，创建自建应用。
+2. 在应用能力中启用 **机器人**。
+3. 从应用凭证页面记录 **App ID** 和 **App Secret**。
+4. 配置事件订阅，指向 LibreFang 实例的 webhook URL。
+5. 设置环境变量：
+
+```bash
+export FEISHU_APP_ID=your-app-id              # 环境变量
+export FEISHU_APP_SECRET=your-app-secret
+librefang vault set FEISHU_APP_ID             # 加密金库（推荐）
+librefang vault set FEISHU_APP_SECRET
+librefang config set-key feishu               # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+6. 添加到配置文件：
+
+```toml
+[channels.feishu]
+app_id_env = "FEISHU_APP_ID"
+app_secret_env = "FEISHU_APP_SECRET"
+default_agent = "assistant"
+```
+
+7. 重启守护进程。
+
+### 工作原理
+
+飞书适配器使用开放平台 webhook 协议接收消息事件。它使用应用凭证获取 tenant access token，然后通过飞书 REST API 发送消息回复。事件负载通过应用的验证令牌进行校验。
+
+---
+
+## Rocket.Chat
+
+### 前置条件
+
+- 具备管理员权限的 Rocket.Chat 服务器（参见 [Rocket.Chat API](https://developer.rocket.chat/reference/api)）
+- Bot 用户账户或个人访问令牌
+
+### 设置步骤
+
+1. 在 Rocket.Chat 中，前往 **Administration > Rooms** 或创建 Bot 用户。
+2. 通过 **My Account > Personal Access Tokens** 生成个人访问令牌。
+3. 设置环境变量：
+
+```bash
+export ROCKETCHAT_TOKEN=your-access-token     # 环境变量
+export ROCKETCHAT_URL=https://chat.example.com
+librefang vault set ROCKETCHAT_TOKEN          # 加密金库（推荐）
+librefang vault set ROCKETCHAT_URL
+librefang config set-key rocketchat           # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+4. 添加到配置文件：
+
+```toml
+[channels.rocketchat]
+token_env = "ROCKETCHAT_TOKEN"
+url_env = "ROCKETCHAT_URL"
+default_agent = "assistant"
+```
+
+5. 重启守护进程。
+
+### 工作原理
+
+Rocket.Chat 适配器定期轮询 Rocket.Chat REST API 获取新消息。传入消息路由到配置的 Agent，响应通过 REST API 的聊天端点发送。
+
+---
+
+## Zulip
+
+### 前置条件
+
+- Zulip 服务器账户（云版或自托管版）
+- 在 **Settings > Your bots** 中创建的 Bot（参见 [Zulip API 文档](https://zulip.com/api/)）
+
+### 设置步骤
+
+1. 在 Zulip 中，前往 **Settings > Your bots**，点击 **Add a new bot**。
+2. 选择 **Generic bot** 类型并创建。
+3. 记录 Bot 的邮箱地址和 API 密钥。
+4. 设置环境变量：
+
+```bash
+export ZULIP_EMAIL=bot@example.zulipchat.com  # 环境变量
+export ZULIP_API_KEY=your-api-key
+export ZULIP_URL=https://example.zulipchat.com
+librefang vault set ZULIP_EMAIL               # 加密金库（推荐）
+librefang vault set ZULIP_API_KEY
+librefang vault set ZULIP_URL
+librefang config set-key zulip                # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+5. 添加到配置文件：
+
+```toml
+[channels.zulip]
+email_env = "ZULIP_EMAIL"
+api_key_env = "ZULIP_API_KEY"
+url_env = "ZULIP_URL"
+default_agent = "assistant"
+```
+
+6. 重启守护进程。
+
+### 工作原理
+
+Zulip 适配器使用 Zulip 的 event queue API 进行长轮询。它注册一个消息事件队列，然后持续轮询该队列获取新消息。响应通过 `messages` REST 端点发送。
+
+---
+
+## Flock
+
+### 前置条件
+
+- Flock Bot 令牌（从 [Flock 开发者门户](https://docs.flock.com) 获取）
+
+### 设置步骤
+
+1. 前往 [docs.flock.com](https://docs.flock.com)，创建新 Bot。
+2. 复制 Bot 令牌。
+3. 设置环境变量：
+
+```bash
+export FLOCK_BOT_TOKEN=your-flock-bot-token   # 环境变量
+librefang vault set FLOCK_BOT_TOKEN           # 加密金库（推荐）
+librefang config set-key flock                # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+4. 添加到配置文件：
+
+```toml
+[channels.flock]
+token_env = "FLOCK_BOT_TOKEN"
+default_agent = "assistant"
+```
+
+5. 重启守护进程。
+
+### 工作原理
+
+Flock 适配器通过 webhook 回调接收来自 Flock 平台的消息。响应通过 Flock REST API 的 `chat.sendMessage` 端点发送。
+
+---
+
+## Twist
+
+### 前置条件
+
+- Twist 账户和集成令牌（从 [Twist 开发者门户](https://developer.twist.com/v3/) 获取）
+
+### 设置步骤
+
+1. 前往 [developer.twist.com](https://developer.twist.com/)，创建新集成。
+2. 复制集成令牌。
+3. 设置环境变量：
+
+```bash
+export TWIST_TOKEN=your-twist-token           # 环境变量
+librefang vault set TWIST_TOKEN               # 加密金库（推荐）
+librefang config set-key twist                # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+4. 添加到配置文件：
+
+```toml
+[channels.twist]
+token_env = "TWIST_TOKEN"
+default_agent = "assistant"
+```
+
+5. 重启守护进程。
+
+### 工作原理
+
+Twist 适配器轮询 Twist REST API v3 获取配置频道和线程中的新消息。响应通过 API 的评论或消息端点发送。
+
+---
+
+## Pumble
+
+### 前置条件
+
+- 支持 Bot 集成的 Pumble 工作区（参见 [Pumble 帮助文档](https://pumble.com/help)）
+
+### 设置步骤
+
+1. 在 Pumble 中，为工作区配置 Bot 集成。
+2. 复制 Bot 令牌。
+3. 设置环境变量：
+
+```bash
+export PUMBLE_BOT_TOKEN=your-pumble-bot-token # 环境变量
+librefang vault set PUMBLE_BOT_TOKEN          # 加密金库（推荐）
+librefang config set-key pumble               # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+4. 添加到配置文件：
+
+```toml
+[channels.pumble]
+token_env = "PUMBLE_BOT_TOKEN"
+default_agent = "assistant"
+```
+
+5. 重启守护进程。
+
+### 工作原理
+
+Pumble 适配器通过 webhook 回调接收来自 Pumble 平台的消息。响应通过 Pumble API 发送。
+
+---
+
+## Guilded
+
+### 前置条件
+
+- Guilded Bot 令牌（从 [Guilded API 文档](https://www.guilded.gg/docs/api/) 获取）
+
+### 设置步骤
+
+1. 前往 Guilded 服务器设置，创建 Bot。
+2. 复制 Bot 令牌。
+3. 设置环境变量：
+
+```bash
+export GUILDED_BOT_TOKEN=your-guilded-token   # 环境变量
+librefang vault set GUILDED_BOT_TOKEN         # 加密金库（推荐）
+librefang config set-key guilded              # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+4. 添加到配置文件：
+
+```toml
+[channels.guilded]
+token_env = "GUILDED_BOT_TOKEN"
+default_agent = "assistant"
+```
+
+5. 重启守护进程。
+
+### 工作原理
+
+Guilded 适配器通过 WebSocket 连接到 Guilded API 接收实时消息事件。响应通过 Guilded REST API 的频道消息端点发送。

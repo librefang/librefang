@@ -1,0 +1,402 @@
+# 核心消息渠道
+
+## Telegram
+
+### 前置条件
+
+- 一个 Telegram Bot 令牌（从 [@BotFather](https://t.me/botfather) 获取）
+
+### 设置步骤
+
+1. 打开 Telegram，给 `@BotFather` 发消息。
+2. 发送 `/newbot` 并按照提示创建一个新 Bot。
+3. 复制 Bot 令牌。
+4. 设置环境变量：
+
+```bash
+export TELEGRAM_BOT_TOKEN=your-token          # 环境变量
+librefang vault set TELEGRAM_BOT_TOKEN        # 加密金库（推荐）
+librefang config set-key telegram             # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+5. 添加到配置文件：
+
+```toml
+[channels.telegram]
+bot_token_env = "TELEGRAM_BOT_TOKEN"
+default_agent = "assistant"
+# 可选：限制为特定 Telegram 用户 ID
+# allowed_users = ["123456789"]
+
+[channels.telegram.overrides]
+# 可选：使用 Telegram 原生 HTML 格式
+# output_format = "telegram_html"
+# group_policy = "mention_only"
+```
+
+6. 重启守护进程：
+
+```bash
+librefang start
+```
+
+### 工作原理
+
+Telegram 适配器使用 `getUpdates` API 进行长轮询，每隔几秒轮询一次，长轮询超时为 30 秒。API 调用失败时应用指数退避（从 1 秒开始，最长 60 秒）。通过 `watch::channel` 协调关闭。
+
+来自授权用户的消息会转换为 `ChannelMessage` 事件并路由到配置的 Agent。响应通过 `sendMessage` API 发回。过长的响应会使用共享的 `split_message()` 工具自动拆分为多条消息，以遵守 Telegram 4096 字符限制。
+
+### 交互式设置
+
+```bash
+librefang channel setup telegram
+```
+
+此命令将以交互方式引导你完成设置流程。
+
+---
+
+## Discord
+
+### 前置条件
+
+- 一个 Discord 应用和 Bot（从 [Discord 开发者门户](https://discord.com/developers/applications) 创建）
+
+### 设置步骤
+
+1. 前往 [Discord 开发者门户](https://discord.com/developers/applications)。
+2. 点击 "New Application" 并命名。
+3. 进入 **Bot** 部分，点击 "Add Bot"。
+4. 复制 Bot 令牌。
+5. 在 **Privileged Gateway Intents** 下，启用：
+   - **Message Content Intent**（读取消息内容所需）
+6. 前往 **OAuth2 > URL Generator**：
+   - 选择作用域：`bot`
+   - 选择权限：`Send Messages`、`Read Message History`
+   - 复制生成的 URL 并打开它，将 Bot 邀请到你的服务器。
+7. 设置环境变量：
+
+```bash
+export DISCORD_BOT_TOKEN=your-token           # 环境变量
+librefang vault set DISCORD_BOT_TOKEN         # 加密金库（推荐）
+librefang config set-key discord              # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+8. 添加到配置文件：
+
+```toml
+[channels.discord]
+bot_token_env = "DISCORD_BOT_TOKEN"
+default_agent = "coder"
+```
+
+9. 重启守护进程。
+
+### 工作原理
+
+Discord 适配器通过 WebSocket（v10）连接到 Discord Gateway。它监听 `MESSAGE_CREATE` 事件并将消息路由到配置的 Agent。响应通过 REST API 的 `channels/{id}/messages` 端点发送。
+
+适配器自动处理 Gateway 重连、心跳和会话恢复。
+
+---
+
+## Slack
+
+### 前置条件
+
+- 一个启用了 Socket Mode 的 Slack 应用
+
+### 设置步骤
+
+1. 前往 [Slack API](https://api.slack.com/apps)，点击 "Create New App" > "From Scratch"。
+2. 启用 **Socket Mode**（Settings > Socket Mode）：
+   - 生成一个 App-Level Token，作用域为 `connections:write`。
+   - 复制令牌（`xapp-...`）。
+3. 前往 **OAuth & Permissions**，添加 Bot Token Scopes：
+   - `chat:write`
+   - `app_mentions:read`
+   - `im:history`
+   - `im:read`
+   - `im:write`
+4. 将应用安装到你的工作区。
+5. 复制 Bot User OAuth Token（`xoxb-...`）。
+6. 设置环境变量：
+
+```bash
+export SLACK_APP_TOKEN=xapp-...               # 环境变量
+export SLACK_BOT_TOKEN=xoxb-...
+librefang vault set SLACK_APP_TOKEN           # 加密金库（推荐）
+librefang vault set SLACK_BOT_TOKEN
+librefang config set-key slack                # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+7. 添加到配置文件：
+
+```toml
+[channels.slack]
+bot_token_env = "SLACK_BOT_TOKEN"
+app_token_env = "SLACK_APP_TOKEN"
+default_agent = "ops"
+
+[channels.slack.overrides]
+# 可选：使用 Slack 原生 mrkdwn 格式
+# output_format = "slack_mrkdwn"
+# threading = true
+```
+
+8. 重启守护进程。
+
+### 工作原理
+
+Slack 适配器使用 Socket Mode，通过 WebSocket 连接到 Slack 服务器。这避免了需要公网 Webhook URL 的问题。适配器接收事件（应用提及、私信）并路由到配置的 Agent。响应通过 `chat.postMessage` Web API 发送。当 `threading = true` 时，回复通过 `thread_ts` 发送到消息所在的线程。
+
+---
+
+## WhatsApp
+
+### 前置条件
+
+- 一个拥有 WhatsApp Cloud API 访问权限的 Meta Business 账户
+
+### 设置步骤
+
+1. 前往 [Meta for Developers](https://developers.facebook.com/)。
+2. 创建一个 Business App。
+3. 添加 WhatsApp 产品。
+4. 设置一个测试电话号码（或使用生产号码）。
+5. 复制：
+   - Phone Number ID
+   - 永久访问令牌
+   - 选择一个 Verify Token（你自定义的任意字符串）
+6. 设置环境变量：
+
+```bash
+export WA_PHONE_ID=your-phone-id              # 环境变量
+export WA_ACCESS_TOKEN=your-access-token
+export WA_VERIFY_TOKEN=your-verify-token
+librefang vault set WA_PHONE_ID               # 加密金库（推荐）
+librefang vault set WA_ACCESS_TOKEN
+librefang vault set WA_VERIFY_TOKEN
+librefang config set-key whatsapp             # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+7. 添加到配置文件：
+
+```toml
+[channels.whatsapp]
+mode = "cloud_api"
+phone_number_id_env = "WA_PHONE_ID"
+access_token_env = "WA_ACCESS_TOKEN"
+verify_token_env = "WA_VERIFY_TOKEN"
+default_agent = "assistant"
+```
+
+8. 在 Meta 管理后台设置 Webhook，指向你服务器的公网 URL：
+   - URL：`https://your-domain.com:4545/channels/whatsapp/webhook`
+   - Verify Token：你上面选择的值
+   - 订阅：`messages`
+
+9. 重启守护进程。
+
+### 工作原理
+
+WhatsApp 适配器在主 API 服务器（默认端口 4545）上注册 webhook 路由，接收来自 WhatsApp Cloud API 的 Webhook 请求。它处理 Webhook 验证（GET）和消息接收（POST）。响应通过 Cloud API 的 `messages` 端点发送。
+
+### 群聊支持
+
+WhatsApp 群消息会被自动检测。机器人在群聊中的行为由渠道覆盖中的 `group_policy` 设置控制：
+
+| 策略 | 行为 |
+|------|------|
+| `mention_only`（默认） | 仅在被 @提及时回复 |
+| `all` | 回复所有群消息 |
+| `commands_only` | 仅回复斜杠命令 |
+| `ignore` | 忽略所有群消息 |
+
+配置示例：
+
+```toml
+[channels.whatsapp]
+mode = "cloud_api"
+phone_number_id_env = "WA_PHONE_ID"
+access_token_env = "WA_ACCESS_TOKEN"
+verify_token_env = "WA_VERIFY_TOKEN"
+webhook_port = 8443
+default_agent = "assistant"
+group_policy = "mention_only"
+```
+
+---
+
+## 微信（个人）
+
+### 前置条件
+
+- 一个个人微信账号（推荐 iOS 8.0.70+ 版本）
+- WeChat ClawBot 插件访问权限（目前灰度发布中）
+
+### 设置步骤
+
+1. 添加到配置文件：
+
+```toml
+[channels.wechat]
+# bot_token 通过扫码自动获取
+# 如果保存了上次会话的 token，在此设置可跳过扫码登录：
+# bot_token_env = "WECHAT_BOT_TOKEN"
+default_agent = "assistant"
+allowed_users = []        # 留空允许所有人；格式: "hash@im.wechat"
+```
+
+2. 启动（或重启）LibreFang 守护进程。
+3. 守护进程日志中会显示一个二维码 -- 用微信扫码确认。
+4. 确认后，适配器开始接收消息。
+
+> **提示：** 首次扫码登录后，将 `bot_token` 保存到环境变量，这样后续重启时可以跳过扫码流程。
+
+### 工作原理
+
+微信适配器使用腾讯官方的 **iLink 协议**（`ilinkai.weixin.qq.com`），与 WeChat ClawBot 插件使用的协议相同。不涉及第三方代理或非官方 API。
+
+**连接流程：**
+1. **扫码登录** -- 调用 `GET /ilink/bot/get_bot_qrcode` 生成二维码，然后轮询 `GET /ilink/bot/get_qrcode_status` 直到用户扫码确认。返回一个 `bot_token` 供后续所有请求使用。
+2. **长轮询** -- 调用 `POST /ilink/bot/getupdates` 并附带游标（`get_updates_buf`）。服务器最长保持连接 35 秒直到有新消息，然后返回消息及更新后的游标。
+3. **发送** -- 调用 `POST /ilink/bot/sendmessage` 并附带收到消息中的 `context_token`，将回复关联到正确的对话。
+4. **输入中** -- 调用 `POST /ilink/bot/sendtyping` 并附带 `typing_ticket`（通过 `POST /ilink/bot/getconfig` 获取）来显示输入中指示器。
+
+**支持的消息类型：** 文本、图片、语音、文件、视频（全部 5 种 iLink item 类型）。
+
+**重连机制：** 如果配置了 `bot_token`，适配器会跳过扫码登录直接恢复轮询。网络错误时应用指数退避（2 秒到最长 60 秒）。
+
+### 限制
+
+- **媒体上传** 暂不支持（CDN 流程涉及 AES-128-ECB 加密）。可以接收媒体消息；发送媒体时回退为文本占位符。
+- **群聊** 检测暂未实现。
+- **流式** 响应暂不支持（消息以完整文本发送）。
+- **灰度发布** -- iLink API 可能尚未对所有微信账号开放。
+
+---
+
+## Signal
+
+### 前置条件
+
+- 已安装 Signal CLI 并关联了一个手机号
+
+### 设置步骤
+
+1. 安装 [signal-cli](https://github.com/AsamK/signal-cli)。
+2. 注册或关联一个手机号。
+3. 添加到配置文件：
+
+```toml
+[channels.signal]
+signal_cli_path = "/usr/local/bin/signal-cli"
+phone_number = "+1234567890"
+default_agent = "assistant"
+```
+
+4. 重启守护进程。
+
+### 工作原理
+
+Signal 适配器以守护进程模式将 `signal-cli` 作为子进程启动，通过 JSON-RPC 通信。传入的消息从 signal-cli 输出流中读取并路由到配置的 Agent。
+
+---
+
+## Matrix
+
+### 前置条件
+
+- 一个 Matrix homeserver 账户和访问令牌
+
+### 设置步骤
+
+1. 在你的 Matrix homeserver 上创建一个 Bot 账户。
+2. 生成访问令牌。
+3. 设置环境变量：
+
+```bash
+export MATRIX_TOKEN=your-token                # 环境变量
+librefang vault set MATRIX_TOKEN              # 加密金库（推荐）
+librefang config set-key matrix               # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+4. 添加到配置文件：
+
+```toml
+[channels.matrix]
+homeserver_url = "https://matrix.org"
+access_token_env = "MATRIX_TOKEN"
+user_id = "@librefang-bot:matrix.org"
+default_agent = "assistant"
+```
+
+5. 将 Bot 邀请到你希望它监控的房间。
+6. 重启守护进程。
+
+### 工作原理
+
+Matrix 适配器使用 Matrix Client-Server API。它通过长轮询（带超时的 `/sync`）与 homeserver 同步，处理已加入房间中的新消息。响应通过 `/rooms/{roomId}/send` 端点发送。
+
+---
+
+## Email
+
+### 前置条件
+
+- 一个支持 IMAP 和 SMTP 访问的邮箱账户
+
+### 设置步骤
+
+1. 对于 Gmail，创建一个[应用专用密码](https://myaccount.google.com/apppasswords)。
+2. 设置环境变量：
+
+```bash
+export EMAIL_PASSWORD=your-password           # 环境变量
+librefang vault set EMAIL_PASSWORD            # 加密金库（推荐）
+librefang config set-key email                # .env 文件
+# 或通过仪表板 "Set API Key" 按钮设置          # secrets.env
+```
+
+3. 添加到配置文件：
+
+```toml
+[channels.email]
+imap_host = "imap.gmail.com"
+imap_port = 993
+smtp_host = "smtp.gmail.com"
+smtp_port = 587
+username = "you@gmail.com"
+password_env = "EMAIL_PASSWORD"
+poll_interval = 30
+default_agent = "email-assistant"
+```
+
+4. 重启守护进程。
+
+### 工作原理
+
+邮件适配器按配置的间隔轮询 IMAP 收件箱。新邮件被解析（主题 + 正文）并路由到配置的 Agent。响应作为回复邮件通过 SMTP 发送，保留主题行线程。
+
+---
+
+## WebChat（内置）
+
+WebChat UI 内嵌在守护进程中，无需额外配置。守护进程运行时访问：
+
+```
+http://127.0.0.1:4545/
+```
+
+功能：
+- 通过 WebSocket 实时聊天
+- 流式响应（文本增量实时到达）
+- Agent 选择（在运行中的 Agent 之间切换）
+- Token 用量显示
+- 在 localhost 上无需认证（通过 CORS 保护）

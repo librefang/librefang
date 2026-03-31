@@ -1,0 +1,392 @@
+# Social & Community Channels
+
+Social media and community platform integrations.
+
+---
+
+## Reddit
+
+### Prerequisites
+
+- A Reddit account and a registered [Reddit API application](https://www.reddit.com/dev/api/) (script type)
+
+### Setup
+
+1. Go to [reddit.com/prefs/apps](https://www.reddit.com/prefs/apps) and create a new **script** application.
+2. Note the client ID (under the app name) and client secret.
+3. Set environment variables:
+
+```bash
+export REDDIT_CLIENT_ID=your-client-id        # Environment variable
+export REDDIT_CLIENT_SECRET=your-client-secret
+export REDDIT_USERNAME=your-reddit-username
+export REDDIT_PASSWORD=your-reddit-password
+librefang vault set REDDIT_CLIENT_ID          # Encrypted vault (recommended)
+librefang vault set REDDIT_CLIENT_SECRET
+librefang vault set REDDIT_USERNAME
+librefang vault set REDDIT_PASSWORD
+librefang config set-key reddit               # .env file
+# Or set via dashboard "Set API Key" button   # secrets.env
+```
+
+4. Add to config:
+
+```toml
+[channels.reddit]
+client_id_env = "REDDIT_CLIENT_ID"
+client_secret_env = "REDDIT_CLIENT_SECRET"
+username_env = "REDDIT_USERNAME"
+password_env = "REDDIT_PASSWORD"
+subreddits = ["mysubreddit"]
+poll_interval = 30
+default_agent = "assistant"
+```
+
+5. Restart the daemon.
+
+### How It Works
+
+The Reddit adapter authenticates via OAuth2 using script-type credentials and polls specified subreddits for new posts and comments at the configured interval. Responses are posted as replies through the Reddit REST API.
+
+---
+
+## Mastodon
+
+### Prerequisites
+
+- A Mastodon account on any instance
+- An application access token (from the instance's **Preferences > Development** page, see [Mastodon API docs](https://docs.joinmastodon.org/api/))
+
+### Setup
+
+1. On your Mastodon instance, go to **Preferences > Development > New Application**.
+2. Grant the scopes `read` and `write`.
+3. Copy the access token.
+4. Set environment variables:
+
+```bash
+export MASTODON_INSTANCE_URL=https://mastodon.social  # Environment variable
+export MASTODON_ACCESS_TOKEN=your-access-token
+librefang vault set MASTODON_INSTANCE_URL     # Encrypted vault (recommended)
+librefang vault set MASTODON_ACCESS_TOKEN
+librefang config set-key mastodon             # .env file
+# Or set via dashboard "Set API Key" button   # secrets.env
+```
+
+5. Add to config:
+
+```toml
+[channels.mastodon]
+instance_env = "MASTODON_INSTANCE_URL"
+token_env = "MASTODON_ACCESS_TOKEN"
+default_agent = "social-media"
+```
+
+6. Restart the daemon.
+
+### How It Works
+
+The Mastodon adapter connects to the instance's streaming API via Server-Sent Events (SSE) to receive notifications in real time (mentions, direct messages). Responses are posted as toots or direct messages through the Mastodon REST API.
+
+---
+
+## Bluesky
+
+### Prerequisites
+
+- A Bluesky account (see [Bluesky API docs](https://docs.bsky.app))
+- An app password (generated in Bluesky **Settings > App Passwords**)
+
+### Setup
+
+1. In Bluesky, go to **Settings > App Passwords** and create a new app password.
+2. Set environment variables:
+
+```bash
+export BLUESKY_IDENTIFIER=your-handle.bsky.social  # Environment variable
+export BLUESKY_APP_PASSWORD=your-app-password
+librefang vault set BLUESKY_IDENTIFIER        # Encrypted vault (recommended)
+librefang vault set BLUESKY_APP_PASSWORD
+librefang config set-key bluesky              # .env file
+# Or set via dashboard "Set API Key" button   # secrets.env
+```
+
+3. Add to config:
+
+```toml
+[channels.bluesky]
+identifier_env = "BLUESKY_IDENTIFIER"
+app_password_env = "BLUESKY_APP_PASSWORD"
+default_agent = "social-media"
+```
+
+4. Restart the daemon.
+
+### How It Works
+
+The Bluesky adapter authenticates using the AT Protocol and monitors notifications (mentions) via REST polling. Responses are posted as reply posts through the AT Protocol's `com.atproto.repo.createRecord` endpoint.
+
+---
+
+## LinkedIn
+
+### Prerequisites
+
+- A LinkedIn Developer application with Messaging API access (see [LinkedIn API docs](https://learn.microsoft.com/en-us/linkedin/))
+- An OAuth2 access token with messaging permissions
+
+### Setup
+
+1. Create an application in the [LinkedIn Developer Portal](https://www.linkedin.com/developers/).
+2. Request access to the Messaging API and complete the OAuth2 flow.
+3. Set the environment variable:
+
+```bash
+export LINKEDIN_ACCESS_TOKEN=your-token       # Environment variable
+librefang vault set LINKEDIN_ACCESS_TOKEN     # Encrypted vault (recommended)
+librefang config set-key linkedin             # .env file
+# Or set via dashboard "Set API Key" button   # secrets.env
+```
+
+4. Add to config:
+
+```toml
+[channels.linkedin]
+token_env = "LINKEDIN_ACCESS_TOKEN"
+default_agent = "assistant"
+```
+
+5. Restart the daemon.
+
+### How It Works
+
+The LinkedIn adapter polls the LinkedIn Messaging API for new messages at a regular interval. Responses are sent back through the LinkedIn REST API. Note that LinkedIn API access for messaging is restricted and requires approval from LinkedIn.
+
+---
+
+## Twitch
+
+### Prerequisites
+
+- A Twitch account and an OAuth token with chat permissions (from the [Twitch Developer Portal](https://dev.twitch.tv/docs/irc/))
+
+### Setup
+
+1. Register an application on the [Twitch Developer Console](https://dev.twitch.tv/console/apps).
+2. Generate an OAuth token with the `chat:read` and `chat:edit` scopes (use a tool like [twitchtokengenerator.com](https://twitchtokengenerator.com/)).
+3. Set environment variables:
+
+```bash
+export TWITCH_OAUTH_TOKEN=oauth:your-token    # Environment variable
+export TWITCH_NICK=your-bot-username
+export TWITCH_CHANNELS=channel1,channel2
+librefang vault set TWITCH_OAUTH_TOKEN        # Encrypted vault (recommended)
+librefang vault set TWITCH_NICK
+librefang vault set TWITCH_CHANNELS
+librefang config set-key twitch               # .env file
+# Or set via dashboard "Set API Key" button   # secrets.env
+```
+
+4. Add to config:
+
+```toml
+[channels.twitch]
+oauth_token_env = "TWITCH_OAUTH_TOKEN"
+nick_env = "TWITCH_NICK"
+channels = ["channel1", "channel2"]
+default_agent = "assistant"
+```
+
+5. Restart the daemon.
+
+### How It Works
+
+The Twitch adapter connects to Twitch's IRC gateway (`irc.chat.twitch.tv:6697` over TLS) and joins the configured channels. It listens for PRIVMSG events and routes them to the configured agent. Responses are sent as chat messages via the IRC protocol.
+
+---
+
+## Discourse
+
+### Prerequisites
+
+- A Discourse forum with API access enabled (see [Discourse API docs](https://docs.discourse.org))
+- An API key generated by an admin user
+
+### Setup
+
+1. In Discourse, go to **Admin > API** and create a new API key.
+2. Note the username of the API key owner.
+3. Set environment variables:
+
+```bash
+export DISCOURSE_URL=https://forum.example.com  # Environment variable
+export DISCOURSE_API_KEY=your-api-key
+export DISCOURSE_USERNAME=bot-user
+librefang vault set DISCOURSE_URL             # Encrypted vault (recommended)
+librefang vault set DISCOURSE_API_KEY
+librefang vault set DISCOURSE_USERNAME
+librefang config set-key discourse            # .env file
+# Or set via dashboard "Set API Key" button   # secrets.env
+```
+
+4. Add to config:
+
+```toml
+[channels.discourse]
+url_env = "DISCOURSE_URL"
+api_key_env = "DISCOURSE_API_KEY"
+username_env = "DISCOURSE_USERNAME"
+poll_interval = 30
+default_agent = "assistant"
+```
+
+5. Restart the daemon.
+
+### How It Works
+
+The Discourse adapter polls the Discourse REST API for new posts and notifications at the configured interval. Responses are posted as replies through the Discourse posts API.
+
+---
+
+## Gitter
+
+### Prerequisites
+
+- A Gitter account and personal access token (from the [Gitter Developer Portal](https://developer.gitter.im/docs/))
+
+### Setup
+
+1. Go to [developer.gitter.im](https://developer.gitter.im/) and generate a personal access token.
+2. Set the environment variable:
+
+```bash
+export GITTER_TOKEN=your-gitter-token         # Environment variable
+librefang vault set GITTER_TOKEN              # Encrypted vault (recommended)
+librefang config set-key gitter               # .env file
+# Or set via dashboard "Set API Key" button   # secrets.env
+```
+
+3. Add to config:
+
+```toml
+[channels.gitter]
+token_env = "GITTER_TOKEN"
+default_agent = "assistant"
+```
+
+4. Restart the daemon.
+
+### How It Works
+
+The Gitter adapter connects to the Gitter Streaming API to receive messages in real time. Responses are sent back via the Gitter REST API's message endpoint.
+
+---
+
+## Revolt
+
+### Prerequisites
+
+- A Revolt bot token (from the [Revolt Developer Portal](https://developers.revolt.chat/api/))
+
+### Setup
+
+1. Go to [app.revolt.chat/settings/bots](https://app.revolt.chat/settings/bots) and create a new bot.
+2. Copy the bot token.
+3. Set the environment variable:
+
+```bash
+export REVOLT_TOKEN=your-revolt-bot-token     # Environment variable
+librefang vault set REVOLT_TOKEN              # Encrypted vault (recommended)
+librefang config set-key revolt               # .env file
+# Or set via dashboard "Set API Key" button   # secrets.env
+```
+
+4. Add to config:
+
+```toml
+[channels.revolt]
+token_env = "REVOLT_TOKEN"
+default_agent = "assistant"
+```
+
+5. Restart the daemon.
+
+### How It Works
+
+The Revolt adapter connects to the Revolt API via WebSocket for real-time message events. Responses are sent through the Revolt REST API's channel message endpoints.
+
+---
+
+## Keybase
+
+### Prerequisites
+
+- A Keybase account with a paper key (see [Keybase API docs](https://keybase.io/docs/api/))
+
+### Setup
+
+1. Install the [Keybase client](https://keybase.io/download).
+2. Log in and generate a paper key via `keybase paperkey`.
+3. Set environment variables:
+
+```bash
+export KEYBASE_USERNAME=your-username         # Environment variable
+export KEYBASE_PAPERKEY="your paper key words here"
+librefang vault set KEYBASE_USERNAME          # Encrypted vault (recommended)
+librefang vault set KEYBASE_PAPERKEY
+librefang config set-key keybase              # .env file
+# Or set via dashboard "Set API Key" button   # secrets.env
+```
+
+4. Add to config:
+
+```toml
+[channels.keybase]
+username_env = "KEYBASE_USERNAME"
+paperkey_env = "KEYBASE_PAPERKEY"
+default_agent = "assistant"
+```
+
+5. Restart the daemon.
+
+### How It Works
+
+The Keybase adapter uses the Keybase Bot API to poll for new messages. It authenticates with the paper key and listens for chat messages across teams and direct conversations. Responses are sent via the Keybase chat API.
+
+---
+
+## Nostr
+
+### Prerequisites
+
+- A Nostr private key (hex or nsec format) and one or more relay URLs (see [Nostr protocol NIPs](https://github.com/nostr-protocol/nips))
+
+### Setup
+
+1. Generate a Nostr key pair if you do not already have one (e.g., using a Nostr client or `openssl`).
+2. Choose one or more relay URLs.
+3. Set environment variables:
+
+```bash
+export NOSTR_PRIVATE_KEY=nsec1your-key        # Environment variable
+export NOSTR_RELAYS=wss://relay.damus.io,wss://nos.lol
+librefang vault set NOSTR_PRIVATE_KEY         # Encrypted vault (recommended)
+librefang vault set NOSTR_RELAYS
+librefang config set-key nostr                # .env file
+# Or set via dashboard "Set API Key" button   # secrets.env
+```
+
+4. Add to config:
+
+```toml
+[channels.nostr]
+private_key_env = "NOSTR_PRIVATE_KEY"
+relays = ["wss://relay.damus.io", "wss://nos.lol"]
+default_agent = "assistant"
+```
+
+5. Restart the daemon.
+
+### How It Works
+
+The Nostr adapter connects to the configured relays via WebSocket using the NIP-01 protocol. It subscribes to events that mention or tag the bot's public key and routes them to the configured agent. Responses are published as signed Nostr events to all connected relays.

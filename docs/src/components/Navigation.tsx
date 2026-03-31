@@ -358,6 +358,11 @@ const zhNavigation: Array<NavGroup> = [
 		title: "集成",
 		links: [
 			{ title: "通道适配器", href: withPrefix("/zh/channels") },
+			{ title: "核心消息", href: withPrefix("/zh/channels/core") },
+			{ title: "企业协作", href: withPrefix("/zh/channels/enterprise") },
+			{ title: "社交与社区", href: withPrefix("/zh/channels/social") },
+			{ title: "集成与协议", href: withPrefix("/zh/channels/integrations") },
+			{ title: "自定义适配器", href: withPrefix("/zh/channels/custom") },
 			{ title: "API 参考", href: withPrefix("/zh/api") },
 			{ title: "SDK 参考", href: withPrefix("/zh/sdk") },
 			{ title: "CLI 参考", href: withPrefix("/zh/cli") },
@@ -417,6 +422,11 @@ export const enNavigation: Array<NavGroup> = [
 		title: "Integrations",
 		links: [
 			{ title: "Channels", href: withPrefix("/channels") },
+			{ title: "Core Messaging", href: withPrefix("/channels/core") },
+			{ title: "Enterprise", href: withPrefix("/channels/enterprise") },
+			{ title: "Social & Community", href: withPrefix("/channels/social") },
+			{ title: "Integrations", href: withPrefix("/channels/integrations") },
+			{ title: "Custom Adapters", href: withPrefix("/channels/custom") },
 			{ title: "API Reference", href: withPrefix("/api") },
 			{ title: "SDK Reference", href: withPrefix("/sdk") },
 			{ title: "CLI", href: withPrefix("/cli") },

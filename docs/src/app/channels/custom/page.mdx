@@ -1,0 +1,163 @@
+# Writing Custom Adapters
+
+To add support for a new messaging platform, implement the `ChannelAdapter` trait. The trait is defined in `crates/librefang-channels/src/types.rs`.
+
+### The ChannelAdapter Trait
+
+```rust
+pub trait ChannelAdapter: Send + Sync {
+    /// Human-readable name of this adapter.
+    fn name(&self) -> &str;
+
+    /// The channel type this adapter handles.
+    fn channel_type(&self) -> ChannelType;
+
+    /// Start receiving messages. Returns a stream of incoming messages.
+    async fn start(
+        &self,
+    ) -> Result<Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>, Box<dyn std::error::Error>>;
+
+    /// Send a response back to a user on this channel.
+    async fn send(
+        &self,
+        user: &ChannelUser,
+        content: ChannelContent,
+    ) -> Result<(), Box<dyn std::error::Error>>;
+
+    /// Send a typing indicator (optional -- default no-op).
+    async fn send_typing(&self, _user: &ChannelUser) -> Result<(), Box<dyn std::error::Error>> {
+        Ok(())
+    }
+
+    /// Stop the adapter and clean up resources.
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error>>;
+
+    /// Get the current health status of this adapter (optional -- default returns disconnected).
+    fn status(&self) -> ChannelStatus {
+        ChannelStatus::default()
+    }
+
+    /// Send a response as a thread reply (optional -- default falls back to `send()`).
+    async fn send_in_thread(
+        &self,
+        user: &ChannelUser,
+        content: ChannelContent,
+        _thread_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.send(user, content).await
+    }
+}
+```
+
+### 1. Define Your Adapter
+
+Create `crates/librefang-channels/src/myplatform.rs`:
+
+```rust
+use crate::types::{
+    ChannelAdapter, ChannelContent, ChannelMessage, ChannelStatus, ChannelType, ChannelUser,
+};
+use futures::stream::{self, Stream};
+use std::pin::Pin;
+use tokio::sync::watch;
+use zeroize::Zeroizing;
+
+pub struct MyPlatformAdapter {
+    token: Zeroizing<String>,
+    client: reqwest::Client,
+    shutdown: watch::Receiver<bool>,
+}
+
+impl MyPlatformAdapter {
+    pub fn new(token: String, shutdown: watch::Receiver<bool>) -> Self {
+        Self {
+            token: Zeroizing::new(token),
+            client: reqwest::Client::new(),
+            shutdown,
+        }
+    }
+}
+
+impl ChannelAdapter for MyPlatformAdapter {
+    fn name(&self) -> &str {
+        "MyPlatform"
+    }
+
+    fn channel_type(&self) -> ChannelType {
+        ChannelType::Custom("myplatform".to_string())
+    }
+
+    async fn start(
+        &self,
+    ) -> Result<Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>, Box<dyn std::error::Error>> {
+        // Return a stream that yields ChannelMessage items.
+        // Use self.shutdown to detect when the daemon is stopping.
+        // Apply exponential backoff on connection failures.
+        let stream = stream::empty(); // Replace with your polling/WebSocket logic
+        Ok(Box::pin(stream))
+    }
+
+    async fn send(
+        &self,
+        user: &ChannelUser,
+        content: ChannelContent,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // Send the response back to the platform.
+        // Use split_message() if the platform has message length limits.
+        // Use self.client and self.token to call the platform's API.
+        Ok(())
+    }
+
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error>> {
+        // Clean shutdown: close connections, stop polling.
+        Ok(())
+    }
+
+    fn status(&self) -> ChannelStatus {
+        ChannelStatus::default()
+    }
+}
+```
+
+**Key points for new adapters:**
+- Use `ChannelType::Custom("myplatform".to_string())` for the channel type. Only the 9 most common channels have named `ChannelType` variants (`Telegram`, `WhatsApp`, `Slack`, `Discord`, `Signal`, `Matrix`, `Email`, `Teams`, `Mattermost`). All others use `Custom(String)`.
+- Wrap secrets in `Zeroizing<String>` so they are wiped from memory on drop.
+- Accept a `watch::Receiver<bool>` for coordinated shutdown with the daemon.
+- Use exponential backoff for resilience on connection failures.
+- Use the shared `split_message(text, max_len)` utility for platforms with message length limits.
+
+### 2. Register the Module
+
+In `crates/librefang-channels/src/lib.rs`:
+
+```rust
+pub mod myplatform;
+```
+
+### 3. Wire It Into the Bridge
+
+In `crates/librefang-api/src/channel_bridge.rs`, add initialization logic for your adapter alongside the existing adapters.
+
+### 4. Add Config Support
+
+In `librefang-types`, add a config struct:
+
+```rust
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MyPlatformConfig {
+    pub token_env: String,
+    pub default_agent: Option<String>,
+    #[serde(default)]
+    pub overrides: ChannelOverrides,
+}
+```
+
+Add it to the `ChannelsConfig` struct and `config.toml` parsing. The `overrides` field gives your channel automatic support for model/prompt overrides, DM/group policies, rate limiting, threading, and output format selection.
+
+### 5. Add CLI Setup Wizard
+
+In `crates/librefang-cli/src/main.rs`, add a case to `cmd_channel_setup` with step-by-step instructions for your platform.
+
+### 6. Test
+
+Write integration tests. Use the `ChannelMessage` type to simulate incoming messages without connecting to the real platform.

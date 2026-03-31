@@ -1,0 +1,698 @@
+# Integrations & Protocol Channels
+
+Messaging platform integrations, protocol adapters, and webhook-based channels.
+
+---
+
+## LINE
+
+### Prerequisites
+
+- A LINE Messaging API channel (from the [LINE Developers Console](https://developers.line.biz/en/docs/messaging-api/))
+- A publicly accessible webhook URL
+
+### Setup
+
+1. Go to the [LINE Developers Console](https://developers.line.biz/console/) and create a new Messaging API channel.
+2. Note the **Channel Secret** and issue a **Channel Access Token**.
+3. Set environment variables:
+
+```bash
+export LINE_CHANNEL_SECRET=your-secret        # Environment variable
+export LINE_ACCESS_TOKEN=your-access-token
+librefang vault set LINE_CHANNEL_SECRET       # Encrypted vault (recommended)
+librefang vault set LINE_ACCESS_TOKEN
+librefang config set-key line                 # .env file
+# Or set via dashboard "Set API Key" button   # secrets.env
+```
+
+4. Add to config:
+
+```toml
+[channels.line]
+channel_secret_env = "LINE_CHANNEL_SECRET"
+access_token_env = "LINE_ACCESS_TOKEN"
+default_agent = "assistant"
+```
+
+5. In the LINE Developers Console, set the webhook URL to your LibreFang instance (e.g., `https://your-domain.com:4545/channels/line/webhook`).
+6. Restart the daemon.
+
+### How It Works
+
+The LINE adapter registers webhook routes on the shared API server (default port 4545) to receive message events from LINE's Messaging API. Each request is verified using the channel secret's HMAC-SHA256 signature. Responses are sent via the LINE Reply API or Push API.
+
+---
+
+## Viber
+
+### Prerequisites
+
+- A Viber bot token (from the [Viber Developer Portal](https://developers.viber.com/docs/api/))
+- A publicly accessible webhook URL
+
+### Setup
+
+1. Create a bot account on the [Viber Admin Panel](https://partners.viber.com/).
+2. Copy the authentication token.
+3. Set environment variables:
+
+```bash
+export VIBER_AUTH_TOKEN=your-viber-auth-token  # Environment variable
+librefang vault set VIBER_AUTH_TOKEN           # Encrypted vault (recommended)
+librefang config set-key viber                # .env file
+# Or set via dashboard "Set API Key" button   # secrets.env
+```
+
+4. Add to config:
+
+```toml
+[channels.viber]
+auth_token_env = "VIBER_AUTH_TOKEN"
+webhook_url = "https://your-domain.com:4545/channels/viber/webhook"
+default_agent = "assistant"
+```
+
+5. Restart the daemon. The adapter automatically registers the webhook URL with Viber on startup.
+
+### How It Works
+
+The Viber adapter registers a webhook with the Viber API on startup and receives message events via HTTPS POST callbacks on the shared API server at `/channels/viber/webhook`. Responses are sent via the Viber REST API's `send_message` endpoint.
+
+---
+
+## Facebook Messenger
+
+### Prerequisites
+
+- A Meta (Facebook) Developer account with a Facebook Page and App (see [Messenger Platform docs](https://developers.facebook.com/docs/messenger-platform/))
+- A publicly accessible webhook URL
+
+### Setup
+
+1. Go to [Meta for Developers](https://developers.facebook.com/) and create or select an app.
+2. Add the **Messenger** product to your app.
+3. Generate a **Page Access Token** for your Facebook Page.
+4. Choose a **Verify Token** (any string you define).
+5. Set environment variables:
+
+```bash
+export MESSENGER_PAGE_TOKEN=your-page-token   # Environment variable
+export MESSENGER_VERIFY_TOKEN=your-verify-token
+librefang vault set MESSENGER_PAGE_TOKEN      # Encrypted vault (recommended)
+librefang vault set MESSENGER_VERIFY_TOKEN
+librefang config set-key messenger            # .env file
+# Or set via dashboard "Set API Key" button   # secrets.env
+```
+
+6. Add to config:
+
+```toml
+[channels.messenger]
+page_token_env = "MESSENGER_PAGE_TOKEN"
+verify_token_env = "MESSENGER_VERIFY_TOKEN"
+default_agent = "assistant"
+```
+
+7. In the Meta Developer Dashboard, set the webhook callback URL (e.g., `https://your-domain.com:4545/channels/messenger/webhook`) and enter your verify token. Subscribe to the `messages` event.
+8. Restart the daemon.
+
+### How It Works
+
+The Messenger adapter registers webhook routes on the shared API server (default port 4545) that handle webhook verification (GET) and incoming message events (POST) from the Messenger Platform. Responses are sent via the Send API using the page access token.
+
+---
+
+## Threema
+
+### Prerequisites
+
+- A Threema Gateway ID and API secret (from the [Threema Gateway](https://gateway.threema.ch/en/developer/api))
+
+### Setup
+
+1. Register for a [Threema Gateway](https://gateway.threema.ch/) account.
+2. Create a Gateway ID and note the ID and secret.
+3. Set environment variables:
+
+```bash
+export THREEMA_ID=*YOUR_ID                    # Environment variable
+export THREEMA_SECRET=your-api-secret
+librefang vault set THREEMA_ID                # Encrypted vault (recommended)
+librefang vault set THREEMA_SECRET
+librefang config set-key threema              # .env file
+# Or set via dashboard "Set API Key" button   # secrets.env
+```
+
+4. Add to config:
+
+```toml
+[channels.threema]
+id_env = "THREEMA_ID"
+secret_env = "THREEMA_SECRET"
+default_agent = "assistant"
+```
+
+5. Restart the daemon.
+
+### How It Works
+
+The Threema adapter uses the Threema Gateway REST API to send and receive end-to-end encrypted messages. Incoming messages are delivered via webhook callbacks on the shared API server at `/channels/threema/webhook`, and responses are sent through the Gateway's message sending endpoint.
+
+---
+
+## DingTalk
+
+Supports two modes:
+- **Stream mode** (default, recommended): WebSocket long-connection via the DingTalk Stream protocol. No public IP or port required.
+- **Webhook mode** (legacy): HTTP callback server. Requires a public-facing URL.
+
+### Prerequisites
+
+- A DingTalk application from the [DingTalk Open Platform](https://open.dingtalk.com/document/)
+- For **stream mode**: App Key and App Secret from your DingTalk application
+- For **webhook mode**: A custom robot with webhook access token and signing secret
+
+### Setup (Stream Mode -- Recommended)
+
+1. Go to the [DingTalk Open Platform](https://open.dingtalk.com/), create an application (or use an existing one).
+2. Enable the **Robot** capability and note the **App Key** (Client ID) and **App Secret** (Client Secret).
+3. Set environment variables:
+
+```bash
+export DINGTALK_APP_KEY=your-app-key          # Environment variable
+export DINGTALK_APP_SECRET=your-app-secret
+librefang vault set DINGTALK_APP_KEY          # Encrypted vault (recommended)
+librefang vault set DINGTALK_APP_SECRET
+```
+
+4. Add to config:
+
+```toml
+[channels.dingtalk]
+receive_mode = "stream"
+app_key_env = "DINGTALK_APP_KEY"
+app_secret_env = "DINGTALK_APP_SECRET"
+default_agent = "assistant"
+```
+
+5. Restart the daemon.
+
+### Setup (Webhook Mode)
+
+1. In DingTalk, open a group chat and go to **Group Settings > Smart Group Assistant > Add Robot**.
+2. Choose **Custom Robot** and enable the **Security Setting** (sign mode recommended).
+3. Note the webhook access token and signing secret.
+4. Set environment variables:
+
+```bash
+export DINGTALK_ACCESS_TOKEN=your-token       # Environment variable
+export DINGTALK_SECRET=your-signing-secret
+librefang vault set DINGTALK_ACCESS_TOKEN     # Encrypted vault (recommended)
+librefang vault set DINGTALK_SECRET
+```
+
+5. Add to config:
+
+```toml
+[channels.dingtalk]
+receive_mode = "webhook"
+access_token_env = "DINGTALK_ACCESS_TOKEN"
+secret_env = "DINGTALK_SECRET"
+default_agent = "assistant"
+```
+
+6. Restart the daemon.
+
+### How It Works
+
+In **stream mode**, the adapter registers with the DingTalk gateway API (`/v1.0/gateway/connections/open`) to obtain a WebSocket endpoint and ticket. It then maintains a persistent WebSocket connection, receiving bot message callbacks and responding with ACK frames. Heartbeat ping/pong is handled automatically.
+
+In **webhook mode**, the adapter receives messages via HTTP callback on the shared API server at `/channels/dingtalk/webhook`. Each request is verified using HMAC-SHA256 signature with the configured secret. Responses are sent back through the DingTalk webhook URL with a signed timestamp.
+
+---
+
+## QQ
+
+### Prerequisites
+
+- A QQ Bot registered on the [QQ Bot Platform](https://bot.q.qq.com/wiki/)
+- An App ID and token
+
+### Setup
+
+1. Go to the [QQ Bot Platform](https://bot.q.qq.com/) and register a bot application.
+2. Note the App ID and token.
+3. Set environment variables:
+
+```bash
+export QQ_APP_ID=your-app-id                 # Environment variable
+export QQ_TOKEN=your-bot-token
+librefang vault set QQ_APP_ID                # Encrypted vault (recommended)
+librefang vault set QQ_TOKEN
+librefang config set-key qq                   # .env file
+# Or set via dashboard "Set API Key" button   # secrets.env
+```
+
+4. Add to config:
+
+```toml
+[channels.qq]
+app_id_env = "QQ_APP_ID"
+token_env = "QQ_TOKEN"
+default_agent = "assistant"
+```
+
+5. Restart the daemon.
+
+### How It Works
+
+The QQ adapter connects to the QQ Bot API via WebSocket for real-time message delivery. It authenticates using the app credentials, listens for message events in authorized guilds and channels, and sends responses through the QQ Bot REST API.
+
+---
+
+## WeCom
+
+### Prerequisites
+
+- A WeCom (WeChat Work) enterprise account with an **intelligent bot** created from the [WeCom Admin Console](https://work.weixin.qq.com/)
+
+### Setup
+
+1. In the WeCom admin console, go to **Apps > Create App** and select **Intelligent Bot**.
+2. Note the **Bot ID** and **Secret** from the bot settings page.
+3. Set the secret environment variable:
+
+```bash
+export WECOM_BOT_SECRET=your-bot-secret       # Environment variable
+librefang vault set WECOM_BOT_SECRET          # Encrypted vault (recommended)
+librefang config set-key wecom                # .env file
+# Or set via dashboard "Set API Key" button   # secrets.env
+```
+
+4. Add to config:
+
+```toml
+[channels.wecom]
+bot_id = "YOUR_BOT_ID"
+secret_env = "WECOM_BOT_SECRET"
+# account_id = "my-bot"          # Optional: unique ID for multi-bot routing
+# default_agent = "assistant"    # Optional: route messages to specific agent
+```
+
+5. Restart the daemon.
+
+### How It Works
+
+The WeCom adapter connects to `wss://openws.work.weixin.qq.com` via a persistent WebSocket. It authenticates using the Bot ID and a signed token, then subscribes to incoming messages via `aibot_subscribe`. User messages arrive as `aibot_msg_callback` JSON frames and replies are sent back as `aibot_send_msg` frames. No public HTTP endpoint or AES encryption is required.
+
+---
+
+## IRC
+
+### Prerequisites
+
+- An IRC server address and a nickname for the bot (protocol defined in [RFC 2812](https://datatracker.ietf.org/doc/html/rfc2812))
+
+### Setup
+
+1. Choose an IRC server and channels you want the bot to join.
+2. Set environment variables:
+
+```bash
+export IRC_SERVER=irc.libera.chat:6697        # Environment variable
+export IRC_NICK=librefang-bot
+export IRC_CHANNELS=#channel1,#channel2
+# export IRC_PASSWORD=your-password           # Optional
+librefang vault set IRC_SERVER                # Encrypted vault (recommended)
+librefang vault set IRC_NICK
+librefang vault set IRC_CHANNELS
+# librefang vault set IRC_PASSWORD            # Optional
+librefang config set-key irc                  # .env file
+# Or set via dashboard "Set API Key" button   # secrets.env
+```
+
+3. Add to config:
+
+```toml
+[channels.irc]
+server_env = "IRC_SERVER"
+nick_env = "IRC_NICK"
+channels = ["#channel1", "#channel2"]
+# password_env = "IRC_PASSWORD"   # optional
+default_agent = "assistant"
+```
+
+4. Restart the daemon.
+
+### How It Works
+
+The IRC adapter connects to the IRC server over TCP (with optional TLS), authenticates, and joins the configured channels. It listens for PRIVMSG events and routes them to the configured agent. Responses are sent as PRIVMSG replies.
+
+---
+
+## XMPP
+
+### Prerequisites
+
+- An XMPP account (JID) and server (see [XMPP extensions](https://xmpp.org/extensions/))
+
+### Setup
+
+1. Create an XMPP account on your server (or use an existing one).
+2. Set environment variables:
+
+```bash
+export XMPP_JID=bot@example.com               # Environment variable
+export XMPP_PASSWORD=your-password
+export XMPP_SERVER=example.com
+librefang vault set XMPP_JID                  # Encrypted vault (recommended)
+librefang vault set XMPP_PASSWORD
+librefang vault set XMPP_SERVER
+librefang config set-key xmpp                 # .env file
+# Or set via dashboard "Set API Key" button   # secrets.env
+```
+
+3. Add to config:
+
+```toml
+[channels.xmpp]
+jid_env = "XMPP_JID"
+password_env = "XMPP_PASSWORD"
+server_env = "XMPP_SERVER"
+default_agent = "assistant"
+```
+
+4. Restart the daemon.
+
+### How It Works
+
+The XMPP adapter connects to the XMPP server using the specified JID and password, then listens for incoming message stanzas. Responses are sent back as XMPP message stanzas to the originating JID.
+
+---
+
+## MQTT
+
+### Prerequisites
+
+- An MQTT broker (e.g., Mosquitto, HiveMQ, EMQX) accessible from the LibreFang host (see [MQTT specification](https://mqtt.org))
+- Requires the `all-channels` feature flag at compile time
+
+### Setup
+
+1. Ensure your MQTT broker is running and accessible.
+2. Set environment variables (optional, for authenticated brokers):
+
+```bash
+export MQTT_BROKER_URL=mqtt://broker:1883     # Environment variable
+export MQTT_TOPIC=home/agents/input
+# export MQTT_USERNAME=your-username          # Optional
+# export MQTT_PASSWORD=your-password          # Optional
+librefang vault set MQTT_BROKER_URL           # Encrypted vault (recommended)
+librefang vault set MQTT_TOPIC
+# librefang vault set MQTT_USERNAME           # Optional
+# librefang vault set MQTT_PASSWORD           # Optional
+librefang config set-key mqtt                 # .env file
+# Or set via dashboard "Set API Key" button   # secrets.env
+```
+
+3. Add to config:
+
+```toml
+[channels.mqtt]
+host = "broker.example.com"
+port = 1883
+client_id = "librefang-bot"
+subscribe_topics = ["home/agents/input", "home/agents/commands"]
+response_topic = "home/agents/output"
+qos = "at_least_once"                # at_most_once | at_least_once | exactly_once
+# username_env = "MQTT_USERNAME"     # optional
+# password_env = "MQTT_PASSWORD"     # optional
+keep_alive_secs = 30
+default_agent = "home-assistant"
+```
+
+4. Restart the daemon.
+
+### How It Works
+
+The MQTT adapter uses the `rumqttc` crate to connect to the broker using MQTT v3.1.1/v5. It subscribes to the configured topics for incoming messages and publishes agent responses to the configured response topic. Automatic reconnection with exponential backoff is built in.
+
+---
+
+## Ntfy
+
+### Prerequisites
+
+- Access to an [ntfy](https://docs.ntfy.sh) server (self-hosted or the public instance at `ntfy.sh`)
+
+### Setup
+
+1. Choose a topic name on your ntfy server.
+2. Set environment variables:
+
+```bash
+export NTFY_URL=https://ntfy.sh               # Environment variable
+export NTFY_TOPIC=my-librefang-topic
+# export NTFY_TOKEN=your-access-token         # Optional
+librefang vault set NTFY_URL                  # Encrypted vault (recommended)
+librefang vault set NTFY_TOPIC
+# librefang vault set NTFY_TOKEN              # Optional
+librefang config set-key ntfy                 # .env file
+# Or set via dashboard "Set API Key" button   # secrets.env
+```
+
+3. Add to config:
+
+```toml
+[channels.ntfy]
+url_env = "NTFY_URL"
+topic_env = "NTFY_TOPIC"
+# token_env = "NTFY_TOKEN"   # optional
+default_agent = "assistant"
+```
+
+4. Restart the daemon.
+
+### How It Works
+
+The ntfy adapter subscribes to a topic on the ntfy server using Server-Sent Events (SSE) for real-time message delivery. Incoming messages are routed to the configured agent, and responses are published back to the topic via the ntfy REST API.
+
+---
+
+## Gotify
+
+### Prerequisites
+
+- A Gotify server instance and an application token (see [Gotify docs](https://gotify.net/docs/))
+
+### Setup
+
+1. In the Gotify web UI, create a new application and copy the token.
+2. Set environment variables:
+
+```bash
+export GOTIFY_URL=https://gotify.example.com  # Environment variable
+export GOTIFY_TOKEN=your-application-token
+librefang vault set GOTIFY_URL                # Encrypted vault (recommended)
+librefang vault set GOTIFY_TOKEN
+librefang config set-key gotify               # .env file
+# Or set via dashboard "Set API Key" button   # secrets.env
+```
+
+3. Add to config:
+
+```toml
+[channels.gotify]
+url_env = "GOTIFY_URL"
+token_env = "GOTIFY_TOKEN"
+default_agent = "assistant"
+```
+
+4. Restart the daemon.
+
+### How It Works
+
+The Gotify adapter connects to the Gotify server via WebSocket to receive messages in real time. Responses are sent back through the Gotify REST API's message endpoint.
+
+---
+
+## Nextcloud Talk
+
+### Prerequisites
+
+- A Nextcloud instance with the Talk app installed (see [Nextcloud Talk API docs](https://nextcloud-talk.readthedocs.io/))
+- An app password or bot user account
+
+### Setup
+
+1. In Nextcloud, go to **Settings > Security > Devices & sessions** and create an app password, or create a dedicated bot user.
+2. Set environment variables:
+
+```bash
+export NEXTCLOUD_URL=https://nextcloud.example.com  # Environment variable
+export NEXTCLOUD_TOKEN=your-app-password
+librefang vault set NEXTCLOUD_URL             # Encrypted vault (recommended)
+librefang vault set NEXTCLOUD_TOKEN
+librefang config set-key nextcloud            # .env file
+# Or set via dashboard "Set API Key" button   # secrets.env
+```
+
+3. Add to config:
+
+```toml
+[channels.nextcloud]
+url_env = "NEXTCLOUD_URL"
+token_env = "NEXTCLOUD_TOKEN"
+default_agent = "assistant"
+```
+
+4. Restart the daemon.
+
+### How It Works
+
+The Nextcloud Talk adapter polls the Nextcloud Talk REST API for new messages in configured conversations. Responses are posted back as chat messages through the Talk API.
+
+---
+
+## Mumble
+
+### Prerequisites
+
+- A Mumble server (Murmur) accessible from the LibreFang host (see [Mumble protocol documentation](https://wiki.mumble.info/wiki/Protocol))
+
+### Setup
+
+1. Ensure your Mumble server is running and accessible.
+2. Set environment variables:
+
+```bash
+export MUMBLE_SERVER=mumble.example.com:64738 # Environment variable
+export MUMBLE_USERNAME=librefang-bot
+# export MUMBLE_PASSWORD=your-password        # Optional
+librefang vault set MUMBLE_SERVER             # Encrypted vault (recommended)
+librefang vault set MUMBLE_USERNAME
+# librefang vault set MUMBLE_PASSWORD         # Optional
+librefang config set-key mumble               # .env file
+# Or set via dashboard "Set API Key" button   # secrets.env
+```
+
+3. Add to config:
+
+```toml
+[channels.mumble]
+server_env = "MUMBLE_SERVER"
+username_env = "MUMBLE_USERNAME"
+# password_env = "MUMBLE_PASSWORD"   # optional
+default_agent = "assistant"
+```
+
+4. Restart the daemon.
+
+### How It Works
+
+The Mumble adapter connects to the Mumble server using the Mumble TCP protocol and authenticates with the configured credentials. It listens for text messages in the joined channel and routes them to the configured agent. Responses are sent back as text messages.
+
+---
+
+## Webhook
+
+### Prerequisites
+
+- A target URL that accepts HTTP POST requests (no external service registration needed)
+
+### Setup
+
+1. Choose a URL where webhook payloads should be sent.
+2. Choose a shared secret for HMAC-SHA256 signature verification.
+3. Set environment variables:
+
+```bash
+export WEBHOOK_URL=https://your-service.example.com/hook  # Environment variable
+export WEBHOOK_SECRET=your-shared-secret
+librefang vault set WEBHOOK_URL               # Encrypted vault (recommended)
+librefang vault set WEBHOOK_SECRET
+librefang config set-key webhook              # .env file
+# Or set via dashboard "Set API Key" button   # secrets.env
+```
+
+4. Add to config:
+
+```toml
+[channels.webhook]
+url_env = "WEBHOOK_URL"
+secret_env = "WEBHOOK_SECRET"
+default_agent = "assistant"
+```
+
+5. Restart the daemon.
+
+### How It Works
+
+The Webhook adapter provides a generic bidirectional HTTP integration. Incoming messages are received as HTTP POST requests on the shared API server at `/channels/webhook/webhook`, verified via HMAC-SHA256 using the shared secret. Responses are delivered as HTTP POST payloads to the configured URL, also signed with HMAC-SHA256.
+
+---
+
+## Voice
+
+### Prerequisites
+
+- An API key for an OpenAI-compatible STT/TTS provider (e.g., OpenAI, Groq, or a self-hosted Whisper instance)
+
+### Setup
+
+1. Set your STT/TTS API key:
+
+```bash
+export OPENAI_API_KEY=sk-...
+librefang vault set OPENAI_API_KEY              # Encrypted vault (recommended)
+```
+
+2. Add to config:
+
+```toml
+[channels.voice]
+api_key_env = "OPENAI_API_KEY"
+stt_url = "https://api.openai.com"
+tts_url = "https://api.openai.com"
+tts_voice = "alloy"
+# buffer_threshold = 32768    # Audio buffer size in bytes before triggering STT
+# default_agent = "assistant"
+```
+
+3. Restart the daemon.
+
+### WebSocket Protocol
+
+Clients connect to `ws://your-host:4545/channels/voice/ws` and exchange binary + text frames:
+
+**Client to Server (binary):** Raw audio data (PCM 16-bit LE mono 16kHz, or Opus packets).
+
+**Client to Server (JSON):**
+```json
+{ "type": "config", "format": "pcm", "sample_rate": 16000 }
+{ "type": "end_of_speech" }
+```
+
+**Server to Client (JSON):**
+```json
+{ "type": "ready" }
+{ "type": "transcript", "text": "..." }
+{ "type": "response", "text": "..." }
+{ "type": "error", "message": "..." }
+```
+
+**Server to Client (binary):** Synthesized audio response data.
+
+### How It Works
+
+The Voice adapter accepts real-time audio streams over WebSocket on the shared API server at `/channels/voice/ws`. Audio data is buffered until it reaches the configured threshold (default 32KB), then transcribed via the STT provider (OpenAI Whisper API by default). The transcribed text is routed to an agent through the channel bridge. The agent's text response can be synthesized back into audio via TTS and streamed to the client. Supported audio formats are PCM (16-bit LE mono) and Opus.
+
+| Config field | Type | Default | Description |
+|---|---|---|---|
+| `api_key_env` | string | `"OPENAI_API_KEY"` | Env var name holding the API key for STT/TTS services. |
+| `stt_url` | string | `"https://api.openai.com"` | Base URL for the STT (Speech-to-Text) API. |
+| `tts_url` | string | `"https://api.openai.com"` | Base URL for the TTS (Text-to-Speech) API. |
+| `tts_voice` | string | `"alloy"` | TTS voice name. Options: `alloy`, `echo`, `fable`, `onyx`, `nova`, `shimmer`. |
+| `buffer_threshold` | usize | `32768` | Audio buffer size in bytes before triggering STT. |
+| `default_agent` | string | - | Default agent name to route voice messages to. |
