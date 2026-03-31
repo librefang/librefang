@@ -376,7 +376,7 @@ Configures text-to-speech synthesis for voice output.
 ```toml
 [tts]
 enabled = false
-provider = "openai"          # openai | elevenlabs
+provider = "openai"          # openai | elevenlabs | google_tts
 max_text_length = 4096
 timeout_secs = 30
 
@@ -391,6 +391,13 @@ voice_id = "21m00Tcm4TlvDq8ikWAM"
 model_id = "eleven_monolingual_v1"
 stability = 0.5
 similarity_boost = 0.75
+
+[tts.google]
+voice = "en-US-Standard-F"
+language_code = "en-US"
+speaking_rate = 1.0
+pitch = 0.0
+format = "mp3"
 ```
 
 **`[tts]` fields:**
@@ -398,7 +405,7 @@ similarity_boost = 0.75
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `enabled` | bool | `false` | Enable TTS synthesis. |
-| `provider` | string or null | `null` | Default TTS provider: `"openai"` or `"elevenlabs"`. |
+| `provider` | string or null | `null` | Default TTS provider: `"openai"`, `"elevenlabs"`, or `"google_tts"`. |
 | `max_text_length` | usize | `4096` | Maximum text length in characters for a single TTS request. |
 | `timeout_secs` | u64 | `30` | Request timeout per TTS call in seconds. |
 
@@ -419,6 +426,18 @@ similarity_boost = 0.75
 | `model_id` | string | `"eleven_monolingual_v1"` | ElevenLabs model ID. |
 | `stability` | f32 | `0.5` | Voice stability (0.0–1.0). Higher = more consistent, less expressive. |
 | `similarity_boost` | f32 | `0.75` | Voice similarity boost (0.0–1.0). |
+
+**`[tts.google]` fields:**
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `voice` | string | `"en-US-Standard-F"` | Google TTS voice name (e.g. `en-US-Standard-F`, `pl-PL-Wavenet-A`). |
+| `language_code` | string | `"en-US"` | BCP-47 language code (e.g. `en-US`, `pl-PL`). |
+| `speaking_rate` | f32 | `1.0` | Speaking rate multiplier (0.25 to 4.0). |
+| `pitch` | f32 | `0.0` | Pitch adjustment in semitones (-20.0 to 20.0). |
+| `format` | string | `"mp3"` | Output format: `mp3`, `opus`, `wav`. |
+
+Requires `GOOGLE_API_KEY` or `GOOGLE_CLOUD_API_KEY` environment variable.
 
 ---
 
