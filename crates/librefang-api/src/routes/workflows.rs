@@ -45,8 +45,16 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             axum::routing::post(run_workflow),
         )
         .route(
+            "/workflows/{id}/dry-run",
+            axum::routing::post(dry_run_workflow),
+        )
+        .route(
             "/workflows/{id}/runs",
             axum::routing::get(list_workflow_runs),
+        )
+        .route(
+            "/workflows/runs/{run_id}",
+            axum::routing::get(get_workflow_run),
         )
         // Workflow templates (distinct from the agent templates in system.rs)
         .route(
@@ -91,7 +99,7 @@ use axum::response::IntoResponse;
 use axum::Json;
 use librefang_kernel::triggers::{TriggerId, TriggerPattern};
 use librefang_kernel::workflow::{
-    ErrorMode, StepAgent, StepMode, Workflow, WorkflowId, WorkflowStep,
+    ErrorMode, StepAgent, StepMode, Workflow, WorkflowId, WorkflowRunId, WorkflowStep,
 };
 use librefang_runtime::kernel_handle::KernelHandle;
 use librefang_types::agent::AgentId;
@@ -648,18 +656,149 @@ pub async fn run_workflow(
     let input = req["input"].as_str().unwrap_or("").to_string();
 
     match state.kernel.run_workflow(workflow_id, input).await {
-        Ok((run_id, output)) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "run_id": run_id.to_string(),
-                "output": output,
-                "status": "completed",
-            })),
-        ),
+        Ok((run_id, output)) => {
+            // Include step-level detail in the response so callers can inspect I/O
+            let run = state.kernel.workflow_engine().get_run(run_id).await;
+            let step_results = run.as_ref().map(|r| {
+                r.step_results
+                    .iter()
+                    .map(|s| {
+                        serde_json::json!({
+                            "step_name": s.step_name,
+                            "agent_name": s.agent_name,
+                            "prompt": s.prompt,
+                            "output": s.output,
+                            "input_tokens": s.input_tokens,
+                            "output_tokens": s.output_tokens,
+                            "duration_ms": s.duration_ms,
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            });
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "run_id": run_id.to_string(),
+                    "output": output,
+                    "status": "completed",
+                    "step_results": step_results.unwrap_or_default(),
+                })),
+            )
+        }
         Err(e) => {
             tracing::warn!("Workflow run failed for {id}: {e}");
-            ApiErrorResponse::internal("Workflow execution failed").into_json_tuple()
+            // Return the actual error message, not a generic one, to aid debugging
+            let detail = e.to_string();
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({
+                    "error": "workflow_failed",
+                    "detail": detail,
+                })),
+            )
         }
+    }
+}
+
+/// POST /api/workflows/:id/dry-run — Validate and preview a workflow without executing it.
+#[utoipa::path(
+    post,
+    path = "/api/workflows/{id}/dry-run",
+    tag = "workflows",
+    params(("id" = String, Path, description = "Workflow ID")),
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Dry-run preview", body = serde_json::Value),
+        (status = 404, description = "Workflow not found")
+    )
+)]
+pub async fn dry_run_workflow(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let workflow_id = WorkflowId(match id.parse() {
+        Ok(u) => u,
+        Err(_) => {
+            return ApiErrorResponse::bad_request("Invalid workflow ID").into_json_tuple();
+        }
+    });
+
+    let input = req["input"].as_str().unwrap_or("").to_string();
+
+    match state.kernel.dry_run_workflow(workflow_id, input).await {
+        Ok(steps) => {
+            let all_agents_found = steps.iter().all(|s| s.agent_found);
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "valid": all_agents_found,
+                    "steps": steps.iter().map(|s| serde_json::json!({
+                        "step_name": s.step_name,
+                        "agent_name": s.agent_name,
+                        "agent_found": s.agent_found,
+                        "resolved_prompt": s.resolved_prompt,
+                        "skipped": s.skipped,
+                        "skip_reason": s.skip_reason,
+                    })).collect::<Vec<_>>(),
+                })),
+            )
+        }
+        Err(e) => {
+            tracing::warn!("Workflow dry-run failed for {id}: {e}");
+            ApiErrorResponse::not_found(e.to_string()).into_json_tuple()
+        }
+    }
+}
+
+/// GET /api/workflows/runs/:run_id — Get detailed info for a single workflow run.
+#[utoipa::path(
+    get,
+    path = "/api/workflows/runs/{run_id}",
+    tag = "workflows",
+    params(("run_id" = String, Path, description = "Workflow run ID")),
+    responses(
+        (status = 200, description = "Workflow run details", body = serde_json::Value),
+        (status = 404, description = "Run not found")
+    )
+)]
+pub async fn get_workflow_run(
+    State(state): State<Arc<AppState>>,
+    Path(run_id): Path<String>,
+) -> impl IntoResponse {
+    let run_id = WorkflowRunId(match run_id.parse() {
+        Ok(u) => u,
+        Err(_) => {
+            return ApiErrorResponse::bad_request("Invalid run ID").into_json_tuple();
+        }
+    });
+
+    match state.kernel.workflow_engine().get_run(run_id).await {
+        Some(run) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "id": run.id.to_string(),
+                "workflow_id": run.workflow_id.to_string(),
+                "workflow_name": run.workflow_name,
+                "input": run.input,
+                "state": serde_json::to_value(&run.state).unwrap_or_default(),
+                "output": run.output,
+                "error": run.error,
+                "started_at": run.started_at.to_rfc3339(),
+                "completed_at": run.completed_at.map(|t| t.to_rfc3339()),
+                "step_results": run.step_results.iter().map(|s| serde_json::json!({
+                    "step_name": s.step_name,
+                    "agent_id": s.agent_id,
+                    "agent_name": s.agent_name,
+                    "prompt": s.prompt,
+                    "output": s.output,
+                    "input_tokens": s.input_tokens,
+                    "output_tokens": s.output_tokens,
+                    "duration_ms": s.duration_ms,
+                })).collect::<Vec<_>>(),
+            })),
+        ),
+        None => ApiErrorResponse::not_found(format!("Run '{run_id}' not found")).into_json_tuple(),
     }
 }
 

@@ -13,7 +13,8 @@ use crate::scheduler::AgentScheduler;
 use crate::supervisor::Supervisor;
 use crate::triggers::{TriggerEngine, TriggerId, TriggerPattern};
 use crate::workflow::{
-    StepAgent, Workflow, WorkflowEngine, WorkflowId, WorkflowRunId, WorkflowTemplateRegistry,
+    DryRunStep, StepAgent, Workflow, WorkflowEngine, WorkflowId, WorkflowRunId,
+    WorkflowTemplateRegistry,
 };
 
 use librefang_memory::MemorySubstrate;
@@ -2161,7 +2162,9 @@ impl LibreFangKernel {
                     // Check enabled flag — also do a direct TOML read as fallback
                     let mut is_enabled = restored_entry.manifest.enabled;
                     if is_enabled {
-                        // Double-check: read directly from hands/agents TOML in case DB is stale
+                        // Double-check: read directly from hands/agents TOML in case DB is stale.
+                        // Use proper TOML parsing instead of string matching to handle all valid
+                        // whitespace variants and avoid false positives from comments.
                         for dir in &["agents", "hands"] {
                             let check_path = kernel
                                 .home_dir_boot
@@ -2170,9 +2173,7 @@ impl LibreFangKernel {
                                 .join("agent.toml");
                             if check_path.exists() {
                                 if let Ok(content) = std::fs::read_to_string(&check_path) {
-                                    if content.contains("enabled = false")
-                                        || content.contains("enabled=false")
-                                    {
+                                    if toml_enabled_false(&content) {
                                         is_enabled = false;
                                         restored_entry.manifest.enabled = false;
                                     }
@@ -6595,6 +6596,41 @@ system_prompt = "You are a helpful assistant."
         Ok((run_id, output))
     }
 
+    /// Dry-run a workflow: resolve agents and expand prompts without making any LLM calls.
+    ///
+    /// Returns a per-step preview useful for validating a workflow before running it for real.
+    pub async fn dry_run_workflow(
+        &self,
+        workflow_id: WorkflowId,
+        input: String,
+    ) -> KernelResult<Vec<DryRunStep>> {
+        let resolver =
+            |agent_ref: &StepAgent| -> Option<(librefang_types::agent::AgentId, String, bool)> {
+                match agent_ref {
+                    StepAgent::ById { id } => {
+                        let agent_id: librefang_types::agent::AgentId = id.parse().ok()?;
+                        let entry = self.registry.get(agent_id)?;
+                        let inherit = entry.manifest.inherit_parent_context;
+                        Some((agent_id, entry.name.clone(), inherit))
+                    }
+                    StepAgent::ByName { name } => {
+                        let entry = self.registry.find_by_name(name)?;
+                        let inherit = entry.manifest.inherit_parent_context;
+                        Some((entry.id, entry.name.clone(), inherit))
+                    }
+                }
+            };
+
+        self.workflows
+            .dry_run(workflow_id, &input, resolver)
+            .await
+            .map_err(|e| {
+                KernelError::LibreFang(LibreFangError::Internal(format!(
+                    "Workflow dry-run failed: {e}"
+                )))
+            })
+    }
+
     /// Start background loops for all non-reactive agents.
     ///
     /// Must be called after the kernel is wrapped in `Arc` (e.g., from the daemon).
@@ -6626,8 +6662,7 @@ system_prompt = "You are a helpful assistant."
                     .join("agent.toml");
                 if hand_toml.exists() {
                     if let Ok(content) = std::fs::read_to_string(&hand_toml) {
-                        if content.contains("enabled = false") || content.contains("enabled=false")
-                        {
+                        if toml_enabled_false(&content) {
                             info!(hand = %hand_id, "Hand disabled in config — skipping reactivation");
                             continue;
                         }
@@ -8868,6 +8903,20 @@ fn infer_provider_from_model(model: &str) -> Option<String> {
 
 /// A well-known agent ID used for shared memory operations across agents.
 /// This is a fixed UUID so all agents read/write to the same namespace.
+/// Parse an agent.toml string and return true if `enabled` is explicitly set
+/// to `false`. Uses proper TOML parsing to handle all valid whitespace variants
+/// and avoid false positives from commented-out lines.
+fn toml_enabled_false(content: &str) -> bool {
+    #[derive(serde::Deserialize)]
+    struct Probe {
+        enabled: Option<bool>,
+    }
+    toml::from_str::<Probe>(content)
+        .ok()
+        .and_then(|p| p.enabled)
+        == Some(false)
+}
+
 pub fn shared_memory_agent_id() -> AgentId {
     AgentId(uuid::Uuid::from_bytes([
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
