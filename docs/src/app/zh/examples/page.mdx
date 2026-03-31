@@ -1,512 +1,360 @@
 # 使用示例
 
-LibreFang 常用场景的完整示例。
+本页按 LibreFang 的核心能力组织，覆盖 Agent、Hands、Channels、Workflows、Scheduling、Webhooks、Memory 和 API 的典型用法。示例基于当前源码里的 CLI、REST API 和配置结构编写。
+
+如果你想看字段完整说明，继续读：
+
+- [Agent 模板目录](/zh/agents)
+- [工作流引擎指南](/zh/workflows)
+- [自主 Hands](/zh/hands)
+- [通道配置](/zh/configuration/channels)
 
 ---
 
-## 场景 1: 客户服务 Agent
+## LibreFang 能做什么
 
-### 需求
-- 7x24 小时自动回复客户咨询
-- 接入 Telegram 和 Discord
-- 记住客户历史对话
-- 需要人工审批复杂问题
+先看能力边界，再看具体用法。
 
-### Agent 清单
+LibreFang 在当前源码里不是单一“聊天机器人框架”，而是一个 Agent OS，能力大致分成这几层：
+
+- `Agent`：可以生成内置模板 Agent，也可以用 `agent.toml` 自定义 Agent，然后通过 CLI、Dashboard 或 REST API 给它发消息。
+- `Hands`：这是预打包的自主能力模块，比如 `researcher`、`lead`、`browser`、`clip`、`devops`。适合“持续工作”而不是只回一条消息。
+- `Channels`：可以把 Agent 接到 Telegram、Discord、Slack、WeChat 等外部通道，让用户在外部平台里直接和 Agent 交互。
+- `Workflows`：可以把多个 Agent 串成多步骤流水线。当前引擎支持顺序执行、fan-out / collect、conditional、loop 这些模式。
+- `Scheduling`：可以用 `cron` 定时给 Agent 发送 prompt，让它周期性工作。
+- `Webhooks / Triggers`：可以让外部 HTTP 回调或系统事件触发 Agent。
+- `Memory`：每个 Agent 有自己的 KV 记忆空间，用于跨会话保存状态。
+- `Skills / MCP / Extensions`：Agent 可以挂技能，也可以接 MCP server，扩展可用工具。
+- `Control Plane`：有 Dashboard、REST API、TUI、审批队列、安全审计这些管理面能力。
+
+这页主要回答两个问题：
+
+1. LibreFang 能用来做什么？
+2. 这些能力在当前源码里该怎么配、怎么跑？
+
+下面按这个顺序展开。
+
+---
+
+## 1. 先跑起来
+
+首次运行时，`librefang start` 会自动执行快速初始化，默认 API 和 Dashboard 地址是 `http://127.0.0.1:4545`。
+
+```bash
+# 先配置一个模型供应商的 API Key。下面以 Groq 为例。
+export GROQ_API_KEY="gsk_your_key_here"
+
+# 启动守护进程（首次运行会自动 quick init）
+librefang start
+
+# 和默认 assistant 对话
+librefang chat
+
+# 打开 Dashboard
+librefang dashboard
+```
+
+如果你想显式初始化：
+
+```bash
+librefang init
+# 或
+librefang init --quick
+```
+
+---
+
+## 2. 使用内置 Agent 模板
+
+最直接的用法不是先写复杂配置，而是先生成一个现成模板，然后给它发消息。
+
+```bash
+# 生成一个内置 coder Agent
+librefang agent new coder
+
+# 查看当前运行中的 Agent
+librefang agent list
+
+# 给它发一条一次性消息
+librefang message coder "Review the error handling in src/main.rs"
+
+# 进入交互式聊天
+librefang chat coder
+```
+
+常用模板包括 `assistant`、`coder`、`researcher`、`writer`、`customer-support`、`meeting-assistant`。
+
+这层对应的是 LibreFang 最基础的能力：`把一个 Agent 跑起来并让它完成具体任务`。如果你的需求是“写代码”“审查 PR”“写文档”“做研究”，通常从这里开始。
+
+---
+
+## 3. 从 `agent.toml` 生成自定义 Agent
+
+当前源码里，Agent 提示词应该写在 `[model].system_prompt` 下，而不是单独的 `[system_prompt]` 表。
 
 ```toml
 # customer-support.toml
 name = "customer-support"
-version = "1.0.0"
-description = "Customer support agent with approval workflow"
+version = "0.1.0"
+description = "Customer support agent"
+author = "your-name"
 module = "builtin:chat"
+tags = ["support", "example"]
 
 [model]
-provider = "groq"
-model = "llama-3.3-70b-versatile"
+provider = "default"
+model = "default"
+system_prompt = """
+You are a customer support agent.
 
-[system_prompt]
-prompt = """你是一个专业的客服 agent。你的职责是：
-1. 礼貌回复客户咨询
-2. 提供准确的产品信息
-3. 复杂问题转人工
-4. 保持专业和友好"""
+Rules:
+- Reply politely and concisely.
+- If the user asks about refunds or billing, collect facts first.
+- Store important customer facts in memory.
+- If you are unsure, say so clearly.
+"""
+
+[resources]
+max_llm_tokens_per_hour = 50000
 
 [capabilities]
 tools = ["file_read", "web_fetch", "memory_recall", "memory_store"]
 memory_read = ["customer:*"]
 memory_write = ["customer:*"]
 network = ["*"]
-
-[resources]
-max_llm_tokens_per_hour = 50000
-
-[approval]
-required = true
-channels = ["telegram"]
-keywords = ["refund", "complaint", "manager"]
 ```
 
-### 通道配置
-
-```toml
-[telegram]
-bot_token_env = "TELEGRAM_BOT_TOKEN"
-allowed_users = ["*"]
-
-[discord]
-bot_token_env = "DISCORD_BOT_TOKEN"
-guild_ids = ["123456789"]
-
-[channels.customer-support]
-system_prompt = "你是一个客服 agent，请礼貌专业地回复客户。"
-rate_limit = 20
-```
-
----
-
-## 场景 2: 每日新闻摘要
-
-### 需求
-- 每天早上 8 点自动运行
-- 抓取多个新闻源
-- 生成摘要
-- 发送到 Slack
-
-### 工作流
-
-```json
-{
-  "name": "daily-news-digest",
-  "version": "1.0.0",
-  "trigger": {
-    "type": "schedule",
-    "cron": "0 8 * * *"
-  },
-  "steps": [
-    {
-      "id": "fetch-tech-news",
-      "type": "agent",
-      "agent": "researcher",
-      "input": "Fetch latest tech news from Hacker News and TechCrunch",
-      "output_var": "tech_news"
-    },
-    {
-      "id": "fetch-ai-news",
-      "type": "agent",
-      "agent": "researcher",
-      "input": "Fetch latest AI news from AI News and OpenAI blog",
-      "output_var": "ai_news"
-    },
-    {
-      "id": "summarize",
-      "type": "agent",
-      "agent": "writer",
-      "input": "Create a brief summary of these news items: {{tech_news}} and {{ai_news}}",
-      "output_var": "summary"
-    },
-    {
-      "id": "send-slack",
-      "type": "notification",
-      "channel": "slack",
-      "message": "📰 Daily News Digest\n\n{{summary}}"
-    }
-  ]
-}
-```
-
----
-
-## 场景 3: 代码审查助手
-
-### 需求
-- 监听 GitHub PR
-- 自动进行代码审查
-- 提供改进建议
-
-### Agent 清单
-
-```toml
-# code-reviewer.toml
-name = "code-reviewer"
-version = "1.0.0"
-description = "Automated code review agent"
-module = "builtin:chat"
-
-[model]
-provider = "anthropic"
-model = "claude-sonnet-4-20250514"
-
-[system_prompt]
-prompt = """你是一个专业的代码审查专家。你的职责是：
-1. 检查代码质量和风格
-2. 识别潜在 bug 和安全问题
-3. 提供具体的改进建议
-4. 保持建设性和专业"""
-
-[capabilities]
-tools = ["file_read", "web_fetch", "git"]
-memory_read = ["review:*"]
-memory_write = ["review:*"]
-
-[schedule]
-enabled = true
-cron = "0 * * * *"
-```
-
-### Webhook 触发器
-
-```json
-{
-  "type": "webhook",
-  "path": "/webhook/github",
-  "events": ["pull_request"]
-}
-```
-
----
-
-## 场景 4: 销售潜在客户挖掘
-
-### 需求
-- 每天自动挖掘潜在客户
-- 丰富公司信息
-- 评分和排序
-- 发送到 CRM
-
-### Hand 配置
-
-```toml
-[lead]
-icp = "B2B SaaS companies, 50-500 employees, Series A+"
-search_sources = ["linkedin", "crunchbase", "hunter"]
-score_criteria = [
-  "funding_stage: A+ = 30",
-  "employee_count: 50-500 = 20",
-  "tech_stack: contains(ai|ml) = 25",
-  "job_postings: recent = 15"
-]
-deduplicate = true
-crm_integration = "hubspot"
-
-[[lead.quality_thresholds]]
-score = 80
-action = "auto_add_to_crm"
-
-[[lead.quality_thresholds]]
-score = 50
-action = "require_approval"
-```
-
-### 工作流
-
-```json
-{
-  "name": "lead-generation",
-  "trigger": {
-    "type": "schedule",
-    "cron": "0 9 * * *"
-  },
-  "steps": [
-    {
-      "id": "discover",
-      "type": "agent",
-      "agent": "lead",
-      "input": "Find 50 companies matching our ICP"
-    },
-    {
-      "id": "enrich",
-      "type": "agent",
-      "agent": "collector",
-      "input": "Enrich company data: {{discover.companies}}"
-    },
-    {
-      "id": "score",
-      "type": "agent",
-      "agent": "classifier",
-      "input": "Score leads: {{enrich.leads}}"
-    },
-    {
-      "id": "notify",
-      "type": "notification",
-      "channel": "telegram",
-      "message": "Generated {{score.high_quality_count}} qualified leads"
-    }
-  ]
-}
-```
-
----
-
-## 场景 5: 内容创作助手
-
-### 需求
-- 定期生成社交媒体内容
-- 支持多个平台
-- 审批工作流
-
-### Twitter Hand 配置
-
-```toml
-[twitter]
-content_formats = ["thread", "hot_take", "question"]
-topics = ["ai", "technology", "productivity"]
-approval_queue = true
-posting_times = ["9:00", "12:00", "18:00"]
-max_posts_per_day = 5
-
-[twitter.linkedin]
-enabled = true
-posting_times = ["10:00"]
-```
-
-### 内容审批工作流
-
-```json
-{
-  "name": "content-approval",
-  "steps": [
-    {
-      "id": "generate",
-      "type": "agent",
-      "agent": "twitter",
-      "input": "Generate 3 tweet ideas about AI"
-    },
-    {
-      "id": "create",
-      "type": "agent",
-      "agent": "writer",
-      "input": "Write a thread based on: {{generate.ideas[0]}}"
-    },
-    {
-      "id": "approve",
-      "type": "approval",
-      "channels": ["telegram"],
-      "timeout": "24h"
-    },
-    {
-      "id": "publish",
-      "type": "notification",
-      "channel": "twitter",
-      "message": "{{create.content}}"
-    }
-  ]
-}
-```
-
----
-
-## 场景 6: 数据库助手
-
-### 需求
-- 回答数据库相关问题
-- 执行只读查询
-- 生成 SQL
-
-### Agent 清单
-
-```toml
-# db-assistant.toml
-name = "db-assistant"
-version = "1.0.0"
-module = "builtin:chat"
-
-[model]
-provider = "anthropic"
-model = "claude-sonnet-4-20250514"
-
-[system_prompt]
-prompt = """你是一个数据库助手。你可以：
-1. 回答关于数据库设计的问题
-2. 编写和优化 SQL 查询
-3. 解释查询执行计划
-注意：不要执行任何修改数据的操作。"""
-
-[capabilities]
-tools = ["file_read", "postgres_query"]
-memory_read = ["schema:*"]
-
-[security]
-read_only = true
-allowed_tables = ["users", "orders", "products", "analytics_*"]
-max_rows = 1000
-```
-
----
-
-## 场景 7: 个人知识助手
-
-### 需求
-- 管理和检索个人笔记
-- 语义搜索
-- 自动整理
-
-### Agent 清单
-
-```toml
-# knowledge-assistant.toml
-name = "knowledge-assistant"
-version = "1.0.0"
-module = "builtin:chat"
-
-[model]
-provider = "groq"
-model = "llama-3.3-70b-versatile"
-
-[capabilities]
-tools = ["file_read", "file_write", "memory_recall", "memory_store"]
-memory_read = ["knowledge:*", "notes:*", "bookmarks:*"]
-memory_write = ["knowledge:*", "notes:*"]
-
-[memory]
-decay_rate = 0.02
-```
-
-### 使用示例
+生成并使用：
 
 ```bash
-# 存储笔记
-librefang memory set --key "notes:meeting-2025-01-15" --value "Discussed project roadmap"
-
-# 语义搜索
-librefang memory search "project planning"
-
-# 知识图谱查询
-librefang kg query --from "person:alice" --relation "works_with"
+librefang agent spawn ./customer-support.toml
+librefang message customer-support "A user says their payment failed."
 ```
 
 ---
 
-## 场景 8: CI/CD 监控助手
+## 4. 把渠道接到 Agent
 
-### 需求
-- 监控 GitHub Actions
-- 失败时告警
-- 提供调试建议
+渠道配置写在 `~/.librefang/config.toml` 的 `[channels.<name>]` 下，不是 `[telegram]` 或 `[discord]` 顶层表。
 
-### 配置
+这层对应的是 LibreFang 的“外部入口”能力：让 Agent 不只在 CLI 里用，而是能在 Telegram、Discord、Slack、WeChat 等地方直接工作。
 
-```toml
-[github]
-webhook_secret_env = "GITHUB_WEBHOOK_SECRET"
+最简单的方式是交互式配置：
 
-[[triggers]]
-type = "webhook"
-path = "/webhook/github"
-events = ["workflow_run.completed", "workflow_run.failed"]
-
-[notifications]
-channels = ["slack", "telegram"]
+```bash
+librefang channel setup telegram
+librefang channel list
 ```
 
-### 工作流
+手动配置示例：
+
+```toml
+[channels.telegram]
+bot_token_env = "TELEGRAM_BOT_TOKEN"
+default_agent = "customer-support"
+allowed_users = []
+
+[channels.telegram.overrides]
+system_prompt = "Reply as a concise and polite support bot."
+rate_limit_per_user = 10
+```
+
+修改完配置后重启：
+
+```bash
+librefang restart
+```
+
+如果已经有聊天目标，可以做一次联通性检查：
+
+```bash
+librefang channel test telegram --chat-id 123456789
+```
+
+---
+
+## 5. 定时运行 Agent
+
+当前 CLI 里，定时任务是独立的 `cron` 子命令，不是写在工作流 JSON 的 `trigger` 里。
+
+这层对应的是“自主运行”能力里最直接的一种：按时间表触发 Agent。
+
+```bash
+# 每天早上 8 点让 researcher 生成新闻摘要
+librefang cron create researcher "0 8 * * *" \
+  "Fetch the top AI and tech news and write a 10-bullet digest"
+
+# 查看任务
+librefang cron list
+```
+
+如果你已经有自定义 Agent，也可以直接给它设定周期任务：
+
+```bash
+librefang cron create customer-support "0 */2 * * *" \
+  "Summarize unresolved support issues from the last 2 hours"
+```
+
+---
+
+## 6. 创建多步骤工作流
+
+当前 `/api/workflows` 接受的步骤字段是 `name`、`agent_name` 或 `agent_id`、`prompt`、`mode`、`timeout_secs`、`error_mode`、`output_var` 等。
+
+这层对应的是“多 Agent 编排”能力。不是单个 Agent 回一段话，而是多个 Agent 分工执行一个流程。
+
+也就是说，下面这些旧写法不是当前工作流格式：
+
+- `steps[].type = "agent"`
+- `steps[].agent = "writer"`
+- `steps[].input = "..."`
+- `steps[].type = "notification"`
+- 顶层 `trigger`
+
+一个当前源码可用的工作流文件如下：
 
 ```json
 {
-  "name": "cicd-monitor",
-  "trigger": {
-    "type": "event",
-    "event": "workflow_run.failed"
-  },
+  "name": "review-pipeline",
+  "description": "Analyze code and then turn the findings into a review note",
   "steps": [
     {
-      "id": "analyze",
-      "type": "agent",
-      "agent": "debugger",
-      "input": "Analyze failed workflow: {{event.workflow_url}}"
+      "name": "analyze",
+      "agent_name": "coder",
+      "prompt": "Analyze the following patch for bugs, regressions, and missing tests:\\n\\n{{input}}",
+      "mode": "sequential",
+      "timeout_secs": 180,
+      "error_mode": "fail",
+      "output_var": "analysis"
     },
     {
-      "id": "notify",
-      "type": "notification",
-      "channel": "slack",
-      "message": "⚠️ Workflow Failed: {{event.workflow_name}}\n\n{{analyze.suggestion}}"
+      "name": "summary",
+      "agent_name": "writer",
+      "prompt": "Turn this analysis into a concise review comment:\\n\\n{{analysis}}",
+      "mode": "sequential",
+      "timeout_secs": 120,
+      "error_mode": "fail"
     }
   ]
 }
 ```
 
----
+创建和执行：
 
-## 场景 9: 智能家居控制
-
-### 需求
-- 通过聊天控制智能设备
-- 定时任务
-- 场景自动化
-
-### Agent 清单
-
-```toml
-# smart-home.toml
-name = "smart-home"
-version = "1.0.0"
-module = "builtin:chat"
-
-[model]
-provider = "groq"
-model = "llama-3.1-8b-instant"
-
-[capabilities]
-tools = ["shell_execute", "http_request"]
-
-[allowed_devices]
-lights = ["living_room", "bedroom", "kitchen"]
-thermostat = ["main"]
-locks = ["front_door", "back_door"]
-cameras = ["front_porch", "backyard"]
+```bash
+librefang workflow create ./review-pipeline.json
+librefang workflow list
+librefang workflow run <WORKFLOW_ID> "Review this Rust patch for behavioural regressions"
 ```
 
-### 命令示例
+如果你需要“收到 HTTP 请求就触发 Agent”，当前 CLI 用的是独立的 webhook 命令：
 
-```
-用户: "帮我关掉客厅的灯"
-Agent: 已关闭客厅的灯 ✓
-
-用户: "设置下午 6 点的温度为 22 度"
-Agent: 已设置定时任务：18:00 温度调节至 22°C ✓
-
-用户: "如果有人在前门摄像头出现，就给我发 Telegram"
-Agent: 已创建自动化规则：摄像头检测 → Telegram 通知 ✓
+```bash
+librefang webhooks create code-reviewer https://example.com/github-pr
+librefang webhooks list
 ```
 
 ---
 
-## 场景 10: 会议助手
+## 7. 使用 Hands
 
-### 需求
-- 安排会议
-- 发送邀请
-- 会议纪要
+Hands 是已经打包好的自主能力模块。对于很多场景，直接激活 Hand 比自己拼配置更省事。
 
-### Agent 清单
+这层对应的是 LibreFang 最像“产品能力包”的部分。很多高层场景，比如研究、OSINT、线索挖掘、浏览器自动化、内容生成，更应该先看 Hand，而不是从零拼 Agent。
 
-```toml
-# meeting-assistant.toml
-name = "meeting-assistant"
-version = "1.0.0"
-module = "builtin:chat"
+```bash
+# 看看有哪些 Hand
+librefang hand list
 
-[model]
-provider = "groq"
-model = "llama-3.3-70b-versatile"
+# 激活 researcher
+librefang hand activate researcher
 
-[capabilities]
-tools = ["calendar", "email", "file_write", "memory_recall"]
-memory_read = ["meeting:*", "contacts:*"]
-memory_write = ["meeting:*"]
+# 查看运行状态
+librefang hand status researcher
 
-[calendar]
-provider = "google"
-timezone = "Asia/Shanghai"
+# 查看 / 修改配置
+librefang hand settings researcher
+librefang hand set researcher max_results 20
 
-[email]
-smtp_host = "smtp.gmail.com"
+# 和 Hand 对话
+librefang hand chat researcher
 ```
 
-### 功能
+如果缺依赖，可以先检查：
 
-- 自然语言安排会议
-- 自动查找空闲时间
-- 发送日历邀请
-- 会后生成纪要
-- 跟踪行动项目
+```bash
+librefang hand check-deps researcher
+librefang hand install-deps researcher
+```
+
+---
+
+## 8. 使用 Agent Memory
+
+当前 CLI 的 memory 命令是按“某个 Agent 的 KV 存储”来用的，不是全局 `--key/--value` 风格。
+
+```bash
+# 写入一条记忆
+librefang memory set customer-support customer:alice:last_order "A-1024"
+
+# 读取
+librefang memory get customer-support customer:alice:last_order
+
+# 列出这个 Agent 的所有记忆键
+librefang memory list customer-support
+
+# 删除
+librefang memory delete customer-support customer:alice:last_order
+```
+
+---
+
+## 9. 用 REST API 调用 LibreFang
+
+如果你想从外部程序调用，最常见的是创建 Agent 然后发消息。
+
+### 用模板创建 Agent
+
+```bash
+curl -X POST http://127.0.0.1:4545/api/agents \
+  -H "Content-Type: application/json" \
+  -d '{"template": "assistant"}'
+```
+
+### 给 Agent 发消息
+
+```bash
+curl -X POST http://127.0.0.1:4545/api/agents/<AGENT_ID>/message \
+  -H "Content-Type: application/json" \
+  -d '{"message": "Summarize the current status of the project."}'
+```
+
+### 直接上传 manifest 创建 Agent
+
+```bash
+curl -X POST http://127.0.0.1:4545/api/agents \
+  -H "Content-Type: application/json" \
+  -d @- <<'JSON'
+{
+  "manifest_toml": "name = \"api-agent\"\nmodule = \"builtin:chat\"\n\n[model]\nprovider = \"default\"\nmodel = \"default\"\nsystem_prompt = \"You are a concise API agent.\"\n"
+}
+JSON
+```
+
+---
+
+## 10. 当前源码里的几个关键点
+
+- Agent 提示词写在 `[model].system_prompt`，不是 `[system_prompt].prompt`。
+- 通道配置写在 `[channels.<name>]`，例如 `[channels.telegram]`。
+- 工作流步骤使用 `agent_name` 或 `agent_id` 加 `prompt`，不是 `type/agent/input` 这一套。
+- 定时任务用 `librefang cron ...`，Webhook 用 `librefang webhooks ...`。
+- 当前 CLI 没有 `librefang memory search` 或 `librefang kg query` 这两个命令。
+
+如果你想做的是“客服机器人”“定时摘要”“代码审查”“渠道接入”，建议按这条顺序上手：
+
+1. `librefang start`
+2. `librefang agent new <template>` 或 `librefang agent spawn ./agent.toml`
+3. `librefang message <agent> "..."`
+4. `librefang channel setup <channel>` 或编辑 `[channels.<name>]`
+5. `librefang cron create ...` / `librefang workflow create ...`

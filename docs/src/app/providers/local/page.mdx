@@ -1,0 +1,84 @@
+# Local & Self-Hosted Providers
+
+This page covers providers that run on your machine, inside your network, or behind a self-hosted inference endpoint that LibreFang can reach directly.
+
+## Included Providers
+
+- Ollama
+- vLLM
+- LM Studio
+
+---
+
+## Ollama
+
+| | |
+|---|---|
+| **Display Name** | Ollama |
+| **Driver** | OpenAI-compatible |
+| **Env Var** | `OLLAMA_API_KEY` (not required) |
+| **Base URL** | `http://localhost:11434/v1` |
+| **Key Required** | **No** |
+| **Free Tier** | Free (local) |
+| **Auth** | None (local) |
+| **Models** | 3 builtin + auto-discovered |
+
+**Available Models (builtin):**
+- `llama3.2` (Local)
+- `mistral:latest` (Local)
+- `phi3` (Local)
+
+**Setup:**
+1. Install Ollama from [ollama.com](https://ollama.com)
+2. Pull a model: `ollama pull llama3.2`
+3. Start the server: `ollama serve`
+4. No env var needed -- Ollama is always available
+
+**Notes:** LibreFang auto-discovers models from a running Ollama instance and merges them into the catalog with `Local` tier and zero cost. Any model you pull becomes usable immediately.
+
+---
+
+## vLLM
+
+| | |
+|---|---|
+| **Display Name** | vLLM |
+| **Driver** | OpenAI-compatible |
+| **Env Var** | `VLLM_API_KEY` (not required) |
+| **Base URL** | `http://localhost:8000/v1` |
+| **Key Required** | **No** |
+| **Free Tier** | Free (self-hosted) |
+| **Auth** | None (local) |
+| **Models** | 1 builtin + auto-discovered |
+
+**Available Models (builtin):**
+- `vllm-local` (Local)
+
+**Setup:**
+1. Install vLLM: `pip install vllm`
+2. Start the server: `python -m vllm.entrypoints.openai.api_server --model <model-name>`
+3. No env var needed
+
+---
+
+## LM Studio
+
+| | |
+|---|---|
+| **Display Name** | LM Studio |
+| **Driver** | OpenAI-compatible |
+| **Env Var** | `LMSTUDIO_API_KEY` (not required) |
+| **Base URL** | `http://localhost:1234/v1` |
+| **Key Required** | **No** |
+| **Free Tier** | Free (local) |
+| **Auth** | None (local) |
+| **Models** | 1 builtin + auto-discovered |
+
+**Available Models (builtin):**
+- `lmstudio-local` (Local)
+
+**Setup:**
+1. Download LM Studio from [lmstudio.ai](https://lmstudio.ai)
+2. Download a model from the built-in model browser
+3. Start the local server from the "Local Server" tab
+4. No env var needed

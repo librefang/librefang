@@ -867,7 +867,6 @@ system_prompt = """{prompt}"""
 
 [resources]
 max_llm_tokens_per_hour = 200000
-max_concurrent_tools = 10
 
 [capabilities]
 tools = [{tools_str}]
