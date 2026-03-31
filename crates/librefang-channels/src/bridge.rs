@@ -1329,12 +1329,7 @@ async fn send_response(
 }
 
 fn default_output_format_for_channel(channel_type: &str) -> OutputFormat {
-    match channel_type {
-        "telegram" => OutputFormat::TelegramHtml,
-        "slack" => OutputFormat::SlackMrkdwn,
-        "wecom" => OutputFormat::Markdown,
-        _ => OutputFormat::Markdown,
-    }
+    formatter::default_output_format_for_channel(channel_type)
 }
 
 /// Send a lifecycle reaction (best-effort, non-blocking for supported adapters).
