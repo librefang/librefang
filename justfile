@@ -1,5 +1,7 @@
 # LibreFang development commands — requires https://github.com/casey/just
 
+set windows-shell := ["cmd", "/c"]
+
 # Default: list available recipes
 default:
     @just --list
