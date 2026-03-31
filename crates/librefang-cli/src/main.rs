@@ -2101,8 +2101,10 @@ fn cmd_init_upgrade() {
         .and_then(|r| r.as_array())
         .is_some_and(|list| {
             let has_shell = list.iter().any(|v| v.as_str() == Some("shell_exec"));
-            let missing_file_write = !list.iter().any(|v| v.as_str() == Some("file_write"));
-            has_shell && missing_file_write
+            let missing_new = ["file_write", "file_delete", "apply_patch"]
+                .iter()
+                .any(|tool| !list.iter().any(|v| v.as_str() == Some(*tool)));
+            has_shell && missing_new
         });
     if approval_needs_update {
         ui::blank();
