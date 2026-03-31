@@ -123,6 +123,7 @@ async fn test_full_daemon_lifecycle() {
         active_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         prometheus_handle: None,
         media_drivers: librefang_runtime::media::MediaDriverCache::new(),
+        webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
     });
 
     let app = Router::new()
@@ -258,6 +259,7 @@ async fn test_server_immediate_responsiveness() {
         active_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         prometheus_handle: None,
         media_drivers: librefang_runtime::media::MediaDriverCache::new(),
+        webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
     });
 
     let app = Router::new()

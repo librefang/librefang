@@ -39,6 +39,7 @@ pub struct TeamsAdapter {
     /// SECURITY: App password is zeroized on drop to prevent memory disclosure.
     app_password: Zeroizing<String>,
     /// Port on which the inbound webhook HTTP server listens.
+    #[allow(dead_code)]
     webhook_port: u16,
     /// Restrict inbound activities to specific Azure AD tenant IDs (empty = allow all).
     allowed_tenants: Vec<String>,
@@ -48,6 +49,7 @@ pub struct TeamsAdapter {
     account_id: Option<String>,
     /// Shutdown signal.
     shutdown_tx: Arc<watch::Sender<bool>>,
+    #[allow(dead_code)]
     shutdown_rx: watch::Receiver<bool>,
     /// Cached OAuth2 bearer token and its expiry instant.
     cached_token: Arc<RwLock<Option<(String, Instant)>>>,
@@ -287,79 +289,70 @@ impl ChannelAdapter for TeamsAdapter {
         ChannelType::Teams
     }
 
+    async fn create_webhook_routes(
+        &self,
+    ) -> Option<(
+        axum::Router,
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+    )> {
+        // Verify credentials before registering routes
+        if let Err(e) = self.get_token().await {
+            tracing::error!("Teams adapter authentication failed: {e}");
+            return None;
+        }
+        tracing::info!("Teams adapter authenticated (app_id: {})", self.app_id);
+
+        let (tx, rx) = mpsc::channel::<ChannelMessage>(256);
+        let tx = Arc::new(tx);
+        let app_id = Arc::new(self.app_id.clone());
+        let allowed_tenants = Arc::new(self.allowed_tenants.clone());
+        let account_id = Arc::new(self.account_id.clone());
+
+        let app = axum::Router::new().route(
+            "/webhook",
+            axum::routing::post({
+                let app_id = Arc::clone(&app_id);
+                let tenants = Arc::clone(&allowed_tenants);
+                let tx = Arc::clone(&tx);
+                let account_id = Arc::clone(&account_id);
+                move |body: axum::extract::Json<serde_json::Value>| {
+                    let app_id = Arc::clone(&app_id);
+                    let tenants = Arc::clone(&tenants);
+                    let tx = Arc::clone(&tx);
+                    let account_id = Arc::clone(&account_id);
+                    async move {
+                        if let Some(mut msg) = parse_teams_activity(&body, &app_id, &tenants) {
+                            // Inject account_id for multi-bot routing
+                            if let Some(ref aid) = *account_id {
+                                msg.metadata
+                                    .insert("account_id".to_string(), serde_json::json!(aid));
+                            }
+                            let _ = tx.send(msg).await;
+                        }
+                        axum::http::StatusCode::OK
+                    }
+                }
+            }),
+        );
+
+        info!("Teams adapter registered on shared server");
+
+        Some((
+            app,
+            Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)),
+        ))
+    }
+
     async fn start(
         &self,
     ) -> Result<
         Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
         Box<dyn std::error::Error + Send + Sync>,
     > {
-        // Validate credentials by obtaining an initial token
-        let _ = self.get_token().await?;
-        info!("Teams adapter authenticated (app_id: {})", self.app_id);
-
-        let (tx, rx) = mpsc::channel::<ChannelMessage>(256);
-        let port = self.webhook_port;
-        let app_id = self.app_id.clone();
-        let allowed_tenants = self.allowed_tenants.clone();
-        let mut shutdown_rx = self.shutdown_rx.clone();
-        let account_id = Arc::new(self.account_id.clone());
-
-        tokio::spawn(async move {
-            // Build the axum webhook router
-            let app_id_shared = Arc::new(app_id);
-            let tenants_shared = Arc::new(allowed_tenants);
-            let tx_shared = Arc::new(tx);
-
-            let app = axum::Router::new().route(
-                "/api/messages",
-                axum::routing::post({
-                    let app_id = Arc::clone(&app_id_shared);
-                    let tenants = Arc::clone(&tenants_shared);
-                    let tx = Arc::clone(&tx_shared);
-                    move |body: axum::extract::Json<serde_json::Value>| {
-                        let app_id = Arc::clone(&app_id);
-                        let tenants = Arc::clone(&tenants);
-                        let tx = Arc::clone(&tx);
-                        async move {
-                            if let Some(mut msg) = parse_teams_activity(&body, &app_id, &tenants) {
-                                // Inject account_id for multi-bot routing
-                                if let Some(ref aid) = *account_id {
-                                    msg.metadata
-                                        .insert("account_id".to_string(), serde_json::json!(aid));
-                                }
-                                let _ = tx.send(msg).await;
-                            }
-                            axum::http::StatusCode::OK
-                        }
-                    }
-                }),
-            );
-
-            let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
-            info!("Teams webhook server listening on {addr}");
-
-            let listener = match tokio::net::TcpListener::bind(addr).await {
-                Ok(l) => l,
-                Err(e) => {
-                    warn!("Teams webhook bind failed: {e}");
-                    return;
-                }
-            };
-
-            let server = axum::serve(listener, app);
-
-            tokio::select! {
-                result = server => {
-                    if let Err(e) = result {
-                        warn!("Teams webhook server error: {e}");
-                    }
-                }
-                _ = shutdown_rx.changed() => {
-                    info!("Teams adapter shutting down");
-                }
-            }
-        });
-
+        // When using the shared webhook server, create_webhook_routes() is called
+        // instead. This start() is only reached as a fallback (shouldn't happen
+        // in normal operation since BridgeManager prefers create_webhook_routes).
+        let (_tx, rx) = mpsc::channel::<ChannelMessage>(1);
         Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
     }
 

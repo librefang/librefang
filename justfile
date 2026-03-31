@@ -1,5 +1,8 @@
 # LibreFang development commands — requires https://github.com/casey/just
 
+# Cross-platform shell settings
+set shell := if os() == "windows" { ["cmd", "/c"] } else { ["sh", "-c"] }
+
 # Default: list available recipes
 default:
     @just --list
@@ -51,8 +54,10 @@ dash:
 # Build release CLI and install to ~/.librefang/bin (uses thin LTO to avoid OOM)
 install: dashboard-build
     cargo build --profile release-local -p librefang-cli
-    mkdir -p ~/.librefang/bin
-    cp target/release-local/librefang ~/.librefang/bin/librefang
+    target_dir := if os() == "windows" { env("USERPROFILE") + "/.librefang/bin" } else { "~/.librefang/bin" }
+    binary := if os() == "windows" { "librefang.exe" } else { "librefang" }
+    mkdir -p {{target_dir}}
+    cp -f "target/release-local/{{binary}}" "{{target_dir}}/{{binary}}"
 
 # Remove build artifacts
 clean:

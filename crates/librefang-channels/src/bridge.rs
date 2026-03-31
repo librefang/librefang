@@ -739,6 +739,8 @@ pub struct BridgeManager {
     shutdown_rx: watch::Receiver<bool>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
     adapters: Vec<Arc<dyn ChannelAdapter>>,
+    /// Webhook routes collected from adapters, to be mounted on the shared server.
+    webhook_routes: Vec<(String, axum::Router)>,
 }
 
 impl BridgeManager {
@@ -754,6 +756,7 @@ impl BridgeManager {
             shutdown_rx,
             tasks: Vec::new(),
             adapters: Vec::new(),
+            webhook_routes: Vec::new(),
         }
     }
 
@@ -773,6 +776,7 @@ impl BridgeManager {
             shutdown_rx,
             tasks: Vec::new(),
             adapters: Vec::new(),
+            webhook_routes: Vec::new(),
         }
     }
 
@@ -790,7 +794,20 @@ impl BridgeManager {
         &mut self,
         adapter: Arc<dyn ChannelAdapter>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let stream = adapter.start().await?;
+        // Prefer shared webhook routes over adapter-managed HTTP servers.
+        // If the adapter provides webhook routes, collect them for mounting
+        // on the main API server and use the returned stream for dispatch.
+        let stream = if let Some((routes, stream)) = adapter.create_webhook_routes().await {
+            let name = adapter.name().to_string();
+            info!(
+                "Channel {} registered webhook routes on shared server at /channels/{}",
+                name, name
+            );
+            self.webhook_routes.push((name, routes));
+            stream
+        } else {
+            adapter.start().await?
+        };
         let handle = self.handle.clone();
         let router = self.router.clone();
         let rate_limiter = self.rate_limiter.clone();
@@ -1066,6 +1083,20 @@ impl BridgeManager {
     }
 
     /// Stop all adapters and wait for dispatch tasks to finish.
+    /// Take the collected webhook routes and merge them into a single Router.
+    ///
+    /// Each adapter's routes are nested under `/{adapter_name}`. The caller
+    /// should mount the returned router under `/channels` on the main API
+    /// server, without auth middleware (webhook adapters handle their own
+    /// signature verification).
+    pub fn take_webhook_router(&mut self) -> axum::Router {
+        let mut router = axum::Router::new();
+        for (name, routes) in self.webhook_routes.drain(..) {
+            router = router.nest(&format!("/{name}"), routes);
+        }
+        router
+    }
+
     pub async fn stop(&mut self) {
         // Signal the dispatch loops to stop
         let _ = self.shutdown_tx.send(true);

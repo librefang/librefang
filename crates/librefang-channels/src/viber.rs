@@ -44,6 +44,7 @@ pub struct ViberAdapter {
     /// Public webhook URL that Viber will POST events to.
     webhook_url: String,
     /// Port on which the inbound webhook HTTP server listens.
+    #[allow(dead_code)]
     webhook_port: u16,
     /// Sender name displayed in outbound messages.
     sender_name: String,
@@ -55,6 +56,7 @@ pub struct ViberAdapter {
     account_id: Option<String>,
     /// Shutdown signal.
     shutdown_tx: Arc<watch::Sender<bool>>,
+    #[allow(dead_code)]
     shutdown_rx: watch::Receiver<bool>,
 }
 
@@ -315,73 +317,70 @@ impl ChannelAdapter for ViberAdapter {
         ChannelType::Custom("viber".to_string())
     }
 
+    async fn create_webhook_routes(
+        &self,
+    ) -> Option<(
+        axum::Router,
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+    )> {
+        // Validate credentials
+        let bot_name = match self.validate().await {
+            Ok(name) => name,
+            Err(e) => {
+                warn!("Viber adapter validation failed: {e}");
+                return None;
+            }
+        };
+        info!("Viber adapter authenticated as {bot_name}");
+
+        // Register webhook
+        if let Err(e) = self.register_webhook().await {
+            warn!("Viber webhook registration failed: {e}");
+            return None;
+        }
+
+        let (tx, rx) = mpsc::channel::<ChannelMessage>(256);
+        let tx = Arc::new(tx);
+        let account_id = Arc::new(self.account_id.clone());
+
+        let router = axum::Router::new().route(
+            "/webhook",
+            axum::routing::post({
+                let tx = Arc::clone(&tx);
+                move |body: axum::extract::Json<serde_json::Value>| {
+                    let tx = Arc::clone(&tx);
+                    async move {
+                        if let Some(mut msg) = parse_viber_event(&body.0) {
+                            // Inject account_id for multi-bot routing
+                            if let Some(ref aid) = *account_id {
+                                msg.metadata
+                                    .insert("account_id".to_string(), serde_json::json!(aid));
+                            }
+                            let _ = tx.send(msg).await;
+                        }
+                        axum::http::StatusCode::OK
+                    }
+                }
+            }),
+        );
+
+        info!("Viber: registered webhook route on shared server at /channels/viber");
+
+        Some((
+            router,
+            Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)),
+        ))
+    }
+
     async fn start(
         &self,
     ) -> Result<
         Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
         Box<dyn std::error::Error + Send + Sync>,
     > {
-        // Validate credentials
-        let bot_name = self.validate().await?;
-        info!("Viber adapter authenticated as {bot_name}");
-
-        // Register webhook
-        self.register_webhook().await?;
-
-        let (tx, rx) = mpsc::channel::<ChannelMessage>(256);
-        let port = self.webhook_port;
-        let mut shutdown_rx = self.shutdown_rx.clone();
-        let account_id = Arc::new(self.account_id.clone());
-
-        tokio::spawn(async move {
-            let tx = Arc::new(tx);
-
-            let app = axum::Router::new().route(
-                "/viber/webhook",
-                axum::routing::post({
-                    let tx = Arc::clone(&tx);
-                    move |body: axum::extract::Json<serde_json::Value>| {
-                        let tx = Arc::clone(&tx);
-                        async move {
-                            if let Some(mut msg) = parse_viber_event(&body.0) {
-                                // Inject account_id for multi-bot routing
-                                if let Some(ref aid) = *account_id {
-                                    msg.metadata
-                                        .insert("account_id".to_string(), serde_json::json!(aid));
-                                }
-                                let _ = tx.send(msg).await;
-                            }
-                            axum::http::StatusCode::OK
-                        }
-                    }
-                }),
-            );
-
-            let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
-            info!("Viber webhook server listening on {addr}");
-
-            let listener = match tokio::net::TcpListener::bind(addr).await {
-                Ok(l) => l,
-                Err(e) => {
-                    warn!("Viber webhook bind failed: {e}");
-                    return;
-                }
-            };
-
-            let server = axum::serve(listener, app);
-
-            tokio::select! {
-                result = server => {
-                    if let Err(e) = result {
-                        warn!("Viber webhook server error: {e}");
-                    }
-                }
-                _ = shutdown_rx.changed() => {
-                    info!("Viber adapter shutting down");
-                }
-            }
-        });
-
+        // Webhook mode is handled by create_webhook_routes().
+        // If we reach here, return an empty stream as fallback.
+        let (_tx, rx) = mpsc::channel::<ChannelMessage>(1);
         Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
     }
 

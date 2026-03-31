@@ -21,7 +21,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY xtask ./xtask
-COPY agents ./agents
 COPY packages ./packages
 COPY --from=dashboard-builder /build/static/react ./crates/librefang-api/static/react
 
@@ -31,16 +30,14 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --release --bin librefang && \
     cp target/release/librefang /usr/local/bin/librefang
 
-FROM debian:bookworm-slim
+FROM node:lts-bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     python3 \
     python3-venv \
-    nodejs \
-    npm \
+    libicu72 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /usr/local/bin/librefang /usr/local/bin/
-COPY --from=builder /build/agents /opt/librefang/agents
 COPY --from=builder /build/packages /opt/librefang/packages
 COPY deploy/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh

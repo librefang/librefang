@@ -161,7 +161,7 @@ pub async fn quick_init(State(state): State<Arc<AppState>>) -> impl IntoResponse
     }
 
     // Ensure directories exist
-    let _ = std::fs::create_dir_all(&home);
+    let _ = std::fs::create_dir_all(home);
     let _ = std::fs::create_dir_all(home.join("data"));
 
     // Detect best available provider

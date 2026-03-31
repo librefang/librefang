@@ -109,6 +109,7 @@ async fn start_test_server_with_provider(
         #[cfg(feature = "telemetry")]
         prometheus_handle: None,
         media_drivers: librefang_runtime::media::MediaDriverCache::new(),
+        webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
     });
 
     let app = Router::new()
@@ -1350,6 +1351,7 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
         #[cfg(feature = "telemetry")]
         prometheus_handle: None,
         media_drivers: librefang_runtime::media::MediaDriverCache::new(),
+        webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
     });
 
     let api_key_state = middleware::AuthState {

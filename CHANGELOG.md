@@ -5,6 +5,29 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
+## [2026.3.31] - 2026-03-31
+
+### Fixed
+
+- Replace _redirects with _worker.js for SPA routing (#1824) (@houko)
+- Add auto-init step to Windows installer (#1825) (@houko)
+- Auto-init on first run for start/chat commands (#1826) (@houko)
+- Resolve all open issues (#1827 #1828 #1829 #1830 #1832) (#1834) (@houko)
+- Add missing message_timeout_secs in test DefaultModelConfig (#1835) (@houko)
+- Add missing message_timeout_secs in DefaultModelConfig initializers (#1836) (@houko)
+- Remove needless borrow for clippy (Rust 1.94) (#1838) (@houko)
+
+### Documentation
+
+- Fix development guide with just usage and dashboard debugging (#1831) (@houko)
+- Add Windows exe manual install guide (#1833) (@houko)
+
+### Maintenance
+
+- Fix workflow trigger issues and add concurrency controls (#1822) (@houko)
+- Remove redundant web-lint workflow (#1823) (@houko)
+
+
 ## [2026.3.30] - 2026-03-30
 
 ### Added

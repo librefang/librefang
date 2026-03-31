@@ -114,6 +114,9 @@ pub struct AppState {
         Arc<tokio::sync::RwLock<HashMap<String, crate::password_hash::SessionToken>>>,
     /// Media generation driver cache for image/TTS/video/music.
     pub media_drivers: librefang_runtime::media::MediaDriverCache,
+    /// Dynamic webhook router for channel webhook endpoints.
+    /// Mounted under `/channels` on the main server. Updated on hot-reload.
+    pub webhook_router: Arc<tokio::sync::RwLock<Arc<axum::Router>>>,
     /// Prometheus metrics handle (only set when `telemetry` feature + config enabled).
     #[cfg(feature = "telemetry")]
     pub prometheus_handle: Option<metrics_exporter_prometheus::PrometheusHandle>,
