@@ -1,0 +1,431 @@
+# 托管 API 提供商
+
+本页覆盖需要 API Key、并通过 LibreFang 原生 Anthropic/Gemini 驱动或共享 OpenAI-compatible 驱动接入的云端模型提供商。
+
+## 包含的提供商
+
+- Anthropic
+- OpenAI
+- Google Gemini
+- DeepSeek
+- Groq
+- OpenRouter
+- Mistral AI
+- Together AI
+- Fireworks AI
+- Perplexity AI
+- Cohere
+- AI21 Labs
+- Cerebras
+- SambaNova
+- Hugging Face
+- xAI
+
+---
+
+## Anthropic
+
+| | |
+|---|---|
+| **显示名称** | Anthropic |
+| **驱动** | 原生 Anthropic (Messages API) |
+| **环境变量** | `ANTHROPIC_API_KEY` |
+| **基础 URL** | `https://api.anthropic.com` |
+| **需要密钥** | 是 |
+| **免费额度** | 无 |
+| **认证方式** | `x-api-key` 请求头 |
+| **模型数** | 7 |
+
+**可用模型：**
+- `claude-opus-4-20250514` (旗舰)
+- `claude-sonnet-4-20250514` (智能)
+- `claude-haiku-4-5-20251001` (快速)
+
+**设置：**
+1. 在 [console.anthropic.com](https://console.anthropic.com) 注册账号
+2. 在 Settings > API Keys 下创建 API 密钥
+3. `export ANTHROPIC_API_KEY="sk-ant-..."`
+
+---
+
+## OpenAI
+
+| | |
+|---|---|
+| **显示名称** | OpenAI |
+| **驱动** | OpenAI 兼容 |
+| **环境变量** | `OPENAI_API_KEY` |
+| **基础 URL** | `https://api.openai.com/v1` |
+| **需要密钥** | 是 |
+| **免费额度** | 无 |
+| **认证方式** | `Authorization: Bearer` 请求头 |
+| **模型数** | 18 |
+
+**可用模型：**
+- `gpt-4.1` (旗舰)
+- `gpt-4o` (智能)
+- `o3-mini` (智能)
+- `gpt-4.1-mini` (平衡)
+- `gpt-4o-mini` (快速)
+- `gpt-4.1-nano` (快速)
+
+**设置：**
+1. 在 [platform.openai.com](https://platform.openai.com) 注册账号
+2. 在 API Keys 下创建 API 密钥
+3. `export OPENAI_API_KEY="sk-..."`
+
+---
+
+## Google Gemini
+
+| | |
+|---|---|
+| **显示名称** | Google Gemini |
+| **驱动** | 原生 Gemini (generateContent API) |
+| **环境变量** | `GEMINI_API_KEY`（或 `GOOGLE_API_KEY`） |
+| **基础 URL** | `https://generativelanguage.googleapis.com` |
+| **需要密钥** | 是 |
+| **免费额度** | 有（免费额度充裕） |
+| **认证方式** | `x-goog-api-key` 请求头 |
+| **模型数** | 10 |
+
+**可用模型：**
+- `gemini-2.5-pro` (旗舰)
+- `gemini-2.5-flash` (智能)
+- `gemini-2.0-flash` (快速)
+
+**设置：**
+1. 前往 [aistudio.google.com](https://aistudio.google.com)
+2. 获取 API 密钥（含免费额度）
+3. `export GEMINI_API_KEY="AIza..."` 或 `export GOOGLE_API_KEY="AIza..."`
+
+**说明：** Gemini 驱动是完全原生的实现，不是 OpenAI 兼容的。模型通过 URL 路径指定，系统提示通过 `systemInstruction` 传递，工具通过 `functionDeclarations` 传递，流式传输通过 `streamGenerateContent?alt=sse` 实现。
+
+---
+
+## DeepSeek
+
+| | |
+|---|---|
+| **显示名称** | DeepSeek |
+| **驱动** | OpenAI 兼容 |
+| **环境变量** | `DEEPSEEK_API_KEY` |
+| **基础 URL** | `https://api.deepseek.com/v1` |
+| **需要密钥** | 是 |
+| **免费额度** | 无 |
+| **认证方式** | `Authorization: Bearer` 请求头 |
+| **模型数** | 4 |
+
+**可用模型：**
+- `deepseek-chat` (智能) -- DeepSeek V3
+- `deepseek-reasoner` (智能) -- DeepSeek R1，不支持工具调用
+
+**设置：**
+1. 在 [platform.deepseek.com](https://platform.deepseek.com) 注册账号
+2. 创建 API 密钥
+3. `export DEEPSEEK_API_KEY="sk-..."`
+
+---
+
+## Groq
+
+| | |
+|---|---|
+| **显示名称** | Groq |
+| **驱动** | OpenAI 兼容 |
+| **环境变量** | `GROQ_API_KEY` |
+| **基础 URL** | `https://api.groq.com/openai/v1` |
+| **需要密钥** | 是 |
+| **免费额度** | 有（有速率限制） |
+| **认证方式** | `Authorization: Bearer` 请求头 |
+| **模型数** | 10 |
+
+**可用模型：**
+- `llama-3.3-70b-versatile` (平衡)
+- `mixtral-8x7b-32768` (平衡)
+- `llama-3.1-8b-instant` (快速)
+- `gemma2-9b-it` (快速)
+
+**设置：**
+1. 在 [console.groq.com](https://console.groq.com) 注册账号
+2. 创建 API 密钥
+3. `export GROQ_API_KEY="gsk_..."`
+
+**说明：** Groq 在自研的 LPU 硬件上运行开源模型，推理速度极快。免费额度有速率限制，但完全可用。
+
+---
+
+## OpenRouter
+
+| | |
+|---|---|
+| **显示名称** | OpenRouter |
+| **驱动** | OpenAI 兼容 |
+| **环境变量** | `OPENROUTER_API_KEY` |
+| **基础 URL** | `https://openrouter.ai/api/v1` |
+| **需要密钥** | 是 |
+| **免费额度** | 有（8 个免费模型，包括 Step 3.5 Flash、DeepSeek R1、Llama 3.1 8B 等） |
+| **认证方式** | `Authorization: Bearer` 请求头 |
+| **模型数** | 17 |
+
+**可用模型：**
+- `openrouter/google/gemini-2.5-flash` (智能) -- 便宜、快速、100 万上下文（默认）
+- `openrouter/anthropic/claude-sonnet-4` (智能) -- 强推理 + 工具调用
+- `openrouter/openai/gpt-4o` (智能) -- 通过 OpenRouter 使用 GPT-4o
+- `openrouter/deepseek/deepseek-chat` (智能) -- DeepSeek V3
+- `openrouter/meta-llama/llama-3.3-70b-instruct` (平衡) -- Llama 3.3 70B
+- `openrouter/qwen/qwen-2.5-72b-instruct` (平衡) -- Qwen 2.5 72B
+- `openrouter/google/gemini-2.5-pro` (旗舰) -- Gemini 2.5 Pro
+- `openrouter/mistralai/mistral-large-latest` (智能) -- Mistral Large
+- `openrouter/google/gemma-2-9b-it` (快速) -- Gemma 2 9B，免费
+- `openrouter/deepseek/deepseek-r1` (旗舰) -- DeepSeek R1 推理
+
+**设置：**
+1. 在 [openrouter.ai](https://openrouter.ai) 注册账号
+2. 在 Keys 下创建 API 密钥
+3. `export OPENROUTER_API_KEY="sk-or-..."`
+
+**说明：** OpenRouter 是一个统一的网关，可访问来自多个提供商的 200+ 个模型。模型 ID 使用上游格式（如 `google/gemini-2.5-flash`）。你可以通过指定带 `openrouter/` 前缀的完整模型路径来使用 OpenRouter 目录中的任何模型。
+
+---
+
+## Mistral AI
+
+| | |
+|---|---|
+| **显示名称** | Mistral AI |
+| **驱动** | OpenAI 兼容 |
+| **环境变量** | `MISTRAL_API_KEY` |
+| **基础 URL** | `https://api.mistral.ai/v1` |
+| **需要密钥** | 是 |
+| **免费额度** | 无 |
+| **认证方式** | `Authorization: Bearer` 请求头 |
+| **模型数** | 6 |
+
+**可用模型：**
+- `mistral-large-latest` (智能)
+- `codestral-latest` (智能)
+- `mistral-small-latest` (快速)
+
+**设置：**
+1. 在 [console.mistral.ai](https://console.mistral.ai) 注册账号
+2. 创建 API 密钥
+3. `export MISTRAL_API_KEY="..."`
+
+---
+
+## Together AI
+
+| | |
+|---|---|
+| **显示名称** | Together AI |
+| **驱动** | OpenAI 兼容 |
+| **环境变量** | `TOGETHER_API_KEY` |
+| **基础 URL** | `https://api.together.xyz/v1` |
+| **需要密钥** | 是 |
+| **免费额度** | 有（注册赠送有限额度） |
+| **认证方式** | `Authorization: Bearer` 请求头 |
+| **模型数** | 8 |
+
+**可用模型：**
+- `meta-llama/Meta-Llama-3.1-405B-Instruct-Turbo` (旗舰)
+- `Qwen/Qwen2.5-72B-Instruct-Turbo` (智能)
+- `mistralai/Mixtral-8x22B-Instruct-v0.1` (平衡)
+
+**设置：**
+1. 在 [api.together.ai](https://api.together.ai) 注册账号
+2. 创建 API 密钥
+3. `export TOGETHER_API_KEY="..."`
+
+---
+
+## Fireworks AI
+
+| | |
+|---|---|
+| **显示名称** | Fireworks AI |
+| **驱动** | OpenAI 兼容 |
+| **环境变量** | `FIREWORKS_API_KEY` |
+| **基础 URL** | `https://api.fireworks.ai/inference/v1` |
+| **需要密钥** | 是 |
+| **免费额度** | 有（注册赠送有限额度） |
+| **认证方式** | `Authorization: Bearer` 请求头 |
+| **模型数** | 5 |
+
+**可用模型：**
+- `accounts/fireworks/models/llama-v3p1-405b-instruct` (旗舰)
+- `accounts/fireworks/models/mixtral-8x22b-instruct` (平衡)
+
+**设置：**
+1. 在 [fireworks.ai](https://fireworks.ai) 注册账号
+2. 创建 API 密钥
+3. `export FIREWORKS_API_KEY="..."`
+
+---
+
+## Perplexity AI
+
+| | |
+|---|---|
+| **显示名称** | Perplexity AI |
+| **驱动** | OpenAI 兼容 |
+| **环境变量** | `PERPLEXITY_API_KEY` |
+| **基础 URL** | `https://api.perplexity.ai` |
+| **需要密钥** | 是 |
+| **免费额度** | 无 |
+| **认证方式** | `Authorization: Bearer` 请求头 |
+| **模型数** | 2 |
+
+**可用模型：**
+- `sonar-pro` (智能) -- 在线搜索增强
+- `sonar` (平衡) -- 在线搜索增强
+
+**设置：**
+1. 在 [perplexity.ai](https://www.perplexity.ai) 注册账号
+2. 前往 API 设置页面生成密钥
+3. `export PERPLEXITY_API_KEY="pplx-..."`
+
+**说明：** Perplexity 模型内置网页搜索能力，不支持工具调用。
+
+---
+
+## Cohere
+
+| | |
+|---|---|
+| **显示名称** | Cohere |
+| **驱动** | OpenAI 兼容 |
+| **环境变量** | `COHERE_API_KEY` |
+| **基础 URL** | `https://api.cohere.com/v2` |
+| **需要密钥** | 是 |
+| **免费额度** | 有（有速率限制的试用版） |
+| **认证方式** | `Authorization: Bearer` 请求头 |
+| **模型数** | 2 |
+
+**可用模型：**
+- `command-r-plus` (智能)
+- `command-r` (平衡)
+
+**设置：**
+1. 在 [dashboard.cohere.com](https://dashboard.cohere.com) 注册账号
+2. 创建 API 密钥
+3. `export COHERE_API_KEY="..."`
+
+---
+
+## AI21 Labs
+
+| | |
+|---|---|
+| **显示名称** | AI21 Labs |
+| **驱动** | OpenAI 兼容 |
+| **环境变量** | `AI21_API_KEY` |
+| **基础 URL** | `https://api.ai21.com/studio/v1` |
+| **需要密钥** | 是 |
+| **免费额度** | 有（有限额度） |
+| **认证方式** | `Authorization: Bearer` 请求头 |
+| **模型数** | 1 |
+
+**可用模型：**
+- `jamba-1.5-large` (智能)
+
+**设置：**
+1. 在 [studio.ai21.com](https://studio.ai21.com) 注册账号
+2. 创建 API 密钥
+3. `export AI21_API_KEY="..."`
+
+---
+
+## Cerebras
+
+| | |
+|---|---|
+| **显示名称** | Cerebras |
+| **驱动** | OpenAI 兼容 |
+| **环境变量** | `CEREBRAS_API_KEY` |
+| **基础 URL** | `https://api.cerebras.ai/v1` |
+| **需要密钥** | 是 |
+| **免费额度** | 有（免费额度充裕） |
+| **认证方式** | `Authorization: Bearer` 请求头 |
+| **模型数** | 2 |
+
+**可用模型：**
+- `cerebras/llama3.3-70b` (平衡)
+- `cerebras/llama3.1-8b` (快速)
+
+**设置：**
+1. 在 [cloud.cerebras.ai](https://cloud.cerebras.ai) 注册账号
+2. 创建 API 密钥
+3. `export CEREBRAS_API_KEY="..."`
+
+**说明：** Cerebras 在晶圆级芯片上运行推理，速度极快且价格极低（70B 模型输入和输出均为 $0.06/百万 token）。
+
+---
+
+## SambaNova
+
+| | |
+|---|---|
+| **显示名称** | SambaNova |
+| **驱动** | OpenAI 兼容 |
+| **环境变量** | `SAMBANOVA_API_KEY` |
+| **基础 URL** | `https://api.sambanova.ai/v1` |
+| **需要密钥** | 是 |
+| **免费额度** | 有（3 个免费模型） |
+| **认证方式** | `Authorization: Bearer` 请求头 |
+| **模型数** | 3 |
+
+**可用模型：**
+- `sambanova/llama-3.3-70b` (平衡)
+
+**设置：**
+1. 在 [cloud.sambanova.ai](https://cloud.sambanova.ai) 注册账号
+2. 创建 API 密钥
+3. `export SAMBANOVA_API_KEY="..."`
+
+---
+
+## Hugging Face
+
+| | |
+|---|---|
+| **显示名称** | Hugging Face |
+| **驱动** | OpenAI 兼容 |
+| **环境变量** | `HF_API_KEY` |
+| **基础 URL** | `https://api-inference.huggingface.co/v1` |
+| **需要密钥** | 是 |
+| **免费额度** | 无 |
+| **认证方式** | `Authorization: Bearer` 请求头 |
+| **模型数** | 1 |
+
+**可用模型：**
+- `hf/meta-llama/Llama-3.3-70B-Instruct` (平衡)
+
+**设置：**
+1. 在 [huggingface.co](https://huggingface.co) 注册账号
+2. 在 Settings > Access Tokens 下创建令牌
+3. `export HF_API_KEY="hf_..."`
+
+---
+
+## xAI
+
+| | |
+|---|---|
+| **显示名称** | xAI |
+| **驱动** | OpenAI 兼容 |
+| **环境变量** | `XAI_API_KEY` |
+| **基础 URL** | `https://api.x.ai/v1` |
+| **需要密钥** | 是 |
+| **免费额度** | 有（有限的免费额度） |
+| **认证方式** | `Authorization: Bearer` 请求头 |
+| **模型数** | 2 |
+
+**可用模型：**
+- `grok-2` (智能) -- 支持视觉
+- `grok-2-mini` (快速)
+
+**设置：**
+1. 在 [console.x.ai](https://console.x.ai) 注册账号
+2. 创建 API 密钥
+3. `export XAI_API_KEY="xai-..."`

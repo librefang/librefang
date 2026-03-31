@@ -1,0 +1,291 @@
+# Platforms & Managed Endpoints
+
+This page covers providers that route through a platform-specific gateway, enterprise cloud integration, managed inference fabric, or regional model marketplace rather than a single first-party vendor API.
+
+## Included Providers
+
+- Replicate
+- NVIDIA NIM
+- Voyage AI
+- Anyscale
+- DeepInfra
+- Azure OpenAI
+- Amazon Bedrock
+- Qwen (DashScope)
+- MiniMax
+- Vertex AI
+
+---
+
+## Replicate
+
+| | |
+|---|---|
+| **Display Name** | Replicate |
+| **Driver** | OpenAI-compatible |
+| **Env Var** | `REPLICATE_API_TOKEN` |
+| **Base URL** | `https://api.replicate.com/v1` |
+| **Key Required** | Yes |
+| **Free Tier** | No |
+| **Auth** | `Authorization: Bearer` header |
+| **Models** | 1 |
+
+**Available Models:**
+- `replicate/meta-llama-3.3-70b-instruct` (Balanced)
+
+**Setup:**
+1. Sign up at [replicate.com](https://replicate.com)
+2. Go to Account > API Tokens
+3. `export REPLICATE_API_TOKEN="r8_..."`
+
+---
+
+## NVIDIA NIM
+
+| | |
+|---|---|
+| **Display Name** | NVIDIA NIM |
+| **Driver** | OpenAI-compatible |
+| **Env Var** | `NVIDIA_API_KEY` |
+| **Base URL** | `https://integrate.api.nvidia.com/v1` |
+| **Key Required** | Yes |
+| **Free Tier** | Yes (limited credits) |
+| **Auth** | `Authorization: Bearer` header |
+| **Models** | Llama, Mistral, and NVIDIA-optimized models |
+
+**Setup:**
+1. Sign up at [build.nvidia.com](https://build.nvidia.com)
+2. Create an API key
+3. `export NVIDIA_API_KEY="nvapi-..."`
+
+---
+
+## Voyage AI
+
+| | |
+|---|---|
+| **Display Name** | Voyage AI |
+| **Driver** | OpenAI-compatible |
+| **Env Var** | `VOYAGE_API_KEY` |
+| **Base URL** | `https://api.voyageai.com/v1` |
+| **Key Required** | Yes |
+| **Free Tier** | Yes (limited credits) |
+| **Auth** | `Authorization: Bearer` header |
+| **Models** | Embedding and reranking models |
+
+**Notes:** Voyage AI specializes in embedding and reranking models used for semantic search and RAG pipelines.
+
+**Setup:**
+1. Sign up at [voyageai.com](https://www.voyageai.com)
+2. Create an API key
+3. `export VOYAGE_API_KEY="pa-..."`
+
+---
+
+## Anyscale
+
+| | |
+|---|---|
+| **Display Name** | Anyscale |
+| **Driver** | OpenAI-compatible |
+| **Env Var** | `ANYSCALE_API_KEY` |
+| **Base URL** | `https://api.endpoints.anyscale.com/v1` |
+| **Key Required** | Yes |
+| **Free Tier** | Yes (limited credits) |
+| **Auth** | `Authorization: Bearer` header |
+| **Models** | Open-source models (Llama, Mistral, etc.) |
+
+**Setup:**
+1. Sign up at [anyscale.com](https://www.anyscale.com)
+2. Create an API key
+3. `export ANYSCALE_API_KEY="esecret_..."`
+
+---
+
+## DeepInfra
+
+| | |
+|---|---|
+| **Display Name** | DeepInfra |
+| **Driver** | OpenAI-compatible |
+| **Env Var** | `DEEPINFRA_API_KEY` |
+| **Base URL** | `https://api.deepinfra.com/v1/openai` |
+| **Key Required** | Yes |
+| **Free Tier** | Yes (limited credits) |
+| **Auth** | `Authorization: Bearer` header |
+| **Models** | Open-source models at low cost |
+
+**Setup:**
+1. Sign up at [deepinfra.com](https://deepinfra.com)
+2. Create an API key
+3. `export DEEPINFRA_API_KEY="..."`
+
+---
+
+## Azure OpenAI
+
+| | |
+|---|---|
+| **Display Name** | Azure OpenAI |
+| **Driver** | OpenAI-compatible |
+| **Env Var** | `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT` |
+| **Base URL** | `https://<your-resource>.openai.azure.com/openai/deployments/<deployment>` |
+| **Key Required** | Yes |
+| **Free Tier** | No |
+| **Auth** | `api-key` header |
+| **Models** | GPT-4o, GPT-4, and other Azure-hosted models |
+
+**Setup:**
+1. Create an Azure OpenAI resource in the [Azure Portal](https://portal.azure.com)
+2. Deploy a model in Azure OpenAI Studio
+3. Set environment variables:
+   ```bash
+   export AZURE_OPENAI_API_KEY="..."
+   export AZURE_OPENAI_ENDPOINT="https://<your-resource>.openai.azure.com"
+   ```
+
+---
+
+## Amazon Bedrock
+
+| | |
+|---|---|
+| **Display Name** | Amazon Bedrock |
+| **Driver** | OpenAI-compatible (via Bedrock Converse API) |
+| **Env Var** | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` |
+| **Base URL** | AWS regional endpoint |
+| **Key Required** | Yes (AWS credentials) |
+| **Free Tier** | No |
+| **Auth** | AWS Signature v4 |
+| **Models** | Claude, Llama, Titan, Mistral via Bedrock |
+
+**Setup:**
+1. Enable model access in the [AWS Bedrock console](https://console.aws.amazon.com/bedrock)
+2. Configure AWS credentials:
+   ```bash
+   export AWS_ACCESS_KEY_ID="AKIA..."
+   export AWS_SECRET_ACCESS_KEY="..."
+   export AWS_REGION="us-east-1"
+   ```
+
+---
+
+## Qwen (DashScope)
+
+| | |
+|---|---|
+| **Display Name** | Qwen |
+| **Driver** | OpenAI-compatible |
+| **Env Var** | `DASHSCOPE_API_KEY` |
+| **Base URL** | `https://dashscope.aliyuncs.com/compatible-mode/v1` |
+| **Aliases** | `dashscope`, `model_studio` |
+| **Key Required** | Yes |
+| **Free Tier** | Yes (limited credits on signup) |
+| **Auth** | `Authorization: Bearer` header |
+
+**Regions:**
+
+| Region | Endpoint | API Key Env |
+|--------|----------|-------------|
+| *(default)* | `dashscope.aliyuncs.com` | `DASHSCOPE_API_KEY` |
+| `intl` | `dashscope-intl.aliyuncs.com` | `DASHSCOPE_API_KEY` |
+| `us` | `dashscope-us.aliyuncs.com` | `DASHSCOPE_API_KEY` |
+
+**Setup:**
+1. Sign up at [DashScope Console](https://dashscope.console.aliyun.com)
+2. Create an API key
+3. `export DASHSCOPE_API_KEY="sk-..."`
+4. Optionally select a region in `config.toml`:
+   ```toml
+   [provider_regions]
+   qwen = "intl"    # or "us"
+   ```
+
+**Notes:** Qwen uses Alibaba Cloud's DashScope API. The default endpoint serves mainland China; use the `intl` or `us` region for lower latency outside China. Models are defined in the registry TOML and loaded at boot.
+
+---
+
+## MiniMax
+
+| | |
+|---|---|
+| **Display Name** | MiniMax |
+| **Driver** | OpenAI-compatible |
+| **Env Var** | `MINIMAX_API_KEY` |
+| **Base URL** | `https://api.minimax.io/v1` |
+| **Key Required** | Yes |
+| **Free Tier** | No |
+| **Auth** | `Authorization: Bearer` header |
+
+**Regions:**
+
+| Region | Endpoint | API Key Env |
+|--------|----------|-------------|
+| *(default)* | `api.minimax.io` | `MINIMAX_API_KEY` |
+| `china` | `api.minimaxi.com` | `MINIMAX_CN_API_KEY` |
+
+**Setup:**
+1. Sign up at [minimax.io](https://www.minimax.io) (international) or [minimaxi.com](https://www.minimaxi.com) (China)
+2. Create an API key
+3. `export MINIMAX_API_KEY="..."`
+4. For China region:
+   ```toml
+   [provider_regions]
+   minimax = "china"
+   ```
+   ```bash
+   export MINIMAX_CN_API_KEY="..."
+   ```
+
+**Media Generation:** In addition to LLM chat models, MiniMax provides media generation capabilities when used with the Creator Hand or media API endpoints:
+
+| Modality | Model | Description |
+|----------|-------|-------------|
+| Image | `image-01` | Text-to-image generation |
+| TTS | `speech-2.8-hd` | High-quality text-to-speech |
+| Video | `T2V-01` | Text-to-video generation (async) |
+| Music | `music-2.5` | Music generation with optional lyrics |
+
+These are accessed via `/api/media/*` endpoints or through the `image_generate`, `video_generate`, `music_generate`, `text_to_speech` tools.
+
+**Notes:** MiniMax international (`minimax.io`) and China (`minimaxi.com`) use separate API keys. When selecting the `china` region, LibreFang automatically reads from `MINIMAX_CN_API_KEY` instead of `MINIMAX_API_KEY`.
+
+---
+
+## Vertex AI
+
+| | |
+|---|---|
+| **Display Name** | Google Vertex AI |
+| **Driver** | Native Gemini (generateContent API via Vertex) |
+| **Config Section** | `[vertex_ai]` |
+| **Env Var** | `GOOGLE_APPLICATION_CREDENTIALS`, `VERTEX_PROJECT`, `VERTEX_LOCATION` |
+| **Base URL** | `https://<location>-aiplatform.googleapis.com` |
+| **Key Required** | Yes (service account JSON or gcloud CLI) |
+| **Free Tier** | No |
+| **Auth** | OAuth2 service account or `gcloud auth print-access-token` |
+| **Models** | Gemini models via Google Cloud Vertex AI enterprise endpoint |
+
+**Setup:**
+1. Enable Vertex AI API in [Google Cloud Console](https://console.cloud.google.com)
+2. Either create a service account key file, or authenticate with `gcloud auth application-default login`
+3. Set environment variables:
+   ```bash
+   # Option A: Service account key file
+   export GOOGLE_APPLICATION_CREDENTIALS="/path/to/service-account.json"
+   export VERTEX_PROJECT="your-gcp-project"
+   export VERTEX_LOCATION="us-central1"
+
+   # Option B: gcloud CLI (no key file needed)
+   gcloud auth application-default login
+   export VERTEX_PROJECT="your-gcp-project"
+   export VERTEX_LOCATION="us-central1"
+   ```
+4. Configure in `config.toml`:
+   ```toml
+   [vertex_ai]
+   project = "your-gcp-project"
+   location = "us-central1"
+   ```
+
+**Notes:** Vertex AI uses the same Gemini `generateContent` API format as the native Gemini driver but authenticates via Google Cloud OAuth2 instead of an API key. Access tokens are cached with a ~50-minute TTL and auto-refreshed before expiry. The endpoint format is `https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/publishers/google/models/{model}:generateContent`.

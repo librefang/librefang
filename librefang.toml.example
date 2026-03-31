@@ -74,8 +74,9 @@ max_retrieve = 10               # Max memories per retrieval
 
 # ── Web Tools ────────────────────────────────────────────────
 [web]
-search_provider = "auto"        # Tavily → Brave → DuckDuckGo (auto-detect)
+search_provider = "auto"        # Tavily → Brave → Jina → Perplexity → DuckDuckGo (auto-detect)
 # cache_ttl_minutes = 15
+# timeout_secs = 15               # 15 for most providers, 30+ recommended for Jina
 # Session retention & context injection
 # [session]
 # retention_days = 30                        # Auto-cleanup idle sessions (0 = unlimited)
