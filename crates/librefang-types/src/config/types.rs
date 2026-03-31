@@ -243,6 +243,10 @@ pub struct WebConfig {
     pub search_provider: SearchProvider,
     /// Cache TTL in minutes (0 = disabled).
     pub cache_ttl_minutes: u64,
+    /// HTTP timeout for all web search requests (seconds).
+    /// Recommended: 15 for most providers, 30+ for Jina.
+    #[serde(default = "default_search_timeout_secs")]
+    pub timeout_secs: u64,
     /// Brave Search configuration.
     pub brave: BraveSearchConfig,
     /// Tavily Search configuration.
@@ -255,11 +259,16 @@ pub struct WebConfig {
     pub fetch: WebFetchConfig,
 }
 
+fn default_search_timeout_secs() -> u64 {
+    15
+}
+
 impl Default for WebConfig {
     fn default() -> Self {
         Self {
             search_provider: SearchProvider::default(),
             cache_ttl_minutes: 15,
+            timeout_secs: default_search_timeout_secs(),
             brave: BraveSearchConfig::default(),
             tavily: TavilySearchConfig::default(),
             perplexity: PerplexitySearchConfig::default(),

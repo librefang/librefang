@@ -41,7 +41,7 @@ impl WebSearchEngine {
         brave_auth_profiles: Vec<(String, u32)>,
     ) -> Self {
         let client = crate::http_client::proxied_client_builder()
-            .timeout(std::time::Duration::from_secs(15))
+            .timeout(std::time::Duration::from_secs(config.timeout_secs))
             .build()
             .expect("HTTP client build");
 
@@ -359,7 +359,7 @@ impl WebSearchEngine {
         Ok(wrap_external_content("perplexity-search", &output))
     }
 
-    /// Search via Jina AI Search API.
+    /// Search via Jina AI Search API (with single retry on transient errors).
     async fn search_jina(&self, query: &str, max_results: usize) -> Result<String, String> {
         let api_key =
             resolve_api_key(&self.config.jina.api_key_env).ok_or("Jina API key not set")?;
@@ -382,55 +382,76 @@ impl WebSearchEngine {
             body["hl"] = serde_json::Value::String(self.config.jina.language.clone());
         }
 
-        let mut req = self
-            .client
-            .post(endpoint)
-            .header("Authorization", format!("Bearer {}", api_key.as_str()))
-            .header("Accept", "application/json");
+        let mut attempts = 0u32;
+        loop {
+            attempts += 1;
 
-        if self.config.jina.no_cache {
-            req = req.header("X-No-Cache", "true");
+            let mut req = self
+                .client
+                .post(endpoint)
+                .header("Authorization", format!("Bearer {}", api_key.as_str()))
+                .header("Accept", "application/json");
+
+            if self.config.jina.no_cache {
+                req = req.header("X-No-Cache", "true");
+            }
+
+            let resp_result = req.json(&body).send().await;
+
+            match resp_result {
+                Ok(resp) if resp.status().is_success() => {
+                    let data: serde_json::Value = resp
+                        .json()
+                        .await
+                        .map_err(|e| format!("Jina JSON parse failed: {e}"))?;
+
+                    let results = data["data"].as_array().cloned().unwrap_or_default();
+
+                    if results.is_empty() {
+                        let err = format!("No results found for '{query}' (Jina).");
+                        if attempts < 2 {
+                            warn!("{err} Retrying...");
+                            continue;
+                        }
+                        return Err(err);
+                    }
+
+                    let mut output = format!("Search results for '{query}' (Jina):\n\n");
+                    for (i, r) in results.iter().enumerate().take(max_results) {
+                        let title = r["title"].as_str().unwrap_or("");
+                        let url = r["url"].as_str().unwrap_or("");
+                        let content = r["content"]
+                            .as_str()
+                            .or_else(|| r["description"].as_str())
+                            .unwrap_or("");
+                        output.push_str(&format!(
+                            "{}. {}\n   URL: {}\n   {}\n\n",
+                            i + 1,
+                            title,
+                            url,
+                            content
+                        ));
+                    }
+
+                    return Ok(wrap_external_content("jina-search", &output));
+                }
+                Ok(resp) => {
+                    let status = resp.status();
+                    if attempts < 2 {
+                        warn!("Jina returned {status}, retrying...");
+                        continue;
+                    }
+                    return Err(format!("Jina API returned {status}"));
+                }
+                Err(e) => {
+                    if attempts < 2 {
+                        warn!("Jina request failed: {e}, retrying...");
+                        continue;
+                    }
+                    return Err(format!("Jina request failed: {e}"));
+                }
+            }
         }
-
-        let resp = req
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| format!("Jina request failed: {e}"))?;
-
-        if !resp.status().is_success() {
-            return Err(format!("Jina API returned {}", resp.status()));
-        }
-
-        let data: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| format!("Jina JSON parse failed: {e}"))?;
-
-        let results = data["data"].as_array().cloned().unwrap_or_default();
-
-        if results.is_empty() {
-            return Err(format!("No results found for '{query}' (Jina)."));
-        }
-
-        let mut output = format!("Search results for '{query}' (Jina):\n\n");
-        for (i, r) in results.iter().enumerate().take(max_results) {
-            let title = r["title"].as_str().unwrap_or("");
-            let url = r["url"].as_str().unwrap_or("");
-            let content = r["content"]
-                .as_str()
-                .or_else(|| r["description"].as_str())
-                .unwrap_or("");
-            output.push_str(&format!(
-                "{}. {}\n   URL: {}\n   {}\n\n",
-                i + 1,
-                title,
-                url,
-                content
-            ));
-        }
-
-        Ok(wrap_external_content("jina-search", &output))
     }
 
     /// Search via DuckDuckGo HTML (no API key needed).
