@@ -419,7 +419,7 @@ async fn change_password(
     }
 
     // Trigger config reload so the kernel picks up the new hash
-    if let Err(e) = state.kernel.reload_config() {
+    if let Err(e) = state.kernel.reload_config().await {
         tracing::warn!("Config reload after password change failed: {e}");
     }
 
@@ -705,7 +705,7 @@ pub async fn run_daemon(
                 if current != last_modified && current.is_some() {
                     last_modified = current;
                     tracing::info!("Config file changed, reloading...");
-                    match k.reload_config() {
+                    match k.reload_config().await {
                         Ok(plan) => {
                             if plan.has_changes() {
                                 tracing::info!("Config hot-reload applied: {:?}", plan.hot_actions);

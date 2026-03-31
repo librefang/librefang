@@ -6095,7 +6095,7 @@ system_prompt = "You are a helpful assistant."
 
     /// Reload configuration: read the config file, diff against current, and
     /// apply hot-reloadable actions. Returns the reload plan for API response.
-    pub fn reload_config(&self) -> Result<crate::config_reload::ReloadPlan, String> {
+    pub async fn reload_config(&self) -> Result<crate::config_reload::ReloadPlan, String> {
         let old_cfg = self.config.load();
         use crate::config_reload::{
             build_reload_plan, should_apply_hot, validate_config_for_reload,
@@ -6127,7 +6127,7 @@ system_prompt = "You are a helpful assistant."
         // In Off / Restart modes the user expects no runtime changes — they
         // must restart to pick up the new config.
         if should_apply_hot(old_cfg.reload.mode, &plan) {
-            let _write_guard = self.config_reload_lock.blocking_write();
+            let _write_guard = self.config_reload_lock.write().await;
             self.apply_hot_actions_inner(&plan, &new_config);
             self.config.store(std::sync::Arc::new(new_config));
         }
