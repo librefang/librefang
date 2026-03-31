@@ -66,7 +66,7 @@ pub fn resolve_sandbox_path(user_path: &str, workspace_root: &Path) -> Result<Pa
     // Verify the canonical path is inside the workspace
     if !canon_candidate.starts_with(&canon_root) {
         return Err(format!(
-            "Access denied: path '{}' resolves outside workspace. \
+            "Access denied: path '{}' {ERR_SANDBOX_ESCAPE}. \
              If you have an MCP filesystem server configured, use the \
              mcp_filesystem_* tools (e.g. mcp_filesystem_read_file, \
              mcp_filesystem_list_directory) to access files outside \

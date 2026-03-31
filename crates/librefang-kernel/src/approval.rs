@@ -352,6 +352,10 @@ mod tests {
             RiskLevel::High
         );
         assert_eq!(
+            ApprovalManager::classify_risk("apply_patch"),
+            RiskLevel::High
+        );
+        assert_eq!(
             ApprovalManager::classify_risk("web_fetch"),
             RiskLevel::Medium
         );
