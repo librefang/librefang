@@ -2161,7 +2161,9 @@ impl LibreFangKernel {
                     // Check enabled flag — also do a direct TOML read as fallback
                     let mut is_enabled = restored_entry.manifest.enabled;
                     if is_enabled {
-                        // Double-check: read directly from hands/agents TOML in case DB is stale
+                        // Double-check: read directly from hands/agents TOML in case DB is stale.
+                        // Use proper TOML parsing instead of string matching to handle all valid
+                        // whitespace variants and avoid false positives from comments.
                         for dir in &["agents", "hands"] {
                             let check_path = kernel
                                 .home_dir_boot
@@ -2170,9 +2172,7 @@ impl LibreFangKernel {
                                 .join("agent.toml");
                             if check_path.exists() {
                                 if let Ok(content) = std::fs::read_to_string(&check_path) {
-                                    if content.contains("enabled = false")
-                                        || content.contains("enabled=false")
-                                    {
+                                    if toml_enabled_false(&content) {
                                         is_enabled = false;
                                         restored_entry.manifest.enabled = false;
                                     }
@@ -6610,8 +6610,7 @@ system_prompt = "You are a helpful assistant."
                     .join("agent.toml");
                 if hand_toml.exists() {
                     if let Ok(content) = std::fs::read_to_string(&hand_toml) {
-                        if content.contains("enabled = false") || content.contains("enabled=false")
-                        {
+                        if toml_enabled_false(&content) {
                             info!(hand = %hand_id, "Hand disabled in config — skipping reactivation");
                             continue;
                         }
@@ -8852,6 +8851,20 @@ fn infer_provider_from_model(model: &str) -> Option<String> {
 
 /// A well-known agent ID used for shared memory operations across agents.
 /// This is a fixed UUID so all agents read/write to the same namespace.
+/// Parse an agent.toml string and return true if `enabled` is explicitly set
+/// to `false`. Uses proper TOML parsing to handle all valid whitespace variants
+/// and avoid false positives from commented-out lines.
+fn toml_enabled_false(content: &str) -> bool {
+    #[derive(serde::Deserialize)]
+    struct Probe {
+        enabled: Option<bool>,
+    }
+    toml::from_str::<Probe>(content)
+        .ok()
+        .and_then(|p| p.enabled)
+        == Some(false)
+}
+
 pub fn shared_memory_agent_id() -> AgentId {
     AgentId(uuid::Uuid::from_bytes([
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
