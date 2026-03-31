@@ -61,6 +61,10 @@ just ci
 `just install` 会自动先构建 React Dashboard，再编译 CLI 二进制，
 确保 Dashboard 在 `http://127.0.0.1:4545/` 上完整可用。
 
+<Note>
+justfile 使用 `[unix]` 和 `[windows]` recipe 属性实现跨平台支持。所有命令在 macOS、Linux 和 Windows 上均可使用。在 Windows 上，`just install` 会自动使用 PowerShell 命令。
+</Note>
+
 ### 不使用 just 构建
 
 ```bash

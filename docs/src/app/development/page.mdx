@@ -61,6 +61,10 @@ just ci
 `just install` automatically builds the React dashboard before compiling the CLI binary,
 so the dashboard will be fully functional on `http://127.0.0.1:4545/`.
 
+<Note>
+The justfile uses `[unix]` and `[windows]` recipe attributes for cross-platform support. All recipes work on macOS, Linux, and Windows. On Windows, `just install` uses PowerShell commands automatically.
+</Note>
+
 ### Build without just
 
 ```bash

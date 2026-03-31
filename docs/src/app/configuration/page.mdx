@@ -793,7 +793,7 @@ allowed_channels = []
 access_token_env = "WHATSAPP_ACCESS_TOKEN"
 verify_token_env = "WHATSAPP_VERIFY_TOKEN"
 phone_number_id = ""
-webhook_port = 8443
+# webhook_port = 8443  # Deprecated: webhooks now share the API port
 allowed_users = []
 # gateway_url_env = "WHATSAPP_WEB_GATEWAY_URL"  # for QR/Web mode
 # account_id = "my-whatsapp-bot"
@@ -805,7 +805,7 @@ allowed_users = []
 | `access_token_env` | string | `"WHATSAPP_ACCESS_TOKEN"` | Env var holding the WhatsApp Cloud API access token. |
 | `verify_token_env` | string | `"WHATSAPP_VERIFY_TOKEN"` | Env var holding the webhook verification token. |
 | `phone_number_id` | string | `""` | WhatsApp Business phone number ID. |
-| `webhook_port` | u16 | `8443` | Port to listen for incoming webhook callbacks. |
+| `webhook_port` | u16 | `8443` | **Deprecated.** Previously used for standalone webhook server; now ignored. All webhooks share the API port. |
 | `gateway_url_env` | string | `"WHATSAPP_WEB_GATEWAY_URL"` | Env var holding the WhatsApp Web gateway URL. When set, outgoing messages are routed through the QR/Web gateway instead of the Cloud API. |
 | `allowed_users` | list of strings | `[]` | Phone numbers allowed. Empty = allow all. |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
@@ -881,7 +881,7 @@ allowed_senders = []
 [channels.teams]
 app_id = ""
 app_password_env = "TEAMS_APP_PASSWORD"
-webhook_port = 3978
+# webhook_port = 3978  # Deprecated: webhooks now share the API port
 allowed_tenants = []
 ```
 
@@ -889,7 +889,7 @@ allowed_tenants = []
 |-------|------|---------|-------------|
 | `app_id` | string | `""` | Azure Bot App ID. |
 | `app_password_env` | string | `"TEAMS_APP_PASSWORD"` | Env var holding the Azure Bot Framework app password. |
-| `webhook_port` | u16 | `3978` | Port for the Bot Framework incoming webhook. |
+| `webhook_port` | u16 | `3978` | **Deprecated.** Previously used for standalone webhook server; now ignored. All webhooks share the API port. |
 | `allowed_tenants` | list of strings | `[]` | Azure AD tenant IDs allowed. Empty = allow all. |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
 
@@ -937,14 +937,14 @@ use_tls = false
 [channels.google_chat]
 service_account_env = "GOOGLE_CHAT_SERVICE_ACCOUNT"
 space_ids = []
-webhook_port = 8444
+# webhook_port = 8444  # Deprecated: webhooks now share the API port
 ```
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `service_account_env` | string | `"GOOGLE_CHAT_SERVICE_ACCOUNT"` | Env var holding the service account JSON key. |
 | `space_ids` | list of strings | `[]` | Google Chat space IDs to listen in. |
-| `webhook_port` | u16 | `8444` | Port for the incoming webhook. |
+| `webhook_port` | u16 | `8444` | **Deprecated.** Previously used for standalone webhook server; now ignored. All webhooks share the API port. |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
 
 #### `[channels.twitch]`
@@ -1025,14 +1025,14 @@ rooms = []
 [channels.line]
 channel_secret_env = "LINE_CHANNEL_SECRET"
 access_token_env = "LINE_CHANNEL_ACCESS_TOKEN"
-webhook_port = 8450
+# webhook_port = 8450  # Deprecated: webhooks now share the API port
 ```
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `channel_secret_env` | string | `"LINE_CHANNEL_SECRET"` | Env var holding the LINE channel secret. |
 | `access_token_env` | string | `"LINE_CHANNEL_ACCESS_TOKEN"` | Env var holding the LINE channel access token. |
-| `webhook_port` | u16 | `8450` | Port for the incoming webhook. |
+| `webhook_port` | u16 | `8450` | **Deprecated.** Previously used for standalone webhook server; now ignored. All webhooks share the API port. |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
 
 #### `[channels.viber]`
@@ -1041,14 +1041,14 @@ webhook_port = 8450
 [channels.viber]
 auth_token_env = "VIBER_AUTH_TOKEN"
 webhook_url = ""
-webhook_port = 8451
+# webhook_port = 8451  # Deprecated: webhooks now share the API port
 ```
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `auth_token_env` | string | `"VIBER_AUTH_TOKEN"` | Env var holding the Viber Bot auth token. |
 | `webhook_url` | string | `""` | Public URL for the Viber webhook endpoint. |
-| `webhook_port` | u16 | `8451` | Port for the incoming webhook. |
+| `webhook_port` | u16 | `8451` | **Deprecated.** Previously used for standalone webhook server; now ignored. All webhooks share the API port. |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
 
 #### `[channels.messenger]`
@@ -1057,14 +1057,14 @@ webhook_port = 8451
 [channels.messenger]
 page_token_env = "MESSENGER_PAGE_TOKEN"
 verify_token_env = "MESSENGER_VERIFY_TOKEN"
-webhook_port = 8452
+# webhook_port = 8452  # Deprecated: webhooks now share the API port
 ```
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `page_token_env` | string | `"MESSENGER_PAGE_TOKEN"` | Env var holding the Facebook page access token. |
 | `verify_token_env` | string | `"MESSENGER_VERIFY_TOKEN"` | Env var holding the webhook verify token. |
-| `webhook_port` | u16 | `8452` | Port for the incoming webhook. |
+| `webhook_port` | u16 | `8452` | **Deprecated.** Previously used for standalone webhook server; now ignored. All webhooks share the API port. |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
 
 #### `[channels.reddit]`
@@ -1123,14 +1123,14 @@ service_url = "https://bsky.social"
 [channels.feishu]
 app_id = ""
 app_secret_env = "FEISHU_APP_SECRET"
-webhook_port = 8453
+# webhook_port = 8453  # Deprecated: webhooks now share the API port
 ```
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `app_id` | string | `""` | Feishu/Lark app ID. |
 | `app_secret_env` | string | `"FEISHU_APP_SECRET"` | Env var holding the Feishu app secret. |
-| `webhook_port` | u16 | `8453` | Port for the incoming webhook. |
+| `webhook_port` | u16 | `8453` | **Deprecated.** Previously used for standalone webhook server; now ignored. All webhooks share the API port. |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
 
 #### `[channels.revolt]`
@@ -1199,14 +1199,14 @@ allowed_teams = []
 [channels.threema]
 threema_id = ""
 secret_env = "THREEMA_SECRET"
-webhook_port = 8454
+# webhook_port = 8454  # Deprecated: webhooks now share the API port
 ```
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `threema_id` | string | `""` | Threema Gateway ID. |
 | `secret_env` | string | `"THREEMA_SECRET"` | Env var holding the Threema API secret. |
-| `webhook_port` | u16 | `8454` | Port for the incoming webhook. |
+| `webhook_port` | u16 | `8454` | **Deprecated.** Previously used for standalone webhook server; now ignored. All webhooks share the API port. |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
 
 #### `[channels.nostr]`
@@ -1242,13 +1242,13 @@ allowed_rooms = []
 ```toml
 [channels.pumble]
 bot_token_env = "PUMBLE_BOT_TOKEN"
-webhook_port = 8455
+# webhook_port = 8455  # Deprecated: webhooks now share the API port
 ```
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `bot_token_env` | string | `"PUMBLE_BOT_TOKEN"` | Env var holding the Pumble bot token. |
-| `webhook_port` | u16 | `8455` | Port for the incoming webhook. |
+| `webhook_port` | u16 | `8455` | **Deprecated.** Previously used for standalone webhook server; now ignored. All webhooks share the API port. |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
 
 #### `[channels.flock]`
@@ -1256,13 +1256,13 @@ webhook_port = 8455
 ```toml
 [channels.flock]
 bot_token_env = "FLOCK_BOT_TOKEN"
-webhook_port = 8456
+# webhook_port = 8456  # Deprecated: webhooks now share the API port
 ```
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `bot_token_env` | string | `"FLOCK_BOT_TOKEN"` | Env var holding the Flock bot token. |
-| `webhook_port` | u16 | `8456` | Port for the incoming webhook. |
+| `webhook_port` | u16 | `8456` | **Deprecated.** Previously used for standalone webhook server; now ignored. All webhooks share the API port. |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
 
 #### `[channels.twist]`
@@ -1317,7 +1317,7 @@ app_secret_env = "DINGTALK_APP_SECRET"
 receive_mode = "webhook"
 access_token_env = "DINGTALK_ACCESS_TOKEN"
 secret_env = "DINGTALK_SECRET"
-webhook_port = 8457
+# webhook_port = 8457  # Deprecated: webhooks now share the API port
 ```
 
 | Field | Type | Default | Description |
@@ -1327,7 +1327,7 @@ webhook_port = 8457
 | `app_secret_env` | string | `"DINGTALK_APP_SECRET"` | Env var holding the DingTalk App Secret (stream mode). |
 | `access_token_env` | string | `"DINGTALK_ACCESS_TOKEN"` | Env var holding the DingTalk webhook access token (webhook mode). |
 | `secret_env` | string | `"DINGTALK_SECRET"` | Env var holding the DingTalk signing secret (webhook mode). |
-| `webhook_port` | u16 | `8457` | Port for the incoming webhook (webhook mode only). |
+| `webhook_port` | u16 | `8457` | **Deprecated.** Previously used for standalone webhook server; now ignored. All webhooks share the API port. |
 | `robot_code` | string or null | `null` | Robot code for stream mode replies (defaults to app_key). |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
 
@@ -1410,6 +1410,29 @@ listen_port = 8460
 | `listen_port` | u16 | `8460` | Port to listen for incoming webhook requests. |
 | `callback_url` | string or null | `null` | URL to POST outgoing messages to. |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
+
+#### `[channels.voice]`
+
+WebSocket-based voice channel with STT (Speech-to-Text) and TTS (Text-to-Speech) support.
+
+```toml
+[channels.voice]
+api_key_env = "OPENAI_API_KEY"
+stt_url = "https://api.openai.com"
+tts_url = "https://api.openai.com"
+tts_voice = "alloy"
+# buffer_threshold = 32768
+# default_agent = "assistant"
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `api_key_env` | string | `"OPENAI_API_KEY"` | Env var holding the API key for STT/TTS services. |
+| `stt_url` | string | `"https://api.openai.com"` | Base URL for the STT API (OpenAI Whisper-compatible). |
+| `tts_url` | string | `"https://api.openai.com"` | Base URL for the TTS API. |
+| `tts_voice` | string | `"alloy"` | TTS voice name. Options: `alloy`, `echo`, `fable`, `onyx`, `nova`, `shimmer`. |
+| `buffer_threshold` | usize | `32768` | Audio buffer size in bytes before triggering STT. |
+| `default_agent` | string or null | `null` | Agent name to route voice messages to. |
 
 #### `[channels.linkedin]`
 
@@ -1533,6 +1556,18 @@ path = "/search"
 method = "post"
 ```
 
+#### Streamable HTTP
+
+```toml
+[[mcp_servers]]
+name = "remote-tools"
+
+[mcp_servers.transport.Http]
+url = "https://mcp.example.com/v1"
+```
+
+Uses the Streamable HTTP transport (MCP spec 2025-03-26+). Unlike SSE, this is a simpler request/response pattern over standard HTTP POST.
+
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `name` | string | *required* | Display name for this MCP server. Tools are namespaced as `mcp_{name}_{tool}`. |
@@ -1545,6 +1580,7 @@ method = "post"
 |--------|--------|-------------|
 | `stdio` | `command` (string), `args` (list of strings, default `[]`) | Spawn a subprocess, communicate via JSON-RPC over stdin/stdout. |
 | `sse` | `url` (string) | Connect to an HTTP Server-Sent Events endpoint. |
+| `Http` | `url` (string) | Streamable HTTP transport (MCP spec 2025-03-26+). Simple request/response over HTTP POST. |
 | `http_compat` | `base_url` (string), `headers` (list of header configs), `tools` (list of tool configs) | Built-in compatibility adapter for plain HTTP/JSON tool backends without a native MCP server. Each tool maps to an HTTP endpoint. |
 
 **`http_compat` header config:**
@@ -1740,6 +1776,7 @@ Configures the headless browser automation engine used by the `browser_*` agent 
 
 ```toml
 [browser]
+enabled = true
 headless = true
 viewport_width = 1280
 viewport_height = 720
@@ -1751,6 +1788,7 @@ max_sessions = 5
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
+| `enabled` | bool | `true` | Enable the built-in CDP browser tools. Set to `false` to disable all `browser_*` tools. |
 | `headless` | bool | `true` | Run browser in headless mode (no visible window). |
 | `viewport_width` | u32 | `1280` | Browser viewport width in pixels. |
 | `viewport_height` | u32 | `720` | Browser viewport height in pixels. |
@@ -1784,6 +1822,32 @@ debounce_ms = 500
 | `restart` | Full daemon restart on any config change. |
 | `hot` | Hot-reload safe sections only (channels, skills, heartbeat). |
 | `hybrid` | Hot-reload where possible; flag restart-required for sections that need it (default). |
+
+**Hot-reloadable sections (no restart required):**
+
+The following config sections can be changed in `config.toml` while the daemon is running. Changes are detected automatically (polled every 30 seconds):
+
+- `[channels]` — add, remove, or reconfigure channel adapters
+- `[[skills]]` — skill registry
+- `[proxy]` — HTTP/HTTPS/SOCKS5 proxy settings
+- `[browser]` — browser automation settings
+- `[web]` — web search/scraping config
+- `[approval]` — approval policy
+- `[cron]` — cron job settings
+- `[webhook_triggers]` — webhook triggers
+- `[extensions]` — extension config
+- `[[mcp_servers]]` — MCP server connections
+- `[a2a]` — Agent-to-Agent protocol config
+- `[fallback_providers]` — fallback provider chain
+- `provider_urls` — provider base URL overrides
+- `default_model` — default model selection
+- `tool_policy` — tool filtering rules
+- `proactive_memory` — proactive memory thresholds
+- `provider_api_keys` — provider API keys (flushes driver cache)
+- `usage_footer` — usage footer mode
+- `sanitize` — input sanitization rules
+
+**Restart-required sections:** `home_dir`, `data_dir`, `api_listen`, `tls`, `telemetry`. Changes to these fields are logged as warnings but only take effect after restart.
 
 ---
 

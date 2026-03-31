@@ -128,6 +128,7 @@ librefang start [--config <PATH>]
 
 **行为：**
 
+- 如果 `~/.librefang/` 中不存在 `config.toml`，首次运行 `start` 命令时会自动执行快速初始化向导。
 - 检查是否已有守护进程在运行；如果有，则报错退出。
 - 启动 LibreFang 内核（加载配置、初始化 SQLite 数据库、加载 Agent、连接 MCP 服务器、启动后台任务）。
 - 在 `config.toml` 指定的地址启动 HTTP API 服务器（默认：`127.0.0.1:4545`）。
@@ -1271,6 +1272,7 @@ librefang chat [<AGENT>]
 
 **行为：**
 
+- 如果 `~/.librefang/` 中不存在 `config.toml`，首次运行 `chat` 命令时会自动执行快速初始化向导。
 - **守护进程模式：** 在运行中的 Agent 中按名称或 ID 查找。如果未指定 Agent 名称，使用第一个可用的 Agent。如果没有 Agent 存在，建议运行 `librefang agent new`。
 - **独立模式（无守护进程）：** 启动进程内核并从模板自动生成 Agent。搜索与给定名称匹配的 Agent，然后回退到 `assistant`，再回退到第一个可用模板。
 
