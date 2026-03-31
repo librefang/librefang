@@ -697,10 +697,10 @@ pub async fn set_provider_key(
             .unwrap_or_else(|e| e.into_inner());
         match guard.as_ref() {
             Some(dm) => (dm.provider.clone(), dm.api_key_env.clone()),
-            None => (
-                state.kernel.config_ref().default_model.provider.clone(),
-                state.kernel.config_ref().default_model.api_key_env.clone(),
-            ),
+            None => {
+                let dm = state.kernel.config_ref().default_model.clone();
+                (dm.provider, dm.api_key_env)
+            }
         }
     };
     let current_has_key = if current_key_env.is_empty() {

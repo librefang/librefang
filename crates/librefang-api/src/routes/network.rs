@@ -156,8 +156,9 @@ pub async fn get_peer(
     )
 )]
 pub async fn network_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let enabled = state.kernel.config_ref().network_enabled
-        && !state.kernel.config_ref().network.shared_secret.is_empty();
+    let cfg = state.kernel.config_ref();
+    let enabled = cfg.network_enabled && !cfg.network.shared_secret.is_empty();
+    drop(cfg);
 
     let (node_id, listen_address, connected_peers, total_peers) =
         if let Some(peer_node) = state.kernel.peer_node_ref() {
@@ -191,20 +192,21 @@ pub async fn network_status(State(state): State<Arc<AppState>>) -> impl IntoResp
 )]
 pub async fn a2a_agent_card(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let agents = state.kernel.agent_registry().list();
-    let base_url = format!("http://{}", state.kernel.config_ref().api_listen);
+    let cfg = state.kernel.config_ref();
+    let base_url = format!("http://{}", cfg.api_listen);
 
     // Use service-level A2A config for the well-known card when available.
-    let (service_name, service_description) =
-        if let Some(ref a2a_cfg) = state.kernel.config_ref().a2a {
-            let name = if a2a_cfg.name.is_empty() {
-                "LibreFang Agent OS".to_string()
-            } else {
-                a2a_cfg.name.clone()
-            };
-            (name, a2a_cfg.description.clone())
+    let (service_name, service_description) = if let Some(ref a2a_cfg) = cfg.a2a {
+        let name = if a2a_cfg.name.is_empty() {
+            "LibreFang Agent OS".to_string()
         } else {
-            ("LibreFang Agent OS".to_string(), String::new())
+            a2a_cfg.name.clone()
         };
+        (name, a2a_cfg.description.clone())
+    } else {
+        ("LibreFang Agent OS".to_string(), String::new())
+    };
+    drop(cfg);
 
     // Aggregate skills from ALL agents.
     let skills: Vec<librefang_runtime::a2a::AgentSkill> = agents

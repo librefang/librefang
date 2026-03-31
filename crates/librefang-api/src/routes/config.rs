@@ -118,6 +118,7 @@ pub async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         }
     };
 
+    let cfg = state.kernel.config_ref();
     Json(serde_json::json!({
         "status": "running",
         "version": env!("CARGO_PKG_VERSION"),
@@ -125,13 +126,13 @@ pub async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         "active_agent_count": active_agent_count,
         "session_count": session_count,
         "memory_used_mb": memory_used_mb,
-        "default_provider": state.kernel.default_model_override_ref().read().ok().and_then(|g| g.as_ref().map(|dm| dm.provider.clone())).unwrap_or_else(|| state.kernel.config_ref().default_model.provider.clone()),
-        "default_model": state.kernel.default_model_override_ref().read().ok().and_then(|g| g.as_ref().map(|dm| dm.model.clone())).unwrap_or_else(|| state.kernel.config_ref().default_model.model.clone()),
+        "default_provider": state.kernel.default_model_override_ref().read().ok().and_then(|g| g.as_ref().map(|dm| dm.provider.clone())).unwrap_or_else(|| cfg.default_model.provider.clone()),
+        "default_model": state.kernel.default_model_override_ref().read().ok().and_then(|g| g.as_ref().map(|dm| dm.model.clone())).unwrap_or_else(|| cfg.default_model.model.clone()),
         "uptime_seconds": uptime,
-        "api_listen": state.kernel.config_ref().api_listen,
+        "api_listen": cfg.api_listen,
         "home_dir": state.kernel.home_dir().display().to_string(),
-        "log_level": state.kernel.config_ref().log_level,
-        "network_enabled": state.kernel.config_ref().network_enabled,
+        "log_level": cfg.log_level,
+        "network_enabled": cfg.network_enabled,
         "config_exists": state.kernel.home_dir().join("config.toml").exists(),
         "agents": agents,
     }))
@@ -321,7 +322,8 @@ pub async fn health_detail(State(state): State<Arc<AppState>>) -> impl IntoRespo
         .structured_get(shared_id, "__health_check__")
         .is_ok();
 
-    let config_warnings = state.kernel.config_ref().validate();
+    let hcfg = state.kernel.config_ref();
+    let config_warnings = hcfg.validate();
     let status = if db_ok { "ok" } else { "degraded" };
 
     Json(serde_json::json!({
@@ -334,10 +336,10 @@ pub async fn health_detail(State(state): State<Arc<AppState>>) -> impl IntoRespo
         "database": if db_ok { "connected" } else { "error" },
         "memory": {
             "embedding_available": state.kernel.embedding().is_some(),
-            "embedding_provider": state.kernel.config_ref().memory.embedding_provider,
-            "embedding_model": &state.kernel.config_ref().memory.embedding_model,
-            "proactive_memory_enabled": state.kernel.config_ref().proactive_memory.enabled,
-            "extraction_model": &state.kernel.config_ref().proactive_memory.extraction_model,
+            "embedding_provider": hcfg.memory.embedding_provider,
+            "embedding_model": &hcfg.memory.embedding_model,
+            "proactive_memory_enabled": hcfg.proactive_memory.enabled,
+            "extraction_model": &hcfg.proactive_memory.extraction_model,
         },
         "config_warnings": config_warnings,
         "event_bus": {
@@ -1123,7 +1125,10 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
     )
 )]
 pub async fn security_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let auth_mode = if state.kernel.config_ref().api_key.is_empty() {
+    let scfg = state.kernel.config_ref();
+    let api_key_empty = scfg.api_key.is_empty();
+    drop(scfg);
+    let auth_mode = if api_key_empty {
         "localhost_only"
     } else {
         "bearer_token"
@@ -1162,7 +1167,7 @@ pub async fn security_status(State(state): State<Arc<AppState>>) -> impl IntoRes
             },
             "auth": {
                 "mode": auth_mode,
-                "api_key_set": !state.kernel.config_ref().api_key.is_empty()
+                "api_key_set": !api_key_empty
             }
         },
         "monitoring": {
