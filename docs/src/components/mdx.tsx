@@ -1,6 +1,7 @@
 import clsx from "clsx";
 import Link from "next/link";
 
+import { Comments } from "@/components/Comments";
 import { EditOnGitHub } from "@/components/EditOnGitHub";
 import { Feedback } from "@/components/Feedback";
 import { Heading } from "@/components/Heading";
@@ -33,6 +34,7 @@ export function wrapper({ children }: { children: React.ReactNode }) {
 					<EditOnGitHub />
 					<Feedback />
 				</div>
+				<Comments />
 			</footer>
 		</article>
 	);

@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@algolia/autocomplete-core": "1.19.3",
+    "@giscus/react": "^3.1.0",
     "@headlessui/react": "2.2.7",
     "@mdx-js/loader": "3.1.1",
     "@mdx-js/react": "3.1.1",
