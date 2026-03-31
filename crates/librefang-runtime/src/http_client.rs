@@ -64,46 +64,53 @@ static GLOBAL_PROXY: RwLock<Option<ProxyConfig>> = RwLock::new(None);
 ///
 /// # Thread safety
 ///
-/// This function calls `std::env::set_var` which is inherently racy in a
-/// multi-threaded process. The initial call **should** happen during
-/// single-threaded daemon bootstrap, before the Tokio runtime spawns any
-/// worker threads. Subsequent calls (hot-reload) are guarded by the
-/// config-reload `RwLock` so they are serialised with readers.
+/// `std::env::set_var` is inherently racy in a multi-threaded process.
+/// Environment variables are only set during the initial bootstrap call
+/// (when `GLOBAL_PROXY` is still `None`), which happens before the Tokio
+/// runtime spawns worker threads. Subsequent calls (hot-reload) update
+/// `GLOBAL_PROXY` only, avoiding the unsound `set_var` in a
+/// multi-threaded context.
 pub fn init_proxy(cfg: ProxyConfig) {
-    // Export config values as env vars for crates that build reqwest clients
-    // without going through our builder (e.g. librefang-channels).
-    if let Some(ref url) = cfg.http_proxy {
-        if !url.is_empty() {
-            if is_valid_proxy_url(url) {
-                std::env::set_var("HTTP_PROXY", url);
-                std::env::set_var("http_proxy", url);
-            } else {
-                tracing::warn!(
-                    "http_proxy has invalid scheme (expected http://, https://, socks5://, or socks5h://): {}",
-                    librefang_types::config::redact_proxy_url(url)
-                );
+    // Only export env vars during initial bootstrap (single-threaded context).
+    // During hot-reload GLOBAL_PROXY already has a value, and calling
+    // `std::env::set_var` from a multi-threaded tokio runtime is unsound.
+    let is_initial = GLOBAL_PROXY.read().map(|g| g.is_none()).unwrap_or(true);
+
+    if is_initial {
+        if let Some(ref url) = cfg.http_proxy {
+            if !url.is_empty() {
+                if is_valid_proxy_url(url) {
+                    std::env::set_var("HTTP_PROXY", url);
+                    std::env::set_var("http_proxy", url);
+                } else {
+                    tracing::warn!(
+                        "http_proxy has invalid scheme (expected http://, https://, socks5://, or socks5h://): {}",
+                        librefang_types::config::redact_proxy_url(url)
+                    );
+                }
+            }
+        }
+        if let Some(ref url) = cfg.https_proxy {
+            if !url.is_empty() {
+                if is_valid_proxy_url(url) {
+                    std::env::set_var("HTTPS_PROXY", url);
+                    std::env::set_var("https_proxy", url);
+                } else {
+                    tracing::warn!(
+                        "https_proxy has invalid scheme (expected http://, https://, socks5://, or socks5h://): {}",
+                        librefang_types::config::redact_proxy_url(url)
+                    );
+                }
+            }
+        }
+        if let Some(ref no) = cfg.no_proxy {
+            if !no.is_empty() {
+                std::env::set_var("NO_PROXY", no);
+                std::env::set_var("no_proxy", no);
             }
         }
     }
-    if let Some(ref url) = cfg.https_proxy {
-        if !url.is_empty() {
-            if is_valid_proxy_url(url) {
-                std::env::set_var("HTTPS_PROXY", url);
-                std::env::set_var("https_proxy", url);
-            } else {
-                tracing::warn!(
-                    "https_proxy has invalid scheme (expected http://, https://, socks5://, or socks5h://): {}",
-                    librefang_types::config::redact_proxy_url(url)
-                );
-            }
-        }
-    }
-    if let Some(ref no) = cfg.no_proxy {
-        if !no.is_empty() {
-            std::env::set_var("NO_PROXY", no);
-            std::env::set_var("no_proxy", no);
-        }
-    }
+
     if let Ok(mut guard) = GLOBAL_PROXY.write() {
         *guard = Some(cfg);
     }

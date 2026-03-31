@@ -695,13 +695,7 @@ export function ProvidersPage() {
     }
   };
 
-  const handleEdit = (provider: Provider) => {
-    setConfigProvider(provider);
-    setKeyInput("");
-    setUrlInput(provider.base_url || "");
-    setKeyError(null);
-    setKeyTestResult(null);
-  };
+  const handleEdit = (provider: Provider) => handleQuickConfig(provider);
 
   const handleDeleteConfirm = async () => {
     if (!deleteConfirmProvider) return;
