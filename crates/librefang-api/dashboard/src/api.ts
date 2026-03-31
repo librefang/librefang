@@ -871,6 +871,14 @@ export async function wechatQrStatus(qrCode: string): Promise<QrStatusResponse> 
   return get<QrStatusResponse>(`/api/channels/wechat/qr/status?qr_code=${encodeURIComponent(qrCode)}`);
 }
 
+export async function whatsappQrStart(): Promise<QrStartResponse> {
+  return post<QrStartResponse>("/api/channels/whatsapp/qr/start", {});
+}
+
+export async function whatsappQrStatus(qrCode: string): Promise<QrStatusResponse> {
+  return get<QrStatusResponse>(`/api/channels/whatsapp/qr/status?qr_code=${encodeURIComponent(qrCode)}`);
+}
+
 export async function listSkills(): Promise<SkillItem[]> {
   const data = await get<SkillsResponse>("/api/skills");
   return data.skills ?? [];

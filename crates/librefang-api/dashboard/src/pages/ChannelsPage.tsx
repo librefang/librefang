@@ -1,7 +1,7 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { listChannels, configureChannel, wechatQrStart, wechatQrStatus, type ChannelItem } from "../api";
+import { listChannels, configureChannel, wechatQrStart, wechatQrStatus, whatsappQrStart, whatsappQrStatus, type ChannelItem } from "../api";
 import QRCode from "qrcode";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
@@ -435,7 +435,7 @@ function ConfigDialog({ channel, onClose, t }: { channel: Channel; onClose: () =
   );
 }
 
-// QR Login Dialog for channels with setup_type === "qr" (e.g. WeChat)
+// QR Login Dialog for channels with setup_type === "qr" (e.g. WeChat, WhatsApp)
 function QrLoginDialog({ channel, onClose, t }: { channel: Channel; onClose: () => void; t: (key: string) => string }) {
   const queryClient = useQueryClient();
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -455,7 +455,12 @@ function QrLoginDialog({ channel, onClose, t }: { channel: Channel; onClose: () 
     setPhase("loading");
     setMessage("");
     try {
-      const res = await wechatQrStart();
+      // Pick the correct QR API based on channel name
+      const qrStart = channel.name === "whatsapp" ? whatsappQrStart : wechatQrStart;
+      const qrStatus = channel.name === "whatsapp" ? whatsappQrStatus : wechatQrStatus;
+      const displayName = channel.name === "whatsapp" ? "WhatsApp" : "WeChat";
+
+      const res = await qrStart();
       if (!res.available || !res.qr_code) {
         setPhase("error");
         setMessage(res.message || "Failed to get QR code");
@@ -463,21 +468,21 @@ function QrLoginDialog({ channel, onClose, t }: { channel: Channel; onClose: () 
       }
       setQrCode(res.qr_code);
       setPhase("scanning");
-      setMessage(res.message || "Scan this QR code with your WeChat app");
+      setMessage(res.message || `Scan this QR code with your ${displayName} app`);
 
-      // Render QR code to canvas — use the full URL so WeChat recognises the scan
+      // Render QR code to canvas — use the full URL so the app recognises the scan
       const qrContent = res.qr_url || res.qr_code;
       if (canvasRef.current && qrContent) {
         QRCode.toCanvas(canvasRef.current, qrContent, { width: 256, margin: 2 });
       }
 
       // Serial long-poll: wait for each request to finish before sending the next.
-      // The backend holds each request ~30s (iLink long-poll), so setInterval would
+      // The backend holds each request ~30s (long-poll), so setInterval would
       // stack up parallel requests that all resolve at once on scan → flashing UI.
       const pollLoop = async () => {
         while (!cancelledRef.current) {
           try {
-            const status = await wechatQrStatus(res.qr_code!);
+            const status = await qrStatus(res.qr_code!);
             if (cancelledRef.current) break;
             if (status.connected && status.bot_token) {
               cancelledRef.current = true;
