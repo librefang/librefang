@@ -297,11 +297,11 @@ impl ChannelToolRule {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ApprovalPolicy {
-    /// Tools that always require approval. Default: `["shell_exec", "file_write", "file_delete"]`.
+    /// Tools that always require approval. Default: `["shell_exec", "file_write", "file_delete", "apply_patch"]`.
     ///
     /// Accepts either a list of tool names or a boolean shorthand:
     /// - `require_approval = false` → empty list (no tools require approval)
-    /// - `require_approval = true`  → `["shell_exec", "file_write", "file_delete"]` (the default set)
+    /// - `require_approval = true`  → `["shell_exec", "file_write", "file_delete", "apply_patch"]` (the default set)
     #[serde(deserialize_with = "deserialize_require_approval")]
     pub require_approval: Vec<String>,
     /// Timeout in seconds. Default: 60, range: 10..=300.
