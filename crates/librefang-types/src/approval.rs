@@ -346,7 +346,7 @@ impl Default for ApprovalPolicy {
 
 /// Custom deserializer that accepts:
 /// - A list of strings: `["shell_exec", "file_write"]`
-/// - A boolean: `false` → `[]`, `true` → `["shell_exec"]`
+/// - A boolean: `false` → `[]`, `true` → `["shell_exec", "file_write", "file_delete", "apply_patch"]`
 fn deserialize_require_approval<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
