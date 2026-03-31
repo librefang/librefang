@@ -6,7 +6,8 @@
     "workflows": "工作流", "scheduler": "调度器", "goals": "目标", "agents": "智能体",
     "providers": "供应商", "channels": "通道", "skills": "技能", "hands": "Hands", "plugins": "插件", "models": "模型",
     "analytics": "分析", "memory": "记忆", "comms": "通信", "runtime": "运行时", "logs": "日志", "settings": "设置",
-    "network": "网络", "a2a": "A2A", "telemetry": "遥测"
+    "network": "网络", "a2a": "A2A", "telemetry": "遥测",
+    "user_center": "用户中心", "logout": "退出登录"
   },
   "common": {
     "refresh": "刷新", "status": "状态", "daemon_online": "守护进程在线", "infrastructure": "控制台",
@@ -33,7 +34,8 @@
     "version": "版本", "telemetry": "服务监控", "pro_tip": "小贴士", "pro_tip_text": "使用画布设计跨通道的智能体工作流。",
     "no_active_agents": "暂未配置活跃智能体", "no_telemetry": "暂无监控数据",
     "active_sessions": "活跃会话", "agent_count": "Agent 数量",
-    "health_checks": "健康检查", "pro_tip_shortcut": "使用 ⌘K 快速搜索 · 按 ← 折叠侧边栏"
+    "health_checks": "健康检查", "pro_tip_shortcut": "使用 ⌘K 快速搜索 · 按 ← 折叠侧边栏",
+    "setup_title": "需要初始化", "setup_description": "未检测到配置文件，点击自动检测 LLM 供应商并生成默认配置。", "setup_button": "初始化", "setup_running": "初始化中..."
   },
   "agents": {
     "title": "智能体", "subtitle": "内核管理的智能体。",
@@ -66,6 +68,8 @@
     "default_set": "默认供应商已更新",
     "is_default": "默认",
     "add": "添加供应商",
+    "delete_confirm_title": "移除供应商密钥",
+    "delete_confirm_message": "确定要移除此供应商的 API Key 吗？移除后该供应商将变为未配置状态。",
     "help": "管理大模型供应商连接。测试连通性、配置 API Key，监控供应商健康状态。"
   },
   "channels": {

@@ -66,14 +66,43 @@ Windows (PowerShell):
 irm https://librefang.ai/install.ps1 | iex
 ```
 
-脚本自动检测平台和架构，下载二进制，验证 SHA256 校验和，配置 PATH 并启动守护进程。
+脚本自动检测平台和架构，下载二进制，验证 SHA256 校验和，配置 PATH，运行 `librefang init` 并启动守护进程。
 
 环境变量：
 - `LIBREFANG_INSTALL_DIR` — 安装目录（默认 `~/.librefang/bin`）
 - `LIBREFANG_VERSION` — 指定版本（默认最新）
 - `LIBREFANG_AUTO_START` — 是否自动启动（默认 1）
 
-**Homebrew**
+**Windows EXE（手动安装）**
+
+如果脚本在你的环境中无法使用，可以手动安装：
+
+1. 从 [GitHub Releases](https://github.com/librefang/librefang/releases/latest) 下载 `librefang-x86_64-pc-windows-msvc.zip`（ARM 设备下载 `aarch64` 版本）
+2. 解压 `librefang.exe` 到一个目录，如 `C:\Users\<你的用户名>\.librefang\bin\`
+3. 将该目录添加到系统 PATH：
+   - 设置 → 系统 → 关于 → 高级系统设置 → 环境变量
+   - 编辑用户变量中的 `Path` → 添加该目录路径
+4. 打开**新的**终端运行：
+
+```powershell
+# 初始化配置
+librefang init
+
+# 启动守护进程
+librefang start
+
+# 在浏览器中打开 Dashboard: http://127.0.0.1:4545/
+# 与默认 Agent 对话
+librefang chat
+```
+
+<Note>
+`librefang init` 会通过设置向导创建 `~/.librefang/config.toml` 配置文件。
+必须在 `start` 之前运行 `init`，否则守护进程没有配置。
+首次运行时，如果还没有执行过 `init`，`start` 和 `chat` 命令会自动触发初始化。
+</Note>
+
+**Homebrew (macOS / Linux)**
 
 ```bash
 brew tap librefang/tap
@@ -90,17 +119,24 @@ npm install -g @librefang/cli@next             # 最新预发布版 (Beta 或 RC
 npm install -g @librefang/cli@2026.3.25-rc1    # 指定版本
 ```
 
+**pip**
+
+```bash
+pip install librefang-cli                      # Stable
+pip install librefang-cli --pre                # 最新预发布版
+```
+
 **Cargo**
 
 ```bash
 cargo install --git https://github.com/librefang/librefang librefang-cli
 ```
 
-或从源码构建：
+或从源码构建（需要 [just](https://github.com/casey/just)）：
 ```bash
 git clone https://github.com/librefang/librefang.git
 cd librefang
-cargo install --path crates/librefang-cli
+just install
 ```
 
 **Docker**

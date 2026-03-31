@@ -200,8 +200,9 @@ shared_secret = ""                    # network_enabled = true 时必填
 
 # --- 网页工具 ---
 [web]
-search_provider = "auto"              # auto | brave | tavily | perplexity | duckduckgo
+search_provider = "auto"              # auto | brave | jina | tavily | perplexity | duckduckgo
 cache_ttl_minutes = 15
+timeout_secs = 15
 
 [web.brave]
 api_key_env = "BRAVE_API_KEY"
@@ -215,6 +216,10 @@ api_key_env = "TAVILY_API_KEY"
 search_depth = "basic"                # basic | advanced
 max_results = 5
 include_answer = true
+
+[web.jina]
+api_key_env = "JINA_API_KEY"
+max_results = 5
 
 [web.perplexity]
 api_key_env = "PERPLEXITY_API_KEY"
@@ -578,19 +583,22 @@ shared_secret = "my-cluster-secret"
 [web]
 search_provider = "auto"
 cache_ttl_minutes = 15
+timeout_secs = 15
 ```
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `search_provider` | string | `"auto"` | 使用的搜索引擎。见下表。 |
 | `cache_ttl_minutes` | u64 | `15` | 搜索/抓取结果的缓存时长（分钟）。`0` = 禁用缓存。 |
+| `timeout_secs` | u64 | `15` | 所有网页搜索请求的 HTTP 超时时间（秒）。建议：大多数提供商使用 15，Jina 建议使用 30 以上。 |
 
 **`search_provider` 值说明：**
 
 | 值 | 说明 |
 |----|------|
-| `auto` | 级联回退：根据可用的 API Key，依次尝试 Tavily、Brave、Perplexity、DuckDuckGo。 |
+| `auto` | 级联回退：根据可用的 API Key，依次尝试 Tavily、Brave、Jina、Perplexity、DuckDuckGo。 |
 | `brave` | Brave Search API。需要 `BRAVE_API_KEY`。 |
+| `jina` | Jina AI 搜索与信息定位。需要 `JINA_API_KEY`。 |
 | `tavily` | Tavily AI 原生搜索。需要 `TAVILY_API_KEY`。 |
 | `perplexity` | Perplexity AI 搜索。需要 `PERPLEXITY_API_KEY`。 |
 | `duckduckgo` | DuckDuckGo HTML 抓取。无需 API Key。 |
@@ -630,6 +638,19 @@ include_answer = true
 | `search_depth` | string | `"basic"` | 搜索深度：`"basic"` 快速返回结果，`"advanced"` 进行更深入的分析。 |
 | `max_results` | usize | `5` | 返回的最大搜索结果数。 |
 | `include_answer` | bool | `true` | 是否在结果中包含 Tavily 的 AI 生成答案摘要。 |
+
+#### `[web.jina]`
+
+```toml
+[web.jina]
+api_key_env = "JINA_API_KEY"
+max_results = 5
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `api_key_env` | string | `"JINA_API_KEY"` | 存放 Jina AI API Key 的环境变量名称。 |
+| `max_results` | usize | `5` | 返回的最大搜索结果数。 |
 
 #### `[web.perplexity]`
 
@@ -2651,6 +2672,7 @@ max_versions_per_agent = 50
 | 变量 | 使用者 | 说明 |
 |------|--------|------|
 | `BRAVE_API_KEY` | `[web.brave]` | Brave Search API Key。 |
+| `JINA_API_KEY` | `[web.jina]` | Jina AI Search API Key。 |
 | `TAVILY_API_KEY` | `[web.tavily]` | Tavily Search API Key。 |
 | `PERPLEXITY_API_KEY` | `[web.perplexity]` | Perplexity Search API Key（与 LLM 提供商共用）。 |
 
@@ -2762,6 +2784,7 @@ max_versions_per_agent = 50
 | 提供商 | 检查的环境变量 |
 |--------|----------------|
 | `brave` | `web.brave.api_key_env` |
+| `jina` | `web.jina.api_key_env` |
 | `tavily` | `web.tavily.api_key_env` |
 | `perplexity` | `web.perplexity.api_key_env` |
 | `duckduckgo` | （无需检查——不需要 API Key） |

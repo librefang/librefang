@@ -292,6 +292,7 @@ fn start_stream_text_bridge(
     >,
 ) -> mpsc::Receiver<String> {
     let (tx, rx) = mpsc::channel::<String>(64);
+    let error_tx = tx.clone();
 
     let bridge_handle = tokio::spawn(async move {
         // Buffer text per iteration. Some providers emit tool call syntax
@@ -339,9 +340,15 @@ fn start_stream_text_bridge(
     });
 
     tokio::spawn(async move {
-        match kernel_handle.await {
-            Err(e) => error!("Streaming kernel task panicked: {e}"),
-            Ok(Err(e)) => error!("Streaming kernel task returned error: {e}"),
+        let error_msg = match kernel_handle.await {
+            Err(e) => {
+                error!("Streaming kernel task panicked: {e}");
+                Some(format!("Task failed: {e}. Please try again."))
+            }
+            Ok(Err(e)) => {
+                error!("Streaming kernel task returned error: {e}");
+                Some(format!("Task failed: {e}. Please try again."))
+            }
             Ok(Ok(result)) => {
                 debug!(
                     input_tokens = result.total_usage.input_tokens,
@@ -349,8 +356,18 @@ fn start_stream_text_bridge(
                     iterations = result.iterations,
                     "Streaming kernel task completed"
                 );
+                None
             }
+        };
+        // Send error notification to the user through the channel before
+        // awaiting bridge_handle (which drops the original tx). The rx end
+        // stays open as long as at least one sender exists, so error_tx can
+        // still deliver here even if the bridge task already finished.
+        if let Some(msg) = error_msg {
+            let _ = error_tx.send(msg).await;
         }
+        // Drop error_tx so rx will close once bridge_handle also finishes.
+        drop(error_tx);
         if let Err(e) = bridge_handle.await {
             error!("Streaming bridge task panicked: {e}");
         }
@@ -527,8 +544,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         // Look for manifest at ~/.librefang/agents/{name}/agent.toml
         let manifest_path = self
             .kernel
-            .config_ref()
-            .home_dir
+            .home_dir()
             .join("agents")
             .join(manifest_name)
             .join("agent.toml");
@@ -1203,7 +1219,8 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         channel_type: &str,
         account_id: Option<&str>,
     ) -> Option<librefang_types::config::ChannelOverrides> {
-        let channels = &self.kernel.config_ref().channels;
+        let cfg = self.kernel.config_ref();
+        let channels = &cfg.channels;
 
         /// Look up channel overrides, preferring the entry whose `account_id`
         /// matches the message's account_id. Falls back to the first entry
@@ -1509,19 +1526,27 @@ fn read_token(env_var: &str, adapter_name: &str) -> Option<String> {
 ///
 /// Returns `Some(BridgeManager)` if any channels were configured and started,
 /// or `None` if no channels are configured.
-pub async fn start_channel_bridge(kernel: Arc<LibreFangKernel>) -> Option<BridgeManager> {
+/// Start channels and return `(BridgeManager, webhook_router)`.
+///
+/// The webhook router contains routes for all webhook-based channels
+/// (Feishu, Teams, DingTalk, etc.) and should be mounted under `/channels`
+/// on the main API server.
+pub async fn start_channel_bridge(
+    kernel: Arc<LibreFangKernel>,
+) -> (Option<BridgeManager>, axum::Router) {
     let channels = kernel.config_ref().channels.clone();
-    let (bridge, _names) = start_channel_bridge_with_config(kernel, &channels).await;
-    bridge
+    let (bridge, _names, webhook_router) =
+        start_channel_bridge_with_config(kernel, &channels).await;
+    (bridge, webhook_router)
 }
 
 /// Start channels from an explicit `ChannelsConfig` (used by hot-reload).
 ///
-/// Returns `(Option<BridgeManager>, Vec<started_channel_names>)`.
+/// Returns `(Option<BridgeManager>, Vec<started_channel_names>, webhook_router)`.
 pub async fn start_channel_bridge_with_config(
     kernel: Arc<LibreFangKernel>,
     config: &librefang_types::config::ChannelsConfig,
-) -> (Option<BridgeManager>, Vec<String>) {
+) -> (Option<BridgeManager>, Vec<String>, axum::Router) {
     // Check which channels have config — only consider enabled features
     #[allow(unused_mut)]
     let mut has_any = false;
@@ -1594,7 +1619,7 @@ pub async fn start_channel_bridge_with_config(
     }
 
     if !has_any {
-        return (None, Vec::new());
+        return (None, Vec::new(), axum::Router::new());
     }
 
     let handle = KernelBridgeAdapter {
@@ -2567,7 +2592,8 @@ pub async fn start_channel_bridge_with_config(
     }
 
     // ── Sidecar channel adapters ───────────────────────────────
-    for sidecar_config in &kernel.config_ref().sidecar_channels {
+    let sidecar_cfg = kernel.config_ref();
+    for sidecar_config in &sidecar_cfg.sidecar_channels {
         info!(
             name = %sidecar_config.name,
             command = %sidecar_config.command,
@@ -2578,7 +2604,7 @@ pub async fn start_channel_bridge_with_config(
     }
 
     if adapters.is_empty() {
-        return (None, Vec::new());
+        return (None, Vec::new(), axum::Router::new());
     }
 
     // Resolve per-channel default agents AND set the first one as system-wide fallback
@@ -2661,10 +2687,12 @@ pub async fn start_channel_bridge_with_config(
         }
     }
 
+    let webhook_router = manager.take_webhook_router();
+
     if started_names.is_empty() {
-        (None, Vec::new())
+        (None, Vec::new(), webhook_router)
     } else {
-        (Some(manager), started_names)
+        (Some(manager), started_names, webhook_router)
     }
 }
 
@@ -2721,11 +2749,14 @@ pub async fn reload_channels_from_disk(
     *state.channels_config.write().await = fresh_config.channels.clone();
 
     // Start new bridge with fresh channel config
-    let (new_bridge, started) =
+    let (new_bridge, started, webhook_router) =
         start_channel_bridge_with_config(state.kernel.clone(), &fresh_config.channels).await;
 
     // Store the new bridge
     *state.bridge_manager.lock().await = new_bridge;
+
+    // Swap the webhook router so new routes take effect on the shared server
+    *state.webhook_router.write().await = Arc::new(webhook_router);
 
     info!(
         started = started.len(),

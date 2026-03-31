@@ -1,0 +1,272 @@
+# Core Configuration Reference
+
+Core configuration sections for LibreFang: top-level fields, default model, memory, networking, web search, media processing, and link understanding.
+
+---
+
+### Top-Level Fields
+
+These fields sit at the root of `config.toml` (not inside any `[section]`).
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `home_dir` | path | `~/.librefang` | LibreFang home directory. Stores config, agents, skills. |
+| `data_dir` | path | `~/.librefang/data` | Directory for SQLite databases and persistent data. |
+| `log_level` | string | `"info"` | Log verbosity. One of: `trace`, `debug`, `info`, `warn`, `error`. |
+| `api_listen` | string | `"127.0.0.1:4545"` | Bind address for the HTTP/WebSocket/SSE API server. Alias: `listen_addr`. |
+| `network_enabled` | bool | `false` | Enable the OFP peer-to-peer network layer. |
+| `api_key` | string | `""` (empty) | API authentication key. When set, all endpoints except `/api/health` require `Authorization: Bearer <key>`. Empty means unauthenticated (local development only). |
+| `cors_origin` | list of strings | `[]` | CORS allowed origins added to the allow list (in addition to localhost). E.g., `["https://dash.example.com"]`. |
+| `mode` | string | `"default"` | Kernel operating mode. See below. |
+| `language` | string | `"en"` | Language/locale code for CLI output and system messages. |
+| `usage_footer` | string | `"full"` | Controls usage info appended to responses. See below. |
+| `prompt_caching` | bool | `true` | Enable LLM provider prompt caching. Adds cache hints to system prompts (Anthropic: `cache_control`, OpenAI: automatic prefix caching). |
+| `stable_prefix_mode` | bool | `false` | When enabled, avoids volatile system-prompt additions (recalled memory, canonical context) that change every turn, improving provider-side prompt cache hit rates. |
+| `max_cron_jobs` | usize | `500` | Global maximum number of cron jobs across all agents. |
+| `workspaces_dir` | path or null | `null` | Root directory for agent workspaces. Defaults to `~/.librefang/workspaces`. Contains agent working directories and the `hands/` subdirectory for user custom hands. |
+| `include` | list of strings | `[]` | Config file includes (relative paths). See [Config Include Mechanism](#config-include-mechanism). |
+| `provider_urls` | map of string→string | `{}` | Provider base URL overrides. Maps provider ID to custom base URL (e.g., `ollama = "http://192.168.1.100:11434/v1"`). Useful for self-hosted or proxied endpoints. |
+| `provider_api_keys` | map of string→string | `{}` | Provider API key env var overrides. Maps provider ID to the name of an environment variable holding the key (e.g., `nvidia = "NVIDIA_API_KEY"`). When not set for a provider, the convention `{PROVIDER_UPPER}_API_KEY` is used. |
+| `provider_regions` | map of string→string | `{}` | Provider region selection. Maps provider ID to a region name defined in the provider's registry TOML (e.g., `qwen = "intl"`). Overrides the provider's base URL and optionally its API key env var. Applied before `provider_urls` (lower priority). |
+
+**`mode` values:**
+
+| Value | Behavior |
+|-------|----------|
+| `stable` | Conservative: no auto-updates, pinned models, frozen skill registry. Uses `FallbackDriver`. |
+| `default` | Balanced: standard operation. |
+| `dev` | Developer: experimental features enabled. |
+
+**`usage_footer` values:**
+
+| Value | Behavior |
+|-------|----------|
+| `off` | No usage information shown. |
+| `tokens` | Show token counts only. |
+| `cost` | Show estimated cost only. |
+| `full` | Show both token counts and estimated cost (default). |
+
+---
+
+### `[default_model]`
+
+Configures the primary LLM provider used when agents do not specify their own model.
+
+```toml
+[default_model]
+provider = "anthropic"
+model = "claude-sonnet-4-20250514"
+api_key_env = "ANTHROPIC_API_KEY"
+# base_url = "https://api.anthropic.com"
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `provider` | string | `"anthropic"` | Provider name. Supported: `anthropic`, `gemini`, `openai`, `groq`, `openrouter`, `deepseek`, `together`, `mistral`, `fireworks`, `ollama`, `vllm`, `lmstudio`, `perplexity`, `cohere`, `ai21`, `cerebras`, `sambanova`, `huggingface`, `xai`, `replicate`. |
+| `model` | string | `"claude-sonnet-4-20250514"` | Model identifier. Aliases like `sonnet`, `haiku`, `gpt-4o`, `gemini-flash` are resolved by the model catalog. |
+| `api_key_env` | string | `"ANTHROPIC_API_KEY"` | Name of the environment variable holding the API key. The actual key is read from this env var at runtime, never stored in config. |
+| `base_url` | string or null | `null` | Override the API base URL. Useful for proxies or self-hosted endpoints. When `null`, the provider's default URL from the model catalog is used. |
+
+---
+
+### `[memory]`
+
+Configures the SQLite-backed memory substrate, including vector embeddings and memory decay.
+
+```toml
+[memory]
+# sqlite_path = "/custom/path/librefang.db"
+embedding_model = "all-MiniLM-L6-v2"
+consolidation_threshold = 10000
+decay_rate = 0.1
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `sqlite_path` | path or null | `null` | Explicit path to the SQLite database file. When `null`, defaults to `{data_dir}/librefang.db`. |
+| `embedding_model` | string | `"all-MiniLM-L6-v2"` | Model name used for generating vector embeddings for semantic memory search. |
+| `embedding_provider` | string or null | `null` | Embedding provider (e.g., `"openai"`, `"ollama"`). Auto-detected if `null`. |
+| `embedding_api_key_env` | string or null | `null` | Environment variable name holding the API key for the embedding provider. |
+| `consolidation_threshold` | u64 | `10000` | Number of stored memories before automatic consolidation is triggered to merge and prune old entries. |
+| `consolidation_interval_hours` | u64 | `24` | How often memory consolidation runs (hours). `0` = disabled. |
+| `decay_rate` | f32 | `0.1` | Memory confidence decay rate. `0.0` = no decay (memories never fade), `1.0` = aggressive decay. Values between 0.0 and 1.0. |
+
+---
+
+### `[network]`
+
+Configures the OFP (LibreFang Protocol) peer-to-peer networking layer with HMAC-SHA256 mutual authentication.
+
+```toml
+[network]
+listen_addresses = ["/ip4/0.0.0.0/tcp/0"]
+bootstrap_peers = []
+mdns_enabled = true
+max_peers = 50
+shared_secret = "my-cluster-secret"
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `listen_addresses` | list of strings | `["/ip4/0.0.0.0/tcp/0"]` | libp2p multiaddresses to listen on. Port `0` means auto-assign. |
+| `bootstrap_peers` | list of strings | `[]` | Multiaddresses of bootstrap peers for DHT discovery. |
+| `mdns_enabled` | bool | `true` | Enable mDNS for automatic local network peer discovery. |
+| `max_peers` | u32 | `50` | Maximum number of simultaneously connected peers. |
+| `shared_secret` | string | `""` (empty) | Pre-shared secret for OFP HMAC-SHA256 mutual authentication. **Required** when `network_enabled = true`. Both sides must use the same secret. Redacted in logs. |
+
+---
+
+### `[web]`
+
+Configures web search and web fetch capabilities used by agent tools.
+
+```toml
+[web]
+search_provider = "auto"
+cache_ttl_minutes = 15
+timeout_secs = 15
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `search_provider` | string | `"auto"` | Which search engine to use. See values below. |
+| `cache_ttl_minutes` | u64 | `15` | Cache duration for search/fetch results in minutes. `0` = caching disabled. |
+| `timeout_secs` | u64 | `15` | HTTP timeout in seconds for all web search requests. Recommended: 15 for most providers, 30+ for Jina. |
+
+**`search_provider` values:**
+
+| Value | Description |
+|-------|-------------|
+| `auto` | Cascading fallback: tries Tavily, then Brave, then Jina, then Perplexity, then DuckDuckGo, based on which API keys are available. |
+| `brave` | Brave Search API. Requires `BRAVE_API_KEY`. |
+| `jina` | Jina AI search and grounding. Requires `JINA_API_KEY`. |
+| `tavily` | Tavily AI-native search. Requires `TAVILY_API_KEY`. |
+| `perplexity` | Perplexity AI search. Requires `PERPLEXITY_API_KEY`. |
+| `duckduckgo` | DuckDuckGo HTML scraping. No API key needed. |
+
+#### `[web.brave]`
+
+```toml
+[web.brave]
+api_key_env = "BRAVE_API_KEY"
+max_results = 5
+country = ""
+search_lang = ""
+freshness = ""
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `api_key_env` | string | `"BRAVE_API_KEY"` | Environment variable name holding the Brave Search API key. |
+| `max_results` | usize | `5` | Maximum number of search results to return. |
+| `country` | string | `""` | Country code for localized results (e.g., `"US"`, `"GB"`). Empty = no filter. |
+| `search_lang` | string | `""` | Language code (e.g., `"en"`, `"fr"`). Empty = no filter. |
+| `freshness` | string | `""` | Freshness filter. `"pd"` = past day, `"pw"` = past week, `"pm"` = past month. Empty = no filter. |
+
+#### `[web.tavily]`
+
+```toml
+[web.tavily]
+api_key_env = "TAVILY_API_KEY"
+search_depth = "basic"
+max_results = 5
+include_answer = true
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `api_key_env` | string | `"TAVILY_API_KEY"` | Environment variable name holding the Tavily API key. |
+| `search_depth` | string | `"basic"` | Search depth: `"basic"` for fast results, `"advanced"` for deeper analysis. |
+| `max_results` | usize | `5` | Maximum number of search results to return. |
+| `include_answer` | bool | `true` | Whether to include Tavily's AI-generated answer summary in results. |
+
+#### `[web.jina]`
+
+```toml
+[web.jina]
+api_key_env = "JINA_API_KEY"
+max_results = 5
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `api_key_env` | string | `"JINA_API_KEY"` | Environment variable name holding the Jina AI API key. |
+| `max_results` | usize | `5` | Maximum number of search results to return. |
+
+#### `[web.perplexity]`
+
+```toml
+[web.perplexity]
+api_key_env = "PERPLEXITY_API_KEY"
+model = "sonar"
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `api_key_env` | string | `"PERPLEXITY_API_KEY"` | Environment variable name holding the Perplexity API key. |
+| `model` | string | `"sonar"` | Perplexity model to use for search queries. |
+
+#### `[web.fetch]`
+
+```toml
+[web.fetch]
+max_chars = 50000
+max_response_bytes = 10485760
+timeout_secs = 30
+readability = true
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `max_chars` | usize | `50000` | Maximum characters returned in fetched content. Content exceeding this is truncated. |
+| `max_response_bytes` | usize | `10485760` (10 MB) | Maximum HTTP response body size in bytes. |
+| `timeout_secs` | u64 | `30` | HTTP request timeout in seconds. |
+| `readability` | bool | `true` | Enable HTML-to-Markdown readability extraction. When true, fetched HTML is converted to clean Markdown. |
+
+---
+
+### `[media]`
+
+Configures media understanding (image description, audio transcription, video description) for messages that include attachments.
+
+```toml
+[media]
+image_description = true
+audio_transcription = true
+video_description = false
+max_concurrency = 2
+# image_provider = "openai"   # auto-detect if omitted
+# audio_provider = "openai"   # auto-detect if omitted
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `image_description` | bool | `true` | Enable automatic image description for incoming image attachments. |
+| `audio_transcription` | bool | `true` | Enable automatic audio transcription for incoming audio attachments. |
+| `video_description` | bool | `false` | Enable video description. Disabled by default (expensive and slow). |
+| `max_concurrency` | usize | `2` | Maximum number of concurrent media processing tasks. |
+| `image_provider` | string or null | `null` | Preferred provider for image description. Auto-detected from available providers if `null`. |
+| `audio_provider` | string or null | `null` | Preferred provider for audio transcription. Auto-detected from available providers if `null`. |
+
+---
+
+### `[links]`
+
+Configures automatic link understanding — fetching and summarizing URLs found in incoming messages.
+
+```toml
+[links]
+enabled = false
+max_links = 3
+max_content_bytes = 102400
+timeout_secs = 10
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `false` | Enable automatic link understanding. When `true`, URLs in messages are fetched and their content is summarized before the agent processes the message. |
+| `max_links` | usize | `3` | Maximum number of links to process per message. Additional links are ignored. |
+| `max_content_bytes` | usize | `102400` (100 KB) | Maximum content size to fetch per link in bytes. Content exceeding this is truncated. |
+| `timeout_secs` | u64 | `10` | Per-link fetch timeout in seconds. |
+
+---

@@ -6,7 +6,8 @@
     "workflows": "Workflows", "scheduler": "Scheduler", "goals": "Goals", "agents": "Agents",
     "providers": "Providers", "channels": "Channels", "skills": "Skills", "hands": "Hands", "plugins": "Plugins", "models": "Models",
     "analytics": "Analytics", "memory": "Memory", "comms": "Comms", "runtime": "Runtime", "logs": "Logs", "settings": "Settings",
-    "network": "Network", "a2a": "A2A", "telemetry": "Telemetry"
+    "network": "Network", "a2a": "A2A", "telemetry": "Telemetry",
+    "user_center": "User Center", "logout": "Logout"
   },
   "common": {
     "refresh": "Refresh", "status": "Status", "daemon_online": "Daemon Online", "infrastructure": "Infrastructure",
@@ -33,7 +34,8 @@
     "version": "Version", "telemetry": "Service Telemetry", "pro_tip": "Pro Tip", "pro_tip_text": "Use the Canvas to orchestrate agents across multiple channels.",
     "no_active_agents": "No active agents configured", "no_telemetry": "No telemetry data available",
     "active_sessions": "Active Sessions", "agent_count": "Agent Count",
-    "health_checks": "Health Checks", "pro_tip_shortcut": "Use ⌘K to quick search · Press ← to collapse sidebar"
+    "health_checks": "Health Checks", "pro_tip_shortcut": "Use ⌘K to quick search · Press ← to collapse sidebar",
+    "setup_title": "Setup Required", "setup_description": "No configuration file detected. Click to auto-detect your LLM provider and generate a default config.", "setup_button": "Initialize", "setup_running": "Initializing..."
   },
   "agents": {
     "title": "Agents", "subtitle": "Active autonomous units managed by the LibreFang kernel.",
@@ -66,6 +68,8 @@
     "default_set": "Default provider updated",
     "is_default": "Default",
     "add": "Add Provider",
+    "delete_confirm_title": "Remove Provider Key",
+    "delete_confirm_message": "Are you sure you want to remove the API key for this provider? The provider will become unconfigured.",
     "help": "Manage LLM provider connections. Test connectivity, configure API keys, and monitor provider health status."
   },
   "channels": {

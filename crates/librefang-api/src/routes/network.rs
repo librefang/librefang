@@ -156,8 +156,9 @@ pub async fn get_peer(
     )
 )]
 pub async fn network_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let enabled = state.kernel.config_ref().network_enabled
-        && !state.kernel.config_ref().network.shared_secret.is_empty();
+    let cfg = state.kernel.config_ref();
+    let enabled = cfg.network_enabled && !cfg.network.shared_secret.is_empty();
+    drop(cfg);
 
     let (node_id, listen_address, connected_peers, total_peers) =
         if let Some(peer_node) = state.kernel.peer_node_ref() {
@@ -191,20 +192,21 @@ pub async fn network_status(State(state): State<Arc<AppState>>) -> impl IntoResp
 )]
 pub async fn a2a_agent_card(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let agents = state.kernel.agent_registry().list();
-    let base_url = format!("http://{}", state.kernel.config_ref().api_listen);
+    let cfg = state.kernel.config_ref();
+    let base_url = format!("http://{}", cfg.api_listen);
 
     // Use service-level A2A config for the well-known card when available.
-    let (service_name, service_description) =
-        if let Some(ref a2a_cfg) = state.kernel.config_ref().a2a {
-            let name = if a2a_cfg.name.is_empty() {
-                "LibreFang Agent OS".to_string()
-            } else {
-                a2a_cfg.name.clone()
-            };
-            (name, a2a_cfg.description.clone())
+    let (service_name, service_description) = if let Some(ref a2a_cfg) = cfg.a2a {
+        let name = if a2a_cfg.name.is_empty() {
+            "LibreFang Agent OS".to_string()
         } else {
-            ("LibreFang Agent OS".to_string(), String::new())
+            a2a_cfg.name.clone()
         };
+        (name, a2a_cfg.description.clone())
+    } else {
+        ("LibreFang Agent OS".to_string(), String::new())
+    };
+    drop(cfg);
 
     // Aggregate skills from ALL agents.
     let skills: Vec<librefang_runtime::a2a::AgentSkill> = agents
@@ -769,6 +771,18 @@ pub async fn mcp_http(
         // Execute the tool via the kernel's tool runner
         let kernel_handle: Arc<dyn librefang_runtime::kernel_handle::KernelHandle> =
             state.kernel.clone() as Arc<dyn librefang_runtime::kernel_handle::KernelHandle>;
+        // Snapshot config before async call — Guard is !Send and cannot cross .await
+        let cfg = state.kernel.config_snapshot();
+        let tts_opt = if cfg.tts.enabled {
+            Some(state.kernel.tts())
+        } else {
+            None
+        };
+        let docker_opt = if cfg.docker.enabled {
+            Some(&cfg.docker)
+        } else {
+            None
+        };
         let result = librefang_runtime::tool_runner::execute_tool(
             "mcp-http",
             tool_name,
@@ -785,16 +799,8 @@ pub async fn mcp_http(
             Some(state.kernel.media()),
             None, // media_drivers
             None, // exec_policy
-            if state.kernel.config_ref().tts.enabled {
-                Some(state.kernel.tts())
-            } else {
-                None
-            },
-            if state.kernel.config_ref().docker.enabled {
-                Some(&state.kernel.config_ref().docker)
-            } else {
-                None
-            },
+            tts_opt,
+            docker_opt,
             Some(state.kernel.processes()),
             None, // sender_id (MCP HTTP has no sender context)
             None, // channel

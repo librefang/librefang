@@ -1,0 +1,256 @@
+# Provider & Model API
+
+Endpoints for browsing the model catalog and managing LLM provider configurations.
+
+## Model Catalog Endpoints
+
+LibreFang maintains a built-in catalog of 130+ models across 49 providers. These endpoints allow you to browse available models, check provider authentication status, and resolve model aliases.
+
+### GET /api/models
+
+List the full model catalog. Returns all known models with their provider, tier, context window, and pricing information.
+
+**Response** `200 OK`:
+
+```json
+{
+  "models": [
+    {
+      "id": "claude-sonnet-4-20250514",
+      "provider": "anthropic",
+      "display_name": "Claude Sonnet 4",
+      "tier": "frontier",
+      "context_window": 200000,
+      "input_cost_per_1m": 3.0,
+      "output_cost_per_1m": 15.0,
+      "supports_tools": true,
+      "supports_vision": true,
+      "supports_streaming": true
+    },
+    {
+      "id": "gemini-2.5-flash",
+      "provider": "gemini",
+      "display_name": "Gemini 2.5 Flash",
+      "tier": "smart",
+      "context_window": 1048576,
+      "input_cost_per_1m": 0.15,
+      "output_cost_per_1m": 0.6,
+      "supports_tools": true,
+      "supports_vision": true,
+      "supports_streaming": true
+    }
+  ],
+  "total": 130
+}
+```
+
+### GET /api/models/aliases
+
+List all model aliases. Aliases provide short names that resolve to full model IDs (e.g., `sonnet` resolves to `claude-sonnet-4-20250514`).
+
+**Response** `200 OK`:
+
+```json
+{
+  "aliases": {
+    "sonnet": "claude-sonnet-4-20250514",
+    "opus": "claude-opus-4-20250514",
+    "haiku": "claude-3-5-haiku-20241022",
+    "flash": "gemini-2.5-flash",
+    "gpt4": "gpt-4o",
+    "llama": "llama-3.3-70b-versatile",
+    "deepseek": "deepseek-chat",
+    "grok": "grok-2",
+    "jamba": "jamba-1.5-large"
+  },
+  "total": 23
+}
+```
+
+### POST /api/models/aliases
+
+Create a new model alias.
+
+**Request Body**:
+
+```json
+{
+  "alias": "mymodel",
+  "model_id": "llama-3.3-70b-versatile"
+}
+```
+
+### DELETE /api/models/aliases/&lbrace;alias&rbrace;
+
+Delete a model alias.
+
+### POST /api/models/custom
+
+Register a custom model definition.
+
+**Request Body**:
+
+```json
+{
+  "id": "my-local-model",
+  "provider": "ollama",
+  "display_name": "My Local LLM",
+  "context_window": 32768
+}
+```
+
+### DELETE /api/models/custom/&lbrace;id&rbrace;
+
+Remove a custom model definition. The `id` parameter supports slashes (e.g., `ollama/my-model`).
+
+### GET /api/models/&lbrace;id&rbrace;
+
+Get detailed information about a specific model. The `id` parameter supports slashes.
+
+**Response** `200 OK`:
+
+```json
+{
+  "id": "llama-3.3-70b-versatile",
+  "provider": "groq",
+  "display_name": "Llama 3.3 70B",
+  "tier": "fast",
+  "context_window": 131072,
+  "input_cost_per_1m": 0.59,
+  "output_cost_per_1m": 0.79,
+  "supports_tools": true,
+  "supports_vision": false,
+  "supports_streaming": true
+}
+```
+
+### POST /api/catalog/update
+
+Trigger an update of the model catalog from the remote registry.
+
+### GET /api/catalog/status
+
+Get the current catalog version, last update time, and available updates.
+
+---
+
+## Provider Configuration Endpoints
+
+Manage LLM provider API keys at runtime without editing config files or restarting the daemon.
+
+### GET /api/providers
+
+List all known LLM providers and their authentication status. Auth status is detected by checking environment variable presence (never reads secret values).
+
+**Response** `200 OK`:
+
+```json
+{
+  "providers": [
+    {
+      "name": "anthropic",
+      "display_name": "Anthropic",
+      "auth_status": "configured",
+      "env_var": "ANTHROPIC_API_KEY",
+      "base_url": "https://api.anthropic.com",
+      "model_count": 3
+    },
+    {
+      "name": "groq",
+      "display_name": "Groq",
+      "auth_status": "configured",
+      "env_var": "GROQ_API_KEY",
+      "base_url": "https://api.groq.com/openai",
+      "model_count": 4
+    },
+    {
+      "name": "ollama",
+      "display_name": "Ollama",
+      "auth_status": "no_key_needed",
+      "base_url": "http://localhost:11434",
+      "model_count": 0
+    }
+  ],
+  "total": 28
+}
+```
+
+### GET /api/providers/ollama/detect
+
+Auto-detect a locally running Ollama instance and enumerate its available models.
+
+### POST /api/providers/github-copilot/oauth/start
+
+Initiate GitHub Copilot device OAuth flow. Returns a `device_code` and `user_code` for the user to enter at `github.com/login/device`.
+
+### GET /api/providers/github-copilot/oauth/poll/&lbrace;poll_id&rbrace;
+
+Poll the OAuth device flow status. Returns `pending`, `authorized`, or `expired`.
+
+### GET /api/providers/&lbrace;name&rbrace;
+
+Get configuration and status for a specific provider.
+
+### POST /api/providers/&lbrace;name&rbrace;/key
+
+Set an API key for a provider. The key is stored securely and takes effect immediately.
+
+**Request Body**:
+
+```json
+{
+  "api_key": "sk-..."
+}
+```
+
+**Response** `200 OK`:
+
+```json
+{
+  "status": "configured",
+  "provider": "anthropic"
+}
+```
+
+### DELETE /api/providers/&lbrace;name&rbrace;/key
+
+Remove the API key for a provider. Agents using this provider will fall back to the FallbackDriver or fail.
+
+**Response** `200 OK`:
+
+```json
+{
+  "status": "removed",
+  "provider": "anthropic"
+}
+```
+
+### POST /api/providers/&lbrace;name&rbrace;/test
+
+Test provider connectivity by making a minimal API call. Verifies that the configured API key is valid and the provider endpoint is reachable.
+
+**Response** `200 OK`:
+
+```json
+{
+  "status": "ok",
+  "provider": "anthropic",
+  "latency_ms": 245,
+  "model_tested": "claude-sonnet-4-20250514"
+}
+```
+
+### PUT /api/providers/&lbrace;name&rbrace;/url
+
+Override the base URL for a provider (useful for self-hosted or proxy endpoints).
+
+**Request Body**:
+
+```json
+{
+  "url": "https://my-openai-proxy.example.com/v1"
+}
+```
+
+---
+

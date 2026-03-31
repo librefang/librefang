@@ -201,10 +201,19 @@ pub struct DriverConfig {
     /// restricts what agents can do, making this safe.
     #[serde(default = "default_skip_permissions")]
     pub skip_permissions: bool,
+    /// Message timeout in seconds for CLI-based providers (e.g. Claude Code).
+    /// Inactivity-based: the process is killed after this many seconds of
+    /// silence on stdout, not wall-clock time.
+    #[serde(default = "default_message_timeout_secs")]
+    pub message_timeout_secs: u64,
 }
 
 fn default_skip_permissions() -> bool {
     true
+}
+
+fn default_message_timeout_secs() -> u64 {
+    300
 }
 
 /// SECURITY: Custom Debug impl redacts the API key.
@@ -228,6 +237,7 @@ impl std::fmt::Debug for DriverConfig {
             .field("azure_openai.deployment", &self.azure_openai.deployment)
             .field("azure_openai.api_version", &self.azure_openai.api_version)
             .field("skip_permissions", &self.skip_permissions)
+            .field("message_timeout_secs", &self.message_timeout_secs)
             .finish()
     }
 }

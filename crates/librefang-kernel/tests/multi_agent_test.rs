@@ -25,6 +25,7 @@ fn test_config(name: &str) -> KernelConfig {
             model: "llama-3.3-70b-versatile".to_string(),
             api_key_env: "GROQ_API_KEY".to_string(),
             base_url: None,
+            message_timeout_secs: 300,
         },
         ..KernelConfig::default()
     }

@@ -19,6 +19,7 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
         .route("/migrate/scan", axum::routing::post(migrate_scan))
         .route("/migrate", axum::routing::post(run_migrate))
         .route("/shutdown", axum::routing::post(shutdown))
+        .route("/init", axum::routing::post(quick_init))
 }
 use crate::types::*;
 use axum::extract::State;
@@ -117,6 +118,7 @@ pub async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         }
     };
 
+    let cfg = state.kernel.config_ref();
     Json(serde_json::json!({
         "status": "running",
         "version": env!("CARGO_PKG_VERSION"),
@@ -124,14 +126,87 @@ pub async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         "active_agent_count": active_agent_count,
         "session_count": session_count,
         "memory_used_mb": memory_used_mb,
-        "default_provider": state.kernel.default_model_override_ref().read().ok().and_then(|g| g.as_ref().map(|dm| dm.provider.clone())).unwrap_or_else(|| state.kernel.config_ref().default_model.provider.clone()),
-        "default_model": state.kernel.default_model_override_ref().read().ok().and_then(|g| g.as_ref().map(|dm| dm.model.clone())).unwrap_or_else(|| state.kernel.config_ref().default_model.model.clone()),
+        "default_provider": state.kernel.default_model_override_ref().read().ok().and_then(|g| g.as_ref().map(|dm| dm.provider.clone())).unwrap_or_else(|| cfg.default_model.provider.clone()),
+        "default_model": state.kernel.default_model_override_ref().read().ok().and_then(|g| g.as_ref().map(|dm| dm.model.clone())).unwrap_or_else(|| cfg.default_model.model.clone()),
         "uptime_seconds": uptime,
-        "api_listen": state.kernel.config_ref().api_listen,
+        "api_listen": cfg.api_listen,
         "home_dir": state.kernel.home_dir().display().to_string(),
-        "log_level": state.kernel.config_ref().log_level,
-        "network_enabled": state.kernel.config_ref().network_enabled,
+        "log_level": cfg.log_level,
+        "network_enabled": cfg.network_enabled,
+        "config_exists": state.kernel.home_dir().join("config.toml").exists(),
         "agents": agents,
+    }))
+}
+
+/// POST /api/init — Quick initialization (detect provider, write config, reload).
+///
+/// Skips if config.toml already exists. Returns the detected provider/model.
+#[utoipa::path(
+    post,
+    path = "/api/init",
+    tag = "system",
+    responses(
+        (status = 200, description = "Quick init result", body = serde_json::Value)
+    )
+)]
+pub async fn quick_init(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let home = state.kernel.home_dir();
+    let config_path = home.join("config.toml");
+
+    if config_path.exists() {
+        return Json(serde_json::json!({
+            "status": "already_initialized",
+            "message": "config.toml already exists"
+        }));
+    }
+
+    // Ensure directories exist
+    let _ = std::fs::create_dir_all(home);
+    let _ = std::fs::create_dir_all(home.join("data"));
+
+    // Detect best available provider
+    let (provider, api_key_env) = if let Some((p, _model, env_var)) =
+        librefang_runtime::drivers::detect_available_provider()
+    {
+        (p.to_string(), env_var.to_string())
+    } else {
+        ("groq".to_string(), "GROQ_API_KEY".to_string())
+    };
+
+    // Resolve default model from catalog
+    let model = librefang_runtime::model_catalog::ModelCatalog::default()
+        .default_model_for_provider(&provider)
+        .unwrap_or_else(|| "auto".to_string());
+
+    // Write minimal config.toml
+    let config_content = format!(
+        r#"# LibreFang configuration (auto-generated)
+# Run `librefang init --upgrade` for full annotated config.
+
+log_level = "info"
+api_listen = "0.0.0.0:4545"
+
+[default_model]
+provider = "{provider}"
+model = "{model}"
+api_key_env = "{api_key_env}"
+"#
+    );
+
+    if let Err(e) = std::fs::write(&config_path, &config_content) {
+        return Json(serde_json::json!({
+            "status": "error",
+            "message": format!("Failed to write config: {e}")
+        }));
+    }
+
+    // Reload config so kernel picks up new settings
+    let _ = state.kernel.reload_config().await;
+
+    Json(serde_json::json!({
+        "status": "initialized",
+        "provider": provider,
+        "model": model,
     }))
 }
 
@@ -247,7 +322,8 @@ pub async fn health_detail(State(state): State<Arc<AppState>>) -> impl IntoRespo
         .structured_get(shared_id, "__health_check__")
         .is_ok();
 
-    let config_warnings = state.kernel.config_ref().validate();
+    let hcfg = state.kernel.config_ref();
+    let config_warnings = hcfg.validate();
     let status = if db_ok { "ok" } else { "degraded" };
 
     Json(serde_json::json!({
@@ -260,10 +336,10 @@ pub async fn health_detail(State(state): State<Arc<AppState>>) -> impl IntoRespo
         "database": if db_ok { "connected" } else { "error" },
         "memory": {
             "embedding_available": state.kernel.embedding().is_some(),
-            "embedding_provider": state.kernel.config_ref().memory.embedding_provider,
-            "embedding_model": &state.kernel.config_ref().memory.embedding_model,
-            "proactive_memory_enabled": state.kernel.config_ref().proactive_memory.enabled,
-            "extraction_model": &state.kernel.config_ref().proactive_memory.extraction_model,
+            "embedding_provider": hcfg.memory.embedding_provider,
+            "embedding_model": &hcfg.memory.embedding_model,
+            "proactive_memory_enabled": hcfg.proactive_memory.enabled,
+            "extraction_model": &hcfg.proactive_memory.extraction_model,
         },
         "config_warnings": config_warnings,
         "event_bus": {
@@ -435,7 +511,7 @@ pub async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> impl Into
 )]
 pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     // Return a redacted view of the kernel config
-    let config = &state.kernel.config_ref();
+    let config = state.kernel.config_ref();
 
     // -- channels: show which platforms are configured (instance counts), no tokens --
     let channels = {
@@ -1049,7 +1125,10 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
     )
 )]
 pub async fn security_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let auth_mode = if state.kernel.config_ref().api_key.is_empty() {
+    let scfg = state.kernel.config_ref();
+    let api_key_empty = scfg.api_key.is_empty();
+    drop(scfg);
+    let auth_mode = if api_key_empty {
         "localhost_only"
     } else {
         "bearer_token"
@@ -1088,7 +1167,7 @@ pub async fn security_status(State(state): State<Arc<AppState>>) -> impl IntoRes
             },
             "auth": {
                 "mode": auth_mode,
-                "api_key_set": !state.kernel.config_ref().api_key.is_empty()
+                "api_key_set": !api_key_empty
             }
         },
         "monitoring": {
@@ -1295,7 +1374,7 @@ pub async fn config_reload(State(state): State<Arc<AppState>>) -> impl IntoRespo
         "config reload requested via API",
         "pending",
     );
-    match state.kernel.reload_config() {
+    match state.kernel.reload_config().await {
         Ok(plan) => {
             // If channel config changed, the kernel already cleared the adapter
             // registry — but we also need to stop the old BridgeManager and
@@ -1651,7 +1730,7 @@ pub async fn config_set(
     }
 
     // Trigger reload
-    let reload_status = match state.kernel.reload_config() {
+    let reload_status = match state.kernel.reload_config().await {
         Ok(plan) => {
             if plan.restart_required {
                 "applied_partial"

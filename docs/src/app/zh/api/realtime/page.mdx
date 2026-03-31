@@ -1,0 +1,309 @@
+# 实时 API
+
+WebSocket 协议、SSE 流式传输和 OpenAI 兼容 API 端点，用于实时通信。
+
+## WebSocket 协议
+
+### 连接
+
+```
+GET /api/agents/&lbrace;id&rbrace;/ws
+```
+
+升级为 WebSocket 连接，与 Agent 进行实时双向聊天。如果 Agent ID 无效则返回 `400`，如果 Agent 不存在则返回 `404`。
+
+### 消息格式
+
+所有消息均为 JSON 编码的字符串。
+
+### 客户端到服务器
+
+**发送消息：**
+
+```json
+{
+  "type": "message",
+  "content": "What is the weather like?"
+}
+```
+
+也接受纯文本（非 JSON），并将其视为消息处理。
+
+**聊天命令**（以 `/` 前缀发送的消息）：
+
+| 命令 | 说明 |
+|------|------|
+| `/new` | 开始新会话（清除历史） |
+| `/compact` | 触发 LLM 会话压缩 |
+| `/model <name>` | 切换 Agent 的模型 |
+| `/stop` | 取消当前 LLM 运行 |
+| `/usage` | 显示 Token 用量和费用 |
+| `/think` | 切换扩展思考模式 |
+| `/models` | 列出可用模型 |
+| `/providers` | 列出 LLM 提供商及认证状态 |
+
+**Ping：**
+
+```json
+{
+  "type": "ping"
+}
+```
+
+### 服务器到客户端
+
+**连接确认**（连接后立即发送）：
+
+```json
+{
+  "type": "connected",
+  "agent_id": "a1b2c3d4-..."
+}
+```
+
+**思考指示器**（Agent 开始处理时发送）：
+
+```json
+{
+  "type": "thinking"
+}
+```
+
+**文本增量**（LLM 生成输出时的流式 Token）：
+
+```json
+{
+  "type": "text_delta",
+  "content": "The weather"
+}
+```
+
+**工具调用开始**（Agent 调用工具时发送）：
+
+```json
+{
+  "type": "tool_start",
+  "tool": "web_fetch"
+}
+```
+
+**完整响应**（Agent 完成后发送，包含最终聚合响应）：
+
+```json
+{
+  "type": "response",
+  "content": "The weather today is sunny with a high of 72F.",
+  "input_tokens": 245,
+  "output_tokens": 32,
+  "iterations": 2,
+  "cost_usd": 0.0012
+}
+```
+
+**错误：**
+
+```json
+{
+  "type": "error",
+  "content": "Agent not found"
+}
+```
+
+**Agent 列表更新**（每 5 秒发送，包含当前 Agent 状态）：
+
+```json
+{
+  "type": "agents_updated",
+  "agents": [
+    {
+      "id": "a1b2c3d4-...",
+      "name": "hello-world",
+      "state": "Running",
+      "model_provider": "groq",
+      "model_name": "llama-3.3-70b-versatile"
+    }
+  ]
+}
+```
+
+**Pong**（对 Ping 的响应）：
+
+```json
+{
+  "type": "pong"
+}
+```
+
+### 连接生命周期
+
+1. 客户端连接到 `ws://host:port/api/agents/&lbrace;id&rbrace;/ws`。
+2. 服务器发送 `{"type": "connected"}`。
+3. 客户端发送 `{"type": "message", "content": "..."}`。
+4. 服务器发送 `{"type": "thinking"}`，然后发送零个或多个 `{"type": "text_delta"}` 事件，最后发送 `{"type": "response"}`。
+5. 服务器每 5 秒定期发送 `{"type": "agents_updated"}`。
+6. 客户端发送 Close 帧或断开连接以结束会话。
+
+---
+
+## SSE 流式传输
+
+### POST /api/agents/&lbrace;id&rbrace;/message/stream
+
+发送消息并以 Server-Sent Events 流的方式接收响应。支持逐 Token 的实时流式传输。
+
+**请求体**（JSON）：
+
+```json
+{
+  "message": "Explain quantum computing"
+}
+```
+
+**SSE 事件流：**
+
+```
+event: chunk
+data: {"content":"Quantum","done":false}
+
+event: chunk
+data: {"content":" computing","done":false}
+
+event: chunk
+data: {"content":" is a type","done":false}
+
+event: tool_use
+data: {"tool":"web_search"}
+
+event: tool_result
+data: {"tool":"web_search","input":{"query":"quantum computing basics"}}
+
+event: done
+data: {"done":true,"usage":{"input_tokens":150,"output_tokens":340}}
+```
+
+### SSE 事件类型
+
+| 事件名称 | 说明 |
+|----------|------|
+| `chunk` | 来自 LLM 的文本增量。`"done": false` 表示还有更多 Token。 |
+| `tool_use` | Agent 正在调用工具。包含工具名称。 |
+| `tool_result` | 工具调用已完成。包含工具名称和输入。 |
+| `done` | 最终事件。包含 `"done": true` 和 Token 使用统计。 |
+
+---
+
+## OpenAI 兼容 API
+
+LibreFang 提供 OpenAI 兼容 API，可与支持 OpenAI API 格式的工具（Cursor、Continue、Open WebUI 等）即插即用。
+
+### POST /v1/chat/completions
+
+使用 OpenAI 消息格式发送聊天补全请求。
+
+**请求体**：
+
+```json
+{
+  "model": "librefang:coder",
+  "messages": [
+    {"role": "system", "content": "You are a helpful assistant."},
+    {"role": "user", "content": "Hello!"}
+  ],
+  "stream": false,
+  "temperature": 0.7,
+  "max_tokens": 1024
+}
+```
+
+**模型解析**（`model` 字段映射到 LibreFang Agent）：
+
+| 格式 | 示例 | 行为 |
+|------|------|------|
+| `librefang:<name>` | `librefang:coder` | 按名称查找 Agent |
+| UUID | `a1b2c3d4-...` | 按 ID 查找 Agent |
+| 纯字符串 | `coder` | 尝试作为 Agent 名称 |
+| 其他 | `gpt-4o` | 回退到第一个已注册的 Agent |
+
+**图像支持** --- 消息可以包含图像内容部分：
+
+```json
+{
+  "model": "librefang:analyst",
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {"type": "text", "text": "Describe this image"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBOR..."}}
+      ]
+    }
+  ]
+}
+```
+
+**响应（非流式）** `200 OK`：
+
+```json
+{
+  "id": "chatcmpl-a1b2c3d4-...",
+  "object": "chat.completion",
+  "created": 1708617600,
+  "model": "coder",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "Hello! How can I help you today?"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 25,
+    "completion_tokens": 12,
+    "total_tokens": 37
+  }
+}
+```
+
+**流式传输** --- 设置 `"stream": true` 启用 SSE：
+
+```
+data: {"id":"chatcmpl-...","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"Hello"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-...","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"!"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-...","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":25,"completion_tokens":12,"total_tokens":37}}
+
+data: [DONE]
+```
+
+### GET /v1/models
+
+以 OpenAI 格式列出可用模型（Agent）。
+
+**响应** `200 OK`：
+
+```json
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "librefang:coder",
+      "object": "model",
+      "created": 1708617600,
+      "owned_by": "librefang"
+    },
+    {
+      "id": "librefang:researcher",
+      "object": "model",
+      "created": 1708617600,
+      "owned_by": "librefang"
+    }
+  ]
+}
+```
+
+---
+

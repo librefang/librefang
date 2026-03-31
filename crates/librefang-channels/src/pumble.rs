@@ -14,7 +14,7 @@ use futures::Stream;
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::mpsc;
 use tracing::{info, warn};
 use zeroize::Zeroizing;
 
@@ -32,15 +32,10 @@ const MAX_MESSAGE_LEN: usize = 4000;
 pub struct PumbleAdapter {
     /// SECURITY: Bot token is zeroized on drop.
     bot_token: Zeroizing<String>,
-    /// Port for the inbound webhook HTTP listener.
-    webhook_port: u16,
     /// HTTP client for outbound API calls.
     client: reqwest::Client,
     /// Optional account identifier for multi-bot routing.
     account_id: Option<String>,
-    /// Shutdown signal.
-    shutdown_tx: Arc<watch::Sender<bool>>,
-    shutdown_rx: watch::Receiver<bool>,
 }
 
 impl PumbleAdapter {
@@ -48,16 +43,12 @@ impl PumbleAdapter {
     ///
     /// # Arguments
     /// * `bot_token` - Pumble Bot access token.
-    /// * `webhook_port` - Local port to bind the webhook listener on.
-    pub fn new(bot_token: String, webhook_port: u16) -> Self {
-        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    /// * `webhook_port` - Local port (accepted from config, unused with shared server).
+    pub fn new(bot_token: String, _webhook_port: u16) -> Self {
         Self {
             bot_token: Zeroizing::new(bot_token),
-            webhook_port,
             client: crate::http_client::new_client(),
             account_id: None,
-            shutdown_tx: Arc::new(shutdown_tx),
-            shutdown_rx,
         }
     }
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
@@ -224,89 +215,80 @@ impl ChannelAdapter for PumbleAdapter {
         ChannelType::Custom("pumble".to_string())
     }
 
+    async fn create_webhook_routes(
+        &self,
+    ) -> Option<(
+        axum::Router,
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+    )> {
+        // Validate credentials
+        let bot_id = match self.validate().await {
+            Ok(id) => id,
+            Err(e) => {
+                warn!("Pumble adapter validation failed: {e}");
+                return None;
+            }
+        };
+        info!("Pumble adapter authenticated (bot_id: {bot_id})");
+
+        let (tx, rx) = mpsc::channel::<ChannelMessage>(256);
+        let bot_id_shared = Arc::new(bot_id);
+        let tx_shared = Arc::new(tx);
+        let account_id = Arc::new(self.account_id.clone());
+
+        let app = axum::Router::new().route(
+            "/webhook",
+            axum::routing::post({
+                let bot_id = Arc::clone(&bot_id_shared);
+                let tx = Arc::clone(&tx_shared);
+                move |body: axum::extract::Json<serde_json::Value>| {
+                    let bot_id = Arc::clone(&bot_id);
+                    let tx = Arc::clone(&tx);
+                    async move {
+                        // Handle URL verification challenge
+                        if body["type"].as_str() == Some("url_verification") {
+                            let challenge = body["challenge"].as_str().unwrap_or("").to_string();
+                            return (
+                                axum::http::StatusCode::OK,
+                                axum::Json(serde_json::json!({ "challenge": challenge })),
+                            );
+                        }
+
+                        if let Some(mut msg) = parse_pumble_event(&body, &bot_id) {
+                            // Inject account_id for multi-bot routing
+                            if let Some(ref aid) = *account_id {
+                                msg.metadata
+                                    .insert("account_id".to_string(), serde_json::json!(aid));
+                            }
+                            let _ = tx.send(msg).await;
+                        }
+
+                        (
+                            axum::http::StatusCode::OK,
+                            axum::Json(serde_json::json!({})),
+                        )
+                    }
+                }
+            }),
+        );
+
+        info!("Pumble adapter registered on shared server at /channels/pumble/webhook");
+
+        Some((
+            app,
+            Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)),
+        ))
+    }
+
     async fn start(
         &self,
     ) -> Result<
         Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
         Box<dyn std::error::Error + Send + Sync>,
     > {
-        // Validate credentials
-        let bot_id = self.validate().await?;
-        info!("Pumble adapter authenticated (bot_id: {bot_id})");
-
-        let (tx, rx) = mpsc::channel::<ChannelMessage>(256);
-        let port = self.webhook_port;
-        let own_bot_id = bot_id;
-        let mut shutdown_rx = self.shutdown_rx.clone();
-        let account_id = Arc::new(self.account_id.clone());
-
-        tokio::spawn(async move {
-            // Build the axum webhook router
-            let bot_id_shared = Arc::new(own_bot_id);
-            let tx_shared = Arc::new(tx);
-
-            let app = axum::Router::new().route(
-                "/pumble/events",
-                axum::routing::post({
-                    let bot_id = Arc::clone(&bot_id_shared);
-                    let tx = Arc::clone(&tx_shared);
-                    move |body: axum::extract::Json<serde_json::Value>| {
-                        let bot_id = Arc::clone(&bot_id);
-                        let tx = Arc::clone(&tx);
-                        async move {
-                            // Handle URL verification challenge
-                            if body["type"].as_str() == Some("url_verification") {
-                                let challenge =
-                                    body["challenge"].as_str().unwrap_or("").to_string();
-                                return (
-                                    axum::http::StatusCode::OK,
-                                    axum::Json(serde_json::json!({ "challenge": challenge })),
-                                );
-                            }
-
-                            if let Some(mut msg) = parse_pumble_event(&body, &bot_id) {
-                                // Inject account_id for multi-bot routing
-                                if let Some(ref aid) = *account_id {
-                                    msg.metadata
-                                        .insert("account_id".to_string(), serde_json::json!(aid));
-                                }
-                                let _ = tx.send(msg).await;
-                            }
-
-                            (
-                                axum::http::StatusCode::OK,
-                                axum::Json(serde_json::json!({})),
-                            )
-                        }
-                    }
-                }),
-            );
-
-            let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
-            info!("Pumble webhook server listening on {addr}");
-
-            let listener = match tokio::net::TcpListener::bind(addr).await {
-                Ok(l) => l,
-                Err(e) => {
-                    warn!("Pumble webhook bind failed: {e}");
-                    return;
-                }
-            };
-
-            let server = axum::serve(listener, app);
-
-            tokio::select! {
-                result = server => {
-                    if let Err(e) = result {
-                        warn!("Pumble webhook server error: {e}");
-                    }
-                }
-                _ = shutdown_rx.changed() => {
-                    info!("Pumble adapter shutting down");
-                }
-            }
-        });
-
+        // When using the shared webhook server, create_webhook_routes() is called
+        // instead. This start() is only reached as a fallback.
+        let (_tx, rx) = mpsc::channel::<ChannelMessage>(1);
         Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
     }
 
@@ -375,7 +357,6 @@ impl ChannelAdapter for PumbleAdapter {
     }
 
     async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let _ = self.shutdown_tx.send(true);
         Ok(())
     }
 }
@@ -401,9 +382,10 @@ mod tests {
     }
 
     #[test]
-    fn test_pumble_webhook_port() {
+    fn test_pumble_accepts_webhook_port_param() {
+        // webhook_port is accepted in the constructor for config compat but not stored
         let adapter = PumbleAdapter::new("token".to_string(), 9999);
-        assert_eq!(adapter.webhook_port, 9999);
+        assert_eq!(adapter.name(), "pumble");
     }
 
     #[test]

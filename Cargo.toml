@@ -20,7 +20,7 @@ members = [
 ]
 
 [workspace.package]
-version = "2026.3.30-beta3"
+version = "2026.3.31-beta4"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/librefang/librefang"
@@ -45,6 +45,7 @@ anyhow = "1"
 # Concurrency
 dashmap = "6"
 crossbeam = "0.8"
+arc-swap = "1"
 
 # Logging / Tracing
 tracing = "0.1"

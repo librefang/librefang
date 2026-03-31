@@ -168,7 +168,7 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
             ChannelField { key: "access_token_env", label: "Access Token", field_type: FieldType::Secret, env_var: Some("WHATSAPP_ACCESS_TOKEN"), required: false, placeholder: "EAAx...", advanced: true, options: None, show_when: None, readonly: false },
             ChannelField { key: "phone_number_id", label: "Phone Number ID", field_type: FieldType::Text, env_var: None, required: false, placeholder: "1234567890", advanced: true, options: None, show_when: None, readonly: false },
             ChannelField { key: "verify_token_env", label: "Verify Token", field_type: FieldType::Secret, env_var: Some("WHATSAPP_VERIFY_TOKEN"), required: false, placeholder: "my-verify-token", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "webhook_port", label: "Webhook Port", field_type: FieldType::Number, env_var: None, required: false, placeholder: "8443", advanced: true, options: None, show_when: None, readonly: false },
+            ChannelField { key: "webhook_port", label: "Webhook Port (deprecated, ignored)", field_type: FieldType::Number, env_var: None, required: false, placeholder: "8443", advanced: true, options: None, show_when: None, readonly: false },
             ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
         ],
         setup_steps: &["Open WhatsApp on your phone", "Go to Linked Devices", "Tap Link a Device and scan the QR code"],
@@ -231,7 +231,7 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
         fields: &[
             ChannelField { key: "channel_secret_env", label: "Channel Secret", field_type: FieldType::Secret, env_var: Some("LINE_CHANNEL_SECRET"), required: true, placeholder: "abc123...", advanced: false, options: None, show_when: None, readonly: false },
             ChannelField { key: "access_token_env", label: "Channel Access Token", field_type: FieldType::Secret, env_var: Some("LINE_CHANNEL_ACCESS_TOKEN"), required: true, placeholder: "xyz789...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "webhook_port", label: "Webhook Port", field_type: FieldType::Number, env_var: None, required: false, placeholder: "8450", advanced: true, options: None, show_when: None, readonly: false },
+            ChannelField { key: "webhook_port", label: "Webhook Port (deprecated, ignored)", field_type: FieldType::Number, env_var: None, required: false, placeholder: "8450", advanced: true, options: None, show_when: None, readonly: false },
             ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
         ],
         setup_steps: &["Create a Messaging API channel at LINE Developers", "Copy Channel Secret and Access Token", "Paste them below"],
@@ -246,7 +246,7 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
         fields: &[
             ChannelField { key: "auth_token_env", label: "Auth Token", field_type: FieldType::Secret, env_var: Some("VIBER_AUTH_TOKEN"), required: true, placeholder: "4dc...", advanced: false, options: None, show_when: None, readonly: false },
             ChannelField { key: "webhook_url", label: "Webhook URL", field_type: FieldType::Text, env_var: None, required: false, placeholder: "https://your-domain.com/viber", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "webhook_port", label: "Webhook Port", field_type: FieldType::Number, env_var: None, required: false, placeholder: "8451", advanced: true, options: None, show_when: None, readonly: false },
+            ChannelField { key: "webhook_port", label: "Webhook Port (deprecated, ignored)", field_type: FieldType::Number, env_var: None, required: false, placeholder: "8451", advanced: true, options: None, show_when: None, readonly: false },
             ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
         ],
         setup_steps: &["Create a bot at partners.viber.com", "Copy the auth token", "Paste it below"],
@@ -261,7 +261,7 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
         fields: &[
             ChannelField { key: "page_token_env", label: "Page Access Token", field_type: FieldType::Secret, env_var: Some("MESSENGER_PAGE_TOKEN"), required: true, placeholder: "EAAx...", advanced: false, options: None, show_when: None, readonly: false },
             ChannelField { key: "verify_token_env", label: "Verify Token", field_type: FieldType::Secret, env_var: Some("MESSENGER_VERIFY_TOKEN"), required: false, placeholder: "my-verify-token", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "webhook_port", label: "Webhook Port", field_type: FieldType::Number, env_var: None, required: false, placeholder: "8452", advanced: true, options: None, show_when: None, readonly: false },
+            ChannelField { key: "webhook_port", label: "Webhook Port (deprecated, ignored)", field_type: FieldType::Number, env_var: None, required: false, placeholder: "8452", advanced: true, options: None, show_when: None, readonly: false },
             ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
         ],
         setup_steps: &["Create a Facebook App and add Messenger", "Generate a Page Access Token", "Paste it below"],
@@ -276,7 +276,7 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
         fields: &[
             ChannelField { key: "secret_env", label: "API Secret", field_type: FieldType::Secret, env_var: Some("THREEMA_SECRET"), required: true, placeholder: "abc123...", advanced: false, options: None, show_when: None, readonly: false },
             ChannelField { key: "threema_id", label: "Gateway ID", field_type: FieldType::Text, env_var: None, required: true, placeholder: "*MYID01", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "webhook_port", label: "Webhook Port", field_type: FieldType::Number, env_var: None, required: false, placeholder: "8454", advanced: true, options: None, show_when: None, readonly: false },
+            ChannelField { key: "webhook_port", label: "Webhook Port (deprecated, ignored)", field_type: FieldType::Number, env_var: None, required: false, placeholder: "8454", advanced: true, options: None, show_when: None, readonly: false },
             ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
         ],
         setup_steps: &["Register at gateway.threema.ch", "Copy your ID and API secret", "Paste them below"],
@@ -382,7 +382,7 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
         fields: &[
             ChannelField { key: "app_id", label: "App ID", field_type: FieldType::Text, env_var: None, required: true, placeholder: "00000000-0000-...", advanced: false, options: None, show_when: None, readonly: false },
             ChannelField { key: "app_password_env", label: "App Password", field_type: FieldType::Secret, env_var: Some("TEAMS_APP_PASSWORD"), required: true, placeholder: "abc123...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "webhook_port", label: "Webhook Port", field_type: FieldType::Number, env_var: None, required: false, placeholder: "3978", advanced: true, options: None, show_when: None, readonly: false },
+            ChannelField { key: "webhook_port", label: "Webhook Port (deprecated, ignored)", field_type: FieldType::Number, env_var: None, required: false, placeholder: "3978", advanced: true, options: None, show_when: None, readonly: false },
             ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
         ],
         setup_steps: &["Create an Azure Bot registration", "Copy App ID and generate a password", "Paste them below"],
@@ -412,7 +412,7 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
         fields: &[
             ChannelField { key: "service_account_env", label: "Service Account JSON", field_type: FieldType::Secret, env_var: Some("GOOGLE_CHAT_SERVICE_ACCOUNT"), required: true, placeholder: "/path/to/key.json", advanced: false, options: None, show_when: None, readonly: false },
             ChannelField { key: "space_ids", label: "Space IDs", field_type: FieldType::List, env_var: None, required: false, placeholder: "spaces/AAAA", advanced: true, options: None, show_when: None, readonly: false },
-            ChannelField { key: "webhook_port", label: "Webhook Port", field_type: FieldType::Number, env_var: None, required: false, placeholder: "8444", advanced: true, options: None, show_when: None, readonly: false },
+            ChannelField { key: "webhook_port", label: "Webhook Port (deprecated, ignored)", field_type: FieldType::Number, env_var: None, required: false, placeholder: "8444", advanced: true, options: None, show_when: None, readonly: false },
             ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
         ],
         setup_steps: &["Create a Google Cloud project with Chat API", "Download service account JSON key", "Enter the path below"],
@@ -441,7 +441,7 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
         fields: &[
             ChannelField { key: "app_id", label: "App ID", field_type: FieldType::Text, env_var: None, required: true, placeholder: "cli_abc123", advanced: false, options: None, show_when: None, readonly: false },
             ChannelField { key: "app_secret_env", label: "App Secret", field_type: FieldType::Secret, env_var: Some("FEISHU_APP_SECRET"), required: true, placeholder: "abc123...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "webhook_port", label: "Webhook Port", field_type: FieldType::Number, env_var: None, required: false, placeholder: "8453", advanced: true, options: None, show_when: None, readonly: false },
+            ChannelField { key: "webhook_port", label: "Webhook Port (deprecated, ignored)", field_type: FieldType::Number, env_var: None, required: false, placeholder: "8453", advanced: true, options: None, show_when: None, readonly: false },
             ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
         ],
         setup_steps: &["Create an app at open.feishu.cn", "Copy App ID and Secret", "Paste them below"],
@@ -459,7 +459,7 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
             ChannelField { key: "app_secret_env", label: "App Secret (stream)", field_type: FieldType::Secret, env_var: Some("DINGTALK_APP_SECRET"), required: false, placeholder: "abc123...", advanced: false, options: None, show_when: None, readonly: false },
             ChannelField { key: "access_token_env", label: "Access Token (webhook)", field_type: FieldType::Secret, env_var: Some("DINGTALK_ACCESS_TOKEN"), required: false, placeholder: "abc123...", advanced: false, options: None, show_when: None, readonly: false },
             ChannelField { key: "secret_env", label: "Signing Secret (webhook)", field_type: FieldType::Secret, env_var: Some("DINGTALK_SECRET"), required: false, placeholder: "SEC...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "webhook_port", label: "Webhook Port", field_type: FieldType::Number, env_var: None, required: false, placeholder: "8457", advanced: true, options: None, show_when: None, readonly: false },
+            ChannelField { key: "webhook_port", label: "Webhook Port (deprecated, ignored)", field_type: FieldType::Number, env_var: None, required: false, placeholder: "8457", advanced: true, options: None, show_when: None, readonly: false },
             ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
         ],
         setup_steps: &["Create a robot in DingTalk", "Choose mode: webhook (needs public IP) or stream (no public IP needed)", "For webhook: copy token and signing secret", "For stream: copy App Key and App Secret from the app page"],
@@ -473,7 +473,7 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
         setup_type: "form",
         fields: &[
             ChannelField { key: "bot_token_env", label: "Bot Token", field_type: FieldType::Secret, env_var: Some("PUMBLE_BOT_TOKEN"), required: true, placeholder: "abc123...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "webhook_port", label: "Webhook Port", field_type: FieldType::Number, env_var: None, required: false, placeholder: "8455", advanced: true, options: None, show_when: None, readonly: false },
+            ChannelField { key: "webhook_port", label: "Webhook Port (deprecated, ignored)", field_type: FieldType::Number, env_var: None, required: false, placeholder: "8455", advanced: true, options: None, show_when: None, readonly: false },
             ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
         ],
         setup_steps: &["Create a bot in Pumble Integrations", "Copy the token", "Paste it below"],
@@ -487,7 +487,7 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
         setup_type: "form",
         fields: &[
             ChannelField { key: "bot_token_env", label: "Bot Token", field_type: FieldType::Secret, env_var: Some("FLOCK_BOT_TOKEN"), required: true, placeholder: "abc123...", advanced: false, options: None, show_when: None, readonly: false },
-            ChannelField { key: "webhook_port", label: "Webhook Port", field_type: FieldType::Number, env_var: None, required: false, placeholder: "8456", advanced: true, options: None, show_when: None, readonly: false },
+            ChannelField { key: "webhook_port", label: "Webhook Port (deprecated, ignored)", field_type: FieldType::Number, env_var: None, required: false, placeholder: "8456", advanced: true, options: None, show_when: None, readonly: false },
             ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true, options: None, show_when: None, readonly: false },
         ],
         setup_steps: &["Build an app in Flock App Store", "Copy the bot token", "Paste it below"],
@@ -902,26 +902,27 @@ fn build_field_json(
 }
 
 /// For channels with a readonly `callback_url` field, dynamically inject the
-/// actual URL based on the configured `webhook_port` so the user sees a real
-/// value to copy into the platform admin console.
+/// actual URL on the shared webhook server so the user sees a real value to
+/// copy into the platform admin console.
+///
+/// Since v2026.3.31 all webhook channels share the main API server port.
+/// The URL pattern is `http://{api_listen}/channels/{channel_name}/webhook`.
 fn inject_callback_url(
     fields: &mut [serde_json::Value],
     channel_name: &str,
-    config_values: Option<&serde_json::Value>,
+    _config_values: Option<&serde_json::Value>,
 ) {
-    // Map channel name → (default port, path)
-    let (default_port, path) = match channel_name {
-        "wecom" => (8454u16, "/wecom/webhook"),
+    let path = match channel_name {
+        "wecom" => "/channels/wecom/webhook",
         _ => return,
     };
 
-    let port = config_values
-        .and_then(|v| v.get("webhook_port"))
-        .and_then(|v| v.as_u64())
-        .map(|p| p as u16)
-        .unwrap_or(default_port);
-
-    let url = format!("http://0.0.0.0:{port}{path}");
+    // Use 0.0.0.0 with the default API port — users should substitute their
+    // public hostname when pasting into external platform consoles.
+    let url = format!(
+        "http://0.0.0.0:{}{path}",
+        librefang_types::config::DEFAULT_API_PORT
+    );
 
     for field in fields.iter_mut() {
         if field.get("key").and_then(|v| v.as_str()) == Some("callback_url") {
@@ -929,6 +930,24 @@ fn inject_callback_url(
             field["has_value"] = serde_json::Value::Bool(true);
         }
     }
+}
+
+/// Channels that receive messages via webhook on the shared server.
+/// Returns the path suffix (e.g. "/webhook") for the given channel name,
+/// or None if the channel does not use webhook routes.
+fn webhook_route_suffix(channel_name: &str) -> Option<&'static str> {
+    match channel_name {
+        "feishu" | "teams" | "dingtalk" | "line" | "messenger" | "viber" | "google_chat"
+        | "flock" | "pumble" | "threema" | "webhook" | "wecom" => Some("/webhook"),
+        "voice" => Some("/ws"),
+        _ => None,
+    }
+}
+
+/// Build the full webhook endpoint URL for a channel on the shared server.
+/// Returns `None` for channels that don't use webhook routes (e.g. Telegram, Discord).
+fn webhook_endpoint_url(channel_name: &str) -> Option<String> {
+    webhook_route_suffix(channel_name).map(|suffix| format!("/channels/{channel_name}{suffix}"))
 }
 
 /// Find a channel definition by name.
@@ -1163,7 +1182,7 @@ pub async fn list_channels(State(state): State<Arc<AppState>>) -> impl IntoRespo
             .collect();
         inject_callback_url(&mut fields, meta.name, config_vals.as_ref());
 
-        channels.push(serde_json::json!({
+        let mut channel_json = serde_json::json!({
             "name": meta.name,
             "display_name": meta.display_name,
             "icon": meta.icon,
@@ -1178,7 +1197,11 @@ pub async fn list_channels(State(state): State<Arc<AppState>>) -> impl IntoRespo
             "fields": fields,
             "setup_steps": meta.setup_steps,
             "config_template": meta.config_template,
-        }));
+        });
+        if let Some(endpoint) = webhook_endpoint_url(meta.name) {
+            channel_json["webhook_endpoint"] = serde_json::Value::String(endpoint);
+        }
+        channels.push(channel_json);
     }
 
     Json(serde_json::json!({
@@ -1234,25 +1257,27 @@ pub async fn get_channel(
         .collect();
     inject_callback_url(&mut fields, meta.name, config_vals.as_ref());
 
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "name": meta.name,
-            "display_name": meta.display_name,
-            "icon": meta.icon,
-            "description": meta.description,
-            "category": meta.category,
-            "difficulty": meta.difficulty,
-            "setup_time": meta.setup_time,
-            "quick_setup": meta.quick_setup,
-            "setup_type": meta.setup_type,
-            "configured": configured,
-            "has_token": has_token,
-            "fields": fields,
-            "setup_steps": meta.setup_steps,
-            "config_template": meta.config_template,
-        })),
-    )
+    let mut detail = serde_json::json!({
+        "name": meta.name,
+        "display_name": meta.display_name,
+        "icon": meta.icon,
+        "description": meta.description,
+        "category": meta.category,
+        "difficulty": meta.difficulty,
+        "setup_time": meta.setup_time,
+        "quick_setup": meta.quick_setup,
+        "setup_type": meta.setup_type,
+        "configured": configured,
+        "has_token": has_token,
+        "fields": fields,
+        "setup_steps": meta.setup_steps,
+        "config_template": meta.config_template,
+    });
+    if let Some(endpoint) = webhook_endpoint_url(meta.name) {
+        detail["webhook_endpoint"] = serde_json::Value::String(endpoint);
+    }
+
+    (StatusCode::OK, Json(detail))
 }
 
 #[utoipa::path(

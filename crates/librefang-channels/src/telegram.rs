@@ -1009,7 +1009,16 @@ impl ChannelAdapter for TelegramAdapter {
         let msg_id: i64 = message_id
             .parse()
             .map_err(|_| format!("Invalid Telegram message_id: {message_id}"))?;
-        self.fire_reaction(chat_id, msg_id, &reaction.emoji);
+        // Telegram only supports a limited set of reaction emoji.
+        // Map unsupported ones to the closest Telegram-compatible alternative.
+        let emoji = match reaction.emoji.as_str() {
+            "\u{23F3}" => "\u{1F440}",        // ⏳ → 👀
+            "\u{2699}\u{FE0F}" => "\u{26A1}", // ⚙️ → ⚡
+            "\u{2705}" => "\u{1F389}",        // ✅ → 🎉
+            "\u{274C}" => "\u{1F44E}",        // ❌ → 👎
+            other => other,                   // 🤔, ✍️ etc. pass through
+        };
+        self.fire_reaction(chat_id, msg_id, emoji);
         Ok(())
     }
 

@@ -602,84 +602,98 @@ impl LlmDriver for ClaudeCodeDriver {
             ..Default::default()
         };
 
-        let timeout_duration = std::time::Duration::from_secs(self.message_timeout_secs);
-        let stream_result = tokio::time::timeout(timeout_duration, async {
-            while let Ok(Some(line)) = lines.next_line().await {
-                if line.trim().is_empty() {
-                    continue;
-                }
+        // Per-line inactivity timeout: each next_line() call must produce
+        // output within the timeout window. This prevents killing long-running
+        // but actively-streaming responses while still catching hung processes.
+        let inactivity_dur = std::time::Duration::from_secs(self.message_timeout_secs);
+        let stream_err: Option<LlmError> = loop {
+            match tokio::time::timeout(inactivity_dur, lines.next_line()).await {
+                Ok(Ok(Some(line))) => {
+                    if line.trim().is_empty() {
+                        continue;
+                    }
 
-                match serde_json::from_str::<ClaudeStreamEvent>(&line) {
-                    Ok(event) => {
-                        match event.r#type.as_str() {
-                            "content" | "text" | "assistant" | "content_block_delta" => {
-                                if let Some(ref content) = event.content {
-                                    full_text.push_str(content);
-                                    let _ = tx
-                                        .send(StreamEvent::TextDelta {
-                                            text: content.clone(),
-                                        })
-                                        .await;
-                                }
-                            }
-                            "result" | "done" | "complete" => {
-                                if let Some(ref result) = event.result {
-                                    if full_text.is_empty() {
-                                        full_text = result.clone();
+                    match serde_json::from_str::<ClaudeStreamEvent>(&line) {
+                        Ok(event) => {
+                            match event.r#type.as_str() {
+                                "content" | "text" | "assistant" | "content_block_delta" => {
+                                    if let Some(ref content) = event.content {
+                                        full_text.push_str(content);
                                         let _ = tx
                                             .send(StreamEvent::TextDelta {
-                                                text: result.clone(),
+                                                text: content.clone(),
                                             })
                                             .await;
                                     }
                                 }
-                                if let Some(usage) = event.usage {
-                                    final_usage = TokenUsage {
-                                        input_tokens: usage.input_tokens,
-                                        output_tokens: usage.output_tokens,
-                                        ..Default::default()
-                                    };
+                                "result" | "done" | "complete" => {
+                                    if let Some(ref result) = event.result {
+                                        if full_text.is_empty() {
+                                            full_text = result.clone();
+                                            let _ = tx
+                                                .send(StreamEvent::TextDelta {
+                                                    text: result.clone(),
+                                                })
+                                                .await;
+                                        }
+                                    }
+                                    if let Some(usage) = event.usage {
+                                        final_usage = TokenUsage {
+                                            input_tokens: usage.input_tokens,
+                                            output_tokens: usage.output_tokens,
+                                            ..Default::default()
+                                        };
+                                    }
                                 }
-                            }
-                            _ => {
-                                // Unknown event type — try content field as fallback
-                                if let Some(ref content) = event.content {
-                                    full_text.push_str(content);
-                                    let _ = tx
-                                        .send(StreamEvent::TextDelta {
-                                            text: content.clone(),
-                                        })
-                                        .await;
+                                _ => {
+                                    // Unknown event type — try content field as fallback
+                                    if let Some(ref content) = event.content {
+                                        full_text.push_str(content);
+                                        let _ = tx
+                                            .send(StreamEvent::TextDelta {
+                                                text: content.clone(),
+                                            })
+                                            .await;
+                                    }
                                 }
                             }
                         }
-                    }
-                    Err(e) => {
-                        // Not valid JSON — treat as raw text
-                        warn!(line = %line, error = %e, "Non-JSON line from Claude CLI");
-                        full_text.push_str(&line);
-                        let _ = tx.send(StreamEvent::TextDelta { text: line }).await;
+                        Err(e) => {
+                            // Not valid JSON — treat as raw text
+                            warn!(line = %line, error = %e, "Non-JSON line from Claude CLI");
+                            full_text.push_str(&line);
+                            let _ = tx.send(StreamEvent::TextDelta { text: line }).await;
+                        }
                     }
                 }
+                Ok(Ok(None)) => break None, // EOF — stream finished normally
+                Ok(Err(e)) => {
+                    warn!(error = %e, "Claude Code CLI stream IO error");
+                    break None;
+                }
+                Err(_) => {
+                    // Inactivity timeout — no output for message_timeout_secs
+                    warn!(
+                        timeout_secs = self.message_timeout_secs,
+                        model = %pid_label,
+                        "Claude Code CLI streaming subprocess timed out after {}s of inactivity — process killed",
+                        self.message_timeout_secs
+                    );
+                    let _ = child.kill().await;
+                    break Some(LlmError::Http(format!(
+                        "Claude Code CLI streaming subprocess timed out after {}s of inactivity — process killed",
+                        self.message_timeout_secs
+                    )));
+                }
             }
-        })
-        .await;
+        };
 
         // Clear PID tracking
         self.active_pids.remove(&pid_label);
 
-        if stream_result.is_err() {
-            warn!(
-                timeout_secs = self.message_timeout_secs,
-                model = %pid_label,
-                "Claude Code CLI streaming subprocess timed out, killing process"
-            );
-            let _ = child.kill().await;
+        if let Some(err) = stream_err {
             prepared.cleanup();
-            return Err(LlmError::Http(format!(
-                "Claude Code CLI streaming subprocess timed out after {}s — process killed",
-                self.message_timeout_secs
-            )));
+            return Err(err);
         }
 
         // Clean up temp images now that the CLI has finished reading them

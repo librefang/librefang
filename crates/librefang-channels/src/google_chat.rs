@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, watch, RwLock};
+use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, info, warn};
 use zeroize::Zeroizing;
 
@@ -92,15 +92,10 @@ pub struct GoogleChatAdapter {
     service_account_key: Zeroizing<String>,
     /// Space IDs to listen to (e.g., "spaces/AAAA").
     space_ids: Vec<String>,
-    /// Port for the inbound webhook HTTP listener.
-    webhook_port: u16,
     /// HTTP client for outbound API calls.
     client: reqwest::Client,
     /// Optional account identifier for multi-bot routing.
     account_id: Option<String>,
-    /// Shutdown signal.
-    shutdown_tx: Arc<watch::Sender<bool>>,
-    shutdown_rx: watch::Receiver<bool>,
     /// Cached OAuth2 access token with expiry instant.
     cached_token: Arc<RwLock<Option<(String, Instant)>>>,
 }
@@ -111,17 +106,13 @@ impl GoogleChatAdapter {
     /// # Arguments
     /// * `service_account_key` - JSON content of the Google service account key file.
     /// * `space_ids` - Google Chat space IDs to interact with.
-    /// * `webhook_port` - Local port to bind the inbound webhook listener on.
-    pub fn new(service_account_key: String, space_ids: Vec<String>, webhook_port: u16) -> Self {
-        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    /// * `webhook_port` - Local port (accepted from config, unused with shared server).
+    pub fn new(service_account_key: String, space_ids: Vec<String>, _webhook_port: u16) -> Self {
         Self {
             service_account_key: Zeroizing::new(service_account_key),
             space_ids,
-            webhook_port,
             client: crate::http_client::new_client(),
             account_id: None,
-            shutdown_tx: Arc::new(shutdown_tx),
-            shutdown_rx,
             cached_token: Arc::new(RwLock::new(None)),
         }
     }
@@ -329,187 +320,139 @@ impl ChannelAdapter for GoogleChatAdapter {
         ChannelType::Custom("google_chat".to_string())
     }
 
+    async fn create_webhook_routes(
+        &self,
+    ) -> Option<(
+        axum::Router,
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+    )> {
+        // Validate we can parse the service account key
+        if let Err(e) = serde_json::from_str::<serde_json::Value>(&self.service_account_key) {
+            warn!("Google Chat: invalid service account key: {e}");
+            return None;
+        }
+
+        let (tx, rx) = mpsc::channel::<ChannelMessage>(256);
+        let tx = Arc::new(tx);
+        let space_ids = Arc::new(self.space_ids.clone());
+        let account_id = Arc::new(self.account_id.clone());
+
+        let router = axum::Router::new().route(
+            "/webhook",
+            axum::routing::post({
+                let tx = Arc::clone(&tx);
+                let space_ids = Arc::clone(&space_ids);
+                let account_id = Arc::clone(&account_id);
+                move |body: axum::body::Bytes| {
+                    let tx = Arc::clone(&tx);
+                    let space_ids = Arc::clone(&space_ids);
+                    let account_id = Arc::clone(&account_id);
+                    async move {
+                        // Parse the Google Chat event payload
+                        let payload: serde_json::Value = match serde_json::from_slice(&body) {
+                            Ok(v) => v,
+                            Err(_) => {
+                                return (axum::http::StatusCode::BAD_REQUEST, "Invalid JSON");
+                            }
+                        };
+
+                        let event_type = payload["type"].as_str().unwrap_or("");
+                        if event_type != "MESSAGE" {
+                            return (axum::http::StatusCode::OK, "OK");
+                        }
+
+                        let message = &payload["message"];
+                        let text = message["text"].as_str().unwrap_or("");
+                        if text.is_empty() {
+                            return (axum::http::StatusCode::OK, "OK");
+                        }
+
+                        let space_name = payload["space"]["name"].as_str().unwrap_or("");
+                        if !space_ids.is_empty() && !space_ids.iter().any(|s| s == space_name) {
+                            return (axum::http::StatusCode::OK, "OK");
+                        }
+
+                        let sender_name = message["sender"]["displayName"]
+                            .as_str()
+                            .unwrap_or("unknown");
+                        let sender_id = message["sender"]["name"].as_str().unwrap_or("unknown");
+                        let message_name = message["name"].as_str().unwrap_or("").to_string();
+                        let thread_name = message["thread"]["name"].as_str().map(String::from);
+                        let space_type = payload["space"]["type"].as_str().unwrap_or("ROOM");
+                        let is_group = space_type != "DM";
+
+                        let msg_content = if text.starts_with('/') {
+                            let parts: Vec<&str> = text.splitn(2, ' ').collect();
+                            let cmd = parts[0].trim_start_matches('/');
+                            let args: Vec<String> = parts
+                                .get(1)
+                                .map(|a| a.split_whitespace().map(String::from).collect())
+                                .unwrap_or_default();
+                            ChannelContent::Command {
+                                name: cmd.to_string(),
+                                args,
+                            }
+                        } else {
+                            ChannelContent::Text(text.to_string())
+                        };
+
+                        let mut channel_msg = ChannelMessage {
+                            channel: ChannelType::Custom("google_chat".to_string()),
+                            platform_message_id: message_name,
+                            sender: ChannelUser {
+                                platform_id: space_name.to_string(),
+                                display_name: sender_name.to_string(),
+                                librefang_user: None,
+                            },
+                            content: msg_content,
+                            target_agent: None,
+                            timestamp: Utc::now(),
+                            is_group,
+                            thread_id: thread_name,
+                            metadata: {
+                                let mut m = HashMap::new();
+                                m.insert(
+                                    "sender_id".to_string(),
+                                    serde_json::Value::String(sender_id.to_string()),
+                                );
+                                m
+                            },
+                        };
+
+                        // Inject account_id for multi-bot routing
+                        if let Some(ref aid) = *account_id {
+                            channel_msg
+                                .metadata
+                                .insert("account_id".to_string(), serde_json::json!(aid));
+                        }
+                        let _ = tx.send(channel_msg).await;
+
+                        (axum::http::StatusCode::OK, "OK")
+                    }
+                }
+            }),
+        );
+
+        info!(
+            "Google Chat: registered webhook route on shared server at /channels/{}",
+            self.name()
+        );
+
+        Some((
+            router,
+            Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)),
+        ))
+    }
+
     async fn start(
         &self,
     ) -> Result<
         Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
         Box<dyn std::error::Error + Send + Sync>,
     > {
-        // Validate we can parse the service account key
-        let _key: serde_json::Value = serde_json::from_str(&self.service_account_key)
-            .map_err(|e| format!("Invalid service account key: {e}"))?;
-
-        info!(
-            "Google Chat adapter starting webhook listener on port {}",
-            self.webhook_port
-        );
-
-        let (tx, rx) = mpsc::channel::<ChannelMessage>(256);
-        let port = self.webhook_port;
-        let space_ids = self.space_ids.clone();
-        let mut shutdown_rx = self.shutdown_rx.clone();
-        let account_id = Arc::new(self.account_id.clone());
-
-        tokio::spawn(async move {
-            // Bind a minimal HTTP listener for inbound webhooks
-            let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
-            let listener = match tokio::net::TcpListener::bind(addr).await {
-                Ok(l) => l,
-                Err(e) => {
-                    warn!("Google Chat: failed to bind webhook on port {port}: {e}");
-                    return;
-                }
-            };
-
-            info!("Google Chat webhook listener bound on {addr}");
-
-            loop {
-                let (stream, _peer) = tokio::select! {
-                    _ = shutdown_rx.changed() => {
-                        info!("Google Chat adapter shutting down");
-                        break;
-                    }
-                    result = listener.accept() => {
-                        match result {
-                            Ok(conn) => conn,
-                            Err(e) => {
-                                warn!("Google Chat: accept error: {e}");
-                                continue;
-                            }
-                        }
-                    }
-                };
-
-                let tx = tx.clone();
-                let space_ids = space_ids.clone();
-                let account_id = Arc::clone(&account_id);
-
-                tokio::spawn(async move {
-                    // Read HTTP request from the TCP stream
-                    let mut reader = tokio::io::BufReader::new(stream);
-                    let mut request_line = String::new();
-                    if tokio::io::AsyncBufReadExt::read_line(&mut reader, &mut request_line)
-                        .await
-                        .is_err()
-                    {
-                        return;
-                    }
-
-                    // Read headers to find Content-Length (case-insensitive per HTTP spec)
-                    let mut content_length: usize = 0;
-                    loop {
-                        let mut header_line = String::new();
-                        if tokio::io::AsyncBufReadExt::read_line(&mut reader, &mut header_line)
-                            .await
-                            .is_err()
-                        {
-                            return;
-                        }
-                        let trimmed = header_line.trim();
-                        if trimmed.is_empty() {
-                            break;
-                        }
-                        let lower = trimmed.to_lowercase();
-                        if let Some(val) = lower.strip_prefix("content-length:") {
-                            if let Ok(len) = val.trim().parse::<usize>() {
-                                content_length = len;
-                            }
-                        }
-                    }
-
-                    // Read body (cap at 64 KB to prevent abuse)
-                    let read_len = content_length.min(65536);
-                    let mut body_buf = vec![0u8; read_len];
-                    use tokio::io::AsyncReadExt;
-                    if read_len > 0 && reader.read_exact(&mut body_buf).await.is_err() {
-                        return;
-                    }
-
-                    // Send 200 OK response
-                    use tokio::io::AsyncWriteExt;
-                    let resp = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
-                    let _ = reader.get_mut().write_all(resp).await;
-
-                    // Parse the Google Chat event payload
-                    let payload: serde_json::Value = match serde_json::from_slice(&body_buf) {
-                        Ok(v) => v,
-                        Err(_) => return,
-                    };
-
-                    let event_type = payload["type"].as_str().unwrap_or("");
-                    if event_type != "MESSAGE" {
-                        return;
-                    }
-
-                    let message = &payload["message"];
-                    let text = message["text"].as_str().unwrap_or("");
-                    if text.is_empty() {
-                        return;
-                    }
-
-                    let space_name = payload["space"]["name"].as_str().unwrap_or("");
-                    if !space_ids.is_empty() && !space_ids.iter().any(|s| s == space_name) {
-                        return;
-                    }
-
-                    let sender_name = message["sender"]["displayName"]
-                        .as_str()
-                        .unwrap_or("unknown");
-                    let sender_id = message["sender"]["name"].as_str().unwrap_or("unknown");
-                    let message_name = message["name"].as_str().unwrap_or("").to_string();
-                    let thread_name = message["thread"]["name"].as_str().map(String::from);
-                    let space_type = payload["space"]["type"].as_str().unwrap_or("ROOM");
-                    let is_group = space_type != "DM";
-
-                    let msg_content = if text.starts_with('/') {
-                        let parts: Vec<&str> = text.splitn(2, ' ').collect();
-                        let cmd = parts[0].trim_start_matches('/');
-                        let args: Vec<String> = parts
-                            .get(1)
-                            .map(|a| a.split_whitespace().map(String::from).collect())
-                            .unwrap_or_default();
-                        ChannelContent::Command {
-                            name: cmd.to_string(),
-                            args,
-                        }
-                    } else {
-                        ChannelContent::Text(text.to_string())
-                    };
-
-                    let mut channel_msg = ChannelMessage {
-                        channel: ChannelType::Custom("google_chat".to_string()),
-                        platform_message_id: message_name,
-                        sender: ChannelUser {
-                            platform_id: space_name.to_string(),
-                            display_name: sender_name.to_string(),
-                            librefang_user: None,
-                        },
-                        content: msg_content,
-                        target_agent: None,
-                        timestamp: Utc::now(),
-                        is_group,
-                        thread_id: thread_name,
-                        metadata: {
-                            let mut m = HashMap::new();
-                            m.insert(
-                                "sender_id".to_string(),
-                                serde_json::Value::String(sender_id.to_string()),
-                            );
-                            m
-                        },
-                    };
-
-                    // Inject account_id for multi-bot routing
-                    if let Some(ref aid) = *account_id {
-                        channel_msg
-                            .metadata
-                            .insert("account_id".to_string(), serde_json::json!(aid));
-                    }
-                    let _ = tx.send(channel_msg).await;
-                });
-            }
-        });
-
+        // Webhook mode is handled by create_webhook_routes().
+        // Return an empty stream as fallback.
+        let (_tx, rx) = mpsc::channel::<ChannelMessage>(1);
         Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
     }
 
@@ -531,7 +474,6 @@ impl ChannelAdapter for GoogleChatAdapter {
     }
 
     async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let _ = self.shutdown_tx.send(true);
         Ok(())
     }
 }
@@ -607,7 +549,7 @@ mod tests {
     fn test_google_chat_invalid_key() {
         let adapter = GoogleChatAdapter::new("not-json".to_string(), vec![], 8092);
         // Can't call async get_access_token in sync test, but verify construction works
-        assert_eq!(adapter.webhook_port, 8092);
+        assert_eq!(adapter.name(), "google_chat");
     }
 
     #[test]

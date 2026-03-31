@@ -42,8 +42,8 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::sync::{mpsc, watch, Mutex};
-use tracing::{debug, error, info, warn};
+use tokio::sync::{mpsc, Mutex};
+use tracing::{debug, info, warn};
 
 /// Audio format used by the client.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,8 +144,6 @@ impl Default for VoiceStats {
 /// Runs a WebSocket server that accepts audio streams, transcribes them via STT,
 /// sends the text to the agent bridge, and returns synthesized speech via TTS.
 pub struct VoiceAdapter {
-    /// WebSocket listen port.
-    listen_port: u16,
     /// API key for STT/TTS services.
     api_key: String,
     /// STT API base URL.
@@ -158,9 +156,6 @@ pub struct VoiceAdapter {
     buffer_threshold: usize,
     /// Optional account ID for multi-bot routing.
     account_id: Option<String>,
-    /// Shutdown signal.
-    shutdown_tx: Arc<watch::Sender<bool>>,
-    shutdown_rx: watch::Receiver<bool>,
     /// Statistics shared with WebSocket handlers.
     stats: Arc<VoiceStats>,
     /// When the adapter was started.
@@ -180,24 +175,20 @@ impl VoiceAdapter {
     /// * `tts_voice` - Voice name for TTS synthesis.
     /// * `buffer_threshold` - Audio buffer size before triggering STT (bytes).
     pub fn new(
-        listen_port: u16,
+        _listen_port: u16,
         api_key: String,
         stt_url: String,
         tts_url: String,
         tts_voice: String,
         buffer_threshold: usize,
     ) -> Self {
-        let (shutdown_tx, shutdown_rx) = watch::channel(false);
         Self {
-            listen_port,
             api_key,
             stt_url,
             tts_url,
             tts_voice,
             buffer_threshold,
             account_id: None,
-            shutdown_tx: Arc::new(shutdown_tx),
-            shutdown_rx,
             stats: Arc::new(VoiceStats::default()),
             started_at: Mutex::new(None),
             sessions: Arc::new(Mutex::new(HashMap::new())),
@@ -604,15 +595,13 @@ impl ChannelAdapter for VoiceAdapter {
         ChannelType::Custom("voice".to_string())
     }
 
-    async fn start(
+    async fn create_webhook_routes(
         &self,
-    ) -> Result<
+    ) -> Option<(
+        axum::Router,
         Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
-        Box<dyn std::error::Error + Send + Sync>,
-    > {
+    )> {
         let (tx, rx) = mpsc::channel::<ChannelMessage>(256);
-        let port = self.listen_port;
-        let mut shutdown_rx = self.shutdown_rx.clone();
 
         let state = VoiceState {
             msg_tx: Arc::new(tx),
@@ -627,45 +616,28 @@ impl ChannelAdapter for VoiceAdapter {
         };
 
         self.stats.connected.store(true, Ordering::Relaxed);
-        *self.started_at.lock().await = Some(Utc::now());
+        *self.started_at.lock().await = Some(chrono::Utc::now());
 
-        info!("Voice adapter starting WebSocket server on port {port}");
+        let app = axum::Router::new()
+            .route("/ws", axum::routing::get(ws_handler))
+            .with_state(state);
 
-        let stats = Arc::clone(&self.stats);
-        tokio::spawn(async move {
-            let app = axum::Router::new()
-                .route("/voice", axum::routing::get(ws_handler))
-                .with_state(state);
+        info!("Voice adapter registered on shared server at /channels/voice/ws");
 
-            let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
-            info!("Voice WebSocket server listening on ws://{addr}/voice");
+        Some((
+            app,
+            Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)),
+        ))
+    }
 
-            let listener = match tokio::net::TcpListener::bind(addr).await {
-                Ok(l) => l,
-                Err(e) => {
-                    error!("Voice: failed to bind port {port}: {e}");
-                    stats.connected.store(false, Ordering::Relaxed);
-                    return;
-                }
-            };
-
-            let server = axum::serve(listener, app);
-
-            tokio::select! {
-                result = server => {
-                    if let Err(e) = result {
-                        error!("Voice WebSocket server error: {e}");
-                    }
-                }
-                _ = shutdown_rx.changed() => {
-                    info!("Voice adapter shutting down");
-                }
-            }
-
-            stats.connected.store(false, Ordering::Relaxed);
-            info!("Voice WebSocket server stopped");
-        });
-
+    async fn start(
+        &self,
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
+        // Handled by create_webhook_routes() on the shared server.
+        let (_tx, rx) = mpsc::channel::<ChannelMessage>(1);
         Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
     }
 
@@ -713,7 +685,6 @@ impl ChannelAdapter for VoiceAdapter {
     }
 
     async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let _ = self.shutdown_tx.send(true);
         self.stats.connected.store(false, Ordering::Relaxed);
         info!("Voice adapter stopped");
         Ok(())
@@ -752,7 +723,6 @@ mod tests {
             adapter.channel_type(),
             ChannelType::Custom("voice".to_string())
         );
-        assert_eq!(adapter.listen_port, 4546);
     }
 
     #[test]

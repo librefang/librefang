@@ -1,0 +1,791 @@
+# Communication & Network API
+
+Endpoints for channels, webhooks, integrations, MCP/A2A protocols, comms, pairing, OAuth/OIDC, network peers, audit, usage analytics, budget, and approvals.
+
+## Channel Endpoints
+
+### GET /api/channels
+
+List configured channel adapters and their status. Supports 44 channel adapters including Telegram, Discord, Slack, WhatsApp, Matrix, Email, Teams, Mattermost, IRC, Google Chat, Twitch, Rocket.Chat, Zulip, XMPP, LINE, Viber, Messenger, Reddit, Mastodon, Bluesky, and more.
+
+**Response** `200 OK`:
+
+```json
+{
+  "channels": [
+    {
+      "name": "telegram",
+      "enabled": true,
+      "has_token": true
+    },
+    {
+      "name": "discord",
+      "enabled": true,
+      "has_token": false
+    }
+  ],
+  "total": 2
+}
+```
+
+### GET /api/channels/&lbrace;name&rbrace;
+
+Get configuration and status for a specific channel adapter.
+
+### POST /api/channels/&lbrace;name&rbrace;/configure
+
+Configure a channel adapter (set token, bot name, options).
+
+**Request Body** (example for Telegram):
+
+```json
+{
+  "token": "123456:ABC-DEF...",
+  "agent_name": "my-agent"
+}
+```
+
+### DELETE /api/channels/&lbrace;name&rbrace;/configure
+
+Remove the configuration for a channel adapter.
+
+### POST /api/channels/&lbrace;name&rbrace;/test
+
+Send a test message through a channel adapter to verify connectivity.
+
+### POST /api/channels/reload
+
+Reload all channel adapters from config without restarting the daemon.
+
+### POST /api/channels/whatsapp/qr/start
+
+Start a WhatsApp QR code authentication session.
+
+### GET /api/channels/whatsapp/qr/status
+
+Get the current status of the WhatsApp QR code session (pending/scanned/authenticated).
+
+---
+
+## MCP & A2A Protocol Endpoints
+
+LibreFang supports both Model Context Protocol (MCP) for tool interoperability and Agent-to-Agent (A2A) protocol for cross-system agent communication.
+
+### GET /api/mcp/servers
+
+List configured and connected MCP servers with their available tools.
+
+**Response** `200 OK`:
+
+```json
+{
+  "servers": [
+    {
+      "name": "filesystem",
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem"],
+      "connected": true,
+      "tools": [
+        {
+          "name": "mcp_filesystem_read_file",
+          "description": "Read a file from the filesystem"
+        }
+      ]
+    }
+  ],
+  "total": 1
+}
+```
+
+### POST /api/mcp/servers
+
+Add a new MCP server configuration.
+
+**Request Body**:
+
+```json
+{
+  "name": "filesystem",
+  "transport": "stdio",
+  "command": "npx",
+  "args": ["-y", "@modelcontextprotocol/server-filesystem"]
+}
+```
+
+### GET /api/mcp/servers/&lbrace;name&rbrace;
+
+Get configuration and connection status for a specific MCP server.
+
+### PUT /api/mcp/servers/&lbrace;name&rbrace;
+
+Update an MCP server configuration.
+
+### DELETE /api/mcp/servers/&lbrace;name&rbrace;
+
+Remove an MCP server configuration.
+
+### GET /api/a2a/agents
+
+List external A2A agents that have been discovered or registered.
+
+### GET /api/a2a/agents/&lbrace;id&rbrace;
+
+Get details for a specific external A2A agent.
+
+### POST /api/a2a/discover
+
+Discover an external A2A agent by URL (fetches its `/.well-known/agent.json`).
+
+**Request Body**:
+
+```json
+{
+  "url": "https://other-instance.example.com"
+}
+```
+
+### POST /api/a2a/send
+
+Send a task to an external A2A agent.
+
+**Request Body**:
+
+```json
+{
+  "agent_id": "external-agent-id",
+  "message": "Summarize this document: ..."
+}
+```
+
+### GET /api/a2a/tasks/&lbrace;id&rbrace;/status
+
+Check the status of a task sent to an external A2A agent.
+
+### POST /mcp
+
+MCP HTTP transport endpoint. Accepts JSON-RPC 2.0 requests and exposes LibreFang tools via the MCP protocol to external clients.
+
+**Request Body** (JSON-RPC 2.0):
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "tools/list",
+  "id": 1
+}
+```
+
+**Response** `200 OK`:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "result": {
+    "tools": [
+      {
+        "name": "file_read",
+        "description": "Read a file's contents",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "path": {"type": "string"}
+          }
+        }
+      }
+    ]
+  },
+  "id": 1
+}
+```
+
+### GET /.well-known/agent.json
+
+A2A agent card discovery endpoint. Returns the server's A2A agent card, which describes its capabilities, supported protocols, and available agents.
+
+**Response** `200 OK`:
+
+```json
+{
+  "name": "LibreFang",
+  "description": "LibreFang Agent Operating System",
+  "url": "http://127.0.0.1:4545",
+  "version": "0.1.0",
+  "capabilities": {
+    "streaming": true,
+    "pushNotifications": false
+  },
+  "skills": [
+    {
+      "id": "chat",
+      "name": "Chat",
+      "description": "General-purpose chat with any agent"
+    }
+  ]
+}
+```
+
+### GET /a2a/agents
+
+List local agents available via the A2A protocol (unversioned, protocol-level endpoint).
+
+### POST /a2a/tasks/send
+
+Send a task to a local agent via A2A protocol (unversioned).
+
+**Request Body**:
+
+```json
+{
+  "agent_id": "a1b2c3d4-...",
+  "message": {
+    "role": "user",
+    "parts": [
+      {"text": "Review this code for security issues"}
+    ]
+  }
+}
+```
+
+**Response** `200 OK`:
+
+```json
+{
+  "task_id": "task-1234-...",
+  "status": "completed",
+  "result": {
+    "role": "agent",
+    "parts": [
+      {"text": "I found 2 potential security issues..."}
+    ]
+  }
+}
+```
+
+### GET /a2a/tasks/&lbrace;id&rbrace;
+
+Get the status and result of an A2A task (unversioned).
+
+### POST /a2a/tasks/&lbrace;id&rbrace;/cancel
+
+Cancel a running A2A task (unversioned).
+
+**Response** `200 OK`:
+
+```json
+{
+  "task_id": "task-1234-...",
+  "status": "cancelled"
+}
+```
+
+---
+
+## Audit & Security Endpoints
+
+LibreFang maintains a Merkle hash chain audit trail for all security-relevant operations. These endpoints allow inspection and verification of the audit log integrity.
+
+### GET /api/audit/recent
+
+Retrieve recent audit log entries.
+
+**Query Parameters:**
+- `limit` (optional): Number of entries to return (default: 50, max: 500)
+
+**Response** `200 OK`:
+
+```json
+{
+  "entries": [
+    {
+      "id": 1042,
+      "timestamp": "2025-01-15T10:30:00Z",
+      "event_type": "agent_spawned",
+      "agent_id": "a1b2c3d4-...",
+      "details": "Agent 'coder' spawned with model groq/llama-3.3-70b-versatile",
+      "hash": "a1b2c3d4e5f6...",
+      "prev_hash": "f6e5d4c3b2a1..."
+    }
+  ],
+  "total": 1042
+}
+```
+
+### GET /api/audit/verify
+
+Verify the integrity of the Merkle hash chain audit trail. Walks the entire chain and reports any broken links.
+
+**Response** `200 OK`:
+
+```json
+{
+  "status": "valid",
+  "chain_length": 1042,
+  "first_entry": "2025-01-10T08:00:00Z",
+  "last_entry": "2025-01-15T10:30:00Z"
+}
+```
+
+### GET /api/security
+
+Security status overview showing the state of all 16 security systems.
+
+**Response** `200 OK`:
+
+```json
+{
+  "security_systems": {
+    "merkle_audit_trail": "active",
+    "taint_tracking": "active",
+    "wasm_dual_metering": "active",
+    "security_headers": "active",
+    "health_redaction": "active",
+    "subprocess_sandbox": "active",
+    "manifest_signing": "active",
+    "gcra_rate_limiter": "active",
+    "secret_zeroization": "active",
+    "path_traversal_prevention": "active",
+    "ssrf_protection": "active",
+    "capability_inheritance_validation": "active",
+    "ofp_hmac_auth": "active",
+    "prompt_injection_scanning": "active",
+    "loop_guard": "active",
+    "session_repair": "active"
+  },
+  "total_systems": 16,
+  "all_active": true
+}
+```
+
+### GET /api/logs/stream
+
+SSE stream of structured log lines emitted by the daemon. Useful for live dashboards and log tailing.
+
+---
+
+## Usage & Analytics Endpoints
+
+Track token usage, costs, and model utilization across all agents. Powered by the metering engine with cost estimation from the model catalog.
+
+### GET /api/usage
+
+Get overall usage statistics.
+
+**Query Parameters:**
+- `period` (optional): Time period (`hour`, `day`, `week`, `month`; default: `day`)
+
+**Response** `200 OK`:
+
+```json
+{
+  "period": "day",
+  "total_input_tokens": 125000,
+  "total_output_tokens": 87000,
+  "total_cost_usd": 0.42,
+  "request_count": 156,
+  "active_agents": 5
+}
+```
+
+### GET /api/usage/summary
+
+Get a high-level usage summary with quota information.
+
+**Response** `200 OK`:
+
+```json
+{
+  "today": {
+    "input_tokens": 125000,
+    "output_tokens": 87000,
+    "cost_usd": 0.42,
+    "requests": 156
+  },
+  "quota": {
+    "hourly_token_limit": 1000000,
+    "hourly_tokens_used": 45000,
+    "hourly_reset_at": "2025-01-15T11:00:00Z"
+  }
+}
+```
+
+### GET /api/usage/by-model
+
+Get usage breakdown by model.
+
+**Response** `200 OK`:
+
+```json
+{
+  "models": [
+    {
+      "model": "llama-3.3-70b-versatile",
+      "provider": "groq",
+      "input_tokens": 80000,
+      "output_tokens": 55000,
+      "cost_usd": 0.09,
+      "request_count": 120
+    }
+  ]
+}
+```
+
+### GET /api/usage/daily
+
+Get per-day usage breakdown for charting and reporting.
+
+---
+
+## Budget Endpoints
+
+Set spending limits per agent and globally to prevent runaway costs.
+
+### GET /api/budget
+
+Get global budget status and spending summary.
+
+**Response** `200 OK`:
+
+```json
+{
+  "daily_limit_usd": 10.0,
+  "monthly_limit_usd": 200.0,
+  "today_spent_usd": 1.42,
+  "month_spent_usd": 38.50,
+  "status": "ok"
+}
+```
+
+### PUT /api/budget
+
+Update global budget limits.
+
+**Request Body**:
+
+```json
+{
+  "daily_limit_usd": 15.0,
+  "monthly_limit_usd": 300.0
+}
+```
+
+### GET /api/budget/agents
+
+Get a ranked list of agents by their current spending.
+
+**Response** `200 OK`:
+
+```json
+[
+  {
+    "agent_id": "a1b2c3d4-...",
+    "agent_name": "coder",
+    "total_cost_usd": 0.87,
+    "today_cost_usd": 0.12
+  }
+]
+```
+
+### GET /api/budget/agents/&lbrace;id&rbrace;
+
+Get budget status and spending detail for a specific agent.
+
+### PUT /api/budget/agents/&lbrace;id&rbrace;
+
+Set or update budget limits for a specific agent.
+
+**Request Body**:
+
+```json
+{
+  "daily_limit_usd": 2.0,
+  "monthly_limit_usd": 40.0
+}
+```
+
+---
+
+## Webhooks Endpoints
+
+### GET /api/webhooks/events
+
+List event webhook subscriptions (inbound events that trigger agent actions).
+
+### POST /api/webhooks/events
+
+Create a new event webhook subscription.
+
+**Request Body**:
+
+```json
+{
+  "event_type": "agent_spawned",
+  "url": "https://my-service.example.com/events",
+  "secret": "webhook-secret"
+}
+```
+
+### PUT /api/webhooks/events/&lbrace;id&rbrace;
+
+Update an event webhook subscription.
+
+### DELETE /api/webhooks/events/&lbrace;id&rbrace;
+
+Delete an event webhook subscription.
+
+### GET /api/webhooks
+
+List outbound webhook configurations.
+
+### POST /api/webhooks
+
+Create a new outbound webhook.
+
+### GET /api/webhooks/&lbrace;id&rbrace;
+
+Get a specific outbound webhook configuration.
+
+### PUT /api/webhooks/&lbrace;id&rbrace;
+
+Update an outbound webhook configuration.
+
+### DELETE /api/webhooks/&lbrace;id&rbrace;
+
+Delete an outbound webhook.
+
+### POST /api/webhooks/&lbrace;id&rbrace;/test
+
+Send a test payload to an outbound webhook and return the result.
+
+### POST /api/hooks/wake
+
+Webhook trigger endpoint (unversioned). Wakes an agent from an external HTTP call.
+
+### POST /api/hooks/agent
+
+Webhook trigger endpoint (unversioned). Sends a message to an agent from an external HTTP caller.
+
+---
+
+## Integrations Endpoints
+
+Connect LibreFang to external services (GitHub, Jira, Notion, Google Drive, etc.).
+
+### GET /api/integrations
+
+List all connected integrations and their status.
+
+### GET /api/integrations/available
+
+List all integrations available for installation.
+
+### GET /api/integrations/health
+
+Get health status for all connected integrations.
+
+### POST /api/integrations/add
+
+Add and connect a new integration.
+
+**Request Body**:
+
+```json
+{
+  "type": "github",
+  "token": "ghp_...",
+  "name": "my-github"
+}
+```
+
+### POST /api/integrations/reload
+
+Reload all integrations from config.
+
+### GET /api/integrations/&lbrace;id&rbrace;
+
+Get details for a specific integration.
+
+### DELETE /api/integrations/&lbrace;id&rbrace;
+
+Remove an integration.
+
+### POST /api/integrations/&lbrace;id&rbrace;/reconnect
+
+Re-authenticate and reconnect a disconnected integration.
+
+---
+
+## Pairing Endpoints
+
+Pair mobile apps or secondary devices to the daemon for remote control and notifications.
+
+### POST /api/pairing/request
+
+Initiate a pairing request. Returns a pairing code for the user to enter on the remote device.
+
+**Response** `200 OK`:
+
+```json
+{
+  "pairing_code": "XK9-47B",
+  "expires_at": "2025-01-15T10:35:00Z"
+}
+```
+
+### POST /api/pairing/complete
+
+Complete pairing by confirming the code from the remote device.
+
+### POST /api/pairing/notify
+
+Send a push notification to all paired devices.
+
+### GET /api/pairing/devices
+
+List all paired devices.
+
+### DELETE /api/pairing/devices/&lbrace;id&rbrace;
+
+Remove a paired device.
+
+---
+
+## OAuth / OIDC Endpoints
+
+External authentication via OAuth 2.0 and OpenID Connect providers. Enables single sign-on for the WebChat dashboard.
+
+### GET /api/auth/providers
+
+List configured OAuth/OIDC providers (e.g., Google, GitHub, Authentik).
+
+### GET /api/auth/login
+
+Redirect to the default configured OAuth provider's login page.
+
+### GET /api/auth/login/&lbrace;provider&rbrace;
+
+Redirect to a specific provider's OAuth login page.
+
+### GET /api/auth/callback
+
+OAuth callback handler (GET). Receives the authorization code from the provider.
+
+### POST /api/auth/callback
+
+OAuth callback handler (POST). Handles form-post style callbacks.
+
+### GET /api/auth/userinfo
+
+Return the authenticated user's profile from the OIDC userinfo endpoint.
+
+### POST /api/auth/introspect
+
+Token introspection endpoint. Validates and returns metadata for an OAuth access token.
+
+---
+
+## Comms Endpoints
+
+The comms layer manages inter-agent communication, event routing, and messaging topology.
+
+### GET /api/comms/topology
+
+Get the current communication topology (agent graph, routing table).
+
+### GET /api/comms/events
+
+Get recent communication events (messages routed between agents and channels).
+
+### GET /api/comms/events/stream
+
+SSE stream of live communication events as they occur.
+
+### POST /api/comms/send
+
+Send a message directly through the comms layer to an agent or channel.
+
+**Request Body**:
+
+```json
+{
+  "to": "agent:a1b2c3d4-...",
+  "content": "Please review the latest PR",
+  "from": "system"
+}
+```
+
+### POST /api/comms/task
+
+Dispatch a task via the comms layer (routed to the appropriate agent).
+
+---
+
+## Approvals Endpoints
+
+Human-in-the-loop approval workflow. Agents can request approval before executing sensitive actions.
+
+### GET /api/approvals
+
+List pending and recent approval requests.
+
+### POST /api/approvals
+
+Create an approval request (typically called by an agent tool).
+
+**Request Body**:
+
+```json
+{
+  "agent_id": "a1b2c3d4-...",
+  "action": "delete_file",
+  "description": "Agent wants to delete /important/config.toml",
+  "payload": {"path": "/important/config.toml"}
+}
+```
+
+### GET /api/approvals/&lbrace;id&rbrace;
+
+Get details for a specific approval request.
+
+### POST /api/approvals/&lbrace;id&rbrace;/approve
+
+Approve a pending request. The waiting agent proceeds with the action.
+
+### POST /api/approvals/&lbrace;id&rbrace;/reject
+
+Reject a pending request. The waiting agent receives a rejection and halts the action.
+
+---
+
+## Network & Peers Endpoints
+
+### GET /api/peers
+
+List OFP (LibreFang Protocol) wire peers and their connection status.
+
+**Response** `200 OK`:
+
+```json
+{
+  "peers": [
+    {
+      "node_id": "peer-1",
+      "address": "192.168.1.100:4000",
+      "state": "connected",
+      "authenticated": true,
+      "last_seen": "2025-01-15T10:30:00Z"
+    }
+  ]
+}
+```
+
+### GET /api/peers/&lbrace;id&rbrace;
+
+Get details for a specific OFP peer.
+
+### GET /api/network/status
+
+Get the overall OFP network status (node ID, connected peers, message throughput).
+
+---
+

@@ -15,7 +15,7 @@
 
 use librefang_types::config::ProxyConfig;
 use reqwest::Proxy;
-use std::sync::OnceLock;
+use std::sync::{OnceLock, RwLock};
 
 // ── TLS configuration ──────────────────────────────────────────────────
 
@@ -50,60 +50,70 @@ pub fn tls_config() -> rustls::ClientConfig {
 
 // ── Proxy configuration ────────────────────────────────────────────────
 
-/// Global proxy configuration, set once at kernel boot.
-static GLOBAL_PROXY: OnceLock<ProxyConfig> = OnceLock::new();
+/// Global proxy configuration, updated on boot and hot-reload.
+static GLOBAL_PROXY: RwLock<Option<ProxyConfig>> = RwLock::new(None);
 
-/// Initialise the global proxy configuration.
+/// Updates the global proxy configuration.
 ///
-/// Must be called once during daemon startup (before any HTTP client is built).
-/// Subsequent calls are silently ignored.
+/// Can be called multiple times (e.g. during hot-reload). Previous values
+/// are overwritten.
 ///
 /// Config-file values are also exported as environment variables so that
 /// crates which build their own `reqwest::Client` (and thus rely on reqwest's
 /// built-in env-var detection) automatically pick up the proxy settings.
+///
 /// # Thread safety
 ///
-/// This function calls `std::env::set_var` which is inherently racy in a
-/// multi-threaded process. It **must** be called exactly once during
-/// single-threaded daemon bootstrap, before the Tokio runtime spawns any
-/// worker threads. The `OnceLock::set` at the end guarantees that only the
-/// first call takes effect; subsequent calls are silently ignored.
+/// `std::env::set_var` is inherently racy in a multi-threaded process.
+/// Environment variables are only set during the initial bootstrap call
+/// (when `GLOBAL_PROXY` is still `None`), which happens before the Tokio
+/// runtime spawns worker threads. Subsequent calls (hot-reload) update
+/// `GLOBAL_PROXY` only, avoiding the unsound `set_var` in a
+/// multi-threaded context.
 pub fn init_proxy(cfg: ProxyConfig) {
-    // Export config values as env vars for crates that build reqwest clients
-    // without going through our builder (e.g. librefang-channels).
-    if let Some(ref url) = cfg.http_proxy {
-        if !url.is_empty() {
-            if is_valid_proxy_url(url) {
-                std::env::set_var("HTTP_PROXY", url);
-                std::env::set_var("http_proxy", url);
-            } else {
-                tracing::warn!(
-                    "http_proxy has invalid scheme (expected http://, https://, socks5://, or socks5h://): {}",
-                    librefang_types::config::redact_proxy_url(url)
-                );
+    // Only export env vars during initial bootstrap (single-threaded context).
+    // During hot-reload GLOBAL_PROXY already has a value, and calling
+    // `std::env::set_var` from a multi-threaded tokio runtime is unsound.
+    let is_initial = GLOBAL_PROXY.read().map(|g| g.is_none()).unwrap_or(true);
+
+    if is_initial {
+        if let Some(ref url) = cfg.http_proxy {
+            if !url.is_empty() {
+                if is_valid_proxy_url(url) {
+                    std::env::set_var("HTTP_PROXY", url);
+                    std::env::set_var("http_proxy", url);
+                } else {
+                    tracing::warn!(
+                        "http_proxy has invalid scheme (expected http://, https://, socks5://, or socks5h://): {}",
+                        librefang_types::config::redact_proxy_url(url)
+                    );
+                }
+            }
+        }
+        if let Some(ref url) = cfg.https_proxy {
+            if !url.is_empty() {
+                if is_valid_proxy_url(url) {
+                    std::env::set_var("HTTPS_PROXY", url);
+                    std::env::set_var("https_proxy", url);
+                } else {
+                    tracing::warn!(
+                        "https_proxy has invalid scheme (expected http://, https://, socks5://, or socks5h://): {}",
+                        librefang_types::config::redact_proxy_url(url)
+                    );
+                }
+            }
+        }
+        if let Some(ref no) = cfg.no_proxy {
+            if !no.is_empty() {
+                std::env::set_var("NO_PROXY", no);
+                std::env::set_var("no_proxy", no);
             }
         }
     }
-    if let Some(ref url) = cfg.https_proxy {
-        if !url.is_empty() {
-            if is_valid_proxy_url(url) {
-                std::env::set_var("HTTPS_PROXY", url);
-                std::env::set_var("https_proxy", url);
-            } else {
-                tracing::warn!(
-                    "https_proxy has invalid scheme (expected http://, https://, socks5://, or socks5h://): {}",
-                    librefang_types::config::redact_proxy_url(url)
-                );
-            }
-        }
+
+    if let Ok(mut guard) = GLOBAL_PROXY.write() {
+        *guard = Some(cfg);
     }
-    if let Some(ref no) = cfg.no_proxy {
-        if !no.is_empty() {
-            std::env::set_var("NO_PROXY", no);
-            std::env::set_var("no_proxy", no);
-        }
-    }
-    let _ = GLOBAL_PROXY.set(cfg);
 }
 
 /// Check if a proxy URL has a valid scheme.
@@ -115,13 +125,12 @@ fn is_valid_proxy_url(url: &str) -> bool {
 }
 
 /// Return the active proxy config (global or default-empty).
-fn active_proxy() -> &'static ProxyConfig {
-    static EMPTY: ProxyConfig = ProxyConfig {
-        http_proxy: None,
-        https_proxy: None,
-        no_proxy: None,
-    };
-    GLOBAL_PROXY.get().unwrap_or(&EMPTY)
+fn active_proxy() -> ProxyConfig {
+    GLOBAL_PROXY
+        .read()
+        .ok()
+        .and_then(|g| g.clone())
+        .unwrap_or_default()
 }
 
 // ── Client builders ────────────────────────────────────────────────────
@@ -136,7 +145,7 @@ fn active_proxy() -> &'static ProxyConfig {
 /// - `init_proxy()` also exports config values as env vars, ensuring consistency
 ///   for crates that don't use this builder (e.g. `librefang-channels`).
 pub fn proxied_client_builder() -> reqwest::ClientBuilder {
-    build_http_client(active_proxy())
+    build_http_client(&active_proxy())
 }
 
 /// Convenience: build a ready-to-use proxy-aware [`reqwest::Client`].

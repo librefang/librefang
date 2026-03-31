@@ -68,8 +68,6 @@ pub struct DingTalkAdapter {
     access_token: Zeroizing<String>,
     /// SECURITY: Signing secret for HMAC-SHA256 verification.
     secret: Zeroizing<String>,
-    /// Port for the incoming webhook HTTP server.
-    webhook_port: u16,
     // -- Stream mode fields --
     /// SECURITY: Client ID (AppKey) for stream mode.
     client_id: Zeroizing<String>,
@@ -91,13 +89,12 @@ impl DingTalkAdapter {
     /// * `access_token` - Robot access token from DingTalk.
     /// * `secret` - Signing secret for request verification.
     /// * `webhook_port` - Local port to listen for DingTalk callbacks.
-    pub fn new(access_token: String, secret: String, webhook_port: u16) -> Self {
+    pub fn new(access_token: String, secret: String, _webhook_port: u16) -> Self {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         Self {
             mode: DingTalkMode::Webhook,
             access_token: Zeroizing::new(access_token),
             secret: Zeroizing::new(secret),
-            webhook_port,
             client_id: Zeroizing::new(String::new()),
             client_secret: Zeroizing::new(String::new()),
             client: crate::http_client::new_client(),
@@ -118,7 +115,6 @@ impl DingTalkAdapter {
             mode: DingTalkMode::Stream,
             access_token: Zeroizing::new(String::new()),
             secret: Zeroizing::new(String::new()),
-            webhook_port: 0,
             client_id: Zeroizing::new(client_id),
             client_secret: Zeroizing::new(client_secret),
             client: crate::http_client::new_client(),
@@ -366,142 +362,6 @@ impl DingTalkAdapter {
     // Start methods
     // -----------------------------------------------------------------------
 
-    /// Start the webhook-based listener.
-    fn start_webhook(&self, tx: mpsc::Sender<ChannelMessage>) {
-        let port = self.webhook_port;
-        let secret = self.secret.clone();
-        let mut shutdown_rx = self.shutdown_rx.clone();
-        let account_id = Arc::new(self.account_id.clone());
-
-        info!("DingTalk adapter starting webhook server on port {port}");
-
-        tokio::spawn(async move {
-            let tx_shared = Arc::new(tx);
-            let secret_shared = Arc::new(secret);
-
-            let app = axum::Router::new().route(
-                "/",
-                axum::routing::post({
-                    let tx = Arc::clone(&tx_shared);
-                    let secret = Arc::clone(&secret_shared);
-                    let account_id = Arc::clone(&account_id);
-                    move |headers: axum::http::HeaderMap,
-                          body: axum::extract::Json<serde_json::Value>| {
-                        let tx = Arc::clone(&tx);
-                        let secret = Arc::clone(&secret);
-                        let account_id = Arc::clone(&account_id);
-                        async move {
-                            // Extract timestamp and sign from headers
-                            let timestamp_str = headers
-                                .get("timestamp")
-                                .and_then(|v| v.to_str().ok())
-                                .unwrap_or("0");
-                            let signature = headers
-                                .get("sign")
-                                .and_then(|v| v.to_str().ok())
-                                .unwrap_or("");
-
-                            // Verify signature
-                            if let Ok(ts) = timestamp_str.parse::<i64>() {
-                                if !DingTalkAdapter::verify_signature(&secret, ts, signature) {
-                                    warn!("DingTalk: invalid signature");
-                                    return axum::http::StatusCode::FORBIDDEN;
-                                }
-
-                                // Check timestamp freshness (1 hour window)
-                                let now = Utc::now().timestamp_millis();
-                                if (now - ts).unsigned_abs() > 3_600_000 {
-                                    warn!("DingTalk: stale timestamp");
-                                    return axum::http::StatusCode::FORBIDDEN;
-                                }
-                            }
-
-                            if let Some((text, sender_id, sender_nick, conv_id, is_group)) =
-                                DingTalkAdapter::parse_callback(&body)
-                            {
-                                let content = if text.starts_with('/') {
-                                    let parts: Vec<&str> = text.splitn(2, ' ').collect();
-                                    let cmd = parts[0].trim_start_matches('/');
-                                    let args: Vec<String> = parts
-                                        .get(1)
-                                        .map(|a| a.split_whitespace().map(String::from).collect())
-                                        .unwrap_or_default();
-                                    ChannelContent::Command {
-                                        name: cmd.to_string(),
-                                        args,
-                                    }
-                                } else {
-                                    ChannelContent::Text(text)
-                                };
-
-                                let mut msg = ChannelMessage {
-                                    channel: ChannelType::Custom("dingtalk".to_string()),
-                                    platform_message_id: format!(
-                                        "dt-{}",
-                                        Utc::now().timestamp_millis()
-                                    ),
-                                    sender: ChannelUser {
-                                        platform_id: sender_id,
-                                        display_name: sender_nick,
-                                        librefang_user: None,
-                                    },
-                                    content,
-                                    target_agent: None,
-                                    timestamp: Utc::now(),
-                                    is_group,
-                                    thread_id: None,
-                                    metadata: {
-                                        let mut m = HashMap::new();
-                                        m.insert(
-                                            "conversation_id".to_string(),
-                                            serde_json::Value::String(conv_id),
-                                        );
-                                        m
-                                    },
-                                };
-
-                                // Inject account_id for multi-bot routing
-                                if let Some(ref aid) = *account_id {
-                                    msg.metadata
-                                        .insert("account_id".to_string(), serde_json::json!(aid));
-                                }
-                                let _ = tx.send(msg).await;
-                            }
-
-                            axum::http::StatusCode::OK
-                        }
-                    }
-                }),
-            );
-
-            let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
-            info!("DingTalk webhook server listening on {addr}");
-
-            let listener = match tokio::net::TcpListener::bind(addr).await {
-                Ok(l) => l,
-                Err(e) => {
-                    warn!("DingTalk: failed to bind port {port}: {e}");
-                    return;
-                }
-            };
-
-            let server = axum::serve(listener, app);
-
-            tokio::select! {
-                result = server => {
-                    if let Err(e) = result {
-                        warn!("DingTalk webhook server error: {e}");
-                    }
-                }
-                _ = shutdown_rx.changed() => {
-                    info!("DingTalk adapter shutting down");
-                }
-            }
-
-            info!("DingTalk webhook server stopped");
-        });
-    }
-
     /// Start the stream-based WebSocket listener.
     fn start_stream(&self, tx: mpsc::Sender<ChannelMessage>) {
         let client = self.client.clone();
@@ -720,20 +580,144 @@ impl ChannelAdapter for DingTalkAdapter {
         ChannelType::Custom("dingtalk".to_string())
     }
 
+    async fn create_webhook_routes(
+        &self,
+    ) -> Option<(
+        axum::Router,
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+    )> {
+        if self.mode != DingTalkMode::Webhook {
+            return None;
+        }
+
+        let (tx, rx) = mpsc::channel::<ChannelMessage>(256);
+        let tx = Arc::new(tx);
+        let secret = Arc::new(self.secret.clone());
+        let account_id = Arc::new(self.account_id.clone());
+
+        let app = axum::Router::new().route(
+            "/webhook",
+            axum::routing::post({
+                let tx = Arc::clone(&tx);
+                let secret = Arc::clone(&secret);
+                let account_id = Arc::clone(&account_id);
+                move |headers: axum::http::HeaderMap,
+                      body: axum::extract::Json<serde_json::Value>| {
+                    let tx = Arc::clone(&tx);
+                    let secret = Arc::clone(&secret);
+                    let account_id = Arc::clone(&account_id);
+                    async move {
+                        // Extract timestamp and sign from headers
+                        let timestamp_str = headers
+                            .get("timestamp")
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or("0");
+                        let signature = headers
+                            .get("sign")
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or("");
+
+                        // Verify signature
+                        if let Ok(ts) = timestamp_str.parse::<i64>() {
+                            if !DingTalkAdapter::verify_signature(&secret, ts, signature) {
+                                warn!("DingTalk: invalid signature");
+                                return axum::http::StatusCode::FORBIDDEN;
+                            }
+
+                            // Check timestamp freshness (1 hour window)
+                            let now = Utc::now().timestamp_millis();
+                            if (now - ts).unsigned_abs() > 3_600_000 {
+                                warn!("DingTalk: stale timestamp");
+                                return axum::http::StatusCode::FORBIDDEN;
+                            }
+                        }
+
+                        if let Some((text, sender_id, sender_nick, conv_id, is_group)) =
+                            DingTalkAdapter::parse_callback(&body)
+                        {
+                            let content = if text.starts_with('/') {
+                                let parts: Vec<&str> = text.splitn(2, ' ').collect();
+                                let cmd = parts[0].trim_start_matches('/');
+                                let args: Vec<String> = parts
+                                    .get(1)
+                                    .map(|a| a.split_whitespace().map(String::from).collect())
+                                    .unwrap_or_default();
+                                ChannelContent::Command {
+                                    name: cmd.to_string(),
+                                    args,
+                                }
+                            } else {
+                                ChannelContent::Text(text)
+                            };
+
+                            let mut msg = ChannelMessage {
+                                channel: ChannelType::Custom("dingtalk".to_string()),
+                                platform_message_id: format!(
+                                    "dt-{}",
+                                    Utc::now().timestamp_millis()
+                                ),
+                                sender: ChannelUser {
+                                    platform_id: sender_id,
+                                    display_name: sender_nick,
+                                    librefang_user: None,
+                                },
+                                content,
+                                target_agent: None,
+                                timestamp: Utc::now(),
+                                is_group,
+                                thread_id: None,
+                                metadata: {
+                                    let mut m = HashMap::new();
+                                    m.insert(
+                                        "conversation_id".to_string(),
+                                        serde_json::Value::String(conv_id),
+                                    );
+                                    m
+                                },
+                            };
+
+                            // Inject account_id for multi-bot routing
+                            if let Some(ref aid) = *account_id {
+                                msg.metadata
+                                    .insert("account_id".to_string(), serde_json::json!(aid));
+                            }
+                            let _ = tx.send(msg).await;
+                        }
+
+                        axum::http::StatusCode::OK
+                    }
+                }
+            }),
+        );
+
+        info!("DingTalk adapter registered webhook routes on shared server at /channels/dingtalk/webhook");
+
+        Some((
+            app,
+            Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)),
+        ))
+    }
+
     async fn start(
         &self,
     ) -> Result<
         Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
         Box<dyn std::error::Error + Send + Sync>,
     > {
-        let (tx, rx) = mpsc::channel::<ChannelMessage>(256);
-
         match self.mode {
-            DingTalkMode::Webhook => self.start_webhook(tx),
-            DingTalkMode::Stream => self.start_stream(tx),
+            DingTalkMode::Webhook => {
+                // When using the shared webhook server, create_webhook_routes() is called
+                // instead. This start() is only reached as a fallback (shouldn't happen
+                // in normal operation since BridgeManager prefers create_webhook_routes).
+                let (_tx, rx) = mpsc::channel::<ChannelMessage>(1);
+                Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
+            }
+            DingTalkMode::Stream => {
+                let (tx, rx) = mpsc::channel::<ChannelMessage>(256);
+                self.start_stream(tx);
+                Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
+            }
         }
-
-        Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
     }
 
     async fn send(

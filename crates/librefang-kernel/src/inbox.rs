@@ -76,13 +76,14 @@ pub fn inbox_status(config: &InboxConfig, home_dir: &Path) -> InboxStatus {
 ///
 /// The task runs until the kernel's supervisor signals shutdown.
 pub fn start_inbox_watcher(kernel: Arc<LibreFangKernel>) {
-    let config = kernel.config.inbox.clone();
+    let cfg = kernel.config.load();
+    let config = cfg.inbox.clone();
     if !config.enabled {
         debug!("Inbox watcher disabled");
         return;
     }
 
-    let inbox_dir = resolve_inbox_dir(&config, &kernel.config.home_dir);
+    let inbox_dir = resolve_inbox_dir(&config, &cfg.home_dir);
     let processed_dir = inbox_dir.join("processed");
 
     // Ensure directories exist

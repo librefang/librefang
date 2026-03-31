@@ -226,9 +226,11 @@ pub enum SearchProvider {
     Tavily,
     /// Perplexity AI search.
     Perplexity,
+    /// Jina AI search.
+    Jina,
     /// DuckDuckGo HTML (no API key needed).
     DuckDuckGo,
-    /// Auto-select based on available API keys (Tavily → Brave → Perplexity → DuckDuckGo).
+    /// Auto-select based on available API keys (Tavily → Brave → Jina → Perplexity → DuckDuckGo).
     #[default]
     Auto,
 }
@@ -241,14 +243,24 @@ pub struct WebConfig {
     pub search_provider: SearchProvider,
     /// Cache TTL in minutes (0 = disabled).
     pub cache_ttl_minutes: u64,
+    /// HTTP timeout for all web search requests (seconds).
+    /// Recommended: 15 for most providers, 30+ for Jina.
+    #[serde(default = "default_search_timeout_secs")]
+    pub timeout_secs: u64,
     /// Brave Search configuration.
     pub brave: BraveSearchConfig,
     /// Tavily Search configuration.
     pub tavily: TavilySearchConfig,
     /// Perplexity Search configuration.
     pub perplexity: PerplexitySearchConfig,
+    /// Jina Search configuration.
+    pub jina: JinaSearchConfig,
     /// Web fetch configuration.
     pub fetch: WebFetchConfig,
+}
+
+fn default_search_timeout_secs() -> u64 {
+    15
 }
 
 impl Default for WebConfig {
@@ -256,9 +268,11 @@ impl Default for WebConfig {
         Self {
             search_provider: SearchProvider::default(),
             cache_ttl_minutes: 15,
+            timeout_secs: default_search_timeout_secs(),
             brave: BraveSearchConfig::default(),
             tavily: TavilySearchConfig::default(),
             perplexity: PerplexitySearchConfig::default(),
+            jina: JinaSearchConfig::default(),
             fetch: WebFetchConfig::default(),
         }
     }
@@ -332,6 +346,37 @@ impl Default for PerplexitySearchConfig {
         Self {
             api_key_env: "PERPLEXITY_API_KEY".to_string(),
             model: "sonar".to_string(),
+        }
+    }
+}
+
+/// Jina Search API configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct JinaSearchConfig {
+    /// Env var name holding the API key.
+    pub api_key_env: String,
+    /// Maximum results to return.
+    pub max_results: usize,
+    /// Country/region code for geolocation (e.g., "US").
+    pub country: String,
+    /// Language code (e.g., "en").
+    pub language: String,
+    /// Use EU endpoint (https://eu.s.jina.ai/) instead of global.
+    pub use_eu_endpoint: bool,
+    /// Disable Jina server-side cache.
+    pub no_cache: bool,
+}
+
+impl Default for JinaSearchConfig {
+    fn default() -> Self {
+        Self {
+            api_key_env: "JINA_API_KEY".to_string(),
+            max_results: 5,
+            country: String::new(),
+            language: String::new(),
+            use_eu_endpoint: false,
+            no_cache: false,
         }
     }
 }
@@ -2939,6 +2984,15 @@ pub struct DefaultModelConfig {
     pub api_key_env: String,
     /// Optional base URL override.
     pub base_url: Option<String>,
+    /// Message timeout in seconds for CLI-based providers (e.g. Claude Code).
+    /// The timeout is inactivity-based: the process is killed only after this
+    /// many seconds of silence on stdout, not wall-clock time.
+    #[serde(default = "default_message_timeout_secs")]
+    pub message_timeout_secs: u64,
+}
+
+fn default_message_timeout_secs() -> u64 {
+    300
 }
 
 impl Default for DefaultModelConfig {
@@ -2948,6 +3002,7 @@ impl Default for DefaultModelConfig {
             model: String::new(),
             api_key_env: String::new(),
             base_url: None,
+            message_timeout_secs: default_message_timeout_secs(),
         }
     }
 }

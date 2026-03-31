@@ -1,0 +1,735 @@
+# 代理与工作流 API
+
+管理代理、工作流、触发器、调度、目标和定时任务的端点。
+
+## Agent 端点
+
+### GET /api/agents
+
+列出所有运行中的 Agent。
+
+**响应** `200 OK`：
+
+```json
+[
+  {
+    "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "name": "hello-world",
+    "state": "Running",
+    "created_at": "2025-01-15T10:30:00Z",
+    "model_provider": "groq",
+    "model_name": "llama-3.3-70b-versatile"
+  }
+]
+```
+
+### POST /api/agents
+
+从 TOML 清单创建新 Agent。
+
+**请求体**（JSON）：
+
+```json
+{
+  "manifest_toml": "name = \"my-agent\"\nversion = \"0.1.0\"\ndescription = \"Test agent\"\nauthor = \"me\"\nmodule = \"builtin:chat\"\n\n[model]\nprovider = \"groq\"\nmodel = \"llama-3.3-70b-versatile\"\n\n[capabilities]\ntools = [\"file_read\", \"web_fetch\"]\nmemory_read = [\"*\"]\nmemory_write = [\"self.*\"]\n"
+}
+```
+
+**响应** `201 Created`：
+
+```json
+{
+  "agent_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "name": "my-agent"
+}
+```
+
+### POST /api/agents/bulk
+
+批量创建多个 Agent。
+
+### DELETE /api/agents/bulk
+
+通过 ID 列表批量删除多个 Agent。
+
+### POST /api/agents/bulk/start
+
+同时启动多个已停止的 Agent。
+
+### POST /api/agents/bulk/stop
+
+同时停止多个运行中的 Agent。
+
+### GET /api/agents/&lbrace;id&rbrace;
+
+获取单个 Agent 的详细信息。
+
+**响应** `200 OK`：
+
+```json
+{
+  "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "name": "hello-world",
+  "state": "Running",
+  "created_at": "2025-01-15T10:30:00Z",
+  "session_id": "s1b2c3d4-...",
+  "model": {
+    "provider": "groq",
+    "model": "llama-3.3-70b-versatile"
+  },
+  "capabilities": {
+    "tools": ["file_read", "file_list", "web_fetch"],
+    "network": []
+  },
+  "description": "A friendly greeting agent",
+  "tags": []
+}
+```
+
+### DELETE /api/agents/&lbrace;id&rbrace;
+
+终止 Agent 并将其从注册表中移除。
+
+**响应** `200 OK`：
+
+```json
+{
+  "status": "killed",
+  "agent_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+}
+```
+
+### PATCH /api/agents/&lbrace;id&rbrace;
+
+部分更新 Agent 的字段。
+
+### PUT /api/agents/&lbrace;id&rbrace;/update
+
+在运行时更新 Agent 的配置。
+
+**请求体**：
+
+```json
+{
+  "description": "Updated description",
+  "system_prompt": "You are a specialized assistant.",
+  "tags": ["updated", "v2"]
+}
+```
+
+**响应** `200 OK`：
+
+```json
+{
+  "status": "updated",
+  "agent_id": "a1b2c3d4-..."
+}
+```
+
+### PUT /api/agents/&lbrace;id&rbrace;/mode
+
+设置 Agent 的运行模式。`Stable` 模式会固定当前模型并冻结技能注册表。`Normal` 模式恢复默认行为。
+
+**请求体**：
+
+```json
+{
+  "mode": "Stable"
+}
+```
+
+**响应** `200 OK`：
+
+```json
+{
+  "status": "updated",
+  "mode": "Stable",
+  "agent_id": "a1b2c3d4-..."
+}
+```
+
+### PATCH /api/agents/&lbrace;id&rbrace;/identity
+
+更新 Agent 的身份字段（名称、头像、人设）。
+
+### PATCH /api/agents/&lbrace;id&rbrace;/config
+
+部分更新 Agent 的配置对象。
+
+### POST /api/agents/&lbrace;id&rbrace;/clone
+
+将现有 Agent 克隆为新的 Agent，使用全新会话。
+
+### POST /api/agents/&lbrace;id&rbrace;/message
+
+向 Agent 发送消息并接收完整响应。
+
+**请求体**：
+
+```json
+{
+  "message": "What files are in the current directory?"
+}
+```
+
+**响应** `200 OK`：
+
+```json
+{
+  "response": "Here are the files in the current directory:\n- Cargo.toml\n- README.md\n...",
+  "input_tokens": 142,
+  "output_tokens": 87,
+  "iterations": 1
+}
+```
+
+### POST /api/agents/&lbrace;id&rbrace;/message/stream
+
+发送消息并以 Server-Sent Events 流的方式接收响应（参见 [SSE 流式传输](#sse-流式传输)）。
+
+### GET /api/agents/&lbrace;id&rbrace;/session
+
+获取 Agent 当前的对话历史。
+
+**响应** `200 OK`：
+
+```json
+{
+  "session_id": "s1b2c3d4-...",
+  "agent_id": "a1b2c3d4-...",
+  "message_count": 4,
+  "context_window_tokens": 1250,
+  "messages": [
+    {
+      "role": "User",
+      "content": "Hello"
+    },
+    {
+      "role": "Assistant",
+      "content": "Hello! How can I help you?"
+    }
+  ]
+}
+```
+
+### GET /api/agents/&lbrace;id&rbrace;/sessions
+
+列出 Agent 的所有会话。
+
+### POST /api/agents/&lbrace;id&rbrace;/sessions
+
+为 Agent 创建新会话。
+
+### POST /api/agents/&lbrace;id&rbrace;/sessions/&lbrace;session_id&rbrace;/switch
+
+切换 Agent 使用的会话。
+
+### GET /api/agents/&lbrace;id&rbrace;/sessions/by-label/&lbrace;label&rbrace;
+
+通过用户指定的标签查找会话。
+
+### DELETE /api/agents/&lbrace;id&rbrace;/history
+
+清除 Agent 的所有对话历史，但不创建新会话。
+
+### POST /api/agents/&lbrace;id&rbrace;/session/reset
+
+重置 Agent 的会话，清除所有对话历史。
+
+**响应** `200 OK`：
+
+```json
+{
+  "status": "reset",
+  "agent_id": "a1b2c3d4-...",
+  "new_session_id": "s5e6f7g8-..."
+}
+```
+
+### POST /api/agents/&lbrace;id&rbrace;/session/compact
+
+触发基于 LLM 的会话压缩。Agent 的对话将由 LLM 进行摘要，仅保留最近的消息和生成的摘要。
+
+**响应** `200 OK`：
+
+```json
+{
+  "status": "compacted",
+  "message": "Session compacted: 80 messages summarized, 20 kept"
+}
+```
+
+### POST /api/agents/&lbrace;id&rbrace;/stop
+
+取消 Agent 当前的 LLM 运行。中止任何正在进行的生成。
+
+**响应** `200 OK`：
+
+```json
+{
+  "status": "stopped",
+  "message": "Agent run cancelled"
+}
+```
+
+### PUT /api/agents/&lbrace;id&rbrace;/model
+
+在运行时切换 Agent 的 LLM 模型。
+
+**请求体**：
+
+```json
+{
+  "model": "claude-sonnet-4-20250514"
+}
+```
+
+**响应** `200 OK`：
+
+```json
+{
+  "status": "updated",
+  "model": "claude-sonnet-4-20250514"
+}
+```
+
+### GET /api/agents/&lbrace;id&rbrace;/tools
+
+获取 Agent 当前的工具列表。
+
+### PUT /api/agents/&lbrace;id&rbrace;/tools
+
+在运行时替换 Agent 的工具列表。
+
+### GET /api/agents/&lbrace;id&rbrace;/skills
+
+获取 Agent 当前的技能列表。
+
+### PUT /api/agents/&lbrace;id&rbrace;/skills
+
+在运行时替换 Agent 的技能列表。
+
+### GET /api/agents/&lbrace;id&rbrace;/mcp_servers
+
+获取附加到指定 Agent 的 MCP 服务器。
+
+### PUT /api/agents/&lbrace;id&rbrace;/mcp_servers
+
+设置附加到指定 Agent 的 MCP 服务器。
+
+### GET /api/agents/&lbrace;id&rbrace;/traces
+
+获取 Agent 的执行追踪（工具调用、LLM 迭代、耗时等）。
+
+### GET /api/agents/&lbrace;id&rbrace;/metrics
+
+获取 Agent 的运行时指标（Token 数量、延迟、错误率）。
+
+### GET /api/agents/&lbrace;id&rbrace;/logs
+
+获取 Agent 进程输出的最近日志行。
+
+### GET /api/agents/&lbrace;id&rbrace;/deliveries
+
+获取 Agent 从通道接收到的入站消息投递记录。
+
+### GET /api/agents/&lbrace;id&rbrace;/files
+
+列出 Agent 私有文件工作区中的文件。
+
+### GET /api/agents/&lbrace;id&rbrace;/files/&lbrace;filename&rbrace;
+
+从 Agent 的工作区下载指定文件。
+
+### PUT /api/agents/&lbrace;id&rbrace;/files/&lbrace;filename&rbrace;
+
+上传或覆盖 Agent 工作区中的文件。
+
+### DELETE /api/agents/&lbrace;id&rbrace;/files/&lbrace;filename&rbrace;
+
+从 Agent 的工作区中删除文件。
+
+### POST /api/agents/&lbrace;id&rbrace;/upload
+
+上传文件到 Agent 的工作区（multipart 表单数据）。
+
+### GET /api/uploads/&lbrace;file_id&rbrace;
+
+通过上传 ID 获取之前上传的文件。
+
+### GET /api/agents/&lbrace;id&rbrace;/ws
+
+用于实时双向聊天的 WebSocket 连接（参见 [WebSocket 协议](#websocket-协议)）。
+
+### GET /api/agents/&lbrace;id&rbrace;/memory/export
+
+将 Agent 的所有记忆条目导出为 JSON。
+
+### POST /api/agents/&lbrace;id&rbrace;/memory/import
+
+从 JSON 导入 Agent 的记忆条目。
+
+---
+
+## 工作流端点
+
+### GET /api/workflows
+
+列出所有已注册的工作流。
+
+**响应** `200 OK`：
+
+```json
+[
+  {
+    "id": "w1b2c3d4-...",
+    "name": "code-review-pipeline",
+    "description": "Automated code review workflow",
+    "steps": 3,
+    "created_at": "2025-01-15T10:30:00Z"
+  }
+]
+```
+
+### POST /api/workflows
+
+创建新的工作流定义。
+
+**请求体**（JSON）：
+
+```json
+{
+  "name": "code-review-pipeline",
+  "description": "Review code changes with multiple agents",
+  "steps": [
+    {
+      "name": "analyze",
+      "agent_name": "coder",
+      "prompt": "Analyze this code for potential issues: {&lbrace;input&rbrace;}",
+      "mode": "sequential",
+      "timeout_secs": 120,
+      "error_mode": "fail",
+      "output_var": "analysis"
+    }
+  ]
+}
+```
+
+**步骤配置选项：**
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `name` | string | 步骤名称 |
+| `agent_id` | string | Agent UUID（与 `agent_name` 二选一） |
+| `agent_name` | string | Agent 名称（与 `agent_id` 二选一） |
+| `prompt` | string | 提示词模板，支持 `{&lbrace;input&rbrace;}` 和 `{&lbrace;output_var&rbrace;}` 占位符 |
+| `mode` | string | `"sequential"`、`"fan_out"`、`"collect"`、`"conditional"`、`"loop"` |
+| `timeout_secs` | integer | 每步超时时间（默认：120） |
+| `error_mode` | string | `"fail"`、`"skip"`、`"retry"` |
+| `max_retries` | integer | 用于 `"retry"` 错误模式（默认：3） |
+| `output_var` | string | 存储输出的变量名，供后续步骤使用 |
+| `condition` | string | 用于 `"conditional"` 模式 |
+| `max_iterations` | integer | 用于 `"loop"` 模式（默认：5） |
+| `until` | string | 用于 `"loop"` 模式：停止条件 |
+
+**响应** `201 Created`：
+
+```json
+{
+  "workflow_id": "w1b2c3d4-..."
+}
+```
+
+### GET /api/workflows/&lbrace;id&rbrace;
+
+获取指定的工作流定义。
+
+### PUT /api/workflows/&lbrace;id&rbrace;
+
+更新已有的工作流定义。
+
+### DELETE /api/workflows/&lbrace;id&rbrace;
+
+删除工作流定义。
+
+### POST /api/workflows/&lbrace;id&rbrace;/run
+
+执行工作流。
+
+**请求体**：
+
+```json
+{
+  "input": "Review this pull request: ..."
+}
+```
+
+**响应** `200 OK`：
+
+```json
+{
+  "run_id": "r1b2c3d4-...",
+  "output": "Code review summary:\n- No critical issues found\n...",
+  "status": "completed"
+}
+```
+
+### GET /api/workflows/&lbrace;id&rbrace;/runs
+
+列出工作流的执行历史。
+
+**响应** `200 OK`：
+
+```json
+[
+  {
+    "id": "r1b2c3d4-...",
+    "workflow_name": "code-review-pipeline",
+    "state": "Completed",
+    "steps_completed": 3,
+    "started_at": "2025-01-15T10:30:00Z",
+    "completed_at": "2025-01-15T10:32:15Z"
+  }
+]
+```
+
+---
+
+## 触发器端点
+
+### GET /api/triggers
+
+列出所有触发器。可按 Agent 过滤。
+
+**查询参数：**
+- `agent_id`（可选）：按 Agent UUID 过滤
+
+**响应** `200 OK`：
+
+```json
+[
+  {
+    "id": "t1b2c3d4-...",
+    "agent_id": "a1b2c3d4-...",
+    "pattern": {"lifecycle": {}},
+    "prompt_template": "Event: {&lbrace;event&rbrace;}",
+    "enabled": true,
+    "fire_count": 5,
+    "max_fires": 0,
+    "created_at": "2025-01-15T10:30:00Z"
+  }
+]
+```
+
+### POST /api/triggers
+
+创建新的事件触发器。
+
+**请求体**：
+
+```json
+{
+  "agent_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "pattern": {
+    "agent_spawned": {
+      "name_pattern": "*"
+    }
+  },
+  "prompt_template": "A new agent was spawned: {&lbrace;event&rbrace;}. Review its capabilities.",
+  "max_fires": 0
+}
+```
+
+**支持的模式类型：**
+
+| 模式 | 说明 |
+|------|------|
+| `{"lifecycle": {}}` | 所有生命周期事件 |
+| `{"agent_spawned": {"name_pattern": "*"}}` | Agent 创建事件 |
+| `{"agent_terminated": {}}` | Agent 终止事件 |
+| `{"all": {}}` | 所有事件 |
+
+**响应** `201 Created`：
+
+```json
+{
+  "trigger_id": "t1b2c3d4-...",
+  "agent_id": "a1b2c3d4-..."
+}
+```
+
+### PUT /api/triggers/&lbrace;id&rbrace;
+
+更新已有触发器的配置。
+
+**请求体**：
+
+```json
+{
+  "prompt_template": "Updated template: {&lbrace;event&rbrace;}",
+  "enabled": false,
+  "max_fires": 10
+}
+```
+
+**响应** `200 OK`：
+
+```json
+{
+  "status": "updated",
+  "trigger_id": "t1b2c3d4-..."
+}
+```
+
+### DELETE /api/triggers/&lbrace;id&rbrace;
+
+删除触发器。
+
+**响应** `200 OK`：
+
+```json
+{
+  "status": "removed",
+  "trigger_id": "t1b2c3d4-..."
+}
+```
+
+---
+
+## 调度端点
+
+基于时间的 Agent 激活，使用 cron 表达式或间隔语法。
+
+### GET /api/schedules
+
+列出所有已配置的调度。
+
+### POST /api/schedules
+
+创建新的调度。
+
+**请求体**：
+
+```json
+{
+  "agent_id": "a1b2c3d4-...",
+  "cron": "0 9 * * 1-5",
+  "prompt": "Good morning! Summarize overnight events.",
+  "enabled": true
+}
+```
+
+### GET /api/schedules/&lbrace;id&rbrace;
+
+获取指定调度。
+
+### PUT /api/schedules/&lbrace;id&rbrace;
+
+更新调度。
+
+### DELETE /api/schedules/&lbrace;id&rbrace;
+
+删除调度。
+
+### POST /api/schedules/&lbrace;id&rbrace;/run
+
+立即触发调度执行（本次调用忽略其 cron 表达式）。
+
+---
+
+## 目标端点
+
+用于多步骤 Agent 目标的层级化目标追踪系统。
+
+### GET /api/goals
+
+列出所有目标。
+
+### POST /api/goals
+
+创建新目标。
+
+**请求体**：
+
+```json
+{
+  "title": "Migrate database to PostgreSQL",
+  "description": "Complete migration with zero downtime",
+  "agent_id": "a1b2c3d4-...",
+  "parent_id": null,
+  "due_at": "2025-02-01T00:00:00Z"
+}
+```
+
+### GET /api/goals/&lbrace;id&rbrace;
+
+获取指定目标。
+
+### PUT /api/goals/&lbrace;id&rbrace;
+
+更新目标（标题、状态、描述、截止日期）。
+
+### DELETE /api/goals/&lbrace;id&rbrace;
+
+删除目标及其所有子目标。
+
+### GET /api/goals/&lbrace;id&rbrace;/children
+
+列出指定父目标的子目标。
+
+---
+
+## 定时任务端点
+
+使用标准 cron 表达式语法调度周期性任务。
+
+### GET /api/cron/jobs
+
+列出所有定时任务。
+
+### POST /api/cron/jobs
+
+创建新的定时任务。
+
+**请求体**：
+
+```json
+{
+  "name": "daily-digest",
+  "schedule": "0 8 * * *",
+  "agent_id": "a1b2c3d4-...",
+  "prompt": "Prepare the daily digest of overnight activity.",
+  "enabled": true
+}
+```
+
+### GET /api/cron/jobs/&lbrace;id&rbrace;
+
+获取指定定时任务的详情。
+
+### PUT /api/cron/jobs/&lbrace;id&rbrace;
+
+更新定时任务（调度表达式、提示词、Agent 等）。
+
+### DELETE /api/cron/jobs/&lbrace;id&rbrace;
+
+删除定时任务。
+
+### PUT /api/cron/jobs/&lbrace;id&rbrace;/enable
+
+切换定时任务的启用状态。
+
+**请求体**：
+
+```json
+{
+  "enabled": false
+}
+```
+
+### GET /api/cron/jobs/&lbrace;id&rbrace;/status
+
+获取定时任务的上次执行结果和下次预定时间。
+
+---
+

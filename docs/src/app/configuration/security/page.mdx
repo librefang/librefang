@@ -1,0 +1,367 @@
+# Security & Auth Configuration
+
+Configuration for external authentication, Vertex AI, OAuth, auth profiles, tool policies, proactive memory, context engine, audit logging, health checks, plugins, prompt intelligence, and environment variables reference.
+
+---
+
+### `[external_auth]`
+
+Configures OAuth2/OIDC external authentication, allowing users to log in via identity providers like Google, GitHub, Okta, Auth0, or Keycloak.
+
+```toml
+[external_auth]
+enabled = true
+issuer_url = "https://accounts.google.com"
+client_id = "your-client-id.apps.googleusercontent.com"
+client_secret_env = "LIBREFANG_OAUTH_CLIENT_SECRET"
+redirect_url = "http://127.0.0.1:4545/api/auth/callback"
+scopes = ["openid", "profile", "email"]
+allowed_domains = ["example.com"]
+session_ttl_secs = 86400
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `false` | Enable external authentication. |
+| `issuer_url` | string | `""` | OIDC issuer URL for provider discovery at `{issuer_url}/.well-known/openid-configuration`. |
+| `client_id` | string | `""` | OAuth2 client ID registered with the identity provider. |
+| `client_secret_env` | string | `"LIBREFANG_OAUTH_CLIENT_SECRET"` | Env var name holding the OAuth2 client secret. |
+| `redirect_url` | string | `"http://127.0.0.1:4545/api/auth/callback"` | OAuth2 authorization code flow callback URL. |
+| `scopes` | list of strings | `["openid","profile","email"]` | OAuth2 scopes to request. |
+| `allowed_domains` | list of strings | `[]` | Restrict login to these email domains. Empty = allow all. |
+| `audience` | string | `""` | JWT audience claim to validate. Defaults to `client_id` if empty. |
+| `session_ttl_secs` | u64 | `86400` | Session token lifetime in seconds (24 hours default). |
+| `providers` | list of objects | `[]` | Multiple OIDC/OAuth2 providers. When configured, takes precedence over the single-provider fields above. |
+
+For multi-provider setups, use `[[external_auth.providers]]` with fields: `id`, `display_name`, `issuer_url`, `auth_url`, `token_url`, `userinfo_url`, `jwks_uri`, `client_id`, `client_secret_env`, `redirect_url`, `scopes`, `allowed_domains`, `audience`.
+
+---
+
+### `[vertex_ai]`
+
+Configures Google Cloud Vertex AI as an LLM provider.
+
+```toml
+[vertex_ai]
+project_id = "my-gcp-project"
+region = "us-central1"
+credentials_path = "/path/to/service-account.json"
+```
+
+Credentials are resolved in this order:
+1. `credentials_path` in config (JSON string or file path)
+2. `VERTEX_AI_SERVICE_ACCOUNT_JSON` env var
+3. `GOOGLE_APPLICATION_CREDENTIALS` env var (file path)
+4. `gcloud auth print-access-token` CLI fallback
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `project_id` | string or null | `null` | GCP project ID. Falls back to `VERTEX_AI_PROJECT_ID`, `GOOGLE_CLOUD_PROJECT`, or the `project_id` field in the service account JSON. |
+| `region` | string or null | `null` | GCP region for the Vertex AI endpoint. Falls back to `VERTEX_AI_REGION` or `GOOGLE_CLOUD_REGION` env var. Default: `"us-central1"`. |
+| `credentials_path` | string or null | `null` | Path to a GCP service account JSON key file, or the raw JSON string. |
+
+---
+
+### `[oauth]`
+
+Configures OAuth client IDs for PKCE (Proof Key for Code Exchange) flows used by the dashboard.
+
+```toml
+[oauth]
+google_client_id = "your-google-client-id.apps.googleusercontent.com"
+github_client_id = "your-github-app-client-id"
+microsoft_client_id = "your-azure-app-client-id"
+slack_client_id = "your-slack-app-client-id"
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `google_client_id` | string or null | `null` | Google OAuth2 client ID for PKCE flow. |
+| `github_client_id` | string or null | `null` | GitHub OAuth app client ID for PKCE flow. |
+| `microsoft_client_id` | string or null | `null` | Microsoft (Entra ID / Azure AD) OAuth application client ID. |
+| `slack_client_id` | string or null | `null` | Slack OAuth app client ID. |
+
+---
+
+### `[auth_profiles]`
+
+Configures multiple API key profiles per provider to enable key rotation when one key is rate-limited or exhausted.
+
+```toml
+[auth_profiles]
+anthropic = [
+  {name = "primary", api_key_env = "ANTHROPIC_API_KEY_1", priority = 0},
+  {name = "secondary", api_key_env = "ANTHROPIC_API_KEY_2", priority = 1},
+]
+openai = [
+  {name = "main", api_key_env = "OPENAI_API_KEY", priority = 0},
+]
+```
+
+The value is a map from provider name to a list of `AuthProfile` objects:
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `name` | string | *required* | Profile name (e.g., `"primary"`, `"secondary"`). |
+| `api_key_env` | string | *required* | Env var name holding the API key for this profile. |
+| `priority` | u32 | `0` | Priority for key selection. Lower value = preferred. |
+
+---
+
+### `[tool_policy]`
+
+Configures global tool access rules, groups, and recursion depth limits. References the `ToolPolicy` type.
+
+```toml
+[tool_policy]
+subagent_max_depth = 10
+subagent_max_concurrent = 5
+
+[[tool_policy.global_rules]]
+pattern = "shell_*"
+effect = "deny"
+
+[[tool_policy.groups]]
+name = "web_tools"
+tools = ["web_search", "web_fetch"]
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `agent_rules` | list of ToolPolicyRule | `[]` | Per-agent tool rules (highest priority, checked first). |
+| `global_rules` | list of ToolPolicyRule | `[]` | Global tool rules applied to all agents (checked after agent rules). |
+| `groups` | list of ToolGroup | `[]` | Named tool groups for reuse in rules. |
+| `subagent_max_depth` | u32 | `10` | Maximum subagent spawning depth. |
+| `subagent_max_concurrent` | u32 | `5` | Maximum concurrent subagents. |
+
+**ToolPolicyRule fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `pattern` | string | Glob pattern to match tool names (e.g., `"shell_*"`, `"web_*"`, `"mcp_github_*"`). |
+| `effect` | string | `"allow"` or `"deny"`. Deny-wins: if any deny rule matches, the tool is blocked regardless of allow rules. |
+
+**ToolGroup fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | Group name (e.g., `"web_tools"`, `"code_tools"`). |
+| `tools` | list of strings | Tool name patterns included in this group. |
+
+---
+
+### `[proactive_memory]`
+
+Configures proactive memory extraction (mem0-style automatic memory management). References the `ProactiveMemoryConfig` type.
+
+```toml
+[proactive_memory]
+enabled = true
+auto_memorize = true
+auto_retrieve = true
+max_retrieve = 10
+extraction_threshold = 0.7
+# extraction_model = "gpt-4o-mini"  # optional, enables LLM-powered extraction
+extract_categories = ["user_preference", "important_fact", "task_context", "relationship"]
+session_ttl_hours = 24
+duplicate_threshold = 0.5
+confidence_decay_rate = 0.01
+max_memories_per_agent = 1000
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `true` | Master toggle — when `false`, the entire proactive memory subsystem is disabled. |
+| `auto_memorize` | bool | `true` | Automatically extract and store memories after each agent execution. |
+| `auto_retrieve` | bool | `true` | Automatically retrieve relevant memories before each agent execution. |
+| `max_retrieve` | usize | `10` | Maximum number of memories to retrieve per query. |
+| `extraction_threshold` | f32 | `0.7` | Confidence threshold for near-duplicate detection (0.0–1.0). |
+| `extraction_model` | string or null | `null` | LLM model to use for extraction. If `null`, uses rule-based extraction. |
+| `extract_categories` | list of strings | `["user_preference", "important_fact", "task_context", "relationship"]` | Categories to extract from conversations. |
+| `session_ttl_hours` | u32 | `24` | Session memory TTL in hours. Memories older than this are cleaned up before each agent execution. |
+| `duplicate_threshold` | f32 | `0.5` | Similarity threshold for duplicate detection (0.0–1.0). Uses vector cosine similarity when embeddings are available, otherwise falls back to Jaccard word overlap. |
+| `confidence_decay_rate` | f64 | `0.01` | Confidence decay rate per day. Follows exponential decay: `conf × e^(−rate × days)`. Default of `0.01` takes ~70 days to halve. |
+| `max_memories_per_agent` | usize | `1000` | Maximum memories per agent. When exceeded, oldest/lowest-confidence entries are evicted. `0` = no cap. |
+
+---
+
+### `[context_engine]`
+
+Configures the pluggable context assembly engine that controls how agent memory is recalled and assembled into prompts.
+
+```toml
+[context_engine]
+engine = "default"
+# plugin = "qdrant-recall"    # resolves to ~/.librefang/plugins/qdrant-recall/
+
+[context_engine.hooks]
+# ingest = "~/.librefang/scripts/my_recall.py"
+# after_turn = "~/.librefang/scripts/my_indexer.py"
+
+[[context_engine.plugin_registries]]
+name = "Official"
+github_repo = "librefang/librefang-registry"
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `engine` | string | `"default"` | Built-in engine name. Currently only `"default"` is supported. |
+| `plugin` | string or null | `null` | Plugin name. Resolves to `~/.librefang/plugins/<name>/plugin.toml`. Takes precedence over manual `hooks` if set. |
+| `hooks.ingest` | string or null | `null` | Python script path for the `ingest` hook (called on new user message). |
+| `hooks.after_turn` | string or null | `null` | Python script path for the `after_turn` hook (called after each completed turn). |
+| `plugin_registries` | list of objects | Official registry | Plugin registries (GitHub `owner/repo`) to browse for installable plugins. |
+
+---
+
+### `[audit]`
+
+Configures audit log retention.
+
+```toml
+[audit]
+retention_days = 90
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `retention_days` | u32 | `90` | Number of days to retain audit log entries. `0` = unlimited retention. |
+
+---
+
+### `[health_check]`
+
+Configures periodic health checks for LLM providers.
+
+```toml
+[health_check]
+health_check_interval_secs = 60
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `health_check_interval_secs` | u64 | `60` | Interval in seconds between provider health checks. |
+
+---
+
+### `[plugins]`
+
+Configures additional plugin registries to search for installable context engine plugins.
+
+```toml
+[plugins]
+plugin_registries = ["acme-corp/librefang-plugins"]
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `plugin_registries` | list of strings | `[]` | Additional GitHub `owner/repo` plugin registries. Merged with `context_engine.plugin_registries`. |
+
+---
+
+### `[prompt_intelligence]`
+
+Configures prompt versioning and A/B experiment support. When enabled, LibreFang automatically tracks prompt version history and supports running A/B experiments to compare prompt variants. See the [Prompt Intelligence guide](/prompt-intelligence) for full documentation.
+
+```toml
+[prompt_intelligence]
+enabled = false
+hash_prompts = true
+max_versions_per_agent = 50
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `false` | Master toggle. When `false`, no prompt versions are tracked and experiments are skipped. |
+| `hash_prompts` | bool | `true` | Compute content hashes for prompt versions. |
+| `max_versions_per_agent` | u32 | `50` | Maximum prompt versions per agent. Oldest inactive versions are pruned when exceeded. |
+
+---
+
+## Environment Variables
+
+Complete table of all environment variables referenced by the configuration. None of these are read by the config file itself -- they are read at runtime by the kernel and channel adapters.
+
+### LLM Provider Keys
+
+| Variable | Used By | Description |
+|----------|---------|-------------|
+| `ANTHROPIC_API_KEY` | `[default_model]` | Anthropic API key (Claude models). |
+| `GEMINI_API_KEY` | Gemini driver | Google Gemini API key. Alias: `GOOGLE_API_KEY`. |
+| `OPENAI_API_KEY` | OpenAI-compat driver | OpenAI API key. |
+| `GROQ_API_KEY` | Groq provider | Groq API key (fast Llama inference). |
+| `DEEPSEEK_API_KEY` | DeepSeek provider | DeepSeek API key. |
+| `PERPLEXITY_API_KEY` | Perplexity provider / web search | Perplexity API key. |
+| `OPENROUTER_API_KEY` | OpenRouter provider | OpenRouter API key. |
+| `TOGETHER_API_KEY` | Together AI provider | Together AI API key. |
+| `MISTRAL_API_KEY` | Mistral provider | Mistral AI API key. |
+| `FIREWORKS_API_KEY` | Fireworks provider | Fireworks AI API key. |
+| `COHERE_API_KEY` | Cohere provider | Cohere API key. |
+| `AI21_API_KEY` | AI21 provider | AI21 Labs API key. |
+| `CEREBRAS_API_KEY` | Cerebras provider | Cerebras API key. |
+| `SAMBANOVA_API_KEY` | SambaNova provider | SambaNova API key. |
+| `HUGGINGFACE_API_KEY` | Hugging Face provider | Hugging Face Inference API key. |
+| `XAI_API_KEY` | xAI provider | xAI (Grok) API key. |
+| `REPLICATE_API_KEY` | Replicate provider | Replicate API key. |
+
+### Web Search Keys
+
+| Variable | Used By | Description |
+|----------|---------|-------------|
+| `BRAVE_API_KEY` | `[web.brave]` | Brave Search API key. |
+| `TAVILY_API_KEY` | `[web.tavily]` | Tavily Search API key. |
+| `PERPLEXITY_API_KEY` | `[web.perplexity]` | Perplexity Search API key (shared with LLM provider). |
+
+### Channel Tokens
+
+| Variable | Channel | Description |
+|----------|---------|-------------|
+| `TELEGRAM_BOT_TOKEN` | Telegram | Bot API token from @BotFather. |
+| `DISCORD_BOT_TOKEN` | Discord | Discord bot token. |
+| `SLACK_APP_TOKEN` | Slack | Slack app-level token (`xapp-`) for Socket Mode. |
+| `SLACK_BOT_TOKEN` | Slack | Slack bot token (`xoxb-`) for REST API. |
+| `WHATSAPP_ACCESS_TOKEN` | WhatsApp | WhatsApp Cloud API access token. |
+| `WHATSAPP_VERIFY_TOKEN` | WhatsApp | Webhook verification token. |
+| `MATRIX_ACCESS_TOKEN` | Matrix | Matrix homeserver access token. |
+| `EMAIL_PASSWORD` | Email | Email account password or app password. |
+| `TEAMS_APP_PASSWORD` | Teams | Azure Bot Framework app password. |
+| `MATTERMOST_TOKEN` | Mattermost | Mattermost bot token. |
+| `TWITCH_OAUTH_TOKEN` | Twitch | Twitch OAuth token. |
+| `ROCKETCHAT_TOKEN` | Rocket.Chat | Rocket.Chat auth token. |
+| `ZULIP_API_KEY` | Zulip | Zulip bot API key. |
+| `XMPP_PASSWORD` | XMPP | XMPP account password. |
+| `GOOGLE_CHAT_SERVICE_ACCOUNT` | Google Chat | Service account JSON key. |
+| `LINE_CHANNEL_SECRET` | LINE | LINE channel secret. |
+| `LINE_CHANNEL_ACCESS_TOKEN` | LINE | LINE channel access token. |
+| `VIBER_AUTH_TOKEN` | Viber | Viber Bot auth token. |
+| `MESSENGER_PAGE_TOKEN` | Messenger | Facebook page access token. |
+| `MESSENGER_VERIFY_TOKEN` | Messenger | Webhook verification token. |
+| `REDDIT_CLIENT_SECRET` | Reddit | Reddit app client secret. |
+| `REDDIT_PASSWORD` | Reddit | Reddit bot account password. |
+| `MASTODON_ACCESS_TOKEN` | Mastodon | Mastodon access token. |
+| `BLUESKY_APP_PASSWORD` | Bluesky | Bluesky app password. |
+| `FEISHU_APP_SECRET` | Feishu | Feishu/Lark app secret. |
+| `REVOLT_BOT_TOKEN` | Revolt | Revolt bot token. |
+| `NEXTCLOUD_TOKEN` | Nextcloud | Nextcloud Talk auth token. |
+| `GUILDED_BOT_TOKEN` | Guilded | Guilded bot token. |
+| `KEYBASE_PAPERKEY` | Keybase | Keybase paper key. |
+| `THREEMA_SECRET` | Threema | Threema Gateway API secret. |
+| `NOSTR_PRIVATE_KEY` | Nostr | Nostr private key (nsec or hex). |
+| `WEBEX_BOT_TOKEN` | Webex | Webex bot token. |
+| `PUMBLE_BOT_TOKEN` | Pumble | Pumble bot token. |
+| `FLOCK_BOT_TOKEN` | Flock | Flock bot token. |
+| `TWIST_TOKEN` | Twist | Twist API token. |
+| `MUMBLE_PASSWORD` | Mumble | Mumble server password. |
+| `DINGTALK_APP_KEY` | DingTalk | DingTalk App Key / Client ID (stream mode). |
+| `DINGTALK_APP_SECRET` | DingTalk | DingTalk App Secret / Client Secret (stream mode). |
+| `DINGTALK_ACCESS_TOKEN` | DingTalk | DingTalk webhook access token (webhook mode). |
+| `DINGTALK_SECRET` | DingTalk | DingTalk signing secret (webhook mode). |
+| `DISCOURSE_API_KEY` | Discourse | Discourse API key. |
+| `GITTER_TOKEN` | Gitter | Gitter auth token. |
+| `NTFY_TOKEN` | ntfy | ntfy auth token (optional for public topics). |
+| `GOTIFY_APP_TOKEN` | Gotify | Gotify app token (sending). |
+| `GOTIFY_CLIENT_TOKEN` | Gotify | Gotify client token (receiving). |
+| `WEBHOOK_SECRET` | Webhook | HMAC signing secret for webhook verification. |
+| `LINKEDIN_ACCESS_TOKEN` | LinkedIn | LinkedIn OAuth2 access token. |
+
+---
+

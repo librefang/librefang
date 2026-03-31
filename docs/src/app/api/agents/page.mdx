@@ -1,0 +1,735 @@
+# Agent & Workflow API
+
+Endpoints for managing agents, workflows, triggers, schedules, goals, and cron jobs.
+
+## Agent Endpoints
+
+### GET /api/agents
+
+List all running agents.
+
+**Response** `200 OK`:
+
+```json
+[
+  {
+    "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "name": "hello-world",
+    "state": "Running",
+    "created_at": "2025-01-15T10:30:00Z",
+    "model_provider": "groq",
+    "model_name": "llama-3.3-70b-versatile"
+  }
+]
+```
+
+### POST /api/agents
+
+Spawn a new agent from a TOML manifest.
+
+**Request Body** (JSON):
+
+```json
+{
+  "manifest_toml": "name = \"my-agent\"\nversion = \"0.1.0\"\ndescription = \"Test agent\"\nauthor = \"me\"\nmodule = \"builtin:chat\"\n\n[model]\nprovider = \"groq\"\nmodel = \"llama-3.3-70b-versatile\"\n\n[capabilities]\ntools = [\"file_read\", \"web_fetch\"]\nmemory_read = [\"*\"]\nmemory_write = [\"self.*\"]\n"
+}
+```
+
+**Response** `201 Created`:
+
+```json
+{
+  "agent_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "name": "my-agent"
+}
+```
+
+### POST /api/agents/bulk
+
+Bulk create multiple agents in a single request.
+
+### DELETE /api/agents/bulk
+
+Bulk delete multiple agents by ID list.
+
+### POST /api/agents/bulk/start
+
+Start multiple stopped agents simultaneously.
+
+### POST /api/agents/bulk/stop
+
+Stop multiple running agents simultaneously.
+
+### GET /api/agents/&lbrace;id&rbrace;
+
+Returns detailed information about a single agent.
+
+**Response** `200 OK`:
+
+```json
+{
+  "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "name": "hello-world",
+  "state": "Running",
+  "created_at": "2025-01-15T10:30:00Z",
+  "session_id": "s1b2c3d4-...",
+  "model": {
+    "provider": "groq",
+    "model": "llama-3.3-70b-versatile"
+  },
+  "capabilities": {
+    "tools": ["file_read", "file_list", "web_fetch"],
+    "network": []
+  },
+  "description": "A friendly greeting agent",
+  "tags": []
+}
+```
+
+### DELETE /api/agents/&lbrace;id&rbrace;
+
+Terminate an agent and remove it from the registry.
+
+**Response** `200 OK`:
+
+```json
+{
+  "status": "killed",
+  "agent_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+}
+```
+
+### PATCH /api/agents/&lbrace;id&rbrace;
+
+Partially update an agent's fields.
+
+### PUT /api/agents/&lbrace;id&rbrace;/update
+
+Update an agent's configuration at runtime.
+
+**Request Body**:
+
+```json
+{
+  "description": "Updated description",
+  "system_prompt": "You are a specialized assistant.",
+  "tags": ["updated", "v2"]
+}
+```
+
+**Response** `200 OK`:
+
+```json
+{
+  "status": "updated",
+  "agent_id": "a1b2c3d4-..."
+}
+```
+
+### PUT /api/agents/&lbrace;id&rbrace;/mode
+
+Set an agent's operating mode. `Stable` mode pins the current model and freezes the skill registry. `Normal` mode restores default behavior.
+
+**Request Body**:
+
+```json
+{
+  "mode": "Stable"
+}
+```
+
+**Response** `200 OK`:
+
+```json
+{
+  "status": "updated",
+  "mode": "Stable",
+  "agent_id": "a1b2c3d4-..."
+}
+```
+
+### PATCH /api/agents/&lbrace;id&rbrace;/identity
+
+Update an agent's identity fields (name, avatar, persona).
+
+### PATCH /api/agents/&lbrace;id&rbrace;/config
+
+Partially patch an agent's configuration object.
+
+### POST /api/agents/&lbrace;id&rbrace;/clone
+
+Clone an existing agent into a new one with a fresh session.
+
+### POST /api/agents/&lbrace;id&rbrace;/message
+
+Send a message to an agent and receive the complete response.
+
+**Request Body**:
+
+```json
+{
+  "message": "What files are in the current directory?"
+}
+```
+
+**Response** `200 OK`:
+
+```json
+{
+  "response": "Here are the files in the current directory:\n- Cargo.toml\n- README.md\n...",
+  "input_tokens": 142,
+  "output_tokens": 87,
+  "iterations": 1
+}
+```
+
+### POST /api/agents/&lbrace;id&rbrace;/message/stream
+
+Send a message and receive the response as a Server-Sent Events stream (see [SSE Streaming](#sse-streaming)).
+
+### GET /api/agents/&lbrace;id&rbrace;/session
+
+Returns the agent's current conversation history.
+
+**Response** `200 OK`:
+
+```json
+{
+  "session_id": "s1b2c3d4-...",
+  "agent_id": "a1b2c3d4-...",
+  "message_count": 4,
+  "context_window_tokens": 1250,
+  "messages": [
+    {
+      "role": "User",
+      "content": "Hello"
+    },
+    {
+      "role": "Assistant",
+      "content": "Hello! How can I help you?"
+    }
+  ]
+}
+```
+
+### GET /api/agents/&lbrace;id&rbrace;/sessions
+
+List all sessions for an agent.
+
+### POST /api/agents/&lbrace;id&rbrace;/sessions
+
+Create a new session for an agent.
+
+### POST /api/agents/&lbrace;id&rbrace;/sessions/&lbrace;session_id&rbrace;/switch
+
+Switch the agent to use a different session by ID.
+
+### GET /api/agents/&lbrace;id&rbrace;/sessions/by-label/&lbrace;label&rbrace;
+
+Find a session by its user-assigned label.
+
+### DELETE /api/agents/&lbrace;id&rbrace;/history
+
+Clear all conversation history for an agent without creating a new session.
+
+### POST /api/agents/&lbrace;id&rbrace;/session/reset
+
+Reset an agent's session, clearing all conversation history.
+
+**Response** `200 OK`:
+
+```json
+{
+  "status": "reset",
+  "agent_id": "a1b2c3d4-...",
+  "new_session_id": "s5e6f7g8-..."
+}
+```
+
+### POST /api/agents/&lbrace;id&rbrace;/session/compact
+
+Trigger LLM-based session compaction. The agent's conversation is summarized by an LLM, keeping only the most recent messages plus a generated summary.
+
+**Response** `200 OK`:
+
+```json
+{
+  "status": "compacted",
+  "message": "Session compacted: 80 messages summarized, 20 kept"
+}
+```
+
+### POST /api/agents/&lbrace;id&rbrace;/stop
+
+Cancel the agent's current LLM run. Aborts any in-progress generation.
+
+**Response** `200 OK`:
+
+```json
+{
+  "status": "stopped",
+  "message": "Agent run cancelled"
+}
+```
+
+### PUT /api/agents/&lbrace;id&rbrace;/model
+
+Switch an agent's LLM model at runtime.
+
+**Request Body**:
+
+```json
+{
+  "model": "claude-sonnet-4-20250514"
+}
+```
+
+**Response** `200 OK`:
+
+```json
+{
+  "status": "updated",
+  "model": "claude-sonnet-4-20250514"
+}
+```
+
+### GET /api/agents/&lbrace;id&rbrace;/tools
+
+Get an agent's current tool list.
+
+### PUT /api/agents/&lbrace;id&rbrace;/tools
+
+Replace an agent's tool list at runtime.
+
+### GET /api/agents/&lbrace;id&rbrace;/skills
+
+Get an agent's current skill list.
+
+### PUT /api/agents/&lbrace;id&rbrace;/skills
+
+Replace an agent's skill list at runtime.
+
+### GET /api/agents/&lbrace;id&rbrace;/mcp_servers
+
+Get the MCP servers attached to a specific agent.
+
+### PUT /api/agents/&lbrace;id&rbrace;/mcp_servers
+
+Set the MCP servers attached to a specific agent.
+
+### GET /api/agents/&lbrace;id&rbrace;/traces
+
+Get execution traces for an agent (tool calls, LLM iterations, timings).
+
+### GET /api/agents/&lbrace;id&rbrace;/metrics
+
+Get runtime metrics for an agent (token counts, latency, error rates).
+
+### GET /api/agents/&lbrace;id&rbrace;/logs
+
+Get recent log lines emitted by an agent's process.
+
+### GET /api/agents/&lbrace;id&rbrace;/deliveries
+
+Get inbound message deliveries received by an agent from channels.
+
+### GET /api/agents/&lbrace;id&rbrace;/files
+
+List files stored in an agent's private file workspace.
+
+### GET /api/agents/&lbrace;id&rbrace;/files/&lbrace;filename&rbrace;
+
+Download a specific file from an agent's workspace.
+
+### PUT /api/agents/&lbrace;id&rbrace;/files/&lbrace;filename&rbrace;
+
+Upload or overwrite a file in an agent's workspace.
+
+### DELETE /api/agents/&lbrace;id&rbrace;/files/&lbrace;filename&rbrace;
+
+Delete a file from an agent's workspace.
+
+### POST /api/agents/&lbrace;id&rbrace;/upload
+
+Upload a file to an agent's workspace (multipart form data).
+
+### GET /api/uploads/&lbrace;file_id&rbrace;
+
+Retrieve a previously uploaded file by its upload ID.
+
+### GET /api/agents/&lbrace;id&rbrace;/ws
+
+WebSocket connection for real-time bidirectional chat (see [WebSocket Protocol](#websocket-protocol)).
+
+### GET /api/agents/&lbrace;id&rbrace;/memory/export
+
+Export all memory entries for an agent as JSON.
+
+### POST /api/agents/&lbrace;id&rbrace;/memory/import
+
+Import memory entries for an agent from JSON.
+
+---
+
+## Workflow Endpoints
+
+### GET /api/workflows
+
+List all registered workflows.
+
+**Response** `200 OK`:
+
+```json
+[
+  {
+    "id": "w1b2c3d4-...",
+    "name": "code-review-pipeline",
+    "description": "Automated code review workflow",
+    "steps": 3,
+    "created_at": "2025-01-15T10:30:00Z"
+  }
+]
+```
+
+### POST /api/workflows
+
+Create a new workflow definition.
+
+**Request Body** (JSON):
+
+```json
+{
+  "name": "code-review-pipeline",
+  "description": "Review code changes with multiple agents",
+  "steps": [
+    {
+      "name": "analyze",
+      "agent_name": "coder",
+      "prompt": "Analyze this code for potential issues: {&lbrace;input&rbrace;}",
+      "mode": "sequential",
+      "timeout_secs": 120,
+      "error_mode": "fail",
+      "output_var": "analysis"
+    }
+  ]
+}
+```
+
+**Step configuration options:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | Step name |
+| `agent_id` | string | Agent UUID (use either this or `agent_name`) |
+| `agent_name` | string | Agent name (use either this or `agent_id`) |
+| `prompt` | string | Prompt template with `{&lbrace;input&rbrace;}` and `{&lbrace;output_var&rbrace;}` placeholders |
+| `mode` | string | `"sequential"`, `"fan_out"`, `"collect"`, `"conditional"`, `"loop"` |
+| `timeout_secs` | integer | Timeout per step (default: 120) |
+| `error_mode` | string | `"fail"`, `"skip"`, `"retry"` |
+| `max_retries` | integer | For `"retry"` error mode (default: 3) |
+| `output_var` | string | Variable name to store output for later steps |
+| `condition` | string | For `"conditional"` mode |
+| `max_iterations` | integer | For `"loop"` mode (default: 5) |
+| `until` | string | For `"loop"` mode: stop condition |
+
+**Response** `201 Created`:
+
+```json
+{
+  "workflow_id": "w1b2c3d4-..."
+}
+```
+
+### GET /api/workflows/&lbrace;id&rbrace;
+
+Get a specific workflow definition.
+
+### PUT /api/workflows/&lbrace;id&rbrace;
+
+Update an existing workflow definition.
+
+### DELETE /api/workflows/&lbrace;id&rbrace;
+
+Delete a workflow definition.
+
+### POST /api/workflows/&lbrace;id&rbrace;/run
+
+Execute a workflow.
+
+**Request Body**:
+
+```json
+{
+  "input": "Review this pull request: ..."
+}
+```
+
+**Response** `200 OK`:
+
+```json
+{
+  "run_id": "r1b2c3d4-...",
+  "output": "Code review summary:\n- No critical issues found\n...",
+  "status": "completed"
+}
+```
+
+### GET /api/workflows/&lbrace;id&rbrace;/runs
+
+List execution history for a workflow.
+
+**Response** `200 OK`:
+
+```json
+[
+  {
+    "id": "r1b2c3d4-...",
+    "workflow_name": "code-review-pipeline",
+    "state": "Completed",
+    "steps_completed": 3,
+    "started_at": "2025-01-15T10:30:00Z",
+    "completed_at": "2025-01-15T10:32:15Z"
+  }
+]
+```
+
+---
+
+## Trigger Endpoints
+
+### GET /api/triggers
+
+List all triggers. Optionally filter by agent.
+
+**Query Parameters:**
+- `agent_id` (optional): Filter by agent UUID
+
+**Response** `200 OK`:
+
+```json
+[
+  {
+    "id": "t1b2c3d4-...",
+    "agent_id": "a1b2c3d4-...",
+    "pattern": {"lifecycle": {}},
+    "prompt_template": "Event: {&lbrace;event&rbrace;}",
+    "enabled": true,
+    "fire_count": 5,
+    "max_fires": 0,
+    "created_at": "2025-01-15T10:30:00Z"
+  }
+]
+```
+
+### POST /api/triggers
+
+Create a new event trigger.
+
+**Request Body**:
+
+```json
+{
+  "agent_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "pattern": {
+    "agent_spawned": {
+      "name_pattern": "*"
+    }
+  },
+  "prompt_template": "A new agent was spawned: {&lbrace;event&rbrace;}. Review its capabilities.",
+  "max_fires": 0
+}
+```
+
+**Supported pattern types:**
+
+| Pattern | Description |
+|---------|-------------|
+| `{"lifecycle": {}}` | All lifecycle events |
+| `{"agent_spawned": {"name_pattern": "*"}}` | Agent spawn events |
+| `{"agent_terminated": {}}` | Agent termination events |
+| `{"all": {}}` | All events |
+
+**Response** `201 Created`:
+
+```json
+{
+  "trigger_id": "t1b2c3d4-...",
+  "agent_id": "a1b2c3d4-..."
+}
+```
+
+### PUT /api/triggers/&lbrace;id&rbrace;
+
+Update an existing trigger's configuration.
+
+**Request Body**:
+
+```json
+{
+  "prompt_template": "Updated template: {&lbrace;event&rbrace;}",
+  "enabled": false,
+  "max_fires": 10
+}
+```
+
+**Response** `200 OK`:
+
+```json
+{
+  "status": "updated",
+  "trigger_id": "t1b2c3d4-..."
+}
+```
+
+### DELETE /api/triggers/&lbrace;id&rbrace;
+
+Remove a trigger.
+
+**Response** `200 OK`:
+
+```json
+{
+  "status": "removed",
+  "trigger_id": "t1b2c3d4-..."
+}
+```
+
+---
+
+## Schedule Endpoints
+
+Time-based agent activation using cron expressions or interval syntax.
+
+### GET /api/schedules
+
+List all configured schedules.
+
+### POST /api/schedules
+
+Create a new schedule.
+
+**Request Body**:
+
+```json
+{
+  "agent_id": "a1b2c3d4-...",
+  "cron": "0 9 * * 1-5",
+  "prompt": "Good morning! Summarize overnight events.",
+  "enabled": true
+}
+```
+
+### GET /api/schedules/&lbrace;id&rbrace;
+
+Get a specific schedule.
+
+### PUT /api/schedules/&lbrace;id&rbrace;
+
+Update a schedule.
+
+### DELETE /api/schedules/&lbrace;id&rbrace;
+
+Delete a schedule.
+
+### POST /api/schedules/&lbrace;id&rbrace;/run
+
+Trigger a schedule to run immediately (ignores its cron expression for this one invocation).
+
+---
+
+## Goals Endpoints
+
+Hierarchical goal tracking system for multi-step agent objectives.
+
+### GET /api/goals
+
+List all goals.
+
+### POST /api/goals
+
+Create a new goal.
+
+**Request Body**:
+
+```json
+{
+  "title": "Migrate database to PostgreSQL",
+  "description": "Complete migration with zero downtime",
+  "agent_id": "a1b2c3d4-...",
+  "parent_id": null,
+  "due_at": "2025-02-01T00:00:00Z"
+}
+```
+
+### GET /api/goals/&lbrace;id&rbrace;
+
+Get a specific goal.
+
+### PUT /api/goals/&lbrace;id&rbrace;
+
+Update a goal (title, status, description, due date).
+
+### DELETE /api/goals/&lbrace;id&rbrace;
+
+Delete a goal and all its children.
+
+### GET /api/goals/&lbrace;id&rbrace;/children
+
+List sub-goals for a given parent goal.
+
+---
+
+## Cron Endpoints
+
+Schedule recurring jobs using standard cron expression syntax.
+
+### GET /api/cron/jobs
+
+List all cron jobs.
+
+### POST /api/cron/jobs
+
+Create a new cron job.
+
+**Request Body**:
+
+```json
+{
+  "name": "daily-digest",
+  "schedule": "0 8 * * *",
+  "agent_id": "a1b2c3d4-...",
+  "prompt": "Prepare the daily digest of overnight activity.",
+  "enabled": true
+}
+```
+
+### GET /api/cron/jobs/&lbrace;id&rbrace;
+
+Get details for a specific cron job.
+
+### PUT /api/cron/jobs/&lbrace;id&rbrace;
+
+Update a cron job (schedule, prompt, agent, etc.).
+
+### DELETE /api/cron/jobs/&lbrace;id&rbrace;
+
+Delete a cron job.
+
+### PUT /api/cron/jobs/&lbrace;id&rbrace;/enable
+
+Toggle a cron job's enabled state.
+
+**Request Body**:
+
+```json
+{
+  "enabled": false
+}
+```
+
+### GET /api/cron/jobs/&lbrace;id&rbrace;/status
+
+Get the last run result and next scheduled time for a cron job.
+
+---
+

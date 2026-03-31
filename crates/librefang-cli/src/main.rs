@@ -1896,11 +1896,15 @@ fn cmd_init(quick: bool) {
 
     let librefang_dir = cli_librefang_home();
 
-    // Hint about --upgrade when config already exists (skip in quick/CI mode)
+    // When an existing config is detected in interactive mode, redirect to the
+    // upgrade path so user settings (channels, keys, etc.) are preserved.
+    // The interactive wizard unconditionally overwrites config.toml, which
+    // would silently delete channels and custom configuration (#1862).
     if !quick && librefang_dir.join("config.toml").exists() {
-        ui::hint(
-            "Existing installation detected. To upgrade in-place, run: librefang init --upgrade",
-        );
+        ui::hint("Existing installation detected — running upgrade to preserve your settings.");
+        ui::hint("To start fresh, remove ~/.librefang/config.toml and run `librefang init` again.");
+        cmd_init_upgrade();
+        return;
     }
 
     // --- Ensure directories exist ---
@@ -2087,7 +2091,33 @@ fn cmd_init_upgrade() {
         }
     }
 
-    // 7. Summary
+    // 7. Warn users whose require_approval list predates the file_write default (#1861).
+    // The default was expanded to include file_write and file_delete, but users who
+    // had an explicit `require_approval = [...]` entry in their config won't pick up
+    // the new default automatically.
+    let approval_needs_update = existing
+        .get("approval")
+        .and_then(|a| a.get("require_approval"))
+        .and_then(|r| r.as_array())
+        .is_some_and(|list| {
+            let has_shell = list.iter().any(|v| v.as_str() == Some("shell_exec"));
+            let missing_new = ["file_write", "file_delete", "apply_patch"]
+                .iter()
+                .any(|tool| !list.iter().any(|v| v.as_str() == Some(*tool)));
+            has_shell && missing_new
+        });
+    if approval_needs_update {
+        ui::blank();
+        ui::hint(
+            "Your require_approval list only contains \"shell_exec\". \
+             File operations (file_write, file_delete) now require approval by default.",
+        );
+        ui::hint(
+            "To enable: add \"file_write\" and \"file_delete\" to require_approval in config.toml",
+        );
+    }
+
+    // 8. Summary
     ui::blank();
     ui::success("Upgrade complete!");
     ui::kv("Backup", &backup_name);
@@ -2613,7 +2643,20 @@ fn spawn_detached_daemon(
         .map_err(|e| format!("spawn detached daemon: {e}"))
 }
 
+/// Ensure LibreFang is initialized (config.toml exists). Auto-runs quick init on first run.
+fn ensure_initialized(config: &Option<PathBuf>) {
+    if config.is_none() {
+        let home = cli_librefang_home();
+        if !home.join("config.toml").exists() {
+            ui::hint("First run detected — running quick setup...");
+            cmd_init(true);
+        }
+    }
+}
+
 fn cmd_start(config: Option<PathBuf>, tail: bool, spawned: bool, foreground: bool) {
+    ensure_initialized(&config);
+
     let daemon = daemon_config_context(config.as_deref());
     if let Some(base) = find_daemon_in_home(&daemon.home_dir) {
         ui::error_with_fix(
@@ -2712,10 +2755,11 @@ fn cmd_start(config: Option<PathBuf>, tail: bool, spawned: bool, foreground: boo
             }
         };
 
-        let listen_addr = kernel.config_ref().api_listen.clone();
-        let daemon_info_path = kernel.config_ref().home_dir.join("daemon.json");
-        let provider = kernel.config_ref().default_model.provider.clone();
-        let model = kernel.config_ref().default_model.model.clone();
+        let cfg = kernel.config_ref();
+        let listen_addr = cfg.api_listen.clone();
+        let daemon_info_path = kernel.home_dir().join("daemon.json");
+        let provider = cfg.default_model.provider.clone();
+        let model = cfg.default_model.model.clone();
         let agent_count = kernel.agent_registry().count();
         let model_count = kernel
             .model_catalog_ref()
@@ -3192,6 +3236,7 @@ fn cmd_agent_list(config: Option<PathBuf>, json: bool) {
 }
 
 fn cmd_agent_chat(config: Option<PathBuf>, agent_id_str: &str) {
+    ensure_initialized(&config);
     tui::chat_runner::run_chat_tui(config, Some(agent_id_str.to_string()));
 }
 
@@ -3459,6 +3504,7 @@ fn cmd_status(config: Option<PathBuf>, json: bool) {
     } else {
         let kernel = boot_kernel(config);
         let agent_count = kernel.agent_registry().count();
+        let cfg = kernel.config_ref();
 
         if json {
             println!(
@@ -3466,9 +3512,9 @@ fn cmd_status(config: Option<PathBuf>, json: bool) {
                 serde_json::to_string_pretty(&serde_json::json!({
                     "status": "in-process",
                     "agent_count": agent_count,
-                    "data_dir": kernel.config_ref().data_dir.display().to_string(),
-                    "default_provider": kernel.config_ref().default_model.provider,
-                    "default_model": kernel.config_ref().default_model.model,
+                    "data_dir": cfg.data_dir.display().to_string(),
+                    "default_provider": cfg.default_model.provider,
+                    "default_model": cfg.default_model.model,
                     "daemon": false,
                 }))
                 .unwrap_or_default()
@@ -3479,17 +3525,11 @@ fn cmd_status(config: Option<PathBuf>, json: bool) {
         ui::section(&i18n::t("section-status-inprocess"));
         ui::blank();
         ui::kv(&i18n::t("label-agents"), &agent_count.to_string());
-        ui::kv(
-            &i18n::t("label-provider"),
-            &kernel.config_ref().default_model.provider,
-        );
-        ui::kv(
-            &i18n::t("label-model"),
-            &kernel.config_ref().default_model.model,
-        );
+        ui::kv(&i18n::t("label-provider"), &cfg.default_model.provider);
+        ui::kv(&i18n::t("label-model"), &cfg.default_model.model);
         ui::kv(
             &i18n::t("label-data-dir"),
-            &kernel.config_ref().data_dir.display().to_string(),
+            &cfg.data_dir.display().to_string(),
         );
         ui::kv_warn(
             &i18n::t("label-daemon"),
@@ -6902,6 +6942,7 @@ fn cmd_config_test_key(provider: &str) {
 // ---------------------------------------------------------------------------
 
 fn cmd_quick_chat(config: Option<PathBuf>, agent: Option<String>) {
+    ensure_initialized(&config);
     tui::chat_runner::run_chat_tui(config, agent);
 }
 
@@ -8899,6 +8940,14 @@ fn cmd_update(check: bool, version: Option<String>, channel_override: Option<Str
                 if let Some(installed) = installed_binary_version(&default_install) {
                     ui::kv("Installed", &installed);
                 }
+                // Merge any new config defaults added in the updated binary.
+                // Spawn the new binary rather than calling cmd_init_upgrade() here,
+                // because the current process still holds the old binary's template.
+                ui::blank();
+                ui::hint("Merging new config defaults...");
+                let _ = std::process::Command::new(&default_install)
+                    .args(["init", "--upgrade"])
+                    .status();
                 ui::hint("If the daemon is running, restart it with `librefang restart`.");
             }
             #[cfg(windows)]

@@ -305,7 +305,8 @@ pub async fn list_plugin_registries(State(state): State<Arc<AppState>>) -> impl 
         .clone();
 
     // Merge registries from [plugins].plugin_registries (URL strings treated as github repos)
-    for url in &state.kernel.config_ref().plugins.plugin_registries {
+    let cfg = state.kernel.config_ref();
+    for url in &cfg.plugins.plugin_registries {
         if !registries.iter().any(|r| r.github_repo == *url) {
             registries.push(librefang_types::config::PluginRegistrySource {
                 name: url.clone(),

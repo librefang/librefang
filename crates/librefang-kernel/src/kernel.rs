@@ -32,12 +32,13 @@ use librefang_runtime::sandbox::{SandboxConfig, WasmSandbox};
 use librefang_runtime::tool_runner::builtin_tool_definitions;
 use librefang_types::agent::*;
 use librefang_types::capability::Capability;
-use librefang_types::config::{AuthProfile, KernelConfig, OutputFormat};
+use librefang_types::config::{AuthProfile, KernelConfig};
 use librefang_types::error::LibreFangError;
 use librefang_types::event::*;
 use librefang_types::memory::Memory;
 use librefang_types::tool::ToolDefinition;
 
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use librefang_channels::types::SenderContext;
 use std::collections::HashSet;
@@ -255,8 +256,12 @@ fn collect_rotation_key_specs(
 }
 
 pub struct LibreFangKernel {
-    /// Kernel configuration.
-    pub(crate) config: KernelConfig,
+    /// Boot-time home directory (immutable — cannot hot-reload).
+    home_dir_boot: PathBuf,
+    /// Boot-time data directory (immutable — cannot hot-reload).
+    data_dir_boot: PathBuf,
+    /// Kernel configuration (atomically swappable for hot-reload).
+    pub(crate) config: ArcSwap<KernelConfig>,
     /// Agent registry.
     pub(crate) registry: AgentRegistry,
     /// Capability manager.
@@ -391,7 +396,7 @@ pub struct LibreFangKernel {
     self_handle: OnceLock<Weak<LibreFangKernel>>,
     /// Whether we've already logged the "no provider" audit entry (prevents spam).
     pub(crate) provider_unconfigured_logged: std::sync::atomic::AtomicBool,
-    /// Config reload barrier — write-locked during `apply_hot_actions` to prevent
+    /// Config reload barrier — write-locked during `apply_hot_actions_inner` to prevent
     /// concurrent readers from seeing a half-updated configuration (e.g. new provider
     /// URLs but old default model). Read-locked in message hot paths so multiple
     /// requests proceed in parallel but block briefly during a reload.
@@ -861,10 +866,15 @@ fn gethostname() -> Option<String> {
 // sites are migrated to use getters, the underlying pub fields can be
 // narrowed to pub(crate).
 impl LibreFangKernel {
-    /// Full kernel configuration (read-only after boot).
+    /// Full kernel configuration (atomically loaded snapshot).
     #[inline]
-    pub fn config_ref(&self) -> &KernelConfig {
-        &self.config
+    pub fn config_ref(&self) -> arc_swap::Guard<std::sync::Arc<KernelConfig>> {
+        self.config.load()
+    }
+
+    /// Snapshot of current config — use when holding config across `.await` points.
+    pub fn config_snapshot(&self) -> std::sync::Arc<KernelConfig> {
+        self.config.load_full()
     }
 
     /// Return a snapshot of the current budget configuration.
@@ -886,16 +896,22 @@ impl LibreFangKernel {
         f(&mut guard);
     }
 
-    /// LibreFang home directory path (shorthand for `config.home_dir`).
+    /// LibreFang home directory path (boot-time immutable).
     #[inline]
     pub fn home_dir(&self) -> &Path {
-        &self.config.home_dir
+        &self.home_dir_boot
+    }
+
+    /// Data directory path (boot-time immutable).
+    #[inline]
+    pub fn data_dir(&self) -> &Path {
+        &self.data_dir_boot
     }
 
     /// Default LLM model configuration.
     #[inline]
-    pub fn default_model(&self) -> &librefang_types::config::DefaultModelConfig {
-        &self.config.default_model
+    pub fn default_model(&self) -> librefang_types::config::DefaultModelConfig {
+        self.config.load().default_model.clone()
     }
 
     /// Agent registry (list, get, update agents).
@@ -1374,6 +1390,7 @@ impl LibreFangKernel {
             vertex_ai: config.vertex_ai.clone(),
             azure_openai: config.azure_openai.clone(),
             skip_permissions: true,
+            message_timeout_secs: config.default_model.message_timeout_secs,
         };
         // Primary driver failure is non-fatal: the dashboard should remain accessible
         // even if the LLM provider is misconfigured. Users can fix config via dashboard.
@@ -1407,6 +1424,7 @@ impl LibreFangKernel {
                     vertex_ai: config.vertex_ai.clone(),
                     azure_openai: config.azure_openai.clone(),
                     skip_permissions: true,
+                    message_timeout_secs: config.default_model.message_timeout_secs,
                 };
                 match drivers::create_driver(&profile_config) {
                     Ok(profile_driver) => {
@@ -1465,6 +1483,7 @@ impl LibreFangKernel {
                             vertex_ai: config.vertex_ai.clone(),
                             azure_openai: config.azure_openai.clone(),
                             skip_permissions: true,
+                            message_timeout_secs: config.default_model.message_timeout_secs,
                         };
                         match drivers::create_driver(&auto_config) {
                             Ok(d) => {
@@ -1513,6 +1532,7 @@ impl LibreFangKernel {
                 vertex_ai: config.vertex_ai.clone(),
                 azure_openai: config.azure_openai.clone(),
                 skip_permissions: true,
+                message_timeout_secs: config.default_model.message_timeout_secs,
             };
             match drivers::create_driver(&fb_config) {
                 Ok(d) => {
@@ -1950,7 +1970,9 @@ impl LibreFangKernel {
         let workflow_home_dir = config.home_dir.clone();
         let trigger_config = config.triggers.clone();
         let kernel = Self {
-            config,
+            home_dir_boot: config.home_dir.clone(),
+            data_dir_boot: config.data_dir.clone(),
+            config: ArcSwap::new(std::sync::Arc::new(config)),
             registry: AgentRegistry::new(),
             capabilities: CapabilityManager::new(),
             event_bus: EventBus::new(),
@@ -2023,18 +2045,19 @@ impl LibreFangKernel {
         // Uses extraction_model if set, otherwise falls back to agent's default model.
         // This allows using a cheap model (e.g., llama/haiku) for extraction while
         // keeping an expensive model (e.g., opus/gpt-4o) for agent responses.
-        if kernel.config.proactive_memory.enabled {
-            let pm_config = kernel.config.proactive_memory.clone();
+        let cfg = kernel.config.load();
+        if cfg.proactive_memory.enabled {
+            let pm_config = cfg.proactive_memory.clone();
             let extraction_model = pm_config
                 .extraction_model
                 .clone()
                 .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| kernel.config.default_model.model.clone());
+                .unwrap_or_else(|| cfg.default_model.model.clone());
             // Strip provider prefix (e.g. "minimax/minimax-M2.5-highspeed" → "minimax-M2.5-highspeed")
             // so the model name is valid for the upstream API.
             let extraction_model = librefang_runtime::agent_loop::strip_provider_prefix(
                 &extraction_model,
-                &kernel.config.default_model.provider,
+                &cfg.default_model.provider,
             );
             let llm = Some((Arc::clone(&kernel.default_driver) as _, extraction_model));
             let store = if let Some(ref emb) = kernel.embedding_driver {
@@ -2073,8 +2096,7 @@ impl LibreFangKernel {
                     let toml_path = entry.source_toml_path.clone().unwrap_or_else(|| {
                         let safe_name = safe_path_component(&name, "agent");
                         kernel
-                            .config
-                            .home_dir
+                            .home_dir_boot
                             .join("agents")
                             .join(safe_name)
                             .join("agent.toml")
@@ -2142,8 +2164,7 @@ impl LibreFangKernel {
                         // Double-check: read directly from hands/agents TOML in case DB is stale
                         for dir in &["agents", "hands"] {
                             let check_path = kernel
-                                .config
-                                .home_dir
+                                .home_dir_boot
                                 .join(dir)
                                 .join(&name)
                                 .join("agent.toml");
@@ -2169,8 +2190,7 @@ impl LibreFangKernel {
 
                     // Inherit kernel exec_policy for agents that lack one
                     if restored_entry.manifest.exec_policy.is_none() {
-                        restored_entry.manifest.exec_policy =
-                            Some(kernel.config.exec_policy.clone());
+                        restored_entry.manifest.exec_policy = Some(cfg.exec_policy.clone());
                     }
 
                     // Apply global budget defaults to restored agents
@@ -2188,7 +2208,7 @@ impl LibreFangKernel {
                     // 3. Agent named "assistant" (auto-spawned) → update to match
                     //    default_model so config.toml changes take effect on restart
                     {
-                        let dm = &kernel.config.default_model;
+                        let dm = &cfg.default_model;
                         let is_default_provider = restored_entry.manifest.model.provider.is_empty()
                             || restored_entry.manifest.model.provider == "default";
                         let is_default_model = restored_entry.manifest.model.model.is_empty()
@@ -2253,7 +2273,7 @@ impl LibreFangKernel {
         // If no agents exist (fresh install), spawn a default assistant.
         if kernel.registry.list().is_empty() {
             info!("No agents found — spawning default assistant");
-            let manifest = router::load_template_manifest(&kernel.config.home_dir, "assistant")
+            let manifest = router::load_template_manifest(&kernel.home_dir_boot, "assistant")
                 .or_else(|_| {
                     // Fallback: minimal assistant for zero-network boot (init not yet run)
                     toml::from_str::<librefang_types::agent::AgentManifest>(
@@ -2283,7 +2303,7 @@ system_prompt = "You are a helpful assistant."
 
         // Auto-register workflow definitions from ~/.librefang/workflows/
         {
-            let workflows_dir = kernel.config.home_dir.join("workflows");
+            let workflows_dir = kernel.home_dir_boot.join("workflows");
             let loaded =
                 tokio::task::block_in_place(|| kernel.workflows.load_from_dir_sync(&workflows_dir));
             if loaded > 0 {
@@ -2309,7 +2329,7 @@ system_prompt = "You are a helpful assistant."
 
         // Load workflow templates
         {
-            let user_dir = kernel.config.home_dir.join("workflows").join("templates");
+            let user_dir = kernel.home_dir_boot.join("workflows").join("templates");
             let loaded = kernel.template_registry.load_templates_from_dir(&user_dir);
             if loaded > 0 {
                 info!("Loaded {loaded} workflow template(s)");
@@ -2390,43 +2410,24 @@ system_prompt = "You are a helpful assistant."
             .map_err(KernelError::LibreFang)?;
 
         // Inherit kernel exec_policy as fallback if agent manifest doesn't have one
+        let cfg = self.config.load();
         let mut manifest = manifest;
         if manifest.exec_policy.is_none() {
-            manifest.exec_policy = Some(self.config.exec_policy.clone());
+            manifest.exec_policy = Some(cfg.exec_policy.clone());
         }
         info!(agent = %name, id = %agent_id, exec_mode = ?manifest.exec_policy.as_ref().map(|p| &p.mode), "Agent exec_policy resolved");
 
-        // Overlay kernel default_model onto agent if agent didn't explicitly choose.
-        // Treat empty or "default" as "use the kernel's configured default_model".
-        // This allows bundled agents to defer to the user's configured provider/model,
-        // even if the agent manifest specifies an api_key_env (which is just a hint
-        // about which env var to check, not a hard lock on provider/model).
+        // Normalize empty provider/model to "default" so the intent is preserved in DB.
+        // Resolution to concrete values happens at execute_llm_agent time, ensuring
+        // provider changes take effect immediately without re-spawning agents.
         {
             let is_default_provider =
                 manifest.model.provider.is_empty() || manifest.model.provider == "default";
             let is_default_model =
                 manifest.model.model.is_empty() || manifest.model.model == "default";
             if is_default_provider && is_default_model {
-                // Check hot-reloaded override first, fall back to boot-time config
-                let override_guard = self
-                    .default_model_override
-                    .read()
-                    .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
-                let dm = override_guard
-                    .as_ref()
-                    .unwrap_or(&self.config.default_model);
-                if !dm.provider.is_empty() {
-                    manifest.model.provider = dm.provider.clone();
-                }
-                if !dm.model.is_empty() {
-                    manifest.model.model = dm.model.clone();
-                }
-                if !dm.api_key_env.is_empty() && manifest.model.api_key_env.is_none() {
-                    manifest.model.api_key_env = Some(dm.api_key_env.clone());
-                }
-                if dm.base_url.is_some() && manifest.model.base_url.is_none() {
-                    manifest.model.base_url.clone_from(&dm.base_url);
-                }
+                manifest.model.provider = "default".to_string();
+                manifest.model.model = "default".to_string();
             }
         }
 
@@ -2443,9 +2444,9 @@ system_prompt = "You are a helpful assistant."
         // Hand agents set a relative workspace path (hands/<hand>/<role>) resolved
         // against the workspaces root. Standalone agents go to workspaces/agents/<name>.
         let workspaces_root = if manifest.workspace.is_some() {
-            self.config.effective_workspaces_dir()
+            cfg.effective_workspaces_dir()
         } else {
-            self.config.effective_agent_workspaces_dir()
+            cfg.effective_agent_workspaces_dir()
         };
         let workspace_dir = resolve_workspace_dir(
             &workspaces_root,
@@ -3076,6 +3077,7 @@ system_prompt = "You are a helpful assistant."
         // Try to acquire config reload barrier (non-blocking — this is a sync fn).
         // If a reload is in progress we proceed without the guard.
         let _config_guard = self.config_reload_lock.try_read();
+        let cfg = self.config.load();
 
         // Enforce quota before spawning the streaming task
         self.scheduler
@@ -3159,7 +3161,7 @@ system_prompt = "You are a helpful assistant."
                 estimate_token_count, needs_compaction as check_compact,
                 needs_compaction_by_tokens, CompactionConfig,
             };
-            let config = CompactionConfig::from_toml(&self.config.compaction);
+            let config = CompactionConfig::from_toml(&cfg.compaction);
             let by_messages = check_compact(&session, &config);
             let estimated = estimate_token_count(
                 &session.messages,
@@ -3193,13 +3195,13 @@ system_prompt = "You are a helpful assistant."
 
         // Backfill thinking config from global config if per-agent is not set
         if manifest.thinking.is_none() {
-            manifest.thinking = self.config.thinking.clone();
+            manifest.thinking = cfg.thinking.clone();
         }
 
         // Lazy backfill: create workspace for existing agents spawned before workspaces
         if manifest.workspace.is_none() {
             let workspace_dir = resolve_workspace_dir(
-                &self.config.effective_agent_workspaces_dir(),
+                &cfg.effective_agent_workspaces_dir(),
                 None,
                 &manifest.name,
                 agent_id,
@@ -3220,7 +3222,7 @@ system_prompt = "You are a helpful assistant."
         {
             let mcp_tool_count = self.mcp_tools.lock().map(|t| t.len()).unwrap_or(0);
             let shared_id = shared_memory_agent_id();
-            let stable_prefix_mode = self.config.stable_prefix_mode;
+            let stable_prefix_mode = cfg.stable_prefix_mode;
             let user_name = self
                 .memory
                 .structured_get(shared_id, "user_name")
@@ -3331,11 +3333,11 @@ system_prompt = "You are a helpful assistant."
             // Pass prompt_caching config to the agent loop via metadata.
             manifest.metadata.insert(
                 "prompt_caching".to_string(),
-                serde_json::Value::Bool(self.config.prompt_caching),
+                serde_json::Value::Bool(cfg.prompt_caching),
             );
 
             // Pass privacy config to the agent loop via metadata.
-            if let Ok(privacy_json) = serde_json::to_value(&self.config.privacy) {
+            if let Ok(privacy_json) = serde_json::to_value(&cfg.privacy) {
                 manifest
                     .metadata
                     .insert("privacy".to_string(), privacy_json);
@@ -3362,7 +3364,7 @@ system_prompt = "You are a helpful assistant."
         let memory = Arc::clone(&self.memory);
         // Build link context from user message (auto-extract URLs for the agent)
         let message_owned = if let Some(link_ctx) =
-            librefang_runtime::link_understanding::build_link_context(message, &self.config.links)
+            librefang_runtime::link_understanding::build_link_context(message, &cfg.links)
         {
             format!("{message}{link_ctx}")
         } else {
@@ -3434,6 +3436,9 @@ system_prompt = "You are a helpful assistant."
             let injection_rx = kernel_clone.setup_injection_channel(agent_id);
 
             let start_time = std::time::Instant::now();
+            // Snapshot config for the duration of the agent loop call
+            // (load_full returns Arc so the data stays alive across .await).
+            let loop_cfg = kernel_clone.config.load_full();
             let result = run_agent_loop_streaming(
                 &manifest,
                 &message_owned,
@@ -3452,13 +3457,13 @@ system_prompt = "You are a helpful assistant."
                 Some(&phase_cb),
                 Some(&kernel_clone.media_engine),
                 Some(&kernel_clone.media_drivers),
-                if kernel_clone.config.tts.enabled {
+                if loop_cfg.tts.enabled {
                     Some(&kernel_clone.tts_engine)
                 } else {
                     None
                 },
-                if kernel_clone.config.docker.enabled {
-                    Some(&kernel_clone.config.docker)
+                if loop_cfg.docker.enabled {
+                    Some(&loop_cfg.docker)
                 } else {
                     None
                 },
@@ -3567,7 +3572,8 @@ system_prompt = "You are a helpful assistant."
                         use librefang_runtime::compactor::{
                             estimate_token_count, needs_compaction_by_tokens, CompactionConfig,
                         };
-                        let config = CompactionConfig::from_toml(&kernel_clone.config.compaction);
+                        let compact_cfg = kernel_clone.config.load();
+                        let config = CompactionConfig::from_toml(&compact_cfg.compaction);
                         let estimated = estimate_token_count(&session.messages, None, None);
                         if needs_compaction_by_tokens(estimated, &config) {
                             let kc = kernel_clone.clone();
@@ -3768,11 +3774,12 @@ system_prompt = "You are a helpful assistant."
                 Some(k) => k,
                 None => return,
             };
-            let owner = kernel.config.users.iter().find(|u| u.role == "owner");
-            let bindings = match owner {
+            let cfg = kernel.config.load();
+            let bindings = match cfg.users.iter().find(|u| u.role == "owner") {
                 Some(u) => u.channel_bindings.clone(),
                 None => return,
             };
+            drop(cfg);
             for (channel, platform_id) in &bindings {
                 if kernel.channel_adapters.contains_key(channel.as_str()) {
                     if let Err(e) = kernel
@@ -3801,7 +3808,7 @@ system_prompt = "You are a helpful assistant."
         }
 
         let dynamic_choices = router::all_template_descriptions(
-            &self.config.home_dir.join("workspaces").join("agents"),
+            &self.home_dir_boot.join("workspaces").join("agents"),
         );
         let routable_names: HashSet<String> = dynamic_choices
             .iter()
@@ -3867,7 +3874,7 @@ system_prompt = "You are a helpful assistant."
         if let Some(entry) = self.registry.find_by_name(name) {
             return Ok(entry.id);
         }
-        let manifest = router::load_template_manifest(&self.config.home_dir, name)
+        let manifest = router::load_template_manifest(&self.home_dir_boot, name)
             .map_err(|e| KernelError::LibreFang(LibreFangError::Internal(e)))?;
         let id = self.spawn_agent(manifest)?;
         info!(agent = %name, id = %id, "Spawned specialist agent for LLM routing");
@@ -3975,7 +3982,7 @@ system_prompt = "You are a helpful assistant."
         let hand_selection = router::auto_select_hand(message, None);
         let template_selection = router::auto_select_template(
             message,
-            &self.config.home_dir.join("workspaces").join("agents"),
+            &self.home_dir_boot.join("workspaces").join("agents"),
             None,
         );
 
@@ -4103,6 +4110,7 @@ system_prompt = "You are a helpful assistant."
         content_blocks: Option<Vec<librefang_types::message::ContentBlock>>,
         sender_context: Option<&SenderContext>,
     ) -> KernelResult<AgentLoopResult> {
+        let cfg = self.config.load_full();
         // Check metering quota before starting
         self.metering
             .check_quota(agent_id, &entry.manifest.resources)
@@ -4136,15 +4144,49 @@ system_prompt = "You are a helpful assistant."
         // Apply model routing if configured (disabled in Stable mode)
         let mut manifest = entry.manifest.clone();
 
+        // Resolve "default" provider/model to the current effective default.
+        // This covers three cases:
+        // 1. New agents stored as "default"/"default" (post-fix spawn behavior)
+        // 2. The auto-spawned "assistant" agent that may have a stale concrete
+        //    provider/model in DB from before a provider switch
+        // 3. TOML agents with provider="default" that got a concrete value baked in
+        {
+            let is_default_provider =
+                manifest.model.provider.is_empty() || manifest.model.provider == "default";
+            let is_default_model =
+                manifest.model.model.is_empty() || manifest.model.model == "default";
+            let is_auto_spawned =
+                entry.name == "assistant" && manifest.description == "General-purpose assistant";
+            if (is_default_provider && is_default_model) || is_auto_spawned {
+                let override_guard = self
+                    .default_model_override
+                    .read()
+                    .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
+                let dm = override_guard.as_ref().unwrap_or(&cfg.default_model);
+                if !dm.provider.is_empty() {
+                    manifest.model.provider = dm.provider.clone();
+                }
+                if !dm.model.is_empty() {
+                    manifest.model.model = dm.model.clone();
+                }
+                if !dm.api_key_env.is_empty() && manifest.model.api_key_env.is_none() {
+                    manifest.model.api_key_env = Some(dm.api_key_env.clone());
+                }
+                if dm.base_url.is_some() && manifest.model.base_url.is_none() {
+                    manifest.model.base_url.clone_from(&dm.base_url);
+                }
+            }
+        }
+
         // Backfill thinking config from global config if per-agent is not set
         if manifest.thinking.is_none() {
-            manifest.thinking = self.config.thinking.clone();
+            manifest.thinking = cfg.thinking.clone();
         }
 
         // Lazy backfill: create workspace for existing agents spawned before workspaces
         if manifest.workspace.is_none() {
             let workspace_dir = resolve_workspace_dir(
-                &self.config.effective_agent_workspaces_dir(),
+                &cfg.effective_agent_workspaces_dir(),
                 None,
                 &manifest.name,
                 agent_id,
@@ -4166,7 +4208,7 @@ system_prompt = "You are a helpful assistant."
         {
             let mcp_tool_count = self.mcp_tools.lock().map(|t| t.len()).unwrap_or(0);
             let shared_id = shared_memory_agent_id();
-            let stable_prefix_mode = self.config.stable_prefix_mode;
+            let stable_prefix_mode = cfg.stable_prefix_mode;
             let user_name = self
                 .memory
                 .structured_get(shared_id, "user_name")
@@ -4277,18 +4319,18 @@ system_prompt = "You are a helpful assistant."
             // Pass prompt_caching config to the agent loop via metadata.
             manifest.metadata.insert(
                 "prompt_caching".to_string(),
-                serde_json::Value::Bool(self.config.prompt_caching),
+                serde_json::Value::Bool(cfg.prompt_caching),
             );
 
             // Pass privacy config to the agent loop via metadata.
-            if let Ok(privacy_json) = serde_json::to_value(&self.config.privacy) {
+            if let Ok(privacy_json) = serde_json::to_value(&cfg.privacy) {
                 manifest
                     .metadata
                     .insert("privacy".to_string(), privacy_json);
             }
         }
 
-        let is_stable = self.config.mode == librefang_types::config::KernelMode::Stable;
+        let is_stable = cfg.mode == librefang_types::config::KernelMode::Stable;
 
         if is_stable {
             // In Stable mode: use pinned_model if set, otherwise default model
@@ -4324,7 +4366,7 @@ system_prompt = "You are a helpful assistant."
             if let Ok(cat) = self.model_catalog.read() {
                 if let Some(entry) = cat.find_model(&routed_model) {
                     if entry.provider != manifest.model.provider {
-                        let key_env = self.config.resolve_api_key_env(&entry.provider);
+                        let key_env = cfg.resolve_api_key_env(&entry.provider);
                         if std::env::var(&key_env).is_err() {
                             warn!(
                                 agent = %manifest.name,
@@ -4382,7 +4424,7 @@ system_prompt = "You are a helpful assistant."
 
         // Build link context from user message (auto-extract URLs for the agent)
         let message_with_links = if let Some(link_ctx) =
-            librefang_runtime::link_understanding::build_link_context(message, &self.config.links)
+            librefang_runtime::link_understanding::build_link_context(message, &cfg.links)
         {
             format!("{message}{link_ctx}")
         } else {
@@ -4429,13 +4471,13 @@ system_prompt = "You are a helpful assistant."
             None, // on_phase callback
             Some(&self.media_engine),
             Some(&self.media_drivers),
-            if self.config.tts.enabled {
+            if cfg.tts.enabled {
                 Some(&self.tts_engine)
             } else {
                 None
             },
-            if self.config.docker.enabled {
-                Some(&self.config.docker)
+            if cfg.docker.enabled {
+                Some(&cfg.docker)
             } else {
                 None
             },
@@ -4516,7 +4558,7 @@ system_prompt = "You are a helpful assistant."
         // Populate cost on the result based on usage_footer mode
         let mut result = result;
         result.latency_ms = latency_ms;
-        match self.config.usage_footer {
+        match cfg.usage_footer {
             librefang_types::config::UsageFooterMode::Off => {
                 result.cost_usd = None;
             }
@@ -4596,7 +4638,7 @@ system_prompt = "You are a helpful assistant."
         if p.is_absolute() {
             p.to_path_buf()
         } else {
-            self.config.home_dir.join(path)
+            self.home_dir_boot.join(path)
         }
     }
 
@@ -4898,6 +4940,7 @@ system_prompt = "You are a helpful assistant."
         session: &mut librefang_memory::session::Session,
         agent_id: AgentId,
     ) {
+        let cfg = self.config.load();
         use librefang_types::config::InjectionPosition;
         use librefang_types::message::Message;
 
@@ -4916,8 +4959,7 @@ system_prompt = "You are a helpful assistant."
             .unwrap_or_default();
 
         // Merge global + agent injections (global first).
-        let all_injections: Vec<&librefang_types::config::ContextInjection> = self
-            .config
+        let all_injections: Vec<&librefang_types::config::ContextInjection> = cfg
             .session
             .context_injection
             .iter()
@@ -4941,7 +4983,7 @@ system_prompt = "You are a helpful assistant."
         }
 
         // Phase 2: Legacy reset_prompt.
-        if let Some(ref prompt) = self.config.session.reset_prompt {
+        if let Some(ref prompt) = cfg.session.reset_prompt {
             if !prompt.is_empty() {
                 session.messages.push(Message::system(prompt.clone()));
                 debug!(
@@ -4982,7 +5024,7 @@ system_prompt = "You are a helpful assistant."
         }
 
         // Run on_session_start_script if configured (fire-and-forget).
-        if let Some(ref script) = self.config.session.on_session_start_script {
+        if let Some(ref script) = cfg.session.on_session_start_script {
             if !script.is_empty() {
                 let script = script.clone();
                 let aid = agent_id.to_string();
@@ -5379,15 +5421,14 @@ system_prompt = "You are a helpful assistant."
 
     /// Write enabled flag to agent's TOML file.
     fn persist_agent_enabled(&self, _agent_id: AgentId, name: &str, enabled: bool) {
+        let cfg = self.config.load();
         // Check both agents/ and hands/ directories
         let agents_path = self
-            .config
-            .home_dir
+            .home_dir_boot
             .join("agents")
             .join(name)
             .join("agent.toml");
-        let hands_path = self
-            .config
+        let hands_path = cfg
             .effective_hands_workspaces_dir()
             .join(name)
             .join("agent.toml");
@@ -5430,6 +5471,7 @@ system_prompt = "You are a helpful assistant."
     /// Replaces the existing text-truncation compaction with an intelligent
     /// LLM-generated summary of older messages, keeping only recent messages.
     pub async fn compact_agent_session(&self, agent_id: AgentId) -> KernelResult<String> {
+        let cfg = self.config.load_full();
         use librefang_runtime::compactor::{compact_session, needs_compaction, CompactionConfig};
 
         let entry = self.registry.get(agent_id).ok_or_else(|| {
@@ -5448,7 +5490,7 @@ system_prompt = "You are a helpful assistant."
                 label: None,
             });
 
-        let config = CompactionConfig::from_toml(&self.config.compaction);
+        let config = CompactionConfig::from_toml(&cfg.compaction);
 
         if !needs_compaction(&session, &config) {
             return Ok(format!(
@@ -5645,6 +5687,7 @@ system_prompt = "You are a helpful assistant."
         config: std::collections::HashMap<String, serde_json::Value>,
         instance_id: Option<uuid::Uuid>,
     ) -> KernelResult<librefang_hands::HandInstance> {
+        let cfg = self.config.load();
         use librefang_hands::HandError;
 
         let def = self
@@ -5759,17 +5802,16 @@ system_prompt = "You are a helpful assistant."
 
             // Inherit kernel defaults when hand declares "default" provider/model
             if manifest.model.provider == "default" {
-                manifest.model.provider = self.config.default_model.provider.clone();
+                manifest.model.provider = cfg.default_model.provider.clone();
                 if manifest.model.api_key_env.is_none() {
-                    manifest.model.api_key_env =
-                        Some(self.config.default_model.api_key_env.clone());
+                    manifest.model.api_key_env = Some(cfg.default_model.api_key_env.clone());
                 }
                 if manifest.model.base_url.is_none() {
-                    manifest.model.base_url = self.config.default_model.base_url.clone();
+                    manifest.model.base_url = cfg.default_model.base_url.clone();
                 }
             }
             if manifest.model.model == "default" {
-                manifest.model.model = self.config.default_model.model.clone();
+                manifest.model.model = cfg.default_model.model.clone();
             }
 
             // Hand-level tool inheritance + agent_send for multi-agent hands
@@ -5863,10 +5905,7 @@ system_prompt = "You are a helpful assistant."
             // Hand workspace: workspaces/<hand-id>/
             // Agent workspace nested under hand: workspaces/hands/<hand-id>/<role>/
             let safe_hand = safe_path_component(hand_id, "hand");
-            let hand_dir = self
-                .config
-                .effective_hands_workspaces_dir()
-                .join(&safe_hand);
+            let hand_dir = cfg.effective_hands_workspaces_dir().join(&safe_hand);
 
             // Write hand definition to workspace
             let hand_toml_path = hand_dir.join("hand.toml");
@@ -5992,14 +6031,14 @@ system_prompt = "You are a helpful assistant."
 
     /// Reload hand definitions from disk (hot reload).
     pub fn reload_hands(&self) -> (usize, usize) {
-        let (added, updated) = self.hand_registry.reload_from_disk(&self.config.home_dir);
+        let (added, updated) = self.hand_registry.reload_from_disk(&self.home_dir_boot);
         info!(added, updated, "Reloaded hand definitions from disk");
         (added, updated)
     }
 
     /// Persist active hand state to disk.
     pub fn persist_hand_state(&self) {
-        let state_path = self.config.home_dir.join("hand_state.json");
+        let state_path = self.home_dir_boot.join("hand_state.json");
         if let Err(e) = self.hand_registry.persist_state(&state_path) {
             warn!(error = %e, "Failed to persist hand state");
         }
@@ -6072,13 +6111,14 @@ system_prompt = "You are a helpful assistant."
 
     /// Reload configuration: read the config file, diff against current, and
     /// apply hot-reloadable actions. Returns the reload plan for API response.
-    pub fn reload_config(&self) -> Result<crate::config_reload::ReloadPlan, String> {
+    pub async fn reload_config(&self) -> Result<crate::config_reload::ReloadPlan, String> {
+        let old_cfg = self.config.load();
         use crate::config_reload::{
             build_reload_plan, should_apply_hot, validate_config_for_reload,
         };
 
         // Read and parse config file (using load_config to process $include directives)
-        let config_path = self.config.home_dir.join("config.toml");
+        let config_path = self.home_dir_boot.join("config.toml");
         let new_config = if config_path.exists() {
             crate::config::load_config(Some(&config_path))
         } else {
@@ -6091,12 +6131,21 @@ system_prompt = "You are a helpful assistant."
         }
 
         // Build the reload plan
-        let plan = build_reload_plan(&self.config, &new_config);
+        let plan = build_reload_plan(&old_cfg, &new_config);
         plan.log_summary();
 
-        // Apply hot actions if the reload mode allows it
-        if should_apply_hot(self.config.reload.mode, &plan) {
-            self.apply_hot_actions(&plan, &new_config);
+        // Apply hot actions + store new config atomically under the same
+        // write lock.  This prevents message handlers from seeing side effects
+        // (cleared caches, updated overrides) while config_ref() still returns
+        // the old config.
+        //
+        // Only store the new config when hot-reload is active (Hot / Hybrid).
+        // In Off / Restart modes the user expects no runtime changes — they
+        // must restart to pick up the new config.
+        if should_apply_hot(old_cfg.reload.mode, &plan) {
+            let _write_guard = self.config_reload_lock.write().await;
+            self.apply_hot_actions_inner(&plan, &new_config);
+            self.config.store(std::sync::Arc::new(new_config));
         }
 
         Ok(plan)
@@ -6104,19 +6153,14 @@ system_prompt = "You are a helpful assistant."
 
     /// Apply hot-reload actions to the running kernel.
     ///
-    /// Holds a write lock on `config_reload_lock` for the entire duration so
-    /// that concurrent message handlers (which hold a read lock) cannot observe
-    /// a half-updated configuration.
-    fn apply_hot_actions(
+    /// **Caller must hold `config_reload_lock` write guard** so that the
+    /// config swap and side effects are atomic with respect to message handlers.
+    fn apply_hot_actions_inner(
         &self,
         plan: &crate::config_reload::ReloadPlan,
         new_config: &librefang_types::config::KernelConfig,
     ) {
         use crate::config_reload::HotAction;
-
-        // Acquire exclusive lock — blocks new message handlers from reading
-        // config-derived state until all actions are applied atomically.
-        let _write_guard = self.config_reload_lock.blocking_write();
 
         for action in &plan.hot_actions {
             match action {
@@ -6339,6 +6383,15 @@ system_prompt = "You are a helpful assistant."
                     // is used when drivers are next constructed.
                     self.driver_cache.clear();
                 }
+                HotAction::ReloadProviderApiKeys => {
+                    info!("Hot-reload: provider API keys changed — flushing driver cache");
+                    self.driver_cache.clear();
+                }
+                HotAction::ReloadProxy => {
+                    info!("Hot-reload: proxy config changed — reinitializing HTTP proxy env");
+                    librefang_runtime::http_client::init_proxy(new_config.proxy.clone());
+                    self.driver_cache.clear();
+                }
             }
         }
 
@@ -6358,9 +6411,10 @@ system_prompt = "You are a helpful assistant."
     /// Returns the list of (agent_id, message) pairs that were triggered.
     /// Includes depth limiting to prevent circular trigger chains.
     pub async fn publish_event(&self, event: Event) -> Vec<(AgentId, String)> {
+        let cfg = self.config.load_full();
         // Depth guard: prevent circular trigger chains
         static TRIGGER_DEPTH: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        let max_trigger_depth = self.config.triggers.max_depth as u32;
+        let max_trigger_depth = cfg.triggers.max_depth as u32;
 
         let depth = TRIGGER_DEPTH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if depth >= max_trigger_depth {
@@ -6480,6 +6534,7 @@ system_prompt = "You are a helpful assistant."
         workflow_id: WorkflowId,
         input: String,
     ) -> KernelResult<(WorkflowRunId, String)> {
+        let cfg = self.config.load_full();
         let run_id = self
             .workflows
             .create_run(workflow_id, input)
@@ -6521,7 +6576,7 @@ system_prompt = "You are a helpful assistant."
         };
 
         // SECURITY: Global workflow timeout to prevent runaway execution.
-        let max_workflow_secs = self.config.triggers.max_workflow_secs;
+        let max_workflow_secs = cfg.triggers.max_workflow_secs;
 
         let output = tokio::time::timeout(
             std::time::Duration::from_secs(max_workflow_secs),
@@ -6548,8 +6603,9 @@ system_prompt = "You are a helpful assistant."
     /// Hands activated on first boot when no `hand_state.json` exists yet.
     /// By default, NO hands are activated to prevent unexpected token consumption.
     pub async fn start_background_agents(self: &Arc<Self>) {
+        let cfg = self.config.load_full();
         // Restore previously active hands from persisted state
-        let state_path = self.config.home_dir.join("hand_state.json");
+        let state_path = self.home_dir_boot.join("hand_state.json");
         let saved_hands = librefang_hands::registry::HandRegistry::load_state(&state_path);
         if !saved_hands.is_empty() {
             info!("Restoring {} persisted hand(s)", saved_hands.len());
@@ -6564,8 +6620,7 @@ system_prompt = "You are a helpful assistant."
                 // latest hand definition before spawning agents.
                 // Check if hand's agent.toml has enabled=false — skip reactivation
                 let hand_agent_name = format!("{}-hand", hand_id);
-                let hand_toml = self
-                    .config
+                let hand_toml = cfg
                     .effective_hands_workspaces_dir()
                     .join(&hand_agent_name)
                     .join("agent.toml");
@@ -6679,34 +6734,35 @@ system_prompt = "You are a helpful assistant."
             let mut missing: Vec<String> = Vec::new();
 
             // Default LLM provider
-            let llm_env = self
-                .config
-                .resolve_api_key_env(&self.config.default_model.provider);
+            let llm_env = cfg.resolve_api_key_env(&cfg.default_model.provider);
             if std::env::var(&llm_env).unwrap_or_default().is_empty() {
                 missing.push(format!(
                     "LLM ({}): ${}",
-                    self.config.default_model.provider, llm_env
+                    cfg.default_model.provider, llm_env
                 ));
             }
 
             // Fallback LLM providers
-            for fb in &self.config.fallback_providers {
-                let env_var = self.config.resolve_api_key_env(&fb.provider);
+            for fb in &cfg.fallback_providers {
+                let env_var = cfg.resolve_api_key_env(&fb.provider);
                 if std::env::var(&env_var).unwrap_or_default().is_empty() {
                     missing.push(format!("LLM fallback ({}): ${}", fb.provider, env_var));
                 }
             }
 
             // Search provider
-            let search_env = match self.config.web.search_provider {
+            let search_env = match cfg.web.search_provider {
                 librefang_types::config::SearchProvider::Brave => {
-                    Some(("Brave", self.config.web.brave.api_key_env.clone()))
+                    Some(("Brave", cfg.web.brave.api_key_env.clone()))
                 }
                 librefang_types::config::SearchProvider::Tavily => {
-                    Some(("Tavily", self.config.web.tavily.api_key_env.clone()))
+                    Some(("Tavily", cfg.web.tavily.api_key_env.clone()))
                 }
                 librefang_types::config::SearchProvider::Perplexity => {
-                    Some(("Perplexity", self.config.web.perplexity.api_key_env.clone()))
+                    Some(("Perplexity", cfg.web.perplexity.api_key_env.clone()))
+                }
+                librefang_types::config::SearchProvider::Jina => {
+                    Some(("Jina", cfg.web.jina.api_key_env.clone()))
                 }
                 _ => None,
             };
@@ -6774,7 +6830,7 @@ system_prompt = "You are a helpful assistant."
         crate::inbox::start_inbox_watcher(Arc::clone(self));
 
         // Start OFP peer node if network is enabled
-        if self.config.network_enabled && !self.config.network.shared_secret.is_empty() {
+        if cfg.network_enabled && !cfg.network.shared_secret.is_empty() {
             let kernel = Arc::clone(self);
             tokio::spawn(async move {
                 kernel.start_ofp_node().await;
@@ -6858,7 +6914,7 @@ system_prompt = "You are a helpful assistant."
         // Periodic audit log pruning (daily, respects audit.retention_days)
         {
             let kernel = Arc::clone(self);
-            let retention = self.config.audit.retention_days;
+            let retention = cfg.audit.retention_days;
             if retention > 0 {
                 tokio::spawn(async move {
                     let mut interval =
@@ -6881,7 +6937,7 @@ system_prompt = "You are a helpful assistant."
 
         // Periodic session retention cleanup (prune expired / excess sessions)
         {
-            let session_cfg = self.config.session.clone();
+            let session_cfg = cfg.session.clone();
             let needs_cleanup =
                 session_cfg.retention_days > 0 || session_cfg.max_sessions_per_agent > 0;
             if needs_cleanup && session_cfg.cleanup_interval_hours > 0 {
@@ -6935,7 +6991,7 @@ system_prompt = "You are a helpful assistant."
 
         // Periodic memory consolidation (decays stale memory confidence)
         {
-            let interval_hours = self.config.memory.consolidation_interval_hours;
+            let interval_hours = cfg.memory.consolidation_interval_hours;
             if interval_hours > 0 {
                 let kernel = Arc::clone(self);
                 tokio::spawn(async move {
@@ -6971,7 +7027,7 @@ system_prompt = "You are a helpful assistant."
 
         // Periodic memory decay (deletes stale SESSION/AGENT memories by TTL)
         {
-            let decay_config = self.config.memory.decay.clone();
+            let decay_config = cfg.memory.decay.clone();
             if decay_config.enabled && decay_config.decay_interval_hours > 0 {
                 let kernel = Arc::clone(self);
                 let interval_hours = decay_config.decay_interval_hours;
@@ -7193,12 +7249,12 @@ system_prompt = "You are a helpful assistant."
         }
 
         // Log network status from config
-        if self.config.network_enabled {
+        if cfg.network_enabled {
             info!("OFP network enabled — peer discovery will use shared_secret from config");
         }
 
         // Discover configured external A2A agents
-        if let Some(ref a2a_config) = self.config.a2a {
+        if let Some(ref a2a_config) = cfg.a2a {
             if a2a_config.enabled && !a2a_config.external_agents.is_empty() {
                 let kernel = Arc::clone(self);
                 let agents = a2a_config.external_agents.clone();
@@ -7213,7 +7269,7 @@ system_prompt = "You are a helpful assistant."
         }
 
         // Start WhatsApp Web gateway if WhatsApp channel is configured
-        if self.config.channels.whatsapp.is_some() {
+        if cfg.channels.whatsapp.is_some() {
             let kernel = Arc::clone(self);
             tokio::spawn(async move {
                 crate::whatsapp_gateway::start_whatsapp_gateway(&kernel).await;
@@ -7227,10 +7283,10 @@ system_prompt = "You are a helpful assistant."
     /// Binds a TCP listener, registers with the peer registry, and connects
     /// to bootstrap peers from config.
     async fn start_ofp_node(self: &Arc<Self>) {
+        let cfg = self.config.load_full();
         use librefang_wire::{PeerConfig, PeerNode, PeerRegistry};
 
-        let listen_addr_str = self
-            .config
+        let listen_addr_str = cfg
             .network
             .listen_addresses
             .first()
@@ -7259,7 +7315,7 @@ system_prompt = "You are a helpful assistant."
             listen_addr,
             node_id: node_id.clone(),
             node_name: node_name.clone(),
-            shared_secret: self.config.network.shared_secret.clone(),
+            shared_secret: cfg.network.shared_secret.clone(),
         };
 
         let registry = PeerRegistry::new();
@@ -7280,7 +7336,7 @@ system_prompt = "You are a helpful assistant."
                 let _ = self.peer_node.set(node.clone());
 
                 // Connect to bootstrap peers
-                for peer_addr_str in &self.config.network.bootstrap_peers {
+                for peer_addr_str in &cfg.network.bootstrap_peers {
                     // Parse the peer address — support both multiaddr and plain formats
                     let peer_addr: Option<std::net::SocketAddr> = if peer_addr_str.starts_with('/')
                     {
@@ -7324,7 +7380,7 @@ system_prompt = "You are a helpful assistant."
         use crate::heartbeat::{check_agents, is_quiet_hours, HeartbeatConfig};
 
         let kernel = Arc::clone(self);
-        let config = HeartbeatConfig::from_toml(&kernel.config.heartbeat);
+        let config = HeartbeatConfig::from_toml(&kernel.config.load().heartbeat);
         let interval_secs = config.check_interval_secs;
 
         tokio::spawn(async move {
@@ -7469,8 +7525,9 @@ system_prompt = "You are a helpful assistant."
     /// the boot-time snapshot). This helper checks both sources so that custom
     /// providers work immediately without a daemon restart.
     fn lookup_provider_url(&self, provider: &str) -> Option<String> {
+        let cfg = self.config.load();
         // 1. Boot-time config (from config.toml [provider_urls])
-        if let Some(url) = self.config.provider_urls.get(provider) {
+        if let Some(url) = cfg.provider_urls.get(provider) {
             return Some(url.clone());
         }
         // 2. Model catalog (updated at runtime by set_provider_url / apply_url_overrides)
@@ -7483,7 +7540,7 @@ system_prompt = "You are a helpful assistant."
         }
         // 3. Dedicated CLI path config fields (more discoverable than provider_urls).
         if provider == "qwen-code" {
-            if let Some(ref path) = self.config.qwen_code_path {
+            if let Some(ref path) = cfg.qwen_code_path {
                 if !path.is_empty() {
                     return Some(path.clone());
                 }
@@ -7493,6 +7550,7 @@ system_prompt = "You are a helpful assistant."
     }
 
     fn resolve_driver(&self, manifest: &AgentManifest) -> KernelResult<Arc<dyn LlmDriver>> {
+        let cfg = self.config.load();
         let agent_provider = &manifest.model.provider;
 
         // Use the effective default model: hot-reloaded override takes priority
@@ -7503,9 +7561,7 @@ system_prompt = "You are a helpful assistant."
             .default_model_override
             .read()
             .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
-        let effective_default = override_guard
-            .as_ref()
-            .unwrap_or(&self.config.default_model);
+        let effective_default = override_guard.as_ref().unwrap_or(&cfg.default_model);
         let default_provider = &effective_default.provider;
 
         let has_custom_key = manifest.model.api_key_env.is_some();
@@ -7529,14 +7585,14 @@ system_prompt = "You are a helpful assistant."
                 if !effective_default.api_key_env.is_empty() {
                     std::env::var(&effective_default.api_key_env).ok()
                 } else {
-                    let env_var = self.config.resolve_api_key_env(agent_provider);
+                    let env_var = cfg.resolve_api_key_env(agent_provider);
                     std::env::var(&env_var).ok()
                 }
             } else {
                 // Different provider — check auth profiles, provider_api_keys,
                 // and convention-based env var. For custom providers (not in the
                 // hardcoded list), this is the primary path for API key resolution.
-                let env_var = self.config.resolve_api_key_env(agent_provider);
+                let env_var = cfg.resolve_api_key_env(agent_provider);
                 std::env::var(&env_var).ok()
             };
 
@@ -7560,9 +7616,10 @@ system_prompt = "You are a helpful assistant."
                 provider: agent_provider.clone(),
                 api_key,
                 base_url,
-                vertex_ai: self.config.vertex_ai.clone(),
-                azure_openai: self.config.azure_openai.clone(),
+                vertex_ai: cfg.vertex_ai.clone(),
+                azure_openai: cfg.azure_openai.clone(),
                 skip_permissions: true,
+                message_timeout_secs: cfg.default_model.message_timeout_secs,
             };
 
             match self.driver_cache.get_or_create(&driver_config) {
@@ -7592,7 +7649,7 @@ system_prompt = "You are a helpful assistant."
         // Resolve "default" provider in fallback entries to the actual default provider.
         let mut effective_fallbacks = manifest.fallback_models.clone();
         // Append global fallback_providers so every agent benefits from the configured chain
-        for gfb in &self.config.fallback_providers {
+        for gfb in &cfg.fallback_providers {
             let already_present = effective_fallbacks
                 .iter()
                 .any(|fb| fb.provider == gfb.provider && fb.model == gfb.model);
@@ -7628,7 +7685,7 @@ system_prompt = "You are a helpful assistant."
                     std::env::var(env).ok()
                 } else {
                     // Resolve using provider_api_keys / convention for custom providers
-                    let env_var = self.config.resolve_api_key_env(&fb_provider);
+                    let env_var = cfg.resolve_api_key_env(&fb_provider);
                     std::env::var(&env_var).ok()
                 };
                 let config = DriverConfig {
@@ -7638,9 +7695,10 @@ system_prompt = "You are a helpful assistant."
                         .base_url
                         .clone()
                         .or_else(|| self.lookup_provider_url(&fb_provider)),
-                    vertex_ai: self.config.vertex_ai.clone(),
-                    azure_openai: self.config.azure_openai.clone(),
+                    vertex_ai: cfg.vertex_ai.clone(),
+                    azure_openai: cfg.azure_openai.clone(),
                     skip_permissions: true,
+                    message_timeout_secs: cfg.default_model.message_timeout_secs,
                 };
                 match self.driver_cache.get_or_create(&config) {
                     Ok(d) => chain.push((d, fb.model.clone())),
@@ -7748,6 +7806,7 @@ system_prompt = "You are a helpful assistant."
     ///
     /// Called by the API reload endpoint after CLI installs/removes integrations.
     pub async fn reload_extension_mcps(self: &Arc<Self>) -> Result<usize, String> {
+        let cfg = self.config.load_full();
         use librefang_runtime::mcp::{McpConnection, McpServerConfig, McpTransport};
         use librefang_types::config::McpTransportEntry;
 
@@ -7767,7 +7826,7 @@ system_prompt = "You are a helpful assistant."
                 .read()
                 .unwrap_or_else(|e| e.into_inner());
             let ext_mcp_configs = registry.to_mcp_configs();
-            let mut all = self.config.mcp_servers.clone();
+            let mut all = cfg.mcp_servers.clone();
             for ext_cfg in ext_mcp_configs {
                 if !all.iter().any(|s| s.name == ext_cfg.name) {
                     all.push(ext_cfg);
@@ -8045,6 +8104,7 @@ system_prompt = "You are a helpful assistant."
     /// If `capabilities.tools` is empty (or contains `"*"`), all tools are
     /// available (backwards compatible).
     fn available_tools(&self, agent_id: AgentId) -> Arc<Vec<ToolDefinition>> {
+        let cfg = self.config.load();
         // Check the tool list cache first — avoids recomputing builtins, skill tools,
         // and MCP tools on every message for the same agent.
         let skill_gen = self
@@ -8059,7 +8119,7 @@ system_prompt = "You are a helpful assistant."
             }
         }
 
-        let all_builtins = if self.config.browser.enabled {
+        let all_builtins = if cfg.browser.enabled {
             builtin_tool_definitions()
         } else {
             // When built-in browser is disabled (replaced by an external
@@ -8224,9 +8284,7 @@ system_prompt = "You are a helpful assistant."
             .read()
             .ok()
             .and_then(|guard| guard.clone());
-        let effective_policy = effective_policy
-            .as_ref()
-            .unwrap_or(&self.config.tool_policy);
+        let effective_policy = effective_policy.as_ref().unwrap_or(&cfg.tool_policy);
         if !effective_policy.is_empty() {
             all_tools.retain(|t| {
                 let result = librefang_runtime::tool_policy::resolve_tool_access(
@@ -8284,9 +8342,9 @@ system_prompt = "You are a helpful assistant."
             warn!("Skill registry is frozen (Stable mode) — reload skipped");
             return;
         }
-        let skills_dir = self.config.home_dir.join("skills");
+        let skills_dir = self.home_dir_boot.join("skills");
         let mut fresh = librefang_skills::registry::SkillRegistry::new(skills_dir);
-        let bundled = fresh.load_bundled(&self.config.home_dir);
+        let bundled = fresh.load_bundled(&self.home_dir_boot);
         let user = fresh.load_all().unwrap_or(0);
         info!(bundled, user, "Skill registry hot-reloaded");
         *registry = fresh;
@@ -8311,12 +8369,13 @@ system_prompt = "You are a helpful assistant."
         &self,
         manifest: &librefang_types::agent::AgentManifest,
     ) -> Option<&dyn librefang_runtime::context_engine::ContextEngine> {
+        let cfg = self.config.load();
         let engine = self.context_engine.as_deref()?;
         if manifest.allowed_plugins.is_empty() {
             return Some(engine);
         }
         // Check if the configured context engine plugin is in the agent's allowlist
-        if let Some(ref plugin_name) = self.config.context_engine.plugin {
+        if let Some(ref plugin_name) = cfg.context_engine.plugin {
             if manifest.allowed_plugins.iter().any(|p| p == plugin_name) {
                 return Some(engine);
             }
@@ -8899,6 +8958,59 @@ async fn cron_deliver_response(
 impl LibreFangKernel {
     /// Mark all active Hands' cron jobs as due-now so the next scheduler tick fires them.
     /// Called after a provider is first configured so Hands resume immediately.
+    /// Update registry entries for agents that should track the kernel default model.
+    /// Called after a provider switch so agents pick up the new provider without restart.
+    ///
+    /// Agents eligible for update:
+    /// - Any agent with provider="default" or "" (new spawn-time behavior)
+    /// - The auto-spawned "assistant" agent (may have stale concrete provider in DB)
+    /// - Dashboard-created agents (no source_toml_path, no custom api_key_env) whose
+    ///   stored provider matches `old_provider` — these were using the old default
+    pub fn sync_default_model_agents(
+        &self,
+        old_provider: &str,
+        dm: &librefang_types::config::DefaultModelConfig,
+    ) {
+        for entry in self.registry.list() {
+            let is_default_provider = entry.manifest.model.provider.is_empty()
+                || entry.manifest.model.provider == "default";
+            let is_default_model =
+                entry.manifest.model.model.is_empty() || entry.manifest.model.model == "default";
+            let is_auto_spawned = entry.name == "assistant"
+                && entry.manifest.description == "General-purpose assistant";
+            // Dashboard-created agents that were using the old default provider:
+            // no source TOML, no custom API key, and saved provider == old default
+            let is_stale_dashboard_default = entry.source_toml_path.is_none()
+                && entry.manifest.model.api_key_env.is_none()
+                && entry.manifest.model.base_url.is_none()
+                && entry.manifest.model.provider == old_provider;
+
+            if (is_default_provider && is_default_model)
+                || is_auto_spawned
+                || is_stale_dashboard_default
+            {
+                let _ = self.registry.update_model_and_provider(
+                    entry.id,
+                    dm.model.clone(),
+                    dm.provider.clone(),
+                );
+                if !dm.api_key_env.is_empty() {
+                    if let Some(mut e) = self.registry.get(entry.id) {
+                        if e.manifest.model.api_key_env.is_none() {
+                            e.manifest.model.api_key_env = Some(dm.api_key_env.clone());
+                        }
+                        if dm.base_url.is_some() && e.manifest.model.base_url.is_none() {
+                            e.manifest.model.base_url.clone_from(&dm.base_url);
+                        }
+                        let _ = self.memory.save_agent(&e);
+                    }
+                } else if let Some(e) = self.registry.get(entry.id) {
+                    let _ = self.memory.save_agent(&e);
+                }
+            }
+        }
+    }
+
     pub fn trigger_all_hands(&self) {
         let hand_agents: Vec<AgentId> = self
             .hand_registry
@@ -9270,7 +9382,7 @@ impl KernelHandle for LibreFangKernel {
     ) -> Result<serde_json::Value, String> {
         let def = self
             .hand_registry
-            .install_from_content_persisted(&self.config.home_dir, toml_content, skill_content)
+            .install_from_content_persisted(&self.home_dir_boot, toml_content, skill_content)
             .map_err(|e| format!("{e}"))?;
         router::invalidate_hand_route_cache();
 
@@ -9442,6 +9554,7 @@ impl KernelHandle for LibreFangKernel {
         message: &str,
         thread_id: Option<&str>,
     ) -> Result<String, String> {
+        let cfg = self.config.load_full();
         let adapter = self
             .channel_adapters
             .get(channel)
@@ -9464,17 +9577,18 @@ impl KernelHandle for LibreFangKernel {
             librefang_user: None,
         };
 
+        let default_format =
+            librefang_channels::formatter::default_output_format_for_channel(channel);
         let formatted = if channel == "wecom" {
-            let output_format = self
-                .config
+            let output_format = cfg
                 .channels
                 .wecom
                 .as_ref()
                 .and_then(|c| c.overrides.output_format)
-                .unwrap_or(OutputFormat::PlainText);
+                .unwrap_or(default_format);
             librefang_channels::formatter::format_for_wecom(message, output_format)
         } else {
-            message.to_string()
+            librefang_channels::formatter::format_for_channel(message, default_format)
         };
 
         let content = librefang_channels::types::ChannelContent::Text(formatted);
@@ -9645,7 +9759,8 @@ impl KernelHandle for LibreFangKernel {
         &self,
         agent_id: &str,
     ) -> Result<Option<librefang_types::agent::PromptExperiment>, String> {
-        if !self.config.prompt_intelligence.enabled {
+        let cfg = self.config.load();
+        if !cfg.prompt_intelligence.enabled {
             return Ok(None);
         }
         let id: AgentId = agent_id
@@ -9716,6 +9831,7 @@ impl KernelHandle for LibreFangKernel {
         &self,
         version: librefang_types::agent::PromptVersion,
     ) -> Result<(), String> {
+        let cfg = self.config.load();
         let store = self
             .prompt_store
             .get()
@@ -9725,7 +9841,7 @@ impl KernelHandle for LibreFangKernel {
             .create_version(version)
             .map_err(|e| format!("Failed to create version: {e}"))?;
         // Prune old versions if over the configured limit
-        let max = self.config.prompt_intelligence.max_versions_per_agent;
+        let max = cfg.prompt_intelligence.max_versions_per_agent;
         let _ = store.prune_old_versions(agent_id, max);
         Ok(())
     }
@@ -9868,7 +9984,8 @@ impl KernelHandle for LibreFangKernel {
         agent_id: librefang_types::agent::AgentId,
         system_prompt: &str,
     ) -> Result<(), String> {
-        if !self.config.prompt_intelligence.enabled {
+        let cfg = self.config.load();
+        if !cfg.prompt_intelligence.enabled {
             return Ok(());
         }
         let store = self
@@ -9879,7 +9996,7 @@ impl KernelHandle for LibreFangKernel {
             Ok(true) => {
                 tracing::debug!(agent_id = %agent_id, "Auto-tracked new prompt version");
                 // Prune old versions
-                let max = self.config.prompt_intelligence.max_versions_per_agent;
+                let max = cfg.prompt_intelligence.max_versions_per_agent;
                 let _ = store.prune_old_versions(agent_id, max);
                 Ok(())
             }
@@ -9889,11 +10006,13 @@ impl KernelHandle for LibreFangKernel {
     }
 
     fn tool_timeout_secs(&self) -> u64 {
-        self.config.tool_timeout_secs
+        let cfg = self.config.load();
+        cfg.tool_timeout_secs
     }
 
     fn max_agent_call_depth(&self) -> u32 {
-        self.config.max_agent_call_depth
+        let cfg = self.config.load();
+        cfg.max_agent_call_depth
     }
 
     fn goal_list_active(
@@ -10326,6 +10445,7 @@ mod tests {
             model: "Qwen3.5-4B-MLX-4bit".to_string(),
             api_key_env: String::new(),
             base_url: Some("http://127.0.0.1:11434/v1".to_string()),
+            ..Default::default()
         });
 
         let agent_id = kernel
@@ -10353,16 +10473,13 @@ mod tests {
             .expect("agent should spawn with local model override");
 
         let entry = kernel.registry.get(agent_id).expect("agent registry entry");
-        assert_eq!(entry.manifest.model.provider, "ollama");
-        assert_eq!(entry.manifest.model.model, "Qwen3.5-4B-MLX-4bit");
-        assert_eq!(
-            entry.manifest.model.base_url.as_deref(),
-            Some("http://127.0.0.1:11434/v1")
-        );
-        assert!(
-            entry.manifest.model.api_key_env.is_none(),
-            "local model override should not require an API key env var"
-        );
+        // Spawn now stores "default"/"default" so provider changes propagate at
+        // execute time without re-spawning. Concrete resolution happens in
+        // execute_llm_agent, not at spawn.
+        assert_eq!(entry.manifest.model.provider, "default");
+        assert_eq!(entry.manifest.model.model, "default");
+        assert!(entry.manifest.model.base_url.is_none());
+        assert!(entry.manifest.model.api_key_env.is_none());
 
         kernel.shutdown();
     }

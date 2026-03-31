@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::mpsc;
 use tracing::{info, warn};
 use zeroize::Zeroizing;
 
@@ -52,17 +52,12 @@ const MAX_MESSAGE_LEN: usize = 65535;
 pub struct WebhookAdapter {
     /// SECURITY: Shared secret for HMAC-SHA256 signatures (zeroized on drop).
     secret: Zeroizing<String>,
-    /// Port to listen on for incoming webhooks.
-    listen_port: u16,
     /// Optional callback URL for sending messages.
     callback_url: Option<String>,
     /// HTTP client for outbound requests.
     client: reqwest::Client,
     /// Optional account identifier for multi-bot routing.
     account_id: Option<String>,
-    /// Shutdown signal.
-    shutdown_tx: Arc<watch::Sender<bool>>,
-    shutdown_rx: watch::Receiver<bool>,
 }
 
 impl WebhookAdapter {
@@ -72,16 +67,12 @@ impl WebhookAdapter {
     /// * `secret` - Shared secret for HMAC-SHA256 signature verification.
     /// * `listen_port` - Port to listen for incoming webhook POST requests.
     /// * `callback_url` - Optional URL to POST outbound messages to.
-    pub fn new(secret: String, listen_port: u16, callback_url: Option<String>) -> Self {
-        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    pub fn new(secret: String, _listen_port: u16, callback_url: Option<String>) -> Self {
         Self {
             secret: Zeroizing::new(secret),
-            listen_port,
             callback_url,
             client: crate::http_client::new_client(),
             account_id: None,
-            shutdown_tx: Arc::new(shutdown_tx),
-            shutdown_rx,
         }
     }
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
@@ -182,138 +173,122 @@ impl ChannelAdapter for WebhookAdapter {
         ChannelType::Custom("webhook".to_string())
     }
 
+    async fn create_webhook_routes(
+        &self,
+    ) -> Option<(
+        axum::Router,
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+    )> {
+        let (tx, rx) = mpsc::channel::<ChannelMessage>(256);
+        let tx = Arc::new(tx);
+        let secret = Arc::new(self.secret.clone());
+        let account_id = Arc::new(self.account_id.clone());
+
+        let app = axum::Router::new().route(
+            "/webhook",
+            axum::routing::post({
+                let tx = Arc::clone(&tx);
+                let secret = Arc::clone(&secret);
+                let account_id = Arc::clone(&account_id);
+                move |headers: axum::http::HeaderMap, body: axum::body::Bytes| {
+                    let tx = Arc::clone(&tx);
+                    let secret = Arc::clone(&secret);
+                    let account_id = Arc::clone(&account_id);
+                    async move {
+                        let signature = headers
+                            .get("X-Webhook-Signature")
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or("");
+
+                        if !WebhookAdapter::verify_signature(&secret, &body, signature) {
+                            warn!("Webhook: invalid signature");
+                            return (
+                                axum::http::StatusCode::FORBIDDEN,
+                                "Forbidden: invalid signature",
+                            );
+                        }
+
+                        let json_body: serde_json::Value = match serde_json::from_slice(&body) {
+                            Ok(v) => v,
+                            Err(_) => {
+                                return (axum::http::StatusCode::BAD_REQUEST, "Invalid JSON");
+                            }
+                        };
+
+                        if let Some((
+                            message,
+                            sender_id,
+                            sender_name,
+                            thread_id,
+                            is_group,
+                            metadata,
+                        )) = WebhookAdapter::parse_webhook_body(&json_body)
+                        {
+                            let content = if message.starts_with('/') {
+                                let parts: Vec<&str> = message.splitn(2, ' ').collect();
+                                let cmd = parts[0].trim_start_matches('/');
+                                let args: Vec<String> = parts
+                                    .get(1)
+                                    .map(|a| a.split_whitespace().map(String::from).collect())
+                                    .unwrap_or_default();
+                                ChannelContent::Command {
+                                    name: cmd.to_string(),
+                                    args,
+                                }
+                            } else {
+                                ChannelContent::Text(message)
+                            };
+
+                            let mut msg = ChannelMessage {
+                                channel: ChannelType::Custom("webhook".to_string()),
+                                platform_message_id: format!(
+                                    "wh-{}",
+                                    Utc::now().timestamp_millis()
+                                ),
+                                sender: ChannelUser {
+                                    platform_id: sender_id,
+                                    display_name: sender_name,
+                                    librefang_user: None,
+                                },
+                                content,
+                                target_agent: None,
+                                timestamp: Utc::now(),
+                                is_group,
+                                thread_id,
+                                metadata,
+                            };
+
+                            if let Some(ref aid) = *account_id {
+                                msg.metadata
+                                    .insert("account_id".to_string(), serde_json::json!(aid));
+                            }
+                            let _ = tx.send(msg).await;
+                        }
+
+                        (axum::http::StatusCode::OK, "ok")
+                    }
+                }
+            }),
+        );
+
+        info!("Webhook adapter registered on shared server at /channels/webhook/incoming");
+
+        Some((
+            app,
+            Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)),
+        ))
+    }
+
     async fn start(
         &self,
     ) -> Result<
         Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
         Box<dyn std::error::Error + Send + Sync>,
     > {
-        let (tx, rx) = mpsc::channel::<ChannelMessage>(256);
-        let port = self.listen_port;
-        let secret = self.secret.clone();
-        let mut shutdown_rx = self.shutdown_rx.clone();
-        let account_id = Arc::new(self.account_id.clone());
-
-        info!("Webhook adapter starting HTTP server on port {port}");
-
-        tokio::spawn(async move {
-            let tx_shared = Arc::new(tx);
-            let secret_shared = Arc::new(secret);
-
-            let app = axum::Router::new().route(
-                "/webhook",
-                axum::routing::post({
-                    let tx = Arc::clone(&tx_shared);
-                    let secret = Arc::clone(&secret_shared);
-                    move |headers: axum::http::HeaderMap, body: axum::body::Bytes| {
-                        let tx = Arc::clone(&tx);
-                        let secret = Arc::clone(&secret);
-                        async move {
-                            // Extract and verify signature
-                            let signature = headers
-                                .get("X-Webhook-Signature")
-                                .and_then(|v| v.to_str().ok())
-                                .unwrap_or("");
-
-                            if !WebhookAdapter::verify_signature(&secret, &body, signature) {
-                                warn!("Webhook: invalid signature");
-                                return (
-                                    axum::http::StatusCode::FORBIDDEN,
-                                    "Forbidden: invalid signature",
-                                );
-                            }
-
-                            let json_body: serde_json::Value = match serde_json::from_slice(&body) {
-                                Ok(v) => v,
-                                Err(_) => {
-                                    return (axum::http::StatusCode::BAD_REQUEST, "Invalid JSON");
-                                }
-                            };
-
-                            if let Some((
-                                message,
-                                sender_id,
-                                sender_name,
-                                thread_id,
-                                is_group,
-                                metadata,
-                            )) = WebhookAdapter::parse_webhook_body(&json_body)
-                            {
-                                let content = if message.starts_with('/') {
-                                    let parts: Vec<&str> = message.splitn(2, ' ').collect();
-                                    let cmd = parts[0].trim_start_matches('/');
-                                    let args: Vec<String> = parts
-                                        .get(1)
-                                        .map(|a| a.split_whitespace().map(String::from).collect())
-                                        .unwrap_or_default();
-                                    ChannelContent::Command {
-                                        name: cmd.to_string(),
-                                        args,
-                                    }
-                                } else {
-                                    ChannelContent::Text(message)
-                                };
-
-                                let mut msg = ChannelMessage {
-                                    channel: ChannelType::Custom("webhook".to_string()),
-                                    platform_message_id: format!(
-                                        "wh-{}",
-                                        Utc::now().timestamp_millis()
-                                    ),
-                                    sender: ChannelUser {
-                                        platform_id: sender_id,
-                                        display_name: sender_name,
-                                        librefang_user: None,
-                                    },
-                                    content,
-                                    target_agent: None,
-                                    timestamp: Utc::now(),
-                                    is_group,
-                                    thread_id,
-                                    metadata,
-                                };
-
-                                // Inject account_id for multi-bot routing
-                                if let Some(ref aid) = *account_id {
-                                    msg.metadata
-                                        .insert("account_id".to_string(), serde_json::json!(aid));
-                                }
-                                let _ = tx.send(msg).await;
-                            }
-
-                            (axum::http::StatusCode::OK, "ok")
-                        }
-                    }
-                }),
-            );
-
-            let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
-            info!("Webhook HTTP server listening on {addr}");
-
-            let listener = match tokio::net::TcpListener::bind(addr).await {
-                Ok(l) => l,
-                Err(e) => {
-                    warn!("Webhook: failed to bind port {port}: {e}");
-                    return;
-                }
-            };
-
-            let server = axum::serve(listener, app);
-
-            tokio::select! {
-                result = server => {
-                    if let Err(e) = result {
-                        warn!("Webhook server error: {e}");
-                    }
-                }
-                _ = shutdown_rx.changed() => {
-                    info!("Webhook adapter shutting down");
-                }
-            }
-
-            info!("Webhook HTTP server stopped");
-        });
-
+        // When using the shared webhook server, create_webhook_routes() is called
+        // instead. This start() is only reached as a fallback (shouldn't happen
+        // in normal operation since BridgeManager prefers create_webhook_routes).
+        let (_tx, rx) = mpsc::channel::<ChannelMessage>(1);
         Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
     }
 
@@ -381,7 +356,6 @@ impl ChannelAdapter for WebhookAdapter {
     }
 
     async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let _ = self.shutdown_tx.send(true);
         Ok(())
     }
 }

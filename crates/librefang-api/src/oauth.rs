@@ -410,7 +410,8 @@ impl TokenStore {
 /// GET /api/auth/providers — List available authentication providers.
 #[utoipa::path(get, path = "/api/auth/providers", tag = "auth", responses((status = 200, description = "List configured OAuth/OIDC providers", body = serde_json::Value)))]
 pub async fn auth_providers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let ext_auth = &state.kernel.config_ref().external_auth;
+    let cfg = state.kernel.config_snapshot();
+    let ext_auth = &cfg.external_auth;
 
     if !ext_auth.enabled {
         return Json(serde_json::json!({
@@ -442,7 +443,8 @@ pub async fn auth_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
 /// GET /api/auth/login — Redirect to the external identity provider (legacy single-provider).
 #[utoipa::path(get, path = "/api/auth/login", tag = "auth", responses((status = 302, description = "Redirect to OAuth provider login")))]
 pub async fn auth_login(State(state): State<Arc<AppState>>) -> Response {
-    let ext_auth = &state.kernel.config_ref().external_auth;
+    let cfg = state.kernel.config_snapshot();
+    let ext_auth = &cfg.external_auth;
     if !ext_auth.enabled {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -472,7 +474,8 @@ pub async fn auth_login_provider(
     State(state): State<Arc<AppState>>,
     Path(provider_id): Path<String>,
 ) -> Response {
-    let ext_auth = &state.kernel.config_ref().external_auth;
+    let cfg = state.kernel.config_snapshot();
+    let ext_auth = &cfg.external_auth;
     if !ext_auth.enabled {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -599,7 +602,8 @@ pub async fn auth_callback(
     State(state): State<Arc<AppState>>,
     Query(query): Query<CallbackQuery>,
 ) -> impl IntoResponse {
-    let ext_auth = &state.kernel.config_ref().external_auth;
+    let cfg = state.kernel.config_snapshot();
+    let ext_auth = &cfg.external_auth;
     if !ext_auth.enabled {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -665,7 +669,8 @@ pub async fn auth_callback_post(
     State(state): State<Arc<AppState>>,
     Json(body): Json<CallbackBody>,
 ) -> impl IntoResponse {
-    let ext_auth = &state.kernel.config_ref().external_auth;
+    let cfg = state.kernel.config_snapshot();
+    let ext_auth = &cfg.external_auth;
     if !ext_auth.enabled {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -910,7 +915,8 @@ pub async fn auth_userinfo(
     State(state): State<Arc<AppState>>,
     request: axum::http::Request<axum::body::Body>,
 ) -> impl IntoResponse {
-    let ext_auth = &state.kernel.config_ref().external_auth;
+    let kcfg = state.kernel.config_ref();
+    let ext_auth = &kcfg.external_auth;
 
     if !ext_auth.enabled {
         return (
@@ -1001,7 +1007,8 @@ pub async fn auth_introspect(
     State(state): State<Arc<AppState>>,
     Json(req): Json<IntrospectRequest>,
 ) -> impl IntoResponse {
-    let ext_auth = &state.kernel.config_ref().external_auth;
+    let kcfg = state.kernel.config_ref();
+    let ext_auth = &kcfg.external_auth;
     if !ext_auth.enabled {
         return Json(serde_json::json!({
             "active": false,
@@ -1088,7 +1095,8 @@ pub async fn auth_refresh(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RefreshRequest>,
 ) -> impl IntoResponse {
-    let ext_auth = &state.kernel.config_ref().external_auth;
+    let kcfg = state.kernel.config_ref();
+    let ext_auth = &kcfg.external_auth;
     if !ext_auth.enabled {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -1253,7 +1261,8 @@ pub async fn oidc_auth_middleware(
     mut request: axum::http::Request<axum::body::Body>,
     next: axum::middleware::Next,
 ) -> Response {
-    let config = &state.kernel.config_ref().external_auth;
+    let kcfg = state.kernel.config_ref();
+    let config = &kcfg.external_auth;
     if !config.enabled {
         return next.run(request).await;
     }

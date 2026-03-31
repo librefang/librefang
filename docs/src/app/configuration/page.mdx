@@ -201,8 +201,9 @@ shared_secret = ""                    # Required when network_enabled = true
 
 # --- Web Tools ---
 [web]
-search_provider = "auto"              # auto | brave | tavily | perplexity | duckduckgo
+search_provider = "auto"              # auto | brave | jina | tavily | perplexity | duckduckgo
 cache_ttl_minutes = 15
+timeout_secs = 15
 
 [web.brave]
 api_key_env = "BRAVE_API_KEY"
@@ -216,6 +217,10 @@ api_key_env = "TAVILY_API_KEY"
 search_depth = "basic"                # basic | advanced
 max_results = 5
 include_answer = true
+
+[web.jina]
+api_key_env = "JINA_API_KEY"
+max_results = 5
 
 [web.perplexity]
 api_key_env = "PERPLEXITY_API_KEY"
@@ -579,19 +584,22 @@ Configures web search and web fetch capabilities used by agent tools.
 [web]
 search_provider = "auto"
 cache_ttl_minutes = 15
+timeout_secs = 15
 ```
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `search_provider` | string | `"auto"` | Which search engine to use. See values below. |
 | `cache_ttl_minutes` | u64 | `15` | Cache duration for search/fetch results in minutes. `0` = caching disabled. |
+| `timeout_secs` | u64 | `15` | HTTP timeout in seconds for all web search requests. Recommended: 15 for most providers, 30+ for Jina. |
 
 **`search_provider` values:**
 
 | Value | Description |
 |-------|-------------|
-| `auto` | Cascading fallback: tries Tavily, then Brave, then Perplexity, then DuckDuckGo, based on which API keys are available. |
+| `auto` | Cascading fallback: tries Tavily, then Brave, then Jina, then Perplexity, then DuckDuckGo, based on which API keys are available. |
 | `brave` | Brave Search API. Requires `BRAVE_API_KEY`. |
+| `jina` | Jina AI search and grounding. Requires `JINA_API_KEY`. |
 | `tavily` | Tavily AI-native search. Requires `TAVILY_API_KEY`. |
 | `perplexity` | Perplexity AI search. Requires `PERPLEXITY_API_KEY`. |
 | `duckduckgo` | DuckDuckGo HTML scraping. No API key needed. |
@@ -631,6 +639,19 @@ include_answer = true
 | `search_depth` | string | `"basic"` | Search depth: `"basic"` for fast results, `"advanced"` for deeper analysis. |
 | `max_results` | usize | `5` | Maximum number of search results to return. |
 | `include_answer` | bool | `true` | Whether to include Tavily's AI-generated answer summary in results. |
+
+#### `[web.jina]`
+
+```toml
+[web.jina]
+api_key_env = "JINA_API_KEY"
+max_results = 5
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `api_key_env` | string | `"JINA_API_KEY"` | Environment variable name holding the Jina AI API key. |
+| `max_results` | usize | `5` | Maximum number of search results to return. |
 
 #### `[web.perplexity]`
 
@@ -2652,6 +2673,7 @@ Complete table of all environment variables referenced by the configuration. Non
 | Variable | Used By | Description |
 |----------|---------|-------------|
 | `BRAVE_API_KEY` | `[web.brave]` | Brave Search API key. |
+| `JINA_API_KEY` | `[web.jina]` | Jina AI Search API key. |
 | `TAVILY_API_KEY` | `[web.tavily]` | Tavily Search API key. |
 | `PERPLEXITY_API_KEY` | `[web.perplexity]` | Perplexity Search API key (shared with LLM provider). |
 
@@ -2763,6 +2785,7 @@ For **web search providers**, the validator checks:
 | Provider | Env var checked |
 |----------|----------------|
 | `brave` | `web.brave.api_key_env` |
+| `jina` | `web.jina.api_key_env` |
 | `tavily` | `web.tavily.api_key_env` |
 | `perplexity` | `web.perplexity.api_key_env` |
 | `duckduckgo` | (no check -- no API key needed) |

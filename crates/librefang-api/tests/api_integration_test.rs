@@ -80,6 +80,7 @@ async fn start_test_server_with_provider(
             model: model.to_string(),
             api_key_env: api_key_env.to_string(),
             base_url: None,
+            message_timeout_secs: 300,
         },
         ..KernelConfig::default()
     };
@@ -108,6 +109,7 @@ async fn start_test_server_with_provider(
         #[cfg(feature = "telemetry")]
         prometheus_handle: None,
         media_drivers: librefang_runtime::media::MediaDriverCache::new(),
+        webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
     });
 
     let app = Router::new()
@@ -207,6 +209,7 @@ async fn start_full_router(api_key: &str) -> FullRouterHarness {
             model: "test-model".to_string(),
             api_key_env: "OLLAMA_API_KEY".to_string(),
             base_url: None,
+            message_timeout_secs: 300,
         },
         ..KernelConfig::default()
     };
@@ -478,12 +481,7 @@ async fn test_build_router_unauthorized_responses_include_api_version_header() {
 async fn test_run_migrate_uses_daemon_home_when_target_dir_is_empty() {
     let harness = start_full_router("").await;
 
-    let source_dir = harness
-        .state
-        .kernel
-        .config_ref()
-        .home_dir
-        .join("openclaw-source");
+    let source_dir = harness.state.kernel.home_dir().join("openclaw-source");
     std::fs::create_dir_all(&source_dir).unwrap();
     std::fs::write(
         source_dir.join("openclaw.json"),
@@ -526,26 +524,15 @@ async fn test_run_migrate_uses_daemon_home_when_target_dir_is_empty() {
     assert_eq!(json["status"], "completed");
     assert_eq!(json["dry_run"], false);
 
-    let config_path = harness
-        .state
-        .kernel
-        .config_ref()
-        .home_dir
-        .join("config.toml");
+    let config_path = harness.state.kernel.home_dir().join("config.toml");
     let agent_path = harness
         .state
         .kernel
-        .config_ref()
-        .home_dir
+        .home_dir()
         .join("agents")
         .join("main")
         .join("agent.toml");
-    let report_path = harness
-        .state
-        .kernel
-        .config_ref()
-        .home_dir
-        .join("migration_report.md");
+    let report_path = harness.state.kernel.home_dir().join("migration_report.md");
 
     assert!(
         config_path.exists(),
@@ -562,7 +549,7 @@ async fn test_run_migrate_uses_daemon_home_when_target_dir_is_empty() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_config_reload_reports_proxy_changes_require_restart() {
+async fn test_config_reload_hot_reloads_proxy_changes() {
     let server = start_test_server().await;
     let client = reqwest::Client::new();
 
@@ -571,27 +558,11 @@ async fn test_config_reload_reports_proxy_changes_require_restart() {
     let table = config.as_table_mut().unwrap();
     table.insert(
         "home_dir".to_string(),
-        toml::Value::String(
-            server
-                .state
-                .kernel
-                .config_ref()
-                .home_dir
-                .display()
-                .to_string(),
-        ),
+        toml::Value::String(server.state.kernel.home_dir().display().to_string()),
     );
     table.insert(
         "data_dir".to_string(),
-        toml::Value::String(
-            server
-                .state
-                .kernel
-                .config_ref()
-                .data_dir
-                .display()
-                .to_string(),
-        ),
+        toml::Value::String(server.state.kernel.data_dir().display().to_string()),
     );
     table.insert(
         "proxy".to_string(),
@@ -615,16 +586,17 @@ async fn test_config_reload_reports_proxy_changes_require_restart() {
     assert_eq!(resp.status(), 200);
 
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["status"], "partial");
-    assert_eq!(body["restart_required"], true);
+    // Proxy is now hot-reloadable — should NOT require restart
+    assert_eq!(
+        body["restart_required"], false,
+        "proxy changes should be hot-reloaded, not require restart: {body}"
+    );
     assert!(
-        body["restart_reasons"]
+        body["hot_actions_applied"]
             .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|value| value.as_str())
-            .any(|reason| reason.contains("proxy config changed")),
-        "unexpected reload response: {body}"
+            .map(|a| a.iter().any(|v| v.as_str() == Some("ReloadProxy")))
+            .unwrap_or(false),
+        "ReloadProxy should be in hot_actions_applied: {body}"
     );
 }
 
@@ -1350,6 +1322,7 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
             model: "test-model".to_string(),
             api_key_env: "OLLAMA_API_KEY".to_string(),
             base_url: None,
+            message_timeout_secs: 300,
         },
         ..KernelConfig::default()
     };
@@ -1378,6 +1351,7 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
         #[cfg(feature = "telemetry")]
         prometheus_handle: None,
         media_drivers: librefang_runtime::media::MediaDriverCache::new(),
+        webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
     });
 
     let api_key_state = middleware::AuthState {

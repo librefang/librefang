@@ -137,8 +137,9 @@ async fn node_available() -> bool {
 /// The PID is stored in the kernel's `whatsapp_gateway_pid` for shutdown cleanup.
 pub async fn start_whatsapp_gateway(kernel: &Arc<super::kernel::LibreFangKernel>) {
     // Only start if WhatsApp is configured
-    let wa_config = match kernel.config.channels.whatsapp.first() {
-        Some(cfg) => cfg.clone(),
+    let cfg = kernel.config.load_full();
+    let wa_config = match cfg.channels.whatsapp.first() {
+        Some(c) => c.clone(),
         None => return,
     };
 
@@ -161,7 +162,7 @@ pub async fn start_whatsapp_gateway(kernel: &Arc<super::kernel::LibreFangKernel>
     };
 
     let port = DEFAULT_GATEWAY_PORT;
-    let api_listen = &kernel.config.api_listen;
+    let api_listen = &cfg.api_listen;
     let librefang_url = format!("http://{api_listen}");
     let default_agent = wa_config
         .default_agent

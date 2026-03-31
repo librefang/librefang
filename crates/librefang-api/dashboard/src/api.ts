@@ -21,6 +21,7 @@ export interface StatusResponse {
   log_level?: string;
   network_enabled?: boolean;
   session_count?: number;
+  config_exists?: boolean;
 }
 
 export interface VersionResponse {
@@ -115,6 +116,8 @@ export interface ChannelItem {
   setup_type?: string;
   setup_steps?: string[];
   fields?: ChannelField[];
+  /** Webhook endpoint path on the shared server (e.g. "/channels/feishu/webhook"). */
+  webhook_endpoint?: string;
 }
 
 export interface SkillItem {
@@ -692,6 +695,10 @@ async function getText(path: string): Promise<string> {
   return response.text();
 }
 
+export async function postQuickInit(): Promise<{ status: string; provider?: string; model?: string; message?: string }> {
+  return post("/api/init", {});
+}
+
 export async function loadDashboardSnapshot(): Promise<DashboardSnapshot> {
   const [health, status, providersRaw, channelsRaw, skillsRaw, agents, workflows] = await Promise.all([
     get<HealthResponse>("/api/health"),
@@ -717,6 +724,10 @@ export async function loadDashboardSnapshot(): Promise<DashboardSnapshot> {
 
 export async function getAgentDetail(agentId: string): Promise<any> {
   return get<any>(`/api/agents/${encodeURIComponent(agentId)}`);
+}
+
+export async function patchAgentConfig(agentId: string, config: { max_tokens?: number; [key: string]: unknown }): Promise<ApiActionResponse> {
+  return patch<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}/config`, config);
 }
 
 export async function listAgents(): Promise<AgentItem[]> {
@@ -864,6 +875,14 @@ export async function wechatQrStart(): Promise<QrStartResponse> {
 
 export async function wechatQrStatus(qrCode: string): Promise<QrStatusResponse> {
   return get<QrStatusResponse>(`/api/channels/wechat/qr/status?qr_code=${encodeURIComponent(qrCode)}`);
+}
+
+export async function whatsappQrStart(): Promise<QrStartResponse> {
+  return post<QrStartResponse>("/api/channels/whatsapp/qr/start", {});
+}
+
+export async function whatsappQrStatus(qrCode: string): Promise<QrStatusResponse> {
+  return get<QrStatusResponse>(`/api/channels/whatsapp/qr/status?qr_code=${encodeURIComponent(qrCode)}`);
 }
 
 export async function listSkills(): Promise<SkillItem[]> {

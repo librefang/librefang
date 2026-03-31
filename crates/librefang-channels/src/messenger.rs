@@ -14,7 +14,7 @@ use futures::Stream;
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::mpsc;
 use tracing::{info, warn};
 use zeroize::Zeroizing;
 
@@ -37,15 +37,10 @@ pub struct MessengerAdapter {
     page_token: Zeroizing<String>,
     /// SECURITY: Verify token for webhook registration, zeroized on drop.
     verify_token: Zeroizing<String>,
-    /// Port on which the inbound webhook HTTP server listens.
-    webhook_port: u16,
     /// HTTP client for outbound API calls.
     client: reqwest::Client,
     /// Optional account identifier for multi-bot routing.
     account_id: Option<String>,
-    /// Shutdown signal.
-    shutdown_tx: Arc<watch::Sender<bool>>,
-    shutdown_rx: watch::Receiver<bool>,
 }
 
 impl MessengerAdapter {
@@ -54,17 +49,13 @@ impl MessengerAdapter {
     /// # Arguments
     /// * `page_token` - Facebook page access token for the Send API.
     /// * `verify_token` - Token used to verify the webhook during Facebook's setup.
-    /// * `webhook_port` - Local port for the inbound webhook HTTP server.
-    pub fn new(page_token: String, verify_token: String, webhook_port: u16) -> Self {
-        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    /// * `webhook_port` - Local port (accepted from config, unused with shared server).
+    pub fn new(page_token: String, verify_token: String, _webhook_port: u16) -> Self {
         Self {
             page_token: Zeroizing::new(page_token),
             verify_token: Zeroizing::new(verify_token),
-            webhook_port,
             client: crate::http_client::new_client(),
             account_id: None,
-            shutdown_tx: Arc::new(shutdown_tx),
-            shutdown_rx,
         }
     }
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
@@ -161,6 +152,75 @@ impl MessengerAdapter {
         recipient_id: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.api_send_action(recipient_id, "mark_seen").await
+    }
+
+    /// Build the Axum router for Messenger webhook events.
+    ///
+    /// The router handles:
+    /// - GET `/webhook` — Facebook webhook verification challenge
+    /// - POST `/webhook` — Incoming message events
+    fn build_webhook_router(&self, tx: mpsc::Sender<ChannelMessage>) -> axum::Router {
+        let verify_token = Arc::new(self.verify_token.clone());
+        let account_id = Arc::new(self.account_id.clone());
+        let tx = Arc::new(tx);
+
+        axum::Router::new().route(
+            "/webhook",
+            axum::routing::get({
+                // Facebook webhook verification handler
+                let vt = Arc::clone(&verify_token);
+                move |query: axum::extract::Query<HashMap<String, String>>| {
+                    let vt = Arc::clone(&vt);
+                    async move {
+                        let mode = query.get("hub.mode").map(|s| s.as_str()).unwrap_or("");
+                        let token = query
+                            .get("hub.verify_token")
+                            .map(|s| s.as_str())
+                            .unwrap_or("");
+                        let challenge = query.get("hub.challenge").cloned().unwrap_or_default();
+
+                        if mode == "subscribe" && token == vt.as_str() {
+                            info!("Messenger webhook verified");
+                            (axum::http::StatusCode::OK, challenge)
+                        } else {
+                            warn!("Messenger webhook verification failed");
+                            (axum::http::StatusCode::FORBIDDEN, String::new())
+                        }
+                    }
+                }
+            })
+            .post({
+                // Incoming message handler
+                let tx = Arc::clone(&tx);
+                move |body: axum::extract::Json<serde_json::Value>| {
+                    let tx = Arc::clone(&tx);
+                    async move {
+                        let object = body.0["object"].as_str().unwrap_or("");
+                        if object != "page" {
+                            return axum::http::StatusCode::OK;
+                        }
+
+                        if let Some(entries) = body.0["entry"].as_array() {
+                            for entry in entries {
+                                let msgs = parse_messenger_entry(entry);
+                                for mut msg in msgs {
+                                    // Inject account_id for multi-bot routing
+                                    if let Some(ref aid) = *account_id {
+                                        msg.metadata.insert(
+                                            "account_id".to_string(),
+                                            serde_json::json!(aid),
+                                        );
+                                    }
+                                    let _ = tx.send(msg).await;
+                                }
+                            }
+                        }
+
+                        axum::http::StatusCode::OK
+                    }
+                }
+            }),
+        )
     }
 }
 
@@ -275,109 +335,42 @@ impl ChannelAdapter for MessengerAdapter {
         ChannelType::Custom("messenger".to_string())
     }
 
+    async fn create_webhook_routes(
+        &self,
+    ) -> Option<(
+        axum::Router,
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+    )> {
+        // Validate credentials
+        let page_name = match self.validate().await {
+            Ok(name) => name,
+            Err(e) => {
+                warn!("Messenger adapter validation failed: {e}");
+                return None;
+            }
+        };
+        info!("Messenger adapter authenticated as {page_name}");
+
+        let (tx, rx) = mpsc::channel::<ChannelMessage>(256);
+        let router = self.build_webhook_router(tx);
+
+        info!("Messenger: registered webhook route on shared server at /channels/messenger");
+
+        Some((
+            router,
+            Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)),
+        ))
+    }
+
     async fn start(
         &self,
     ) -> Result<
         Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
         Box<dyn std::error::Error + Send + Sync>,
     > {
-        // Validate credentials
-        let page_name = self.validate().await?;
-        info!("Messenger adapter authenticated as {page_name}");
-
-        let (tx, rx) = mpsc::channel::<ChannelMessage>(256);
-        let port = self.webhook_port;
-        let verify_token = self.verify_token.clone();
-        let mut shutdown_rx = self.shutdown_rx.clone();
-        let account_id = Arc::new(self.account_id.clone());
-
-        tokio::spawn(async move {
-            let verify_token = Arc::new(verify_token);
-            let tx = Arc::new(tx);
-
-            let app = axum::Router::new().route(
-                "/webhook",
-                axum::routing::get({
-                    // Facebook webhook verification handler
-                    let vt = Arc::clone(&verify_token);
-                    move |query: axum::extract::Query<HashMap<String, String>>| {
-                        let vt = Arc::clone(&vt);
-                        async move {
-                            let mode = query.get("hub.mode").map(|s| s.as_str()).unwrap_or("");
-                            let token = query
-                                .get("hub.verify_token")
-                                .map(|s| s.as_str())
-                                .unwrap_or("");
-                            let challenge = query.get("hub.challenge").cloned().unwrap_or_default();
-
-                            if mode == "subscribe" && token == vt.as_str() {
-                                info!("Messenger webhook verified");
-                                (axum::http::StatusCode::OK, challenge)
-                            } else {
-                                warn!("Messenger webhook verification failed");
-                                (axum::http::StatusCode::FORBIDDEN, String::new())
-                            }
-                        }
-                    }
-                })
-                .post({
-                    // Incoming message handler
-                    let tx = Arc::clone(&tx);
-                    move |body: axum::extract::Json<serde_json::Value>| {
-                        let tx = Arc::clone(&tx);
-                        async move {
-                            let object = body.0["object"].as_str().unwrap_or("");
-                            if object != "page" {
-                                return axum::http::StatusCode::OK;
-                            }
-
-                            if let Some(entries) = body.0["entry"].as_array() {
-                                for entry in entries {
-                                    let msgs = parse_messenger_entry(entry);
-                                    for mut msg in msgs {
-                                        // Inject account_id for multi-bot routing
-                                        if let Some(ref aid) = *account_id {
-                                            msg.metadata.insert(
-                                                "account_id".to_string(),
-                                                serde_json::json!(aid),
-                                            );
-                                        }
-                                        let _ = tx.send(msg).await;
-                                    }
-                                }
-                            }
-
-                            axum::http::StatusCode::OK
-                        }
-                    }
-                }),
-            );
-
-            let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
-            info!("Messenger webhook server listening on {addr}");
-
-            let listener = match tokio::net::TcpListener::bind(addr).await {
-                Ok(l) => l,
-                Err(e) => {
-                    warn!("Messenger webhook bind failed: {e}");
-                    return;
-                }
-            };
-
-            let server = axum::serve(listener, app);
-
-            tokio::select! {
-                result = server => {
-                    if let Err(e) = result {
-                        warn!("Messenger webhook server error: {e}");
-                    }
-                }
-                _ = shutdown_rx.changed() => {
-                    info!("Messenger adapter shutting down");
-                }
-            }
-        });
-
+        // Webhook mode is handled by create_webhook_routes().
+        // If we reach here, return an empty stream as fallback.
+        let (_tx, rx) = mpsc::channel::<ChannelMessage>(1);
         Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
     }
 
@@ -444,7 +437,6 @@ impl ChannelAdapter for MessengerAdapter {
     }
 
     async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let _ = self.shutdown_tx.send(true);
         Ok(())
     }
 }
@@ -465,7 +457,6 @@ mod tests {
             adapter.channel_type(),
             ChannelType::Custom("messenger".to_string())
         );
-        assert_eq!(adapter.webhook_port, 8080);
     }
 
     #[test]

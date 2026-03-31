@@ -1070,7 +1070,8 @@ pub async fn session_cleanup(
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-    let cfg = &state.kernel.config_ref().session;
+    let kcfg = state.kernel.config_ref();
+    let cfg = &kcfg.session;
     let mut total: u64 = 0;
 
     if cfg.retention_days > 0 {
@@ -1421,8 +1422,10 @@ pub async fn webhook_wake(
             t.t("api-error-webhook-invalid-token"),
         )
     };
-    // Check if webhook triggers are enabled
-    let wh_config = match &state.kernel.config_ref().webhook_triggers {
+    // Check if webhook triggers are enabled — use config_snapshot()
+    // because wh_config is held across .await below.
+    let cfg = state.kernel.config_snapshot();
+    let wh_config = match &cfg.webhook_triggers {
         Some(c) if c.enabled => c,
         _ => {
             return ApiErrorResponse::not_found(err_webhook_not_enabled).into_json_tuple();
@@ -1485,8 +1488,10 @@ pub async fn webhook_agent(
             t.t("api-error-webhook-no-agents"),
         )
     };
-    // Check if webhook triggers are enabled
-    let wh_config = match &state.kernel.config_ref().webhook_triggers {
+    // Check if webhook triggers are enabled — use config_snapshot()
+    // because wh_config is held across .await below.
+    let cfg2 = state.kernel.config_snapshot();
+    let wh_config = match &cfg2.webhook_triggers {
         Some(c) if c.enabled => c,
         _ => {
             return ApiErrorResponse::not_found(err_webhook_not_enabled).into_json_tuple();
@@ -2457,7 +2462,8 @@ pub async fn queue_status(State(state): State<Arc<AppState>>) -> impl IntoRespon
         })
         .collect();
 
-    let queue_cfg = &state.kernel.config_ref().queue;
+    let kcfg2 = state.kernel.config_ref();
+    let queue_cfg = &kcfg2.queue;
     Json(serde_json::json!({
         "lanes": lanes,
         "config": {
@@ -3076,7 +3082,7 @@ pub async fn task_queue_retry(
 
 /// GET /api/registry/schema — Return the full registry schema for all content types.
 async fn registry_schema(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let home_dir = &state.kernel.config_ref().home_dir;
+    let home_dir = state.kernel.home_dir();
     match librefang_types::registry_schema::load_registry_schema(home_dir) {
         Some(schema) => match serde_json::to_value(&schema) {
             Ok(val) => Json(val).into_response(),
@@ -3097,7 +3103,7 @@ async fn registry_schema_by_type(
     State(state): State<Arc<AppState>>,
     Path(content_type): Path<String>,
 ) -> impl IntoResponse {
-    let home_dir = &state.kernel.config_ref().home_dir;
+    let home_dir = state.kernel.home_dir();
     match librefang_types::registry_schema::load_registry_schema(home_dir) {
         Some(schema) => match schema.content_types.get(&content_type) {
             Some(ct) => match serde_json::to_value(ct) {
@@ -3138,7 +3144,7 @@ async fn create_registry_content(
     Query(params): Query<HashMap<String, String>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    let home_dir = &state.kernel.config_ref().home_dir;
+    let home_dir = state.kernel.home_dir();
     let allow_overwrite = params
         .get("allow_overwrite")
         .is_some_and(|v| v == "true" || v == "1");

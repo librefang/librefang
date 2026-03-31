@@ -1,0 +1,163 @@
+# 编写自定义适配器
+
+要添加对新消息平台的支持，需要实现 `ChannelAdapter` trait。该 trait 定义在 `crates/librefang-channels/src/types.rs` 中。
+
+### ChannelAdapter Trait
+
+```rust
+pub trait ChannelAdapter: Send + Sync {
+    /// Human-readable name of this adapter.
+    fn name(&self) -> &str;
+
+    /// The channel type this adapter handles.
+    fn channel_type(&self) -> ChannelType;
+
+    /// Start receiving messages. Returns a stream of incoming messages.
+    async fn start(
+        &self,
+    ) -> Result<Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>, Box<dyn std::error::Error>>;
+
+    /// Send a response back to a user on this channel.
+    async fn send(
+        &self,
+        user: &ChannelUser,
+        content: ChannelContent,
+    ) -> Result<(), Box<dyn std::error::Error>>;
+
+    /// Send a typing indicator (optional -- default no-op).
+    async fn send_typing(&self, _user: &ChannelUser) -> Result<(), Box<dyn std::error::Error>> {
+        Ok(())
+    }
+
+    /// Stop the adapter and clean up resources.
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error>>;
+
+    /// Get the current health status of this adapter (optional -- default returns disconnected).
+    fn status(&self) -> ChannelStatus {
+        ChannelStatus::default()
+    }
+
+    /// Send a response as a thread reply (optional -- default falls back to `send()`).
+    async fn send_in_thread(
+        &self,
+        user: &ChannelUser,
+        content: ChannelContent,
+        _thread_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.send(user, content).await
+    }
+}
+```
+
+### 1. 定义你的适配器
+
+创建 `crates/librefang-channels/src/myplatform.rs`：
+
+```rust
+use crate::types::{
+    ChannelAdapter, ChannelContent, ChannelMessage, ChannelStatus, ChannelType, ChannelUser,
+};
+use futures::stream::{self, Stream};
+use std::pin::Pin;
+use tokio::sync::watch;
+use zeroize::Zeroizing;
+
+pub struct MyPlatformAdapter {
+    token: Zeroizing<String>,
+    client: reqwest::Client,
+    shutdown: watch::Receiver<bool>,
+}
+
+impl MyPlatformAdapter {
+    pub fn new(token: String, shutdown: watch::Receiver<bool>) -> Self {
+        Self {
+            token: Zeroizing::new(token),
+            client: reqwest::Client::new(),
+            shutdown,
+        }
+    }
+}
+
+impl ChannelAdapter for MyPlatformAdapter {
+    fn name(&self) -> &str {
+        "MyPlatform"
+    }
+
+    fn channel_type(&self) -> ChannelType {
+        ChannelType::Custom("myplatform".to_string())
+    }
+
+    async fn start(
+        &self,
+    ) -> Result<Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>, Box<dyn std::error::Error>> {
+        // Return a stream that yields ChannelMessage items.
+        // Use self.shutdown to detect when the daemon is stopping.
+        // Apply exponential backoff on connection failures.
+        let stream = stream::empty(); // Replace with your polling/WebSocket logic
+        Ok(Box::pin(stream))
+    }
+
+    async fn send(
+        &self,
+        user: &ChannelUser,
+        content: ChannelContent,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // Send the response back to the platform.
+        // Use split_message() if the platform has message length limits.
+        // Use self.client and self.token to call the platform's API.
+        Ok(())
+    }
+
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error>> {
+        // Clean shutdown: close connections, stop polling.
+        Ok(())
+    }
+
+    fn status(&self) -> ChannelStatus {
+        ChannelStatus::default()
+    }
+}
+```
+
+**新适配器要点：**
+- 使用 `ChannelType::Custom("myplatform".to_string())` 作为通道类型。只有最常用的 9 个通道有命名的 `ChannelType` 变体（`Telegram`、`WhatsApp`、`Slack`、`Discord`、`Signal`、`Matrix`、`Email`、`Teams`、`Mattermost`）。其他通道一律使用 `Custom(String)`。
+- 将密钥包装在 `Zeroizing<String>` 中，释放时自动从内存清零。
+- 接受 `watch::Receiver<bool>` 以便与守护进程协调关闭。
+- 使用指数退避增强连接失败时的容错性。
+- 使用共享的 `split_message(text, max_len)` 工具处理有消息长度限制的平台。
+
+### 2. 注册模块
+
+在 `crates/librefang-channels/src/lib.rs` 中：
+
+```rust
+pub mod myplatform;
+```
+
+### 3. 接入 Bridge
+
+在 `crates/librefang-api/src/channel_bridge.rs` 中，为你的适配器添加初始化逻辑，与已有的适配器并列。
+
+### 4. 添加配置支持
+
+在 `librefang-types` 中添加配置结构体：
+
+```rust
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MyPlatformConfig {
+    pub token_env: String,
+    pub default_agent: Option<String>,
+    #[serde(default)]
+    pub overrides: ChannelOverrides,
+}
+```
+
+将其添加到 `ChannelsConfig` 结构体和 `config.toml` 的解析逻辑中。`overrides` 字段让你的通道自动获得模型/提示词覆盖、DM/群组策略、速率限制、线程回复和输出格式选择的支持。
+
+### 5. 添加 CLI 设置向导
+
+在 `crates/librefang-cli/src/main.rs` 中，为 `cmd_channel_setup` 添加一个分支，包含你平台的分步设置说明。
+
+### 6. 测试
+
+编写集成测试。使用 `ChannelMessage` 类型模拟传入消息，无需连接真实平台。

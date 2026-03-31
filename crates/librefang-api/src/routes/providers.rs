@@ -697,10 +697,10 @@ pub async fn set_provider_key(
             .unwrap_or_else(|e| e.into_inner());
         match guard.as_ref() {
             Some(dm) => (dm.provider.clone(), dm.api_key_env.clone()),
-            None => (
-                state.kernel.config_ref().default_model.provider.clone(),
-                state.kernel.config_ref().default_model.api_key_env.clone(),
-            ),
+            None => {
+                let dm = state.kernel.config_ref().default_model.clone();
+                (dm.provider, dm.api_key_env)
+            }
         }
     };
     let current_has_key = if current_key_env.is_empty() {
@@ -736,6 +736,7 @@ pub async fn set_provider_key(
                     model: model_id,
                     api_key_env: env_var.clone(),
                     base_url: None,
+                    ..Default::default()
                 };
                 let mut guard = state
                     .kernel
@@ -790,6 +791,24 @@ pub async fn set_provider_key(
 
     // Trigger all active hands so they resume immediately
     state.kernel.trigger_all_hands();
+
+    // If default provider switched, update registry entries for agents that were
+    // using the old default so they immediately pick up the new provider/model.
+    if switched {
+        let new_dm = {
+            let guard = state
+                .kernel
+                .default_model_override_ref()
+                .read()
+                .unwrap_or_else(|e| e.into_inner());
+            guard
+                .clone()
+                .unwrap_or_else(|| state.kernel.config_ref().default_model.clone())
+        };
+        state
+            .kernel
+            .sync_default_model_agents(&current_provider, &new_dm);
+    }
 
     let mut resp = serde_json::json!({"status": "saved", "provider": name});
     if switched {
@@ -1163,21 +1182,40 @@ pub async fn set_default_provider(
         }
     };
 
+    // Read old default before updating, so sync_default_model_agents knows what to migrate
+    let old_provider = {
+        let guard = state
+            .kernel
+            .default_model_override_ref()
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        match guard.as_ref() {
+            Some(dm) => dm.provider.clone(),
+            None => state.kernel.config_ref().default_model.provider.clone(),
+        }
+    };
+
     // Hot-update the in-memory default model override
+    let new_dm = librefang_types::config::DefaultModelConfig {
+        provider: name.clone(),
+        model: model_id.clone(),
+        api_key_env: env_var.clone(),
+        base_url: None,
+        ..Default::default()
+    };
     {
-        let new_dm = librefang_types::config::DefaultModelConfig {
-            provider: name.clone(),
-            model: model_id.clone(),
-            api_key_env: env_var.clone(),
-            base_url: None,
-        };
         let mut guard = state
             .kernel
             .default_model_override_ref()
             .write()
             .unwrap_or_else(|e| e.into_inner());
-        *guard = Some(new_dm);
+        *guard = Some(new_dm.clone());
     }
+
+    // Update registry entries for agents that were tracking the old default
+    state
+        .kernel
+        .sync_default_model_agents(&old_provider, &new_dm);
 
     (
         StatusCode::OK,
@@ -1445,7 +1483,8 @@ pub async fn copilot_oauth_poll(
 /// After syncing, the kernel's in-memory catalog is refreshed.
 #[utoipa::path(post, path = "/api/catalog/update", tag = "models", responses((status = 200, description = "Catalog updated", body = serde_json::Value)))]
 pub async fn catalog_update(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let mirror = &state.kernel.config_ref().registry.registry_mirror;
+    let cfg = state.kernel.config_ref();
+    let mirror = &cfg.registry.registry_mirror;
     match librefang_runtime::catalog_sync::sync_catalog_to(state.kernel.home_dir(), mirror).await {
         Ok(result) => {
             // Refresh the in-memory catalog so the new models are available immediately

@@ -141,8 +141,6 @@ pub struct FeishuAdapter {
     region: FeishuRegion,
     /// How to receive inbound events.
     receive_mode: FeishuReceiveMode,
-    /// Port on which the inbound webhook HTTP server listens (webhook mode only).
-    webhook_port: u16,
     /// Optional verification token for webhook event validation.
     verification_token: Option<String>,
     /// Optional encrypt key for webhook event decryption.
@@ -167,7 +165,7 @@ impl FeishuAdapter {
     pub fn new(
         app_id: String,
         app_secret: String,
-        webhook_port: u16,
+        _webhook_port: u16,
         region: FeishuRegion,
         receive_mode: FeishuReceiveMode,
     ) -> Self {
@@ -177,7 +175,6 @@ impl FeishuAdapter {
             app_secret: Zeroizing::new(app_secret),
             region,
             receive_mode,
-            webhook_port,
             verification_token: None,
             encrypt_key: None,
             client: crate::http_client::new_client(),
@@ -433,98 +430,75 @@ impl FeishuAdapter {
     // Webhook receive mode
     // -----------------------------------------------------------------------
 
-    /// Start the webhook HTTP server and return a message stream.
-    fn start_webhook(&self, tx: mpsc::Sender<ChannelMessage>) {
-        let port = self.webhook_port;
-        let verification_token = self.verification_token.clone();
+    /// Build the Axum router for Feishu webhook events.
+    fn build_webhook_router(&self, tx: mpsc::Sender<ChannelMessage>) -> axum::Router {
+        let verification_token = Arc::new(self.verification_token.clone());
+        let encrypt_key = Arc::new(self.encrypt_key.clone());
         let seen_events = Arc::clone(&self.seen_events);
-        let encrypt_key = self.encrypt_key.clone();
-        let mut shutdown_rx = self.shutdown_rx.clone();
         let account_id = Arc::new(self.account_id.clone());
         let label = self.region.label();
         let region = self.region;
+        let tx = Arc::new(tx);
 
-        tokio::spawn(async move {
-            let verification_token = Arc::new(verification_token);
-            let encrypt_key = Arc::new(encrypt_key);
-            let tx = Arc::new(tx);
-
-            let app = axum::Router::new().route(
-                "/feishu/webhook",
-                axum::routing::post({
-                    let vt = Arc::clone(&verification_token);
-                    let ek = Arc::clone(&encrypt_key);
+        axum::Router::new().route(
+            "/webhook",
+            axum::routing::post({
+                let vt = Arc::clone(&verification_token);
+                let ek = Arc::clone(&encrypt_key);
+                let tx = Arc::clone(&tx);
+                let seen = Arc::clone(&seen_events);
+                move |body: axum::extract::Json<serde_json::Value>| {
+                    let vt = Arc::clone(&vt);
+                    let ek = Arc::clone(&ek);
                     let tx = Arc::clone(&tx);
-                    let seen = Arc::clone(&seen_events);
-                    move |body: axum::extract::Json<serde_json::Value>| {
-                        let vt = Arc::clone(&vt);
-                        let ek = Arc::clone(&ek);
-                        let tx = Arc::clone(&tx);
-                        let seen = Arc::clone(&seen);
-                        async move {
-                            let payload =
-                                match decrypt_feishu_payload_if_needed(&body.0, ek.as_deref()) {
-                                    Ok(value) => value,
-                                    Err(err) => {
-                                        warn!("{label}: failed to decrypt webhook payload: {err}");
-                                        return (
-                                            axum::http::StatusCode::BAD_REQUEST,
-                                            axum::Json(serde_json::json!({})),
-                                        );
-                                    }
-                                };
-
-                            // Handle URL verification challenge
-                            if let Some(challenge) = payload.get("challenge") {
-                                // Verify token if configured
-                                if let Some(ref expected_token) = *vt {
-                                    let token = payload["token"].as_str().unwrap_or("");
-                                    if token != expected_token {
-                                        warn!("{}: invalid verification token", label);
-                                        return (
-                                            axum::http::StatusCode::FORBIDDEN,
-                                            axum::Json(serde_json::json!({})),
-                                        );
-                                    }
-                                }
+                    let seen = Arc::clone(&seen);
+                    async move {
+                        let payload = match decrypt_feishu_payload_if_needed(&body.0, ek.as_deref())
+                        {
+                            Ok(value) => value,
+                            Err(err) => {
+                                warn!("{label}: failed to decrypt webhook payload: {err}");
                                 return (
-                                    axum::http::StatusCode::OK,
-                                    axum::Json(serde_json::json!({
-                                        "challenge": challenge,
-                                    })),
-                                );
-                            }
-
-                            // Deduplicate by event_id — Feishu retries webhook
-                            // callbacks up to 3 times when the response is slow.
-                            if is_duplicate_event(&payload, &seen) {
-                                debug!("{label}: duplicate event, skipping");
-                                return (
-                                    axum::http::StatusCode::OK,
+                                    axum::http::StatusCode::BAD_REQUEST,
                                     axum::Json(serde_json::json!({})),
                                 );
                             }
+                        };
 
-                            // Handle event callback
-                            if let Some(schema) = payload["schema"].as_str() {
-                                if schema == "2.0" {
-                                    // V2 event format — try message first, then card action
-                                    let parsed = parse_feishu_event(&payload, region)
-                                        .or_else(|| parse_card_action(&payload, region));
-                                    if let Some(mut msg) = parsed {
-                                        // Inject account_id for multi-bot routing
-                                        if let Some(ref aid) = *account_id {
-                                            msg.metadata.insert(
-                                                "account_id".to_string(),
-                                                serde_json::json!(aid),
-                                            );
-                                        }
-                                        let _ = tx.send(msg).await;
-                                    }
+                        // Handle URL verification challenge
+                        if let Some(challenge) = payload.get("challenge") {
+                            if let Some(ref expected_token) = *vt {
+                                let token = payload["token"].as_str().unwrap_or("");
+                                if token != expected_token {
+                                    warn!("{}: invalid verification token", label);
+                                    return (
+                                        axum::http::StatusCode::FORBIDDEN,
+                                        axum::Json(serde_json::json!({})),
+                                    );
                                 }
-                            } else {
-                                // V1 event format (legacy)
-                                if let Some(mut msg) = parse_feishu_event_v1(&payload, region) {
+                            }
+                            return (
+                                axum::http::StatusCode::OK,
+                                axum::Json(serde_json::json!({
+                                    "challenge": challenge,
+                                })),
+                            );
+                        }
+
+                        // Deduplicate by event_id
+                        if is_duplicate_event(&payload, &seen) {
+                            debug!("{label}: duplicate event, skipping");
+                            return (
+                                axum::http::StatusCode::OK,
+                                axum::Json(serde_json::json!({})),
+                            );
+                        }
+
+                        if let Some(schema) = payload["schema"].as_str() {
+                            if schema == "2.0" {
+                                let parsed = parse_feishu_event(&payload, region)
+                                    .or_else(|| parse_card_action(&payload, region));
+                                if let Some(mut msg) = parsed {
                                     if let Some(ref aid) = *account_id {
                                         msg.metadata.insert(
                                             "account_id".to_string(),
@@ -534,40 +508,25 @@ impl FeishuAdapter {
                                     let _ = tx.send(msg).await;
                                 }
                             }
-
-                            (
-                                axum::http::StatusCode::OK,
-                                axum::Json(serde_json::json!({})),
-                            )
+                        } else {
+                            // V1 event format (legacy)
+                            if let Some(mut msg) = parse_feishu_event_v1(&payload, region) {
+                                if let Some(ref aid) = *account_id {
+                                    msg.metadata
+                                        .insert("account_id".to_string(), serde_json::json!(aid));
+                                }
+                                let _ = tx.send(msg).await;
+                            }
                         }
-                    }
-                }),
-            );
 
-            let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
-            info!("{label} webhook server listening on {addr}");
-
-            let listener = match tokio::net::TcpListener::bind(addr).await {
-                Ok(l) => l,
-                Err(e) => {
-                    warn!("{label} webhook bind failed: {e}");
-                    return;
-                }
-            };
-
-            let server = axum::serve(listener, app);
-
-            tokio::select! {
-                result = server => {
-                    if let Err(e) = result {
-                        warn!("{label} webhook server error: {e}");
+                        (
+                            axum::http::StatusCode::OK,
+                            axum::Json(serde_json::json!({})),
+                        )
                     }
                 }
-                _ = shutdown_rx.changed() => {
-                    info!("{label} adapter shutting down (webhook)");
-                }
-            }
-        });
+            }),
+        )
     }
 
     // -----------------------------------------------------------------------
@@ -1410,6 +1369,43 @@ impl ChannelAdapter for FeishuAdapter {
         ChannelType::Custom(self.name().to_string())
     }
 
+    async fn create_webhook_routes(
+        &self,
+    ) -> Option<(
+        axum::Router,
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+    )> {
+        // Only webhook mode uses HTTP routes; websocket mode has no HTTP server.
+        if !matches!(self.receive_mode, FeishuReceiveMode::Webhook) {
+            return None;
+        }
+
+        let label = self.region.label();
+
+        // Validate credentials
+        let bot_name = match self.validate().await {
+            Ok(name) => name,
+            Err(e) => {
+                warn!("{label} adapter validation failed: {e}");
+                return None;
+            }
+        };
+        info!("{label} adapter authenticated as {bot_name}");
+
+        let (tx, rx) = mpsc::channel::<ChannelMessage>(256);
+        let router = self.build_webhook_router(tx);
+
+        info!(
+            "{label}: registered webhook route on shared server at /channels/{}",
+            self.name()
+        );
+
+        Some((
+            router,
+            Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)),
+        ))
+    }
+
     async fn start(
         &self,
     ) -> Result<
@@ -1418,26 +1414,20 @@ impl ChannelAdapter for FeishuAdapter {
     > {
         let label = self.region.label();
 
-        // Validate credentials
-        let bot_name = self.validate().await?;
-        info!("{label} adapter authenticated as {bot_name}");
+        // WebSocket mode still uses start() — it doesn't need an HTTP server.
+        if matches!(self.receive_mode, FeishuReceiveMode::Websocket) {
+            let bot_name = self.validate().await?;
+            info!("{label} adapter authenticated as {bot_name}");
 
-        let (tx, rx) = mpsc::channel::<ChannelMessage>(256);
-
-        match self.receive_mode {
-            FeishuReceiveMode::Webhook => {
-                info!(
-                    "{label}: starting in webhook receive mode (port {})",
-                    self.webhook_port
-                );
-                self.start_webhook(tx);
-            }
-            FeishuReceiveMode::Websocket => {
-                info!("{label}: starting in WebSocket receive mode");
-                self.start_websocket(tx);
-            }
+            let (tx, rx) = mpsc::channel::<ChannelMessage>(256);
+            info!("{label}: starting in WebSocket receive mode");
+            self.start_websocket(tx);
+            return Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)));
         }
 
+        // Webhook mode should be handled by create_webhook_routes().
+        // If we reach here, return an empty stream as fallback.
+        let (_tx, rx) = mpsc::channel::<ChannelMessage>(1);
         Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
     }
 
@@ -1497,7 +1487,6 @@ mod tests {
             adapter.channel_type(),
             ChannelType::Custom("feishu".to_string())
         );
-        assert_eq!(adapter.webhook_port, 9000);
         assert_eq!(adapter.region, FeishuRegion::Cn);
         assert_eq!(adapter.receive_mode, FeishuReceiveMode::Websocket);
     }

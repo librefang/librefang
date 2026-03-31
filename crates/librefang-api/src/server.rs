@@ -160,7 +160,8 @@ pub(crate) fn dashboard_session_token(kernel: &LibreFangKernel) -> Option<String
 
 pub(crate) fn valid_api_tokens(kernel: &LibreFangKernel) -> Vec<String> {
     let mut tokens = Vec::new();
-    let explicit_api_key = kernel.config_ref().api_key.trim();
+    let cfg = kernel.config_ref();
+    let explicit_api_key = cfg.api_key.trim();
     if !explicit_api_key.is_empty() {
         tokens.push(explicit_api_key.to_string());
     }
@@ -177,7 +178,7 @@ async fn dashboard_login(
     axum::extract::State(state): axum::extract::State<Arc<routes::AppState>>,
     axum::Json(body): axum::Json<serde_json::Value>,
 ) -> axum::response::Response {
-    let cfg = &state.kernel.config_ref();
+    let cfg = state.kernel.config_snapshot();
     let cfg_user = resolve_dashboard_credential(
         &cfg.dashboard_user,
         "LIBREFANG_DASHBOARD_USER",
@@ -252,7 +253,7 @@ async fn dashboard_login(
 async fn dashboard_auth_check(
     axum::extract::State(state): axum::extract::State<Arc<routes::AppState>>,
 ) -> axum::response::Json<serde_json::Value> {
-    let cfg = &state.kernel.config_ref();
+    let cfg = state.kernel.config_ref();
     let du = resolve_dashboard_credential(
         &cfg.dashboard_user,
         "LIBREFANG_DASHBOARD_USER",
@@ -288,7 +289,7 @@ async fn change_password(
     axum::extract::State(state): axum::extract::State<Arc<routes::AppState>>,
     axum::Json(body): axum::Json<ChangePasswordRequest>,
 ) -> axum::response::Response {
-    let cfg = state.kernel.config_ref();
+    let cfg = state.kernel.config_snapshot();
 
     let cfg_user = resolve_dashboard_credential(
         &cfg.dashboard_user,
@@ -418,7 +419,7 @@ async fn change_password(
     }
 
     // Trigger config reload so the kernel picks up the new hash
-    if let Err(e) = state.kernel.reload_config() {
+    if let Err(e) = state.kernel.reload_config().await {
         tracing::warn!("Config reload after password change failed: {e}");
     }
 
@@ -446,7 +447,10 @@ pub async fn build_router(
     listen_addr: SocketAddr,
 ) -> (Router<()>, Arc<AppState>) {
     // Start channel bridges (Telegram, etc.)
-    let bridge = channel_bridge::start_channel_bridge(kernel.clone()).await;
+    // Webhook-based channels (Feishu, Teams, etc.) register their routes
+    // for mounting on this server instead of starting separate HTTP servers.
+    let (bridge, initial_webhook_router) =
+        channel_bridge::start_channel_bridge(kernel.clone()).await;
 
     // Initialize Prometheus metrics recorder if telemetry feature is enabled
     // and the config has prometheus_enabled = true.
@@ -460,6 +464,7 @@ pub async fn build_router(
 
     let channels_config = kernel.config_ref().channels.clone();
     let active_sessions = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+    let webhook_router = Arc::new(tokio::sync::RwLock::new(Arc::new(initial_webhook_router)));
     let state = Arc::new(AppState {
         kernel: kernel.clone(),
         started_at: Instant::now(),
@@ -471,12 +476,13 @@ pub async fn build_router(
         skillhub_cache: dashmap::DashMap::new(),
         provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
         webhook_store: crate::webhook_store::WebhookStore::load(
-            kernel.config_ref().home_dir.join("webhooks.json"),
+            kernel.home_dir().join("webhooks.json"),
         ),
         active_sessions: active_sessions.clone(),
         media_drivers: librefang_runtime::media::MediaDriverCache::new_with_urls(
             kernel.config_ref().provider_urls.clone(),
         ),
+        webhook_router,
         #[cfg(feature = "telemetry")]
         prometheus_handle: prom_handle,
     });
@@ -501,7 +507,8 @@ pub async fn build_router(
             }
         }
         // Add explicitly configured CORS origins from config.toml
-        for origin in &state.kernel.config_ref().cors_origin {
+        let cors_cfg = state.kernel.config_ref();
+        for origin in &cors_cfg.cors_origin {
             if let Ok(v) = origin.parse::<axum::http::HeaderValue>() {
                 origins.push(v);
             } else {
@@ -521,7 +528,7 @@ pub async fn build_router(
         api_key_lock: api_key_lock.clone(),
         active_sessions: active_sessions.clone(),
     };
-    let rl_cfg = &state.kernel.config_ref().rate_limit;
+    let rl_cfg = state.kernel.config_ref().rate_limit.clone();
     let gcra_limiter = rate_limiter::GcraState {
         limiter: rate_limiter::create_rate_limiter(rl_cfg.api_requests_per_minute),
         retry_after_secs: rl_cfg.retry_after_secs,
@@ -616,6 +623,30 @@ pub async fn build_router(
     // `librefang_telemetry::metrics::record_http_request()`.  A separate metrics
     // middleware layer is not needed (and would double-count requests).
 
+    // Mount channel webhook routes under /channels/{adapter_name}/*.
+    // These bypass auth/rate-limit layers since external platforms (Feishu,
+    // Teams, etc.) handle their own signature verification.
+    // The router is dynamic (behind RwLock) so hot-reload can swap routes.
+    let channel_webhook_state = state.webhook_router.clone();
+    let channel_routes = Router::new().fallback(move |req: axum::extract::Request| {
+        let wr = channel_webhook_state.clone();
+        async move {
+            use tower::ServiceExt;
+            let guard = wr.read().await;
+            let router: Arc<axum::Router> = Arc::clone(&guard);
+            drop(guard);
+            // Unwrap the Arc — if we hold the only reference we avoid a clone,
+            // otherwise Router::clone is needed (only during hot-reload overlap).
+            Arc::try_unwrap(router)
+                .unwrap_or_else(|arc| (*arc).clone())
+                .into_service()
+                .oneshot(req)
+                .await
+                .unwrap_or_else(|e: std::convert::Infallible| match e {})
+        }
+    });
+    let app = app.nest("/channels", channel_routes);
+
     let app = app.with_state(state.clone());
 
     (app, state)
@@ -638,14 +669,16 @@ pub async fn run_daemon(
     // Initialize OpenTelemetry OTLP tracing when telemetry feature is compiled
     // in and the config has `telemetry.enabled = true`.
     #[cfg(feature = "telemetry")]
-    if kernel.config_ref().telemetry.enabled {
-        let cfg = &kernel.config_ref().telemetry;
-        if let Err(e) = crate::telemetry::init_otel_tracing(
-            &cfg.otlp_endpoint,
-            &cfg.service_name,
-            cfg.sample_rate,
-        ) {
-            tracing::warn!("Failed to initialize OpenTelemetry tracing: {e}");
+    {
+        let cfg = kernel.config_ref();
+        if cfg.telemetry.enabled {
+            if let Err(e) = crate::telemetry::init_otel_tracing(
+                &cfg.telemetry.otlp_endpoint,
+                &cfg.telemetry.service_name,
+                cfg.telemetry.sample_rate,
+            ) {
+                tracing::warn!("Failed to initialize OpenTelemetry tracing: {e}");
+            }
         }
     }
 
@@ -659,7 +692,7 @@ pub async fn run_daemon(
     {
         let k = kernel.clone();
         let st = state.clone();
-        let config_path = kernel.config_ref().home_dir.join("config.toml");
+        let config_path = kernel.home_dir().join("config.toml");
         bg_tasks.push(tokio::spawn(async move {
             let mut last_modified = std::fs::metadata(&config_path)
                 .and_then(|m| m.modified())
@@ -672,7 +705,7 @@ pub async fn run_daemon(
                 if current != last_modified && current.is_some() {
                     last_modified = current;
                     tracing::info!("Config file changed, reloading...");
-                    match k.reload_config() {
+                    match k.reload_config().await {
                         Ok(plan) => {
                             if plan.has_changes() {
                                 tracing::info!("Config hot-reload applied: {:?}", plan.hot_actions);
@@ -777,9 +810,10 @@ pub async fn run_daemon(
         let kernel = state.kernel.clone();
         bg_tasks.push(tokio::spawn(async move {
             loop {
+                let cfg = kernel.config_snapshot();
                 match librefang_runtime::catalog_sync::sync_catalog_to(
-                    &kernel.config_ref().home_dir,
-                    &kernel.config_ref().registry.registry_mirror,
+                    kernel.home_dir(),
+                    &cfg.registry.registry_mirror,
                 )
                 .await
                 {

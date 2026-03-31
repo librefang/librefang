@@ -1,0 +1,367 @@
+# 安全与认证配置
+
+外部认证、Vertex AI、OAuth、认证配置文件、工具策略、主动记忆、上下文引擎、审计日志、健康检查、插件、Prompt 智能以及环境变量参考的配置。
+
+---
+
+### `[external_auth]`
+
+配置 OAuth2/OIDC 外部认证，允许用户通过 Google、GitHub、Okta、Auth0 或 Keycloak 等身份提供商登录。
+
+```toml
+[external_auth]
+enabled = true
+issuer_url = "https://accounts.google.com"
+client_id = "your-client-id.apps.googleusercontent.com"
+client_secret_env = "LIBREFANG_OAUTH_CLIENT_SECRET"
+redirect_url = "http://127.0.0.1:4545/api/auth/callback"
+scopes = ["openid", "profile", "email"]
+allowed_domains = ["example.com"]
+session_ttl_secs = 86400
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | `false` | 启用外部认证。 |
+| `issuer_url` | string | `""` | OIDC 发行者 URL，用于在 `{issuer_url}/.well-known/openid-configuration` 进行提供商发现。 |
+| `client_id` | string | `""` | 在身份提供商注册的 OAuth2 客户端 ID。 |
+| `client_secret_env` | string | `"LIBREFANG_OAUTH_CLIENT_SECRET"` | 存放 OAuth2 客户端密钥的环境变量名称。 |
+| `redirect_url` | string | `"http://127.0.0.1:4545/api/auth/callback"` | OAuth2 授权码流程的回调 URL。 |
+| `scopes` | list of strings | `["openid","profile","email"]` | 请求的 OAuth2 权限范围。 |
+| `allowed_domains` | list of strings | `[]` | 限制登录到这些邮箱域名。空列表 = 允许所有。 |
+| `audience` | string | `""` | 要验证的 JWT audience 声明。为空时默认使用 `client_id`。 |
+| `session_ttl_secs` | u64 | `86400` | 会话令牌有效期（秒）。默认 24 小时。 |
+| `providers` | list of objects | `[]` | 多个 OIDC/OAuth2 提供商。配置后优先于上述单提供商字段。 |
+
+对于多提供商配置，使用 `[[external_auth.providers]]`，支持以下字段：`id`、`display_name`、`issuer_url`、`auth_url`、`token_url`、`userinfo_url`、`jwks_uri`、`client_id`、`client_secret_env`、`redirect_url`、`scopes`、`allowed_domains`、`audience`。
+
+---
+
+### `[vertex_ai]`
+
+配置 Google Cloud Vertex AI 作为 LLM 提供商。
+
+```toml
+[vertex_ai]
+project_id = "my-gcp-project"
+region = "us-central1"
+credentials_path = "/path/to/service-account.json"
+```
+
+凭据按以下顺序解析：
+1. 配置中的 `credentials_path`（JSON 字符串或文件路径）
+2. `VERTEX_AI_SERVICE_ACCOUNT_JSON` 环境变量
+3. `GOOGLE_APPLICATION_CREDENTIALS` 环境变量（文件路径）
+4. `gcloud auth print-access-token` CLI 后备
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `project_id` | string 或 null | `null` | GCP 项目 ID。回退到 `VERTEX_AI_PROJECT_ID`、`GOOGLE_CLOUD_PROJECT`，或服务账号 JSON 中的 `project_id` 字段。 |
+| `region` | string 或 null | `null` | Vertex AI 端点的 GCP 区域。回退到 `VERTEX_AI_REGION` 或 `GOOGLE_CLOUD_REGION` 环境变量。默认：`"us-central1"`。 |
+| `credentials_path` | string 或 null | `null` | GCP 服务账号 JSON 密钥文件的路径，或原始 JSON 字符串。 |
+
+---
+
+### `[oauth]`
+
+配置仪表盘使用的 PKCE（Proof Key for Code Exchange）流程的 OAuth 客户端 ID。
+
+```toml
+[oauth]
+google_client_id = "your-google-client-id.apps.googleusercontent.com"
+github_client_id = "your-github-app-client-id"
+microsoft_client_id = "your-azure-app-client-id"
+slack_client_id = "your-slack-app-client-id"
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `google_client_id` | string 或 null | `null` | 用于 PKCE 流程的 Google OAuth2 客户端 ID。 |
+| `github_client_id` | string 或 null | `null` | 用于 PKCE 流程的 GitHub OAuth 应用客户端 ID。 |
+| `microsoft_client_id` | string 或 null | `null` | Microsoft（Entra ID / Azure AD）OAuth 应用客户端 ID。 |
+| `slack_client_id` | string 或 null | `null` | Slack OAuth 应用客户端 ID。 |
+
+---
+
+### `[auth_profiles]`
+
+为每个提供商配置多个 API Key 配置文件，以实现当某个 Key 被限速或用尽时的轮换。
+
+```toml
+[auth_profiles]
+anthropic = [
+  {name = "primary", api_key_env = "ANTHROPIC_API_KEY_1", priority = 0},
+  {name = "secondary", api_key_env = "ANTHROPIC_API_KEY_2", priority = 1},
+]
+openai = [
+  {name = "main", api_key_env = "OPENAI_API_KEY", priority = 0},
+]
+```
+
+值是从提供商名称到 `AuthProfile` 对象列表的映射：
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `name` | string | *必填* | 配置文件名称（例如 `"primary"`、`"secondary"`）。 |
+| `api_key_env` | string | *必填* | 存放该配置文件 API Key 的环境变量名称。 |
+| `priority` | u32 | `0` | Key 选择优先级。值越小越优先。 |
+
+---
+
+### `[tool_policy]`
+
+配置全局工具访问规则、分组和递归深度限制。引用 `ToolPolicy` 类型。
+
+```toml
+[tool_policy]
+subagent_max_depth = 10
+subagent_max_concurrent = 5
+
+[[tool_policy.global_rules]]
+pattern = "shell_*"
+effect = "deny"
+
+[[tool_policy.groups]]
+name = "web_tools"
+tools = ["web_search", "web_fetch"]
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `agent_rules` | list of ToolPolicyRule | `[]` | 每个 Agent 的工具规则（最高优先级，最先检查）。 |
+| `global_rules` | list of ToolPolicyRule | `[]` | 应用于所有 Agent 的全局工具规则（在 agent 规则之后检查）。 |
+| `groups` | list of ToolGroup | `[]` | 命名工具组，便于在规则中重用。 |
+| `subagent_max_depth` | u32 | `10` | 子 Agent 最大生成深度。 |
+| `subagent_max_concurrent` | u32 | `5` | 最大并发子 Agent 数。 |
+
+**ToolPolicyRule 字段：**
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `pattern` | string | 匹配工具名称的 Glob 模式（例如 `"shell_*"`、`"web_*"`、`"mcp_github_*"`）。 |
+| `effect` | string | `"allow"` 或 `"deny"`。拒绝优先：只要有任何 deny 规则匹配，该工具就会被阻止，无论是否有 allow 规则。 |
+
+**ToolGroup 字段：**
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `name` | string | 组名（例如 `"web_tools"`、`"code_tools"`）。 |
+| `tools` | list of strings | 包含在该组中的工具名称模式。 |
+
+---
+
+### `[proactive_memory]`
+
+配置主动记忆提取（mem0 风格的自动记忆管理）。引用 `ProactiveMemoryConfig` 类型。
+
+```toml
+[proactive_memory]
+enabled = true
+auto_memorize = true
+auto_retrieve = true
+max_retrieve = 10
+extraction_threshold = 0.7
+# extraction_model = "gpt-4o-mini"  # 可选，启用 LLM 驱动的提取
+extract_categories = ["user_preference", "important_fact", "task_context", "relationship"]
+session_ttl_hours = 24
+duplicate_threshold = 0.5
+confidence_decay_rate = 0.01
+max_memories_per_agent = 1000
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | `true` | 主开关——为 `false` 时整个主动记忆子系统被禁用。 |
+| `auto_memorize` | bool | `true` | 每次 Agent 执行后自动提取并存储记忆。 |
+| `auto_retrieve` | bool | `true` | 每次 Agent 执行前自动检索相关记忆。 |
+| `max_retrieve` | usize | `10` | 每次查询检索的最大记忆数。 |
+| `extraction_threshold` | f32 | `0.7` | 近似重复检测的置信度阈值（0.0-1.0）。 |
+| `extraction_model` | string 或 null | `null` | 用于提取的 LLM 模型。为 `null` 时使用基于规则的提取。 |
+| `extract_categories` | list of strings | `["user_preference", "important_fact", "task_context", "relationship"]` | 从对话中提取的类别。 |
+| `session_ttl_hours` | u32 | `24` | 会话记忆的 TTL（小时）。超过此时间的记忆在每次 Agent 执行前被清理。 |
+| `duplicate_threshold` | f32 | `0.5` | 重复检测的相似度阈值（0.0-1.0）。有嵌入向量时使用余弦相似度，否则回退到 Jaccard 词重叠。 |
+| `confidence_decay_rate` | f64 | `0.01` | 每天的置信度衰减率。遵循指数衰减：`conf x e^(-rate x days)`。默认 `0.01` 约 70 天减半。 |
+| `max_memories_per_agent` | usize | `1000` | 每个 Agent 的最大记忆数。超出时淘汰最旧/置信度最低的条目。`0` = 无上限。 |
+
+---
+
+### `[context_engine]`
+
+配置可插拔的上下文组装引擎，控制 Agent 记忆如何被召回并组装到提示词中。
+
+```toml
+[context_engine]
+engine = "default"
+# plugin = "qdrant-recall"    # 解析为 ~/.librefang/plugins/qdrant-recall/
+
+[context_engine.hooks]
+# ingest = "~/.librefang/scripts/my_recall.py"
+# after_turn = "~/.librefang/scripts/my_indexer.py"
+
+[[context_engine.plugin_registries]]
+name = "Official"
+github_repo = "librefang/librefang-registry"
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `engine` | string | `"default"` | 内置引擎名称。目前仅支持 `"default"`。 |
+| `plugin` | string 或 null | `null` | 插件名称。解析为 `~/.librefang/plugins/<name>/plugin.toml`。设置时优先于手动 `hooks`。 |
+| `hooks.ingest` | string 或 null | `null` | `ingest` 钩子的 Python 脚本路径（在收到新用户消息时调用）。 |
+| `hooks.after_turn` | string 或 null | `null` | `after_turn` 钩子的 Python 脚本路径（在每轮对话完成后调用）。 |
+| `plugin_registries` | list of objects | 官方注册表 | 插件注册表（GitHub `owner/repo`），用于浏览可安装的插件。 |
+
+---
+
+### `[audit]`
+
+配置审计日志保留策略。
+
+```toml
+[audit]
+retention_days = 90
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `retention_days` | u32 | `90` | 审计日志条目的保留天数。`0` = 无限期保留。 |
+
+---
+
+### `[health_check]`
+
+配置 LLM 提供商的定期健康检查。
+
+```toml
+[health_check]
+health_check_interval_secs = 60
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `health_check_interval_secs` | u64 | `60` | 提供商健康检查的间隔（秒）。 |
+
+---
+
+### `[plugins]`
+
+配置额外的插件注册表，用于搜索可安装的上下文引擎插件。
+
+```toml
+[plugins]
+plugin_registries = ["acme-corp/librefang-plugins"]
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `plugin_registries` | list of strings | `[]` | 额外的 GitHub `owner/repo` 插件注册表。与 `context_engine.plugin_registries` 合并。 |
+
+---
+
+### `[prompt_intelligence]`
+
+配置 Prompt 版本管理和 A/B 实验功能。启用后，LibreFang 自动追踪 prompt 版本历史，支持运行 A/B 实验对比不同 prompt 变体。详细文档见 [Prompt 智能指南](/zh/prompt-intelligence)。
+
+```toml
+[prompt_intelligence]
+enabled = false
+hash_prompts = true
+max_versions_per_agent = 50
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | `false` | 总开关。关闭时不追踪 prompt 版本，不运行实验 |
+| `hash_prompts` | bool | `true` | 计算 prompt 内容哈希用于去重 |
+| `max_versions_per_agent` | u32 | `50` | 每个 agent 最大 prompt 版本数，超出后自动清理最旧的非活跃版本 |
+
+---
+
+## 环境变量
+
+以下是配置中引用的所有环境变量的完整表格。这些变量不由配置文件本身读取——它们在运行时由内核和通道适配器读取。
+
+### LLM 提供商密钥
+
+| 变量 | 使用者 | 说明 |
+|------|--------|------|
+| `ANTHROPIC_API_KEY` | `[default_model]` | Anthropic API Key（Claude 系列模型）。 |
+| `GEMINI_API_KEY` | Gemini 驱动 | Google Gemini API Key。别名：`GOOGLE_API_KEY`。 |
+| `OPENAI_API_KEY` | OpenAI 兼容驱动 | OpenAI API Key。 |
+| `GROQ_API_KEY` | Groq 提供商 | Groq API Key（快速 Llama 推理）。 |
+| `DEEPSEEK_API_KEY` | DeepSeek 提供商 | DeepSeek API Key。 |
+| `PERPLEXITY_API_KEY` | Perplexity 提供商 / 网页搜索 | Perplexity API Key。 |
+| `OPENROUTER_API_KEY` | OpenRouter 提供商 | OpenRouter API Key。 |
+| `TOGETHER_API_KEY` | Together AI 提供商 | Together AI API Key。 |
+| `MISTRAL_API_KEY` | Mistral 提供商 | Mistral AI API Key。 |
+| `FIREWORKS_API_KEY` | Fireworks 提供商 | Fireworks AI API Key。 |
+| `COHERE_API_KEY` | Cohere 提供商 | Cohere API Key。 |
+| `AI21_API_KEY` | AI21 提供商 | AI21 Labs API Key。 |
+| `CEREBRAS_API_KEY` | Cerebras 提供商 | Cerebras API Key。 |
+| `SAMBANOVA_API_KEY` | SambaNova 提供商 | SambaNova API Key。 |
+| `HUGGINGFACE_API_KEY` | Hugging Face 提供商 | Hugging Face Inference API Key。 |
+| `XAI_API_KEY` | xAI 提供商 | xAI (Grok) API Key。 |
+| `REPLICATE_API_KEY` | Replicate 提供商 | Replicate API Key。 |
+
+### 网页搜索密钥
+
+| 变量 | 使用者 | 说明 |
+|------|--------|------|
+| `BRAVE_API_KEY` | `[web.brave]` | Brave Search API Key。 |
+| `TAVILY_API_KEY` | `[web.tavily]` | Tavily Search API Key。 |
+| `PERPLEXITY_API_KEY` | `[web.perplexity]` | Perplexity Search API Key（与 LLM 提供商共用）。 |
+
+### 通道令牌
+
+| 变量 | 通道 | 说明 |
+|------|------|------|
+| `TELEGRAM_BOT_TOKEN` | Telegram | 从 @BotFather 获取的 Bot API 令牌。 |
+| `DISCORD_BOT_TOKEN` | Discord | Discord Bot 令牌。 |
+| `SLACK_APP_TOKEN` | Slack | Slack 应用级令牌（`xapp-`），用于 Socket Mode。 |
+| `SLACK_BOT_TOKEN` | Slack | Slack Bot 令牌（`xoxb-`），用于 REST API。 |
+| `WHATSAPP_ACCESS_TOKEN` | WhatsApp | WhatsApp Cloud API 访问令牌。 |
+| `WHATSAPP_VERIFY_TOKEN` | WhatsApp | Webhook 验证令牌。 |
+| `MATRIX_ACCESS_TOKEN` | Matrix | Matrix 家服务器访问令牌。 |
+| `EMAIL_PASSWORD` | Email | 邮箱密码或应用专用密码。 |
+| `TEAMS_APP_PASSWORD` | Teams | Azure Bot Framework 应用密码。 |
+| `MATTERMOST_TOKEN` | Mattermost | Mattermost Bot 令牌。 |
+| `TWITCH_OAUTH_TOKEN` | Twitch | Twitch OAuth 令牌。 |
+| `ROCKETCHAT_TOKEN` | Rocket.Chat | Rocket.Chat 认证令牌。 |
+| `ZULIP_API_KEY` | Zulip | Zulip Bot API Key。 |
+| `XMPP_PASSWORD` | XMPP | XMPP 账号密码。 |
+| `GOOGLE_CHAT_SERVICE_ACCOUNT` | Google Chat | 服务账号 JSON 密钥。 |
+| `LINE_CHANNEL_SECRET` | LINE | LINE Channel Secret。 |
+| `LINE_CHANNEL_ACCESS_TOKEN` | LINE | LINE Channel Access Token。 |
+| `VIBER_AUTH_TOKEN` | Viber | Viber Bot 认证令牌。 |
+| `MESSENGER_PAGE_TOKEN` | Messenger | Facebook 页面访问令牌。 |
+| `MESSENGER_VERIFY_TOKEN` | Messenger | Webhook 验证令牌。 |
+| `REDDIT_CLIENT_SECRET` | Reddit | Reddit 应用客户端密钥。 |
+| `REDDIT_PASSWORD` | Reddit | Reddit Bot 账号密码。 |
+| `MASTODON_ACCESS_TOKEN` | Mastodon | Mastodon 访问令牌。 |
+| `BLUESKY_APP_PASSWORD` | Bluesky | Bluesky 应用密码。 |
+| `FEISHU_APP_SECRET` | Feishu | 飞书/Lark 应用密钥。 |
+| `REVOLT_BOT_TOKEN` | Revolt | Revolt Bot 令牌。 |
+| `NEXTCLOUD_TOKEN` | Nextcloud | Nextcloud Talk 认证令牌。 |
+| `GUILDED_BOT_TOKEN` | Guilded | Guilded Bot 令牌。 |
+| `KEYBASE_PAPERKEY` | Keybase | Keybase 纸钥匙。 |
+| `THREEMA_SECRET` | Threema | Threema Gateway API 密钥。 |
+| `NOSTR_PRIVATE_KEY` | Nostr | Nostr 私钥（nsec 或十六进制格式）。 |
+| `WEBEX_BOT_TOKEN` | Webex | Webex Bot 令牌。 |
+| `PUMBLE_BOT_TOKEN` | Pumble | Pumble Bot 令牌。 |
+| `FLOCK_BOT_TOKEN` | Flock | Flock Bot 令牌。 |
+| `TWIST_TOKEN` | Twist | Twist API 令牌。 |
+| `MUMBLE_PASSWORD` | Mumble | Mumble 服务器密码。 |
+| `DINGTALK_APP_KEY` | DingTalk | 钉钉 App Key / Client ID（stream 模式）。 |
+| `DINGTALK_APP_SECRET` | DingTalk | 钉钉 App Secret / Client Secret（stream 模式）。 |
+| `DINGTALK_ACCESS_TOKEN` | DingTalk | 钉钉 Webhook 访问令牌（webhook 模式）。 |
+| `DINGTALK_SECRET` | DingTalk | 钉钉签名密钥（webhook 模式）。 |
+| `DISCOURSE_API_KEY` | Discourse | Discourse API Key。 |
+| `GITTER_TOKEN` | Gitter | Gitter 认证令牌。 |
+| `NTFY_TOKEN` | ntfy | ntfy 认证令牌（公共主题可选）。 |
+| `GOTIFY_APP_TOKEN` | Gotify | Gotify 应用令牌（发送）。 |
+| `GOTIFY_CLIENT_TOKEN` | Gotify | Gotify 客户端令牌（接收）。 |
+| `WEBHOOK_SECRET` | Webhook | 用于 Webhook 验证的 HMAC 签名密钥。 |
+| `LINKEDIN_ACCESS_TOKEN` | LinkedIn | LinkedIn OAuth2 访问令牌。 |
+
+---
+

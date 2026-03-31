@@ -1,12 +1,13 @@
-import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { useTranslation } from "react-i18next";
 import type { DashboardSnapshot, HealthCheck, VersionResponse } from "../api";
-import { loadDashboardSnapshot, getVersionInfo } from "../api";
+import { loadDashboardSnapshot, getVersionInfo, postQuickInit } from "../api";
 import { Card } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
 import { CardSkeleton } from "../components/ui/Skeleton";
-import { Home, RefreshCw, Users, Layers, Server, Network, Zap, MessageCircle, User, Clock, Shield, Sparkles, Calendar, HardDrive, Activity, Globe } from "lucide-react";
+import { Home, RefreshCw, Users, Layers, Server, Network, Zap, MessageCircle, User, Clock, Shield, Sparkles, Calendar, HardDrive, Activity, Globe, Rocket } from "lucide-react";
 import { truncateId } from "../lib/string";
 import { isProviderAvailable } from "../lib/status";
 import { getStatusVariant } from "../lib/status";
@@ -31,6 +32,22 @@ export function OverviewPage() {
   const snapshot = snapshotQuery.data ?? null;
   const versionInfo = versionQuery.data;
   const isLoading = snapshotQuery.isLoading;
+
+  const queryClient = useQueryClient();
+  const [initLoading, setInitLoading] = useState(false);
+  const needsInit = snapshot?.status?.config_exists === false;
+
+  const handleInit = async () => {
+    setInitLoading(true);
+    try {
+      await postQuickInit();
+      await queryClient.invalidateQueries({ queryKey: ["dashboard", "snapshot"] });
+    } catch {
+      // ignore — banner will remain if init failed
+    } finally {
+      setInitLoading(false);
+    }
+  };
 
   const agentsActive = snapshot?.status?.active_agent_count ?? 0;
   const agentsTotal = snapshot?.status?.agent_count ?? 0;
@@ -139,6 +156,28 @@ export function OverviewPage() {
           </button>
         </div>
       </header>
+
+      {/* Setup Banner */}
+      {needsInit && (
+        <Card padding="lg" className="border-brand/30 bg-gradient-to-r from-brand/5 via-brand/10 to-brand/5">
+          <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
+            <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-brand/15">
+              <Rocket className="h-6 w-6 text-brand" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <h3 className="text-sm font-bold">{t("overview.setup_title")}</h3>
+              <p className="mt-1 text-xs text-text-dim">{t("overview.setup_description")}</p>
+            </div>
+            <button
+              onClick={handleInit}
+              disabled={initLoading}
+              className="shrink-0 rounded-xl bg-brand px-5 py-2.5 text-xs font-bold text-white shadow-lg shadow-brand/20 transition-all hover:shadow-xl hover:shadow-brand/30 hover:-translate-y-0.5 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {initLoading ? t("overview.setup_running") : t("overview.setup_button")}
+            </button>
+          </div>
+        </Card>
+      )}
 
       {/* Stats Cards */}
       <div className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-4 stagger-children">

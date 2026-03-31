@@ -1,11 +1,13 @@
 //! Config hot-reload — diffs two `KernelConfig` instances and produces a `ReloadPlan`.
 //!
 //! **Hot-reload safe**: channels, skills, usage footer, web config, browser,
-//! approval policy, cron settings, webhook triggers, extensions, tool policy.
+//! approval policy, cron settings, webhook triggers, extensions, tool policy,
+//! api_key, dashboard credentials, stable_prefix_mode, proxy, provider_api_keys,
+//! sanitize, default model, language, mode.
 //!
-//! **No-op** (informational only): log_level, language, mode.
+//! **No-op** (informational only): log_level (reload handle not yet plumbed).
 //!
-//! **Restart required**: api_listen, api_key, network, memory, proxy, stable_prefix_mode.
+//! **Restart required**: api_listen, network, memory, home_dir, data_dir, vault.
 
 use librefang_types::config::{KernelConfig, ReloadMode};
 use tracing::{info, warn};
@@ -49,6 +51,10 @@ pub enum HotAction {
     UpdateToolPolicy,
     /// Proactive memory config changed — update thresholds/toggles in-place.
     UpdateProactiveMemory,
+    /// Provider API keys changed — flush driver cache.
+    ReloadProviderApiKeys,
+    /// Proxy config changed — reinitialize HTTP proxy env.
+    ReloadProxy,
 }
 
 // ---------------------------------------------------------------------------
@@ -143,8 +149,8 @@ pub fn build_reload_plan(old: &KernelConfig, new: &KernelConfig) -> ReloadPlan {
     }
 
     if old.api_key != new.api_key {
-        plan.restart_required = true;
-        plan.restart_reasons.push("api_key changed".to_string());
+        plan.noop_changes
+            .push("api_key changed (effective immediately via config swap)".to_string());
     }
 
     if old.dashboard_user != new.dashboard_user
@@ -175,12 +181,9 @@ pub fn build_reload_plan(old: &KernelConfig, new: &KernelConfig) -> ReloadPlan {
             .push("memory config changed".to_string());
     }
 
-    // Proxy config is applied once during boot and exported into process env,
-    // so changes require a restart to rebuild clients consistently.
+    // Proxy config — hot-reloadable: re-export env vars and flush driver cache.
     if field_changed(&old.proxy, &new.proxy) {
-        plan.restart_required = true;
-        plan.restart_reasons
-            .push("proxy config changed".to_string());
+        plan.hot_actions.push(HotAction::ReloadProxy);
     }
 
     // Default model — hot-reloadable (just swap config fields, new agents pick it up)
@@ -204,11 +207,10 @@ pub fn build_reload_plan(old: &KernelConfig, new: &KernelConfig) -> ReloadPlan {
         ));
     }
 
-    // Stable prefix mode — requires restart (affects prompt building for all agents)
+    // Stable prefix mode — hot-reloaded via ArcSwap config, effective on next message.
     if old.stable_prefix_mode != new.stable_prefix_mode {
-        plan.restart_required = true;
-        plan.restart_reasons.push(format!(
-            "stable_prefix_mode changed: {} -> {}",
+        plan.noop_changes.push(format!(
+            "stable_prefix_mode: {} -> {} (effective on next message)",
             old.stable_prefix_mode, new.stable_prefix_mode
         ));
     }
@@ -281,30 +283,36 @@ pub fn build_reload_plan(old: &KernelConfig, new: &KernelConfig) -> ReloadPlan {
     }
 
     if field_changed(&old.sanitize, &new.sanitize) {
-        plan.noop_changes
-            .push("sanitize config changed (applied at bridge startup)".to_string());
+        plan.noop_changes.push(
+            "sanitize config changed (effective on next message via config swap)".to_string(),
+        );
     }
 
     if field_changed(&old.provider_api_keys, &new.provider_api_keys) {
-        plan.noop_changes
-            .push("provider_api_keys changed (takes effect on next driver init)".to_string());
+        plan.hot_actions.push(HotAction::ReloadProviderApiKeys);
     }
 
     // ----- No-op fields -----
 
     if old.log_level != new.log_level {
-        plan.noop_changes
-            .push(format!("log_level: {} -> {}", old.log_level, new.log_level));
+        plan.noop_changes.push(format!(
+            "log_level: {} -> {} (requires restart — reload handle not yet plumbed)",
+            old.log_level, new.log_level
+        ));
     }
 
     if old.language != new.language {
-        plan.noop_changes
-            .push(format!("language: {} -> {}", old.language, new.language));
+        plan.noop_changes.push(format!(
+            "language: {} -> {} (effective on next message)",
+            old.language, new.language
+        ));
     }
 
     if old.mode != new.mode {
-        plan.noop_changes
-            .push(format!("mode: {:?} -> {:?}", old.mode, new.mode));
+        plan.noop_changes.push(format!(
+            "mode: {:?} -> {:?} (effective on next message)",
+            old.mode, new.mode
+        ));
     }
 
     plan
@@ -406,13 +414,16 @@ mod tests {
     }
 
     #[test]
-    fn test_api_key_requires_restart() {
+    fn test_api_key_hot_reloaded() {
         let a = default_cfg();
         let mut b = default_cfg();
         b.api_key = "super-secret-key".to_string();
         let plan = build_reload_plan(&a, &b);
-        assert!(plan.restart_required);
-        assert!(plan.restart_reasons.iter().any(|r| r.contains("api_key")));
+        assert!(
+            !plan.restart_required,
+            "api_key should be hot-reloaded via config swap"
+        );
+        assert!(plan.noop_changes.iter().any(|r| r.contains("api_key")));
     }
 
     #[test]
@@ -468,29 +479,29 @@ mod tests {
     }
 
     #[test]
-    fn test_stable_prefix_mode_requires_restart() {
+    fn test_stable_prefix_mode_hot_reloaded() {
         let a = default_cfg();
         let mut b = default_cfg();
         b.stable_prefix_mode = true;
         let plan = build_reload_plan(&a, &b);
-        assert!(plan.restart_required);
+        assert!(
+            !plan.restart_required,
+            "stable_prefix_mode should be hot-reloaded via config swap"
+        );
         assert!(plan
-            .restart_reasons
+            .noop_changes
             .iter()
             .any(|r| r.contains("stable_prefix_mode")));
     }
 
     #[test]
-    fn test_proxy_config_requires_restart() {
+    fn test_proxy_config_hot_reloaded() {
         let a = default_cfg();
         let mut b = default_cfg();
         b.proxy.http_proxy = Some("http://proxy.example.com:8080".to_string());
         let plan = build_reload_plan(&a, &b);
-        assert!(plan.restart_required);
-        assert!(plan
-            .restart_reasons
-            .iter()
-            .any(|r| r.contains("proxy config changed")));
+        assert!(!plan.restart_required, "proxy should be hot-reloaded");
+        assert!(plan.hot_actions.contains(&HotAction::ReloadProxy));
     }
 
     // -----------------------------------------------------------------------
