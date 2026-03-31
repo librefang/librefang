@@ -339,6 +339,11 @@ const zhNavigation: Array<NavGroup> = [
 			{ title: "功能配置", href: withPrefix("/zh/configuration/features") },
 			{ title: "安全配置", href: withPrefix("/zh/configuration/security") },
 			{ title: "LLM 提供商", href: withPrefix("/zh/providers") },
+			{ title: "托管 API", href: withPrefix("/zh/providers/hosted") },
+			{ title: "本地与自托管", href: withPrefix("/zh/providers/local") },
+			{ title: "平台与托管端点", href: withPrefix("/zh/providers/platforms") },
+			{ title: "开发工具", href: withPrefix("/zh/providers/tools") },
+			{ title: "提供商管理", href: withPrefix("/zh/providers/management") },
 		],
 	},
 	{
@@ -415,6 +420,11 @@ export const enNavigation: Array<NavGroup> = [
 			{ title: "Feature Config", href: withPrefix("/configuration/features") },
 			{ title: "Security Config", href: withPrefix("/configuration/security") },
 			{ title: "Providers", href: withPrefix("/providers") },
+			{ title: "Hosted APIs", href: withPrefix("/providers/hosted") },
+			{ title: "Local & Self-Hosted", href: withPrefix("/providers/local") },
+			{ title: "Platforms & Managed", href: withPrefix("/providers/platforms") },
+			{ title: "Developer Tools", href: withPrefix("/providers/tools") },
+			{ title: "Provider Management", href: withPrefix("/providers/management") },
 		],
 	},
 	{
