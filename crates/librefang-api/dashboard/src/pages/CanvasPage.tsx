@@ -23,7 +23,7 @@ import {
   ConnectionLineType,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { listAgents, listWorkflows, createWorkflow, updateWorkflow, deleteWorkflow, runWorkflow, getWorkflow, listWorkflowTemplates, instantiateTemplate, saveWorkflowAsTemplate, createSchedule, type AgentItem, type WorkflowItem, type WorkflowTemplate as ApiWorkflowTemplate } from "../api";
+import { listAgents, listWorkflows, createWorkflow, updateWorkflow, deleteWorkflow, runWorkflow, dryRunWorkflow, getWorkflow, listWorkflowTemplates, instantiateTemplate, saveWorkflowAsTemplate, createSchedule, type AgentItem, type WorkflowItem, type WorkflowTemplate as ApiWorkflowTemplate, type DryRunResult, type WorkflowStepResult } from "../api";
 import { Card } from "../components/ui/Card";
 import { ScheduleModal } from "../components/ui/ScheduleModal";
 import { Button } from "../components/ui/Button";
@@ -33,7 +33,8 @@ import {
   Play, Save, Trash2, Plus, FolderOpen, Loader2,
   Maximize2, Minimize2, ArrowLeft, X, Group, ChevronDown, ChevronRight,
   Copy, ClipboardPaste, LayoutGrid,
-  Download, Upload, HelpCircle, Scan, Check, LayoutTemplate, Search, Tag, BookCopy, Calendar
+  Download, Upload, HelpCircle, Scan, Check, LayoutTemplate, Search, Tag, BookCopy, Calendar,
+  FlaskConical, AlertCircle, CheckCircle2, SkipForward, ChevronUp,
 } from "lucide-react";
 import { truncateId } from "../lib/string";
 
@@ -649,9 +650,13 @@ function CanvasPageInner() {
   const [runningWorkflowId, setRunningWorkflowId] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [editingNode, setEditingNode] = useState<Node | null>(null);
-  const [runResult, setRunResult] = useState<{ output: string; status: string; run_id: string } | null>(null);
-  const [showRunInput, setShowRunInput] = useState(false);
+  const [runResult, setRunResult] = useState<{ output: string; status: string; run_id: string; step_results?: WorkflowStepResult[] } | null>(null);
+  const [showRunInput, setShowRunInput] = useState<false | "run" | "dry">(false);
   const [runInput, setRunInput] = useState("");
+  const [dryRunResult, setDryRunResult] = useState<DryRunResult | null>(null);
+  const [isDryRunning, setIsDryRunning] = useState(false);
+  const [expandedRunStep, setExpandedRunStep] = useState<number | null>(null);
+  const [expandedDryStep, setExpandedDryStep] = useState<number | null>(null);
 
   const [selectedNodeIds, setSelectedNodeIds] = useState<Set<string>>(new Set());
   const [spacePressed, setSpacePressed] = useState(false);
@@ -1399,13 +1404,17 @@ function CanvasPageInner() {
 
   // Click run -> show input dialog
   const handleRunClick = useCallback((id?: string) => {
-    if (id) {
+    if (id === "dry") {
+      // Dry Run button clicked — open input dialog in dry-run mode
+      setRunInput("");
+      setShowRunInput("dry");
+    } else if (id) {
       // Run saved workflow directly from sidebar
       setRunInput("");
-      setShowRunInput(true);
+      setShowRunInput("run");
     } else if (selectedWorkflow?.id || nodes.length > 0) {
       setRunInput("");
-      setShowRunInput(true);
+      setShowRunInput("run");
     }
   }, [selectedWorkflow, nodes]);
 
@@ -1492,10 +1501,13 @@ function CanvasPageInner() {
         ...n,
         data: { ...(n.data as any), _runState: allNodeIds.includes(n.id) ? "done" : undefined }
       })));
+      setDryRunResult(null);
+      setExpandedRunStep(null);
       setRunResult({
         output: (resp as any).output || (resp as any).message || JSON.stringify(resp),
         status: (resp as any).status || "completed",
         run_id: (resp as any).run_id || "",
+        step_results: (resp as any).step_results ?? [],
       });
       // Clear done state and edge animation after 3 seconds
       setTimeout(() => {
@@ -1507,11 +1519,34 @@ function CanvasPageInner() {
       // Error: clear all state and edge animation
       setNodes(nds => nds.map(n => ({ ...n, data: { ...(n.data as any), _runState: undefined } })));
       setEdges(eds => eds.map(e => ({ ...e, animated: false })));
-      showError(e?.message || String(e));
+      const detail = (e as any)?.message || String(e);
+      showError(detail);
     } finally {
       setRunningWorkflowId(null);
     }
   }, [selectedWorkflow, nodes, edges, workflowName, workflowDescription, buildSteps, runInput, t, showError]);
+
+  // Dry-run: resolve agents and expand prompts without calling any LLMs
+  const handleDryRun = useCallback(async (id?: string) => {
+    setShowRunInput(false);
+    let workflowId = id || selectedWorkflow?.id;
+    if (!workflowId) {
+      showError(t("canvas.no_agent_steps"));
+      return;
+    }
+    setIsDryRunning(true);
+    setDryRunResult(null);
+    setRunResult(null);
+    setExpandedDryStep(null);
+    try {
+      const result = await dryRunWorkflow(workflowId, runInput);
+      setDryRunResult(result);
+    } catch (e: any) {
+      showError((e as any)?.message || String(e));
+    } finally {
+      setIsDryRunning(false);
+    }
+  }, [selectedWorkflow, runInput, showError, t]);
 
   // Delete workflow
   const handleDeleteConfirmed = useCallback(async (id: string) => {
@@ -1722,8 +1757,14 @@ function CanvasPageInner() {
               <Calendar className="w-4 h-4 mr-1" />
               <span className="hidden sm:inline">{t("nav.scheduler")}</span>
             </Button>
+            <Button variant="secondary" onClick={() => handleRunClick("dry")}
+              disabled={(!selectedWorkflow && agentStepCount === 0) || !!runningWorkflowId || isDryRunning}
+              title="Dry Run — validate without calling LLMs">
+              {isDryRunning ? <Loader2 className="w-4 h-4 animate-spin" /> : <FlaskConical className="w-4 h-4" />}
+              <span className="hidden sm:inline ml-1">Dry Run</span>
+            </Button>
             <Button variant="primary" onClick={() => handleRunClick()}
-              disabled={(!selectedWorkflow && agentStepCount === 0) || !!runningWorkflowId}>
+              disabled={(!selectedWorkflow && agentStepCount === 0) || !!runningWorkflowId || isDryRunning}>
               {runningWorkflowId ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
               <span className="hidden sm:inline ml-1">{t("workflows.run_workflow")}</span>
             </Button>
@@ -1806,27 +1847,53 @@ function CanvasPageInner() {
               t={t} />
           )}
 
-          {/* Run input dialog */}
+          {/* Run / Dry-run input dialog */}
           {showRunInput && (
             <div className="absolute top-3 right-3 z-20 w-80 rounded-xl border border-border-subtle bg-surface shadow-2xl overflow-hidden">
-              <div className="flex items-center justify-between px-3 py-2 bg-success/10 border-b border-border-subtle">
-                <span className="text-xs font-bold text-success">{t("canvas.run_input_title")}</span>
+              <div className={`flex items-center justify-between px-3 py-2 border-b border-border-subtle ${showRunInput === "dry" ? "bg-brand/10" : "bg-success/10"}`}>
+                <div className="flex items-center gap-2">
+                  {showRunInput === "dry"
+                    ? <FlaskConical className="w-3.5 h-3.5 text-brand" />
+                    : <Play className="w-3.5 h-3.5 text-success" />}
+                  <span className={`text-xs font-bold ${showRunInput === "dry" ? "text-brand" : "text-success"}`}>
+                    {showRunInput === "dry" ? "Dry Run" : t("canvas.run_input_title")}
+                  </span>
+                </div>
                 <button onClick={() => setShowRunInput(false)} className="p-1 rounded hover:bg-main"><X className="w-3.5 h-3.5" /></button>
               </div>
               <div className="p-3 space-y-3">
-                <p className="text-[10px] text-text-dim">{t("canvas.run_input_hint")}</p>
+                <p className="text-[10px] text-text-dim">
+                  {showRunInput === "dry"
+                    ? "Validate agents and preview resolved prompts without calling any LLMs."
+                    : t("canvas.run_input_hint")}
+                </p>
                 <textarea value={runInput} onChange={e => setRunInput(e.target.value)}
                   placeholder={t("canvas.run_input_placeholder")}
                   rows={4} autoFocus
                   className="w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-xs outline-none focus:border-brand resize-none"
-                  onKeyDown={e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) handleRunConfirm(); }}
+                  onKeyDown={e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) showRunInput === "dry" ? handleDryRun() : handleRunConfirm(); }}
                 />
                 <div className="flex gap-2">
-                  <Button variant="primary" size="sm" className="flex-1" onClick={() => handleRunConfirm()}
-                    disabled={!!runningWorkflowId}>
-                    <Play className="w-3.5 h-3.5 mr-1" />
-                    {t("canvas.run_now")}
-                  </Button>
+                  {showRunInput === "dry" ? (
+                    <Button variant="primary" size="sm" className="flex-1" onClick={() => handleDryRun()}
+                      disabled={isDryRunning}>
+                      {isDryRunning ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : <FlaskConical className="w-3.5 h-3.5 mr-1" />}
+                      Validate
+                    </Button>
+                  ) : (
+                    <>
+                      <Button variant="primary" size="sm" className="flex-1" onClick={() => handleRunConfirm()}
+                        disabled={!!runningWorkflowId}>
+                        <Play className="w-3.5 h-3.5 mr-1" />
+                        {t("canvas.run_now")}
+                      </Button>
+                      <Button variant="ghost" size="sm" onClick={() => handleDryRun()}
+                        disabled={isDryRunning || !!runningWorkflowId}
+                        title="Dry Run">
+                        <FlaskConical className="w-3.5 h-3.5" />
+                      </Button>
+                    </>
+                  )}
                   <Button variant="secondary" size="sm" onClick={() => setShowRunInput(false)}>
                     {t("common.cancel")}
                   </Button>
@@ -1945,9 +2012,56 @@ function CanvasPageInner() {
             </div>
           )}
 
+          {/* Dry-run result panel */}
+          {dryRunResult && !runResult && (
+            <div className="absolute bottom-3 left-3 right-3 z-20 max-h-64 rounded-xl border border-border-subtle bg-surface shadow-2xl overflow-hidden flex flex-col">
+              <div className="flex items-center justify-between px-3 py-2 bg-brand/10 border-b border-border-subtle shrink-0">
+                <div className="flex items-center gap-2">
+                  <FlaskConical className="w-3.5 h-3.5 text-brand" />
+                  <span className="text-xs font-bold text-brand">Dry Run</span>
+                  {dryRunResult.valid
+                    ? <Badge variant="success">valid</Badge>
+                    : <Badge variant="error">issues found</Badge>}
+                </div>
+                <button onClick={() => setDryRunResult(null)} className="p-1 rounded hover:bg-main"><X className="w-3.5 h-3.5" /></button>
+              </div>
+              <div className="overflow-y-auto flex-1 p-2 space-y-1.5">
+                {dryRunResult.steps.map((step, i) => (
+                  <div key={i} className="rounded-lg border border-border-subtle bg-main overflow-hidden">
+                    <button
+                      className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-surface transition-colors"
+                      onClick={() => setExpandedDryStep(expandedDryStep === i ? null : i)}>
+                      {step.skipped
+                        ? <SkipForward className="w-3 h-3 text-text-dim/40 shrink-0" />
+                        : step.agent_found
+                          ? <CheckCircle2 className="w-3 h-3 text-success shrink-0" />
+                          : <AlertCircle className="w-3 h-3 text-warning shrink-0" />}
+                      <span className="text-[10px] font-bold truncate flex-1">{step.step_name}</span>
+                      {step.agent_name && <span className="text-[9px] text-text-dim/50 shrink-0">{step.agent_name}</span>}
+                      {step.skipped && <span className="text-[9px] px-1 rounded bg-main border border-border-subtle text-text-dim/40 shrink-0">skip</span>}
+                      {expandedDryStep === i
+                        ? <ChevronUp className="w-3 h-3 text-text-dim/30 shrink-0" />
+                        : <ChevronDown className="w-3 h-3 text-text-dim/30 shrink-0" />}
+                    </button>
+                    {expandedDryStep === i && (
+                      <div className="px-3 pb-3 space-y-1.5 border-t border-border-subtle">
+                        {!step.agent_found && <p className="text-[10px] text-warning mt-2">Agent not found</p>}
+                        {step.skip_reason && <p className="text-[10px] text-text-dim mt-2">{step.skip_reason}</p>}
+                        <p className="text-[9px] font-bold text-text-dim/50 mt-2">Resolved prompt:</p>
+                        <pre className="text-[10px] text-text whitespace-pre-wrap max-h-20 overflow-y-auto bg-surface rounded-lg p-2">
+                          {step.resolved_prompt || "(empty)"}
+                        </pre>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* Run result panel */}
           {runResult && (
-            <div className="absolute bottom-3 left-3 right-3 z-20 max-h-48 rounded-xl border border-border-subtle bg-surface shadow-2xl overflow-hidden flex flex-col">
+            <div className="absolute bottom-3 left-3 right-3 z-20 max-h-64 rounded-xl border border-border-subtle bg-surface shadow-2xl overflow-hidden flex flex-col">
               <div className="flex items-center justify-between px-3 py-2 bg-success/10 border-b border-border-subtle shrink-0">
                 <div className="flex items-center gap-2">
                   <span className="text-xs font-bold text-success">{t("canvas.run_result")}</span>
@@ -1956,7 +2070,48 @@ function CanvasPageInner() {
                 </div>
                 <button onClick={() => setRunResult(null)} className="p-1 rounded hover:bg-main"><X className="w-3.5 h-3.5" /></button>
               </div>
-              <pre className="px-3 py-2 text-xs text-text whitespace-pre-wrap overflow-y-auto flex-1">{runResult.output}</pre>
+              <div className="overflow-y-auto flex-1">
+                <pre className="px-3 py-2 text-xs text-text whitespace-pre-wrap">{runResult.output}</pre>
+                {/* Step-level I/O */}
+                {runResult.step_results && runResult.step_results.length > 0 && (
+                  <div className="px-3 pb-3 space-y-1.5 border-t border-border-subtle">
+                    <p className="text-[9px] font-bold text-text-dim/50 pt-2">Step details</p>
+                    {runResult.step_results.map((s, i) => (
+                      <div key={i} className="rounded-lg border border-border-subtle bg-main overflow-hidden">
+                        <button
+                          className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-surface transition-colors"
+                          onClick={() => setExpandedRunStep(expandedRunStep === i ? null : i)}>
+                          <CheckCircle2 className="w-3 h-3 text-success shrink-0" />
+                          <span className="text-[10px] font-bold truncate flex-1">{s.step_name}</span>
+                          <span className="text-[9px] text-text-dim/50 shrink-0">{s.duration_ms}ms</span>
+                          {expandedRunStep === i
+                            ? <ChevronUp className="w-3 h-3 text-text-dim/30 shrink-0" />
+                            : <ChevronDown className="w-3 h-3 text-text-dim/30 shrink-0" />}
+                        </button>
+                        {expandedRunStep === i && (
+                          <div className="px-3 pb-3 space-y-2 border-t border-border-subtle">
+                            <div>
+                              <p className="text-[9px] font-bold text-text-dim/50 mt-2">Prompt sent:</p>
+                              <pre className="text-[10px] text-text whitespace-pre-wrap max-h-20 overflow-y-auto bg-surface rounded-lg p-2 mt-1">
+                                {s.prompt || "(empty)"}
+                              </pre>
+                            </div>
+                            <div>
+                              <p className="text-[9px] font-bold text-text-dim/50">Output:</p>
+                              <pre className="text-[10px] text-text whitespace-pre-wrap max-h-20 overflow-y-auto bg-surface rounded-lg p-2 mt-1">
+                                {s.output || "(empty)"}
+                              </pre>
+                            </div>
+                            <p className="text-[9px] text-text-dim/40">
+                              {s.agent_name} · {s.input_tokens} in / {s.output_tokens} out tokens
+                            </p>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
           )}
         </main>

@@ -39,6 +39,11 @@ pub struct JobMeta {
     pub last_status: Option<String>,
     /// Number of consecutive failed executions.
     pub consecutive_errors: u32,
+    /// True when the job was disabled automatically by the scheduler after
+    /// repeated failures — as opposed to being manually disabled by the user.
+    /// Only auto-disabled jobs are re-enabled on agent reassignment.
+    #[serde(default)]
+    pub auto_disabled: bool,
 }
 
 impl JobMeta {
@@ -49,6 +54,7 @@ impl JobMeta {
             one_shot,
             last_status: None,
             consecutive_errors: 0,
+            auto_disabled: false,
         }
     }
 }
@@ -179,6 +185,10 @@ impl CronScheduler {
         match self.jobs.get_mut(&id) {
             Some(mut meta) => {
                 meta.job.enabled = enabled;
+                // Any explicit enable/disable by the user clears the auto_disabled
+                // flag so the scheduler won't accidentally re-enable a job the
+                // user deliberately turned off.
+                meta.auto_disabled = false;
                 if enabled {
                     meta.consecutive_errors = 0;
                     meta.job.next_run = Some(compute_next_run(&meta.job.schedule));
@@ -208,6 +218,8 @@ impl CronScheduler {
                 }
                 if let Some(enabled) = updates["enabled"].as_bool() {
                     meta.job.enabled = enabled;
+                    // Explicit update from user clears the auto_disabled flag.
+                    meta.auto_disabled = false;
                     if enabled {
                         meta.consecutive_errors = 0;
                         meta.job.next_run = Some(compute_next_run(&meta.job.schedule));
@@ -295,19 +307,14 @@ impl CronScheduler {
                 // Reset consecutive errors so the job gets a fresh start
                 // with the new agent.
                 entry.value_mut().consecutive_errors = 0;
-                if !entry.value().job.enabled {
-                    // Re-enable jobs that were auto-disabled due to the stale
-                    // agent ID causing repeated failures.
-                    if entry
-                        .value()
-                        .last_status
-                        .as_deref()
-                        .is_some_and(|s| s.contains("not found") || s.contains("No such agent"))
-                    {
-                        entry.value_mut().job.enabled = true;
-                        entry.value_mut().job.next_run =
-                            Some(compute_next_run(&entry.value().job.schedule));
-                    }
+                if !entry.value().job.enabled && entry.value().auto_disabled {
+                    // Re-enable only jobs that were auto-disabled by the scheduler
+                    // (stale agent ID → repeated failures). Jobs the user deliberately
+                    // turned off have auto_disabled=false and are left alone.
+                    entry.value_mut().job.enabled = true;
+                    entry.value_mut().auto_disabled = false;
+                    entry.value_mut().job.next_run =
+                        Some(compute_next_run(&entry.value().job.schedule));
                 }
                 count += 1;
             }
@@ -427,6 +434,7 @@ impl CronScheduler {
                     "Auto-disabling cron job after repeated failures"
                 );
                 meta.job.enabled = false;
+                meta.auto_disabled = true;
             } else {
                 meta.job.next_run = Some(compute_next_run_after(&meta.job.schedule, Utc::now()));
             }
@@ -1181,6 +1189,35 @@ mod tests {
             "Job should be re-enabled after reassignment"
         );
         assert_eq!(meta.consecutive_errors, 0);
+        assert_eq!(meta.job.agent_id, new_agent);
+    }
+
+    #[test]
+    fn test_reassign_does_not_reenable_manually_disabled_jobs() {
+        let (sched, _tmp) = make_scheduler(100);
+        let old_agent = AgentId::new();
+        let new_agent = AgentId::new();
+
+        let job = make_job(old_agent);
+        let id = sched.add_job(job, false).unwrap();
+
+        // Manually disable the job via set_enabled — this is a deliberate user action.
+        sched.set_enabled(id, false).unwrap();
+        let meta = sched.get_meta(id).unwrap();
+        assert!(!meta.job.enabled, "Job should be disabled");
+        assert!(
+            !meta.auto_disabled,
+            "auto_disabled must be false for manual disables"
+        );
+
+        // Reassign should NOT re-enable a manually-disabled job.
+        sched.reassign_agent_jobs(old_agent, new_agent);
+
+        let meta = sched.get_meta(id).unwrap();
+        assert!(
+            !meta.job.enabled,
+            "Manually-disabled job must stay disabled after reassignment"
+        );
         assert_eq!(meta.job.agent_id, new_agent);
     }
 
