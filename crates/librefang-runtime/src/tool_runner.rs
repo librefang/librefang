@@ -3503,23 +3503,42 @@ async fn tool_text_to_speech(
     let format = input["format"].as_str();
     let provider = input["provider"].as_str();
 
-    // Try MediaDriverCache first (multi-provider: OpenAI, Gemini, MiniMax).
-    // Fall back to old TtsEngine for backwards compatibility.
     if let Some(cache) = media_drivers {
-        let request = librefang_types::media::MediaTtsRequest {
-            text: text.to_string(),
-            provider: provider.map(String::from),
-            model: input["model"].as_str().map(String::from),
-            voice: voice.map(String::from),
-            format: format.map(String::from),
-            speed: input["speed"].as_f64().map(|v| v as f32),
-            language: input["language"].as_str().map(String::from),
-        };
+        let resolved_provider =
+            provider.or_else(|| tts_engine.and_then(|e| e.tts_config().provider.as_deref()));
 
-        let driver_result = if let Some(p) = provider {
+        let driver_result = if let Some(p) = resolved_provider {
             cache.get_or_create(p, None)
         } else {
             cache.detect_for_capability(librefang_types::media::MediaCapability::TextToSpeech)
+        };
+
+        // Google TTS: override LLM-provided voice (e.g. "alloy") with the
+        // configured one — Google doesn't recognise OpenAI voice names.
+        let (effective_voice, effective_language, effective_speed) =
+            if resolved_provider == Some("google_tts") {
+                if let Some(engine) = tts_engine {
+                    let cfg = &engine.tts_config().google;
+                    (
+                        Some(cfg.voice.clone()),
+                        Some(cfg.language_code.clone()),
+                        Some(cfg.speaking_rate),
+                    )
+                } else {
+                    (None, None, None)
+                }
+            } else {
+                (None, None, None)
+            };
+
+        let request = librefang_types::media::MediaTtsRequest {
+            text: text.to_string(),
+            provider: resolved_provider.map(String::from),
+            model: input["model"].as_str().map(String::from),
+            voice: effective_voice.or_else(|| voice.map(String::from)),
+            format: format.map(String::from),
+            speed: effective_speed.or_else(|| input["speed"].as_f64().map(|v| v as f32)),
+            language: effective_language.or_else(|| input["language"].as_str().map(String::from)),
         };
 
         if let Ok(driver) = driver_result {

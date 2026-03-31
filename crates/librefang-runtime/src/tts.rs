@@ -26,6 +26,10 @@ impl TtsEngine {
         Self { config }
     }
 
+    pub fn tts_config(&self) -> &TtsConfig {
+        &self.config
+    }
+
     /// Detect which TTS provider is available based on environment variables.
     fn detect_provider() -> Option<&'static str> {
         if std::env::var("OPENAI_API_KEY").is_ok() {
