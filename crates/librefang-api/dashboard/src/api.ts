@@ -1076,6 +1076,66 @@ export async function listWorkflowRuns(workflowId: string): Promise<WorkflowRunI
   return get<WorkflowRunItem[]>(`/api/workflows/${encodeURIComponent(workflowId)}/runs`);
 }
 
+/** Per-step execution result returned by run/detail endpoints. */
+export interface WorkflowStepResult {
+  step_name: string;
+  agent_id?: string;
+  agent_name: string;
+  /** The actual prompt sent to the agent after variable expansion. */
+  prompt: string;
+  output: string;
+  input_tokens: number;
+  output_tokens: number;
+  duration_ms: number;
+}
+
+/** Full detail for a single workflow run. */
+export interface WorkflowRunDetail {
+  id: string;
+  workflow_id: string;
+  workflow_name: string;
+  input: string;
+  state: string;
+  output?: string;
+  error?: string;
+  started_at: string;
+  completed_at?: string | null;
+  step_results: WorkflowStepResult[];
+}
+
+/** Per-step preview returned by dry-run. */
+export interface DryRunStepPreview {
+  step_name: string;
+  agent_name?: string;
+  agent_found: boolean;
+  resolved_prompt: string;
+  skipped: boolean;
+  skip_reason?: string;
+}
+
+/** Response from the dry-run endpoint. */
+export interface DryRunResult {
+  valid: boolean;
+  steps: DryRunStepPreview[];
+}
+
+/**
+ * Validate a workflow without making any LLM calls.
+ * Returns per-step previews with resolved prompts and agent resolution status.
+ */
+export async function dryRunWorkflow(workflowId: string, input: string): Promise<DryRunResult> {
+  return post<DryRunResult>(
+    `/api/workflows/${encodeURIComponent(workflowId)}/dry-run`,
+    { input },
+    30000
+  );
+}
+
+/** Fetch full detail for a single workflow run (includes step-level I/O). */
+export async function getWorkflowRun(runId: string): Promise<WorkflowRunDetail> {
+  return get<WorkflowRunDetail>(`/api/workflows/runs/${encodeURIComponent(runId)}`);
+}
+
 export async function saveWorkflowAsTemplate(workflowId: string): Promise<ApiActionResponse> {
   return post<ApiActionResponse>(`/api/workflows/${encodeURIComponent(workflowId)}/save-as-template`, {});
 }
