@@ -1517,6 +1517,17 @@ url = "https://mcp.example.com/sse"
 
 ```toml
 [[mcp_servers]]
+name = "cloud-tools"
+timeout_secs = 30
+
+[mcp_servers.transport]
+type = "http"
+url = "https://mcp.example.com/mcp"
+headers = [{name = "Authorization", value_env = "MCP_API_KEY"}]
+```
+
+```toml
+[[mcp_servers]]
 name = "my-http-backend"
 timeout_secs = 30
 
@@ -1544,6 +1555,7 @@ method = "post"
 |--------|------|------|
 | `stdio` | `command`（string）、`args`（list of strings，默认 `[]`） | 启动子进程，通过 stdin/stdout 上的 JSON-RPC 通信。 |
 | `sse` | `url`（string） | 连接到 HTTP Server-Sent Events 端点。 |
+| `http` | `url`（string）、`headers`（header 配置列表，可选） | Streamable HTTP 传输方式（MCP 规范 2025-03-26+）。客户端通过单个 HTTP 端点使用 POST 发送 JSON-RPC 请求，服务器可选择以 SSE 流或普通 JSON 响应。相比 `sse` 传输方式，`http` 不需要专用的 SSE 通道，更适合无状态部署和 serverless 环境。 |
 | `http_compat` | `base_url`（string）、`headers`（header 配置列表）、`tools`（工具配置列表） | 内置兼容适配器，用于没有原生 MCP 服务器的纯 HTTP/JSON 工具后端。每个工具映射到一个 HTTP 端点。 |
 
 **`http_compat` header 配置：**
@@ -1783,6 +1795,32 @@ debounce_ms = 500
 | `restart` | 任何配置变更都进行完整守护进程重启。 |
 | `hot` | 仅对安全的部分进行热重载（通道、技能、心跳）。 |
 | `hybrid` | 尽可能热重载；对需要重启的部分标记提示（默认）。 |
+
+**可热重载的配置段（无需重启）：**
+
+以下配置段在 daemon 运行时修改 `config.toml` 后会自动生效（每 30 秒轮询检测）：
+
+- `[channels]` — 添加、删除或重新配置渠道适配器
+- `[[skills]]` — 技能注册表
+- `[proxy]` — HTTP/HTTPS/SOCKS5 代理设置
+- `[browser]` — 浏览器自动化设置
+- `[web]` — 网页搜索/抓取配置
+- `[approval]` — 审批策略
+- `[cron]` — 定时任务设置
+- `[webhook_triggers]` — Webhook 触发器
+- `[extensions]` — 扩展配置
+- `[[mcp_servers]]` — MCP 服务器连接
+- `[a2a]` — Agent-to-Agent 协议配置
+- `[fallback_providers]` — 备用提供商链
+- `provider_urls` — 提供商 URL 覆盖
+- `default_model` — 默认模型选择
+- `tool_policy` — 工具过滤规则
+- `proactive_memory` — 主动记忆阈值
+- `provider_api_keys` — 提供商 API key（会刷新驱动缓存）
+- `usage_footer` — 使用量页脚模式
+- `sanitize` — 输入清理规则
+
+**需要重启的配置段：** `home_dir`、`data_dir`、`api_listen`、`tls`、`telemetry`。这些字段的变更会记录警告日志，但只在重启后生效。
 
 ---
 

@@ -1533,6 +1533,18 @@ path = "/search"
 method = "post"
 ```
 
+#### Streamable HTTP
+
+```toml
+[[mcp_servers]]
+name = "remote-tools"
+
+[mcp_servers.transport.Http]
+url = "https://mcp.example.com/v1"
+```
+
+Uses the Streamable HTTP transport (MCP spec 2025-03-26+). Unlike SSE, this is a simpler request/response pattern over standard HTTP POST.
+
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `name` | string | *required* | Display name for this MCP server. Tools are namespaced as `mcp_{name}_{tool}`. |
@@ -1545,6 +1557,7 @@ method = "post"
 |--------|--------|-------------|
 | `stdio` | `command` (string), `args` (list of strings, default `[]`) | Spawn a subprocess, communicate via JSON-RPC over stdin/stdout. |
 | `sse` | `url` (string) | Connect to an HTTP Server-Sent Events endpoint. |
+| `Http` | `url` (string) | Streamable HTTP transport (MCP spec 2025-03-26+). Simple request/response over HTTP POST. |
 | `http_compat` | `base_url` (string), `headers` (list of header configs), `tools` (list of tool configs) | Built-in compatibility adapter for plain HTTP/JSON tool backends without a native MCP server. Each tool maps to an HTTP endpoint. |
 
 **`http_compat` header config:**
@@ -1740,6 +1753,7 @@ Configures the headless browser automation engine used by the `browser_*` agent 
 
 ```toml
 [browser]
+enabled = true
 headless = true
 viewport_width = 1280
 viewport_height = 720
@@ -1751,6 +1765,7 @@ max_sessions = 5
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
+| `enabled` | bool | `true` | Enable the built-in CDP browser tools. Set to `false` to disable all `browser_*` tools. |
 | `headless` | bool | `true` | Run browser in headless mode (no visible window). |
 | `viewport_width` | u32 | `1280` | Browser viewport width in pixels. |
 | `viewport_height` | u32 | `720` | Browser viewport height in pixels. |
@@ -1784,6 +1799,32 @@ debounce_ms = 500
 | `restart` | Full daemon restart on any config change. |
 | `hot` | Hot-reload safe sections only (channels, skills, heartbeat). |
 | `hybrid` | Hot-reload where possible; flag restart-required for sections that need it (default). |
+
+**Hot-reloadable sections (no restart required):**
+
+The following config sections can be changed in `config.toml` while the daemon is running. Changes are detected automatically (polled every 30 seconds):
+
+- `[channels]` — add, remove, or reconfigure channel adapters
+- `[[skills]]` — skill registry
+- `[proxy]` — HTTP/HTTPS/SOCKS5 proxy settings
+- `[browser]` — browser automation settings
+- `[web]` — web search/scraping config
+- `[approval]` — approval policy
+- `[cron]` — cron job settings
+- `[webhook_triggers]` — webhook triggers
+- `[extensions]` — extension config
+- `[[mcp_servers]]` — MCP server connections
+- `[a2a]` — Agent-to-Agent protocol config
+- `[fallback_providers]` — fallback provider chain
+- `provider_urls` — provider base URL overrides
+- `default_model` — default model selection
+- `tool_policy` — tool filtering rules
+- `proactive_memory` — proactive memory thresholds
+- `provider_api_keys` — provider API keys (flushes driver cache)
+- `usage_footer` — usage footer mode
+- `sanitize` — input sanitization rules
+
+**Restart-required sections:** `home_dir`, `data_dir`, `api_listen`, `tls`, `telemetry`. Changes to these fields are logged as warnings but only take effect after restart.
 
 ---
 

@@ -126,6 +126,8 @@ Start the LibreFang daemon (kernel + API server).
 librefang start [--config <PATH>]
 ```
 
+**Auto-initialization:** If no `config.toml` exists in `~/.librefang/`, a quick setup wizard runs automatically on the first `start` command. The wizard walks through provider selection and API key configuration before booting the daemon.
+
 **Behavior:**
 
 - Checks if a daemon is already running; exits with an error if so.
@@ -1273,6 +1275,7 @@ librefang chat [<AGENT>]
 
 - **Daemon mode:** Finds the agent by name or ID among running agents. If no agent name is given, uses the first available agent. If no agents exist, suggests `librefang agent new`.
 - **Standalone mode (no daemon):** Boots an in-process kernel and auto-spawns an agent from templates. Searches for an agent matching the given name, then falls back to `assistant`, then to the first available template.
+- **Auto-initialization:** If no `config.toml` exists in `~/.librefang/`, a quick setup wizard runs automatically before starting the chat session.
 
 This is the simplest way to start chatting -- it works with or without a daemon.
 

@@ -424,6 +424,24 @@ default_agent = "assistant"
 
 The WhatsApp adapter runs an HTTP server (on the configured `webhook_port`) that receives incoming webhooks from the WhatsApp Cloud API. It handles webhook verification (GET) and message reception (POST). Responses are sent via the Cloud API's `messages` endpoint.
 
+### Group Chat Support
+
+WhatsApp group messages are automatically detected. The bot's behavior in groups is controlled by the `group_policy` setting in channel overrides:
+
+| Policy | Behavior |
+|--------|----------|
+| `mention_only` (default) | Only respond when @mentioned |
+| `all` | Respond to all group messages |
+| `commands_only` | Only respond to slash commands |
+| `ignore` | Ignore all group messages |
+
+Example:
+
+```toml
+[channels.whatsapp.overrides]
+group_policy = "mention_only"
+```
+
 ---
 
 ## WeChat (Personal)
@@ -2045,6 +2063,8 @@ The `AgentRouter` determines which agent receives an incoming message. The routi
 2. **User-agent binding**: If a user has previously been associated with a specific agent (via commands or configuration), messages from that user route to that agent.
 3. **Command prefix**: Users can switch agents by sending a command like `/agent coder` in the chat. Subsequent messages will be routed to the "coder" agent.
 4. **Fallback**: If no routing applies, messages go to the first available agent.
+
+When a channel has `default_agent` configured, messages from that channel bypass semantic and keyword routing and go directly to the specified agent. Users can still switch agents manually via the `/agent` command.
 
 ---
 
