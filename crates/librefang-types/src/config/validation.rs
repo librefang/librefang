@@ -567,6 +567,17 @@ impl KernelConfig {
                     ));
                 }
             }
+            SearchProvider::Jina => {
+                if std::env::var(&self.web.jina.api_key_env)
+                    .unwrap_or_default()
+                    .is_empty()
+                {
+                    warnings.push(format!(
+                        "Jina search selected but {} is not set",
+                        self.web.jina.api_key_env
+                    ));
+                }
+            }
             SearchProvider::DuckDuckGo | SearchProvider::Auto => {}
         }
 
@@ -671,6 +682,13 @@ impl KernelConfig {
             self.web.fetch.timeout_secs = 30;
         } else if self.web.fetch.timeout_secs > 120 {
             self.web.fetch.timeout_secs = 120;
+        }
+
+        // Web search timeout: min 5s, max 120s
+        if self.web.timeout_secs == 0 {
+            self.web.timeout_secs = 15;
+        } else if self.web.timeout_secs > 120 {
+            self.web.timeout_secs = 120;
         }
 
         // Queue concurrency: min 1 per lane (0 would deadlock)

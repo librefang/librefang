@@ -1,8 +1,8 @@
 //! Multi-provider web search engine with auto-fallback.
 //!
-//! Supports 4 providers: Tavily (AI-agent-native), Brave, Perplexity, and
-//! DuckDuckGo (zero-config fallback). Auto mode cascades through available
-//! providers based on configured API keys.
+//! Supports 5 providers: Tavily (AI-agent-native), Brave, Jina, Perplexity,
+//! and DuckDuckGo (zero-config fallback). Auto mode cascades through
+//! available providers based on configured API keys.
 //!
 //! All API keys use `Zeroizing<String>` via `resolve_api_key()` to auto-wipe
 //! secrets from memory on drop.
@@ -41,7 +41,7 @@ impl WebSearchEngine {
         brave_auth_profiles: Vec<(String, u32)>,
     ) -> Self {
         let client = crate::http_client::proxied_client_builder()
-            .timeout(std::time::Duration::from_secs(15))
+            .timeout(std::time::Duration::from_secs(config.timeout_secs))
             .build()
             .expect("HTTP client build");
 
@@ -76,6 +76,7 @@ impl WebSearchEngine {
         let result = match self.config.search_provider {
             SearchProvider::Brave => self.search_brave(query, max_results).await,
             SearchProvider::Tavily => self.search_tavily(query, max_results).await,
+            SearchProvider::Jina => self.search_jina(query, max_results).await,
             SearchProvider::Perplexity => self.search_perplexity(query).await,
             SearchProvider::DuckDuckGo => self.search_duckduckgo(query, max_results).await,
             SearchProvider::Auto => self.search_auto(query, max_results).await,
@@ -90,7 +91,7 @@ impl WebSearchEngine {
     }
 
     /// Auto-select provider based on available API keys.
-    /// Priority: Tavily → Brave → Perplexity → DuckDuckGo
+    /// Priority: Tavily → Brave → Jina → Perplexity → DuckDuckGo
     async fn search_auto(&self, query: &str, max_results: usize) -> Result<String, String> {
         // Tavily first (AI-agent-native)
         if resolve_api_key(&self.config.tavily.api_key_env).is_some() {
@@ -114,7 +115,16 @@ impl WebSearchEngine {
             }
         }
 
-        // Perplexity third
+        // Jina third
+        if resolve_api_key(&self.config.jina.api_key_env).is_some() {
+            debug!("Auto: trying Jina");
+            match self.search_jina(query, max_results).await {
+                Ok(result) => return Ok(result),
+                Err(e) => warn!("Jina failed, falling back: {e}"),
+            }
+        }
+
+        // Perplexity fourth
         if resolve_api_key(&self.config.perplexity.api_key_env).is_some() {
             debug!("Auto: trying Perplexity");
             match self.search_perplexity(query).await {
@@ -129,7 +139,7 @@ impl WebSearchEngine {
         debug!("Auto: falling back to DuckDuckGo");
         match self.search_duckduckgo(query, max_results).await {
             Ok(result) if !result.trim().is_empty() => Ok(result),
-            Ok(_) => Err("All search providers failed; DuckDuckGo returned empty results (likely captcha-blocked). Configure a Brave, Tavily, or Perplexity API key for reliable search.".to_string()),
+            Ok(_) => Err("All search providers failed; DuckDuckGo returned empty results (likely captcha-blocked). Configure a Brave, Tavily, Jina, or Perplexity API key for reliable search.".to_string()),
             Err(e) => Err(format!("All search providers exhausted. Last error (DuckDuckGo): {e}")),
         }
     }
@@ -349,6 +359,99 @@ impl WebSearchEngine {
         Ok(wrap_external_content("perplexity-search", &output))
     }
 
+    /// Search via Jina AI Search API (with single retry on transient errors).
+    async fn search_jina(&self, query: &str, max_results: usize) -> Result<String, String> {
+        let api_key =
+            resolve_api_key(&self.config.jina.api_key_env).ok_or("Jina API key not set")?;
+
+        let endpoint = if self.config.jina.use_eu_endpoint {
+            "https://eu.s.jina.ai/"
+        } else {
+            "https://s.jina.ai/"
+        };
+
+        let mut body = serde_json::json!({
+            "q": query,
+            "num": max_results,
+        });
+
+        if !self.config.jina.country.is_empty() {
+            body["gl"] = serde_json::Value::String(self.config.jina.country.clone());
+        }
+        if !self.config.jina.language.is_empty() {
+            body["hl"] = serde_json::Value::String(self.config.jina.language.clone());
+        }
+
+        let mut attempts = 0u32;
+        loop {
+            attempts += 1;
+
+            let mut req = self
+                .client
+                .post(endpoint)
+                .header("Authorization", format!("Bearer {}", api_key.as_str()))
+                .header("Accept", "application/json");
+
+            if self.config.jina.no_cache {
+                req = req.header("X-No-Cache", "true");
+            }
+
+            let resp_result = req.json(&body).send().await;
+
+            match resp_result {
+                Ok(resp) if resp.status().is_success() => {
+                    let data: serde_json::Value = resp
+                        .json()
+                        .await
+                        .map_err(|e| format!("Jina JSON parse failed: {e}"))?;
+
+                    let results = data["data"].as_array().cloned().unwrap_or_default();
+
+                    if results.is_empty() {
+                        return Err(format!("No results found for '{query}' (Jina)."));
+                    }
+
+                    let mut output = format!("Search results for '{query}' (Jina):\n\n");
+                    for (i, r) in results.iter().enumerate().take(max_results) {
+                        let title = r["title"].as_str().unwrap_or("");
+                        let url = r["url"].as_str().unwrap_or("");
+                        let content = r["content"]
+                            .as_str()
+                            .or_else(|| r["description"].as_str())
+                            .unwrap_or("");
+                        output.push_str(&format!(
+                            "{}. {}\n   URL: {}\n   {}\n\n",
+                            i + 1,
+                            title,
+                            url,
+                            content
+                        ));
+                    }
+
+                    return Ok(wrap_external_content("jina-search", &output));
+                }
+                Ok(resp) => {
+                    let status = resp.status();
+                    // Only retry on transient errors: 429 (rate limit) or 5xx (server errors)
+                    let is_transient = status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                        || status.is_server_error();
+                    if is_transient && attempts < 2 {
+                        warn!("Jina returned {status}, retrying...");
+                        continue;
+                    }
+                    return Err(format!("Jina API returned {status}"));
+                }
+                Err(e) => {
+                    if attempts < 2 {
+                        warn!("Jina request failed: {e}, retrying...");
+                        continue;
+                    }
+                    return Err(format!("Jina request failed: {e}"));
+                }
+            }
+        }
+    }
+
     /// Search via DuckDuckGo HTML (no API key needed).
     async fn search_duckduckgo(&self, query: &str, max_results: usize) -> Result<String, String> {
         debug!(query, "Searching via DuckDuckGo HTML");
@@ -536,5 +639,176 @@ mod tests {
         let results = parse_ddg_results(html, 5);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].1, "https://example.com");
+    }
+
+    // ── Jina provider tests ──────────────────────────────────
+
+    #[test]
+    fn test_jina_config_defaults() {
+        let config = librefang_types::config::JinaSearchConfig::default();
+        assert_eq!(config.api_key_env, "JINA_API_KEY");
+        assert_eq!(config.max_results, 5);
+        assert!(!config.use_eu_endpoint);
+        assert!(config.country.is_empty());
+        assert!(config.language.is_empty());
+        assert!(!config.no_cache);
+    }
+
+    #[test]
+    fn test_jina_search_provider_serde_json() {
+        let provider = librefang_types::config::SearchProvider::Jina;
+        let json = serde_json::to_string(&provider).unwrap();
+        assert_eq!(json, "\"jina\"");
+        let back: librefang_types::config::SearchProvider = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, librefang_types::config::SearchProvider::Jina);
+    }
+
+    #[test]
+    fn test_jina_search_provider_serde_toml() {
+        // Ensure "jina" round-trips through TOML the same as JSON
+        let toml_str = r#"search_provider = "jina""#;
+        #[derive(serde::Deserialize)]
+        struct W {
+            search_provider: librefang_types::config::SearchProvider,
+        }
+        let w: W = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            w.search_provider,
+            librefang_types::config::SearchProvider::Jina
+        );
+    }
+
+    #[test]
+    fn test_jina_config_toml_full_roundtrip() {
+        let toml_str = r#"
+            [web]
+            search_provider = "jina"
+            [web.jina]
+            api_key_env = "MY_JINA_KEY"
+            max_results = 10
+            country = "US"
+            language = "en"
+            use_eu_endpoint = true
+            no_cache = true
+        "#;
+        let config: librefang_types::config::KernelConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            config.web.search_provider,
+            librefang_types::config::SearchProvider::Jina
+        );
+        assert_eq!(config.web.jina.api_key_env, "MY_JINA_KEY");
+        assert_eq!(config.web.jina.max_results, 10);
+        assert_eq!(config.web.jina.country, "US");
+        assert_eq!(config.web.jina.language, "en");
+        assert!(config.web.jina.use_eu_endpoint);
+        assert!(config.web.jina.no_cache);
+    }
+
+    #[test]
+    fn test_jina_config_toml_partial_uses_defaults() {
+        // Only set search_provider, leave [web.jina] section out entirely
+        let toml_str = r#"
+            [web]
+            search_provider = "jina"
+        "#;
+        let config: librefang_types::config::KernelConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            config.web.search_provider,
+            librefang_types::config::SearchProvider::Jina
+        );
+        // All jina fields should fall back to defaults
+        assert_eq!(config.web.jina.api_key_env, "JINA_API_KEY");
+        assert_eq!(config.web.jina.max_results, 5);
+        assert!(!config.web.jina.use_eu_endpoint);
+        assert!(!config.web.jina.no_cache);
+    }
+
+    #[test]
+    fn test_jina_config_serialize_roundtrip() {
+        // Serialize a KernelConfig with Jina and deserialize it back
+        let mut config = librefang_types::config::KernelConfig::default();
+        config.web.search_provider = librefang_types::config::SearchProvider::Jina;
+        config.web.jina.country = "PL".to_string();
+        config.web.jina.language = "pl".to_string();
+        config.web.jina.use_eu_endpoint = true;
+
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        let back: librefang_types::config::KernelConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(
+            back.web.search_provider,
+            librefang_types::config::SearchProvider::Jina
+        );
+        assert_eq!(back.web.jina.country, "PL");
+        assert_eq!(back.web.jina.language, "pl");
+        assert!(back.web.jina.use_eu_endpoint);
+    }
+
+    #[test]
+    fn test_web_config_default_includes_jina() {
+        let config = librefang_types::config::WebConfig::default();
+        assert_eq!(config.jina.api_key_env, "JINA_API_KEY");
+        assert_eq!(config.jina.max_results, 5);
+        assert!(!config.jina.use_eu_endpoint);
+        assert!(config.jina.country.is_empty());
+        assert!(config.jina.language.is_empty());
+        assert!(!config.jina.no_cache);
+    }
+
+    #[test]
+    fn test_kernel_config_default_has_jina_in_web() {
+        let config = librefang_types::config::KernelConfig::default();
+        assert_eq!(config.web.jina.api_key_env, "JINA_API_KEY");
+    }
+
+    #[test]
+    fn test_jina_config_custom_env_var() {
+        let toml_str = r#"
+            [web.jina]
+            api_key_env = "CUSTOM_JINA_TOKEN"
+        "#;
+        let config: librefang_types::config::KernelConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.web.jina.api_key_env, "CUSTOM_JINA_TOKEN");
+    }
+
+    #[test]
+    fn test_jina_eu_endpoint_default_false() {
+        let config = librefang_types::config::JinaSearchConfig::default();
+        assert!(
+            !config.use_eu_endpoint,
+            "EU endpoint should be disabled by default"
+        );
+    }
+
+    #[test]
+    fn test_jina_no_cache_default_false() {
+        let config = librefang_types::config::JinaSearchConfig::default();
+        assert!(!config.no_cache, "no_cache should be disabled by default");
+    }
+
+    #[test]
+    fn test_jina_config_all_providers_coexist() {
+        // Ensure Jina config doesn't break other providers in the same WebConfig
+        let toml_str = r#"
+            [web]
+            search_provider = "auto"
+            [web.brave]
+            api_key_env = "MY_BRAVE"
+            [web.tavily]
+            api_key_env = "MY_TAVILY"
+            [web.jina]
+            api_key_env = "MY_JINA"
+            max_results = 3
+        "#;
+        let config: librefang_types::config::KernelConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            config.web.search_provider,
+            librefang_types::config::SearchProvider::Auto
+        );
+        assert_eq!(config.web.brave.api_key_env, "MY_BRAVE");
+        assert_eq!(config.web.tavily.api_key_env, "MY_TAVILY");
+        assert_eq!(config.web.jina.api_key_env, "MY_JINA");
+        assert_eq!(config.web.jina.max_results, 3);
+        // Perplexity should keep its default
+        assert_eq!(config.web.perplexity.api_key_env, "PERPLEXITY_API_KEY");
     }
 }
