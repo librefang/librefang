@@ -444,10 +444,18 @@ export function SkillsPage() {
   const skillhubError = activeSkillhubQuery.error as any;
   const isSkillhubRateLimited = skillhubError?.message?.includes("429") || skillhubError?.message?.includes("rate") || skillhubError?.message?.includes("Rate limit") || skillhubError?.status === 429;
 
-  const filteredSkillhub = useMemo(
-    () => skillhubSkills.map(s => ({ ...s, is_installed: isInstalledFromMarketplace(s.slug, "skillhub") })),
-    [skillhubSkills, installedSkills],
-  );
+  const filteredSkillhub = useMemo(() => {
+    const all = skillhubSkills.map(s => ({ ...s, is_installed: isInstalledFromMarketplace(s.slug, "skillhub") }));
+    if (!selectedCategory) return all;
+    const kws = (categories.find(c => c.id === selectedCategory)?.keyword || "").toLowerCase().split(" ");
+    return all.filter(s =>
+      kws.some(kw =>
+        s.name.toLowerCase().includes(kw) ||
+        s.description?.toLowerCase().includes(kw) ||
+        s.tags?.some((tag: string) => tag.toLowerCase().includes(kw))
+      )
+    );
+  }, [skillhubSkills, installedSkills, selectedCategory]);
   const skillhubTotalPages = Math.ceil(filteredSkillhub.length / ITEMS_PER_PAGE);
   const paginatedSkillhub = filteredSkillhub.slice((page - 1) * ITEMS_PER_PAGE, page * ITEMS_PER_PAGE);
 
