@@ -562,13 +562,23 @@ pub(crate) async fn stream_gemini_sse(
         let chunk = chunk_result.map_err(|e| LlmError::Http(e.to_string()))?;
         buffer.push_str(&String::from_utf8_lossy(&chunk));
 
-        while let Some(pos) = buffer.find("\n\n") {
+        while let Some((pos, delim_len)) = buffer
+            .find("\r\n\r\n")
+            .map(|p| (p, 4usize))
+            .into_iter()
+            .chain(buffer.find("\n\n").map(|p| (p, 2usize)))
+            .min_by_key(|&(p, _)| p)
+        {
             let event_text = buffer[..pos].to_string();
-            buffer = buffer[pos + 2..].to_string();
+            buffer = buffer[pos + delim_len..].to_string();
 
             let data = event_text
                 .lines()
-                .find_map(|line| line.strip_prefix("data:").map(|d| d.trim_start()))
+                .find_map(|line| {
+                    line.trim_end_matches('\r')
+                        .strip_prefix("data:")
+                        .map(|d| d.trim_start())
+                })
                 .unwrap_or("");
 
             if data.is_empty() {
@@ -907,14 +917,24 @@ impl LlmDriver for GeminiDriver {
                 buffer.push_str(&String::from_utf8_lossy(&chunk));
 
                 // Process complete SSE events (delimited by \n\n or \r\n\r\n)
-                while let Some(pos) = buffer.find("\n\n") {
+                while let Some((pos, delim_len)) = buffer
+                    .find("\r\n\r\n")
+                    .map(|p| (p, 4usize))
+                    .into_iter()
+                    .chain(buffer.find("\n\n").map(|p| (p, 2usize)))
+                    .min_by_key(|&(p, _)| p)
+                {
                     let event_text = buffer[..pos].to_string();
-                    buffer = buffer[pos + 2..].to_string();
+                    buffer = buffer[pos + delim_len..].to_string();
 
                     // Extract the data line (handle both "data: " and "data:" formats)
                     let data = event_text
                         .lines()
-                        .find_map(|line| line.strip_prefix("data:").map(|d| d.trim_start()))
+                        .find_map(|line| {
+                            line.trim_end_matches('\r')
+                                .strip_prefix("data:")
+                                .map(|d| d.trim_start())
+                        })
                         .unwrap_or("");
 
                     if data.is_empty() {
