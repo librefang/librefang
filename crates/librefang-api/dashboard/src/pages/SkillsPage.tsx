@@ -649,7 +649,7 @@ export function SkillsPage() {
             )}
           </>
         )
-      )}
+      ) : null}
 
       {/* Built-in Tools */}
       {viewMode === "builtin" && (
