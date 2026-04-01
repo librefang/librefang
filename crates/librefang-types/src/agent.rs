@@ -279,7 +279,7 @@ pub enum ScheduleMode {
 }
 
 fn default_check_interval() -> u64 {
-    3600
+    300
 }
 
 /// Resource limits for an agent.
