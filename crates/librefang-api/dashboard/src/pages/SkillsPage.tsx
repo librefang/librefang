@@ -2,7 +2,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { formatDate } from "../lib/datetime";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { listSkills, uninstallSkill, clawhubSearch, clawhubInstall, clawhubGetSkill, skillhubSearch, skillhubBrowse, skillhubInstall, skillhubGetSkill, listTools, type ClawHubBrowseItem } from "../api";
+import { listSkills, uninstallSkill, clawhubSearch, clawhubInstall, clawhubGetSkill, skillhubSearch, skillhubBrowse, skillhubInstall, skillhubGetSkill, type ClawHubBrowseItem } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -24,7 +24,7 @@ type ClawHubSkillWithStatus = ClawHubBrowseItem & { is_installed?: boolean };
 const REFRESH_MS = 30000;
 const ITEMS_PER_PAGE = 6;
 
-type ViewMode = "installed" | "marketplace" | "builtin";
+type ViewMode = "installed" | "marketplace";
 type MarketplaceSource = "clawhub" | "skillhub";
 
 // Categories with icons and search keywords
@@ -311,7 +311,6 @@ export function SkillsPage() {
   const [page, setPage] = useState(1);
 
   // Actions
-  const [builtinSearch, setBuiltinSearch] = useState("");
   const [uninstalling, setUninstalling] = useState<string | null>(null);
   const [detailsSkill, setDetailsSkill] = useState<ClawHubSkillWithStatus | null>(null);
   const [detailsSource, setDetailsSource] = useState<MarketplaceSource>("clawhub");
@@ -324,16 +323,6 @@ export function SkillsPage() {
 
   // Queries
   const skillsQuery = useQuery({ queryKey: ["skills", "list"], queryFn: listSkills, refetchInterval: REFRESH_MS });
-  const builtinToolsQuery = useQuery({ queryKey: ["tools"], queryFn: listTools, enabled: viewMode === "builtin" });
-  const builtinTools: any[] = builtinToolsQuery.data ?? [];
-  const filteredBuiltin = useMemo(
-    () => builtinTools.filter((tool) =>
-      !builtinSearch ||
-      (tool.name || "").toLowerCase().includes(builtinSearch.toLowerCase()) ||
-      (tool.description || "").toLowerCase().includes(builtinSearch.toLowerCase())
-    ),
-    [builtinTools, builtinSearch]
-  );
 
   // ClawHub (non-CN)
   const searchQuery = useQuery({
@@ -528,16 +517,7 @@ export function SkillsPage() {
           }`}
         >
           {USE_SKILLHUB ? <Store className="w-4 h-4" /> : <Sparkles className="w-4 h-4" />}
-          {USE_SKILLHUB ? t("skills.skillhub") : t("skills.marketplace")}
-        </button>
-        <button
-          onClick={() => { setViewMode("builtin"); setPage(1); setSearch(""); setSelectedCategory(null); }}
-          className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-colors ${
-            viewMode === "builtin" ? "bg-surface text-text shadow-sm" : "text-text-dim hover:text-text-main"
-          }`}
-        >
-          <Wrench className="w-4 h-4" />
-          {t("skills.builtin")}
+          {USE_SKILLHUB ? t("skills.builtin") : t("skills.marketplace")}
         </button>
       </div>
 
@@ -580,20 +560,6 @@ export function SkillsPage() {
         />
       )}
 
-      {/* Search — Built-in */}
-      {viewMode === "builtin" && (
-        <Input
-          value={builtinSearch}
-          onChange={(e) => setBuiltinSearch(e.target.value)}
-          placeholder={t("settings.tools_search")}
-          leftIcon={<Search className="w-4 h-4" />}
-          rightIcon={builtinSearch ? (
-            <button onClick={() => setBuiltinSearch("")} className="hover:text-text-main">
-              <X className="w-3 h-3" />
-            </button>
-          ) : undefined}
-        />
-      )}
 
       {/* Content */}
       {viewMode === "installed" ? (
@@ -650,47 +616,6 @@ export function SkillsPage() {
           </>
         )
       ) : null}
-
-      {/* Built-in Tools */}
-      {viewMode === "builtin" && (
-        builtinToolsQuery.isLoading ? (
-          <div className="grid gap-2 sm:gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            {[1,2,3,4,5,6].map(i => <CardSkeleton key={i} />)}
-          </div>
-        ) : filteredBuiltin.length === 0 ? (
-          <EmptyState title={t("common.no_data")} icon={<Wrench className="h-6 w-6" />} />
-        ) : (
-          <div className="grid gap-2 sm:gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            {filteredBuiltin.map((tool: any, i: number) => (
-              <div
-                key={tool.name || i}
-                className="flex items-start gap-3 p-4 rounded-2xl border border-border-subtle bg-surface hover:border-brand/20 hover:bg-brand/[0.02] transition-colors duration-200 cursor-default group"
-              >
-                <div className="w-9 h-9 rounded-xl bg-brand/8 flex items-center justify-center shrink-0 ring-1 ring-brand/10 group-hover:ring-brand/20 transition-all duration-200">
-                  <Wrench className="w-4 h-4 text-brand/50 group-hover:text-brand/70 transition-colors duration-200" />
-                </div>
-                <div className="min-w-0 flex-1 pt-0.5">
-                  <div className="flex items-center gap-1.5 flex-wrap">
-                    <p className="text-sm font-bold truncate group-hover:text-brand transition-colors duration-200">
-                      {tool.name || tool.id}
-                    </p>
-                    {tool.source && (
-                      <span className="text-[9px] px-1.5 py-px rounded-full bg-main border border-border-subtle text-text-dim font-medium shrink-0">
-                        {tool.source}
-                      </span>
-                    )}
-                  </div>
-                  {tool.description && (
-                    <p className="text-xs text-text-dim line-clamp-2 mt-0.5 leading-relaxed">
-                      {tool.description}
-                    </p>
-                  )}
-                </div>
-              </div>
-            ))}
-          </div>
-        )
-      )}
 
       {/* Details Modal */}
       {detailsSkill && skillWithDetails && (
