@@ -822,6 +822,30 @@ impl Default for PairingConfig {
     }
 }
 
+/// Skills configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SkillsConfig {
+    /// Whether bundled (compile-time embedded) skills are loaded. Default: true.
+    pub load_bundled: bool,
+    /// Whether user-installed skills from the skills directory are loaded. Default: true.
+    pub load_user: bool,
+    /// Extra skill directories to scan in addition to `~/.librefang/skills/`.
+    /// Each entry must be an absolute path.
+    #[serde(default)]
+    pub extra_dirs: Vec<std::path::PathBuf>,
+}
+
+impl Default for SkillsConfig {
+    fn default() -> Self {
+        Self {
+            load_bundled: true,
+            load_user: true,
+            extra_dirs: Vec::new(),
+        }
+    }
+}
+
 /// Extensions & integrations configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1711,6 +1735,9 @@ pub struct KernelConfig {
     /// Extensions & integrations configuration.
     #[serde(default)]
     pub extensions: ExtensionsConfig,
+    /// Skills configuration (bundled + user-installed skills).
+    #[serde(default)]
+    pub skills: SkillsConfig,
     /// Credential vault configuration.
     #[serde(default)]
     pub vault: VaultConfig,
@@ -2789,6 +2816,7 @@ impl Default for KernelConfig {
             fallback_providers: Vec::new(),
             browser: BrowserConfig::default(),
             extensions: ExtensionsConfig::default(),
+            skills: SkillsConfig::default(),
             vault: VaultConfig::default(),
             workspaces_dir: None,
             log_dir: None,
@@ -3050,7 +3078,11 @@ pub struct MemoryConfig {
     pub consolidation_threshold: u64,
     /// Memory decay rate (0.0 = no decay, 1.0 = aggressive decay).
     pub decay_rate: f32,
-    /// Embedding provider (e.g., "openai", "ollama"). None = auto-detect.
+    /// Embedding provider. Valid values: `"openai"`, `"groq"`, `"mistral"`,
+    /// `"together"`, `"fireworks"`, `"cohere"`, `"ollama"`, `"bedrock"`,
+    /// `"vllm"`, `"lmstudio"`, or `"auto"`.
+    /// `None` or `"auto"` = probe API-key env vars across all cloud providers,
+    /// then fall back to local Ollama.
     #[serde(default)]
     pub embedding_provider: Option<String>,
     /// Environment variable name for the embedding API key.

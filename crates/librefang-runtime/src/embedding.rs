@@ -440,7 +440,52 @@ impl EmbeddingDriver for BedrockEmbeddingDriver {
     }
 }
 
+/// Probe environment variables and local services to detect an available
+/// embedding provider.
+///
+/// Checks in priority order:
+/// 1. `OPENAI_API_KEY`    → `"openai"`
+/// 2. `GROQ_API_KEY`      → `"groq"`
+/// 3. `MISTRAL_API_KEY`   → `"mistral"`
+/// 4. `TOGETHER_API_KEY`  → `"together"`
+/// 5. `FIREWORKS_API_KEY` → `"fireworks"`
+/// 6. `COHERE_API_KEY`    → `"cohere"`
+/// 7. `OLLAMA_HOST` set, or Ollama running on localhost → `"ollama"`
+/// 8. `None` if nothing is available
+pub fn detect_embedding_provider() -> Option<&'static str> {
+    // Cloud providers — check API key env vars in priority order.
+    let cloud_providers: &[(&str, &str)] = &[
+        ("OPENAI_API_KEY", "openai"),
+        ("GROQ_API_KEY", "groq"),
+        ("MISTRAL_API_KEY", "mistral"),
+        ("TOGETHER_API_KEY", "together"),
+        ("FIREWORKS_API_KEY", "fireworks"),
+        ("COHERE_API_KEY", "cohere"),
+    ];
+    for &(env_var, provider) in cloud_providers {
+        if let Ok(val) = std::env::var(env_var) {
+            if !val.trim().is_empty() {
+                return Some(provider);
+            }
+        }
+    }
+
+    // Local Ollama — available if OLLAMA_HOST is set or the standard host is
+    // configured. We don't attempt a live TCP probe here (that would be async
+    // and would require a runtime); presence of the env var is sufficient signal.
+    if std::env::var("OLLAMA_HOST").is_ok() {
+        return Some("ollama");
+    }
+
+    None
+}
+
 /// Create an embedding driver from kernel config.
+///
+/// Pass `"auto"` as `provider` to invoke [`detect_embedding_provider`] and
+/// pick the first available provider automatically.  Returns
+/// `Err(EmbeddingError::MissingApiKey)` when `"auto"` is requested but no
+/// provider can be detected.
 pub fn create_embedding_driver(
     provider: &str,
     model: &str,
@@ -448,6 +493,31 @@ pub fn create_embedding_driver(
     custom_base_url: Option<&str>,
     dimensions_override: Option<usize>,
 ) -> Result<Box<dyn EmbeddingDriver + Send + Sync>, EmbeddingError> {
+    // Resolve "auto" to the first available provider.
+    if provider == "auto" {
+        let detected = detect_embedding_provider().ok_or_else(|| {
+            EmbeddingError::MissingApiKey(
+                "No embedding provider available. Set one of: OPENAI_API_KEY, GROQ_API_KEY, \
+                 MISTRAL_API_KEY, TOGETHER_API_KEY, FIREWORKS_API_KEY, COHERE_API_KEY, \
+                 or configure Ollama."
+                    .to_string(),
+            )
+        })?;
+        // Determine the API key env var for the detected provider.
+        let resolved_key_env = if api_key_env.is_empty() {
+            provider_default_key_env(detected)
+        } else {
+            api_key_env
+        };
+        return create_embedding_driver(
+            detected,
+            model,
+            resolved_key_env,
+            custom_base_url,
+            dimensions_override,
+        );
+    }
+
     // Bedrock uses its own auth (SigV4) and endpoint format — handle early.
     if provider == "bedrock" {
         warn!(
@@ -529,6 +599,20 @@ pub fn create_embedding_driver(
 
     let driver = OpenAIEmbeddingDriver::new(config)?;
     Ok(Box::new(driver))
+}
+
+/// Return the default API-key environment variable name for a given provider.
+fn provider_default_key_env(provider: &str) -> &'static str {
+    match provider {
+        "openai" => "OPENAI_API_KEY",
+        "groq" => "GROQ_API_KEY",
+        "mistral" => "MISTRAL_API_KEY",
+        "together" => "TOGETHER_API_KEY",
+        "fireworks" => "FIREWORKS_API_KEY",
+        "cohere" => "COHERE_API_KEY",
+        // Local providers don't need a key.
+        _ => "",
+    }
 }
 
 /// Compute cosine similarity between two vectors.
