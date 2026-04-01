@@ -132,6 +132,13 @@ fn kill_stale_processes() {
         }
     }
 
+    // Remove stale daemon info file so the new daemon doesn't think
+    // the old one is still alive (race between kill and PID check).
+    let daemon_json = librefang_home().join("daemon.json");
+    if daemon_json.exists() {
+        let _ = std::fs::remove_file(&daemon_json);
+    }
+
     std::thread::sleep(std::time::Duration::from_secs(1));
 }
 
