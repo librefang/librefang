@@ -76,7 +76,8 @@ function FangHubSkillCard({ skill, pendingId, onInstall, t }: {
 }) {
   const isPending = pendingId === skill.name;
   return (
-    <Card hover padding="none" className="flex flex-col overflow-hidden">
+    <Card hover padding="none" className="relative flex flex-col overflow-hidden">
+      <span className="absolute top-2.5 right-2.5 text-[9px] font-black px-1.5 py-0.5 rounded-full bg-brand/15 text-brand leading-none z-10">{t("skills.official")}</span>
       <div className="h-1.5 bg-gradient-to-r from-brand via-brand/60 to-brand/30" />
       <div className="p-5 flex-1 flex flex-col">
         <div className="flex items-start justify-between gap-3 mb-3">
@@ -91,16 +92,13 @@ function FangHubSkillCard({ skill, pendingId, onInstall, t }: {
               )}
             </div>
           </div>
-          <div className="flex flex-col items-end gap-1.5 shrink-0">
-            <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full bg-brand/15 text-brand leading-none">{t("skills.official")}</span>
-            {skill.is_installed ? (
-              <Badge variant="success"><CheckCircle2 className="w-3 h-3 mr-1" />{t("skills.installed")}</Badge>
-            ) : (
-              <Button variant="primary" size="sm" onClick={() => onInstall(skill.name)} disabled={!!pendingId}>
-                {isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
-              </Button>
-            )}
-          </div>
+          {skill.is_installed ? (
+            <Badge variant="success"><CheckCircle2 className="w-3 h-3 mr-1" />{t("skills.installed")}</Badge>
+          ) : (
+            <Button variant="primary" size="sm" onClick={() => onInstall(skill.name)} disabled={!!pendingId}>
+              {isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
+            </Button>
+          )}
         </div>
         {skill.description && (
           <p className="text-xs text-text-dim line-clamp-2 mb-3">{skill.description}</p>
