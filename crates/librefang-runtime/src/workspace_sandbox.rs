@@ -65,12 +65,18 @@ pub fn resolve_sandbox_path(user_path: &str, workspace_root: &Path) -> Result<Pa
                 .map_err(|e| format!("Failed to resolve parent directory: {e}"))?;
             canon_parent.join(filename)
         } else {
-            // Parent doesn't exist yet; return the joined path.
+            // Parent doesn't exist yet. Build the path from the *canonical* workspace
+            // root so the starts_with check below passes on platforms where the
+            // workspace root itself is a symlink (e.g. macOS /tmp -> /private/tmp).
             // This is safe because:
             // 1. We already rejected '..' components
-            // 2. candidate = workspace_root.join(path), so it's inside by construction
-            // 3. No symlinks can exist in non-existent parent directories
-            candidate
+            // 2. The relative suffix is derived from workspace_root.join(path),
+            //    so no symlinks can exist in the non-existent subtree
+            let relative = candidate
+                .strip_prefix(workspace_root)
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|_| candidate.clone());
+            canon_root.join(relative)
         }
     };
 
@@ -158,7 +164,7 @@ mod tests {
         let result = resolve_sandbox_path("nested/deep/file.txt", dir.path());
         assert!(result.is_ok());
         let resolved = result.unwrap();
-        assert!(resolved.starts_with(dir.path()));
+        assert!(resolved.starts_with(dir.path().canonicalize().unwrap()));
         assert!(resolved.ends_with("file.txt"));
     }
 
