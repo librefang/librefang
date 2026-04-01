@@ -198,24 +198,18 @@ fn run_watch(
 
     // After every successful rebuild: kill the old daemon by port, start a new one.
     // Environment variables (API keys etc.) are inherited from the current shell.
-    let restart_cmd = format!(
-        "for pid in $(lsof -ti :{port} -sTCP:LISTEN 2>/dev/null); do kill -9 $pid 2>/dev/null; done; \
+    // Wrapped in a subshell so cargo-watch's appended '; echo ...' doesn't produce '&;' syntax error.
+    let rebuild_and_restart = format!(
+        "(cargo build -p librefang-cli && \
+         for pid in $(lsof -ti :{port} -sTCP:LISTEN 2>/dev/null); do kill -9 $pid 2>/dev/null; done; \
          sleep 0.3; \
-         LIBREFANG_PORT={port} {binary} start --foreground &",
+         LIBREFANG_PORT={port} {binary} start --foreground &)",
         port = port,
         binary = binary_str,
     );
 
     let cargo_watch_status = Command::new("cargo")
-        .args([
-            "watch",
-            "--watch",
-            "crates",
-            "-x",
-            "build -p librefang-cli",
-            "-s",
-            &restart_cmd,
-        ])
+        .args(["watch", "--watch", "crates", "-s", &rebuild_and_restart])
         .current_dir(root)
         .status()?;
 
