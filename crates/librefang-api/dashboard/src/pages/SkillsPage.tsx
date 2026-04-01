@@ -583,7 +583,7 @@ export function SkillsPage() {
         >
           <Zap className="w-4 h-4" />
           {t("skills.builtin")}
-          <span className="absolute top-0.5 right-1 text-[8px] font-black px-1 py-px rounded-full bg-brand text-white leading-none">{t("skills.official")}</span>
+          <span className={`absolute top-0.5 right-1 text-[8px] font-black px-1 py-px rounded-full leading-none ${viewMode === "fanghub" ? "bg-brand text-white" : "bg-border-subtle text-text-dim"}`}>{t("skills.official")}</span>
         </button>
 
         {/* ClawHub — non-CN only */}
