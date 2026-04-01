@@ -414,7 +414,11 @@
     "stars_count": "stars",
     "downloads_count": "downloads",
     "install_timeout": "Installation timed out",
-    "help": "Browse and install skills to extend agent capabilities. Manage installed skills and discover new ones from the marketplace."
+    "help": "Browse and install skills to extend agent capabilities. Manage installed skills and discover new ones from the marketplace.",
+    "skillhub": "SkillHub",
+    "skillhub_search_placeholder": "Search SkillHub...",
+    "skillhub_rate_limited_desc": "SkillHub rate limit reached. Please try again later.",
+    "builtin": "Built-in"
   },
   "hands": {
     "title": "Hands",

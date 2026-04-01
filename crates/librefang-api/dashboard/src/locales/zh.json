@@ -414,7 +414,11 @@
     "stars_count": "星标",
     "downloads_count": "下载",
     "install_timeout": "安装超时",
-    "help": "浏览和安装技能以扩展智能体能力。管理已安装的技能，从市场中发现新技能。"
+    "help": "浏览和安装技能以扩展智能体能力。管理已安装的技能，从市场中发现新技能。",
+    "skillhub": "SkillHub",
+    "skillhub_search_placeholder": "搜索 SkillHub...",
+    "skillhub_rate_limited_desc": "SkillHub 请求频率限制，请稍后重试。",
+    "builtin": "内置工具"
   },
   "hands": {
     "title": "Hands",
