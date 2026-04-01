@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { formatCompact, formatCost as formatCostUtil } from "../lib/format";
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { listModels } from "../api";
 import { Badge } from "../components/ui/Badge";
@@ -12,15 +12,12 @@ import {
 } from "lucide-react";
 
 const REFRESH_MS = 60000;
-const PAGE_SIZE = 50;
-
 export function ModelsPage() {
   const { t } = useTranslation();
   const [search, setSearch] = useState("");
   const [tierFilter, setTierFilter] = useState<string>("all");
   const [providerFilter, setProviderFilter] = useState<string>("all");
   const [availableOnly, setAvailableOnly] = useState(false);
-  const [page, setPage] = useState(0);
 
   const modelsQuery = useQuery({
     queryKey: ["models"],
@@ -60,11 +57,7 @@ export function ModelsPage() {
     [allModels, search, tierFilter, providerFilter, availableOnly],
   );
 
-  // Reset page when filters change
-  useEffect(() => { setPage(0); }, [search, tierFilter, providerFilter, availableOnly]);
-
-  const paged = filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
-  const totalPages = Math.ceil(filtered.length / PAGE_SIZE);
+  const paged = filtered;
 
   const tierColor = (tier?: string) => {
     switch (tier) {
@@ -146,19 +139,8 @@ export function ModelsPage() {
         </button>
       </div>
 
-      {/* Results count + pagination */}
-      <div className="flex items-center justify-between">
-        <p className="text-xs text-text-dim">{filtered.length} {t("models.results")}</p>
-        {totalPages > 1 && (
-          <div className="flex items-center gap-2">
-            <button onClick={() => setPage(p => Math.max(0, p - 1))} disabled={page === 0}
-              className="px-2 py-1 rounded-lg text-xs font-bold text-text-dim hover:bg-main disabled:opacity-30">&lt;</button>
-            <span className="text-xs text-text-dim">{page + 1} / {totalPages}</span>
-            <button onClick={() => setPage(p => Math.min(totalPages - 1, p + 1))} disabled={page >= totalPages - 1}
-              className="px-2 py-1 rounded-lg text-xs font-bold text-text-dim hover:bg-main disabled:opacity-30">&gt;</button>
-          </div>
-        )}
-      </div>
+      {/* Results count */}
+      <p className="text-xs text-text-dim">{filtered.length} {t("models.results")}</p>
 
       {/* Model List */}
       {modelsQuery.isLoading ? (

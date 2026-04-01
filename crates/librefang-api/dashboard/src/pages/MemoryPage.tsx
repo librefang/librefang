@@ -10,7 +10,6 @@ import { Card } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
 import { Input } from "../components/ui/Input";
 import { Button } from "../components/ui/Button";
-import { Pagination } from "../components/ui/Pagination";
 import { MarkdownContent } from "../components/ui/MarkdownContent";
 import { useUIStore } from "../lib/store";
 import { Database, Search, Trash2, Plus, X, Sparkles, Zap, Clock, Edit2, Loader2, Settings } from "lucide-react";
@@ -326,8 +325,6 @@ export function MemoryPage() {
   const [showConfigDialog, setShowConfigDialog] = useState(false);
   const [editingMemory, setEditingMemory] = useState<{ id: string; content?: string } | null>(null);
 
-  const [page, setPage] = useState(0);
-  const pageSize = 20;
 
   const healthQuery = useQuery<{ memory?: { embedding_available: boolean; embedding_provider: string; embedding_model: string; extraction_model: string; proactive_memory_enabled: boolean } }>({
     queryKey: ["health", "detail"],
@@ -337,13 +334,13 @@ export function MemoryPage() {
   const memoryConfig = healthQuery.data?.memory;
 
   const memoryQuery = useQuery<{ memories: MemoryItem[]; total: number }>({
-    queryKey: ["memory", "list", page, search],
+    queryKey: ["memory", "list", search],
     queryFn: async () => {
       if (search.trim()) {
         const items = await searchMemories({ query: search.trim(), limit: 50 });
         return { memories: items, total: items.length };
       }
-      const res = await listMemories({ offset: page * pageSize, limit: pageSize });
+      const res = await listMemories({ offset: 0, limit: 10000 });
       return { memories: res.memories ?? [], total: res.total ?? 0 };
     },
     refetchInterval: REFRESH_MS,
@@ -442,7 +439,7 @@ export function MemoryPage() {
         <div className="flex-1">
           <Input
             value={search}
-            onChange={(e) => { setSearch(e.target.value); setPage(0); }}
+            onChange={(e) => { setSearch(e.target.value); }}
             placeholder={t("common.search")}
             leftIcon={<Search className="w-4 h-4" />}
             rightIcon={search && (
@@ -539,14 +536,6 @@ export function MemoryPage() {
         </div>
       )}
 
-      {/* Pagination */}
-      {!search.trim() && totalCount > pageSize && (
-        <Pagination
-          currentPage={page + 1}
-          totalPages={Math.ceil(totalCount / pageSize)}
-          onPageChange={(p) => setPage(p - 1)}
-        />
-      )}
 
       {/* Dialogs */}
       {showAddDialog && <AddMemoryDialog onClose={() => setShowAddDialog(false)} />}

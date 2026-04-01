@@ -10,7 +10,6 @@ import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { Input } from "../components/ui/Input";
-import { Pagination } from "../components/ui/Pagination";
 import {
   Network, Search, CheckCircle2, XCircle, ChevronRight, X, Grid3X3, List,
   Settings, Key, Clock, AlertCircle, CheckSquare, Square,
@@ -18,7 +17,6 @@ import {
 } from "lucide-react";
 
 const REFRESH_MS = 30000;
-const ITEMS_PER_PAGE = 6;
 
 const channelIcons: Record<string, React.ReactNode> = {
   slack: <MessageCircle className="w-5 h-5" />,
@@ -586,7 +584,6 @@ type TabType = "configured" | "unconfigured";
 export function ChannelsPage() {
   const { t } = useTranslation();
   const [activeTab, setActiveTab] = useState<TabType>("configured");
-  const [page, setPage] = useState(1);
   const [search, setSearch] = useState("");
   const [sortField, setSortField] = useState<SortField>("name");
   const [sortOrder, setSortOrder] = useState<SortOrder>("asc");
@@ -619,15 +616,10 @@ export function ChannelsPage() {
     [channels, activeTab, search, sortField, sortOrder],
   );
 
-  const totalPages = Math.ceil(filteredChannels.length / ITEMS_PER_PAGE);
-  const paginatedChannels = filteredChannels.slice(
-    (page - 1) * ITEMS_PER_PAGE,
-    page * ITEMS_PER_PAGE
-  );
+  const paginatedChannels = filteredChannels;
 
   const handleTabChange = (tab: TabType) => {
     setActiveTab(tab);
-    setPage(1);
     setSelectedIds(new Set());
   };
 
@@ -681,7 +673,7 @@ export function ChannelsPage() {
         <div className="flex-1">
           <Input
             value={search}
-            onChange={(e) => { setSearch(e.target.value); setPage(1); setSelectedIds(new Set()); }}
+            onChange={(e) => { setSearch(e.target.value); setSelectedIds(new Set()); }}
             placeholder={t("common.search")}
             leftIcon={<Search className="w-4 h-4" />}
             rightIcon={search && (
@@ -795,9 +787,6 @@ export function ChannelsPage() {
               />
             ))}
           </div>
-          {totalPages > 1 && (
-            <Pagination currentPage={page} totalPages={totalPages} onPageChange={setPage} />
-          )}
         </>
       )}
 
