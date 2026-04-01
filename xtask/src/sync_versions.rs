@@ -21,7 +21,7 @@ fn read_workspace_version(root: &Path) -> Result<String, Box<dyn std::error::Err
 }
 
 fn validate_calver(version: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let re = Regex::new(r"^[0-9]{4}\.[0-9]{1,2}\.[0-9]{2,4}(-(beta|rc)[0-9]+)?$")?;
+    let re = Regex::new(r"^[0-9]{4}\.[0-9]{1,2}\.[0-9]{1,4}(-(beta|rc)[0-9]+)?$")?;
     if !re.is_match(version) {
         return Err(format!(
             "'{}' is not a valid CalVer (expected: YYYY.M.DD e.g. 2026.3.21)",

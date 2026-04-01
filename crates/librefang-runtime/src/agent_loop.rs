@@ -44,8 +44,8 @@ const MAX_RETRIES: u32 = 3;
 const BASE_RETRY_DELAY_MS: u64 = 1000;
 
 /// Timeout for individual tool executions (seconds).
-/// Raised from 60s to 120s for browser automation and long-running builds.
-const TOOL_TIMEOUT_SECS: u64 = 120;
+/// Raised from 120s to 600s for agent_send/agent_spawn and long-running builds.
+const TOOL_TIMEOUT_SECS: u64 = 600;
 
 /// Maximum consecutive MaxTokens continuations before returning partial response.
 /// Raised from 3 to 5 to allow longer-form generation.
@@ -3907,7 +3907,7 @@ mod tests {
 
     #[test]
     fn test_tool_timeout_constant() {
-        assert_eq!(TOOL_TIMEOUT_SECS, 120);
+        assert_eq!(TOOL_TIMEOUT_SECS, 600);
     }
 
     #[test]

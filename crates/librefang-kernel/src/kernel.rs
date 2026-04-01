@@ -1798,56 +1798,51 @@ impl LibreFangKernel {
                         None
                     }
                 }
-            } else if std::env::var("OPENAI_API_KEY").is_ok() {
-                let model = if configured_model == "all-MiniLM-L6-v2"
-                    || configured_model == "text-embedding-3-small"
-                {
-                    default_embedding_model_for_provider("openai")
-                } else {
-                    configured_model.as_str()
-                };
-                let openai_url = config.provider_urls.get("openai").map(|s| s.as_str());
-                match create_embedding_driver(
-                    "openai",
-                    model,
-                    "OPENAI_API_KEY",
-                    openai_url,
-                    config.memory.embedding_dimensions,
-                ) {
-                    Ok(d) => {
-                        info!(model = %model, "Embedding driver auto-detected: OpenAI");
-                        Some(Arc::from(d))
-                    }
-                    Err(e) => {
-                        warn!(error = %e, "OpenAI embedding auto-detect failed");
-                        None
-                    }
-                }
             } else {
-                // Try Ollama (local, no key needed)
-                let model = if configured_model == "all-MiniLM-L6-v2"
-                    || configured_model == "text-embedding-3-small"
-                {
-                    default_embedding_model_for_provider("ollama")
+                // No explicit provider configured — probe environment to find one.
+                use librefang_runtime::embedding::detect_embedding_provider;
+                if let Some(detected) = detect_embedding_provider() {
+                    let model = if configured_model == "all-MiniLM-L6-v2"
+                        || configured_model == "text-embedding-3-small"
+                    {
+                        default_embedding_model_for_provider(detected)
+                    } else {
+                        configured_model.as_str()
+                    };
+                    let provider_url = config.provider_urls.get(detected).map(|s| s.as_str());
+                    // Determine the API key env var for the detected provider.
+                    let key_env = match detected {
+                        "openai" => "OPENAI_API_KEY",
+                        "groq" => "GROQ_API_KEY",
+                        "mistral" => "MISTRAL_API_KEY",
+                        "together" => "TOGETHER_API_KEY",
+                        "fireworks" => "FIREWORKS_API_KEY",
+                        "cohere" => "COHERE_API_KEY",
+                        _ => "",
+                    };
+                    match create_embedding_driver(
+                        detected,
+                        model,
+                        key_env,
+                        provider_url,
+                        config.memory.embedding_dimensions,
+                    ) {
+                        Ok(d) => {
+                            info!(provider = %detected, model = %model, "Embedding driver auto-detected");
+                            Some(Arc::from(d))
+                        }
+                        Err(e) => {
+                            warn!(provider = %detected, error = %e, "Auto-detected embedding driver init failed — falling back to text search");
+                            None
+                        }
+                    }
                 } else {
-                    configured_model.as_str()
-                };
-                let ollama_url = config.provider_urls.get("ollama").map(|s| s.as_str());
-                match create_embedding_driver(
-                    "ollama",
-                    model,
-                    "",
-                    ollama_url,
-                    config.memory.embedding_dimensions,
-                ) {
-                    Ok(d) => {
-                        info!(model = %model, "Embedding driver auto-detected: Ollama (local)");
-                        Some(Arc::from(d))
-                    }
-                    Err(e) => {
-                        debug!("No embedding driver available (Ollama probe failed: {e}) — using text search fallback");
-                        None
-                    }
+                    warn!(
+                        "No embedding provider available. Set one of: OPENAI_API_KEY, \
+                         GROQ_API_KEY, MISTRAL_API_KEY, TOGETHER_API_KEY, FIREWORKS_API_KEY, \
+                         COHERE_API_KEY, or configure Ollama."
+                    );
+                    None
                 }
             }
         };
@@ -6257,22 +6252,7 @@ system_prompt = "You are a helpful assistant."
                     self.channel_adapters.clear();
                 }
                 HotAction::ReloadSkills => {
-                    info!("Hot-reload: reloading skill registry");
-                    let mut reg = self
-                        .skill_registry
-                        .write()
-                        .unwrap_or_else(|e| e.into_inner());
-                    match reg.load_all() {
-                        Ok(n) => {
-                            info!("Hot-reload: reloaded {n} skill(s)");
-                        }
-                        Err(e) => {
-                            warn!("Hot-reload: failed to reload skills: {e}");
-                        }
-                    }
-                    // Bump skill generation so tool list caches are invalidated
-                    self.skill_generation
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    self.reload_skills();
                 }
                 HotAction::UpdateUsageFooter => {
                     info!(

@@ -5,6 +5,51 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
+## [2026.4.1] - 2026-04-01
+
+### Added
+
+- ArcSwap config hot-reload for all mutable config fields (#1846) (@houko)
+- Shared webhook server for all channel adapters (#1848) (@houko)
+- Add Edit on GitHub link to all doc pages (#1859) (@houko)
+- Add Giscus comment widget for docs feedback (#1860) (@houko)
+- Add Jina.ai search provider with configurable timeout and retry (#1879) (@leszek3737)
+- Streaming responses with progressive message edits (#1880) (@f-liva)
+- Expose max_tokens per-agent config (closes #1883) (#1887) (@houko)
+- Add mise configuration to manage tooling to develop this repository (#1889) (@joshuachong)
+- Add dry-run, per-step I/O logging, and detailed error messages (#1892) (@houko)
+
+### Fixed
+
+- Make justfile compatible with Windows (#1844) (@houko)
+- Remove agents copy from Dockerfile (does not exist) (#1845) (@houko)
+- Remove nonexistent agents/ directory from Dockerfile (#1849) (@houko)
+- Resolve MCP server start-up failures by updating base runtime image to official node LTS image (#1851) (@j5bart)
+- Resolve issues #1850 #1852 — WhatsApp QR and justfile compat (#1853) (@houko)
+- Remove dead code from webhook adapters, add fallback warning (#1854) (@houko)
+- Webhook URL migration — deprecate webhook_port, show new endpoints (#1855) (@houko)
+- Preserve config.toml settings during update (#1867) (@houko)
+- Route file operations through approval panel (#1868) (@houko)
+- Sync agent model when default provider changes at runtime (#1873) (@houko)
+- Make reload_config async to fix panic in async context (#1874) (@houko)
+- Apply channel-native formatting in channel_send tool (#1877) (@houko)
+- Map lifecycle reaction emoji to Telegram-supported set (#1881) (@f-liva)
+- Restore WeCom default output format to Markdown (#1884) (@houko)
+- Enable Test button when API key entered but not yet saved (#1886) (@houko)
+- Prevent agent auto-revive and uncontrolled background token burn (#1893) (@houko)
+- Use new tag instead of main in release review URL (#1894) (@houko)
+
+### Changed
+
+- Split channels page into category sub-pages (#1864) (@houko)
+- Split api, configuration, cli into sub-pages (#1865) (@houko)
+- Align examples and split providers into sub-pages (#1869) (@houko)
+
+### Documentation
+
+- Complete all missing documentation for recent features (#1858) (@houko)
+
+
 ## [2026.3.31] - 2026-03-31
 
 ### Fixed

@@ -1413,9 +1413,10 @@ pub async fn get_agent_session(
                                         msg.get_mut("tools").and_then(|v| v.as_array_mut())
                                     {
                                         if let Some(tool_obj) = tools_arr.get_mut(tool_idx) {
-                                            let preview: String =
-                                                result.chars().take(2000).collect();
-                                            tool_obj["result"] = serde_json::Value::String(preview);
+                                            // Cap at 100 KB to keep session responses manageable
+                                            let capped: String =
+                                                result.chars().take(102_400).collect();
+                                            tool_obj["result"] = serde_json::Value::String(capped);
                                             tool_obj["is_error"] =
                                                 serde_json::Value::Bool(*is_error);
                                         }
