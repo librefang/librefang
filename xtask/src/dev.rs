@@ -198,30 +198,35 @@ fn run_watch(
     let binary_str = binary.display().to_string();
     let port = args.port;
 
-    // Start the daemon first so it's available immediately
     println!("Starting daemon on port {port} (watch mode)...");
     println!("  Binary: {binary_str}");
     println!("  Watching: crates/");
     println!("  Press Ctrl+C to stop\n");
 
-    let _ = Command::new(binary)
-        .args(["start", "--foreground"])
-        .env("LIBREFANG_PORT", port.to_string())
-        .spawn()?;
-
-    // After every successful rebuild: kill the old daemon by port, start a new one.
-    // Environment variables (API keys etc.) are inherited from the current shell.
-    // Wrapped in a subshell so cargo-watch's appended '; echo ...' doesn't produce '&;' syntax error.
+    // Single script manages the daemon lifecycle: kill old, remove stale PID
+    // file, start fresh.  Used for both the initial launch and every
+    // cargo-watch rebuild so there is exactly one code-path (no races).
     let home_dir = librefang_home().display().to_string();
-    let rebuild_and_restart = format!(
-        "(cargo build -p librefang-cli && \
-         for pid in $(lsof -ti :{port} -sTCP:LISTEN 2>/dev/null); do kill -9 $pid 2>/dev/null; done; \
+    let restart_script = format!(
+        "(for pid in $(lsof -ti :{port} -sTCP:LISTEN 2>/dev/null); do kill -9 $pid 2>/dev/null; done; \
          rm -f {home}/daemon.json; \
          sleep 0.3; \
          LIBREFANG_PORT={port} {binary} start --foreground &)",
         port = port,
         binary = binary_str,
         home = home_dir,
+    );
+
+    // Start daemon immediately (no build needed — already built above).
+    let _ = Command::new("sh")
+        .args(["-c", &restart_script])
+        .current_dir(root)
+        .status();
+
+    // On every crate change: rebuild, then restart via the same script.
+    let rebuild_and_restart = format!(
+        "(cargo build -p librefang-cli && {restart})",
+        restart = restart_script,
     );
 
     let cargo_watch_status = Command::new("cargo")
