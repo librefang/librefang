@@ -894,7 +894,11 @@ pub async fn test_provider(
         }
     };
 
-    let api_key = std::env::var(&env_var).ok();
+    // Treat empty-string env vars the same as missing — an env var set to ""
+    // (e.g. `DEEPSEEK_API_KEY=` in secrets.env) should not bypass the guard.
+    let api_key = std::env::var(&env_var)
+        .ok()
+        .filter(|k| !k.trim().is_empty());
     // Only require API key for providers that need one (skip local providers like ollama/vllm/lmstudio)
     if key_required && api_key.is_none() && !env_var.is_empty() {
         return ApiErrorResponse::bad_request("Provider API key not configured").into_json_tuple();

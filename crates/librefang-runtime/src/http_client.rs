@@ -25,12 +25,17 @@ static TLS_CONFIG: OnceLock<rustls::ClientConfig> = OnceLock::new();
 fn init_tls_config() -> rustls::ClientConfig {
     let mut root_store = rustls::RootCertStore::empty();
 
+    // Always seed with bundled Mozilla CA roots first so common public CAs are
+    // trusted even on systems with incomplete or outdated system cert stores
+    // (minimal Docker images, Termux, corporate Linux with partial CA bundles).
+    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+
+    // Supplement with system CA certificates (adds org-internal / self-signed CAs
+    // and keeps trust anchors up-to-date without a librefang release).
     let result = rustls_native_certs::load_native_certs();
     let (added, _) = root_store.add_parsable_certificates(result.certs);
-
     if added == 0 {
-        tracing::warn!("No system CA certificates found, using bundled Mozilla CA roots");
-        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        tracing::debug!("No system CA certificates found; relying on bundled Mozilla CA roots");
     }
 
     rustls::ClientConfig::builder_with_provider(
