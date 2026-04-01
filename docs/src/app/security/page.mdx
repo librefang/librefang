@@ -643,6 +643,47 @@ http://localhost:8080/api       ->  localhost:8080
 http://example.com              ->  example.com:80
 ```
 
+### 7.6 SSRF Allowlist (self-hosted / K8s)
+
+Self-hosted and Kubernetes deployments often need agents to reach internal
+services (e.g., a private API behind a corporate proxy).  The
+`[tools.web_fetch] ssrf_allowed_hosts` option lets operators explicitly
+whitelist CIDRs or hostnames that are otherwise blocked by the private-IP
+check.
+
+**Cloud metadata ranges (`169.254.0.0/16`, `100.64.0.0/10`) are
+unconditionally blocked and cannot be added to the allowlist.**
+
+#### Config
+
+```toml
+[tools.web_fetch]
+ssrf_allowed_hosts = [
+  "10.0.0.0/8",                # CIDR — entire RFC-1918 /8
+  "172.16.0.0/12",             # CIDR — RFC-1918 /12
+  "*.internal.example.com",    # glob prefix wildcard
+  "svc.cluster.local",         # literal hostname
+  "192.168.1.100",             # literal IP
+]
+```
+
+#### Matching rules
+
+| Entry format | Example | Matched against |
+|---|---|---|
+| CIDR | `"10.0.0.0/8"` | Resolved IP of the target host |
+| Glob prefix | `"*.internal.example.com"` | Hostname in the URL (suffix match) |
+| Literal IP | `"192.168.1.100"` | Resolved IP of the target host |
+| Literal hostname | `"svc.cluster.local"` | Hostname in the URL (case-insensitive) |
+
+#### What stays blocked
+
+Even with a matching allowlist entry, the following are **always** rejected:
+
+- `169.254.0.0/16` — link-local / AWS EC2 instance metadata
+- `100.64.0.0/10` — CGNAT (includes Alibaba Cloud IMDS at `100.100.100.200`)
+- All entries in the hostname blocklist (`localhost`, `metadata.google.internal`, etc.)
+
 ---
 
 ## 8. Secret Zeroization

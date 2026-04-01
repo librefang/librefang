@@ -674,6 +674,14 @@ max_chars = 50000
 max_response_bytes = 10485760
 timeout_secs = 30
 readability = true
+
+# Optional: allow agents to reach internal services (self-hosted / K8s).
+# Cloud metadata endpoints (169.254.x.x, 100.64.x.x) remain blocked unconditionally.
+# ssrf_allowed_hosts = [
+#   "10.0.0.0/8",                # CIDR — entire private subnet
+#   "*.internal.example.com",    # glob — all subdomains
+#   "svc.cluster.local",         # literal hostname
+# ]
 ```
 
 | Field | Type | Default | Description |
@@ -682,6 +690,7 @@ readability = true
 | `max_response_bytes` | usize | `10485760` (10 MB) | Maximum HTTP response body size in bytes. |
 | `timeout_secs` | u64 | `30` | HTTP request timeout in seconds. |
 | `readability` | bool | `true` | Enable HTML-to-Markdown readability extraction. When true, fetched HTML is converted to clean Markdown. |
+| `ssrf_allowed_hosts` | list of strings | `[]` | Hosts/CIDRs exempt from SSRF blocking. Supports CIDR notation (`"10.0.0.0/8"`), glob prefix patterns (`"*.internal.example.com"`), and literal IPs or hostnames. Cloud metadata ranges (`169.254.0.0/16`, `100.64.0.0/10`) are **always blocked** regardless of this list. |
 
 ---
 
