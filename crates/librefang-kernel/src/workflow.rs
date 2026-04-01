@@ -207,6 +207,8 @@ pub struct StepResult {
     pub agent_id: String,
     /// Agent name.
     pub agent_name: String,
+    /// The actual prompt sent to the agent (after variable expansion and context injection).
+    pub prompt: String,
     /// Output from this step.
     pub output: String,
     /// Token usage.
@@ -214,6 +216,24 @@ pub struct StepResult {
     pub output_tokens: u64,
     /// Duration in milliseconds.
     pub duration_ms: u64,
+}
+
+/// Preview of a single step produced by a dry-run (no LLM calls made).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DryRunStep {
+    /// Step name.
+    pub step_name: String,
+    /// Resolved agent name, or `None` when the agent was not found.
+    pub agent_name: Option<String>,
+    /// Whether the agent was successfully resolved.
+    pub agent_found: bool,
+    /// The resolved prompt (after variable expansion with the provided sample input).
+    pub resolved_prompt: String,
+    /// Whether this step would be skipped (e.g. conditional step whose condition
+    /// evaluates to false against the sample input).
+    pub skipped: bool,
+    /// Human-readable reason for skipping, if applicable.
+    pub skip_reason: Option<String>,
 }
 
 /// The workflow engine — manages definitions and executes pipeline runs.
@@ -979,6 +999,7 @@ impl WorkflowEngine {
                         agent_inherit,
                     );
 
+                    let prompt_sent = prompt.clone();
                     let start = std::time::Instant::now();
                     let result =
                         Self::execute_step_with_error_mode(step, agent_id, prompt, &send_message)
@@ -991,6 +1012,7 @@ impl WorkflowEngine {
                                 step_name: step.name.clone(),
                                 agent_id: agent_id.to_string(),
                                 agent_name,
+                                prompt: prompt_sent,
                                 output: output.clone(),
                                 input_tokens,
                                 output_tokens,
@@ -1039,6 +1061,7 @@ impl WorkflowEngine {
                     // Build all futures
                     let mut futures = Vec::new();
                     let mut step_infos = Vec::new();
+                    let mut step_prompts: Vec<String> = Vec::new();
 
                     // Snapshot step results once for all fan-out steps
                     let prev_results: Vec<StepResult> = self
@@ -1070,6 +1093,7 @@ impl WorkflowEngine {
                         let timeout_dur = std::time::Duration::from_secs(fan_step.timeout_secs);
 
                         step_infos.push((*idx, fan_step.name.clone(), agent_id, agent_name));
+                        step_prompts.push(prompt.clone());
                         futures.push(tokio::time::timeout(
                             timeout_dur,
                             send_message(agent_id, prompt),
@@ -1090,6 +1114,7 @@ impl WorkflowEngine {
                                     step_name: step_name.clone(),
                                     agent_id: agent_id.to_string(),
                                     agent_name: agent_name.clone(),
+                                    prompt: step_prompts[k].clone(),
                                     output: output.clone(),
                                     input_tokens,
                                     output_tokens,
@@ -1219,6 +1244,7 @@ impl WorkflowEngine {
                         agent_inherit,
                     );
 
+                    let prompt_sent = prompt.clone();
                     let start = std::time::Instant::now();
                     let result =
                         Self::execute_step_with_error_mode(step, agent_id, prompt, &send_message)
@@ -1231,6 +1257,7 @@ impl WorkflowEngine {
                                 step_name: step.name.clone(),
                                 agent_id: agent_id.to_string(),
                                 agent_name,
+                                prompt: prompt_sent,
                                 output: output.clone(),
                                 input_tokens,
                                 output_tokens,
@@ -1289,6 +1316,7 @@ impl WorkflowEngine {
                             agent_inherit,
                         );
 
+                        let prompt_sent = prompt.clone();
                         let start = std::time::Instant::now();
                         let result = Self::execute_step_with_error_mode(
                             step,
@@ -1305,6 +1333,7 @@ impl WorkflowEngine {
                                     step_name: format!("{} (iter {})", step.name, loop_iter + 1),
                                     agent_id: agent_id.to_string(),
                                     agent_name: agent_name.clone(),
+                                    prompt: prompt_sent,
                                     output: output.clone(),
                                     input_tokens,
                                     output_tokens,
@@ -1440,6 +1469,7 @@ impl WorkflowEngine {
                     .ok_or_else(|| format!("Agent not found for step '{}'", step.name))?;
 
                 let prompt = Self::expand_variables(&step.prompt_template, input, &variables);
+                let prompt_sent = prompt.clone();
                 let start = std::time::Instant::now();
                 let result =
                     Self::execute_step_with_error_mode(step, agent_id, prompt, send_message).await;
@@ -1451,6 +1481,7 @@ impl WorkflowEngine {
                             step_name: step.name.clone(),
                             agent_id: agent_id.to_string(),
                             agent_name,
+                            prompt: prompt_sent,
                             output: output.clone(),
                             input_tokens,
                             output_tokens,
@@ -1490,6 +1521,7 @@ impl WorkflowEngine {
                 // Multiple steps in layer — execute concurrently
                 let mut futures = Vec::new();
                 let mut step_metas: Vec<(usize, String, AgentId, String, bool)> = Vec::new();
+                let mut step_prompts: Vec<String> = Vec::new();
 
                 for &step_idx in layer {
                     let step = &workflow.steps[step_idx];
@@ -1509,6 +1541,7 @@ impl WorkflowEngine {
 
                     // Each future returns (result, duration_ms) for per-step timing
                     if dep_failed {
+                        step_prompts.push(String::new());
                         let step_name = step.name.clone();
                         let error_mode = step.error_mode.clone();
                         futures.push(Box::pin(async move {
@@ -1532,6 +1565,7 @@ impl WorkflowEngine {
                     } else {
                         let prompt =
                             Self::expand_variables(&step.prompt_template, input, &variables);
+                        step_prompts.push(prompt.clone());
                         let timeout_dur = std::time::Duration::from_secs(step.timeout_secs);
                         let err_mode = step.error_mode.clone();
                         let step_name = step.name.clone();
@@ -1587,6 +1621,7 @@ impl WorkflowEngine {
                                 step_name: step_name.clone(),
                                 agent_id: agent_id.to_string(),
                                 agent_name: agent_name.clone(),
+                                prompt: step_prompts[k].clone(),
                                 output: output.clone(),
                                 input_tokens,
                                 output_tokens,
@@ -1639,6 +1674,83 @@ impl WorkflowEngine {
 
         info!(run_id = %run_id, "Workflow DAG execution completed successfully");
         Ok(last_output)
+    }
+
+    /// Dry-run a workflow: resolve agents and expand prompts without making any LLM calls.
+    ///
+    /// Returns a per-step preview describing what would be executed. Useful for
+    /// validating a workflow definition before committing to a real run.
+    ///
+    /// The `agent_resolver` returns `(AgentId, agent_name, inherit_parent_context)`.
+    pub async fn dry_run(
+        &self,
+        workflow_id: WorkflowId,
+        input: &str,
+        agent_resolver: impl Fn(&StepAgent) -> Option<(AgentId, String, bool)>,
+    ) -> Result<Vec<DryRunStep>, String> {
+        let workflow = self
+            .workflows
+            .read()
+            .await
+            .get(&workflow_id)
+            .ok_or_else(|| format!("Workflow '{workflow_id}' not found"))?
+            .clone();
+
+        let mut preview = Vec::new();
+        let mut variables: HashMap<String, String> = HashMap::new();
+        let mut current_input = input.to_string();
+
+        for (i, step) in workflow.steps.iter().enumerate() {
+            let raw_prompt =
+                Self::expand_variables(&step.prompt_template, &current_input, &variables);
+
+            match &step.mode {
+                StepMode::Conditional { condition } => {
+                    let prev_lower = current_input.to_lowercase();
+                    let condition_met = evaluate_condition(&prev_lower, condition);
+                    let (agent_name, agent_found) = match agent_resolver(&step.agent) {
+                        Some((_, name, _)) => (Some(name), true),
+                        None => (None, false),
+                    };
+                    preview.push(DryRunStep {
+                        step_name: step.name.clone(),
+                        agent_name,
+                        agent_found,
+                        resolved_prompt: raw_prompt,
+                        skipped: !condition_met,
+                        skip_reason: if !condition_met {
+                            Some(format!(
+                                "Condition '{condition}' not met against current input"
+                            ))
+                        } else {
+                            None
+                        },
+                    });
+                    // In dry-run, don't advance current_input for skipped steps
+                }
+                _ => {
+                    let (agent_name, agent_found) = match agent_resolver(&step.agent) {
+                        Some((_, name, _)) => (Some(name), true),
+                        None => (None, false),
+                    };
+                    preview.push(DryRunStep {
+                        step_name: step.name.clone(),
+                        agent_name: agent_name.clone(),
+                        agent_found,
+                        resolved_prompt: raw_prompt.clone(),
+                        skipped: false,
+                        skip_reason: None,
+                    });
+                    // Advance with a placeholder so later steps can expand {{input}}
+                    if let Some(ref var) = step.output_var {
+                        variables.insert(var.clone(), format!("<output of step {}>", i + 1));
+                    }
+                    current_input = format!("<output of step {} ({})>", i + 1, step.name);
+                }
+            }
+        }
+
+        Ok(preview)
     }
 }
 
@@ -3309,6 +3421,7 @@ prompt_template = "do {{x}}"
             step_name: "s1".to_string(),
             agent_id: "id-1".to_string(),
             agent_name: "agent-1".to_string(),
+            prompt: "do analysis".to_string(),
             output: "analysis complete".to_string(),
             input_tokens: 10,
             output_tokens: 5,
@@ -3347,6 +3460,7 @@ prompt_template = "do {{x}}"
             step_name: "s1".to_string(),
             agent_id: "id-1".to_string(),
             agent_name: "agent-1".to_string(),
+            prompt: "do it".to_string(),
             output: "x".repeat(2000),
             input_tokens: 10,
             output_tokens: 5,
@@ -3602,6 +3716,7 @@ prompt_template = "do {{x}}"
                 step_name: "step-1".to_string(),
                 agent_id: "agent-abc".to_string(),
                 agent_name: "test-agent".to_string(),
+                prompt: "test prompt".to_string(),
                 output: "done".to_string(),
                 input_tokens: 10,
                 output_tokens: 20,
