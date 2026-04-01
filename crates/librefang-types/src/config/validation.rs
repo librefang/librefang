@@ -82,6 +82,15 @@ impl KernelConfig {
             "sanitize",
             "telemetry",
             "update_channel",
+            "skills",
+            "compaction",
+            "registry",
+            "rate_limit",
+            "tool_timeout_secs",
+            "max_upload_size_bytes",
+            "max_concurrent_bg_llm",
+            "max_agent_call_depth",
+            "max_request_body_bytes",
         ]
     }
 

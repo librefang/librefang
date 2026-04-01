@@ -253,13 +253,14 @@ impl MediaEngine {
 
 /// Detect which vision provider is available based on environment variables.
 fn detect_vision_provider() -> Option<&'static str> {
-    if std::env::var("ANTHROPIC_API_KEY").is_ok() {
+    let has_key = |var: &str| std::env::var(var).is_ok_and(|v| !v.trim().is_empty());
+    if has_key("ANTHROPIC_API_KEY") {
         return Some("anthropic");
     }
-    if std::env::var("OPENAI_API_KEY").is_ok() {
+    if has_key("OPENAI_API_KEY") {
         return Some("openai");
     }
-    if std::env::var("GEMINI_API_KEY").is_ok() || std::env::var("GOOGLE_API_KEY").is_ok() {
+    if has_key("GEMINI_API_KEY") || has_key("GOOGLE_API_KEY") {
         return Some("gemini");
     }
     None
@@ -267,10 +268,11 @@ fn detect_vision_provider() -> Option<&'static str> {
 
 /// Detect which audio transcription provider is available.
 fn detect_audio_provider() -> Option<&'static str> {
-    if std::env::var("GROQ_API_KEY").is_ok() {
+    let has_key = |var: &str| std::env::var(var).is_ok_and(|v| !v.trim().is_empty());
+    if has_key("GROQ_API_KEY") {
         return Some("groq");
     }
-    if std::env::var("OPENAI_API_KEY").is_ok() {
+    if has_key("OPENAI_API_KEY") {
         return Some("openai");
     }
     None

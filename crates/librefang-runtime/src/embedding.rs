@@ -470,10 +470,10 @@ pub fn detect_embedding_provider() -> Option<&'static str> {
         }
     }
 
-    // Local Ollama — available if OLLAMA_HOST is set or the standard host is
-    // configured. We don't attempt a live TCP probe here (that would be async
-    // and would require a runtime); presence of the env var is sufficient signal.
-    if std::env::var("OLLAMA_HOST").is_ok() {
+    // Local Ollama — available if OLLAMA_HOST is set and non-empty. We don't
+    // attempt a live TCP probe here (that would be async and would require a
+    // runtime); a non-empty env var is sufficient signal.
+    if std::env::var("OLLAMA_HOST").is_ok_and(|v| !v.trim().is_empty()) {
         return Some("ollama");
     }
 

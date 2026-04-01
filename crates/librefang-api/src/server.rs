@@ -792,6 +792,10 @@ pub async fn run_daemon(
 
     let (app, state) = build_router(kernel.clone(), addr).await;
 
+    // Background provider key validation — runs shortly after boot so the
+    // dashboard shows ValidatedKey / InvalidKey instead of just Configured.
+    kernel.clone().spawn_key_validation();
+
     // Config file hot-reload watcher (polls every 30 seconds).
     // Spawned after `build_router` so it can access `AppState` for bridge reload.
     {

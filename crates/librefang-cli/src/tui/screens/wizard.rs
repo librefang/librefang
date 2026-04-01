@@ -219,13 +219,14 @@ impl WizardState {
     }
 
     fn build_provider_order(&mut self) {
+        let has_key = |var: &str| std::env::var(var).map_or(false, |v| !v.trim().is_empty());
         self.provider_order.clear();
         // Detected providers first
         for (i, p) in PROVIDERS.iter().enumerate() {
             let detected = if librefang_runtime::drivers::is_cli_provider(p.name) {
                 librefang_runtime::drivers::cli_provider_available(p.name)
             } else {
-                !p.env_var.is_empty() && std::env::var(p.env_var).is_ok()
+                !p.env_var.is_empty() && has_key(p.env_var)
             };
             if detected {
                 self.provider_order.push(i);
@@ -236,7 +237,7 @@ impl WizardState {
             let detected = if librefang_runtime::drivers::is_cli_provider(p.name) {
                 librefang_runtime::drivers::cli_provider_available(p.name)
             } else {
-                !p.env_var.is_empty() && std::env::var(p.env_var).is_ok()
+                !p.env_var.is_empty() && has_key(p.env_var)
             };
             if !detected {
                 self.provider_order.push(i);

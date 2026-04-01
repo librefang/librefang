@@ -120,14 +120,15 @@ impl ModelCatalog {
                 continue;
             }
 
-            // Primary: check the provider's declared env var
-            let has_key = std::env::var(&provider.api_key_env).is_ok();
+            // Primary: check the provider's declared env var (non-empty after trim)
+            let has_key = std::env::var(&provider.api_key_env).is_ok_and(|v| !v.trim().is_empty());
 
             // Secondary: provider-specific fallback keys (still API-key-based auth)
             let has_key_fallback = match provider.id.as_str() {
-                "gemini" => std::env::var("GOOGLE_API_KEY").is_ok(),
+                "gemini" => std::env::var("GOOGLE_API_KEY").is_ok_and(|v| !v.trim().is_empty()),
                 "openai" | "codex" => {
-                    std::env::var("OPENAI_API_KEY").is_ok() || read_codex_credential().is_some()
+                    std::env::var("OPENAI_API_KEY").is_ok_and(|v| !v.trim().is_empty())
+                        || read_codex_credential().is_some()
                 }
                 _ => false,
             };
@@ -159,6 +160,25 @@ impl ModelCatalog {
                 auth_status = %provider.auth_status,
                 "detect_auth result"
             );
+        }
+    }
+
+    /// Collect providers that need background key validation.
+    ///
+    /// Returns `(provider_id, base_url, api_key_env)` for every provider
+    /// whose current auth status is `Configured` (key present, not yet validated).
+    pub fn providers_needing_validation(&self) -> Vec<(String, String, String)> {
+        self.providers
+            .iter()
+            .filter(|p| p.auth_status == AuthStatus::Configured)
+            .map(|p| (p.id.clone(), p.base_url.clone(), p.api_key_env.clone()))
+            .collect()
+    }
+
+    /// Update the `auth_status` of a single provider after background validation.
+    pub fn set_provider_auth_status(&mut self, provider_id: &str, status: AuthStatus) {
+        if let Some(p) = self.providers.iter_mut().find(|p| p.id == provider_id) {
+            p.auth_status = status;
         }
     }
 
@@ -1778,5 +1798,46 @@ supports_streaming = true
         let providers = catalog.list_providers();
         assert_eq!(providers.len(), 1);
         assert!(providers[0].media_capabilities.is_empty());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Background key validation
+// ---------------------------------------------------------------------------
+
+/// Probe a single provider's API key via a lightweight `GET /models` request.
+///
+/// Returns:
+/// - `Some(true)`  — HTTP 2xx or 429 (rate-limited = key is valid)
+/// - `Some(false)` — HTTP 401 or 403 (key rejected by provider)
+/// - `None`        — network error, 404, 5xx, etc. (don't update status)
+pub async fn probe_api_key(provider_id: &str, base_url: &str, api_key: &str) -> Option<bool> {
+    use std::time::Duration;
+
+    let client = crate::http_client::proxied_client_builder()
+        .timeout(Duration::from_secs(8))
+        .build()
+        .ok()?;
+
+    let url = format!("{}/models", base_url.trim_end_matches('/'));
+
+    let req = match provider_id.to_lowercase().as_str() {
+        "anthropic" => client
+            .get(&url)
+            .header("x-api-key", api_key)
+            .header("anthropic-version", "2023-06-01"),
+        "gemini" => client.get(&url).header("x-goog-api-key", api_key),
+        _ => client
+            .get(&url)
+            .header("Authorization", format!("Bearer {api_key}")),
+    };
+
+    let status = req.send().await.ok()?.status().as_u16();
+    tracing::debug!(provider = %provider_id, http_status = status, "provider key probe");
+
+    match status {
+        200..=299 | 429 => Some(true), // 429 = rate-limited, key is still valid
+        401 | 403 => Some(false),
+        _ => None, // transient / unknown — don't penalise
     }
 }

@@ -691,6 +691,8 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                 librefang_types::model_catalog::AuthStatus::Missing => "not configured",
                 librefang_types::model_catalog::AuthStatus::NotRequired => "local (no key needed)",
                 librefang_types::model_catalog::AuthStatus::CliNotInstalled => "CLI not installed",
+                librefang_types::model_catalog::AuthStatus::ValidatedKey => "key validated",
+                librefang_types::model_catalog::AuthStatus::InvalidKey => "invalid key",
             };
             msg.push_str(&format!(
                 "  {} — {} [{}, {} model(s)]\n",

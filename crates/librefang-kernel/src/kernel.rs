@@ -959,6 +959,56 @@ impl LibreFangKernel {
         &self.model_catalog
     }
 
+    /// Spawn background tasks to validate API keys for every `Configured` provider.
+    ///
+    /// Called at daemon boot and whenever a new key is set via the dashboard.
+    /// Results (ValidatedKey / InvalidKey) are written back into the catalog.
+    pub fn spawn_key_validation(self: Arc<Self>) {
+        use librefang_types::model_catalog::AuthStatus;
+
+        let to_validate = self
+            .model_catalog
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .providers_needing_validation();
+
+        if to_validate.is_empty() {
+            return;
+        }
+
+        tokio::spawn(async move {
+            let handles: Vec<_> = to_validate
+                .into_iter()
+                .map(|(id, base_url, key_env)| {
+                    let kernel = Arc::clone(&self);
+                    tokio::spawn(async move {
+                        let key = match std::env::var(&key_env) {
+                            Ok(k) if !k.trim().is_empty() => k,
+                            _ => return,
+                        };
+                        if let Some(valid) =
+                            librefang_runtime::model_catalog::probe_api_key(&id, &base_url, &key)
+                                .await
+                        {
+                            let status = if valid {
+                                AuthStatus::ValidatedKey
+                            } else {
+                                AuthStatus::InvalidKey
+                            };
+                            tracing::info!(provider = %id, valid, "provider key validation result");
+                            kernel
+                                .model_catalog
+                                .write()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .set_provider_auth_status(&id, status);
+                        }
+                    })
+                })
+                .collect();
+            futures::future::join_all(handles).await;
+        });
+    }
+
     /// Invalidate all cached LLM drivers so the next request rebuilds them
     /// with current provider URLs / API keys.
     #[inline]
