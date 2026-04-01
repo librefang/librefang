@@ -6257,22 +6257,7 @@ system_prompt = "You are a helpful assistant."
                     self.channel_adapters.clear();
                 }
                 HotAction::ReloadSkills => {
-                    info!("Hot-reload: reloading skill registry");
-                    let mut reg = self
-                        .skill_registry
-                        .write()
-                        .unwrap_or_else(|e| e.into_inner());
-                    match reg.load_all() {
-                        Ok(n) => {
-                            info!("Hot-reload: reloaded {n} skill(s)");
-                        }
-                        Err(e) => {
-                            warn!("Hot-reload: failed to reload skills: {e}");
-                        }
-                    }
-                    // Bump skill generation so tool list caches are invalidated
-                    self.skill_generation
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    self.reload_skills();
                 }
                 HotAction::UpdateUsageFooter => {
                     info!(
