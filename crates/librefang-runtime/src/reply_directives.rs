@@ -113,7 +113,7 @@ impl StreamingDirectiveAccumulator {
             }
         } else if trimmed == "@current" {
             self.directives.current_thread = true;
-        } else if trimmed == "silent" {
+        } else if trimmed.eq_ignore_ascii_case("silent") {
             self.directives.silent = true;
         }
         // Unknown directives are silently dropped (stripped from output)
