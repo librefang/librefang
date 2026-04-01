@@ -191,6 +191,9 @@ criterion = { version = "0.8", features = ["html_reports"] }
 # Performance
 smallvec = "1"
 
+[profile.dev]
+split-debuginfo = "unpacked" # Speeds up incremental linking on macOS
+
 [profile.release]
 lto = true
 codegen-units = 1

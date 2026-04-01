@@ -140,6 +140,10 @@ doctor *ARGS:
 dev *ARGS:
     cargo xtask dev {{ARGS}}
 
+# Watch crates/ and auto-restart daemon on changes (requires cargo-watch)
+watch *ARGS:
+    cargo xtask dev --watch {{ARGS}}
+
 # Database management (info, backup, reset)
 db *ARGS:
     cargo xtask db {{ARGS}}
