@@ -789,7 +789,7 @@ export function ChatPage() {
                     : (agent.state || "").toLowerCase() === "running" ? "bg-gradient-to-br from-brand/20 to-accent/20 text-brand"
                     : "bg-main text-text-dim/40"
                   }`}>
-                    {agent.name.charAt(0).toUpperCase()}
+                    {t(`agents.builtin.${agent.name}.name`, { defaultValue: agent.name }).charAt(0).toUpperCase()}
                     {(agent.state || "").toLowerCase() === "running" ? (
                       <span className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-success border-2 border-white dark:border-surface animate-pulse" />
                     ) : (
@@ -798,7 +798,7 @@ export function ChatPage() {
                   </div>
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-1.5">
-                      <p className={`text-sm font-bold truncate ${(agent.state || "").toLowerCase() !== "running" ? "opacity-50" : ""}`}>{agent.name}</p>
+                      <p className={`text-sm font-bold truncate ${(agent.state || "").toLowerCase() !== "running" ? "opacity-50" : ""}`}>{t(`agents.builtin.${agent.name}.name`, { defaultValue: agent.name })}</p>
                       {agent.auth_status === "configured" && <span className={`flex-shrink-0 px-1 py-0.5 rounded text-[8px] font-bold uppercase leading-none ${selectedAgentId === agent.id ? "bg-white/20" : "bg-brand/10 text-brand"}`}>KEY</span>}
                       {agent.auth_status === "configured_cli" && <span className={`flex-shrink-0 px-1 py-0.5 rounded text-[8px] font-bold uppercase leading-none ${selectedAgentId === agent.id ? "bg-white/20" : "bg-accent/10 text-accent"}`}>CLI</span>}
                       {isAuthUnavailable(agent.auth_status) && <AlertCircle className="h-3 w-3 text-warning flex-shrink-0" />}
@@ -832,7 +832,7 @@ export function ChatPage() {
               <option value="">{t("chat.select_agent")}</option>
               {agents.map(agent => (
                 <option key={agent.id} value={agent.id}>
-                  {agent.name} ({agent.state || "unknown"})
+                  {t(`agents.builtin.${agent.name}.name`, { defaultValue: agent.name })} ({agent.state || "unknown"})
                 </option>
               ))}
             </select>

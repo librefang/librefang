@@ -138,7 +138,7 @@ export function SchedulerPage() {
                   <div className="flex items-center gap-2 sm:gap-3 pl-9 sm:pl-11 text-[9px] sm:text-[10px] text-text-dim/60 flex-wrap">
                     <span className="font-mono bg-main px-1 sm:px-1.5 py-0.5 rounded">{s.cron}</span>
                     <span className="text-text-dim hidden sm:inline">{cronHint(s.cron || "")}</span>
-                    {agent && <span className="font-bold text-brand truncate">{agent.name}</span>}
+                    {agent && <span className="font-bold text-brand truncate">{t(`agents.builtin.${agent.name}.name`, { defaultValue: agent.name })}</span>}
                     {!agent && s.agent && <span className="font-bold text-brand truncate">{s.agent}</span>}
                   </div>
                 </div>

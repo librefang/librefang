@@ -280,7 +280,7 @@ export function OverviewPage() {
                       <User className="h-5 w-5" />
                     </div>
                     <div className="min-w-0 flex-1">
-                      <p className="truncate text-sm font-bold">{agent.name}</p>
+                      <p className="truncate text-sm font-bold">{t(`agents.builtin.${agent.name}.name`, { defaultValue: agent.name })}</p>
                       <p className="truncate text-[10px] text-text-dim uppercase tracking-tight font-medium">
                         {truncateId(agent.id)} · {translateStatus(agent.state)}
                       </p>

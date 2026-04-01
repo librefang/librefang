@@ -251,7 +251,7 @@ export function AgentsPage() {
                     <span className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full bg-success border-2 border-surface" />
                   </div>
                   <div>
-                    <h3 className="text-lg font-black tracking-tight">{detailAgent.name}</h3>
+                    <h3 className="text-lg font-black tracking-tight">{t(`agents.builtin.${detailAgent.name}.name`, { defaultValue: detailAgent.name })}</h3>
                     <p className="text-[10px] text-text-dim font-mono mt-0.5">{truncateId(detailAgent.id, 16)}</p>
                   </div>
                 </div>
@@ -485,7 +485,7 @@ export function AgentsPage() {
       {showPrompts && detailAgent && (
         <PromptsExperimentsModal 
           agentId={detailAgent.id} 
-          agentName={detailAgent.name}
+          agentName={t(`agents.builtin.${detailAgent.name}.name`, { defaultValue: detailAgent.name })}
           onClose={() => setShowPrompts(false)} 
         />
       )}
