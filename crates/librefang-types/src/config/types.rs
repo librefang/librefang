@@ -393,6 +393,10 @@ pub struct WebFetchConfig {
     pub timeout_secs: u64,
     /// Enable HTML→Markdown readability extraction.
     pub readability: bool,
+    /// Hosts/CIDRs that are exempt from SSRF blocking (e.g. internal services in K8s).
+    /// Cloud metadata endpoints (169.254.x.x, etc.) remain blocked unconditionally.
+    #[serde(default)]
+    pub ssrf_allowed_hosts: Vec<String>,
 }
 
 impl Default for WebFetchConfig {
@@ -402,6 +406,7 @@ impl Default for WebFetchConfig {
             max_response_bytes: 10 * 1024 * 1024, // 10 MB
             timeout_secs: 30,
             readability: true,
+            ssrf_allowed_hosts: vec![],
         }
     }
 }

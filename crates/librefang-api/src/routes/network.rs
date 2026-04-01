@@ -454,7 +454,12 @@ pub async fn a2a_list_external_agents(State(state): State<Arc<AppState>>) -> imp
 
 /// Check whether a URL is safe to fetch (not targeting internal/private networks).
 /// Returns `Ok(())` if the URL is safe, or `Err(message)` describing the problem.
-fn is_url_safe_for_ssrf(raw_url: &str) -> Result<(), String> {
+///
+/// `allowed_hosts` entries may be CIDRs (e.g. `"10.0.0.0/8"`), glob hostname
+/// patterns (e.g. `"*.internal.example.com"`), or literal IPs/hostnames.
+/// Cloud metadata ranges (`169.254.0.0/16`, `100.64.0.0/10`) remain blocked
+/// unconditionally regardless of allowlist entries.
+fn is_url_safe_for_ssrf(raw_url: &str, allowed_hosts: &[String]) -> Result<(), String> {
     let parsed = url::Url::parse(raw_url).map_err(|e| format!("Invalid URL: {e}"))?;
 
     // Only allow http and https schemes
@@ -489,6 +494,11 @@ fn is_url_safe_for_ssrf(raw_url: &str) -> Result<(), String> {
 
     for ip in &addrs {
         if is_private_ip(ip) {
+            // Cloud metadata ranges are unconditionally blocked even when
+            // the host appears in the allowlist.
+            if !is_cloud_metadata_ip(ip) && is_host_allowed(host, ip, allowed_hosts) {
+                continue;
+            }
             return Err(format!(
                 "Requests to private/internal IP addresses are not allowed ({ip})"
             ));
@@ -496,6 +506,92 @@ fn is_url_safe_for_ssrf(raw_url: &str) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// Returns true if the IP is in a cloud metadata / CGNAT range that must be
+/// blocked unconditionally (`169.254.0.0/16` or `100.64.0.0/10`).
+fn is_cloud_metadata_ip(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            (o[0] == 169 && o[1] == 254) || (o[0] == 100 && (o[1] & 0xC0) == 64)
+        }
+        IpAddr::V6(_) => false,
+    }
+}
+
+/// Check whether a hostname or resolved IP matches any entry in `allowed_hosts`.
+///
+/// Entry formats:
+/// - `"10.0.0.0/8"`             — CIDR; matched against the resolved `ip`
+/// - `"*.internal.example.com"` — glob prefix wildcard; matched against `hostname`
+/// - `"10.1.2.3"` / `"svc.local"` — literal IP or hostname exact match
+fn is_host_allowed(hostname: &str, ip: &IpAddr, allowed_hosts: &[String]) -> bool {
+    for entry in allowed_hosts {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        if entry.contains('/') {
+            if cidr_contains(entry, ip).unwrap_or(false) {
+                return true;
+            }
+            continue;
+        }
+        if let Some(suffix) = entry.strip_prefix('*') {
+            if suffix.is_empty() {
+                continue; // reject bare "*" — too broad
+            }
+            if hostname.ends_with(suffix) {
+                return true;
+            }
+            continue;
+        }
+        if let Ok(entry_ip) = entry.parse::<IpAddr>() {
+            if entry_ip == *ip {
+                return true;
+            }
+            continue;
+        }
+        if entry.eq_ignore_ascii_case(hostname) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Check if `ip` falls within the CIDR range `cidr` (e.g. `"10.0.0.0/8"`).
+fn cidr_contains(cidr: &str, ip: &IpAddr) -> Result<bool, ()> {
+    let (addr_str, prefix_str) = cidr.split_once('/').ok_or(())?;
+    let prefix_len: u32 = prefix_str.parse().map_err(|_| ())?;
+    match (addr_str.parse::<IpAddr>(), ip) {
+        (Ok(IpAddr::V4(net_addr)), IpAddr::V4(v4)) => {
+            if prefix_len > 32 {
+                return Err(());
+            }
+            let mask = if prefix_len == 0 {
+                0u32
+            } else {
+                !0u32 << (32 - prefix_len)
+            };
+            Ok((u32::from_be_bytes(net_addr.octets()) & mask)
+                == (u32::from_be_bytes(v4.octets()) & mask))
+        }
+        (Ok(IpAddr::V6(net_addr)), IpAddr::V6(v6)) => {
+            if prefix_len > 128 {
+                return Err(());
+            }
+            let net_bits = u128::from_be_bytes(net_addr.octets());
+            let ip_bits = u128::from_be_bytes(v6.octets());
+            let mask = if prefix_len == 0 {
+                0u128
+            } else {
+                !0u128 << (128 - prefix_len)
+            };
+            Ok((net_bits & mask) == (ip_bits & mask))
+        }
+        _ => Ok(false),
+    }
 }
 
 /// Returns true if the IP address is in a private, loopback, link-local, or
@@ -591,7 +687,14 @@ pub async fn a2a_discover_external(
     };
 
     // SSRF protection: validate URL before making any outbound request
-    if let Err(reason) = is_url_safe_for_ssrf(&url) {
+    let ssrf_allowed = state
+        .kernel
+        .config_snapshot()
+        .web
+        .fetch
+        .ssrf_allowed_hosts
+        .clone();
+    if let Err(reason) = is_url_safe_for_ssrf(&url, &ssrf_allowed) {
         return ApiErrorResponse::bad_request(reason).into_json_tuple();
     }
 
@@ -639,7 +742,7 @@ pub async fn a2a_discover_external(
     )
 )]
 pub async fn a2a_send_external(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let url = match body["url"].as_str() {
@@ -651,6 +754,18 @@ pub async fn a2a_send_external(
         None => return ApiErrorResponse::bad_request("Missing 'message' field").into_json_tuple(),
     };
     let session_id = body["session_id"].as_str();
+
+    // SSRF protection: validate URL before making any outbound request
+    let ssrf_allowed = state
+        .kernel
+        .config_snapshot()
+        .web
+        .fetch
+        .ssrf_allowed_hosts
+        .clone();
+    if let Err(reason) = is_url_safe_for_ssrf(&url, &ssrf_allowed) {
+        return ApiErrorResponse::bad_request(reason).into_json_tuple();
+    }
 
     let client = librefang_runtime::a2a::A2aClient::new();
     match client.send_task(&url, &message, session_id).await {
@@ -679,7 +794,7 @@ pub async fn a2a_send_external(
     )
 )]
 pub async fn a2a_external_task_status(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Path(task_id): Path<String>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
@@ -689,6 +804,18 @@ pub async fn a2a_external_task_status(
             return ApiErrorResponse::bad_request("Missing 'url' query parameter").into_json_tuple()
         }
     };
+
+    // SSRF protection: validate URL before making any outbound request
+    let ssrf_allowed = state
+        .kernel
+        .config_snapshot()
+        .web
+        .fetch
+        .ssrf_allowed_hosts
+        .clone();
+    if let Err(reason) = is_url_safe_for_ssrf(&url, &ssrf_allowed) {
+        return ApiErrorResponse::bad_request(reason).into_json_tuple();
+    }
 
     let client = librefang_runtime::a2a::A2aClient::new();
     match client.get_task(&url, &task_id).await {

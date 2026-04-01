@@ -56,6 +56,9 @@ search_provider = "auto"        # Tavily → Brave → Jina → Perplexity → D
 max_chars = 50000               # Max chars extracted from web pages
 timeout_secs = 30
 readability = true              # Clean HTML → readable text
+# ssrf_allowed_hosts = []       # Allow internal hosts/CIDRs (self-hosted/K8s only)
+                                # e.g. ["10.0.0.0/8", "*.internal.example.com"]
+                                # Cloud metadata (169.254.x.x, 100.64.x.x) always blocked.
 
 # ── Task Queue ───────────────────────────────────────────────
 [queue.concurrency]
