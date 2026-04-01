@@ -586,7 +586,7 @@ export function SkillsPage() {
         >
           <Zap className="w-4 h-4" />
           {t("skills.builtin")}
-          <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full bg-brand/15 text-brand leading-none">Official</span>
+          <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full bg-brand/15 text-brand leading-none">{t("skills.official")}</span>
         </button>
 
         {/* ClawHub — non-CN only */}
