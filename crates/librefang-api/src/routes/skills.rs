@@ -5,6 +5,7 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
     axum::Router::new()
         // Skills
         .route("/skills", axum::routing::get(list_skills))
+        .route("/skills/registry", axum::routing::get(list_skill_registry))
         .route("/skills/install", axum::routing::post(install_skill))
         .route("/skills/uninstall", axum::routing::post(uninstall_skill))
         .route("/skills/create", axum::routing::post(create_skill))
@@ -294,6 +295,66 @@ pub async fn uninstall_skill(
         }
         Err(e) => ApiErrorResponse::not_found(format!("{e}")).into_json_tuple(),
     }
+}
+
+/// GET /api/skills/registry — List official skills from the local registry cache (~/.librefang/registry/skills).
+#[utoipa::path(
+    get,
+    path = "/api/skills/registry",
+    tag = "skills",
+    responses(
+        (status = 200, description = "Official skills available in the FangHub registry", body = serde_json::Value)
+    )
+)]
+pub async fn list_skill_registry(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let registry_skills_dir = state.kernel.home_dir().join("registry").join("skills");
+
+    if !registry_skills_dir.exists() {
+        return Json(serde_json::json!({ "skills": [], "total": 0 }));
+    }
+
+    let mut skills: Vec<serde_json::Value> = Vec::new();
+
+    if let Ok(entries) = std::fs::read_dir(&registry_skills_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let manifest_path = path.join("skill.toml");
+            if !manifest_path.exists() {
+                continue;
+            }
+            match std::fs::read_to_string(&manifest_path) {
+                Ok(content) => {
+                    if let Ok(manifest) =
+                        toml::from_str::<librefang_skills::SkillManifest>(&content)
+                    {
+                        let name = manifest.skill.name.clone();
+                        let installed_dir = state.kernel.home_dir().join("skills").join(&name);
+                        let is_installed = installed_dir.exists();
+                        skills.push(serde_json::json!({
+                            "name": name,
+                            "description": manifest.skill.description,
+                            "version": manifest.skill.version,
+                            "author": manifest.skill.author,
+                            "tags": manifest.skill.tags,
+                            "is_installed": is_installed,
+                        }));
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to read registry skill manifest {:?}: {e}",
+                        manifest_path
+                    );
+                }
+            }
+        }
+    }
+
+    let total = skills.len();
+    Json(serde_json::json!({ "skills": skills, "total": total }))
 }
 
 /// GET /api/marketplace/search — Search the FangHub marketplace.

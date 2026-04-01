@@ -987,6 +987,26 @@ export async function skillhubGetSkill(slug: string): Promise<ClawHubSkillDetail
   return get<ClawHubSkillDetail>(`/api/skillhub/skill/${encodeURIComponent(slug)}`);
 }
 
+// ── FangHub (official LibreFang registry skills) ──────
+
+export interface FangHubSkill {
+  name: string;
+  description: string;
+  version: string;
+  author?: string;
+  tags?: string[];
+  is_installed: boolean;
+}
+
+export interface FangHubListResponse {
+  skills: FangHubSkill[];
+  total: number;
+}
+
+export async function fanghubListSkills(): Promise<FangHubListResponse> {
+  return get<FangHubListResponse>("/api/skills/registry");
+}
+
 // ── Workflow Templates ────────────────────────────────
 
 export interface TemplateParameter {
