@@ -592,6 +592,7 @@ mod tests {
             identity: Default::default(),
             onboarding_completed: false,
             onboarding_completed_at: None,
+            is_hand: false,
         };
 
         store.save_agent(&entry).unwrap();
