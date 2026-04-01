@@ -1,0 +1,157 @@
+# 开发工具提供商
+
+本页覆盖通过本地助手工具链或 CLI 运行时接入的提供商，而不是标准的远程 LLM API。当 LibreFang 需要复用现有编码助手或终端助手栈时，主要看这里。
+
+## 包含的提供商
+
+- Claude Code
+- GitHub Copilot
+- Aider
+- Claude Code CLI
+- Codex CLI
+- Gemini CLI
+- Qwen Code
+
+---
+
+## Claude Code
+
+| | |
+|---|---|
+| **显示名称** | Claude Code |
+| **驱动** | 原生 Anthropic (Messages API) |
+| **环境变量** | `ANTHROPIC_API_KEY` |
+| **基础 URL** | `https://api.anthropic.com` |
+| **需要密钥** | 是 |
+| **免费额度** | 无 |
+| **认证方式** | `x-api-key` 请求头 |
+| **模型数** | Claude 模型（扩展工具调用） |
+
+**说明：** Claude Code 是 Anthropic 针对 Agent 编程任务优化的模型变体。它使用与 Anthropic 相同的 API 密钥和基础 URL，但针对长时间工具调用工作流进行了调优。
+
+---
+
+## GitHub Copilot
+
+| | |
+|---|---|
+| **显示名称** | GitHub Copilot |
+| **驱动** | OpenAI 兼容（通过 Copilot token 交换） |
+| **环境变量** | `GITHUB_TOKEN` |
+| **基础 URL** | `https://api.githubcopilot.com` |
+| **需要密钥** | 是（GitHub PAT 或 OAuth token） |
+| **免费额度** | 随 GitHub Copilot 订阅附赠 |
+| **认证方式** | OAuth PKCE 流程；将 GitHub PAT 交换为短期 Copilot API token |
+| **模型数** | GitHub Copilot 托管的模型（GPT-4o、Claude 等） |
+
+**设置：**
+1. 订阅 [GitHub Copilot](https://github.com/features/copilot)
+2. 创建具有 `copilot` 权限的 Personal Access Token
+3. `export GITHUB_TOKEN="ghp_..."`
+
+**说明：** Copilot 驱动自动处理 OAuth PKCE token 交换 — 它从 `https://api.github.com/copilot_internal/v2/token` 获取短期 Copilot API token 并缓存，支持自动刷新。Copilot API 使用 OpenAI 兼容的聊天补全格式。Token 在到期前 5 分钟自动刷新。
+
+---
+
+## Aider
+
+| | |
+|---|---|
+| **显示名称** | Aider |
+| **类型** | **CLI Provider** |
+| **驱动** | 子进程 (CLI) |
+| **环境变量** | 无（使用自身的提供商环境变量） |
+| **二进制文件** | `aider`（需在 PATH 中） |
+| **需要密钥** | 否（使用 Aider 自身的认证） |
+| **免费额度** | 取决于 Aider 配置的后端 |
+
+**设置：**
+1. 安装 Aider：`pip install aider-install && aider-install`
+2. 通过 Aider 自身的环境变量配置 LLM 提供商（如 `OPENAI_API_KEY`）
+3. 无需额外的 LibreFang 配置
+
+**说明：** CLI Provider — LibreFang 以子进程方式以非交互模式（`--message`）调用 `aider` 二进制文件。Aider 通过标准环境变量（`OPENAI_API_KEY`、`ANTHROPIC_API_KEY` 等）自行处理 LLM 提供商认证。自动启用 `--yes-always`、`--no-auto-commits` 和 `--no-git` 标志。可使用 `AIDER_CLI_PATH` 覆盖二进制文件路径。
+
+---
+
+## Claude Code CLI
+
+| | |
+|---|---|
+| **显示名称** | Claude Code CLI |
+| **类型** | **CLI Provider** |
+| **驱动** | 子进程 (CLI) |
+| **环境变量** | 无（使用自身的 OAuth 会话） |
+| **二进制文件** | `claude`（需在 PATH 中） |
+| **需要密钥** | 否（使用 Claude Code 自身的会话认证） |
+| **免费额度** | 取决于 Claude Code 订阅 |
+
+**设置：**
+1. 安装 Claude Code：`npm install -g @anthropic-ai/claude-code`
+2. 认证：`claude auth login`
+3. 无需额外的 LibreFang 配置
+
+**说明：** CLI Provider — LibreFang 以子进程方式以打印模式（`-p`）调用 `claude` 二进制文件。驱动会从子进程环境中移除其他提供商的 API 密钥以防泄露。活跃的子进程 PID 会被追踪，消息超时（默认 5 分钟）可防止挂起的进程阻塞 Agent。支持通过 base64 编码图片进行视觉输入。
+
+---
+
+## Codex CLI
+
+| | |
+|---|---|
+| **显示名称** | Codex CLI |
+| **类型** | **CLI Provider** |
+| **驱动** | 子进程 (CLI) |
+| **环境变量** | `OPENAI_API_KEY`（供 Codex CLI 自身使用） |
+| **二进制文件** | `codex`（需在 PATH 中） |
+| **需要密钥** | 是（Codex CLI 需要 OpenAI API 密钥） |
+| **免费额度** | 无 |
+
+**设置：**
+1. 安装 Codex CLI：`npm install -g @openai/codex`
+2. `export OPENAI_API_KEY="sk-..."`
+3. 无需额外的 LibreFang 配置
+
+**说明：** CLI Provider — LibreFang 以子进程方式以安静模式（`-q`）调用 `codex` 二进制文件。驱动会从子进程环境中移除其他提供商的 API 密钥（仅保留 `OPENAI_API_KEY` 和 `CODEX_*` 变量）。这使得安装了 Codex CLI 的用户无需额外配置即可将其作为 LLM 提供商使用。
+
+---
+
+## Gemini CLI
+
+| | |
+|---|---|
+| **显示名称** | Gemini CLI |
+| **类型** | **CLI Provider** |
+| **驱动** | 子进程 (CLI) |
+| **环境变量** | 无（默认使用 Google OAuth） |
+| **二进制文件** | `gemini`（需在 PATH 中） |
+| **需要密钥** | 否（使用 Google OAuth） |
+| **免费额度** | 有（通过 Google 账户） |
+
+**设置：**
+1. 安装 Gemini CLI：`npm install -g @google/gemini-cli`
+2. 认证：`gemini auth login`
+3. 无需额外的 LibreFang 配置
+
+**说明：** CLI Provider — LibreFang 以子进程方式以打印模式（`-p`）调用 `gemini` 二进制文件。驱动会保留 `GEMINI_*` 和 `GOOGLE_*` 环境变量，同时移除其他提供商的密钥。使用 Google OAuth 认证时无需单独配置 API 密钥。
+
+---
+
+## Qwen Code
+
+| | |
+|---|---|
+| **显示名称** | Qwen Code |
+| **类型** | **CLI Provider** |
+| **驱动** | 子进程 (CLI) |
+| **环境变量** | 无（默认使用通义千问 OAuth） |
+| **二进制文件** | `qwen`（需在 PATH 中） |
+| **需要密钥** | 否（使用通义千问 OAuth） |
+| **免费额度** | 有（通过阿里云账户） |
+
+**设置：**
+1. 安装 Qwen Code：`npm install -g @alibaba/qwen-code`
+2. 认证：`qwen auth login`
+3. 无需额外的 LibreFang 配置
+
+**说明：** CLI Provider — LibreFang 以子进程方式以打印模式（`-p`）调用 `qwen` 二进制文件。驱动会保留 `QWEN_*` 环境变量，同时移除其他提供商的密钥。支持来自 Qwen Code CLI 的流式 JSON 输出。使用通义千问 OAuth 认证时无需单独配置 API 密钥。

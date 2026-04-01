@@ -226,9 +226,11 @@ pub enum SearchProvider {
     Tavily,
     /// Perplexity AI search.
     Perplexity,
+    /// Jina AI search.
+    Jina,
     /// DuckDuckGo HTML (no API key needed).
     DuckDuckGo,
-    /// Auto-select based on available API keys (Tavily → Brave → Perplexity → DuckDuckGo).
+    /// Auto-select based on available API keys (Tavily → Brave → Jina → Perplexity → DuckDuckGo).
     #[default]
     Auto,
 }
@@ -241,14 +243,24 @@ pub struct WebConfig {
     pub search_provider: SearchProvider,
     /// Cache TTL in minutes (0 = disabled).
     pub cache_ttl_minutes: u64,
+    /// HTTP timeout for all web search requests (seconds).
+    /// Recommended: 15 for most providers, 30+ for Jina.
+    #[serde(default = "default_search_timeout_secs")]
+    pub timeout_secs: u64,
     /// Brave Search configuration.
     pub brave: BraveSearchConfig,
     /// Tavily Search configuration.
     pub tavily: TavilySearchConfig,
     /// Perplexity Search configuration.
     pub perplexity: PerplexitySearchConfig,
+    /// Jina Search configuration.
+    pub jina: JinaSearchConfig,
     /// Web fetch configuration.
     pub fetch: WebFetchConfig,
+}
+
+fn default_search_timeout_secs() -> u64 {
+    15
 }
 
 impl Default for WebConfig {
@@ -256,9 +268,11 @@ impl Default for WebConfig {
         Self {
             search_provider: SearchProvider::default(),
             cache_ttl_minutes: 15,
+            timeout_secs: default_search_timeout_secs(),
             brave: BraveSearchConfig::default(),
             tavily: TavilySearchConfig::default(),
             perplexity: PerplexitySearchConfig::default(),
+            jina: JinaSearchConfig::default(),
             fetch: WebFetchConfig::default(),
         }
     }
@@ -336,6 +350,37 @@ impl Default for PerplexitySearchConfig {
     }
 }
 
+/// Jina Search API configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct JinaSearchConfig {
+    /// Env var name holding the API key.
+    pub api_key_env: String,
+    /// Maximum results to return.
+    pub max_results: usize,
+    /// Country/region code for geolocation (e.g., "US").
+    pub country: String,
+    /// Language code (e.g., "en").
+    pub language: String,
+    /// Use EU endpoint (https://eu.s.jina.ai/) instead of global.
+    pub use_eu_endpoint: bool,
+    /// Disable Jina server-side cache.
+    pub no_cache: bool,
+}
+
+impl Default for JinaSearchConfig {
+    fn default() -> Self {
+        Self {
+            api_key_env: "JINA_API_KEY".to_string(),
+            max_results: 5,
+            country: String::new(),
+            language: String::new(),
+            use_eu_endpoint: false,
+            no_cache: false,
+        }
+    }
+}
+
 /// Web fetch configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -348,6 +393,10 @@ pub struct WebFetchConfig {
     pub timeout_secs: u64,
     /// Enable HTML→Markdown readability extraction.
     pub readability: bool,
+    /// Hosts/CIDRs that are exempt from SSRF blocking (e.g. internal services in K8s).
+    /// Cloud metadata endpoints (169.254.x.x, etc.) remain blocked unconditionally.
+    #[serde(default)]
+    pub ssrf_allowed_hosts: Vec<String>,
 }
 
 impl Default for WebFetchConfig {
@@ -357,6 +406,7 @@ impl Default for WebFetchConfig {
             max_response_bytes: 10 * 1024 * 1024, // 10 MB
             timeout_secs: 30,
             readability: true,
+            ssrf_allowed_hosts: vec![],
         }
     }
 }
@@ -557,12 +607,14 @@ pub struct FallbackProviderConfig {
 pub struct TtsConfig {
     /// Enable TTS. Default: false.
     pub enabled: bool,
-    /// Default provider: "openai" or "elevenlabs".
+    /// Default provider: "openai", "elevenlabs", or "google_tts".
     pub provider: Option<String>,
     /// OpenAI TTS settings.
     pub openai: TtsOpenAiConfig,
     /// ElevenLabs TTS settings.
     pub elevenlabs: TtsElevenLabsConfig,
+    /// Google Cloud TTS settings.
+    pub google: TtsGoogleConfig,
     /// Max text length for TTS (chars). Default: 4096.
     pub max_text_length: usize,
     /// Timeout per TTS request in seconds. Default: 30.
@@ -576,6 +628,7 @@ impl Default for TtsConfig {
             provider: None,
             openai: TtsOpenAiConfig::default(),
             elevenlabs: TtsElevenLabsConfig::default(),
+            google: TtsGoogleConfig::default(),
             max_text_length: 4096,
             timeout_secs: 30,
         }
@@ -628,6 +681,34 @@ impl Default for TtsElevenLabsConfig {
             model_id: "eleven_monolingual_v1".to_string(),
             stability: 0.5,
             similarity_boost: 0.75,
+        }
+    }
+}
+
+/// Google Cloud TTS settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TtsGoogleConfig {
+    /// Voice name (e.g. "en-US-Standard-F", "pl-PL-Wavenet-A"). Default: "en-US-Standard-F".
+    pub voice: String,
+    /// Language code (e.g. "en-US", "pl-PL"). Default: "en-US".
+    pub language_code: String,
+    /// Speaking rate: 0.25 to 4.0. Default: 1.0.
+    pub speaking_rate: f32,
+    /// Pitch adjustment: -20.0 to 20.0. Default: 0.0.
+    pub pitch: f32,
+    /// Output format: "mp3", "opus", "wav". Default: "mp3".
+    pub format: String,
+}
+
+impl Default for TtsGoogleConfig {
+    fn default() -> Self {
+        Self {
+            voice: "en-US-Standard-F".to_string(),
+            language_code: "en-US".to_string(),
+            speaking_rate: 1.0,
+            pitch: 0.0,
+            format: "mp3".to_string(),
         }
     }
 }
@@ -742,6 +823,30 @@ impl Default for PairingConfig {
             push_provider: "none".to_string(),
             ntfy_url: None,
             ntfy_topic: None,
+        }
+    }
+}
+
+/// Skills configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SkillsConfig {
+    /// Whether bundled (compile-time embedded) skills are loaded. Default: true.
+    pub load_bundled: bool,
+    /// Whether user-installed skills from the skills directory are loaded. Default: true.
+    pub load_user: bool,
+    /// Extra skill directories to scan in addition to `~/.librefang/skills/`.
+    /// Each entry must be an absolute path.
+    #[serde(default)]
+    pub extra_dirs: Vec<std::path::PathBuf>,
+}
+
+impl Default for SkillsConfig {
+    fn default() -> Self {
+        Self {
+            load_bundled: true,
+            load_user: true,
+            extra_dirs: Vec::new(),
         }
     }
 }
@@ -1564,7 +1669,7 @@ pub struct KernelConfig {
     /// Allowed CORS origins. When non-empty, these origins are added to the
     /// CORS allow list (in addition to localhost). Accepts exact origin strings
     /// like `"https://dash.example.com"`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cors_origin: Vec<String>,
     /// Whether to enable the OFP network layer.
     pub network_enabled: bool,
@@ -1604,10 +1709,10 @@ pub struct KernelConfig {
     #[serde(default = "default_language")]
     pub language: String,
     /// User configurations for RBAC multi-user support.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub users: Vec<UserConfig>,
     /// MCP server configurations for external tool integration.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp_servers: Vec<McpServerConfigEntry>,
     /// A2A (Agent-to-Agent) protocol configuration.
     #[serde(default)]
@@ -1627,7 +1732,7 @@ pub struct KernelConfig {
     pub web: WebConfig,
     /// Fallback providers tried in order if the primary fails.
     /// Configure in config.toml as `[[fallback_providers]]`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fallback_providers: Vec<FallbackProviderConfig>,
     /// Browser automation configuration.
     #[serde(default)]
@@ -1635,6 +1740,9 @@ pub struct KernelConfig {
     /// Extensions & integrations configuration.
     #[serde(default)]
     pub extensions: ExtensionsConfig,
+    /// Skills configuration (bundled + user-installed skills).
+    #[serde(default)]
+    pub skills: SkillsConfig,
     /// Credential vault configuration.
     #[serde(default)]
     pub vault: VaultConfig,
@@ -1669,13 +1777,13 @@ pub struct KernelConfig {
     /// Config include files — loaded and deep-merged before the root config.
     /// Paths are relative to the root config file's directory.
     /// Security: absolute paths and `..` components are rejected.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub include: Vec<String>,
     /// Shell/exec security policy.
     #[serde(default)]
     pub exec_policy: ExecPolicy,
     /// Agent bindings for multi-account routing.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bindings: Vec<AgentBinding>,
     /// Broadcast routing configuration.
     #[serde(default)]
@@ -1729,7 +1837,7 @@ pub struct KernelConfig {
     #[serde(default)]
     pub oauth: OAuthConfig,
     /// Sidecar channel adapters (external process-based).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sidecar_channels: Vec<SidecarChannelConfig>,
     /// HTTP proxy configuration for all outbound connections.
     #[serde(default)]
@@ -2713,6 +2821,7 @@ impl Default for KernelConfig {
             fallback_providers: Vec::new(),
             browser: BrowserConfig::default(),
             extensions: ExtensionsConfig::default(),
+            skills: SkillsConfig::default(),
             vault: VaultConfig::default(),
             workspaces_dir: None,
             log_dir: None,
@@ -2974,7 +3083,11 @@ pub struct MemoryConfig {
     pub consolidation_threshold: u64,
     /// Memory decay rate (0.0 = no decay, 1.0 = aggressive decay).
     pub decay_rate: f32,
-    /// Embedding provider (e.g., "openai", "ollama"). None = auto-detect.
+    /// Embedding provider. Valid values: `"openai"`, `"groq"`, `"mistral"`,
+    /// `"together"`, `"fireworks"`, `"cohere"`, `"ollama"`, `"bedrock"`,
+    /// `"vllm"`, `"lmstudio"`, or `"auto"`.
+    /// `None` or `"auto"` = probe API-key env vars across all cloud providers,
+    /// then fall back to local Ollama.
     #[serde(default)]
     pub embedding_provider: Option<String>,
     /// Environment variable name for the embedding API key.

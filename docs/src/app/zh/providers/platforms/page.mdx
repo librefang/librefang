@@ -1,0 +1,291 @@
+# 平台与托管端点
+
+本页覆盖通过平台专用网关、企业云集成、托管推理平台或区域模型市场接入的提供商，而不是单一的一方模型厂商 API。
+
+## 包含的提供商
+
+- Replicate
+- NVIDIA NIM
+- Voyage AI
+- Anyscale
+- DeepInfra
+- Azure OpenAI
+- Amazon Bedrock
+- Qwen (DashScope)
+- MiniMax
+- Vertex AI
+
+---
+
+## Replicate
+
+| | |
+|---|---|
+| **显示名称** | Replicate |
+| **驱动** | OpenAI 兼容 |
+| **环境变量** | `REPLICATE_API_TOKEN` |
+| **基础 URL** | `https://api.replicate.com/v1` |
+| **需要密钥** | 是 |
+| **免费额度** | 无 |
+| **认证方式** | `Authorization: Bearer` 请求头 |
+| **模型数** | 1 |
+
+**可用模型：**
+- `replicate/meta-llama-3.3-70b-instruct` (平衡)
+
+**设置：**
+1. 在 [replicate.com](https://replicate.com) 注册账号
+2. 前往 Account > API Tokens
+3. `export REPLICATE_API_TOKEN="r8_..."`
+
+---
+
+## NVIDIA NIM
+
+| | |
+|---|---|
+| **显示名称** | NVIDIA NIM |
+| **驱动** | OpenAI 兼容 |
+| **环境变量** | `NVIDIA_API_KEY` |
+| **基础 URL** | `https://integrate.api.nvidia.com/v1` |
+| **需要密钥** | 是 |
+| **免费额度** | 有（有限额度） |
+| **认证方式** | `Authorization: Bearer` 请求头 |
+| **模型数** | Llama、Mistral 及 NVIDIA 优化模型 |
+
+**设置：**
+1. 在 [build.nvidia.com](https://build.nvidia.com) 注册账号
+2. 创建 API 密钥
+3. `export NVIDIA_API_KEY="nvapi-..."`
+
+---
+
+## Voyage AI
+
+| | |
+|---|---|
+| **显示名称** | Voyage AI |
+| **驱动** | OpenAI 兼容 |
+| **环境变量** | `VOYAGE_API_KEY` |
+| **基础 URL** | `https://api.voyageai.com/v1` |
+| **需要密钥** | 是 |
+| **免费额度** | 有（有限额度） |
+| **认证方式** | `Authorization: Bearer` 请求头 |
+| **模型数** | 嵌入和重排序模型 |
+
+**说明：** Voyage AI 专注于语义搜索和 RAG 管线所使用的嵌入及重排序模型。
+
+**设置：**
+1. 在 [voyageai.com](https://www.voyageai.com) 注册账号
+2. 创建 API 密钥
+3. `export VOYAGE_API_KEY="pa-..."`
+
+---
+
+## Anyscale
+
+| | |
+|---|---|
+| **显示名称** | Anyscale |
+| **驱动** | OpenAI 兼容 |
+| **环境变量** | `ANYSCALE_API_KEY` |
+| **基础 URL** | `https://api.endpoints.anyscale.com/v1` |
+| **需要密钥** | 是 |
+| **免费额度** | 有（有限额度） |
+| **认证方式** | `Authorization: Bearer` 请求头 |
+| **模型数** | 开源模型（Llama、Mistral 等） |
+
+**设置：**
+1. 在 [anyscale.com](https://www.anyscale.com) 注册账号
+2. 创建 API 密钥
+3. `export ANYSCALE_API_KEY="esecret_..."`
+
+---
+
+## DeepInfra
+
+| | |
+|---|---|
+| **显示名称** | DeepInfra |
+| **驱动** | OpenAI 兼容 |
+| **环境变量** | `DEEPINFRA_API_KEY` |
+| **基础 URL** | `https://api.deepinfra.com/v1/openai` |
+| **需要密钥** | 是 |
+| **免费额度** | 有（有限额度） |
+| **认证方式** | `Authorization: Bearer` 请求头 |
+| **模型数** | 低成本开源模型 |
+
+**设置：**
+1. 在 [deepinfra.com](https://deepinfra.com) 注册账号
+2. 创建 API 密钥
+3. `export DEEPINFRA_API_KEY="..."`
+
+---
+
+## Azure OpenAI
+
+| | |
+|---|---|
+| **显示名称** | Azure OpenAI |
+| **驱动** | OpenAI 兼容 |
+| **环境变量** | `AZURE_OPENAI_API_KEY`、`AZURE_OPENAI_ENDPOINT` |
+| **基础 URL** | `https://<your-resource>.openai.azure.com/openai/deployments/<deployment>` |
+| **需要密钥** | 是 |
+| **免费额度** | 无 |
+| **认证方式** | `api-key` 请求头 |
+| **模型数** | GPT-4o、GPT-4 及其他 Azure 托管模型 |
+
+**设置：**
+1. 在 [Azure 门户](https://portal.azure.com) 中创建 Azure OpenAI 资源
+2. 在 Azure OpenAI Studio 中部署模型
+3. 设置环境变量：
+   ```bash
+   export AZURE_OPENAI_API_KEY="..."
+   export AZURE_OPENAI_ENDPOINT="https://<your-resource>.openai.azure.com"
+   ```
+
+---
+
+## Amazon Bedrock
+
+| | |
+|---|---|
+| **显示名称** | Amazon Bedrock |
+| **驱动** | OpenAI 兼容（通过 Bedrock Converse API） |
+| **环境变量** | `AWS_ACCESS_KEY_ID`、`AWS_SECRET_ACCESS_KEY`、`AWS_REGION` |
+| **基础 URL** | AWS 区域端点 |
+| **需要密钥** | 是（AWS 凭证） |
+| **免费额度** | 无 |
+| **认证方式** | AWS Signature v4 |
+| **模型数** | 通过 Bedrock 使用 Claude、Llama、Titan、Mistral |
+
+**设置：**
+1. 在 [AWS Bedrock 控制台](https://console.aws.amazon.com/bedrock) 中启用模型访问
+2. 配置 AWS 凭证：
+   ```bash
+   export AWS_ACCESS_KEY_ID="AKIA..."
+   export AWS_SECRET_ACCESS_KEY="..."
+   export AWS_REGION="us-east-1"
+   ```
+
+---
+
+## Qwen (DashScope)
+
+| | |
+|---|---|
+| **显示名称** | Qwen |
+| **驱动** | OpenAI 兼容 |
+| **环境变量** | `DASHSCOPE_API_KEY` |
+| **基础 URL** | `https://dashscope.aliyuncs.com/compatible-mode/v1` |
+| **别名** | `dashscope`、`model_studio` |
+| **需要密钥** | 是 |
+| **免费额度** | 有（注册赠送有限额度） |
+| **认证方式** | `Authorization: Bearer` 请求头 |
+
+**区域：**
+
+| 区域 | 端点 | API 密钥环境变量 |
+|--------|----------|-------------|
+| *（默认）* | `dashscope.aliyuncs.com` | `DASHSCOPE_API_KEY` |
+| `intl` | `dashscope-intl.aliyuncs.com` | `DASHSCOPE_API_KEY` |
+| `us` | `dashscope-us.aliyuncs.com` | `DASHSCOPE_API_KEY` |
+
+**设置：**
+1. 在 [DashScope 控制台](https://dashscope.console.aliyun.com) 注册账号
+2. 创建 API 密钥
+3. `export DASHSCOPE_API_KEY="sk-..."`
+4. 可选：在 `config.toml` 中选择区域：
+   ```toml
+   [provider_regions]
+   qwen = "intl"    # 或 "us"
+   ```
+
+**说明：** Qwen 使用阿里云的 DashScope API。默认端点服务于中国大陆；如在中国境外使用，建议选择 `intl` 或 `us` 区域以降低延迟。模型定义在注册表 TOML 中，在启动时加载。
+
+---
+
+## MiniMax
+
+| | |
+|---|---|
+| **显示名称** | MiniMax |
+| **驱动** | OpenAI 兼容 |
+| **环境变量** | `MINIMAX_API_KEY` |
+| **基础 URL** | `https://api.minimax.io/v1` |
+| **需要密钥** | 是 |
+| **免费额度** | 无 |
+| **认证方式** | `Authorization: Bearer` 请求头 |
+
+**区域：**
+
+| 区域 | 端点 | API 密钥环境变量 |
+|--------|----------|-------------|
+| *（默认）* | `api.minimax.io` | `MINIMAX_API_KEY` |
+| `china` | `api.minimaxi.com` | `MINIMAX_CN_API_KEY` |
+
+**设置：**
+1. 在 [minimax.io](https://www.minimax.io)（国际版）或 [minimaxi.com](https://www.minimaxi.com)（中国版）注册账号
+2. 创建 API 密钥
+3. `export MINIMAX_API_KEY="..."`
+4. 中国区域设置：
+   ```toml
+   [provider_regions]
+   minimax = "china"
+   ```
+   ```bash
+   export MINIMAX_CN_API_KEY="..."
+   ```
+
+**媒体生成：** 除了 LLM 聊天模型外，MiniMax 还通过 Creator Hand 或媒体 API 端点提供媒体生成能力：
+
+| 模态 | 模型 | 描述 |
+|----------|-------|-------------|
+| 图片 | `image-01` | 文本生成图片 |
+| 语音 | `speech-2.8-hd` | 高质量文本转语音 |
+| 视频 | `T2V-01` | 文本生成视频（异步） |
+| 音乐 | `music-2.5` | 音乐生成，支持可选歌词 |
+
+这些功能通过 `/api/media/*` 端点或 `image_generate`、`video_generate`、`music_generate`、`text_to_speech` 工具访问。
+
+**说明：** MiniMax 国际版（`minimax.io`）和中国版（`minimaxi.com`）使用不同的 API 密钥。选择 `china` 区域时，LibreFang 会自动从 `MINIMAX_CN_API_KEY` 而非 `MINIMAX_API_KEY` 读取密钥。
+
+---
+
+## Vertex AI
+
+| | |
+|---|---|
+| **显示名称** | Google Vertex AI |
+| **驱动** | 原生 Gemini（通过 Vertex 使用 generateContent API） |
+| **配置段** | `[vertex_ai]` |
+| **环境变量** | `GOOGLE_APPLICATION_CREDENTIALS`、`VERTEX_PROJECT`、`VERTEX_LOCATION` |
+| **基础 URL** | `https://<location>-aiplatform.googleapis.com` |
+| **需要密钥** | 是（服务账号 JSON 或 gcloud CLI） |
+| **免费额度** | 无 |
+| **认证方式** | OAuth2 服务账号或 `gcloud auth print-access-token` |
+| **模型数** | 通过 Google Cloud Vertex AI 企业端点使用 Gemini 模型 |
+
+**设置：**
+1. 在 [Google Cloud 控制台](https://console.cloud.google.com) 中启用 Vertex AI API
+2. 创建服务账号密钥文件，或使用 `gcloud auth application-default login` 进行认证
+3. 设置环境变量：
+   ```bash
+   # 方式 A：服务账号密钥文件
+   export GOOGLE_APPLICATION_CREDENTIALS="/path/to/service-account.json"
+   export VERTEX_PROJECT="your-gcp-project"
+   export VERTEX_LOCATION="us-central1"
+
+   # 方式 B：gcloud CLI（无需密钥文件）
+   gcloud auth application-default login
+   export VERTEX_PROJECT="your-gcp-project"
+   export VERTEX_LOCATION="us-central1"
+   ```
+4. 在 `config.toml` 中配置：
+   ```toml
+   [vertex_ai]
+   project = "your-gcp-project"
+   location = "us-central1"
+   ```
+
+**说明：** Vertex AI 使用与原生 Gemini 驱动相同的 `generateContent` API 格式，但通过 Google Cloud OAuth2 而非 API 密钥进行认证。访问令牌缓存约 50 分钟的 TTL，并在到期前自动刷新。端点格式为 `https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/publishers/google/models/{model}:generateContent`。

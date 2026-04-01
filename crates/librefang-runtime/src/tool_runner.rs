@@ -1405,7 +1405,10 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
 fn validate_path(path: &str) -> Result<&str, String> {
     for component in std::path::Path::new(path).components() {
         if matches!(component, std::path::Component::ParentDir) {
-            return Err("Path traversal denied: '..' components are forbidden".to_string());
+            return Err(format!(
+                "{}: '..' components are forbidden",
+                crate::workspace_sandbox::ERR_PATH_TRAVERSAL
+            ));
         }
     }
     Ok(path)
@@ -2753,7 +2756,7 @@ async fn tool_a2a_discover(input: &serde_json::Value) -> Result<String, String> 
     let url = input["url"].as_str().ok_or("Missing 'url' parameter")?;
 
     // SSRF protection: block private/metadata IPs
-    if crate::web_fetch::check_ssrf(url).is_err() {
+    if crate::web_fetch::check_ssrf(url, &[]).is_err() {
         return Err("SSRF blocked: URL resolves to a private or metadata address".to_string());
     }
 
@@ -2776,7 +2779,7 @@ async fn tool_a2a_send(
     // Resolve agent URL: either directly provided or looked up by name
     let url = if let Some(url) = input["agent_url"].as_str() {
         // SSRF protection
-        if crate::web_fetch::check_ssrf(url).is_err() {
+        if crate::web_fetch::check_ssrf(url, &[]).is_err() {
             return Err("SSRF blocked: URL resolves to a private or metadata address".to_string());
         }
         url.to_string()
@@ -3500,23 +3503,44 @@ async fn tool_text_to_speech(
     let format = input["format"].as_str();
     let provider = input["provider"].as_str();
 
-    // Try MediaDriverCache first (multi-provider: OpenAI, Gemini, MiniMax).
-    // Fall back to old TtsEngine for backwards compatibility.
     if let Some(cache) = media_drivers {
-        let request = librefang_types::media::MediaTtsRequest {
-            text: text.to_string(),
-            provider: provider.map(String::from),
-            model: input["model"].as_str().map(String::from),
-            voice: voice.map(String::from),
-            format: format.map(String::from),
-            speed: input["speed"].as_f64().map(|v| v as f32),
-            language: input["language"].as_str().map(String::from),
-        };
+        let resolved_provider =
+            provider.or_else(|| tts_engine.and_then(|e| e.tts_config().provider.as_deref()));
 
-        let driver_result = if let Some(p) = provider {
+        let driver_result = if let Some(p) = resolved_provider {
             cache.get_or_create(p, None)
         } else {
             cache.detect_for_capability(librefang_types::media::MediaCapability::TextToSpeech)
+        };
+
+        // Google TTS: override LLM-provided voice (e.g. "alloy") with the
+        // configured one — Google doesn't recognise OpenAI voice names.
+        let (effective_voice, effective_language, effective_speed, effective_pitch) =
+            if resolved_provider == Some("google_tts") {
+                if let Some(engine) = tts_engine {
+                    let cfg = &engine.tts_config().google;
+                    (
+                        Some(cfg.voice.clone()),
+                        Some(cfg.language_code.clone()),
+                        Some(cfg.speaking_rate),
+                        Some(cfg.pitch),
+                    )
+                } else {
+                    (None, None, None, None)
+                }
+            } else {
+                (None, None, None, None)
+            };
+
+        let request = librefang_types::media::MediaTtsRequest {
+            text: text.to_string(),
+            provider: resolved_provider.map(String::from),
+            model: input["model"].as_str().map(String::from),
+            voice: effective_voice.or_else(|| voice.map(String::from)),
+            format: format.map(String::from),
+            speed: effective_speed.or_else(|| input["speed"].as_f64().map(|v| v as f32)),
+            language: effective_language.or_else(|| input["language"].as_str().map(String::from)),
+            pitch: effective_pitch.or_else(|| input["pitch"].as_f64().map(|v| v as f32)),
         };
 
         if let Ok(driver) = driver_result {

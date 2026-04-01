@@ -901,7 +901,7 @@ pub async fn tool_browser_navigate(
     // the resolved address is not possible here. We still call check_ssrf to
     // validate the URL scheme and reject IPs that resolve to internal/loopback
     // ranges; the SsrfResolution result is intentionally discarded.
-    let _ = crate::web_fetch::check_ssrf(url)?;
+    let _ = crate::web_fetch::check_ssrf(url, &[])?;
 
     let resp = mgr
         .send_command(

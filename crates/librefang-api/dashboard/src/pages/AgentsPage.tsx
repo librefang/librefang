@@ -3,7 +3,7 @@ import { formatTime } from "../lib/datetime";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
-import { listAgents, getAgentDetail, spawnAgent, suspendAgent, resumeAgent, 
+import { listAgents, getAgentDetail, spawnAgent, suspendAgent, resumeAgent, patchAgentConfig,
   listPromptVersions, listExperiments, activatePromptVersion, startExperiment, pauseExperiment, completeExperiment,
   createPromptVersion, createExperiment, deletePromptVersion, PromptVersion, PromptExperiment, ExperimentVariantMetrics, getExperimentMetrics } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
@@ -31,10 +31,27 @@ export function AgentsPage() {
   const [templateName, setTemplateName] = useState("");
   const [manifestToml, setManifestToml] = useState("");
   const [showPrompts, setShowPrompts] = useState(false);
+  const [editingMaxTokens, setEditingMaxTokens] = useState(false);
+  const [maxTokensInput, setMaxTokensInput] = useState("");
   const queryClient = useQueryClient();
   const spawnMutation = useMutation({
     mutationFn: spawnAgent,
     onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["agents"] }); setShowCreate(false); setTemplateName(""); setManifestToml(""); }
+  });
+
+  const patchAgentConfigMutation = useMutation({
+    mutationFn: ({ agentId, config }: { agentId: string; config: { max_tokens?: number } }) =>
+      patchAgentConfig(agentId, config),
+    onSuccess: (_, { agentId }) => {
+      queryClient.invalidateQueries({ queryKey: ["agents"] });
+      queryClient.invalidateQueries({ queryKey: ["agent-detail", agentId] });
+      setEditingMaxTokens(false);
+      setMaxTokensInput("");
+      // Refresh detail panel
+      if (detailAgent?.id === agentId) {
+        getAgentDetail(agentId).then(setDetailAgent).catch(() => {});
+      }
+    },
   });
 
   const agentsQuery = useQuery({
@@ -252,6 +269,50 @@ export function AgentsPage() {
                   <div className="p-4 rounded-xl bg-main/50 border border-border-subtle/50 space-y-2.5 text-xs">
                     <div className="flex justify-between items-center"><span className="text-text-dim">{t("agents.provider")}</span><span className="font-black text-brand">{detailAgent.model.provider}</span></div>
                     <div className="flex justify-between items-center"><span className="text-text-dim">{t("agents.model")}</span><span className="font-black">{detailAgent.model.model}</span></div>
+                    <div className="flex justify-between items-center">
+                      <span className="text-text-dim">{t("agents.max_tokens") || "Max Tokens"}</span>
+                      {editingMaxTokens ? (
+                        <div className="flex items-center gap-1">
+                          <input
+                            type="number"
+                            min={1}
+                            max={200000}
+                            value={maxTokensInput}
+                            onChange={e => setMaxTokensInput(e.target.value)}
+                            onKeyDown={e => {
+                              if (e.key === "Enter") {
+                                const val = parseInt(maxTokensInput, 10);
+                                if (!isNaN(val) && val > 0) patchAgentConfigMutation.mutate({ agentId: detailAgent.id, config: { max_tokens: val } });
+                              }
+                              if (e.key === "Escape") { setEditingMaxTokens(false); setMaxTokensInput(""); }
+                            }}
+                            className="w-24 px-2 py-0.5 rounded bg-main border border-border-subtle text-xs font-mono focus:outline-none focus:border-brand"
+                            autoFocus
+                          />
+                          <button
+                            onClick={() => {
+                              const val = parseInt(maxTokensInput, 10);
+                              if (!isNaN(val) && val > 0) patchAgentConfigMutation.mutate({ agentId: detailAgent.id, config: { max_tokens: val } });
+                            }}
+                            disabled={patchAgentConfigMutation.isPending}
+                            className="p-0.5 rounded hover:bg-success/10 text-success disabled:opacity-50"
+                          >
+                            <Check className="w-3 h-3" />
+                          </button>
+                          <button onClick={() => { setEditingMaxTokens(false); setMaxTokensInput(""); }} className="p-0.5 rounded hover:bg-main text-text-dim">
+                            <X className="w-3 h-3" />
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          onClick={() => { setEditingMaxTokens(true); setMaxTokensInput(String(detailAgent.model.max_tokens ?? 4096)); }}
+                          className="font-black hover:text-brand transition-colors cursor-pointer"
+                          title="Click to edit"
+                        >
+                          {(detailAgent.model.max_tokens ?? 4096).toLocaleString()}
+                        </button>
+                      )}
+                    </div>
                   </div>
                 </div>
               )}

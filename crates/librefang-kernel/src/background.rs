@@ -65,11 +65,15 @@ impl BackgroundExecutor {
     }
 
     /// Pause an agent's background loop (ticks will be skipped until resumed).
+    ///
+    /// Safe to call before `start_agent` — pre-creates the pause flag so that
+    /// when the loop does start it begins in the paused state.
     pub fn pause_agent(&self, agent_id: AgentId) {
-        if let Some(flag) = self.pause_flags.get(&agent_id) {
-            flag.store(true, Ordering::SeqCst);
-            info!(id = %agent_id, "Background loop paused");
-        }
+        self.pause_flags
+            .entry(agent_id)
+            .or_insert_with(|| Arc::new(AtomicBool::new(true)))
+            .store(true, Ordering::SeqCst);
+        info!(id = %agent_id, "Background loop paused");
     }
 
     /// Resume a paused agent's background loop.
@@ -107,8 +111,13 @@ impl BackgroundExecutor {
                 let mut shutdown = self.shutdown_rx.clone();
                 let busy = Arc::new(AtomicBool::new(false));
                 let semaphore = self.llm_semaphore.clone();
-                let paused = Arc::new(AtomicBool::new(false));
-                self.pause_flags.insert(agent_id, paused.clone());
+                // Reuse a pre-existing pause flag (set by pause_agent before loop start)
+                // so hands paused before their loop begins stay paused.
+                let paused = self
+                    .pause_flags
+                    .entry(agent_id)
+                    .or_insert_with(|| Arc::new(AtomicBool::new(false)))
+                    .clone();
 
                 info!(
                     agent = %name, id = %agent_id,
@@ -177,8 +186,13 @@ impl BackgroundExecutor {
                 let mut shutdown = self.shutdown_rx.clone();
                 let busy = Arc::new(AtomicBool::new(false));
                 let semaphore = self.llm_semaphore.clone();
-                let paused = Arc::new(AtomicBool::new(false));
-                self.pause_flags.insert(agent_id, paused.clone());
+                // Reuse a pre-existing pause flag (set by pause_agent before loop start)
+                // so hands paused before their loop begins stay paused.
+                let paused = self
+                    .pause_flags
+                    .entry(agent_id)
+                    .or_insert_with(|| Arc::new(AtomicBool::new(false)))
+                    .clone();
 
                 info!(
                     agent = %name, id = %agent_id,

@@ -204,6 +204,7 @@ mod tests {
             speed: None,
             format: None,
             language: None,
+            pitch: None,
         };
         let result = driver.synthesize_speech(&req).await;
         assert!(matches!(result, Err(MediaError::NotSupported(_))));

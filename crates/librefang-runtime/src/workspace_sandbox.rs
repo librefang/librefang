@@ -5,6 +5,14 @@
 
 use std::path::{Path, PathBuf};
 
+/// Error prefix emitted when a `..` component is found in a user-supplied path.
+/// Used by `agent_loop` to identify sandbox rejections as soft (recoverable) failures.
+pub const ERR_PATH_TRAVERSAL: &str = "Path traversal denied";
+
+/// Error prefix emitted when a path canonicalizes to outside the workspace root.
+/// Used by `agent_loop` to identify sandbox rejections as soft (recoverable) failures.
+pub const ERR_SANDBOX_ESCAPE: &str = "resolves outside workspace";
+
 /// Resolve a user-supplied path within a workspace sandbox.
 ///
 /// - Rejects `..` components outright.
@@ -18,7 +26,9 @@ pub fn resolve_sandbox_path(user_path: &str, workspace_root: &Path) -> Result<Pa
     // Reject any `..` components
     for component in path.components() {
         if matches!(component, std::path::Component::ParentDir) {
-            return Err("Path traversal denied: '..' components are forbidden".to_string());
+            return Err(format!(
+                "{ERR_PATH_TRAVERSAL}: '..' components are forbidden"
+            ));
         }
     }
 
@@ -41,22 +51,33 @@ pub fn resolve_sandbox_path(user_path: &str, workspace_root: &Path) -> Result<Pa
             .map_err(|e| format!("Failed to resolve path: {e}"))?
     } else {
         // For new files: canonicalize the parent and append the filename
+        // If the parent doesn't exist yet, return the joined path and let
+        // the caller create the directory structure.
         let parent = candidate
             .parent()
             .ok_or_else(|| "Invalid path: no parent directory".to_string())?;
         let filename = candidate
             .file_name()
             .ok_or_else(|| "Invalid path: no filename".to_string())?;
-        let canon_parent = parent
-            .canonicalize()
-            .map_err(|e| format!("Failed to resolve parent directory: {e}"))?;
-        canon_parent.join(filename)
+        if parent.exists() {
+            let canon_parent = parent
+                .canonicalize()
+                .map_err(|e| format!("Failed to resolve parent directory: {e}"))?;
+            canon_parent.join(filename)
+        } else {
+            // Parent doesn't exist yet; return the joined path.
+            // This is safe because:
+            // 1. We already rejected '..' components
+            // 2. candidate = workspace_root.join(path), so it's inside by construction
+            // 3. No symlinks can exist in non-existent parent directories
+            candidate
+        }
     };
 
     // Verify the canonical path is inside the workspace
     if !canon_candidate.starts_with(&canon_root) {
         return Err(format!(
-            "Access denied: path '{}' resolves outside workspace. \
+            "Access denied: path '{}' {ERR_SANDBOX_ESCAPE}. \
              If you have an MCP filesystem server configured, use the \
              mcp_filesystem_* tools (e.g. mcp_filesystem_read_file, \
              mcp_filesystem_list_directory) to access files outside \
@@ -128,6 +149,17 @@ mod tests {
         let resolved = result.unwrap();
         assert!(resolved.starts_with(dir.path().canonicalize().unwrap()));
         assert!(resolved.ends_with("new_file.txt"));
+    }
+
+    #[test]
+    fn test_nonexistent_file_with_nonexistent_parent() {
+        let dir = TempDir::new().unwrap();
+        // Parent directory doesn't exist yet
+        let result = resolve_sandbox_path("nested/deep/file.txt", dir.path());
+        assert!(result.is_ok());
+        let resolved = result.unwrap();
+        assert!(resolved.starts_with(dir.path()));
+        assert!(resolved.ends_with("file.txt"));
     }
 
     #[cfg(unix)]

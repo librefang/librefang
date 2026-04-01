@@ -1,0 +1,84 @@
+# 本地与自托管提供商
+
+本页覆盖运行在本机、内网，或由你自己托管且可被 LibreFang 直接访问的推理端点。
+
+## 包含的提供商
+
+- Ollama
+- vLLM
+- LM Studio
+
+---
+
+## Ollama
+
+| | |
+|---|---|
+| **显示名称** | Ollama |
+| **驱动** | OpenAI 兼容 |
+| **环境变量** | `OLLAMA_API_KEY`（非必需） |
+| **基础 URL** | `http://localhost:11434/v1` |
+| **需要密钥** | **否** |
+| **免费额度** | 免费（本地运行） |
+| **认证方式** | 无（本地） |
+| **模型数** | 3 个内置 + 自动发现 |
+
+**可用模型（内置）：**
+- `llama3.2` (本地)
+- `mistral:latest` (本地)
+- `phi3` (本地)
+
+**设置：**
+1. 从 [ollama.com](https://ollama.com) 安装 Ollama
+2. 拉取模型：`ollama pull llama3.2`
+3. 启动服务器：`ollama serve`
+4. 无需设置环境变量 -- Ollama 始终可用
+
+**说明：** LibreFang 会自动从运行中的 Ollama 实例发现模型，并以 `Local` 层级和零成本将其合并到目录中。任何你拉取的模型都会立即可用。
+
+---
+
+## vLLM
+
+| | |
+|---|---|
+| **显示名称** | vLLM |
+| **驱动** | OpenAI 兼容 |
+| **环境变量** | `VLLM_API_KEY`（非必需） |
+| **基础 URL** | `http://localhost:8000/v1` |
+| **需要密钥** | **否** |
+| **免费额度** | 免费（自托管） |
+| **认证方式** | 无（本地） |
+| **模型数** | 1 个内置 + 自动发现 |
+
+**可用模型（内置）：**
+- `vllm-local` (本地)
+
+**设置：**
+1. 安装 vLLM：`pip install vllm`
+2. 启动服务器：`python -m vllm.entrypoints.openai.api_server --model <model-name>`
+3. 无需设置环境变量
+
+---
+
+## LM Studio
+
+| | |
+|---|---|
+| **显示名称** | LM Studio |
+| **驱动** | OpenAI 兼容 |
+| **环境变量** | `LMSTUDIO_API_KEY`（非必需） |
+| **基础 URL** | `http://localhost:1234/v1` |
+| **需要密钥** | **否** |
+| **免费额度** | 免费（本地运行） |
+| **认证方式** | 无（本地） |
+| **模型数** | 1 个内置 + 自动发现 |
+
+**可用模型（内置）：**
+- `lmstudio-local` (本地)
+
+**设置：**
+1. 从 [lmstudio.ai](https://lmstudio.ai) 下载 LM Studio
+2. 通过内置模型浏览器下载模型
+3. 从 "Local Server" 标签页启动本地服务器
+4. 无需设置环境变量

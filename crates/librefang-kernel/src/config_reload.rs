@@ -228,6 +228,10 @@ pub fn build_reload_plan(old: &KernelConfig, new: &KernelConfig) -> ReloadPlan {
         plan.hot_actions.push(HotAction::ReloadChannels);
     }
 
+    if field_changed(&old.skills, &new.skills) {
+        plan.hot_actions.push(HotAction::ReloadSkills);
+    }
+
     if old.usage_footer != new.usage_footer {
         plan.hot_actions.push(HotAction::UpdateUsageFooter);
     }
@@ -552,6 +556,45 @@ mod tests {
         let plan = build_reload_plan(&a, &b);
         assert!(!plan.restart_required);
         assert!(plan.hot_actions.contains(&HotAction::ReloadExtensions));
+    }
+
+    #[test]
+    fn test_skills_hot_reload_load_user_toggle() {
+        let a = default_cfg();
+        let mut b = default_cfg();
+        b.skills.load_user = false;
+        let plan = build_reload_plan(&a, &b);
+        assert!(!plan.restart_required);
+        assert!(
+            plan.hot_actions.contains(&HotAction::ReloadSkills),
+            "disabling load_user should trigger ReloadSkills"
+        );
+    }
+
+    #[test]
+    fn test_skills_hot_reload_extra_dirs() {
+        let a = default_cfg();
+        let mut b = default_cfg();
+        b.skills
+            .extra_dirs
+            .push(std::path::PathBuf::from("/tmp/my-skills"));
+        let plan = build_reload_plan(&a, &b);
+        assert!(!plan.restart_required);
+        assert!(
+            plan.hot_actions.contains(&HotAction::ReloadSkills),
+            "adding extra_dirs should trigger ReloadSkills"
+        );
+    }
+
+    #[test]
+    fn test_skills_no_reload_when_unchanged() {
+        let a = default_cfg();
+        let b = default_cfg();
+        let plan = build_reload_plan(&a, &b);
+        assert!(
+            !plan.hot_actions.contains(&HotAction::ReloadSkills),
+            "identical skills config must not push ReloadSkills"
+        );
     }
 
     #[test]

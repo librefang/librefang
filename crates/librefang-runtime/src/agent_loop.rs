@@ -15,6 +15,7 @@ use crate::loop_guard::{LoopGuard, LoopGuardConfig, LoopGuardVerdict};
 use crate::mcp::McpConnection;
 use crate::tool_runner;
 use crate::web_search::WebToolsContext;
+use crate::workspace_sandbox::{ERR_PATH_TRAVERSAL, ERR_SANDBOX_ESCAPE};
 use librefang_memory::session::Session;
 use librefang_memory::{MemorySubstrate, ProactiveMemoryHooks};
 use librefang_skills::registry::SkillRegistry;
@@ -43,8 +44,8 @@ const MAX_RETRIES: u32 = 3;
 const BASE_RETRY_DELAY_MS: u64 = 1000;
 
 /// Timeout for individual tool executions (seconds).
-/// Raised from 60s to 120s for browser automation and long-running builds.
-const TOOL_TIMEOUT_SECS: u64 = 120;
+/// Raised from 120s to 600s for agent_send/agent_spawn and long-running builds.
+const TOOL_TIMEOUT_SECS: u64 = 600;
 
 /// Maximum consecutive MaxTokens continuations before returning partial response.
 /// Raised from 3 to 5 to allow longer-form generation.
@@ -1378,12 +1379,15 @@ pub async fn run_agent_loop(
                     });
 
                     // Stop executing remaining tool calls on failure (#948)
-                    // but not for approval denials — those should continue the loop
-                    let is_approval_denial = result.is_error
-                        && result
+                    // but not for approval denials or sandbox security rejections —
+                    // those should let the LLM recover and retry with a valid path (#1861)
+                    let is_soft_error = result.is_error
+                        && (result
                             .content
-                            .contains("requires human approval and was denied");
-                    if result.is_error && !is_approval_denial {
+                            .contains("requires human approval and was denied")
+                            || result.content.contains(ERR_PATH_TRAVERSAL)
+                            || result.content.contains(ERR_SANDBOX_ESCAPE));
+                    if result.is_error && !is_soft_error {
                         warn!(
                             tool = %tool_call.name,
                             "Tool execution failed — skipping remaining tool calls"
@@ -2868,12 +2872,15 @@ pub async fn run_agent_loop_streaming(
                     });
 
                     // Stop executing remaining tool calls on failure (#948)
-                    // but not for approval denials — those should continue the loop
-                    let is_approval_denial = result.is_error
-                        && result
+                    // but not for approval denials or sandbox security rejections —
+                    // those should let the LLM recover and retry with a valid path (#1861)
+                    let is_soft_error = result.is_error
+                        && (result
                             .content
-                            .contains("requires human approval and was denied");
-                    if result.is_error && !is_approval_denial {
+                            .contains("requires human approval and was denied")
+                            || result.content.contains(ERR_PATH_TRAVERSAL)
+                            || result.content.contains(ERR_SANDBOX_ESCAPE));
+                    if result.is_error && !is_soft_error {
                         warn!(
                             tool = %tool_call.name,
                             "Tool execution failed — skipping remaining tool calls (streaming)"
@@ -3900,7 +3907,7 @@ mod tests {
 
     #[test]
     fn test_tool_timeout_constant() {
-        assert_eq!(TOOL_TIMEOUT_SECS, 120);
+        assert_eq!(TOOL_TIMEOUT_SECS, 600);
     }
 
     #[test]

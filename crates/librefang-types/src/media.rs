@@ -491,6 +491,9 @@ pub struct MediaTtsRequest {
     /// Language hint (e.g. "en", "zh", "ja").
     #[serde(default)]
     pub language: Option<String>,
+    /// Pitch adjustment (e.g. -20.0 to 20.0 for Google TTS). Provider-specific.
+    #[serde(default)]
+    pub pitch: Option<f32>,
 }
 
 impl MediaTtsRequest {
@@ -510,6 +513,11 @@ impl MediaTtsRequest {
         if let Some(speed) = self.speed {
             if !(0.25..=4.0).contains(&speed) {
                 return Err(format!("Invalid speed {speed}. Must be 0.25-4.0"));
+            }
+        }
+        if let Some(pitch) = self.pitch {
+            if !(-20.0..=20.0).contains(&pitch) {
+                return Err(format!("Invalid pitch {pitch}. Must be -20.0 to 20.0"));
             }
         }
         Ok(())
@@ -985,6 +993,7 @@ mod tests {
             speed: Some(1.0),
             format: None,
             language: None,
+            pitch: None,
         };
         assert!(req.validate().is_ok());
     }
@@ -999,6 +1008,7 @@ mod tests {
             speed: None,
             format: None,
             language: None,
+            pitch: None,
         };
         assert!(req.validate().is_err());
     }
@@ -1013,6 +1023,7 @@ mod tests {
             speed: Some(10.0),
             format: None,
             language: None,
+            pitch: None,
         };
         assert!(req.validate().is_err());
     }

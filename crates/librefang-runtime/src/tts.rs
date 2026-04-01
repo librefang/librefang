@@ -26,6 +26,10 @@ impl TtsEngine {
         Self { config }
     }
 
+    pub fn tts_config(&self) -> &TtsConfig {
+        &self.config
+    }
+
     /// Detect which TTS provider is available based on environment variables.
     fn detect_provider() -> Option<&'static str> {
         if std::env::var("OPENAI_API_KEY").is_ok() {
@@ -33,6 +37,10 @@ impl TtsEngine {
         }
         if std::env::var("ELEVENLABS_API_KEY").is_ok() {
             return Some("elevenlabs");
+        }
+        if std::env::var("GOOGLE_API_KEY").is_ok() || std::env::var("GOOGLE_CLOUD_API_KEY").is_ok()
+        {
+            return Some("google_tts");
         }
         None
     }
@@ -67,7 +75,7 @@ impl TtsEngine {
             .provider
             .as_deref()
             .or_else(|| Self::detect_provider())
-            .ok_or("No TTS provider configured. Set OPENAI_API_KEY or ELEVENLABS_API_KEY")?;
+            .ok_or("No TTS provider configured. Set OPENAI_API_KEY, ELEVENLABS_API_KEY, or GOOGLE_API_KEY")?;
 
         match provider {
             "openai" => {
@@ -75,6 +83,10 @@ impl TtsEngine {
                     .await
             }
             "elevenlabs" => self.synthesize_elevenlabs(text, voice_override).await,
+            "google_tts" => {
+                self.synthesize_google(text, voice_override, format_override)
+                    .await
+            }
             other => Err(format!("Unknown TTS provider: {other}")),
         }
     }
@@ -222,6 +234,51 @@ impl TtsEngine {
             duration_estimate_ms: duration_ms,
         })
     }
+
+    /// Synthesize via Google Cloud TTS API.
+    /// Delegates to `GoogleTtsMediaDriver` to avoid duplicating SSML handling.
+    async fn synthesize_google(
+        &self,
+        text: &str,
+        voice_override: Option<&str>,
+        format_override: Option<&str>,
+    ) -> Result<TtsResult, String> {
+        use crate::media::google_tts::GoogleTtsMediaDriver;
+        use crate::media::MediaDriver;
+        use librefang_types::media::MediaTtsRequest;
+
+        let driver = GoogleTtsMediaDriver::new(None);
+        let request = MediaTtsRequest {
+            text: text.to_string(),
+            provider: Some("google_tts".to_string()),
+            model: None,
+            voice: Some(
+                voice_override
+                    .unwrap_or(&self.config.google.voice)
+                    .to_string(),
+            ),
+            format: Some(
+                format_override
+                    .unwrap_or(&self.config.google.format)
+                    .to_string(),
+            ),
+            speed: Some(self.config.google.speaking_rate),
+            language: Some(self.config.google.language_code.clone()),
+            pitch: Some(self.config.google.pitch),
+        };
+
+        let result = driver
+            .synthesize_speech(&request)
+            .await
+            .map_err(|e| format!("Google TTS failed: {e}"))?;
+
+        Ok(TtsResult {
+            audio_data: result.audio_data,
+            format: result.format,
+            provider: "google_tts".to_string(),
+            duration_estimate_ms: result.duration_ms.unwrap_or(500),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -250,6 +307,11 @@ mod tests {
         assert_eq!(config.openai.speed, 1.0);
         assert_eq!(config.elevenlabs.voice_id, "21m00Tcm4TlvDq8ikWAM");
         assert_eq!(config.elevenlabs.model_id, "eleven_monolingual_v1");
+        assert_eq!(config.google.voice, "en-US-Standard-F");
+        assert_eq!(config.google.language_code, "en-US");
+        assert_eq!(config.google.speaking_rate, 1.0);
+        assert_eq!(config.google.pitch, 0.0);
+        assert_eq!(config.google.format, "mp3");
     }
 
     #[tokio::test]

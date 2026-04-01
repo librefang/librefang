@@ -1109,6 +1109,17 @@ impl LlmDriver for OpenAIDriver {
                                     })
                                     .await;
                             }
+                        } else if let Some(reasoning) = delta["reasoning"].as_str() {
+                            // Fallback: Ollama and some local servers expose the reasoning
+                            // field instead of reasoning_content.
+                            if !reasoning.is_empty() {
+                                reasoning_content.push_str(reasoning);
+                                let _ = tx
+                                    .send(StreamEvent::ThinkingDelta {
+                                        text: reasoning.to_string(),
+                                    })
+                                    .await;
+                            }
                         }
 
                         // Tool call deltas

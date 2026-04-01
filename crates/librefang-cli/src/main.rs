@@ -1896,11 +1896,15 @@ fn cmd_init(quick: bool) {
 
     let librefang_dir = cli_librefang_home();
 
-    // Hint about --upgrade when config already exists (skip in quick/CI mode)
+    // When an existing config is detected in interactive mode, redirect to the
+    // upgrade path so user settings (channels, keys, etc.) are preserved.
+    // The interactive wizard unconditionally overwrites config.toml, which
+    // would silently delete channels and custom configuration (#1862).
     if !quick && librefang_dir.join("config.toml").exists() {
-        ui::hint(
-            "Existing installation detected. To upgrade in-place, run: librefang init --upgrade",
-        );
+        ui::hint("Existing installation detected — running upgrade to preserve your settings.");
+        ui::hint("To start fresh, remove ~/.librefang/config.toml and run `librefang init` again.");
+        cmd_init_upgrade();
+        return;
     }
 
     // --- Ensure directories exist ---
@@ -2087,7 +2091,33 @@ fn cmd_init_upgrade() {
         }
     }
 
-    // 7. Summary
+    // 7. Warn users whose require_approval list predates the file_write default (#1861).
+    // The default was expanded to include file_write and file_delete, but users who
+    // had an explicit `require_approval = [...]` entry in their config won't pick up
+    // the new default automatically.
+    let approval_needs_update = existing
+        .get("approval")
+        .and_then(|a| a.get("require_approval"))
+        .and_then(|r| r.as_array())
+        .is_some_and(|list| {
+            let has_shell = list.iter().any(|v| v.as_str() == Some("shell_exec"));
+            let missing_new = ["file_write", "file_delete", "apply_patch"]
+                .iter()
+                .any(|tool| !list.iter().any(|v| v.as_str() == Some(*tool)));
+            has_shell && missing_new
+        });
+    if approval_needs_update {
+        ui::blank();
+        ui::hint(
+            "Your require_approval list only contains \"shell_exec\". \
+             File operations (file_write, file_delete) now require approval by default.",
+        );
+        ui::hint(
+            "To enable: add \"file_write\" and \"file_delete\" to require_approval in config.toml",
+        );
+    }
+
+    // 8. Summary
     ui::blank();
     ui::success("Upgrade complete!");
     ui::kv("Backup", &backup_name);
@@ -8910,6 +8940,14 @@ fn cmd_update(check: bool, version: Option<String>, channel_override: Option<Str
                 if let Some(installed) = installed_binary_version(&default_install) {
                     ui::kv("Installed", &installed);
                 }
+                // Merge any new config defaults added in the updated binary.
+                // Spawn the new binary rather than calling cmd_init_upgrade() here,
+                // because the current process still holds the old binary's template.
+                ui::blank();
+                ui::hint("Merging new config defaults...");
+                let _ = std::process::Command::new(&default_install)
+                    .args(["init", "--upgrade"])
+                    .status();
                 ui::hint("If the daemon is running, restart it with `librefang restart`.");
             }
             #[cfg(windows)]

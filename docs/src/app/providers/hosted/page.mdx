@@ -1,0 +1,431 @@
+# Hosted Provider APIs
+
+This page covers internet-hosted model providers that authenticate with an API key and connect through LibreFang's native Anthropic/Gemini drivers or the shared OpenAI-compatible driver.
+
+## Included Providers
+
+- Anthropic
+- OpenAI
+- Google Gemini
+- DeepSeek
+- Groq
+- OpenRouter
+- Mistral AI
+- Together AI
+- Fireworks AI
+- Perplexity AI
+- Cohere
+- AI21 Labs
+- Cerebras
+- SambaNova
+- Hugging Face
+- xAI
+
+---
+
+## Anthropic
+
+| | |
+|---|---|
+| **Display Name** | Anthropic |
+| **Driver** | Native Anthropic (Messages API) |
+| **Env Var** | `ANTHROPIC_API_KEY` |
+| **Base URL** | `https://api.anthropic.com` |
+| **Key Required** | Yes |
+| **Free Tier** | No |
+| **Auth** | `x-api-key` header |
+| **Models** | 7 |
+
+**Available Models:**
+- `claude-opus-4-20250514` (Frontier)
+- `claude-sonnet-4-20250514` (Smart)
+- `claude-haiku-4-5-20251001` (Fast)
+
+**Setup:**
+1. Sign up at [console.anthropic.com](https://console.anthropic.com)
+2. Create an API key under Settings > API Keys
+3. `export ANTHROPIC_API_KEY="sk-ant-..."`
+
+---
+
+## OpenAI
+
+| | |
+|---|---|
+| **Display Name** | OpenAI |
+| **Driver** | OpenAI-compatible |
+| **Env Var** | `OPENAI_API_KEY` |
+| **Base URL** | `https://api.openai.com/v1` |
+| **Key Required** | Yes |
+| **Free Tier** | No |
+| **Auth** | `Authorization: Bearer` header |
+| **Models** | 18 |
+
+**Available Models:**
+- `gpt-4.1` (Frontier)
+- `gpt-4o` (Smart)
+- `o3-mini` (Smart)
+- `gpt-4.1-mini` (Balanced)
+- `gpt-4o-mini` (Fast)
+- `gpt-4.1-nano` (Fast)
+
+**Setup:**
+1. Sign up at [platform.openai.com](https://platform.openai.com)
+2. Create an API key under API Keys
+3. `export OPENAI_API_KEY="sk-..."`
+
+---
+
+## Google Gemini
+
+| | |
+|---|---|
+| **Display Name** | Google Gemini |
+| **Driver** | Native Gemini (generateContent API) |
+| **Env Var** | `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) |
+| **Base URL** | `https://generativelanguage.googleapis.com` |
+| **Key Required** | Yes |
+| **Free Tier** | Yes (generous free tier) |
+| **Auth** | `x-goog-api-key` header |
+| **Models** | 10 |
+
+**Available Models:**
+- `gemini-2.5-pro` (Frontier)
+- `gemini-2.5-flash` (Smart)
+- `gemini-2.0-flash` (Fast)
+
+**Setup:**
+1. Go to [aistudio.google.com](https://aistudio.google.com)
+2. Get an API key (free tier included)
+3. `export GEMINI_API_KEY="AIza..."` or `export GOOGLE_API_KEY="AIza..."`
+
+**Notes:** The Gemini driver is a fully native implementation. It is not OpenAI-compatible. Model goes in the URL path, system prompt via `systemInstruction`, tools via `functionDeclarations`, streaming via `streamGenerateContent?alt=sse`.
+
+---
+
+## DeepSeek
+
+| | |
+|---|---|
+| **Display Name** | DeepSeek |
+| **Driver** | OpenAI-compatible |
+| **Env Var** | `DEEPSEEK_API_KEY` |
+| **Base URL** | `https://api.deepseek.com/v1` |
+| **Key Required** | Yes |
+| **Free Tier** | No |
+| **Auth** | `Authorization: Bearer` header |
+| **Models** | 4 |
+
+**Available Models:**
+- `deepseek-chat` (Smart) -- DeepSeek V3
+- `deepseek-reasoner` (Smart) -- DeepSeek R1, no tool support
+
+**Setup:**
+1. Sign up at [platform.deepseek.com](https://platform.deepseek.com)
+2. Create an API key
+3. `export DEEPSEEK_API_KEY="sk-..."`
+
+---
+
+## Groq
+
+| | |
+|---|---|
+| **Display Name** | Groq |
+| **Driver** | OpenAI-compatible |
+| **Env Var** | `GROQ_API_KEY` |
+| **Base URL** | `https://api.groq.com/openai/v1` |
+| **Key Required** | Yes |
+| **Free Tier** | Yes (rate-limited) |
+| **Auth** | `Authorization: Bearer` header |
+| **Models** | 10 |
+
+**Available Models:**
+- `llama-3.3-70b-versatile` (Balanced)
+- `mixtral-8x7b-32768` (Balanced)
+- `llama-3.1-8b-instant` (Fast)
+- `gemma2-9b-it` (Fast)
+
+**Setup:**
+1. Sign up at [console.groq.com](https://console.groq.com)
+2. Create an API key
+3. `export GROQ_API_KEY="gsk_..."`
+
+**Notes:** Groq runs open-source models on custom LPU hardware. Extremely fast inference. Free tier has rate limits but is very usable.
+
+---
+
+## OpenRouter
+
+| | |
+|---|---|
+| **Display Name** | OpenRouter |
+| **Driver** | OpenAI-compatible |
+| **Env Var** | `OPENROUTER_API_KEY` |
+| **Base URL** | `https://openrouter.ai/api/v1` |
+| **Key Required** | Yes |
+| **Free Tier** | Yes (8 free models including Step 3.5 Flash, DeepSeek R1, Llama 3.1 8B, etc.) |
+| **Auth** | `Authorization: Bearer` header |
+| **Models** | 17 |
+
+**Available Models:**
+- `openrouter/google/gemini-2.5-flash` (Smart) -- cheap, fast, 1M context (default)
+- `openrouter/anthropic/claude-sonnet-4` (Smart) -- strong reasoning + tools
+- `openrouter/openai/gpt-4o` (Smart) -- GPT-4o via OpenRouter
+- `openrouter/deepseek/deepseek-chat` (Smart) -- DeepSeek V3
+- `openrouter/meta-llama/llama-3.3-70b-instruct` (Balanced) -- Llama 3.3 70B
+- `openrouter/qwen/qwen-2.5-72b-instruct` (Balanced) -- Qwen 2.5 72B
+- `openrouter/google/gemini-2.5-pro` (Frontier) -- Gemini 2.5 Pro
+- `openrouter/mistralai/mistral-large-latest` (Smart) -- Mistral Large
+- `openrouter/google/gemma-2-9b-it` (Fast) -- Gemma 2 9B, free
+- `openrouter/deepseek/deepseek-r1` (Frontier) -- DeepSeek R1 reasoning
+
+**Setup:**
+1. Sign up at [openrouter.ai](https://openrouter.ai)
+2. Create an API key under Keys
+3. `export OPENROUTER_API_KEY="sk-or-..."`
+
+**Notes:** OpenRouter is a unified gateway to 200+ models from many providers. Model IDs use the upstream format (e.g. `google/gemini-2.5-flash`). You can use any model from OpenRouter's catalog by specifying the full model path with the `openrouter/` prefix.
+
+---
+
+## Mistral AI
+
+| | |
+|---|---|
+| **Display Name** | Mistral AI |
+| **Driver** | OpenAI-compatible |
+| **Env Var** | `MISTRAL_API_KEY` |
+| **Base URL** | `https://api.mistral.ai/v1` |
+| **Key Required** | Yes |
+| **Free Tier** | No |
+| **Auth** | `Authorization: Bearer` header |
+| **Models** | 6 |
+
+**Available Models:**
+- `mistral-large-latest` (Smart)
+- `codestral-latest` (Smart)
+- `mistral-small-latest` (Fast)
+
+**Setup:**
+1. Sign up at [console.mistral.ai](https://console.mistral.ai)
+2. Create an API key
+3. `export MISTRAL_API_KEY="..."`
+
+---
+
+## Together AI
+
+| | |
+|---|---|
+| **Display Name** | Together AI |
+| **Driver** | OpenAI-compatible |
+| **Env Var** | `TOGETHER_API_KEY` |
+| **Base URL** | `https://api.together.xyz/v1` |
+| **Key Required** | Yes |
+| **Free Tier** | Yes (limited credits on signup) |
+| **Auth** | `Authorization: Bearer` header |
+| **Models** | 8 |
+
+**Available Models:**
+- `meta-llama/Meta-Llama-3.1-405B-Instruct-Turbo` (Frontier)
+- `Qwen/Qwen2.5-72B-Instruct-Turbo` (Smart)
+- `mistralai/Mixtral-8x22B-Instruct-v0.1` (Balanced)
+
+**Setup:**
+1. Sign up at [api.together.ai](https://api.together.ai)
+2. Create an API key
+3. `export TOGETHER_API_KEY="..."`
+
+---
+
+## Fireworks AI
+
+| | |
+|---|---|
+| **Display Name** | Fireworks AI |
+| **Driver** | OpenAI-compatible |
+| **Env Var** | `FIREWORKS_API_KEY` |
+| **Base URL** | `https://api.fireworks.ai/inference/v1` |
+| **Key Required** | Yes |
+| **Free Tier** | Yes (limited credits on signup) |
+| **Auth** | `Authorization: Bearer` header |
+| **Models** | 5 |
+
+**Available Models:**
+- `accounts/fireworks/models/llama-v3p1-405b-instruct` (Frontier)
+- `accounts/fireworks/models/mixtral-8x22b-instruct` (Balanced)
+
+**Setup:**
+1. Sign up at [fireworks.ai](https://fireworks.ai)
+2. Create an API key
+3. `export FIREWORKS_API_KEY="..."`
+
+---
+
+## Perplexity AI
+
+| | |
+|---|---|
+| **Display Name** | Perplexity AI |
+| **Driver** | OpenAI-compatible |
+| **Env Var** | `PERPLEXITY_API_KEY` |
+| **Base URL** | `https://api.perplexity.ai` |
+| **Key Required** | Yes |
+| **Free Tier** | No |
+| **Auth** | `Authorization: Bearer` header |
+| **Models** | 2 |
+
+**Available Models:**
+- `sonar-pro` (Smart) -- online search-augmented
+- `sonar` (Balanced) -- online search-augmented
+
+**Setup:**
+1. Sign up at [perplexity.ai](https://www.perplexity.ai)
+2. Go to API settings and generate a key
+3. `export PERPLEXITY_API_KEY="pplx-..."`
+
+**Notes:** Perplexity models have built-in web search. They do not support tool use.
+
+---
+
+## Cohere
+
+| | |
+|---|---|
+| **Display Name** | Cohere |
+| **Driver** | OpenAI-compatible |
+| **Env Var** | `COHERE_API_KEY` |
+| **Base URL** | `https://api.cohere.com/v2` |
+| **Key Required** | Yes |
+| **Free Tier** | Yes (rate-limited trial) |
+| **Auth** | `Authorization: Bearer` header |
+| **Models** | 2 |
+
+**Available Models:**
+- `command-r-plus` (Smart)
+- `command-r` (Balanced)
+
+**Setup:**
+1. Sign up at [dashboard.cohere.com](https://dashboard.cohere.com)
+2. Create an API key
+3. `export COHERE_API_KEY="..."`
+
+---
+
+## AI21 Labs
+
+| | |
+|---|---|
+| **Display Name** | AI21 Labs |
+| **Driver** | OpenAI-compatible |
+| **Env Var** | `AI21_API_KEY` |
+| **Base URL** | `https://api.ai21.com/studio/v1` |
+| **Key Required** | Yes |
+| **Free Tier** | Yes (limited credits) |
+| **Auth** | `Authorization: Bearer` header |
+| **Models** | 1 |
+
+**Available Models:**
+- `jamba-1.5-large` (Smart)
+
+**Setup:**
+1. Sign up at [studio.ai21.com](https://studio.ai21.com)
+2. Create an API key
+3. `export AI21_API_KEY="..."`
+
+---
+
+## Cerebras
+
+| | |
+|---|---|
+| **Display Name** | Cerebras |
+| **Driver** | OpenAI-compatible |
+| **Env Var** | `CEREBRAS_API_KEY` |
+| **Base URL** | `https://api.cerebras.ai/v1` |
+| **Key Required** | Yes |
+| **Free Tier** | Yes (generous free tier) |
+| **Auth** | `Authorization: Bearer` header |
+| **Models** | 2 |
+
+**Available Models:**
+- `cerebras/llama3.3-70b` (Balanced)
+- `cerebras/llama3.1-8b` (Fast)
+
+**Setup:**
+1. Sign up at [cloud.cerebras.ai](https://cloud.cerebras.ai)
+2. Create an API key
+3. `export CEREBRAS_API_KEY="..."`
+
+**Notes:** Cerebras runs inference on wafer-scale chips. Ultra-fast and ultra-cheap ($0.06/M tokens for both input and output on the 70B model).
+
+---
+
+## SambaNova
+
+| | |
+|---|---|
+| **Display Name** | SambaNova |
+| **Driver** | OpenAI-compatible |
+| **Env Var** | `SAMBANOVA_API_KEY` |
+| **Base URL** | `https://api.sambanova.ai/v1` |
+| **Key Required** | Yes |
+| **Free Tier** | Yes (3 free models) |
+| **Auth** | `Authorization: Bearer` header |
+| **Models** | 3 |
+
+**Available Models:**
+- `sambanova/llama-3.3-70b` (Balanced)
+
+**Setup:**
+1. Sign up at [cloud.sambanova.ai](https://cloud.sambanova.ai)
+2. Create an API key
+3. `export SAMBANOVA_API_KEY="..."`
+
+---
+
+## Hugging Face
+
+| | |
+|---|---|
+| **Display Name** | Hugging Face |
+| **Driver** | OpenAI-compatible |
+| **Env Var** | `HF_API_KEY` |
+| **Base URL** | `https://api-inference.huggingface.co/v1` |
+| **Key Required** | Yes |
+| **Free Tier** | No |
+| **Auth** | `Authorization: Bearer` header |
+| **Models** | 1 |
+
+**Available Models:**
+- `hf/meta-llama/Llama-3.3-70B-Instruct` (Balanced)
+
+**Setup:**
+1. Sign up at [huggingface.co](https://huggingface.co)
+2. Create a token under Settings > Access Tokens
+3. `export HF_API_KEY="hf_..."`
+
+---
+
+## xAI
+
+| | |
+|---|---|
+| **Display Name** | xAI |
+| **Driver** | OpenAI-compatible |
+| **Env Var** | `XAI_API_KEY` |
+| **Base URL** | `https://api.x.ai/v1` |
+| **Key Required** | Yes |
+| **Free Tier** | Yes (limited free credits) |
+| **Auth** | `Authorization: Bearer` header |
+| **Models** | 2 |
+
+**Available Models:**
+- `grok-2` (Smart) -- supports vision
+- `grok-2-mini` (Fast)
+
+**Setup:**
+1. Sign up at [console.x.ai](https://console.x.ai)
+2. Create an API key
+3. `export XAI_API_KEY="xai-..."`

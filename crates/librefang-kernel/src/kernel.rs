@@ -13,7 +13,8 @@ use crate::scheduler::AgentScheduler;
 use crate::supervisor::Supervisor;
 use crate::triggers::{TriggerEngine, TriggerId, TriggerPattern};
 use crate::workflow::{
-    StepAgent, Workflow, WorkflowEngine, WorkflowId, WorkflowRunId, WorkflowTemplateRegistry,
+    DryRunStep, StepAgent, Workflow, WorkflowEngine, WorkflowId, WorkflowRunId,
+    WorkflowTemplateRegistry,
 };
 
 use librefang_memory::MemorySubstrate;
@@ -1797,56 +1798,51 @@ impl LibreFangKernel {
                         None
                     }
                 }
-            } else if std::env::var("OPENAI_API_KEY").is_ok() {
-                let model = if configured_model == "all-MiniLM-L6-v2"
-                    || configured_model == "text-embedding-3-small"
-                {
-                    default_embedding_model_for_provider("openai")
-                } else {
-                    configured_model.as_str()
-                };
-                let openai_url = config.provider_urls.get("openai").map(|s| s.as_str());
-                match create_embedding_driver(
-                    "openai",
-                    model,
-                    "OPENAI_API_KEY",
-                    openai_url,
-                    config.memory.embedding_dimensions,
-                ) {
-                    Ok(d) => {
-                        info!(model = %model, "Embedding driver auto-detected: OpenAI");
-                        Some(Arc::from(d))
-                    }
-                    Err(e) => {
-                        warn!(error = %e, "OpenAI embedding auto-detect failed");
-                        None
-                    }
-                }
             } else {
-                // Try Ollama (local, no key needed)
-                let model = if configured_model == "all-MiniLM-L6-v2"
-                    || configured_model == "text-embedding-3-small"
-                {
-                    default_embedding_model_for_provider("ollama")
+                // No explicit provider configured — probe environment to find one.
+                use librefang_runtime::embedding::detect_embedding_provider;
+                if let Some(detected) = detect_embedding_provider() {
+                    let model = if configured_model == "all-MiniLM-L6-v2"
+                        || configured_model == "text-embedding-3-small"
+                    {
+                        default_embedding_model_for_provider(detected)
+                    } else {
+                        configured_model.as_str()
+                    };
+                    let provider_url = config.provider_urls.get(detected).map(|s| s.as_str());
+                    // Determine the API key env var for the detected provider.
+                    let key_env = match detected {
+                        "openai" => "OPENAI_API_KEY",
+                        "groq" => "GROQ_API_KEY",
+                        "mistral" => "MISTRAL_API_KEY",
+                        "together" => "TOGETHER_API_KEY",
+                        "fireworks" => "FIREWORKS_API_KEY",
+                        "cohere" => "COHERE_API_KEY",
+                        _ => "",
+                    };
+                    match create_embedding_driver(
+                        detected,
+                        model,
+                        key_env,
+                        provider_url,
+                        config.memory.embedding_dimensions,
+                    ) {
+                        Ok(d) => {
+                            info!(provider = %detected, model = %model, "Embedding driver auto-detected");
+                            Some(Arc::from(d))
+                        }
+                        Err(e) => {
+                            warn!(provider = %detected, error = %e, "Auto-detected embedding driver init failed — falling back to text search");
+                            None
+                        }
+                    }
                 } else {
-                    configured_model.as_str()
-                };
-                let ollama_url = config.provider_urls.get("ollama").map(|s| s.as_str());
-                match create_embedding_driver(
-                    "ollama",
-                    model,
-                    "",
-                    ollama_url,
-                    config.memory.embedding_dimensions,
-                ) {
-                    Ok(d) => {
-                        info!(model = %model, "Embedding driver auto-detected: Ollama (local)");
-                        Some(Arc::from(d))
-                    }
-                    Err(e) => {
-                        debug!("No embedding driver available (Ollama probe failed: {e}) — using text search fallback");
-                        None
-                    }
+                    warn!(
+                        "No embedding provider available. Set one of: OPENAI_API_KEY, \
+                         GROQ_API_KEY, MISTRAL_API_KEY, TOGETHER_API_KEY, FIREWORKS_API_KEY, \
+                         COHERE_API_KEY, or configure Ollama."
+                    );
+                    None
                 }
             }
         };
@@ -2161,7 +2157,9 @@ impl LibreFangKernel {
                     // Check enabled flag — also do a direct TOML read as fallback
                     let mut is_enabled = restored_entry.manifest.enabled;
                     if is_enabled {
-                        // Double-check: read directly from hands/agents TOML in case DB is stale
+                        // Double-check: read directly from hands/agents TOML in case DB is stale.
+                        // Use proper TOML parsing instead of string matching to handle all valid
+                        // whitespace variants and avoid false positives from comments.
                         for dir in &["agents", "hands"] {
                             let check_path = kernel
                                 .home_dir_boot
@@ -2170,9 +2168,7 @@ impl LibreFangKernel {
                                 .join("agent.toml");
                             if check_path.exists() {
                                 if let Ok(content) = std::fs::read_to_string(&check_path) {
-                                    if content.contains("enabled = false")
-                                        || content.contains("enabled=false")
-                                    {
+                                    if toml_enabled_false(&content) {
                                         is_enabled = false;
                                         restored_entry.manifest.enabled = false;
                                     }
@@ -2417,35 +2413,17 @@ system_prompt = "You are a helpful assistant."
         }
         info!(agent = %name, id = %agent_id, exec_mode = ?manifest.exec_policy.as_ref().map(|p| &p.mode), "Agent exec_policy resolved");
 
-        // Overlay kernel default_model onto agent if agent didn't explicitly choose.
-        // Treat empty or "default" as "use the kernel's configured default_model".
-        // This allows bundled agents to defer to the user's configured provider/model,
-        // even if the agent manifest specifies an api_key_env (which is just a hint
-        // about which env var to check, not a hard lock on provider/model).
+        // Normalize empty provider/model to "default" so the intent is preserved in DB.
+        // Resolution to concrete values happens at execute_llm_agent time, ensuring
+        // provider changes take effect immediately without re-spawning agents.
         {
             let is_default_provider =
                 manifest.model.provider.is_empty() || manifest.model.provider == "default";
             let is_default_model =
                 manifest.model.model.is_empty() || manifest.model.model == "default";
             if is_default_provider && is_default_model {
-                // Check hot-reloaded override first, fall back to boot-time config
-                let override_guard = self
-                    .default_model_override
-                    .read()
-                    .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
-                let dm = override_guard.as_ref().unwrap_or(&cfg.default_model);
-                if !dm.provider.is_empty() {
-                    manifest.model.provider = dm.provider.clone();
-                }
-                if !dm.model.is_empty() {
-                    manifest.model.model = dm.model.clone();
-                }
-                if !dm.api_key_env.is_empty() && manifest.model.api_key_env.is_none() {
-                    manifest.model.api_key_env = Some(dm.api_key_env.clone());
-                }
-                if dm.base_url.is_some() && manifest.model.base_url.is_none() {
-                    manifest.model.base_url.clone_from(&dm.base_url);
-                }
+                manifest.model.provider = "default".to_string();
+                manifest.model.model = "default".to_string();
             }
         }
 
@@ -4161,6 +4139,40 @@ system_prompt = "You are a helpful assistant."
 
         // Apply model routing if configured (disabled in Stable mode)
         let mut manifest = entry.manifest.clone();
+
+        // Resolve "default" provider/model to the current effective default.
+        // This covers three cases:
+        // 1. New agents stored as "default"/"default" (post-fix spawn behavior)
+        // 2. The auto-spawned "assistant" agent that may have a stale concrete
+        //    provider/model in DB from before a provider switch
+        // 3. TOML agents with provider="default" that got a concrete value baked in
+        {
+            let is_default_provider =
+                manifest.model.provider.is_empty() || manifest.model.provider == "default";
+            let is_default_model =
+                manifest.model.model.is_empty() || manifest.model.model == "default";
+            let is_auto_spawned =
+                entry.name == "assistant" && manifest.description == "General-purpose assistant";
+            if (is_default_provider && is_default_model) || is_auto_spawned {
+                let override_guard = self
+                    .default_model_override
+                    .read()
+                    .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
+                let dm = override_guard.as_ref().unwrap_or(&cfg.default_model);
+                if !dm.provider.is_empty() {
+                    manifest.model.provider = dm.provider.clone();
+                }
+                if !dm.model.is_empty() {
+                    manifest.model.model = dm.model.clone();
+                }
+                if !dm.api_key_env.is_empty() && manifest.model.api_key_env.is_none() {
+                    manifest.model.api_key_env = Some(dm.api_key_env.clone());
+                }
+                if dm.base_url.is_some() && manifest.model.base_url.is_none() {
+                    manifest.model.base_url.clone_from(&dm.base_url);
+                }
+            }
+        }
 
         // Backfill thinking config from global config if per-agent is not set
         if manifest.thinking.is_none() {
@@ -6240,22 +6252,7 @@ system_prompt = "You are a helpful assistant."
                     self.channel_adapters.clear();
                 }
                 HotAction::ReloadSkills => {
-                    info!("Hot-reload: reloading skill registry");
-                    let mut reg = self
-                        .skill_registry
-                        .write()
-                        .unwrap_or_else(|e| e.into_inner());
-                    match reg.load_all() {
-                        Ok(n) => {
-                            info!("Hot-reload: reloaded {n} skill(s)");
-                        }
-                        Err(e) => {
-                            warn!("Hot-reload: failed to reload skills: {e}");
-                        }
-                    }
-                    // Bump skill generation so tool list caches are invalidated
-                    self.skill_generation
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    self.reload_skills();
                 }
                 HotAction::UpdateUsageFooter => {
                     info!(
@@ -6579,6 +6576,41 @@ system_prompt = "You are a helpful assistant."
         Ok((run_id, output))
     }
 
+    /// Dry-run a workflow: resolve agents and expand prompts without making any LLM calls.
+    ///
+    /// Returns a per-step preview useful for validating a workflow before running it for real.
+    pub async fn dry_run_workflow(
+        &self,
+        workflow_id: WorkflowId,
+        input: String,
+    ) -> KernelResult<Vec<DryRunStep>> {
+        let resolver =
+            |agent_ref: &StepAgent| -> Option<(librefang_types::agent::AgentId, String, bool)> {
+                match agent_ref {
+                    StepAgent::ById { id } => {
+                        let agent_id: librefang_types::agent::AgentId = id.parse().ok()?;
+                        let entry = self.registry.get(agent_id)?;
+                        let inherit = entry.manifest.inherit_parent_context;
+                        Some((agent_id, entry.name.clone(), inherit))
+                    }
+                    StepAgent::ByName { name } => {
+                        let entry = self.registry.find_by_name(name)?;
+                        let inherit = entry.manifest.inherit_parent_context;
+                        Some((entry.id, entry.name.clone(), inherit))
+                    }
+                }
+            };
+
+        self.workflows
+            .dry_run(workflow_id, &input, resolver)
+            .await
+            .map_err(|e| {
+                KernelError::LibreFang(LibreFangError::Internal(format!(
+                    "Workflow dry-run failed: {e}"
+                )))
+            })
+    }
+
     /// Start background loops for all non-reactive agents.
     ///
     /// Must be called after the kernel is wrapped in `Arc` (e.g., from the daemon).
@@ -6610,8 +6642,7 @@ system_prompt = "You are a helpful assistant."
                     .join("agent.toml");
                 if hand_toml.exists() {
                     if let Ok(content) = std::fs::read_to_string(&hand_toml) {
-                        if content.contains("enabled = false") || content.contains("enabled=false")
-                        {
+                        if toml_enabled_false(&content) {
                             info!(hand = %hand_id, "Hand disabled in config — skipping reactivation");
                             continue;
                         }
@@ -6744,6 +6775,9 @@ system_prompt = "You are a helpful assistant."
                 }
                 librefang_types::config::SearchProvider::Perplexity => {
                     Some(("Perplexity", cfg.web.perplexity.api_key_env.clone()))
+                }
+                librefang_types::config::SearchProvider::Jina => {
+                    Some(("Jina", cfg.web.jina.api_key_env.clone()))
                 }
                 _ => None,
             };
@@ -8849,6 +8883,20 @@ fn infer_provider_from_model(model: &str) -> Option<String> {
 
 /// A well-known agent ID used for shared memory operations across agents.
 /// This is a fixed UUID so all agents read/write to the same namespace.
+/// Parse an agent.toml string and return true if `enabled` is explicitly set
+/// to `false`. Uses proper TOML parsing to handle all valid whitespace variants
+/// and avoid false positives from commented-out lines.
+fn toml_enabled_false(content: &str) -> bool {
+    #[derive(serde::Deserialize)]
+    struct Probe {
+        enabled: Option<bool>,
+    }
+    toml::from_str::<Probe>(content)
+        .ok()
+        .and_then(|p| p.enabled)
+        == Some(false)
+}
+
 pub fn shared_memory_agent_id() -> AgentId {
     AgentId(uuid::Uuid::from_bytes([
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -8939,6 +8987,59 @@ async fn cron_deliver_response(
 impl LibreFangKernel {
     /// Mark all active Hands' cron jobs as due-now so the next scheduler tick fires them.
     /// Called after a provider is first configured so Hands resume immediately.
+    /// Update registry entries for agents that should track the kernel default model.
+    /// Called after a provider switch so agents pick up the new provider without restart.
+    ///
+    /// Agents eligible for update:
+    /// - Any agent with provider="default" or "" (new spawn-time behavior)
+    /// - The auto-spawned "assistant" agent (may have stale concrete provider in DB)
+    /// - Dashboard-created agents (no source_toml_path, no custom api_key_env) whose
+    ///   stored provider matches `old_provider` — these were using the old default
+    pub fn sync_default_model_agents(
+        &self,
+        old_provider: &str,
+        dm: &librefang_types::config::DefaultModelConfig,
+    ) {
+        for entry in self.registry.list() {
+            let is_default_provider = entry.manifest.model.provider.is_empty()
+                || entry.manifest.model.provider == "default";
+            let is_default_model =
+                entry.manifest.model.model.is_empty() || entry.manifest.model.model == "default";
+            let is_auto_spawned = entry.name == "assistant"
+                && entry.manifest.description == "General-purpose assistant";
+            // Dashboard-created agents that were using the old default provider:
+            // no source TOML, no custom API key, and saved provider == old default
+            let is_stale_dashboard_default = entry.source_toml_path.is_none()
+                && entry.manifest.model.api_key_env.is_none()
+                && entry.manifest.model.base_url.is_none()
+                && entry.manifest.model.provider == old_provider;
+
+            if (is_default_provider && is_default_model)
+                || is_auto_spawned
+                || is_stale_dashboard_default
+            {
+                let _ = self.registry.update_model_and_provider(
+                    entry.id,
+                    dm.model.clone(),
+                    dm.provider.clone(),
+                );
+                if !dm.api_key_env.is_empty() {
+                    if let Some(mut e) = self.registry.get(entry.id) {
+                        if e.manifest.model.api_key_env.is_none() {
+                            e.manifest.model.api_key_env = Some(dm.api_key_env.clone());
+                        }
+                        if dm.base_url.is_some() && e.manifest.model.base_url.is_none() {
+                            e.manifest.model.base_url.clone_from(&dm.base_url);
+                        }
+                        let _ = self.memory.save_agent(&e);
+                    }
+                } else if let Some(e) = self.registry.get(entry.id) {
+                    let _ = self.memory.save_agent(&e);
+                }
+            }
+        }
+    }
+
     pub fn trigger_all_hands(&self) {
         let hand_agents: Vec<AgentId> = self
             .hand_registry
@@ -10401,16 +10502,13 @@ mod tests {
             .expect("agent should spawn with local model override");
 
         let entry = kernel.registry.get(agent_id).expect("agent registry entry");
-        assert_eq!(entry.manifest.model.provider, "ollama");
-        assert_eq!(entry.manifest.model.model, "Qwen3.5-4B-MLX-4bit");
-        assert_eq!(
-            entry.manifest.model.base_url.as_deref(),
-            Some("http://127.0.0.1:11434/v1")
-        );
-        assert!(
-            entry.manifest.model.api_key_env.is_none(),
-            "local model override should not require an API key env var"
-        );
+        // Spawn now stores "default"/"default" so provider changes propagate at
+        // execute time without re-spawning. Concrete resolution happens in
+        // execute_llm_agent, not at spawn.
+        assert_eq!(entry.manifest.model.provider, "default");
+        assert_eq!(entry.manifest.model.model, "default");
+        assert!(entry.manifest.model.base_url.is_none());
+        assert!(entry.manifest.model.api_key_env.is_none());
 
         kernel.shutdown();
     }

@@ -114,7 +114,7 @@ fn compute_calver() -> String {
         "{}.{}.{}",
         now.format("%Y"),
         now.format("%-m"),
-        now.format("%d"),
+        now.format("%-d"),
     )
 }
 
@@ -310,7 +310,7 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     // Validate CalVer early, before using version in git tags/branches
     let calver_re =
-        Regex::new(r"^[0-9]{4}\.[0-9]{1,2}(\.[0-9]{2,4})?(-(beta|rc)[0-9]+|-lts(\.[0-9]+)?)?$")
+        Regex::new(r"^[0-9]{4}\.[0-9]{1,2}(\.[0-9]{1,4})?(-(beta|rc)[0-9]+|-lts(\.[0-9]+)?)?$")
             .unwrap();
     if !calver_re.is_match(&version) {
         return Err(format!(
@@ -357,8 +357,8 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
         }
         if let Some(ref pt) = prev_tag {
             println!(
-                "  Review:  https://github.com/librefang/librefang/compare/{}...main",
-                pt
+                "  Review:  https://github.com/librefang/librefang/compare/{}...{}",
+                pt, tag
             );
         }
         println!();
