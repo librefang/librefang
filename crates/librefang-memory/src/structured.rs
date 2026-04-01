@@ -431,7 +431,7 @@ impl StructuredStore {
             let new_blob = rmp_serde::to_vec_named(&manifest)
                 .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
             if new_blob != manifest_blob {
-                tracing::info!(
+                tracing::debug!(
                     agent = %name, id = %id_str,
                     "Auto-repaired agent manifest (schema upgraded)"
                 );
