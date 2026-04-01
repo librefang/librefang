@@ -203,30 +203,41 @@ fn run_watch(
     println!("  Watching: crates/");
     println!("  Press Ctrl+C to stop\n");
 
-    // Single script manages the daemon lifecycle: kill old, remove stale PID
-    // file, start fresh.  Used for both the initial launch and every
-    // cargo-watch rebuild so there is exactly one code-path (no races).
+    // Stop any running daemon via the CLI (reads daemon.json, sends SIGTERM,
+    // waits for exit) — far more reliable than lsof + kill -9.
+    let _ = Command::new(binary).arg("stop").status();
+    // Belt-and-suspenders: also kill by port in case `stop` missed something.
     let home_dir = librefang_home().display().to_string();
-    let restart_script = format!(
-        "(for pid in $(lsof -ti :{port} -sTCP:LISTEN 2>/dev/null); do kill -9 $pid 2>/dev/null; done; \
+    let stop_script = format!(
+        "{binary} stop 2>/dev/null; \
+         for pid in $(lsof -ti :{port} -sTCP:LISTEN 2>/dev/null); do kill -9 $pid 2>/dev/null; done; \
          rm -f {home}/daemon.json; \
-         sleep 0.3; \
-         LIBREFANG_PORT={port} {binary} start --foreground &)",
-        port = port,
+         sleep 0.5",
         binary = binary_str,
+        port = port,
         home = home_dir,
     );
 
     // Start daemon immediately (no build needed — already built above).
     let _ = Command::new("sh")
-        .args(["-c", &restart_script])
+        .args([
+            "-c",
+            &format!(
+                "({stop} && LIBREFANG_PORT={port} {binary} start --foreground &)",
+                stop = stop_script,
+                port = port,
+                binary = binary_str,
+            ),
+        ])
         .current_dir(root)
         .status();
 
-    // On every crate change: rebuild, then restart via the same script.
+    // On every crate change: rebuild, then stop+restart.
     let rebuild_and_restart = format!(
-        "(cargo build -p librefang-cli && {restart})",
-        restart = restart_script,
+        "(cargo build -p librefang-cli && {stop} && LIBREFANG_PORT={port} {binary} start --foreground &)",
+        stop = stop_script,
+        port = port,
+        binary = binary_str,
     );
 
     let cargo_watch_status = Command::new("cargo")
