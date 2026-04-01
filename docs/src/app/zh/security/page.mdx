@@ -628,6 +628,45 @@ http://localhost:8080/api       ->  localhost:8080
 http://example.com              ->  example.com:80
 ```
 
+### 7.6 SSRF 白名单（自托管 / K8s）
+
+自托管和 Kubernetes 部署通常需要 Agent 访问内部服务（例如企业代理后面的
+私有 API）。`[tools.web_fetch] ssrf_allowed_hosts` 配置项允许运维人员
+显式豁免原本会被私有 IP 检查拦截的 CIDR 或主机名。
+
+**云元数据地址段（`169.254.0.0/16`、`100.64.0.0/10`）无条件拦截，
+无法通过白名单豁免。**
+
+#### 配置示例
+
+```toml
+[tools.web_fetch]
+ssrf_allowed_hosts = [
+  "10.0.0.0/8",                # CIDR — 整个 RFC-1918 /8 段
+  "172.16.0.0/12",             # CIDR — RFC-1918 /12 段
+  "*.internal.example.com",    # glob 前缀通配符
+  "svc.cluster.local",         # 字面主机名
+  "192.168.1.100",             # 字面 IP
+]
+```
+
+#### 匹配规则
+
+| 条目格式 | 示例 | 匹配对象 |
+|---|---|---|
+| CIDR | `"10.0.0.0/8"` | 目标主机的解析 IP |
+| glob 前缀 | `"*.internal.example.com"` | URL 中的主机名（后缀匹配） |
+| 字面 IP | `"192.168.1.100"` | 目标主机的解析 IP |
+| 字面主机名 | `"svc.cluster.local"` | URL 中的主机名（大小写不敏感） |
+
+#### 仍然会被拦截的地址
+
+即使白名单中有匹配条目，以下地址**始终**会被拒绝：
+
+- `169.254.0.0/16` — 链路本地 / AWS EC2 实例元数据
+- `100.64.0.0/10` — CGNAT（包括阿里云 IMDS `100.100.100.200`）
+- 主机名黑名单中的所有条目（`localhost`、`metadata.google.internal` 等）
+
 ---
 
 ## 8. 密钥零化
