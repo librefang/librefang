@@ -40,10 +40,14 @@ impl fmt::Display for ModelTier {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthStatus {
-    /// API key is present in the environment.
+    /// API key is present and confirmed valid via a live API probe.
+    ValidatedKey,
+    /// API key is present (non-empty) but not yet validated.
     Configured,
     /// No API key, but a CLI tool (e.g. claude-code) is available as fallback.
     ConfiguredCli,
+    /// API key is present but was rejected by the provider (HTTP 401/403).
+    InvalidKey,
     /// API key is missing.
     #[default]
     Missing,
@@ -55,10 +59,15 @@ pub enum AuthStatus {
 
 impl AuthStatus {
     /// Returns true if the provider is usable (key or CLI available).
+    ///
+    /// `InvalidKey` returns false — the key exists but won't work.
     pub fn is_available(self) -> bool {
         matches!(
             self,
-            AuthStatus::Configured | AuthStatus::ConfiguredCli | AuthStatus::NotRequired
+            AuthStatus::ValidatedKey
+                | AuthStatus::Configured
+                | AuthStatus::ConfiguredCli
+                | AuthStatus::NotRequired
         )
     }
 }
@@ -66,8 +75,10 @@ impl AuthStatus {
 impl fmt::Display for AuthStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            AuthStatus::ValidatedKey => write!(f, "validated_key"),
             AuthStatus::Configured => write!(f, "configured"),
             AuthStatus::ConfiguredCli => write!(f, "configured_cli"),
+            AuthStatus::InvalidKey => write!(f, "invalid_key"),
             AuthStatus::Missing => write!(f, "missing"),
             AuthStatus::NotRequired => write!(f, "not_required"),
             AuthStatus::CliNotInstalled => write!(f, "cli_not_installed"),

@@ -92,7 +92,7 @@ impl CredentialResolver {
             return true;
         }
         // Check env (non-empty after trim)
-        std::env::var(key).map_or(false, |v| !v.trim().is_empty())
+        std::env::var(key).is_ok_and(|v| !v.trim().is_empty())
     }
 
     /// Resolve all required credentials for an integration.

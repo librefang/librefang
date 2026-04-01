@@ -473,7 +473,7 @@ pub fn detect_embedding_provider() -> Option<&'static str> {
     // Local Ollama — available if OLLAMA_HOST is set and non-empty. We don't
     // attempt a live TCP probe here (that would be async and would require a
     // runtime); a non-empty env var is sufficient signal.
-    if std::env::var("OLLAMA_HOST").map_or(false, |v| !v.trim().is_empty()) {
+    if std::env::var("OLLAMA_HOST").is_ok_and(|v| !v.trim().is_empty()) {
         return Some("ollama");
     }
 

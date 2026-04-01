@@ -32,9 +32,7 @@ impl TtsEngine {
 
     /// Detect which TTS provider is available based on environment variables.
     fn detect_provider() -> Option<&'static str> {
-        let has_key = |var: &str| {
-            std::env::var(var).map_or(false, |v| !v.trim().is_empty())
-        };
+        let has_key = |var: &str| std::env::var(var).is_ok_and(|v| !v.trim().is_empty());
         if has_key("OPENAI_API_KEY") {
             return Some("openai");
         }

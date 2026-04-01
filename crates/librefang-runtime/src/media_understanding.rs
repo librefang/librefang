@@ -253,7 +253,7 @@ impl MediaEngine {
 
 /// Detect which vision provider is available based on environment variables.
 fn detect_vision_provider() -> Option<&'static str> {
-    let has_key = |var: &str| std::env::var(var).map_or(false, |v| !v.trim().is_empty());
+    let has_key = |var: &str| std::env::var(var).is_ok_and(|v| !v.trim().is_empty());
     if has_key("ANTHROPIC_API_KEY") {
         return Some("anthropic");
     }
@@ -268,7 +268,7 @@ fn detect_vision_provider() -> Option<&'static str> {
 
 /// Detect which audio transcription provider is available.
 fn detect_audio_provider() -> Option<&'static str> {
-    let has_key = |var: &str| std::env::var(var).map_or(false, |v| !v.trim().is_empty());
+    let has_key = |var: &str| std::env::var(var).is_ok_and(|v| !v.trim().is_empty());
     if has_key("GROQ_API_KEY") {
         return Some("groq");
     }

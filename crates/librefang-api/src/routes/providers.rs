@@ -674,13 +674,17 @@ pub async fn set_provider_key(
     // Set env var in current process so detect_auth picks it up
     std::env::set_var(&env_var, &key);
 
-    // Refresh auth detection
+    // Refresh auth detection (sync, sets status to Configured if non-empty)
     state
         .kernel
         .model_catalog_ref()
         .write()
         .unwrap_or_else(|e| e.into_inner())
         .detect_auth();
+
+    // Kick off a background probe to validate the new key immediately so the
+    // dashboard reflects ValidatedKey / InvalidKey without waiting for restart.
+    state.kernel.clone().spawn_key_validation();
 
     // Auto-switch default provider if current default has no working key.
     // This fixes the common case where a user adds e.g. a Gemini key via dashboard

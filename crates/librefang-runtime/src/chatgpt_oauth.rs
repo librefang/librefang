@@ -474,7 +474,7 @@ pub async fn fetch_best_codex_model(access_token: &str) -> String {
 
 /// Check if ChatGPT session auth is available (CHATGPT_SESSION_TOKEN env var is set and non-empty).
 pub fn chatgpt_session_available() -> bool {
-    std::env::var("CHATGPT_SESSION_TOKEN").map_or(false, |v| !v.trim().is_empty())
+    std::env::var("CHATGPT_SESSION_TOKEN").is_ok_and(|v| !v.trim().is_empty())
 }
 
 // ---------------------------------------------------------------------------
