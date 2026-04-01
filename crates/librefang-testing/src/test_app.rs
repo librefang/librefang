@@ -140,6 +140,7 @@ impl TestAppState {
                 tmp.path().join("test_webhooks.json"),
             ),
             active_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
             prometheus_handle: None,
             media_drivers: librefang_runtime::media::MediaDriverCache::new(),
             webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),

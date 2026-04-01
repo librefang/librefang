@@ -186,6 +186,7 @@ impl SetupWizard {
             response_format: None,
             inherit_parent_context: true,
             context_injection: vec![],
+            is_hand: false,
         };
 
         let skills_to_install: Vec<String> = intent
