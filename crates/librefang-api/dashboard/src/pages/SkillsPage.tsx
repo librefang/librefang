@@ -91,19 +91,13 @@ function FangHubSkillCard({ skill, pendingId, onInstall, t }: {
               )}
             </div>
           </div>
-          <div className="flex flex-col items-end gap-1.5 shrink-0">
-            <span className="flex items-center gap-1 text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-brand/10 text-brand border border-brand/20">
-              <Zap className="w-2.5 h-2.5" />
-              Official
-            </span>
-            {skill.is_installed ? (
-              <Badge variant="success"><CheckCircle2 className="w-3 h-3 mr-1" />{t("skills.installed")}</Badge>
-            ) : (
-              <Button variant="primary" size="sm" onClick={() => onInstall(skill.name)} disabled={!!pendingId}>
-                {isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
-              </Button>
-            )}
-          </div>
+          {skill.is_installed ? (
+            <Badge variant="success"><CheckCircle2 className="w-3 h-3 mr-1" />{t("skills.installed")}</Badge>
+          ) : (
+            <Button variant="primary" size="sm" onClick={() => onInstall(skill.name)} disabled={!!pendingId}>
+              {isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
+            </Button>
+          )}
         </div>
         {skill.description && (
           <p className="text-xs text-text-dim line-clamp-2 mb-3">{skill.description}</p>
@@ -589,6 +583,7 @@ export function SkillsPage() {
         >
           <Zap className="w-4 h-4" />
           {t("skills.builtin")}
+          <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full bg-brand/15 text-brand leading-none">Official</span>
         </button>
 
         {/* ClawHub — non-CN only */}
