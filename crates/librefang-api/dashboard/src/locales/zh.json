@@ -742,7 +742,10 @@
       "organizer_desc": "分类和结构化",
       "report_writer": "周报撰写",
       "report_writer_desc": "生成专业周报"
-    }
+    },
+    "template_empty_title": "模板库为空",
+    "template_empty_desc": "模板在守护进程启动时从 registry 同步。重启守护进程，或运行以下命令来初始化模板库。",
+    "template_empty_cmd": "librefang init"
   },
   "scheduler": {
     "title": "调度器",

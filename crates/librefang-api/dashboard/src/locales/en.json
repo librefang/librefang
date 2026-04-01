@@ -738,7 +738,10 @@
       "organizer_desc": "Categorize and structure",
       "report_writer": "Report Writer",
       "report_writer_desc": "Generate polished report"
-    }
+    },
+    "template_empty_title": "No templates yet",
+    "template_empty_desc": "Templates are synced from the registry when the daemon starts. Restart the daemon or run the command below to populate the library.",
+    "template_empty_cmd": "librefang init"
   },
   "scheduler": {
     "title": "Scheduler",

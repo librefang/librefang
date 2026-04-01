@@ -26,7 +26,7 @@ import { ScheduleModal } from "../components/ui/ScheduleModal";
 import {
   Layers, Trash2, FilePlus, Play, Search,
   Calendar, FileText, Activity, Bot, ArrowRight, Loader2, Clock, ChevronRight,
-  ChevronDown, FlaskConical, AlertCircle, CheckCircle2, SkipForward,
+  ChevronDown, FlaskConical, AlertCircle, CheckCircle2, SkipForward, PackageOpen, RefreshCw,
 } from "lucide-react";
 
 const categoryIconMap: Record<string, React.ComponentType<{ className?: string }>> = {
@@ -211,7 +211,23 @@ export function WorkflowsPage() {
             })}
           </div>
         ) : (
-          <div className="py-12 text-center text-text-dim text-sm">{t("common.no_data")}</div>
+          <div className="py-16 flex flex-col items-center gap-4 text-center">
+            <div className="w-14 h-14 rounded-2xl bg-brand/10 flex items-center justify-center">
+              <PackageOpen className="w-7 h-7 text-brand/60" />
+            </div>
+            <div>
+              <p className="text-sm font-bold">{t("workflows.template_empty_title")}</p>
+              <p className="text-xs text-text-dim mt-1 max-w-xs">{t("workflows.template_empty_desc")}</p>
+              <code className="inline-block mt-3 px-3 py-1.5 rounded-lg bg-main text-[11px] font-mono text-text-dim border border-border-subtle">{t("workflows.template_empty_cmd")}</code>
+            </div>
+            <button
+              onClick={() => templatesQuery.refetch()}
+              className="flex items-center gap-1.5 text-xs text-brand hover:underline mt-1"
+            >
+              <RefreshCw className="w-3 h-3" />
+              {t("common.refresh")}
+            </button>
+          </div>
         )
       )}
 
