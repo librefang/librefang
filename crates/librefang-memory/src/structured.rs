@@ -269,10 +269,13 @@ impl StructuredStore {
                 let identity = identity_str
                     .and_then(|s| serde_json::from_str(&s).ok())
                     .unwrap_or_default();
+                // is_hand: tags-based check first; fall back to name convention
+                // for legacy agents whose manifests predate the hand: tag.
                 let is_hand = manifest
                     .tags
                     .iter()
-                    .any(|t: &String| t.starts_with("hand:"));
+                    .any(|t: &String| t.starts_with("hand:"))
+                    || name.contains(':');
                 Ok(Some(AgentEntry {
                     id: agent_id,
                     name,
@@ -457,10 +460,13 @@ impl StructuredStore {
                 .and_then(|s| serde_json::from_str(&s).ok())
                 .unwrap_or_default();
 
+            // is_hand: tags-based check first; fall back to name convention
+            // for legacy agents whose manifests predate the hand: tag.
             let is_hand = manifest
                 .tags
                 .iter()
-                .any(|t: &String| t.starts_with("hand:"));
+                .any(|t: &String| t.starts_with("hand:"))
+                || name.contains(':');
             agents.push(AgentEntry {
                 id: agent_id,
                 name,
