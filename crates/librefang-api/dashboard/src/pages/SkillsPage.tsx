@@ -91,13 +91,19 @@ function FangHubSkillCard({ skill, pendingId, onInstall, t }: {
               )}
             </div>
           </div>
-          {skill.is_installed ? (
-            <Badge variant="success"><CheckCircle2 className="w-3 h-3 mr-1" />{t("skills.installed")}</Badge>
-          ) : (
-            <Button variant="primary" size="sm" onClick={() => onInstall(skill.name)} disabled={!!pendingId}>
-              {isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
-            </Button>
-          )}
+          <div className="flex flex-col items-end gap-1.5 shrink-0">
+            <span className="flex items-center gap-1 text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-brand/10 text-brand border border-brand/20">
+              <Zap className="w-2.5 h-2.5" />
+              Official
+            </span>
+            {skill.is_installed ? (
+              <Badge variant="success"><CheckCircle2 className="w-3 h-3 mr-1" />{t("skills.installed")}</Badge>
+            ) : (
+              <Button variant="primary" size="sm" onClick={() => onInstall(skill.name)} disabled={!!pendingId}>
+                {isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
+              </Button>
+            )}
+          </div>
         </div>
         {skill.description && (
           <p className="text-xs text-text-dim line-clamp-2 mb-3">{skill.description}</p>
@@ -347,7 +353,7 @@ export function SkillsPage() {
   const addToast = useUIStore((s) => s.addToast);
 
   // View state — default to the region-appropriate marketplace
-  const [viewMode, setViewMode] = useState<ViewMode>(USE_SKILLHUB ? "skillhub" : "marketplace");
+  const [viewMode, setViewMode] = useState<ViewMode>("fanghub");
   const [selectedCategory, setSelectedCategory] = useState<string | null>(categories[0]?.id || null);
   const [search, setSearch] = useState("");
   const [skillhubSearch_, setSkillhubSearch] = useState("");
@@ -574,6 +580,17 @@ export function SkillsPage() {
           </span>
         </button>
 
+        {/* FangHub — always shown, first */}
+        <button
+          onClick={() => { setViewMode("fanghub"); setPage(1); setSearch(""); setSkillhubSearch(""); setSelectedCategory(null); }}
+          className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-colors ${
+            viewMode === "fanghub" ? "bg-surface text-brand shadow-sm" : "text-text-dim hover:text-text-main"
+          }`}
+        >
+          <Zap className="w-4 h-4" />
+          {t("skills.builtin")}
+        </button>
+
         {/* ClawHub — non-CN only */}
         {!USE_SKILLHUB && (
           <button
@@ -599,17 +616,6 @@ export function SkillsPage() {
             {t("skills.skillhub")}
           </button>
         )}
-
-        {/* FangHub — always shown */}
-        <button
-          onClick={() => { setViewMode("fanghub"); setPage(1); setSearch(""); setSkillhubSearch(""); setSelectedCategory(null); }}
-          className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-colors ${
-            viewMode === "fanghub" ? "bg-surface text-brand shadow-sm" : "text-text-dim hover:text-text-main"
-          }`}
-        >
-          <Zap className="w-4 h-4" />
-          {t("skills.builtin")}
-        </button>
       </div>
 
       {/* Category Chips — ClawHub only */}
