@@ -91,13 +91,16 @@ function FangHubSkillCard({ skill, pendingId, onInstall, t }: {
               )}
             </div>
           </div>
-          {skill.is_installed ? (
-            <Badge variant="success"><CheckCircle2 className="w-3 h-3 mr-1" />{t("skills.installed")}</Badge>
-          ) : (
-            <Button variant="primary" size="sm" onClick={() => onInstall(skill.name)} disabled={!!pendingId}>
-              {isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
-            </Button>
-          )}
+          <div className="flex flex-col items-end gap-1.5 shrink-0">
+            <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full bg-brand/15 text-brand leading-none">{t("skills.official")}</span>
+            {skill.is_installed ? (
+              <Badge variant="success"><CheckCircle2 className="w-3 h-3 mr-1" />{t("skills.installed")}</Badge>
+            ) : (
+              <Button variant="primary" size="sm" onClick={() => onInstall(skill.name)} disabled={!!pendingId}>
+                {isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
+              </Button>
+            )}
+          </div>
         </div>
         {skill.description && (
           <p className="text-xs text-text-dim line-clamp-2 mb-3">{skill.description}</p>
