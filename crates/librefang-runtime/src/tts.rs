@@ -236,90 +236,47 @@ impl TtsEngine {
     }
 
     /// Synthesize via Google Cloud TTS API.
+    /// Delegates to `GoogleTtsMediaDriver` to avoid duplicating SSML handling.
     async fn synthesize_google(
         &self,
         text: &str,
         voice_override: Option<&str>,
         format_override: Option<&str>,
     ) -> Result<TtsResult, String> {
-        let api_key = std::env::var("GOOGLE_API_KEY")
-            .or_else(|_| std::env::var("GOOGLE_CLOUD_API_KEY"))
-            .map_err(|_| "GOOGLE_API_KEY or GOOGLE_CLOUD_API_KEY not set")?;
+        use crate::media::google_tts::GoogleTtsMediaDriver;
+        use crate::media::MediaDriver;
+        use librefang_types::media::MediaTtsRequest;
 
-        let voice = voice_override.unwrap_or(&self.config.google.voice);
-        let language_code = &self.config.google.language_code;
-        let format = format_override.unwrap_or(&self.config.google.format);
-
-        let audio_encoding = match format {
-            "opus" | "ogg" => "OGG_OPUS",
-            "wav" | "pcm" => "LINEAR16",
-            _ => "MP3",
+        let driver = GoogleTtsMediaDriver::new(None);
+        let request = MediaTtsRequest {
+            text: text.to_string(),
+            provider: Some("google_tts".to_string()),
+            model: None,
+            voice: Some(
+                voice_override
+                    .unwrap_or(&self.config.google.voice)
+                    .to_string(),
+            ),
+            format: Some(
+                format_override
+                    .unwrap_or(&self.config.google.format)
+                    .to_string(),
+            ),
+            speed: Some(self.config.google.speaking_rate),
+            language: Some(self.config.google.language_code.clone()),
+            pitch: Some(self.config.google.pitch),
         };
 
-        let body = serde_json::json!({
-            "input": { "text": text },
-            "voice": {
-                "languageCode": language_code,
-                "name": voice,
-            },
-            "audioConfig": {
-                "audioEncoding": audio_encoding,
-                "speakingRate": self.config.google.speaking_rate,
-                "pitch": self.config.google.pitch,
-            }
-        });
-
-        let url = format!(
-            "https://texttospeech.googleapis.com/v1/text:synthesize?key={}",
-            api_key
-        );
-
-        let client = crate::http_client::proxied_client();
-        let response = client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .timeout(std::time::Duration::from_secs(self.config.timeout_secs))
-            .send()
+        let result = driver
+            .synthesize_speech(&request)
             .await
-            .map_err(|e| format!("Google TTS request failed: {e}"))?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let err = response.text().await.unwrap_or_default();
-            let truncated = crate::str_utils::safe_truncate_str(&err, 500);
-            return Err(format!("Google TTS failed (HTTP {status}): {truncated}"));
-        }
-
-        let resp_json: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|e| format!("Failed to parse Google TTS response: {e}"))?;
-
-        let audio_b64 = resp_json["audioContent"]
-            .as_str()
-            .ok_or("Google TTS response missing audioContent field")?;
-
-        use base64::Engine;
-        let audio_data = base64::engine::general_purpose::STANDARD
-            .decode(audio_b64)
-            .map_err(|e| format!("Failed to decode Google TTS audio: {e}"))?;
-
-        if audio_data.len() > MAX_AUDIO_RESPONSE_BYTES {
-            return Err(format!(
-                "Audio data exceeds {}MB limit",
-                MAX_AUDIO_RESPONSE_BYTES / 1024 / 1024
-            ));
-        }
-
-        let word_count = text.split_whitespace().count();
-        let duration_ms = (word_count as u64 * 400).max(500);
+            .map_err(|e| format!("Google TTS failed: {e}"))?;
 
         Ok(TtsResult {
-            audio_data,
-            format: format.to_string(),
+            audio_data: result.audio_data,
+            format: result.format,
             provider: "google_tts".to_string(),
-            duration_estimate_ms: duration_ms,
+            duration_estimate_ms: result.duration_ms.unwrap_or(500),
         })
     }
 }

@@ -491,6 +491,9 @@ pub struct MediaTtsRequest {
     /// Language hint (e.g. "en", "zh", "ja").
     #[serde(default)]
     pub language: Option<String>,
+    /// Pitch adjustment (e.g. -20.0 to 20.0 for Google TTS). Provider-specific.
+    #[serde(default)]
+    pub pitch: Option<f32>,
 }
 
 impl MediaTtsRequest {
@@ -985,6 +988,7 @@ mod tests {
             speed: Some(1.0),
             format: None,
             language: None,
+            pitch: None,
         };
         assert!(req.validate().is_ok());
     }
@@ -999,6 +1003,7 @@ mod tests {
             speed: None,
             format: None,
             language: None,
+            pitch: None,
         };
         assert!(req.validate().is_err());
     }
@@ -1013,6 +1018,7 @@ mod tests {
             speed: Some(10.0),
             format: None,
             language: None,
+            pitch: None,
         };
         assert!(req.validate().is_err());
     }

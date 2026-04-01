@@ -91,7 +91,7 @@ impl MediaDriver for GoogleTtsMediaDriver {
             "audioConfig": {
                 "audioEncoding": audio_encoding,
                 "speakingRate": speaking_rate,
-                "pitch": 0.0,
+                "pitch": request.pitch.unwrap_or(0.0),
             },
         });
 
@@ -136,9 +136,10 @@ impl MediaDriver for GoogleTtsMediaDriver {
             )));
         }
 
-        // Rough duration estimate: ~150 words/min
+        // Rough duration estimate: ~150 words/min, adjusted for speaking rate
         let word_count = request.text.split_whitespace().count();
-        let duration_ms = (word_count as u64 * 400).max(500);
+        let rate = speaking_rate.max(0.25);
+        let duration_ms = ((word_count as f64 * 400.0) / rate as f64).max(500.0) as u64;
 
         let model = request
             .model
@@ -184,14 +185,15 @@ fn build_input(text: &str) -> serde_json::Value {
 
 /// Returns true if the text looks like it contains SSML markup tags.
 fn is_ssml(text: &str) -> bool {
-    // Common SSML tags aside from <speak> and <break>
+    // Common SSML tags aside from <speak> and <break>.
+    // For <p> and <s>, require closing tags to avoid false positives on plain HTML.
     text.contains("<prosody")
         || text.contains("<emphasis")
         || text.contains("<say-as")
         || text.contains("<phoneme")
         || text.contains("<audio")
-        || text.contains("<p>")
-        || text.contains("<s>")
+        || (text.contains("<p>") && text.contains("</p>"))
+        || (text.contains("<s>") && text.contains("</s>"))
         || text.contains("<sub")
         || text.contains("<mark")
         || text.contains("<par")

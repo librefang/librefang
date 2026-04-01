@@ -3515,7 +3515,7 @@ async fn tool_text_to_speech(
 
         // Google TTS: override LLM-provided voice (e.g. "alloy") with the
         // configured one — Google doesn't recognise OpenAI voice names.
-        let (effective_voice, effective_language, effective_speed) =
+        let (effective_voice, effective_language, effective_speed, effective_pitch) =
             if resolved_provider == Some("google_tts") {
                 if let Some(engine) = tts_engine {
                     let cfg = &engine.tts_config().google;
@@ -3523,12 +3523,13 @@ async fn tool_text_to_speech(
                         Some(cfg.voice.clone()),
                         Some(cfg.language_code.clone()),
                         Some(cfg.speaking_rate),
+                        Some(cfg.pitch),
                     )
                 } else {
-                    (None, None, None)
+                    (None, None, None, None)
                 }
             } else {
-                (None, None, None)
+                (None, None, None, None)
             };
 
         let request = librefang_types::media::MediaTtsRequest {
@@ -3539,6 +3540,7 @@ async fn tool_text_to_speech(
             format: format.map(String::from),
             speed: effective_speed.or_else(|| input["speed"].as_f64().map(|v| v as f32)),
             language: effective_language.or_else(|| input["language"].as_str().map(String::from)),
+            pitch: effective_pitch.or_else(|| input["pitch"].as_f64().map(|v| v as f32)),
         };
 
         if let Ok(driver) = driver_result {
