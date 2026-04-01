@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="public/assets/logo.png" width="160" alt="LibreFang Logo" />
+  <img src="../public/assets/logo.png" width="160" alt="LibreFang Logo" />
 </p>
 
 <h1 align="center">LibreFang</h1>
@@ -40,7 +40,7 @@ Tradycyjne frameworki agentowe czekają, aż coś wpiszesz. LibreFang uruchamia 
 > LibreFang to społecznościowy fork projektu [`RightNow-AI/openfang`](https://github.com/RightNow-AI/openfang) charakteryzujący się otwartym zarządzaniem (open governance) oraz polityką PR opartą na zasadzie merge-first. Szczegóły znajdziesz w pliku [GOVERNANCE.md](docs/GOVERNANCE.md).
 
 <p align="center">
-  <img src="public/assets/dashboard.png" width="800" alt="LibreFang Dashboard" />
+  <img src="../public/assets/dashboard.png" width="800" alt="LibreFang Dashboard" />
 </p>
 
 ## Szybki start
@@ -215,7 +215,7 @@ Zobacz [docs/comparison.md](docs/comparison.md), aby zapoznać się z benchmarka
 ## Współtwórcy
 
 <a href="https://github.com/librefang/librefang/graphs/contributors">
-  <img src="web/public/assets/contributors.svg" alt="Contributors" />
+  <img src="../web/public/assets/contributors.svg" alt="Contributors" />
 </a>
 
 <p align="center">
@@ -225,7 +225,7 @@ Zobacz [docs/comparison.md](docs/comparison.md), aby zapoznać się z benchmarka
 
 <p align="center">
   <a href="https://github.com/librefang/librefang/stargazers">
-    <img src="web/public/assets/star-history.svg" alt="Star History" />
+    <img src="../web/public/assets/star-history.svg" alt="Star History" />
   </a>
 </p>
 
