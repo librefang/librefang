@@ -254,8 +254,9 @@ impl StructuredStore {
                 identity_str,
                 source_toml_path,
             )) => {
-                let manifest = rmp_serde::from_slice(&manifest_blob)
-                    .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
+                let manifest: librefang_types::agent::AgentManifest =
+                    rmp_serde::from_slice(&manifest_blob)
+                        .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
                 let state = serde_json::from_str(&state_str)
                     .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
                 let created_at = chrono::DateTime::parse_from_rfc3339(&created_str)
@@ -268,6 +269,10 @@ impl StructuredStore {
                 let identity = identity_str
                     .and_then(|s| serde_json::from_str(&s).ok())
                     .unwrap_or_default();
+                let is_hand = manifest
+                    .tags
+                    .iter()
+                    .any(|t: &String| t.starts_with("hand:"));
                 Ok(Some(AgentEntry {
                     id: agent_id,
                     name,
@@ -284,6 +289,7 @@ impl StructuredStore {
                     identity,
                     onboarding_completed: false,
                     onboarding_completed_at: None,
+                    is_hand,
                 }))
             }
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -451,6 +457,10 @@ impl StructuredStore {
                 .and_then(|s| serde_json::from_str(&s).ok())
                 .unwrap_or_default();
 
+            let is_hand = manifest
+                .tags
+                .iter()
+                .any(|t: &String| t.starts_with("hand:"));
             agents.push(AgentEntry {
                 id: agent_id,
                 name,
@@ -467,6 +477,7 @@ impl StructuredStore {
                 identity,
                 onboarding_completed: false,
                 onboarding_completed_at: None,
+                is_hand,
             });
         }
 

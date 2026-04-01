@@ -716,6 +716,7 @@ fn enrich_agent_json(
     serde_json::json!({
         "id": e.id.to_string(),
         "name": e.name,
+        "is_hand": e.is_hand,
         "state": format!("{:?}", e.state),
         "mode": e.mode,
         "created_at": e.created_at.to_rfc3339(),
@@ -786,6 +787,11 @@ pub async fn list_agents(
     let mut agents: Vec<librefang_types::agent::AgentEntry> = state.kernel.agent_registry().list();
 
     // -- Filtering --
+    // Exclude hand agents by default; pass ?include_hands=true to include them.
+    if !params.include_hands.unwrap_or(false) {
+        agents.retain(|e| !e.is_hand);
+    }
+
     if let Some(ref q) = params.q {
         let q_lower = q.to_lowercase();
         agents.retain(|e| {

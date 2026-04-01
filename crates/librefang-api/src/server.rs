@@ -224,11 +224,12 @@ async fn dashboard_login(
             }
 
             // Store the session token so the auth middleware can validate it.
-            state
-                .active_sessions
-                .write()
-                .await
-                .insert(token.token.clone(), token.clone());
+            {
+                let mut sessions = state.active_sessions.write().await;
+                sessions.insert(token.token.clone(), token.clone());
+                // Persist so sessions survive daemon restarts.
+                save_sessions(state.kernel.home_dir(), &sessions);
+            }
 
             axum::response::Json(serde_json::json!({
                 "ok": true,
@@ -270,6 +271,7 @@ async fn dashboard_auth_check(
 
     axum::response::Json(serde_json::json!({
         "mode": if has_credentials { "credentials" } else if has_api_key { "api_key" } else { "none" },
+        "username": if has_credentials { du.trim().to_string() } else { String::new() },
     }))
 }
 
@@ -277,14 +279,17 @@ async fn dashboard_auth_check(
 #[derive(serde::Deserialize)]
 struct ChangePasswordRequest {
     current_password: String,
-    new_password: String,
+    /// New password — optional, omit to keep the current password.
+    new_password: Option<String>,
+    /// New username — optional, omit to keep the current username.
+    new_username: Option<String>,
 }
 
-/// Change the dashboard password.
+/// Change the dashboard password and/or username.
 ///
-/// Verifies the current password against the stored hash (or legacy plaintext),
-/// then hashes the new password with Argon2id and persists `dashboard_pass_hash`
-/// to config.toml. All existing sessions are invalidated on success.
+/// Verifies the current password, then updates whichever credentials are
+/// provided in the request body. At least one of `new_password` or
+/// `new_username` must be non-empty. All existing sessions are invalidated on success.
 async fn change_password(
     axum::extract::State(state): axum::extract::State<Arc<routes::AppState>>,
     axum::Json(body): axum::Json<ChangePasswordRequest>,
@@ -318,7 +323,7 @@ async fn change_password(
             .into_response();
     }
 
-    // Verify current password (reuse existing verification logic)
+    // Verify current password
     let verify = crate::password_hash::verify_dashboard_password(
         &cfg_user,
         &body.current_password,
@@ -337,47 +342,58 @@ async fn change_password(
             .into_response();
     }
 
-    // Validate new password is not empty
-    if body.new_password.trim().is_empty() {
+    // At least one of new_password / new_username must be provided
+    let new_pass_trimmed = body
+        .new_password
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let new_user_trimmed = body
+        .new_username
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    if new_pass_trimmed.is_none() && new_user_trimmed.is_none() {
         return (
             axum::http::StatusCode::BAD_REQUEST,
             axum::response::Json(serde_json::json!({
                 "ok": false,
-                "error": "New password cannot be empty"
+                "error": "Provide at least a new password or new username"
             })),
         )
             .into_response();
     }
 
-    // Validate minimum password length
-    if body.new_password.len() < 8 {
-        return (
-            axum::http::StatusCode::BAD_REQUEST,
-            axum::response::Json(serde_json::json!({
-                "ok": false,
-                "error": "Password must be at least 8 characters"
-            })),
-        )
-            .into_response();
-    }
-
-    // Hash the new password with Argon2id
-    let new_hash = match crate::password_hash::hash_password(&body.new_password) {
-        Ok(h) => h,
-        Err(e) => {
-            tracing::error!("Failed to hash new password: {e}");
+    // Validate new password length if provided
+    if let Some(np) = new_pass_trimmed {
+        if np.len() < 8 {
             return (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                axum::http::StatusCode::BAD_REQUEST,
                 axum::response::Json(serde_json::json!({
                     "ok": false,
-                    "error": "Failed to hash new password"
+                    "error": "Password must be at least 8 characters"
                 })),
             )
                 .into_response();
         }
-    };
+    }
 
-    // Persist to config.toml
+    // Validate new username if provided
+    if let Some(nu) = new_user_trimmed {
+        if nu.len() < 2 {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                axum::response::Json(serde_json::json!({
+                    "ok": false,
+                    "error": "Username must be at least 2 characters"
+                })),
+            )
+                .into_response();
+        }
+    }
+
+    // Load config.toml for writing
     let config_path = state.kernel.home_dir().join("config.toml");
     let mut table: toml::value::Table = if config_path.exists() {
         match std::fs::read_to_string(&config_path) {
@@ -387,12 +403,38 @@ async fn change_password(
     } else {
         toml::value::Table::new()
     };
-    table.insert(
-        "dashboard_pass_hash".to_string(),
-        toml::Value::String(new_hash),
-    );
-    // Remove legacy plaintext password if present
-    table.remove("dashboard_pass");
+
+    // Update username if requested
+    if let Some(nu) = new_user_trimmed {
+        table.insert(
+            "dashboard_user".to_string(),
+            toml::Value::String(nu.to_string()),
+        );
+    }
+
+    // Update password if requested
+    if let Some(np) = new_pass_trimmed {
+        let new_hash = match crate::password_hash::hash_password(np) {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::error!("Failed to hash new password: {e}");
+                return (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    axum::response::Json(serde_json::json!({
+                        "ok": false,
+                        "error": "Failed to hash new password"
+                    })),
+                )
+                    .into_response();
+            }
+        };
+        table.insert(
+            "dashboard_pass_hash".to_string(),
+            toml::Value::String(new_hash),
+        );
+        // Remove legacy plaintext password if present
+        table.remove("dashboard_pass");
+    }
 
     let toml_string = match toml::to_string_pretty(&table) {
         Ok(s) => s,
@@ -418,21 +460,79 @@ async fn change_password(
             .into_response();
     }
 
-    // Trigger config reload so the kernel picks up the new hash
+    // Trigger config reload so the kernel picks up the new credentials
     if let Err(e) = state.kernel.reload_config().await {
-        tracing::warn!("Config reload after password change failed: {e}");
+        tracing::warn!("Config reload after credential change failed: {e}");
     }
+
+    // Update api_key_lock so the derived static token reflects new credentials immediately
+    let new_api_key = valid_api_tokens(state.kernel.as_ref()).join("\n");
+    *state.api_key_lock.write().await = new_api_key;
 
     // Invalidate all existing sessions to force re-login
     state.active_sessions.write().await.clear();
+    clear_sessions_file(state.kernel.home_dir());
 
-    tracing::info!("Dashboard password changed successfully");
+    tracing::info!("Dashboard credentials changed successfully");
 
     axum::response::Json(serde_json::json!({
         "ok": true,
-        "message": "Password changed successfully"
+        "message": "Credentials changed successfully"
     }))
     .into_response()
+}
+
+/// Path to the file where active sessions are persisted across restarts.
+fn sessions_path(home_dir: &std::path::Path) -> std::path::PathBuf {
+    home_dir.join("sessions.json")
+}
+
+/// Load persisted sessions from disk, dropping any that have already expired.
+fn load_sessions(
+    home_dir: &std::path::Path,
+) -> std::collections::HashMap<String, crate::password_hash::SessionToken> {
+    let path = sessions_path(home_dir);
+    let content = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(_) => return std::collections::HashMap::new(),
+    };
+    let sessions: std::collections::HashMap<String, crate::password_hash::SessionToken> =
+        serde_json::from_str(&content).unwrap_or_default();
+    sessions
+        .into_iter()
+        .filter(|(_, st)| {
+            !crate::password_hash::is_token_expired(
+                st,
+                crate::password_hash::DEFAULT_SESSION_TTL_SECS,
+            )
+        })
+        .collect()
+}
+
+/// Persist active sessions to disk so they survive daemon restarts.
+fn save_sessions(
+    home_dir: &std::path::Path,
+    sessions: &std::collections::HashMap<String, crate::password_hash::SessionToken>,
+) {
+    let path = sessions_path(home_dir);
+    match serde_json::to_string(sessions) {
+        Ok(content) => {
+            if let Err(e) = std::fs::write(&path, content) {
+                tracing::warn!("Failed to persist sessions: {e}");
+            }
+        }
+        Err(e) => tracing::warn!("Failed to serialize sessions: {e}"),
+    }
+}
+
+/// Remove the sessions persistence file (called on password change to force re-login).
+fn clear_sessions_file(home_dir: &std::path::Path) {
+    let path = sessions_path(home_dir);
+    if path.exists() {
+        if let Err(e) = std::fs::remove_file(&path) {
+            tracing::warn!("Failed to clear sessions file: {e}");
+        }
+    }
 }
 
 /// Build the full API router with all routes, middleware, and state.
@@ -463,8 +563,14 @@ pub async fn build_router(
     };
 
     let channels_config = kernel.config_ref().channels.clone();
-    let active_sessions = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+    let persisted_sessions = load_sessions(kernel.home_dir());
+    let active_sessions = Arc::new(tokio::sync::RwLock::new(persisted_sessions));
     let webhook_router = Arc::new(tokio::sync::RwLock::new(Arc::new(initial_webhook_router)));
+
+    // Create api_key_lock before AppState so both AppState and AuthState share the same Arc.
+    let api_key = valid_api_tokens(kernel.as_ref()).join("\n");
+    let api_key_lock = Arc::new(tokio::sync::RwLock::new(api_key));
+
     let state = Arc::new(AppState {
         kernel: kernel.clone(),
         started_at: Instant::now(),
@@ -479,6 +585,7 @@ pub async fn build_router(
             kernel.home_dir().join("webhooks.json"),
         ),
         active_sessions: active_sessions.clone(),
+        api_key_lock: api_key_lock.clone(),
         media_drivers: librefang_runtime::media::MediaDriverCache::new_with_urls(
             kernel.config_ref().provider_urls.clone(),
         ),
@@ -521,9 +628,7 @@ pub async fn build_router(
             .allow_headers(tower_http::cors::Any)
     };
 
-    // Middleware accepts any token in this composite key.
-    let api_key = valid_api_tokens(state.kernel.as_ref()).join("\n");
-    let api_key_lock = Arc::new(tokio::sync::RwLock::new(api_key));
+    // AuthState shares api_key_lock with AppState so change_password can update it live.
     let auth_state = middleware::AuthState {
         api_key_lock: api_key_lock.clone(),
         active_sessions: active_sessions.clone(),

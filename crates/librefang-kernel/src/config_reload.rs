@@ -55,6 +55,8 @@ pub enum HotAction {
     ReloadProviderApiKeys,
     /// Proxy config changed — reinitialize HTTP proxy env.
     ReloadProxy,
+    /// Dashboard credentials (user/pass/hash) changed — config swap is sufficient.
+    UpdateDashboardCredentials,
 }
 
 // ---------------------------------------------------------------------------
@@ -157,8 +159,7 @@ pub fn build_reload_plan(old: &KernelConfig, new: &KernelConfig) -> ReloadPlan {
         || old.dashboard_pass != new.dashboard_pass
         || old.dashboard_pass_hash != new.dashboard_pass_hash
     {
-        plan.noop_changes
-            .push("dashboard credentials changed (hot-reloaded)".to_string());
+        plan.hot_actions.push(HotAction::UpdateDashboardCredentials);
     }
 
     if old.network_enabled != new.network_enabled {

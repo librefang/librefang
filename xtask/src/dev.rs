@@ -113,6 +113,12 @@ fn kill_stale_processes() {
         .args(["remove", "ai.librefang.daemon"])
         .output();
 
+    // Kill any lingering daemon processes by name (handles the case where Ctrl+C
+    // kills xtask before the cleanup code can run, leaving the daemon orphaned)
+    let _ = Command::new("pkill")
+        .args(["-9", "-f", "librefang.*start"])
+        .output();
+
     // Kill listeners on API port and dashboard dev server ports
     for port in [4545, 5173, 5174, 5175, 5176, 5177, 5178] {
         let output = Command::new("lsof")

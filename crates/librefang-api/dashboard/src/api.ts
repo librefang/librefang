@@ -1860,6 +1860,17 @@ export async function checkDashboardAuthMode(): Promise<AuthMode> {
   }
 }
 
+export async function getDashboardUsername(): Promise<string> {
+  try {
+    const resp = await fetch("/api/auth/dashboard-check");
+    if (!resp.ok) return "";
+    const data = await resp.json();
+    return (data.username as string) || "";
+  } catch {
+    return "";
+  }
+}
+
 export async function dashboardLogin(username: string, password: string): Promise<{ ok: boolean; token?: string; error?: string }> {
   try {
     const resp = await fetch("/api/auth/dashboard-login", {
@@ -2106,10 +2117,15 @@ export async function createRegistryContent(
 
 export async function changePassword(
   currentPassword: string,
-  newPassword: string,
+  newPassword: string | null,
+  newUsername: string | null,
 ): Promise<{ ok: boolean; error?: string; message?: string }> {
   return post<{ ok: boolean; error?: string; message?: string }>(
     "/api/auth/change-password",
-    { current_password: currentPassword, new_password: newPassword },
+    {
+      current_password: currentPassword,
+      ...(newPassword ? { new_password: newPassword } : {}),
+      ...(newUsername ? { new_username: newUsername } : {}),
+    },
   );
 }

@@ -267,6 +267,7 @@ mod tests {
             identity: AgentIdentity::default(),
             onboarding_completed: false,
             onboarding_completed_at: None,
+            is_hand: false,
         };
         registry.register(non_autonomous_entry).unwrap();
 
@@ -291,6 +292,7 @@ mod tests {
             identity: AgentIdentity::default(),
             onboarding_completed: false,
             onboarding_completed_at: None,
+            is_hand: false,
         };
         registry.register(autonomous_entry).unwrap();
 

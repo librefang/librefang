@@ -740,6 +740,9 @@ pub struct AgentEntry {
     /// When onboarding was completed.
     #[serde(default)]
     pub onboarding_completed_at: Option<DateTime<Utc>>,
+    /// Whether this agent was spawned by a Hand (true) or is a regular agent (false).
+    #[serde(default)]
+    pub is_hand: bool,
 }
 
 /// A stored prompt version for an agent.
@@ -1206,6 +1209,7 @@ mod tests {
             identity: AgentIdentity::default(),
             onboarding_completed: false,
             onboarding_completed_at: None,
+            is_hand: false,
         };
         let json = serde_json::to_string(&entry).unwrap();
         let back: AgentEntry = serde_json::from_str(&json).unwrap();
@@ -1269,6 +1273,7 @@ mod tests {
             },
             onboarding_completed: false,
             onboarding_completed_at: None,
+            is_hand: false,
         };
         let json = serde_json::to_string(&entry).unwrap();
         let back: AgentEntry = serde_json::from_str(&json).unwrap();

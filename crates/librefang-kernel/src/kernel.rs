@@ -2466,6 +2466,7 @@ system_prompt = "You are a helpful assistant."
 
         // Create registry entry
         let tags = manifest.tags.clone();
+        let is_hand = tags.iter().any(|t| t.starts_with("hand:"));
         let entry = AgentEntry {
             id: agent_id,
             name: manifest.name.clone(),
@@ -2482,6 +2483,7 @@ system_prompt = "You are a helpful assistant."
             identity: Default::default(),
             onboarding_completed: false,
             onboarding_completed_at: None,
+            is_hand,
         };
         self.registry
             .register(entry.clone())
@@ -6374,6 +6376,9 @@ system_prompt = "You are a helpful assistant."
                     info!("Hot-reload: proxy config changed — reinitializing HTTP proxy env");
                     librefang_runtime::http_client::init_proxy(new_config.proxy.clone());
                     self.driver_cache.clear();
+                }
+                HotAction::UpdateDashboardCredentials => {
+                    info!("Hot-reload: dashboard credentials updated — config swap is sufficient");
                 }
             }
         }
@@ -10334,6 +10339,7 @@ mod tests {
             onboarding_completed: false,
             onboarding_completed_at: None,
             source_toml_path: None,
+            is_hand: false,
         };
         registry.register(entry).unwrap();
 
@@ -10372,6 +10378,7 @@ mod tests {
             onboarding_completed: false,
             onboarding_completed_at: None,
             source_toml_path: None,
+            is_hand: false,
         };
         registry.register(e1).unwrap();
 
@@ -10396,6 +10403,7 @@ mod tests {
             onboarding_completed: false,
             onboarding_completed_at: None,
             source_toml_path: None,
+            is_hand: false,
         };
         registry.register(e2).unwrap();
 

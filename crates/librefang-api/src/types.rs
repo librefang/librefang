@@ -345,6 +345,8 @@ pub struct AgentListQuery {
     pub sort: Option<String>,
     /// Sort direction: "asc" or "desc" (default: "asc").
     pub order: Option<String>,
+    /// Include hand agents in the response (default: false).
+    pub include_hands: Option<bool>,
 }
 
 /// Paginated list response wrapper.

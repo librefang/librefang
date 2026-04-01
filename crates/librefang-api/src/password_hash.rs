@@ -53,8 +53,8 @@ pub struct SessionToken {
     pub created_at: u64,
 }
 
-/// Default session TTL: 24 hours.
-pub const DEFAULT_SESSION_TTL_SECS: u64 = 86400;
+/// Default session TTL: 30 days.
+pub const DEFAULT_SESSION_TTL_SECS: u64 = 30 * 24 * 3600;
 
 /// Generate a cryptographically random session token.
 ///

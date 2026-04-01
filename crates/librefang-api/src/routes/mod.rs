@@ -112,6 +112,9 @@ pub struct AppState {
     /// Maps token string -> SessionToken (with creation timestamp for expiry checks).
     pub active_sessions:
         Arc<tokio::sync::RwLock<HashMap<String, crate::password_hash::SessionToken>>>,
+    /// Shared api_key_lock from the auth middleware — updated on password/api_key change
+    /// so the new credentials take effect immediately without restart.
+    pub api_key_lock: Arc<tokio::sync::RwLock<String>>,
     /// Media generation driver cache for image/TTS/video/music.
     pub media_drivers: librefang_runtime::media::MediaDriverCache,
     /// Dynamic webhook router for channel webhook endpoints.

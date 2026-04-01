@@ -3,13 +3,12 @@ import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Card } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
-import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
 import { PageHeader } from "../components/ui/PageHeader";
 import { ListSkeleton } from "../components/ui/Skeleton";
-import { Globe, Sun, Moon, Settings, PanelLeftClose, PanelLeft, Wrench, Search, RefreshCw, Lock } from "lucide-react";
+import { Globe, Sun, Moon, Settings, PanelLeftClose, PanelLeft, Wrench, Search, RefreshCw } from "lucide-react";
 import { useUIStore } from "../lib/store";
-import { changePassword, checkDashboardAuthMode, clearApiKey, listTools } from "../api";
+import { listTools } from "../api";
 
 // Tool name i18n mapping for Chinese
 const toolNameZh: Record<string, string> = {
@@ -58,16 +57,6 @@ export function SettingsPage() {
   const setNavLayout = useUIStore((s) => s.setNavLayout);
   const isZh = i18n.language === "zh";
   const [toolSearch, setToolSearch] = useState("");
-
-  // Password change state
-  const [currentPassword, setCurrentPassword] = useState("");
-  const [newPassword, setNewPassword] = useState("");
-  const [confirmPassword, setConfirmPassword] = useState("");
-  const [pwChanging, setPwChanging] = useState(false);
-  const [pwMessage, setPwMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
-
-  const authModeQuery = useQuery({ queryKey: ["authMode"], queryFn: checkDashboardAuthMode });
-  const hasCredentialAuth = authModeQuery.data === "credentials";
 
   const toolsQuery = useQuery({ queryKey: ["tools"], queryFn: listTools });
   const tools = toolsQuery.data ?? [];
@@ -165,97 +154,6 @@ export function SettingsPage() {
           </div>
         </Card>
 
-        {/* Change Password — only shown when credential auth is active */}
-        {hasCredentialAuth && (
-          <Card padding="lg" hover className="min-w-0 overflow-hidden">
-            <h2 className="text-base sm:text-lg font-black tracking-tight flex items-center gap-2 mb-5 sm:mb-6">
-              <Lock className="w-4 h-4 sm:w-5 sm:h-5 text-brand" />
-              {t("settings.change_password")}
-            </h2>
-            <form
-              className="space-y-4"
-              onSubmit={async (e) => {
-                e.preventDefault();
-                setPwMessage(null);
-                if (newPassword !== confirmPassword) {
-                  setPwMessage({ type: "error", text: t("settings.pw_mismatch") });
-                  return;
-                }
-                if (!newPassword.trim()) {
-                  setPwMessage({ type: "error", text: t("settings.pw_empty") });
-                  return;
-                }
-                if (newPassword.length < 8) {
-                  setPwMessage({ type: "error", text: t("settings.pw_too_short") });
-                  return;
-                }
-                setPwChanging(true);
-                try {
-                  const res = await changePassword(currentPassword, newPassword);
-                  if (res.ok) {
-                    setPwMessage({ type: "success", text: t("settings.pw_success") });
-                    setCurrentPassword("");
-                    setNewPassword("");
-                    setConfirmPassword("");
-                    // Server invalidated all sessions, force re-login after short delay
-                    setTimeout(() => {
-                      clearApiKey();
-                      window.location.reload();
-                    }, 1500);
-                  } else {
-                    setPwMessage({ type: "error", text: res.error || t("settings.pw_failed") });
-                  }
-                } catch (err: any) {
-                  setPwMessage({ type: "error", text: err.message || t("settings.pw_failed") });
-                } finally {
-                  setPwChanging(false);
-                }
-              }}
-            >
-              <Input
-                type="password"
-                label={t("settings.pw_current")}
-                value={currentPassword}
-                onChange={(e) => setCurrentPassword(e.target.value)}
-                placeholder="********"
-                autoComplete="current-password"
-                leftIcon={<Lock className="h-3.5 w-3.5" />}
-                className="text-xs!"
-                required
-              />
-              <Input
-                type="password"
-                label={t("settings.pw_new")}
-                value={newPassword}
-                onChange={(e) => setNewPassword(e.target.value)}
-                placeholder="********"
-                autoComplete="new-password"
-                leftIcon={<Lock className="h-3.5 w-3.5" />}
-                className="text-xs!"
-                required
-              />
-              <Input
-                type="password"
-                label={t("settings.pw_confirm")}
-                value={confirmPassword}
-                onChange={(e) => setConfirmPassword(e.target.value)}
-                placeholder="********"
-                autoComplete="new-password"
-                leftIcon={<Lock className="h-3.5 w-3.5" />}
-                className="text-xs!"
-                required
-              />
-              {pwMessage && (
-                <p className={`text-xs font-semibold ${pwMessage.type === "success" ? "text-success" : "text-error"}`}>
-                  {pwMessage.text}
-                </p>
-              )}
-              <Button type="submit" variant="primary" size="sm" isLoading={pwChanging} leftIcon={<Lock className="h-3.5 w-3.5" />}>
-                {t("settings.pw_submit")}
-              </Button>
-            </form>
-          </Card>
-        )}
       </div>
     </div>
   );

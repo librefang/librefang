@@ -1,10 +1,10 @@
 import { Link, Outlet } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Globe, Sun, Moon, Search, ChevronLeft, ChevronRight, ChevronDown, Menu, Home, Layers, MessageCircle, Clock, CheckCircle, Calendar, Shield, Users, User, Server, Network, Bell, Hand, BarChart3, Database, Activity, FileText, Settings, Puzzle, Cpu, Lock, Share2, Gauge, LogOut, UserCircle } from "lucide-react";
+import { Globe, Sun, Moon, Search, ChevronLeft, ChevronRight, ChevronDown, Menu, Home, Layers, MessageCircle, Clock, CheckCircle, Calendar, Shield, Users, User, Server, Network, Bell, Hand, BarChart3, Database, Activity, FileText, Settings, Puzzle, Cpu, Lock, Share2, Gauge, LogOut, UserCircle, X } from "lucide-react";
 import { useUIStore } from "./lib/store";
 import { CommandPalette, useCommandPalette } from "./components/ui/CommandPalette";
-import { checkDashboardAuthMode, clearApiKey, dashboardLogin, getVersionInfo, setApiKey, setOnUnauthorized, verifyStoredAuth, type AuthMode } from "./api";
+import { changePassword, checkDashboardAuthMode, clearApiKey, dashboardLogin, getDashboardUsername, getVersionInfo, setApiKey, setOnUnauthorized, verifyStoredAuth, type AuthMode } from "./api";
 
 function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated: () => void }) {
   const { t } = useTranslation();
@@ -135,6 +135,172 @@ function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated
   );
 }
 
+function ChangePasswordModal({ onClose }: { onClose: () => void }) {
+  const { t } = useTranslation();
+  const [currentUsername, setCurrentUsername] = useState("");
+  const [newUsername, setNewUsername] = useState("");
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
+
+  useEffect(() => {
+    getDashboardUsername().then((u) => {
+      setCurrentUsername(u);
+      setNewUsername(u);
+    });
+  }, []);
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setMessage(null);
+
+    const changedUsername = newUsername.trim() !== currentUsername.trim() ? newUsername.trim() : null;
+    const changedPassword = newPassword || null;
+
+    if (!changedUsername && !changedPassword) {
+      setMessage({ type: "error", text: t("settings.pw_no_changes") });
+      return;
+    }
+    if (changedPassword) {
+      if (newPassword !== confirmPassword) {
+        setMessage({ type: "error", text: t("settings.pw_mismatch") });
+        return;
+      }
+      if (newPassword.length < 8) {
+        setMessage({ type: "error", text: t("settings.pw_too_short") });
+        return;
+      }
+    }
+    if (changedUsername && changedUsername.length < 2) {
+      setMessage({ type: "error", text: t("settings.username_too_short") });
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      const res = await changePassword(currentPassword, changedPassword, changedUsername);
+      if (res.ok) {
+        setMessage({ type: "success", text: t("settings.pw_success") });
+        setTimeout(() => { clearApiKey(); window.location.reload(); }, 1500);
+      } else {
+        setMessage({ type: "error", text: res.error || t("settings.pw_failed") });
+      }
+    } catch (err: any) {
+      setMessage({ type: "error", text: err.message || t("settings.pw_failed") });
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  const inputClass = "w-full rounded-xl border border-border-subtle bg-main px-4 py-3 text-sm focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none transition-colors placeholder:text-text-dim/40";
+
+  return (
+    <div className="fixed inset-0 z-200 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+      <div className="w-full max-w-md mx-4 animate-fade-in-scale">
+        <div className="rounded-2xl border border-border-subtle bg-surface shadow-2xl">
+          {/* Header */}
+          <div className="flex items-center justify-between px-6 pt-6 pb-4">
+            <h2 className="text-base font-black tracking-tight">{t("settings.change_credentials")}</h2>
+            <button
+              onClick={onClose}
+              className="h-7 w-7 flex items-center justify-center rounded-lg text-text-dim hover:text-brand hover:bg-surface-hover transition-colors"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+
+          <form onSubmit={handleSubmit}>
+            <div className="px-6 space-y-5">
+              {/* Username */}
+              <div>
+                <label className="block text-xs font-semibold text-text-dim mb-1.5">{t("settings.new_username")}</label>
+                <input
+                  type="text"
+                  value={newUsername}
+                  onChange={(e) => { setNewUsername(e.target.value); setMessage(null); }}
+                  autoComplete="username"
+                  autoFocus
+                  className={inputClass}
+                />
+              </div>
+
+              {/* New password */}
+              <div>
+                <div className="flex items-baseline justify-between mb-1.5">
+                  <label className="text-xs font-semibold text-text-dim">{t("settings.pw_new")}</label>
+                  <span className="text-[10px] text-text-dim/50">{t("settings.pw_leave_blank")}</span>
+                </div>
+                <input
+                  type="password"
+                  value={newPassword}
+                  onChange={(e) => { setNewPassword(e.target.value); setMessage(null); }}
+                  placeholder="••••••••"
+                  autoComplete="new-password"
+                  className={inputClass}
+                />
+              </div>
+
+              {/* Confirm password — always visible, grayed out when no new password */}
+              <div className={newPassword ? "" : "opacity-40 pointer-events-none"}>
+                <label className="block text-xs font-semibold text-text-dim mb-1.5">{t("settings.pw_confirm")}</label>
+                <input
+                  type="password"
+                  value={confirmPassword}
+                  onChange={(e) => { setConfirmPassword(e.target.value); setMessage(null); }}
+                  placeholder="••••••••"
+                  autoComplete="new-password"
+                  tabIndex={newPassword ? 0 : -1}
+                  className={`${inputClass} ${newPassword && confirmPassword && newPassword !== confirmPassword ? "border-error focus:border-error focus:ring-error/10" : ""}`}
+                />
+              </div>
+            </div>
+
+            {/* Verify identity section */}
+            <div className="mx-6 mt-5 rounded-xl bg-surface-hover/60 border border-border-subtle px-4 py-3.5">
+              <label className="block text-[10px] font-bold uppercase tracking-widest text-text-dim mb-2">{t("settings.pw_verify_identity")}</label>
+              <input
+                type="password"
+                value={currentPassword}
+                onChange={(e) => { setCurrentPassword(e.target.value); setMessage(null); }}
+                placeholder={t("settings.pw_current_placeholder")}
+                autoComplete="current-password"
+                className={inputClass}
+              />
+            </div>
+
+            {/* Error / success */}
+            {message && (
+              <p className={`mx-6 mt-3 text-xs font-semibold ${message.type === "success" ? "text-success" : "text-error"}`}>
+                {message.text}
+              </p>
+            )}
+
+            {/* Actions */}
+            <div className="flex gap-3 px-6 py-5">
+              <button
+                type="button"
+                onClick={onClose}
+                className="flex-1 rounded-xl border border-border-subtle py-2.5 text-sm font-bold text-text-dim hover:bg-surface-hover transition-colors"
+              >
+                {t("common.cancel")}
+              </button>
+              <button
+                type="submit"
+                disabled={submitting || !currentPassword}
+                className="flex-1 rounded-xl bg-brand py-2.5 text-sm font-bold text-white hover:bg-brand/90 transition-colors disabled:opacity-50"
+              >
+                {submitting ? t("common.saving") : t("common.save")}
+              </button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function App() {
   const { t } = useTranslation();
   const theme = useUIStore((s) => s.theme);
@@ -155,6 +321,7 @@ export function App() {
   const [appVersion, setAppVersion] = useState("");
   const [hostname, setHostname] = useState("");
   const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const [showChangePassword, setShowChangePassword] = useState(false);
 
   // Wire up global 401 handler so any failed request re-shows login
   useEffect(() => {
@@ -225,26 +392,17 @@ export function App() {
       label: t("nav.core"),
       items: [
         { to: "/overview", label: t("nav.overview"), icon: Home },
-        { to: "/hands", label: t("nav.hands"), icon: Hand },
-        { to: "/workflows", label: t("nav.workflows"), icon: Layers },
         { to: "/chat", label: t("nav.chat"), icon: MessageCircle },
+        { to: "/agents", label: t("nav.agents"), icon: Users },
         { to: "/sessions", label: t("nav.sessions"), icon: Clock },
         { to: "/approvals", label: t("nav.approvals"), icon: CheckCircle },
+        { to: "/hands", label: t("nav.hands"), icon: Hand },
       ],
     },
     {
-      key: "automation",
-      label: t("nav.automation"),
+      key: "configure",
+      label: t("nav.configure"),
       items: [
-        { to: "/scheduler", label: t("nav.scheduler"), icon: Calendar },
-        { to: "/goals", label: t("nav.goals"), icon: Shield },
-      ],
-    },
-    {
-      key: "resources",
-      label: t("nav.resources"),
-      items: [
-        { to: "/agents", label: t("nav.agents"), icon: Users },
         { to: "/providers", label: t("nav.providers"), icon: Server },
         { to: "/models", label: t("nav.models"), icon: Cpu },
         { to: "/channels", label: t("nav.channels"), icon: Network },
@@ -253,17 +411,32 @@ export function App() {
       ],
     },
     {
-      key: "system",
-      label: t("nav.system"),
+      key: "automate",
+      label: t("nav.automate"),
+      items: [
+        { to: "/workflows", label: t("nav.workflows"), icon: Layers },
+        { to: "/scheduler", label: t("nav.scheduler"), icon: Calendar },
+        { to: "/goals", label: t("nav.goals"), icon: Shield },
+      ],
+    },
+    {
+      key: "observe",
+      label: t("nav.observe"),
       items: [
         { to: "/analytics", label: t("nav.analytics"), icon: BarChart3 },
         { to: "/memory", label: t("nav.memory"), icon: Database },
+        { to: "/logs", label: t("nav.logs"), icon: FileText },
+        { to: "/runtime", label: t("nav.runtime"), icon: Activity },
+      ],
+    },
+    {
+      key: "advanced",
+      label: t("nav.advanced"),
+      items: [
         { to: "/comms", label: t("nav.comms"), icon: Activity },
         { to: "/network", label: t("nav.network"), icon: Share2 },
         { to: "/a2a", label: t("nav.a2a"), icon: Globe },
-        { to: "/runtime", label: t("nav.runtime"), icon: Activity },
         { to: "/telemetry", label: t("nav.telemetry"), icon: Gauge },
-        { to: "/logs", label: t("nav.logs"), icon: FileText },
       ],
     },
   ], [t]);
@@ -449,6 +622,13 @@ export function App() {
                       <Settings className="h-3.5 w-3.5" />
                       {t("nav.settings")}
                     </Link>
+                    <button
+                      onClick={() => { setUserMenuOpen(false); setShowChangePassword(true); }}
+                      className="flex w-full items-center gap-2.5 px-3 py-2 text-xs font-medium text-text-dim hover:text-brand hover:bg-surface-hover transition-colors"
+                    >
+                      <Lock className="h-3.5 w-3.5" />
+                      {t("settings.change_password")}
+                    </button>
                     {authMode !== "none" && (
                       <button
                         onClick={() => { clearApiKey(); window.location.reload(); }}
@@ -474,6 +654,7 @@ export function App() {
       </div>
 
       <CommandPalette isOpen={isPaletteOpen} onClose={() => setPaletteOpen(false)} />
+      {showChangePassword && <ChangePasswordModal onClose={() => setShowChangePassword(false)} />}
       {authChecked && authNeeded && (
         <AuthDialog mode={authMode} onAuthenticated={() => { setAuthNeeded(false); window.location.hash = "#/overview"; }} />
       )}
