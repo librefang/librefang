@@ -12,7 +12,6 @@ import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { Input } from "../components/ui/Input";
-import { Pagination } from "../components/ui/Pagination";
 import { useUIStore } from "../lib/store";
 import {
   Server, Zap, Clock, Key, Globe, CheckCircle2, XCircle, Loader2, AlertCircle, Search,
@@ -21,7 +20,6 @@ import {
 } from "lucide-react";
 
 const REFRESH_MS = 30000;
-const ITEMS_PER_PAGE = 6;
 
 const providerIcons: Record<string, React.ReactNode> = {
   openai: <Sparkles className="w-5 h-5" />,
@@ -514,7 +512,6 @@ export function ProvidersPage() {
   const { t } = useTranslation();
   const [pendingId, setPendingId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<TabType>("configured");
-  const [page, setPage] = useState(1);
   const [search, setSearch] = useState("");
   const [sortField, setSortField] = useState<SortField>("name");
   const [sortOrder, setSortOrder] = useState<SortOrder>("asc");
@@ -566,29 +563,22 @@ export function ProvidersPage() {
     [providers, activeTab, search, filterStatus, sortField, sortOrder],
   );
 
-  const totalPages = Math.ceil(filteredProviders.length / ITEMS_PER_PAGE);
-  const paginatedProviders = filteredProviders.slice(
-    (page - 1) * ITEMS_PER_PAGE,
-    page * ITEMS_PER_PAGE
-  );
+  const paginatedProviders = filteredProviders;
 
   // Reset page when filters change
   const handleTabChange = (tab: TabType) => {
     setActiveTab(tab);
-    setPage(1);
     setSelectedIds(new Set());
     setFilterStatus("all");
   };
 
   const handleSearch = (value: string) => {
     setSearch(value);
-    setPage(1);
     setSelectedIds(new Set());
   };
 
   const handleFilterChange = (filter: FilterStatus) => {
     setFilterStatus(filter);
-    setPage(1);
     setSelectedIds(new Set());
   };
 
@@ -927,9 +917,6 @@ export function ProvidersPage() {
               />
             ))}
           </div>
-          {totalPages > 1 && (
-            <Pagination currentPage={page} totalPages={totalPages} onPageChange={setPage} />
-          )}
         </>
       )}
 
