@@ -5,6 +5,36 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
+## [2026.4.2] - 2026-04-02
+
+### Added
+
+- Progressive timeout with partial output preservation (#1918) (@f-liva)
+- Write-ahead message journal for crash recovery (#1919) (@f-liva)
+- Hot reload by default in just dev (#1920) (@houko)
+- Replace cron text input with visual schedule picker (#1923) (@houko)
+- Persistent sessions, credential management & hand agent filtering (#1927) (@houko)
+- Redesign settings page and add built-in tools tab to skills (#1929) (@houko)
+
+### Fixed
+
+- Always include Mozilla CA roots alongside system certs (#1922) (@houko)
+- Show template steps as nodes when opening workflow template (#1924) (@houko)
+- Treat blank env vars as unconfigured in provider detection (#1931) (@houko)
+- Validate API keys via live HTTP probe (#1932) (@houko)
+- Validate API keys via live HTTP probe on boot (#1933) (@houko)
+- Eliminate daemon startup race in just dev (#1934) (@houko)
+- Preserve newlines in user chat messages (#1935) (@leszek3737)
+
+### Documentation
+
+- Add Polish translation of README (#1940) (@leszek3737)
+
+### Maintenance
+
+- Skip Cloudflare deploy for fork PRs (#1928) (@houko)
+
+
 ## [2026.4.1] - 2026-04-01
 
 ### Added
