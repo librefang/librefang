@@ -31,7 +31,7 @@ export function PageHeader({ icon, title, subtitle, actions, isFetching, onRefre
           {actions}
           {helpText && (
             <button
-              onClick={() => setShowHelp(!showHelp)}
+              onClick={() => setShowHelp(true)}
               className="flex h-8 w-8 items-center justify-center rounded-xl border border-border-subtle bg-surface text-text-dim hover:text-brand hover:border-brand/30 transition-colors duration-200"
               title={t("common.help", { defaultValue: "Help" })}
             >
@@ -49,13 +49,32 @@ export function PageHeader({ icon, title, subtitle, actions, isFetching, onRefre
           )}
         </div>
       </header>
+
+      {/* Help Modal */}
       {showHelp && helpText && (
-        <div className="rounded-xl border border-brand/20 bg-brand/5 px-4 py-3 text-sm text-text-dim leading-relaxed animate-fade-in-up">
-          <div className="flex items-start justify-between gap-3">
-            <p className="whitespace-pre-line">{helpText}</p>
-            <button onClick={() => setShowHelp(false)} className="shrink-0 text-text-dim/50 hover:text-text-dim">
-              <X className="h-4 w-4" />
-            </button>
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm"
+          onClick={() => setShowHelp(false)}
+        >
+          <div
+            className="bg-surface border border-border-subtle rounded-2xl w-full max-w-md shadow-2xl animate-fade-in-scale"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between p-4 border-b border-border-subtle">
+              <div className="flex items-center gap-2">
+                <HelpCircle className="h-4 w-4 text-brand" />
+                <span className="font-bold text-sm">{title}</span>
+              </div>
+              <button
+                onClick={() => setShowHelp(false)}
+                className="p-1.5 hover:bg-main/30 rounded-lg transition-colors text-text-dim hover:text-text-main"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="p-5">
+              <p className="text-sm text-text-dim leading-relaxed whitespace-pre-line">{helpText}</p>
+            </div>
           </div>
         </div>
       )}
