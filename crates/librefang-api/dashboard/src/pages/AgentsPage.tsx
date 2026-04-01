@@ -91,7 +91,7 @@ export function AgentsPage() {
               {!isSuspended && <span className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full bg-success border-2 border-surface animate-pulse" />}
             </div>
             <div className="min-w-0">
-              <h2 className="text-base font-black tracking-tight truncate">{agent.name}</h2>
+              <h2 className="text-base font-black tracking-tight truncate">{t(`agents.builtin.${agent.name}.name`, { defaultValue: agent.name })}</h2>
               <p className="text-[10px] font-mono text-text-dim/50 truncate mt-0.5">{truncateId(agent.id)}</p>
             </div>
           </div>
@@ -204,7 +204,7 @@ export function AgentsPage() {
                       <Avatar fallback={agent.name} size="md" />
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap">
-                          <h3 className="text-xs sm:text-sm font-bold truncate">{agent.name}</h3>
+                          <h3 className="text-xs sm:text-sm font-bold truncate">{t(`agents.builtin.${agent.name}.name`, { defaultValue: agent.name })}</h3>
                           <span className="text-[8px] px-1.5 py-0.5 rounded-full bg-purple-100 text-purple-600 dark:bg-purple-900/30 dark:text-purple-400 font-bold hidden sm:inline">{t("agents.hand_badge")}</span>
                           <Badge variant={getStatusVariant(agent.state)}>
                             {agent.state ? t(`common.${agent.state.toLowerCase()}`, { defaultValue: agent.state }) : t("common.idle")}
