@@ -284,7 +284,7 @@ function useChatMessages(agentId: string | null, agents: any[] = []) {
             if (data.type === "text_delta") {
               const chunk = data.content || "";
               setMessages(prev => prev.map(m =>
-                m.id === botMsg.id ? { ...m, content: m.content + chunk } : m
+                m.id === botMsg.id ? { ...m, content: m.content + chunk, error: undefined } : m
               ));
             } else if (data.type === "typing") {
               if (data.state === "stop") {
@@ -306,8 +306,13 @@ function useChatMessages(agentId: string | null, agents: any[] = []) {
               setMessages(prev => prev.map(m =>
                 m.id === botMsg.id ? { ...m, isStreaming: false, error } : m
               ));
-              setIsLoading(false);
-              cleanup();
+              // Don't cleanup immediately — the agent may recover and send a final
+              // response. Shorten the inactivity window to 30s so the user isn't
+              // blocked forever if the agent truly failed.
+              if (fallbackTimer) clearTimeout(fallbackTimer);
+              fallbackTimer = setTimeout(() => {
+                if (!responded) { cleanup(); sendViaHttp(); }
+              }, 30_000);
             } else if (data.type === "response") {
               setMessages(prev => prev.map(m =>
                 m.id === botMsg.id
