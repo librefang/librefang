@@ -16,10 +16,6 @@ pub struct DevArgs {
     /// Build in release mode
     #[arg(long)]
     pub release: bool,
-
-    /// Watch crates/ for changes and auto-rebuild + restart the daemon
-    #[arg(long)]
-    pub watch: bool,
 }
 
 pub fn run(args: DevArgs) -> Result<(), Box<dyn std::error::Error>> {
@@ -107,32 +103,7 @@ pub fn run(args: DevArgs) -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    // Watch mode: use cargo-watch to rebuild and restart daemon on every change
-    if args.watch {
-        return run_watch(&args, &root, &binary, _dashboard_child);
-    }
-
-    // Start daemon
-    println!("Starting daemon on port {}...", args.port);
-    println!("  Binary: {}", binary.display());
-    println!("  Press Ctrl+C to stop\n");
-
-    let status = Command::new(&binary)
-        .args(["start", "--foreground"])
-        .env("LIBREFANG_PORT", args.port.to_string())
-        .current_dir(&root)
-        .status()?;
-
-    // Cleanup dashboard if it was started
-    if let Some(mut child) = _dashboard_child {
-        let _ = child.kill();
-    }
-
-    if !status.success() {
-        return Err("Daemon exited with error".into());
-    }
-
-    Ok(())
+    run_watch(&args, &root, &binary, _dashboard_child)
 }
 
 /// Kill stale processes on API and dashboard ports.
