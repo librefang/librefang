@@ -120,14 +120,18 @@ impl ModelCatalog {
                 continue;
             }
 
-            // Primary: check the provider's declared env var
-            let has_key = std::env::var(&provider.api_key_env).is_ok();
+            // Primary: check the provider's declared env var (non-empty after trim)
+            let has_key = std::env::var(&provider.api_key_env)
+                .map_or(false, |v| !v.trim().is_empty());
 
             // Secondary: provider-specific fallback keys (still API-key-based auth)
             let has_key_fallback = match provider.id.as_str() {
-                "gemini" => std::env::var("GOOGLE_API_KEY").is_ok(),
+                "gemini" => std::env::var("GOOGLE_API_KEY")
+                    .map_or(false, |v| !v.trim().is_empty()),
                 "openai" | "codex" => {
-                    std::env::var("OPENAI_API_KEY").is_ok() || read_codex_credential().is_some()
+                    std::env::var("OPENAI_API_KEY")
+                        .map_or(false, |v| !v.trim().is_empty())
+                        || read_codex_credential().is_some()
                 }
                 _ => false,
             };

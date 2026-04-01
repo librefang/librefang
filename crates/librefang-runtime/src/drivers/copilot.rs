@@ -154,9 +154,9 @@ pub fn parse_copilot_token(raw: &str) -> (String, Option<String>) {
     (raw.to_string(), proxy_ep)
 }
 
-/// Check if GitHub Copilot auth is available (GITHUB_TOKEN env var is set).
+/// Check if GitHub Copilot auth is available (GITHUB_TOKEN env var is set and non-empty).
 pub fn copilot_auth_available() -> bool {
-    std::env::var("GITHUB_TOKEN").is_ok()
+    std::env::var("GITHUB_TOKEN").map_or(false, |v| !v.trim().is_empty())
 }
 
 /// LLM driver that wraps OpenAI-compatible with Copilot token exchange.

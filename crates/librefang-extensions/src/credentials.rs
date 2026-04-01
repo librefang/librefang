@@ -91,8 +91,8 @@ impl CredentialResolver {
         if self.dotenv.contains_key(key) {
             return true;
         }
-        // Check env
-        std::env::var(key).is_ok()
+        // Check env (non-empty after trim)
+        std::env::var(key).map_or(false, |v| !v.trim().is_empty())
     }
 
     /// Resolve all required credentials for an integration.

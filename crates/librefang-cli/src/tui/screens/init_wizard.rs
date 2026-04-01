@@ -373,13 +373,14 @@ impl State {
     }
 
     fn build_provider_order(&mut self) {
+        let has_key = |var: &str| std::env::var(var).map_or(false, |v| !v.trim().is_empty());
         self.provider_order.clear();
-        let gemini_via_google = std::env::var("GOOGLE_API_KEY").is_ok();
+        let gemini_via_google = has_key("GOOGLE_API_KEY");
         for (i, p) in PROVIDERS.iter().enumerate() {
             let detected = if p.name == "claude-code" {
                 librefang_runtime::drivers::claude_code::claude_code_available()
             } else {
-                (!p.env_var.is_empty() && std::env::var(p.env_var).is_ok())
+                (!p.env_var.is_empty() && has_key(p.env_var))
                     || (p.name == "gemini" && gemini_via_google)
             };
             if detected {
@@ -390,7 +391,7 @@ impl State {
             let detected = if p.name == "claude-code" {
                 librefang_runtime::drivers::claude_code::claude_code_available()
             } else {
-                (!p.env_var.is_empty() && std::env::var(p.env_var).is_ok())
+                (!p.env_var.is_empty() && has_key(p.env_var))
                     || (p.name == "gemini" && gemini_via_google)
             };
             if !detected {
@@ -442,12 +443,13 @@ impl State {
     }
 
     fn is_provider_detected(&self, prov_idx: usize) -> bool {
+        let has_key = |var: &str| std::env::var(var).map_or(false, |v| !v.trim().is_empty());
         let p = &PROVIDERS[prov_idx];
         if p.name == "claude-code" {
             return librefang_runtime::drivers::claude_code::claude_code_available();
         }
-        (!p.env_var.is_empty() && std::env::var(p.env_var).is_ok())
-            || (p.name == "gemini" && std::env::var("GOOGLE_API_KEY").is_ok())
+        (!p.env_var.is_empty() && has_key(p.env_var))
+            || (p.name == "gemini" && has_key("GOOGLE_API_KEY"))
     }
 
     /// Populate model_entries from the catalog for the selected provider.

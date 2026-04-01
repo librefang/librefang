@@ -430,7 +430,7 @@ impl ChannelState {
             let env_vars: Vec<(String, bool)> = def
                 .env_vars
                 .iter()
-                .map(|v| (v.to_string(), std::env::var(v).is_ok()))
+                .map(|v| (v.to_string(), std::env::var(v).map_or(false, |val| !val.trim().is_empty())))
                 .collect();
             let all_set = env_vars.is_empty() || env_vars.iter().all(|(_, set)| *set);
             let any_set = env_vars.iter().any(|(_, set)| *set);
