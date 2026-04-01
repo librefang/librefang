@@ -633,6 +633,18 @@ export function SkillsPage() {
       {/* Category Chips — ClawHub, SkillHub, FangHub */}
       {(viewMode === "marketplace" || viewMode === "skillhub" || viewMode === "fanghub") && (
         <div className="flex flex-wrap gap-1.5 sm:gap-2">
+          {viewMode === "fanghub" && (
+            <button
+              onClick={() => { setSelectedCategory(null); setPage(1); }}
+              className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${
+                !selectedCategory
+                  ? "bg-brand text-white shadow-md"
+                  : "bg-main/50 text-text-dim hover:bg-main hover:text-text-main border border-border-subtle"
+              }`}
+            >
+              {t("common.all")}
+            </button>
+          )}
           {categories.map(cat => (
             <button
               key={cat.id}
