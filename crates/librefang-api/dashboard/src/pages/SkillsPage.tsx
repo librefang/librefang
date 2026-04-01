@@ -76,8 +76,7 @@ function FangHubSkillCard({ skill, pendingId, onInstall, t }: {
 }) {
   const isPending = pendingId === skill.name;
   return (
-    <Card hover padding="none" className="relative flex flex-col overflow-hidden">
-      <span className="absolute top-2.5 right-2.5 text-[9px] font-black px-1.5 py-0.5 rounded-full bg-brand/15 text-brand leading-none z-10">{t("skills.official")}</span>
+    <Card hover padding="none" className="flex flex-col overflow-hidden">
       <div className="h-1.5 bg-gradient-to-r from-brand via-brand/60 to-brand/30" />
       <div className="p-5 flex-1 flex flex-col">
         <div className="flex items-start justify-between gap-3 mb-3">
@@ -578,13 +577,13 @@ export function SkillsPage() {
         {/* FangHub — always shown, first */}
         <button
           onClick={() => { setViewMode("fanghub"); setPage(1); setSearch(""); setSkillhubSearch(""); setSelectedCategory(null); }}
-          className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-colors ${
+          className={`relative flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-colors ${
             viewMode === "fanghub" ? "bg-surface text-brand shadow-sm" : "text-text-dim hover:text-text-main"
           }`}
         >
           <Zap className="w-4 h-4" />
           {t("skills.builtin")}
-          <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full bg-brand/15 text-brand leading-none">{t("skills.official")}</span>
+          <span className="absolute -top-1.5 -right-1.5 text-[8px] font-black px-1 py-px rounded-full bg-brand text-white leading-none">{t("skills.official")}</span>
         </button>
 
         {/* ClawHub — non-CN only */}
