@@ -564,7 +564,7 @@ export function SkillsPage() {
         <button
           onClick={() => { setViewMode("installed"); setPage(1); setSearch(""); setSkillhubSearch(""); setSelectedCategory(null); }}
           className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-colors ${
-            viewMode === "installed" ? "bg-surface text-success shadow-sm" : "text-text-dim hover:text-text-main"
+            viewMode === "installed" ? "bg-surface text-success shadow-sm" : "bg-main/50 text-text-dim hover:text-text-main"
           }`}
         >
           <Package className="w-4 h-4" />
@@ -578,7 +578,7 @@ export function SkillsPage() {
         <button
           onClick={() => { setViewMode("fanghub"); setPage(1); setSearch(""); setSkillhubSearch(""); setSelectedCategory(null); }}
           className={`relative flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-colors ${
-            viewMode === "fanghub" ? "bg-surface text-brand shadow-sm" : "text-text-dim hover:text-text-main"
+            viewMode === "fanghub" ? "bg-surface text-brand shadow-sm" : "bg-main/50 text-text-dim hover:text-text-main"
           }`}
         >
           <Zap className="w-4 h-4" />
@@ -591,7 +591,7 @@ export function SkillsPage() {
           <button
             onClick={() => { setViewMode("marketplace"); setPage(1); setSkillhubSearch(""); setSelectedCategory(categories[0]?.id || null); }}
             className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-colors ${
-              viewMode === "marketplace" ? "bg-surface text-brand shadow-sm" : "text-text-dim hover:text-text-main"
+              viewMode === "marketplace" ? "bg-surface text-brand shadow-sm" : "bg-main/50 text-text-dim hover:text-text-main"
             }`}
           >
             <Sparkles className="w-4 h-4" />
@@ -604,7 +604,7 @@ export function SkillsPage() {
           <button
             onClick={() => { setViewMode("skillhub"); setPage(1); setSearch(""); setSelectedCategory(null); }}
             className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-colors ${
-              viewMode === "skillhub" ? "bg-surface text-accent shadow-sm" : "text-text-dim hover:text-text-main"
+              viewMode === "skillhub" ? "bg-surface text-accent shadow-sm" : "bg-main/50 text-text-dim hover:text-text-main"
             }`}
           >
             <Store className="w-4 h-4" />
