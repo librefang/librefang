@@ -375,22 +375,24 @@ export function SkillsPage() {
     enabled: viewMode === "marketplace" && !!searchKeyword,
   });
 
-  // Skillhub queries
+  // Skillhub queries — category selection also drives search
+  const skillhubKeyword = skillhubSearch_ || (selectedCategory ? categories.find(c => c.id === selectedCategory)?.keyword || "" : "");
+
   const skillhubBrowseQuery = useQuery({
     queryKey: ["skillhub", "browse"],
     queryFn: () => skillhubBrowse(),
     staleTime: 60000,
-    enabled: viewMode === "skillhub" && !skillhubSearch_,
+    enabled: viewMode === "skillhub" && !skillhubKeyword,
   });
 
   const skillhubSearchQuery = useQuery({
-    queryKey: ["skillhub", "search", skillhubSearch_],
-    queryFn: () => skillhubSearch(skillhubSearch_),
+    queryKey: ["skillhub", "search", skillhubKeyword],
+    queryFn: () => skillhubSearch(skillhubKeyword),
     staleTime: 60000,
-    enabled: viewMode === "skillhub" && !!skillhubSearch_,
+    enabled: viewMode === "skillhub" && !!skillhubKeyword,
   });
 
-  const activeSkillhubQuery = skillhubSearch_ ? skillhubSearchQuery : skillhubBrowseQuery;
+  const activeSkillhubQuery = skillhubKeyword ? skillhubSearchQuery : skillhubBrowseQuery;
 
   // FangHub — official skills from local registry (~/.librefang/registry/skills)
   const fanghubQuery = useQuery({
@@ -448,6 +450,20 @@ export function SkillsPage() {
   );
   const skillhubTotalPages = Math.ceil(filteredSkillhub.length / ITEMS_PER_PAGE);
   const paginatedSkillhub = filteredSkillhub.slice((page - 1) * ITEMS_PER_PAGE, page * ITEMS_PER_PAGE);
+
+  const fanghubSkills = fanghubQuery.data?.skills ?? [];
+  const filteredFanghub = useMemo(() => {
+    if (!selectedCategory) return fanghubSkills;
+    const keyword = categories.find(c => c.id === selectedCategory)?.keyword || "";
+    const kws = keyword.toLowerCase().split(" ");
+    return fanghubSkills.filter(s =>
+      kws.some(kw =>
+        s.name.toLowerCase().includes(kw) ||
+        s.description?.toLowerCase().includes(kw) ||
+        s.tags?.some(tag => tag.toLowerCase().includes(kw))
+      )
+    );
+  }, [fanghubSkills, selectedCategory]);
 
   // Mutations
   const uninstallMutation = useMutation({
@@ -519,6 +535,7 @@ export function SkillsPage() {
     } else {
       setSelectedCategory(categoryId);
       setSearch("");
+      setSkillhubSearch("");
     }
     setPage(1);
   };
@@ -613,8 +630,8 @@ export function SkillsPage() {
         )}
       </div>
 
-      {/* Category Chips — ClawHub only */}
-      {viewMode === "marketplace" && (
+      {/* Category Chips — ClawHub, SkillHub, FangHub */}
+      {(viewMode === "marketplace" || viewMode === "skillhub" || viewMode === "fanghub") && (
         <div className="flex flex-wrap gap-1.5 sm:gap-2">
           {categories.map(cat => (
             <button
@@ -730,11 +747,11 @@ export function SkillsPage() {
         /* viewMode === "fanghub" — official LibreFang registry skills */
         fanghubQuery.isLoading ? (
           <CardSkeleton count={3} />
-        ) : (fanghubQuery.data?.skills ?? []).length === 0 ? (
+        ) : filteredFanghub.length === 0 ? (
           <EmptyState title={t("skills.no_results")} icon={<Zap className="h-6 w-6" />} />
         ) : (
           <div className="grid gap-2 sm:gap-4 md:grid-cols-2 xl:grid-cols-3">
-            {(fanghubQuery.data?.skills ?? []).map((skill: FangHubSkill) => (
+            {filteredFanghub.map((skill: FangHubSkill) => (
               <FangHubSkillCard
                 key={skill.name}
                 skill={skill}
