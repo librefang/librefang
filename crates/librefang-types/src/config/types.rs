@@ -1609,7 +1609,7 @@ pub struct KernelConfig {
     /// Allowed CORS origins. When non-empty, these origins are added to the
     /// CORS allow list (in addition to localhost). Accepts exact origin strings
     /// like `"https://dash.example.com"`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cors_origin: Vec<String>,
     /// Whether to enable the OFP network layer.
     pub network_enabled: bool,
@@ -1649,10 +1649,10 @@ pub struct KernelConfig {
     #[serde(default = "default_language")]
     pub language: String,
     /// User configurations for RBAC multi-user support.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub users: Vec<UserConfig>,
     /// MCP server configurations for external tool integration.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp_servers: Vec<McpServerConfigEntry>,
     /// A2A (Agent-to-Agent) protocol configuration.
     #[serde(default)]
@@ -1672,7 +1672,7 @@ pub struct KernelConfig {
     pub web: WebConfig,
     /// Fallback providers tried in order if the primary fails.
     /// Configure in config.toml as `[[fallback_providers]]`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fallback_providers: Vec<FallbackProviderConfig>,
     /// Browser automation configuration.
     #[serde(default)]
@@ -1714,13 +1714,13 @@ pub struct KernelConfig {
     /// Config include files — loaded and deep-merged before the root config.
     /// Paths are relative to the root config file's directory.
     /// Security: absolute paths and `..` components are rejected.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub include: Vec<String>,
     /// Shell/exec security policy.
     #[serde(default)]
     pub exec_policy: ExecPolicy,
     /// Agent bindings for multi-account routing.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bindings: Vec<AgentBinding>,
     /// Broadcast routing configuration.
     #[serde(default)]
@@ -1774,7 +1774,7 @@ pub struct KernelConfig {
     #[serde(default)]
     pub oauth: OAuthConfig,
     /// Sidecar channel adapters (external process-based).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sidecar_channels: Vec<SidecarChannelConfig>,
     /// HTTP proxy configuration for all outbound connections.
     #[serde(default)]
