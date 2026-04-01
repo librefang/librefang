@@ -3019,7 +3019,11 @@ pub struct MemoryConfig {
     pub consolidation_threshold: u64,
     /// Memory decay rate (0.0 = no decay, 1.0 = aggressive decay).
     pub decay_rate: f32,
-    /// Embedding provider (e.g., "openai", "ollama"). None = auto-detect.
+    /// Embedding provider. Valid values: `"openai"`, `"groq"`, `"mistral"`,
+    /// `"together"`, `"fireworks"`, `"cohere"`, `"ollama"`, `"bedrock"`,
+    /// `"vllm"`, `"lmstudio"`, or `"auto"`.
+    /// `None` or `"auto"` = probe API-key env vars across all cloud providers,
+    /// then fall back to local Ollama.
     #[serde(default)]
     pub embedding_provider: Option<String>,
     /// Environment variable name for the embedding API key.
