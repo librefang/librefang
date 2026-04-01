@@ -166,14 +166,20 @@ fn run_watch(
     binary: &std::path::Path,
     dashboard_child: Option<std::process::Child>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Check cargo-watch is available
+    // Auto-install cargo-watch if missing
     let has_watch = Command::new("cargo")
         .args(["watch", "--version"])
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false);
     if !has_watch {
-        return Err("cargo-watch not installed. Run: cargo install cargo-watch".into());
+        println!("cargo-watch not found, installing...");
+        let status = Command::new("cargo")
+            .args(["install", "cargo-watch"])
+            .status()?;
+        if !status.success() {
+            return Err("Failed to install cargo-watch".into());
+        }
     }
 
     let binary_str = binary.display().to_string();
