@@ -5830,6 +5830,7 @@ system_prompt = "You are a helpful assistant."
                 format!("hand_instance:{}", instance.instance_id),
                 format!("hand_role:{role}"),
             ];
+            manifest.is_hand = true;
             manifest.skills = def.skills.clone();
             manifest.mcp_servers = def.mcp_servers.clone();
 

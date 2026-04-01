@@ -254,9 +254,21 @@ impl StructuredStore {
                 identity_str,
                 source_toml_path,
             )) => {
-                let manifest: librefang_types::agent::AgentManifest =
+                let mut manifest: librefang_types::agent::AgentManifest =
                     rmp_serde::from_slice(&manifest_blob)
                         .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
+                // Migrate legacy hand agents: if manifest.is_hand is not set but
+                // the agent looks like a hand (tags or name convention), fix it now.
+                if !manifest.is_hand {
+                    let looks_like_hand = manifest
+                        .tags
+                        .iter()
+                        .any(|t: &String| t.starts_with("hand:"))
+                        || name.contains(':');
+                    if looks_like_hand {
+                        manifest.is_hand = true;
+                    }
+                }
                 let state = serde_json::from_str(&state_str)
                     .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
                 let created_at = chrono::DateTime::parse_from_rfc3339(&created_str)
@@ -269,13 +281,7 @@ impl StructuredStore {
                 let identity = identity_str
                     .and_then(|s| serde_json::from_str(&s).ok())
                     .unwrap_or_default();
-                // is_hand: tags-based check first; fall back to name convention
-                // for legacy agents whose manifests predate the hand: tag.
-                let is_hand = manifest
-                    .tags
-                    .iter()
-                    .any(|t: &String| t.starts_with("hand:"))
-                    || name.contains(':');
+                let is_hand = manifest.is_hand;
                 Ok(Some(AgentEntry {
                     id: agent_id,
                     name,
@@ -416,7 +422,7 @@ impl StructuredStore {
                 }
             };
 
-            let manifest: librefang_types::agent::AgentManifest = match rmp_serde::from_slice(
+            let mut manifest: librefang_types::agent::AgentManifest = match rmp_serde::from_slice(
                 &manifest_blob,
             ) {
                 Ok(m) => m,
@@ -428,6 +434,20 @@ impl StructuredStore {
                     continue;
                 }
             };
+
+            // Migrate legacy hand agents: if manifest.is_hand is not set but the
+            // agent looks like a hand (tags or name convention), fix it now so
+            // the repaired blob persists the correct value.
+            if !manifest.is_hand {
+                let looks_like_hand = manifest
+                    .tags
+                    .iter()
+                    .any(|t: &String| t.starts_with("hand:"))
+                    || name.contains(':');
+                if looks_like_hand {
+                    manifest.is_hand = true;
+                }
+            }
 
             // Auto-repair: re-serialize with current schema and queue for update.
             // This upgrades the stored blob so future boots don't hit lenient paths.
@@ -460,13 +480,7 @@ impl StructuredStore {
                 .and_then(|s| serde_json::from_str(&s).ok())
                 .unwrap_or_default();
 
-            // is_hand: tags-based check first; fall back to name convention
-            // for legacy agents whose manifests predate the hand: tag.
-            let is_hand = manifest
-                .tags
-                .iter()
-                .any(|t: &String| t.starts_with("hand:"))
-                || name.contains(':');
+            let is_hand = manifest.is_hand;
             agents.push(AgentEntry {
                 id: agent_id,
                 name,

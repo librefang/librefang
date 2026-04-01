@@ -570,6 +570,10 @@ pub struct AgentManifest {
     /// global ones within each position group.
     #[serde(default)]
     pub context_injection: Vec<crate::config::ContextInjection>,
+    /// Whether this agent was spawned by a Hand. Persisted in the manifest so
+    /// it survives restarts without requiring tag-based detection.
+    #[serde(default)]
+    pub is_hand: bool,
 }
 
 fn default_true() -> bool {
@@ -612,6 +616,7 @@ impl Default for AgentManifest {
             inherit_parent_context: true,
             thinking: None,
             context_injection: Vec::new(),
+            is_hand: false,
         }
     }
 }
