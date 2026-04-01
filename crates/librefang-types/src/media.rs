@@ -515,6 +515,11 @@ impl MediaTtsRequest {
                 return Err(format!("Invalid speed {speed}. Must be 0.25-4.0"));
             }
         }
+        if let Some(pitch) = self.pitch {
+            if !(-20.0..=20.0).contains(&pitch) {
+                return Err(format!("Invalid pitch {pitch}. Must be -20.0 to 20.0"));
+            }
+        }
         Ok(())
     }
 }

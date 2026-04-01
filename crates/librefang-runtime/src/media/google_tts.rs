@@ -185,20 +185,22 @@ fn build_input(text: &str) -> serde_json::Value {
 
 /// Returns true if the text looks like it contains SSML markup tags.
 fn is_ssml(text: &str) -> bool {
-    // Common SSML tags aside from <speak> and <break>.
-    // For <p> and <s>, require closing tags to avoid false positives on plain HTML.
+    // Unambiguous SSML-only tags (not valid HTML).
+    // For <p>/<s>, require paired closing tags to reduce false positives.
+    // For <sub>/<mark>/<audio>, require SSML-specific attributes (alias=/name=/src=)
+    // because these are also standard HTML tags and would otherwise false-positive.
     text.contains("<prosody")
         || text.contains("<emphasis")
         || text.contains("<say-as")
         || text.contains("<phoneme")
-        || text.contains("<audio")
+        || text.contains("<par>")
+        || text.contains("<seq>")
+        || text.contains("<media ")
+        || text.contains("<audio src")
+        || text.contains("<sub alias")
+        || text.contains("<mark name")
         || (text.contains("<p>") && text.contains("</p>"))
         || (text.contains("<s>") && text.contains("</s>"))
-        || text.contains("<sub")
-        || text.contains("<mark")
-        || text.contains("<par")
-        || text.contains("<seq")
-        || text.contains("<media")
 }
 
 /// Map a requested audio format to a Google Cloud TTS audioEncoding value.
