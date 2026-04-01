@@ -263,7 +263,7 @@ debounce_ms = 500
 # ── Text-to-Speech ───────────────────────────────────────────
 # [tts]
 # enabled = false
-# provider = "openai"          # or "elevenlabs"
+# provider = "openai"          # or "elevenlabs" or "google_tts"
 
 # ── Network (P2P Federation) ─────────────────────────────────
 # network_enabled = false

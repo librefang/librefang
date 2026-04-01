@@ -607,12 +607,14 @@ pub struct FallbackProviderConfig {
 pub struct TtsConfig {
     /// Enable TTS. Default: false.
     pub enabled: bool,
-    /// Default provider: "openai" or "elevenlabs".
+    /// Default provider: "openai", "elevenlabs", or "google_tts".
     pub provider: Option<String>,
     /// OpenAI TTS settings.
     pub openai: TtsOpenAiConfig,
     /// ElevenLabs TTS settings.
     pub elevenlabs: TtsElevenLabsConfig,
+    /// Google Cloud TTS settings.
+    pub google: TtsGoogleConfig,
     /// Max text length for TTS (chars). Default: 4096.
     pub max_text_length: usize,
     /// Timeout per TTS request in seconds. Default: 30.
@@ -626,6 +628,7 @@ impl Default for TtsConfig {
             provider: None,
             openai: TtsOpenAiConfig::default(),
             elevenlabs: TtsElevenLabsConfig::default(),
+            google: TtsGoogleConfig::default(),
             max_text_length: 4096,
             timeout_secs: 30,
         }
@@ -678,6 +681,34 @@ impl Default for TtsElevenLabsConfig {
             model_id: "eleven_monolingual_v1".to_string(),
             stability: 0.5,
             similarity_boost: 0.75,
+        }
+    }
+}
+
+/// Google Cloud TTS settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TtsGoogleConfig {
+    /// Voice name (e.g. "en-US-Standard-F", "pl-PL-Wavenet-A"). Default: "en-US-Standard-F".
+    pub voice: String,
+    /// Language code (e.g. "en-US", "pl-PL"). Default: "en-US".
+    pub language_code: String,
+    /// Speaking rate: 0.25 to 4.0. Default: 1.0.
+    pub speaking_rate: f32,
+    /// Pitch adjustment: -20.0 to 20.0. Default: 0.0.
+    pub pitch: f32,
+    /// Output format: "mp3", "opus", "wav". Default: "mp3".
+    pub format: String,
+}
+
+impl Default for TtsGoogleConfig {
+    fn default() -> Self {
+        Self {
+            voice: "en-US-Standard-F".to_string(),
+            language_code: "en-US".to_string(),
+            speaking_rate: 1.0,
+            pitch: 0.0,
+            format: "mp3".to_string(),
         }
     }
 }

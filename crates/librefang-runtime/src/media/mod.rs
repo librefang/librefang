@@ -8,6 +8,7 @@
 
 pub mod elevenlabs;
 pub mod gemini;
+pub mod google_tts;
 pub mod minimax;
 pub mod openai;
 
@@ -160,6 +161,7 @@ impl MediaDriverCache {
                 "gemini".into(),
                 "elevenlabs".into(),
                 "minimax".into(),
+                "google_tts".into(),
             ]),
         }
     }
@@ -179,6 +181,7 @@ impl MediaDriverCache {
                 "gemini".into(),
                 "elevenlabs".into(),
                 "minimax".into(),
+                "google_tts".into(),
             ]),
         }
     }
@@ -195,7 +198,7 @@ impl MediaDriverCache {
             .filter(|p| !p.media_capabilities.is_empty())
             .map(|p| p.id.clone())
             .collect();
-        for builtin in ["openai", "gemini", "elevenlabs", "minimax"] {
+        for builtin in ["openai", "gemini", "elevenlabs", "minimax", "google_tts"] {
             if !media_provs.iter().any(|p| p == builtin) {
                 media_provs.push(builtin.to_string());
             }
@@ -305,8 +308,9 @@ fn create_media_driver(
         "gemini" | "google" => Ok(Arc::new(gemini::GeminiMediaDriver::new(base_url))),
         "minimax" => Ok(Arc::new(minimax::MiniMaxMediaDriver::new(base_url))),
         "openai" => Ok(Arc::new(openai::OpenAIMediaDriver::new(base_url))),
+        "google_tts" => Ok(Arc::new(google_tts::GoogleTtsMediaDriver::new(base_url))),
         other => Err(MediaError::InvalidRequest(format!(
-            "Unknown media provider: '{other}'. Available: openai, gemini, elevenlabs, minimax"
+            "Unknown media provider: '{other}'. Available: openai, gemini, elevenlabs, minimax, google_tts"
         ))),
     }
 }
@@ -462,10 +466,11 @@ mod tests {
         let cache = MediaDriverCache::new();
         cache.load_providers_from_registry(&[]);
         let list = cache.media_providers.read().unwrap();
-        assert_eq!(list.len(), 4);
+        assert_eq!(list.len(), 5);
         assert!(list.contains(&"openai".to_string()));
         assert!(list.contains(&"gemini".to_string()));
         assert!(list.contains(&"elevenlabs".to_string()));
         assert!(list.contains(&"minimax".to_string()));
+        assert!(list.contains(&"google_tts".to_string()));
     }
 }
