@@ -125,16 +125,17 @@ impl MediaDriver for GoogleTtsMediaDriver {
             .as_str()
             .ok_or_else(|| MediaError::Other("Missing audioContent in response".into()))?;
 
-        let audio_data = base64::engine::general_purpose::STANDARD
-            .decode(audio_b64)
-            .map_err(|e| MediaError::Other(format!("Failed to decode base64 audio: {e}")))?;
-
-        if audio_data.len() > MAX_AUDIO_RESPONSE_BYTES {
+        // Pre-check before decoding: base64 expands ~33%, so decoded size ≈ len * 3/4.
+        if audio_b64.len() > MAX_AUDIO_RESPONSE_BYTES * 4 / 3 {
             return Err(MediaError::Other(format!(
                 "Audio data exceeds {}MB limit",
                 MAX_AUDIO_RESPONSE_BYTES / 1024 / 1024
             )));
         }
+
+        let audio_data = base64::engine::general_purpose::STANDARD
+            .decode(audio_b64)
+            .map_err(|e| MediaError::Other(format!("Failed to decode base64 audio: {e}")))?;
 
         // Rough duration estimate: ~150 words/min, adjusted for speaking rate
         let word_count = request.text.split_whitespace().count();
@@ -258,6 +259,26 @@ mod tests {
         assert!(ssml_val.ends_with("</speak>"));
         assert!(ssml_val.contains(partial));
         assert!(input["text"].is_null());
+
+        // Unambiguous SSML-only tags → detected as SSML
+        assert!(is_ssml("<prosody rate=\"fast\">hello</prosody>"));
+        assert!(is_ssml("<emphasis level=\"strong\">hi</emphasis>"));
+        assert!(is_ssml("<say-as interpret-as=\"characters\">ABC</say-as>"));
+        assert!(is_ssml("text <par> parallel </par> text"));
+        assert!(is_ssml("text <seq> sequential </seq> text"));
+        assert!(is_ssml("<mark name=\"bookmark1\"/>"));
+        assert!(is_ssml(
+            "<sub alias=\"World Wide Web Consortium\">W3C</sub>"
+        ));
+        assert!(is_ssml("<audio src=\"https://example.com/sound.mp3\"/>"));
+        assert!(is_ssml("<p>Hello</p> <p>World</p>"));
+
+        // Plain HTML tags that look like SSML but aren't → must NOT be detected
+        assert!(!is_ssml("Use <mark> to highlight text"));
+        assert!(!is_ssml("H<sub>2</sub>O is water"));
+        assert!(!is_ssml("<audio controls><source src=\"x.mp3\"/></audio>"));
+        assert!(!is_ssml("text with <param> tag"));
+        assert!(!is_ssml("sequence of events"));
     }
 
     #[test]

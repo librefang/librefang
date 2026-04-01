@@ -647,4 +647,140 @@ mod tests {
         let config = KernelConfig::default();
         assert_eq!(config.config_version, CONFIG_VERSION);
     }
+
+    #[test]
+    fn test_load_config_with_users_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("config.toml");
+
+        let mut f = std::fs::File::create(&root).unwrap();
+        writeln!(f, "[[users]]").unwrap();
+        writeln!(f, "name = \"Alice\"").unwrap();
+        writeln!(f, "role = \"owner\"").unwrap();
+        drop(f);
+
+        let config = load_config(Some(&root));
+        assert_eq!(config.users.len(), 1);
+        assert_eq!(config.users[0].name, "Alice");
+        assert_eq!(config.users[0].role, "owner");
+        assert!(config.users[0].channel_bindings.is_empty());
+        assert!(config.users[0].api_key_hash.is_none());
+    }
+
+    #[test]
+    fn test_load_config_with_users_and_channel_bindings() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("config.toml");
+
+        let mut f = std::fs::File::create(&root).unwrap();
+        writeln!(f, "[[users]]").unwrap();
+        writeln!(f, "name = \"Alice\"").unwrap();
+        writeln!(f, "role = \"owner\"").unwrap();
+        writeln!(f, "[users.channel_bindings]").unwrap();
+        writeln!(f, "telegram = \"123456\"").unwrap();
+        drop(f);
+
+        let config = load_config(Some(&root));
+        assert_eq!(config.users.len(), 1);
+        assert_eq!(config.users[0].name, "Alice");
+        assert_eq!(
+            config.users[0].channel_bindings.get("telegram").unwrap(),
+            "123456"
+        );
+    }
+
+    #[test]
+    fn test_load_config_users_migration_roundtrip() {
+        // When no config_version is present, migration runs and writes back.
+        // Verify that the round-trip preserves users data.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("config.toml");
+
+        let mut f = std::fs::File::create(&root).unwrap();
+        writeln!(f, "log_level = \"debug\"").unwrap();
+        writeln!(f, "[[users]]").unwrap();
+        writeln!(f, "name = \"Alice\"").unwrap();
+        writeln!(f, "role = \"owner\"").unwrap();
+        drop(f);
+
+        // First load: triggers migration (v1 → v2), writes back
+        let config1 = load_config(Some(&root));
+        assert_eq!(config1.log_level, "debug");
+        assert_eq!(config1.users.len(), 1);
+        assert_eq!(config1.users[0].name, "Alice");
+        assert_eq!(config1.config_version, CONFIG_VERSION);
+
+        // Second load: reads migrated file, no migration needed
+        let config2 = load_config(Some(&root));
+        assert_eq!(config2.log_level, "debug");
+        assert_eq!(config2.users.len(), 1);
+        assert_eq!(config2.users[0].name, "Alice");
+        assert_eq!(config2.config_version, CONFIG_VERSION);
+    }
+
+    #[test]
+    fn test_migrated_config_no_users_array_key() {
+        // When the migration writes back a config WITHOUT [[users]] entries,
+        // it must NOT emit `users = []` (an inline empty array). If it does,
+        // a subsequent manual `[[users]]` addition by the user would produce
+        // duplicate `users` keys in the TOML file, breaking the next parse.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("config.toml");
+
+        let mut f = std::fs::File::create(&root).unwrap();
+        writeln!(f, "log_level = \"debug\"").unwrap();
+        // No [[users]] section — migration should not add users = []
+        drop(f);
+
+        let _config = load_config(Some(&root));
+        let contents = std::fs::read_to_string(&root).unwrap();
+
+        // The migrated file should not have a `users = []` line that would
+        // conflict with a user later adding `[[users]]` sections.
+        assert!(
+            !contents.contains("users = []"),
+            "Migrated config must not contain `users = []`; got:\n{contents}"
+        );
+    }
+
+    #[test]
+    fn test_users_array_key_conflicts_with_array_of_tables() {
+        // Verify that if a config has BOTH `users = []` and `[[users]]`,
+        // the TOML parser rejects it (duplicate key). The kernel should
+        // fall back to defaults gracefully rather than panic.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("config.toml");
+
+        let mut f = std::fs::File::create(&root).unwrap();
+        writeln!(f, "log_level = \"warn\"").unwrap();
+        writeln!(f, "users = []").unwrap(); // would conflict with [[users]]
+        writeln!(f, "[[users]]").unwrap();
+        writeln!(f, "name = \"Alice\"").unwrap();
+        writeln!(f, "role = \"owner\"").unwrap();
+        drop(f);
+
+        // Should fall back to defaults (TOML parse error: duplicate key)
+        let config = load_config(Some(&root));
+        assert_eq!(config.log_level, "info"); // default, not "warn"
+        assert!(config.users.is_empty());
+    }
+
+    #[test]
+    fn test_load_config_users_missing_name_falls_back_to_defaults() {
+        // A [[users]] block without a required `name` field should fail deserialization
+        // and fall back to defaults rather than panicking.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("config.toml");
+
+        let mut f = std::fs::File::create(&root).unwrap();
+        writeln!(f, "log_level = \"warn\"").unwrap();
+        writeln!(f, "[[users]]").unwrap();
+        writeln!(f, "role = \"owner\"").unwrap(); // no name — invalid
+        drop(f);
+
+        let config = load_config(Some(&root));
+        // Should fall back to defaults (users deserialization fails)
+        assert_eq!(config.log_level, "info"); // default, not "warn"
+        assert!(config.users.is_empty());
+    }
 }
