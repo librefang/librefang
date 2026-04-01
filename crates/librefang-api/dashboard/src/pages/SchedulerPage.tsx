@@ -6,7 +6,8 @@ import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { PageHeader } from "../components/ui/PageHeader";
 import { useUIStore } from "../lib/store";
-import { Clock, Plus, Play, Trash2, Calendar, Zap, X, Loader2, AlertCircle } from "lucide-react";
+import { Clock, Plus, Play, Trash2, Calendar, Zap, X, Loader2, AlertCircle, ChevronRight } from "lucide-react";
+import { ScheduleModal } from "../components/ui/ScheduleModal";
 import { ListSkeleton } from "../components/ui/Skeleton";
 import { truncateId } from "../lib/string";
 
@@ -17,6 +18,7 @@ export function SchedulerPage() {
   const queryClient = useQueryClient();
   const addToast = useUIStore((s) => s.addToast);
   const [showCreate, setShowCreate] = useState(false);
+  const [showCronPicker, setShowCronPicker] = useState(false);
   const [name, setName] = useState("");
   const [cron, setCron] = useState("0 9 * * *");
   const [agentId, setAgentId] = useState("");
@@ -215,9 +217,26 @@ export function SchedulerPage() {
               </div>
               <div>
                 <label className="text-[10px] font-bold text-text-dim uppercase">{t("scheduler.cron_exp")}</label>
-                <input value={cron} onChange={e => setCron(e.target.value)} placeholder="0 9 * * *" className={`${inputClass} font-mono`} />
-                <p className="text-[9px] text-text-dim/50 mt-1">{cronHint(cron)}</p>
+                <button
+                  type="button"
+                  onClick={() => setShowCronPicker(true)}
+                  className="w-full flex items-center justify-between px-3 py-2 rounded-xl border border-border-subtle bg-main hover:border-brand transition-colors text-left"
+                >
+                  <div>
+                    <p className="text-sm">{cronHint(cron)}</p>
+                    <p className="text-[10px] font-mono text-text-dim/50">{cron}</p>
+                  </div>
+                  <ChevronRight className="w-4 h-4 text-text-dim/40 flex-shrink-0" />
+                </button>
               </div>
+              {showCronPicker && (
+                <ScheduleModal
+                  title={t("scheduler.cron_exp")}
+                  initialCron={cron}
+                  onSave={(c) => { setCron(c); setShowCronPicker(false); }}
+                  onClose={() => setShowCronPicker(false)}
+                />
+              )}
               <div>
                 <label className="text-[10px] font-bold text-text-dim uppercase">{t("scheduler.target_agent")}</label>
                 <select value={agentId} onChange={e => setAgentId(e.target.value)} className={inputClass}>
