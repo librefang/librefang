@@ -3,7 +3,6 @@ import { formatDate } from "../lib/datetime";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { listSkills, uninstallSkill, clawhubSearch, clawhubInstall, clawhubGetSkill, skillhubSearch, skillhubBrowse, skillhubInstall, skillhubGetSkill, fanghubListSkills, installSkill, type ClawHubBrowseItem, type FangHubSkill } from "../api";
-import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
 import { Card } from "../components/ui/Card";
@@ -15,7 +14,7 @@ import {
   Wrench, Search, CheckCircle2, X,
   Download, Trash2, Star, Loader2, Sparkles, Package,
   Code, GitBranch, Globe, Cloud, Monitor, Bot, Database,
-  Briefcase, Shield, Terminal, Calendar, Store, Zap,
+  Briefcase, Shield, Terminal, Calendar, Store, Zap, RefreshCw,
 } from "lucide-react";
 
 type ClawHubSkillWithStatus = ClawHubBrowseItem & { is_installed?: boolean };
@@ -559,100 +558,104 @@ export function SkillsPage() {
 
   return (
     <div className="flex flex-col gap-4 transition-colors duration-300">
-      <PageHeader
-        badge={t("common.infrastructure")}
-        title={t("skills.title")}
-        subtitle={t("skills.subtitle")}
-        isFetching={isAnyFetching}
-        onRefresh={() => { void skillsQuery.refetch(); void searchQuery.refetch(); void activeSkillhubQuery.refetch(); }}
-        icon={<Wrench className="h-4 w-4" />}
-        helpText={t("skills.help")}
-        actions={
-          <div className="hidden rounded-full border border-border-subtle bg-surface px-3 py-1.5 text-[10px] font-bold uppercase text-text-dim sm:block">
-            {t("skills.installed_count", { count: installedSkills.length })}
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2 min-w-0">
+          <div className="p-1.5 rounded-lg bg-brand/10 text-brand shrink-0"><Wrench className="h-4 w-4" /></div>
+          <div className="min-w-0">
+            <h1 className="text-base font-extrabold tracking-tight">{t("skills.title")}</h1>
+            <p className="text-[11px] text-text-dim hidden sm:block">{t("skills.subtitle")}</p>
           </div>
-        }
-      />
-
-      {/* View Toggle + Category Chips — one row */}
-      <div className="flex items-center gap-2 flex-wrap">
-        {/* Tabs */}
-        <div className="flex gap-0.5 p-0.5 bg-main/30 rounded-lg shrink-0">
-          <button
-            onClick={() => { setViewMode("installed"); setSearch(""); setSkillhubSearch(""); setSelectedCategory(null); }}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${
-              viewMode === "installed" ? "bg-surface text-success shadow-sm" : "bg-surface-hover text-text-dim hover:text-text-main"
-            }`}
-          >
-            <Package className="w-3.5 h-3.5" />
-            {t("skills.installed")}
-            <span className={`px-1.5 py-0.5 rounded-full text-[10px] ${viewMode === "installed" ? "bg-success/20 text-success" : "bg-border-subtle text-text-dim"}`}>
-              {installedSkills.length}
-            </span>
-          </button>
-
-          <button
-            onClick={() => { setViewMode("fanghub"); setSearch(""); setSkillhubSearch(""); setSelectedCategory(null); }}
-            className={`relative flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${
-              viewMode === "fanghub" ? "bg-surface text-brand shadow-sm" : "bg-surface-hover text-text-dim hover:text-text-main"
-            }`}
-          >
-            <Zap className="w-3.5 h-3.5" />
-            {t("skills.builtin")}
-            <span className={`absolute top-0.5 right-1 text-[8px] font-black px-1 py-px rounded-full leading-none ${viewMode === "fanghub" ? "bg-brand text-white" : "bg-border-subtle text-text-dim"}`}>{t("skills.official")}</span>
-          </button>
-
-          {!USE_SKILLHUB && (
-            <button
-              onClick={() => { setViewMode("marketplace"); setSkillhubSearch(""); setSelectedCategory(null); }}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${
-                viewMode === "marketplace" ? "bg-surface text-brand shadow-sm" : "bg-surface-hover text-text-dim hover:text-text-main"
-              }`}
-            >
-              <Sparkles className="w-3.5 h-3.5" />
-              {t("skills.marketplace")}
-            </button>
-          )}
-
-          {USE_SKILLHUB && (
-            <button
-              onClick={() => { setViewMode("skillhub"); setSearch(""); setSelectedCategory(null); }}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${
-                viewMode === "skillhub" ? "bg-surface text-accent shadow-sm" : "bg-surface-hover text-text-dim hover:text-text-main"
-              }`}
-            >
-              <Store className="w-3.5 h-3.5" />
-              {t("skills.skillhub")}
-            </button>
-          )}
         </div>
+        <div className="flex items-center gap-2 shrink-0">
+          <span className="hidden sm:inline-block px-2.5 py-1 rounded-full border border-border-subtle bg-surface text-[10px] font-bold uppercase text-text-dim">
+            {t("skills.installed_count", { count: installedSkills.length })}
+          </span>
+          <button
+            className="flex h-8 items-center gap-1.5 rounded-xl border border-border-subtle bg-surface px-3 text-xs font-bold text-text-dim hover:text-brand hover:border-brand/30 transition-colors"
+            onClick={() => { void skillsQuery.refetch(); void searchQuery.refetch(); void activeSkillhubQuery.refetch(); }}
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${isAnyFetching ? "animate-spin" : ""}`} />
+            <span className="hidden sm:inline">{t("common.refresh")}</span>
+          </button>
+        </div>
+      </div>
 
-        {/* Category Chips */}
-        {(viewMode === "marketplace" || viewMode === "skillhub" || viewMode === "fanghub") && (
-          <div className="flex items-center gap-1 flex-wrap">
-            <button
-              onClick={() => { setSelectedCategory(null); }}
-              className={`px-2.5 py-1 rounded-md text-xs font-bold transition-colors ${
-                !selectedCategory ? "bg-brand text-white" : "text-text-dim hover:text-text-main border border-border-subtle"
-              }`}
-            >
-              {t("common.all")}
-            </button>
-            {categories.map(cat => (
-              <button
-                key={cat.id}
-                onClick={() => handleCategoryClick(cat.id)}
-                className={`flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-bold transition-colors ${
-                  selectedCategory === cat.id ? "bg-brand text-white" : "text-text-dim hover:text-text-main border border-border-subtle"
-                }`}
-              >
-                {getCategoryIcon(cat.id)}
-                {cat.name}
-              </button>
-            ))}
-          </div>
+      {/* View Toggle */}
+      <div className="flex gap-1 p-1 bg-main/30 rounded-xl w-fit">
+        <button
+          onClick={() => { setViewMode("installed"); setSearch(""); setSkillhubSearch(""); setSelectedCategory(null); }}
+          className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-colors ${
+            viewMode === "installed" ? "bg-surface text-success shadow-sm" : "bg-surface-hover text-text-dim hover:text-text-main"
+          }`}
+        >
+          <Package className="w-4 h-4" />
+          {t("skills.installed")}
+          <span className={`ml-1 px-1.5 py-0.5 rounded-full text-[10px] ${viewMode === "installed" ? "bg-success/20 text-success" : "bg-border-subtle text-text-dim"}`}>
+            {installedSkills.length}
+          </span>
+        </button>
+
+        <button
+          onClick={() => { setViewMode("fanghub"); setSearch(""); setSkillhubSearch(""); setSelectedCategory(null); }}
+          className={`relative flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-colors ${
+            viewMode === "fanghub" ? "bg-surface text-brand shadow-sm" : "bg-surface-hover text-text-dim hover:text-text-main"
+          }`}
+        >
+          <Zap className="w-4 h-4" />
+          {t("skills.builtin")}
+          <span className={`absolute top-0.5 right-1 text-[8px] font-black px-1 py-px rounded-full leading-none ${viewMode === "fanghub" ? "bg-brand text-white" : "bg-border-subtle text-text-dim"}`}>{t("skills.official")}</span>
+        </button>
+
+        {!USE_SKILLHUB && (
+          <button
+            onClick={() => { setViewMode("marketplace"); setSkillhubSearch(""); setSelectedCategory(null); }}
+            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-colors ${
+              viewMode === "marketplace" ? "bg-surface text-brand shadow-sm" : "bg-surface-hover text-text-dim hover:text-text-main"
+            }`}
+          >
+            <Sparkles className="w-4 h-4" />
+            {t("skills.marketplace")}
+          </button>
+        )}
+
+        {USE_SKILLHUB && (
+          <button
+            onClick={() => { setViewMode("skillhub"); setSearch(""); setSelectedCategory(null); }}
+            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-colors ${
+              viewMode === "skillhub" ? "bg-surface text-accent shadow-sm" : "bg-surface-hover text-text-dim hover:text-text-main"
+            }`}
+          >
+            <Store className="w-4 h-4" />
+            {t("skills.skillhub")}
+          </button>
         )}
       </div>
+
+      {/* Category Chips */}
+      {(viewMode === "marketplace" || viewMode === "skillhub" || viewMode === "fanghub") && (
+        <div className="flex flex-wrap gap-1.5 sm:gap-2">
+          <button
+            onClick={() => { setSelectedCategory(null); }}
+            className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${
+              !selectedCategory ? "bg-brand text-white shadow-md" : "bg-main/50 text-text-dim hover:bg-main hover:text-text-main border border-border-subtle"
+            }`}
+          >
+            {t("common.all")}
+          </button>
+          {categories.map(cat => (
+            <button
+              key={cat.id}
+              onClick={() => handleCategoryClick(cat.id)}
+              className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${
+                selectedCategory === cat.id ? "bg-brand text-white shadow-md" : "bg-main/50 text-text-dim hover:bg-main hover:text-text-main border border-border-subtle"
+              }`}
+            >
+              {getCategoryIcon(cat.id)}
+              {cat.name}
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* Search — ClawHub */}
       {viewMode === "marketplace" && (
