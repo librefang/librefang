@@ -102,11 +102,35 @@ export function WorkflowsPage() {
   };
 
   const handleUseTemplate = async (tmpl: WorkflowTemplate) => {
+    const steps: any[] = (tmpl as any).steps ?? [];
+    const nameToIdx = new Map(steps.map((s: any, i: number) => [s.name, i]));
+    const nodes = steps.map((s: any, idx: number) => ({
+      id: `node-${idx}`,
+      type: "custom",
+      position: { x: 50, y: idx * 160 },
+      data: { label: s.name, prompt: s.prompt_template || "", nodeType: "agent" },
+    }));
+    const edges: any[] = [];
+    steps.forEach((s: any, idx: number) => {
+      (s.depends_on ?? []).forEach((dep: string) => {
+        const src = nameToIdx.get(dep);
+        if (src !== undefined) edges.push({ id: `e-${src}-${idx}`, source: `node-${src}`, target: `node-${idx}` });
+      });
+    });
+    if (edges.length === 0 && nodes.length > 1) {
+      nodes.slice(0, -1).forEach((_: any, i: number) =>
+        edges.push({ id: `e-${i}`, source: `node-${i}`, target: `node-${i + 1}` })
+      );
+    }
+
     const hasRequiredParams = (tmpl.parameters ?? []).some(p => p.required);
     if (hasRequiredParams) {
-      // Template needs params — open canvas with TemplateBrowser
+      // Template has required params — open canvas pre-populated with nodes so
+      // the user can see the workflow structure and fill in parameter values.
       sessionStorage.removeItem("canvasNodes");
-      sessionStorage.removeItem("workflowTemplate");
+      sessionStorage.setItem("workflowTemplate", JSON.stringify({
+        nodes, edges, name: tmpl.name, description: tmpl.description ?? "",
+      }));
       navigate({ to: "/canvas", search: { t: Date.now(), wf: undefined } });
       return;
     }
@@ -116,10 +140,19 @@ export function WorkflowsPage() {
       if (workflowId) {
         await queryClient.invalidateQueries({ queryKey: ["workflows"] });
         openWorkflow(workflowId);
+      } else {
+        // Instantiation succeeded but no ID returned — fall back to pre-populated canvas
+        sessionStorage.removeItem("canvasNodes");
+        sessionStorage.setItem("workflowTemplate", JSON.stringify({
+          nodes, edges, name: tmpl.name, description: tmpl.description ?? "",
+        }));
+        navigate({ to: "/canvas", search: { t: Date.now(), wf: undefined } });
       }
     } catch {
       sessionStorage.removeItem("canvasNodes");
-      sessionStorage.removeItem("workflowTemplate");
+      sessionStorage.setItem("workflowTemplate", JSON.stringify({
+        nodes, edges, name: tmpl.name, description: tmpl.description ?? "",
+      }));
       navigate({ to: "/canvas", search: { t: Date.now(), wf: undefined } });
     }
   };
