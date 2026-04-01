@@ -420,6 +420,8 @@ const MessageBubble = memo(function MessageBubble({ message }: { message: ChatMe
               <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
               <span>{message.error}</span>
             </div>
+          ) : isUser ? (
+            <p className="whitespace-pre-line break-words">{message.content}</p>
           ) : (
             <MarkdownContent
               remarkPlugins={[remarkMath]}
