@@ -14,7 +14,7 @@ use librefang_types::i18n;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
-use tracing::info;
+use tracing::{debug, info};
 
 use librefang_telemetry::metrics;
 
@@ -80,14 +80,26 @@ pub async fn request_logging(request: Request<Body>, next: Next) -> Response<Bod
     let elapsed = start.elapsed();
     let status = response.status().as_u16();
 
-    info!(
-        request_id = %request_id,
-        method = %method,
-        path = %uri,
-        status = status,
-        latency_ms = elapsed.as_millis() as u64,
-        "API request"
-    );
+    // GET 2xx — routine polling, keep out of INFO to reduce noise
+    if method == axum::http::Method::GET && status < 300 {
+        debug!(
+            request_id = %request_id,
+            method = %method,
+            path = %uri,
+            status = status,
+            latency_ms = elapsed.as_millis() as u64,
+            "API request"
+        );
+    } else {
+        info!(
+            request_id = %request_id,
+            method = %method,
+            path = %uri,
+            status = status,
+            latency_ms = elapsed.as_millis() as u64,
+            "API request"
+        );
+    }
 
     metrics::record_http_request(&uri, method.as_str(), status, elapsed);
 
