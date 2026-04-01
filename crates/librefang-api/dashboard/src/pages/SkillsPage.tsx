@@ -348,7 +348,7 @@ export function SkillsPage() {
 
   // View state — default to the region-appropriate marketplace
   const [viewMode, setViewMode] = useState<ViewMode>("fanghub");
-  const [selectedCategory, setSelectedCategory] = useState<string | null>(categories[0]?.id || null);
+  const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [skillhubSearch_, setSkillhubSearch] = useState("");
   const [page, setPage] = useState(1);
