@@ -335,8 +335,14 @@ fn is_host_allowed(hostname: &str, ip: &IpAddr, allowed_hosts: &[String]) -> boo
             }
             continue;
         }
-        // Glob hostname pattern (starts with '*')
+        // Glob hostname pattern (starts with '*').
+        // Bare "*" is rejected — it would match every hostname and silently
+        // bypass all private-IP protection, which is almost certainly a
+        // misconfiguration rather than intent.
         if let Some(suffix) = entry.strip_prefix('*') {
+            if suffix.is_empty() {
+                continue; // reject "*" — too broad
+            }
             // "*.foo.com" -> suffix = ".foo.com"
             if hostname.ends_with(suffix) {
                 return true;
@@ -592,5 +598,25 @@ mod tests {
         // Regular private IPs are NOT cloud metadata
         let priv_ip: IpAddr = "10.0.0.1".parse().unwrap();
         assert!(!is_cloud_metadata_ip(&priv_ip));
+    }
+
+    #[test]
+    fn test_bare_glob_star_is_rejected() {
+        use std::net::IpAddr;
+        let ip: IpAddr = "10.1.2.3".parse().unwrap();
+        // Bare "*" must NOT match everything — it would bypass all private-IP protection.
+        let allowed = vec!["*".to_string()];
+        assert!(
+            !is_host_allowed("any.internal.host", &ip, &allowed),
+            "bare '*' must not be a universal allowlist entry"
+        );
+        // "*" with a dot suffix still works normally.
+        let allowed_dot = vec!["*.internal.example.com".to_string()];
+        assert!(is_host_allowed(
+            "svc.internal.example.com",
+            &ip,
+            &allowed_dot
+        ));
+        assert!(!is_host_allowed("evil.com", &ip, &allowed_dot));
     }
 }

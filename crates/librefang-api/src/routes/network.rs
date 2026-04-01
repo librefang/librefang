@@ -539,6 +539,9 @@ fn is_host_allowed(hostname: &str, ip: &IpAddr, allowed_hosts: &[String]) -> boo
             continue;
         }
         if let Some(suffix) = entry.strip_prefix('*') {
+            if suffix.is_empty() {
+                continue; // reject bare "*" — too broad
+            }
             if hostname.ends_with(suffix) {
                 return true;
             }
@@ -739,7 +742,7 @@ pub async fn a2a_discover_external(
     )
 )]
 pub async fn a2a_send_external(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let url = match body["url"].as_str() {
@@ -751,6 +754,18 @@ pub async fn a2a_send_external(
         None => return ApiErrorResponse::bad_request("Missing 'message' field").into_json_tuple(),
     };
     let session_id = body["session_id"].as_str();
+
+    // SSRF protection: validate URL before making any outbound request
+    let ssrf_allowed = state
+        .kernel
+        .config_snapshot()
+        .web
+        .fetch
+        .ssrf_allowed_hosts
+        .clone();
+    if let Err(reason) = is_url_safe_for_ssrf(&url, &ssrf_allowed) {
+        return ApiErrorResponse::bad_request(reason).into_json_tuple();
+    }
 
     let client = librefang_runtime::a2a::A2aClient::new();
     match client.send_task(&url, &message, session_id).await {
@@ -779,7 +794,7 @@ pub async fn a2a_send_external(
     )
 )]
 pub async fn a2a_external_task_status(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Path(task_id): Path<String>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
@@ -789,6 +804,18 @@ pub async fn a2a_external_task_status(
             return ApiErrorResponse::bad_request("Missing 'url' query parameter").into_json_tuple()
         }
     };
+
+    // SSRF protection: validate URL before making any outbound request
+    let ssrf_allowed = state
+        .kernel
+        .config_snapshot()
+        .web
+        .fetch
+        .ssrf_allowed_hosts
+        .clone();
+    if let Err(reason) = is_url_safe_for_ssrf(&url, &ssrf_allowed) {
+        return ApiErrorResponse::bad_request(reason).into_json_tuple();
+    }
 
     let client = librefang_runtime::a2a::A2aClient::new();
     match client.get_task(&url, &task_id).await {
