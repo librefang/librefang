@@ -240,6 +240,45 @@ fn run_watch(
         binary = binary_str,
     );
 
+    // Background thread: auto-pull origin/main every 30 seconds.
+    {
+        let root_auto = root.to_path_buf();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_secs(30));
+            let fetch = Command::new("git")
+                .args(["fetch", "origin", "main"])
+                .current_dir(&root_auto)
+                .stderr(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .status();
+            if !matches!(fetch, Ok(s) if s.success()) {
+                continue;
+            }
+            // Only rebase if there are new commits
+            let behind = Command::new("git")
+                .args(["rev-list", "--count", "HEAD..origin/main"])
+                .current_dir(&root_auto)
+                .output();
+            let count: u64 = behind
+                .ok()
+                .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse().ok())
+                .unwrap_or(0);
+            if count > 0 {
+                println!("\n\x1b[36m↻ auto-pull: {count} new commit(s), rebasing...\x1b[0m");
+                let status = Command::new("git")
+                    .args(["rebase", "origin/main"])
+                    .current_dir(&root_auto)
+                    .status();
+                match status {
+                    Ok(s) if s.success() => {
+                        println!("\x1b[32m✓ auto-pull done — cargo-watch will rebuild\x1b[0m")
+                    }
+                    _ => eprintln!("\x1b[31m✗ auto-pull rebase failed\x1b[0m"),
+                }
+            }
+        });
+    }
+
     // Background thread: hotkey listener for dev workflow shortcuts.
     let root_clone = root.to_path_buf();
     let hotkey_port = port;
