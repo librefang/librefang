@@ -237,7 +237,22 @@ pub async fn install_skill(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SkillInstallRequest>,
 ) -> impl IntoResponse {
-    let skills_dir = state.kernel.home_dir().join("skills");
+    let home = state.kernel.home_dir();
+    let skills_dir = if let Some(ref hand_id) = req.hand {
+        let hand_dir = home.join("workspaces").join("hands").join(hand_id);
+        if !hand_dir.exists() {
+            return ApiErrorResponse::not_found(format!("Hand '{hand_id}' not found"))
+                .into_json_tuple();
+        }
+        hand_dir.join("skills")
+    } else {
+        home.join("skills")
+    };
+    if let Err(e) = std::fs::create_dir_all(&skills_dir) {
+        return ApiErrorResponse::internal(format!("Failed to create skills dir: {e}"))
+            .into_json_tuple();
+    }
+
     let config = librefang_skills::marketplace::MarketplaceConfig::default();
     let client = librefang_skills::marketplace::MarketplaceClient::new(config);
 
@@ -251,6 +266,7 @@ pub async fn install_skill(
                     "status": "installed",
                     "name": req.name,
                     "version": version,
+                    "hand": req.hand,
                 })),
             )
         }
@@ -709,7 +725,21 @@ pub async fn clawhub_install(
     State(state): State<Arc<AppState>>,
     Json(req): Json<crate::types::ClawHubInstallRequest>,
 ) -> impl IntoResponse {
-    let skills_dir = state.kernel.home_dir().join("skills");
+    let home = state.kernel.home_dir();
+    let skills_dir = if let Some(ref hand_id) = req.hand {
+        let hand_dir = home.join("workspaces").join("hands").join(hand_id);
+        if !hand_dir.exists() {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": format!("Hand '{hand_id}' not found")})),
+            );
+        }
+        let dir = hand_dir.join("skills");
+        let _ = std::fs::create_dir_all(&dir);
+        dir
+    } else {
+        home.join("skills")
+    };
     let cache_dir = state.kernel.home_dir().join(".cache").join("clawhub");
     let client = librefang_skills::clawhub::ClawHubClient::new(cache_dir);
 
@@ -988,7 +1018,21 @@ pub async fn skillhub_install(
     State(state): State<Arc<AppState>>,
     Json(req): Json<crate::types::ClawHubInstallRequest>,
 ) -> impl IntoResponse {
-    let skills_dir = state.kernel.home_dir().join("skills");
+    let home = state.kernel.home_dir();
+    let skills_dir = if let Some(ref hand_id) = req.hand {
+        let hand_dir = home.join("workspaces").join("hands").join(hand_id);
+        if !hand_dir.exists() {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": format!("Hand '{hand_id}' not found")})),
+            );
+        }
+        let dir = hand_dir.join("skills");
+        let _ = std::fs::create_dir_all(&dir);
+        dir
+    } else {
+        home.join("skills")
+    };
     let cache_dir = state
         .kernel
         .config_ref()

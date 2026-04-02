@@ -225,6 +225,9 @@ pub struct InjectMessageResponse {
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct SkillInstallRequest {
     pub name: String,
+    /// Install into a specific hand's workspace instead of globally.
+    #[serde(default)]
+    pub hand: Option<String>,
 }
 
 /// Request to uninstall a skill.
@@ -267,6 +270,9 @@ pub struct MigrateScanRequest {
 pub struct ClawHubInstallRequest {
     /// ClawHub skill slug (e.g., "github-helper").
     pub slug: String,
+    /// Install into a specific hand's workspace instead of globally.
+    #[serde(default)]
+    pub hand: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

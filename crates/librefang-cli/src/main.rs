@@ -616,19 +616,29 @@ enum SkillCommands {
     Install {
         /// Skill name, local path, or git URL.
         source: String,
+        /// Install into a specific hand's workspace instead of globally.
+        #[arg(long)]
+        hand: Option<String>,
     },
     /// List installed skills.
     #[command(
-        long_about = "List all skills currently installed in this LibreFang instance.\n\nExamples:\n  librefang skill list"
+        long_about = "List all skills currently installed in this LibreFang instance.\n\nExamples:\n  librefang skill list\n  librefang skill list --hand clip"
     )]
-    List,
+    List {
+        /// List skills installed in a specific hand's workspace.
+        #[arg(long)]
+        hand: Option<String>,
+    },
     /// Remove an installed skill.
     #[command(
-        long_about = "Remove an installed skill by name.\n\nExamples:\n  librefang skill remove web-search"
+        long_about = "Remove an installed skill by name.\n\nExamples:\n  librefang skill remove web-search\n  librefang skill remove web-search --hand clip"
     )]
     Remove {
         /// Skill name.
         name: String,
+        /// Remove from a specific hand's workspace instead of globally.
+        #[arg(long)]
+        hand: Option<String>,
     },
     /// Search FangHub for skills.
     #[command(
@@ -1614,9 +1624,9 @@ fn main() {
         },
         Some(Commands::Migrate(args)) => cmd_migrate(args),
         Some(Commands::Skill(sub)) => match sub {
-            SkillCommands::Install { source } => cmd_skill_install(&source),
-            SkillCommands::List => cmd_skill_list(),
-            SkillCommands::Remove { name } => cmd_skill_remove(&name),
+            SkillCommands::Install { source, hand } => cmd_skill_install(&source, hand.as_deref()),
+            SkillCommands::List { hand } => cmd_skill_list(hand.as_deref()),
+            SkillCommands::Remove { name, hand } => cmd_skill_remove(&name, hand.as_deref()),
             SkillCommands::Search { query } => cmd_skill_search(&query),
             SkillCommands::Test { path, tool, input } => cmd_skill_test(path, tool, input),
             SkillCommands::Publish {
@@ -2027,7 +2037,7 @@ fn cmd_init_upgrade() {
         }
     };
 
-    let existing: toml::Value = match existing_raw.parse() {
+    let existing: toml::Value = match toml::from_str(&existing_raw) {
         Ok(v) => v,
         Err(e) => {
             ui::error(&format!("Failed to parse config.toml: {e}"));
@@ -2038,7 +2048,7 @@ fn cmd_init_upgrade() {
 
     let (provider, api_key_env, model) = detect_best_provider();
     let default_config_str = render_init_default_config(&provider, &model, &api_key_env);
-    let defaults: toml::Value = match default_config_str.parse() {
+    let defaults: toml::Value = match toml::from_str(&default_config_str) {
         Ok(v) => v,
         Err(e) => {
             ui::error(&format!("Failed to parse default config template: {e}"));
@@ -5014,9 +5024,24 @@ fn cmd_migrate(args: MigrateArgs) {
 // Skill commands
 // ---------------------------------------------------------------------------
 
-fn cmd_skill_install(source: &str) {
+/// Resolve the skills directory: global or per-hand workspace.
+fn resolve_skills_dir(hand: Option<&str>) -> PathBuf {
     let home = librefang_home();
-    let skills_dir = home.join("skills");
+    match hand {
+        None => home.join("skills"),
+        Some(hand_id) => {
+            let hand_dir = home.join("workspaces").join("hands").join(hand_id);
+            if !hand_dir.exists() {
+                eprintln!("Hand '{hand_id}' not found at {}", hand_dir.display());
+                std::process::exit(1);
+            }
+            hand_dir.join("skills")
+        }
+    }
+}
+
+fn cmd_skill_install(source: &str, hand: Option<&str>) {
+    let skills_dir = resolve_skills_dir(hand);
     std::fs::create_dir_all(&skills_dir).unwrap_or_else(|e| {
         eprintln!("Error creating skills directory: {e}");
         std::process::exit(1);
@@ -5041,7 +5066,14 @@ fn cmd_skill_install(source: &str) {
                             eprintln!("Failed to write manifest: {e}");
                             std::process::exit(1);
                         }
-                        println!("Installed OpenClaw skill: {}", manifest.skill.name);
+                        if let Some(h) = hand {
+                            println!(
+                                "Installed OpenClaw skill '{}' to hand '{h}'",
+                                manifest.skill.name
+                            );
+                        } else {
+                            println!("Installed OpenClaw skill: {}", manifest.skill.name);
+                        }
                     }
                     Err(e) => {
                         eprintln!("Failed to convert OpenClaw skill: {e}");
@@ -5067,10 +5099,17 @@ fn cmd_skill_install(source: &str) {
 
         let dest = skills_dir.join(&manifest.skill.name);
         copy_dir_recursive(&source_path, &dest);
-        println!(
-            "Installed skill: {} v{}",
-            manifest.skill.name, manifest.skill.version
-        );
+        if let Some(h) = hand {
+            println!(
+                "Installed skill '{}' v{} to hand '{h}'",
+                manifest.skill.name, manifest.skill.version
+            );
+        } else {
+            println!(
+                "Installed skill: {} v{}",
+                manifest.skill.name, manifest.skill.version
+            );
+        }
     } else {
         // Remote install from FangHub
         println!("Installing {source} from FangHub...");
@@ -5079,7 +5118,13 @@ fn cmd_skill_install(source: &str) {
             librefang_skills::marketplace::MarketplaceConfig::default(),
         );
         match rt.block_on(client.install(source, &skills_dir)) {
-            Ok(version) => println!("Installed {source} {version}"),
+            Ok(version) => {
+                if let Some(h) = hand {
+                    println!("Installed {source} {version} to hand '{h}'");
+                } else {
+                    println!("Installed {source} {version}");
+                }
+            }
             Err(e) => {
                 eprintln!("Failed to install skill: {e}");
                 std::process::exit(1);
@@ -5088,15 +5133,24 @@ fn cmd_skill_install(source: &str) {
     }
 }
 
-fn cmd_skill_list() {
-    let home = librefang_home();
-    let skills_dir = home.join("skills");
+fn cmd_skill_list(hand: Option<&str>) {
+    let skills_dir = resolve_skills_dir(hand);
 
     let mut registry = librefang_skills::registry::SkillRegistry::new(skills_dir);
     match registry.load_all() {
-        Ok(0) => println!("No skills installed."),
+        Ok(0) => {
+            if let Some(h) = hand {
+                println!("No skills installed for hand '{h}'.");
+            } else {
+                println!("No skills installed.");
+            }
+        }
         Ok(count) => {
-            println!("{count} skill(s) installed:\n");
+            if let Some(h) = hand {
+                println!("{count} skill(s) installed for hand '{h}':\n");
+            } else {
+                println!("{count} skill(s) installed:\n");
+            }
             println!(
                 "{:<20} {:<10} {:<8} DESCRIPTION",
                 "NAME", "VERSION", "TOOLS"
@@ -5119,14 +5173,19 @@ fn cmd_skill_list() {
     }
 }
 
-fn cmd_skill_remove(name: &str) {
-    let home = librefang_home();
-    let skills_dir = home.join("skills");
+fn cmd_skill_remove(name: &str, hand: Option<&str>) {
+    let skills_dir = resolve_skills_dir(hand);
 
     let mut registry = librefang_skills::registry::SkillRegistry::new(skills_dir);
     let _ = registry.load_all();
     match registry.remove(name) {
-        Ok(()) => println!("Removed skill: {name}"),
+        Ok(()) => {
+            if let Some(h) = hand {
+                println!("Removed skill '{name}' from hand '{h}'");
+            } else {
+                println!("Removed skill: {name}");
+            }
+        }
         Err(e) => {
             eprintln!("Failed to remove skill: {e}");
             std::process::exit(1);
