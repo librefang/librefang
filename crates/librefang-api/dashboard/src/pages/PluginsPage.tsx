@@ -25,6 +25,7 @@ export function PluginsPage() {
   const [showInstall, setShowInstall] = useState(false);
   const [showScaffold, setShowScaffold] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  const [installingName, setInstallingName] = useState<string | null>(null);
 
   // Install form
   const [installSource, setInstallSource] = useState<"registry" | "local" | "git">("registry");
@@ -43,7 +44,8 @@ export function PluginsPage() {
 
   const installMutation = useMutation({
     mutationFn: installPlugin,
-    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["plugins"] }); setShowInstall(false); resetInstallForm(); }
+    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["plugins"] }); setShowInstall(false); resetInstallForm(); },
+    onSettled: () => { setInstallingName(null); },
   });
   const uninstallMutation = useMutation({
     mutationFn: uninstallPlugin,
@@ -73,6 +75,7 @@ export function PluginsPage() {
   };
 
   const handleRegistryInstall = (name: string, repo: string) => {
+    setInstallingName(name);
     installMutation.mutate({ source: "registry", name, github_repo: repo });
   };
 
@@ -217,8 +220,8 @@ export function PluginsPage() {
                           ) : (
                             <Button variant="primary" size="sm"
                               onClick={() => handleRegistryInstall(rp.name, reg.github_repo)}
-                              disabled={installMutation.isPending}>
-                              {installMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5 mr-1" />}
+                              disabled={installingName === rp.name}>
+                              {installingName === rp.name ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5 mr-1" />}
                               {t("plugins.install")}
                             </Button>
                           )}

@@ -496,6 +496,9 @@
     "usage_by_agent_desc": "Consumption ranking by agent.",
     "no_agent_data": "No agent usage data yet",
     "no_model_data": "No model usage data yet",
+    "no_trend_data": "No trend data available yet",
+    "cost_per_call": "Cost per Call",
+    "cheapest_call": "Cheapest/Call",
     "help": "View usage statistics and cost analytics. Monitor API calls, token consumption, and set budget limits to control spending."
   },
   "memory": {
@@ -1126,18 +1129,18 @@
     "new_plugin": "New Plugin",
     "install": "Install",
     "installed_tab": "Installed",
-    "registry_tab": "Registry",
+    "registry_tab": "Marketplace",
     "no_plugins": "No plugins installed",
-    "no_plugins_desc": "Install plugins from the registry or create your own.",
-    "loading_registries": "Loading registries...",
-    "no_registries": "No registries configured.",
+    "no_plugins_desc": "Install plugins from the marketplace or create your own.",
+    "loading_registries": "Loading marketplace...",
+    "no_registries": "No marketplace configured.",
     "no_available": "No plugins available.",
     "installed": "Installed",
     "plugin_name": "Plugin Name",
     "description": "Description",
     "install_title": "Install Plugin",
     "source": "Source",
-    "source_registry": "Registry",
+    "source_registry": "Marketplace",
     "source_local": "Local",
     "source_git": "Git",
     "registry_optional": "Registry (optional)",
@@ -1149,7 +1152,7 @@
     "scaffold_desc": "What does this plugin do?",
     "create": "Create",
     "deps": "Deps",
-    "help": "Install and manage plugins to extend agent capabilities. Add plugins from registries, local paths, or Git repositories."
+    "help": "Install and manage plugins to extend agent capabilities. Add plugins from the marketplace, local paths, or Git repositories."
   },
   "schema_form": {
     "select_option": "Select...",

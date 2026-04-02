@@ -496,6 +496,9 @@
     "usage_by_agent_desc": "按智能体分组的消耗排名。",
     "no_agent_data": "暂无智能体消耗数据",
     "no_model_data": "暂无模型消耗数据",
+    "no_trend_data": "暂无趋势数据",
+    "cost_per_call": "单次调用成本",
+    "cheapest_call": "最低单次成本",
     "help": "查看使用统计和成本分析。监控 API 调用次数、Token 消耗量，设置预算限额控制支出。"
   },
   "memory": {
