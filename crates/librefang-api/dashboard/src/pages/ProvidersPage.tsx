@@ -43,7 +43,7 @@ function getProviderIcon(id: string): React.ReactNode {
 }
 
 function getLatencyColor(ms?: number) {
-  if (!ms) return "text-text-dim";
+  if (ms == null) return "text-text-dim";
   if (ms < 200) return "text-success";
   if (ms < 500) return "text-warning";
   return "text-error";
@@ -126,7 +126,7 @@ function ProviderCard({ provider: p, isSelected, isDefault, pendingId, viewMode,
             <p className="text-[8px] uppercase text-text-dim">{t("providers.models")}</p>
           </div>
           <div className="text-center">
-            <p className={`text-xs font-black ${getLatencyColor(p.latency_ms)}`}>{p.latency_ms ? `${p.latency_ms}ms` : "-"}</p>
+            <p className={`text-xs font-black ${getLatencyColor(p.latency_ms)}`}>{p.latency_ms != null ? `${p.latency_ms}ms` : "-"}</p>
             <p className="text-[8px] uppercase text-text-dim">{t("providers.latency")}</p>
           </div>
           {p.last_tested && (
@@ -178,6 +178,7 @@ function ProviderCard({ provider: p, isSelected, isDefault, pendingId, viewMode,
             onClick={() => onTest(p.id)}
             disabled={pendingId === p.id}
             leftIcon={pendingId === p.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Zap className="w-3 h-3" />}
+            className="whitespace-nowrap"
           >
             <span className="hidden sm:inline">{pendingId === p.id ? t("providers.analyzing") : t("providers.test")}</span>
           </Button>
@@ -235,7 +236,7 @@ function ProviderCard({ provider: p, isSelected, isDefault, pendingId, viewMode,
               <p className="text-[9px] font-black uppercase tracking-wider text-text-dim/70">{t("providers.latency")}</p>
             </div>
             <p className={`text-xl font-black ${getLatencyColor(p.latency_ms)}`}>
-              {p.latency_ms ? `${p.latency_ms}ms` : "-"}
+              {p.latency_ms != null ? `${p.latency_ms}ms` : "-"}
             </p>
           </div>
         </div>
@@ -303,25 +304,24 @@ function ProviderCard({ provider: p, isSelected, isDefault, pendingId, viewMode,
           )}
         </div>
 
-        {/* Default badge */}
-        {isDefault && (
-          <div className="mb-2">
+        {/* Default status */}
+        <div className="mb-2">
+          {isDefault ? (
             <Badge variant="brand">
               <Star className="w-3 h-3 mr-1 inline" />{t("providers.is_default")}
             </Badge>
-          </div>
-        )}
+          ) : isConfigured ? (
+            <button onClick={() => onSetDefault(p.id)} className="inline-flex items-center gap-1 text-[10px] font-bold text-brand/70 hover:text-brand cursor-pointer transition-colors">
+              <Star className="w-3 h-3" />{t("providers.set_as_default")}
+            </button>
+          ) : null}
+        </div>
 
         {/* Actions */}
         <div className="flex gap-2 mt-auto">
           {!isConfigured && (
-            <Button variant="ghost" size="sm" onClick={() => onQuickConfig(p)} leftIcon={<Key className="w-3 h-3" />} className="flex-1">
+            <Button variant="ghost" size="sm" onClick={() => onQuickConfig(p)} leftIcon={<Key className="w-3 h-3" />} className="flex-1 whitespace-nowrap">
               {t("providers.config")}
-            </Button>
-          )}
-          {isConfigured && !isDefault && (
-            <Button variant="ghost" size="sm" onClick={() => onSetDefault(p.id)} leftIcon={<Star className="w-3 h-3" />} className="flex-1">
-              {t("providers.set_as_default")}
             </Button>
           )}
           {isConfigured && (
@@ -340,7 +340,7 @@ function ProviderCard({ provider: p, isSelected, isDefault, pendingId, viewMode,
             onClick={() => onTest(p.id)}
             disabled={pendingId === p.id}
             leftIcon={pendingId === p.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Zap className="w-3 h-3" />}
-            className="flex-1"
+            className="flex-1 whitespace-nowrap"
           >
             {pendingId === p.id ? t("providers.analyzing") : t("providers.test")}
           </Button>

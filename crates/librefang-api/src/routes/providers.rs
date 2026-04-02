@@ -398,12 +398,29 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
             }
         }
 
-        // For local providers, attach the probe result
+        // For local providers, attach the probe result and downgrade
+        // auth_status when the service is not reachable so the dashboard
+        // shows "needs setup" instead of "configured".
         if let Some(probe) = probe_map.remove(&i) {
             attach_probe_result(&mut entry, &probe, &p.id, state.kernel.model_catalog_ref());
+            if !probe.reachable {
+                entry["auth_status"] = serde_json::json!("missing");
+            }
         } else if librefang_runtime::provider_health::is_local_provider(&p.id) {
             // Local HTTP provider with no probe result yet — still label it local.
             entry["is_local"] = serde_json::json!(true);
+        }
+
+        // Attach cached manual test result (latency) if no probe already set it.
+        // TTL: 10 minutes — stale results are ignored.
+        if entry.get("latency_ms").is_none() || entry["latency_ms"].is_null() {
+            if let Some(ref_entry) = state.provider_test_cache.get(&p.id) {
+                let (tested_at, ms, tested_rfc3339) = ref_entry.value();
+                if tested_at.elapsed() < std::time::Duration::from_secs(600) {
+                    entry["latency_ms"] = serde_json::json!(ms);
+                    entry["last_tested"] = serde_json::json!(tested_rfc3339);
+                }
+            }
         }
 
         providers.push(entry);
@@ -498,6 +515,9 @@ pub async fn get_provider(
             &provider.id,
             state.kernel.model_catalog_ref(),
         );
+        if !probe.reachable {
+            entry["auth_status"] = serde_json::json!("missing");
+        }
     } else if librefang_runtime::provider_health::is_local_provider(&provider.id) {
         entry["is_local"] = serde_json::json!(true);
     }
@@ -899,14 +919,21 @@ pub async fn test_provider(
     };
 
     // ── CLI-based providers (no HTTP base URL) ──
-    // Check CLI availability BEFORE requiring an API key, since CLI providers
-    // (e.g. claude-code, gemini-cli) don't need API keys at all.
-    if base_url.is_empty() {
+    // Only treat as CLI provider if key is not required (true CLI providers
+    // like claude-code, gemini-cli). Providers with key_required but empty
+    // base_url are API providers missing configuration (e.g. OpenRouter proxied).
+    if base_url.is_empty() && !key_required {
+        let cli_start = Instant::now();
         let cli_ok = librefang_runtime::drivers::cli_provider_available(name.as_str());
+        let cli_latency = cli_start.elapsed().as_millis();
+        state.provider_test_cache.insert(
+            name.clone(),
+            (Instant::now(), cli_latency, chrono::Utc::now().to_rfc3339()),
+        );
         return if cli_ok {
             (
                 StatusCode::OK,
-                Json(serde_json::json!({"status":"ok","provider":name,"latency_ms":0})),
+                Json(serde_json::json!({"status":"ok","provider":name,"latency_ms":cli_latency})),
             )
         } else {
             (
@@ -916,6 +943,11 @@ pub async fn test_provider(
                 ),
             )
         };
+    }
+
+    // API providers with no base_url configured cannot be tested.
+    if base_url.is_empty() {
+        return ApiErrorResponse::bad_request("Provider base URL not configured").into_json_tuple();
     }
 
     // Treat empty-string env vars the same as missing — an env var set to ""
@@ -936,6 +968,10 @@ pub async fn test_provider(
 
     // ── Bedrock: AWS Signature auth — can't test with simple HTTP ──
     if name == "bedrock" || name == "aws-bedrock" {
+        state.provider_test_cache.insert(
+            name.clone(),
+            (Instant::now(), 0, chrono::Utc::now().to_rfc3339()),
+        );
         return (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -1028,6 +1064,12 @@ pub async fn test_provider(
     };
 
     let latency_ms = start.elapsed().as_millis();
+
+    // Cache test result so GET /api/providers can show latency for all providers.
+    state.provider_test_cache.insert(
+        name.clone(),
+        (Instant::now(), latency_ms, chrono::Utc::now().to_rfc3339()),
+    );
 
     if (200..300).contains(&status_code) {
         (

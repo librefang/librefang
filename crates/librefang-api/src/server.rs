@@ -162,9 +162,12 @@ pub(crate) fn valid_api_tokens(kernel: &LibreFangKernel) -> Vec<String> {
     let mut tokens = Vec::new();
     let cfg = kernel.config_ref();
     let explicit_api_key = cfg.api_key.trim();
-    if !explicit_api_key.is_empty() {
-        tokens.push(explicit_api_key.to_string());
+    if explicit_api_key.is_empty() {
+        // No api_key configured — API is open, no auth required.
+        // Dashboard login is handled separately by session cookie checks.
+        return tokens;
     }
+    tokens.push(explicit_api_key.to_string());
     if let Some(token) = dashboard_session_token(kernel) {
         tokens.push(token);
     }
@@ -581,6 +584,7 @@ pub async fn build_router(
         clawhub_cache: dashmap::DashMap::new(),
         skillhub_cache: dashmap::DashMap::new(),
         provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
+        provider_test_cache: dashmap::DashMap::new(),
         webhook_store: crate::webhook_store::WebhookStore::load(
             kernel.home_dir().join("webhooks.json"),
         ),

@@ -7,7 +7,7 @@
       "name": "Apache-2.0",
       "url": "https://www.apache.org/licenses/LICENSE-2.0"
     },
-    "version": "2026.3.31-beta4"
+    "version": "2026.4.2-beta8"
   },
   "paths": {
     "/.well-known/agent.json": {
@@ -7273,6 +7273,13 @@
           "slug"
         ],
         "properties": {
+          "hand": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Install into a specific hand's workspace instead of globally."
+          },
           "slug": {
             "type": "string",
             "description": "ClawHub skill slug (e.g., \"github-helper\")."
@@ -7532,6 +7539,15 @@
               "null"
             ]
           },
+          "max_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Maximum tokens for LLM response. Controls conversation window size.",
+            "minimum": 0
+          },
           "model": {
             "type": [
               "string",
@@ -7595,6 +7611,13 @@
           "name"
         ],
         "properties": {
+          "hand": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Install into a specific hand's workspace instead of globally."
+          },
           "name": {
             "type": "string"
           }
