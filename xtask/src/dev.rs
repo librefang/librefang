@@ -257,7 +257,7 @@ fn run_watch(
             if buf[0] == b'r' {
                 println!("\n\x1b[36m↻ git pull...\x1b[0m");
                 let status = Command::new("git")
-                    .args(["pull", "--rebase"])
+                    .args(["pull", "--rebase", "origin", "main"])
                     .current_dir(&root_clone)
                     .status();
                 match status {
