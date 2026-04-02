@@ -55,6 +55,7 @@ pub async fn usage_stats(State(state): State<Arc<AppState>>) -> impl IntoRespons
             serde_json::json!({
                 "agent_id": e.id.to_string(),
                 "name": e.name,
+                "is_hand": e.is_hand,
                 "total_tokens": summary.total_input_tokens + summary.total_output_tokens,
                 "input_tokens": summary.total_input_tokens,
                 "output_tokens": summary.total_output_tokens,
