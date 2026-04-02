@@ -420,7 +420,9 @@
     "skillhub_search_placeholder": "搜索 SkillHub...",
     "skillhub_rate_limited_desc": "SkillHub 请求频率限制，请稍后重试。",
     "builtin": "FangHub",
-    "official": "官方"
+    "official": "官方",
+    "install_to": "安装到",
+    "global": "全局（所有 Agent）"
   },
   "hands": {
     "title": "Hands",

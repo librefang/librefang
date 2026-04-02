@@ -420,7 +420,9 @@
     "skillhub_search_placeholder": "Search SkillHub...",
     "skillhub_rate_limited_desc": "SkillHub rate limit reached. Please try again later.",
     "builtin": "FangHub",
-    "official": "Official"
+    "official": "Official",
+    "install_to": "Install to",
+    "global": "Global (all agents)"
   },
   "hands": {
     "title": "Hands",

@@ -2,7 +2,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { formatDate } from "../lib/datetime";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { listSkills, uninstallSkill, clawhubSearch, clawhubInstall, clawhubGetSkill, skillhubSearch, skillhubBrowse, skillhubInstall, skillhubGetSkill, fanghubListSkills, installSkill, type ClawHubBrowseItem, type FangHubSkill } from "../api";
+import { listSkills, uninstallSkill, clawhubSearch, clawhubInstall, clawhubGetSkill, skillhubSearch, skillhubBrowse, skillhubInstall, skillhubGetSkill, fanghubListSkills, installSkill, listHands, type ClawHubBrowseItem, type FangHubSkill, type HandDefinitionItem } from "../api";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
 import { Card } from "../components/ui/Card";
@@ -354,6 +354,11 @@ export function SkillsPage() {
   const [detailsSkill, setDetailsSkill] = useState<ClawHubSkillWithStatus | null>(null);
   const [detailsSource, setDetailsSource] = useState<MarketplaceSource>("clawhub");
   const [installingId, setInstallingId] = useState<string | null>(null);
+  const [targetHand, setTargetHand] = useState<string>("");
+
+  // Hands query for install target selector
+  const handsQuery = useQuery({ queryKey: ["hands", "list"], queryFn: listHands });
+  const hands = handsQuery.data ?? [];
 
   // Get search keyword from category or use search input
   const searchKeyword = selectedCategory
@@ -477,7 +482,7 @@ export function SkillsPage() {
 
   const installMutation = useMutation({
     mutationKey: ["install", "skill", "clawhub"],
-    mutationFn: ({ slug }: { slug: string }) => clawhubInstall(slug),
+    mutationFn: ({ slug, hand }: { slug: string; hand?: string }) => clawhubInstall(slug, undefined, hand || undefined),
     retry: 0,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["skills", "list"] });
@@ -494,7 +499,7 @@ export function SkillsPage() {
 
   const skillhubInstallMutation = useMutation({
     mutationKey: ["install", "skill", "skillhub"],
-    mutationFn: ({ slug }: { slug: string }) => skillhubInstall(slug),
+    mutationFn: ({ slug, hand }: { slug: string; hand?: string }) => skillhubInstall(slug, hand || undefined),
     retry: 0,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["skills", "list"] });
@@ -512,7 +517,7 @@ export function SkillsPage() {
 
   const fanghubInstallMutation = useMutation({
     mutationKey: ["install", "skill", "fanghub"],
-    mutationFn: ({ name }: { name: string }) => installSkill(name),
+    mutationFn: ({ name, hand }: { name: string; hand?: string }) => installSkill(name, hand || undefined),
     retry: 0,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["skills", "list"] });
@@ -539,10 +544,11 @@ export function SkillsPage() {
 
   const handleInstall = (slug: string, source: MarketplaceSource = "clawhub") => {
     setInstallingId(slug);
+    const hand = targetHand || undefined;
     if (source === "skillhub") {
-      skillhubInstallMutation.mutate({ slug });
+      skillhubInstallMutation.mutate({ slug, hand });
     } else {
-      installMutation.mutate({ slug });
+      installMutation.mutate({ slug, hand });
     }
   };
 
@@ -630,6 +636,23 @@ export function SkillsPage() {
           </button>
         )}
       </div>
+
+      {/* Install Target: Global or Hand */}
+      {viewMode !== "installed" && hands.length > 0 && (
+        <div className="flex items-center gap-2">
+          <span className="text-[11px] font-bold text-text-dim">{t("skills.install_to")}:</span>
+          <select
+            value={targetHand}
+            onChange={(e) => setTargetHand(e.target.value)}
+            className="rounded-lg border border-border-subtle bg-surface px-3 py-1.5 text-xs font-bold text-text-main"
+          >
+            <option value="">{t("skills.global")}</option>
+            {hands.map((h: HandDefinitionItem) => (
+              <option key={h.id} value={h.id}>{h.name || h.id}</option>
+            ))}
+          </select>
+        </div>
+      )}
 
       {/* Category Chips */}
       {(viewMode === "marketplace" || viewMode === "skillhub" || viewMode === "fanghub") && (
@@ -764,7 +787,7 @@ export function SkillsPage() {
                 pendingId={installingId}
                 onInstall={(name) => {
                   setInstallingId(name);
-                  fanghubInstallMutation.mutate({ name });
+                  fanghubInstallMutation.mutate({ name, hand: targetHand || undefined });
                 }}
                 t={t}
               />

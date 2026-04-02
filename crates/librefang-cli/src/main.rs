@@ -3,6 +3,7 @@
 //! When a daemon is running (`librefang start`), the CLI talks to it over HTTP.
 //! Otherwise, commands boot an in-process kernel (single-shot mode).
 
+mod desktop_install;
 mod dotenv;
 mod http_client;
 pub mod i18n;
@@ -2368,61 +2369,14 @@ fn cmd_init_interactive(librefang_dir: &std::path::Path) {
 
 /// Launch the librefang-desktop Tauri app, connecting to the running daemon.
 fn launch_desktop_app(_librefang_dir: &std::path::Path) {
-    // Look for the desktop binary next to our own executable.
-    let desktop_bin = {
-        let exe = std::env::current_exe().ok();
-        let dir = exe.as_ref().and_then(|e| e.parent());
+    if let Some(path) = desktop_install::find_desktop_binary() {
+        desktop_install::launch(&path);
+        return;
+    }
 
-        #[cfg(windows)]
-        let name = "librefang-desktop.exe";
-        #[cfg(not(windows))]
-        let name = "librefang-desktop";
-
-        dir.map(|d| d.join(name))
-    };
-
-    match desktop_bin {
-        Some(ref path) if path.exists() => {
-            ui::success(&i18n::t("desktop-launching"));
-            match std::process::Command::new(path)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-            {
-                Ok(_) => {
-                    ui::success(&i18n::t("desktop-started"));
-                }
-                Err(e) => {
-                    ui::error(&i18n::t_args(
-                        "desktop-launch-fail",
-                        &[("error", &e.to_string())],
-                    ));
-                    ui::hint(&i18n::t("hint-try-dashboard"));
-                }
-            }
-        }
-        _ => {
-            ui::error(&i18n::t("desktop-not-found"));
-            ui::hint(&i18n::t("hint-install-desktop"));
-            ui::hint(&i18n::t("hint-fallback-web-dashboard"));
-            ui::blank();
-            if let Some(base) = find_daemon() {
-                let url = format!("{base}/");
-                if !open_in_browser(&url) {
-                    // Browser launch failed entirely (e.g., sandbox EPERM,
-                    // no display server, container environment).
-                    ui::hint(&i18n::t("hint-could-not-open-browser"));
-                }
-                // Always print the URL so the user can open it manually,
-                // even when open_in_browser reported success — the spawned
-                // opener may still fail asynchronously.
-                ui::hint(&i18n::t_args("hint-dashboard-url", &[("url", &url)]));
-            } else {
-                ui::hint(&i18n::t("daemon-not-running-start"));
-                ui::hint(&i18n::t("hint-then-open-dashboard"));
-            }
-        }
+    // Not installed — offer to download
+    if let Some(installed) = desktop_install::prompt_and_install() {
+        desktop_install::launch(&installed);
     }
 }
 

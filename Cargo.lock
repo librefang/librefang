@@ -3937,6 +3937,7 @@ dependencies = [
  "tracing-opentelemetry",
  "tracing-subscriber",
  "unic-langid",
+ "ureq",
  "uuid",
  "zeroize",
 ]

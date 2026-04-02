@@ -9,10 +9,10 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 
-use crate::tui::theme;
-use crate::ui;
 use std::path::PathBuf;
 use std::time::Duration;
+
+use crate::tui::theme;
 
 // ── Provider detection ──────────────────────────────────────────────────────
 
@@ -559,61 +559,15 @@ fn render_separator(frame: &mut ratatui::Frame, area: Rect) {
 // ── Desktop app launcher ────────────────────────────────────────────────────
 
 pub fn launch_desktop_app() {
-    let desktop_bin = {
-        let exe = std::env::current_exe().ok();
-        let dir = exe.as_ref().and_then(|e| e.parent());
+    use crate::desktop_install;
 
-        #[cfg(windows)]
-        let name = "librefang-desktop.exe";
-        #[cfg(not(windows))]
-        let name = "librefang-desktop";
-
-        // Check sibling of current exe first
-        let sibling = dir.map(|d| d.join(name));
-
-        match sibling {
-            Some(ref path) if path.exists() => sibling,
-            _ => which_lookup(name),
-        }
-    };
-
-    match desktop_bin {
-        Some(ref path) if path.exists() => {
-            match std::process::Command::new(path)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-            {
-                Ok(_) => {
-                    ui::success("Desktop app launched.");
-                }
-                Err(e) => {
-                    ui::error_with_fix(
-                        &format!("Failed to launch desktop app: {e}"),
-                        "Build it: cargo build -p librefang-desktop",
-                    );
-                }
-            }
-        }
-        _ => {
-            ui::error_with_fix(
-                "Desktop app not found",
-                "Build it: cargo build -p librefang-desktop",
-            );
-        }
+    if let Some(path) = desktop_install::find_desktop_binary() {
+        desktop_install::launch(&path);
+        return;
     }
-}
 
-/// Simple PATH lookup for a binary name.
-fn which_lookup(name: &str) -> Option<PathBuf> {
-    let path_var = std::env::var("PATH").ok()?;
-    let separator = if cfg!(windows) { ';' } else { ':' };
-    for dir in path_var.split(separator) {
-        let candidate = PathBuf::from(dir).join(name);
-        if candidate.exists() {
-            return Some(candidate);
-        }
+    // Not installed — offer to download
+    if let Some(installed) = desktop_install::prompt_and_install() {
+        desktop_install::launch(&installed);
     }
-    None
 }

@@ -898,8 +898,8 @@ export async function listTools(): Promise<any[]> {
   return data.tools ?? data ?? [];
 }
 
-export async function installSkill(name: string): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>("/api/skills/install", { name }, LONG_RUNNING_TIMEOUT_MS);
+export async function installSkill(name: string, hand?: string): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>("/api/skills/install", { name, hand }, LONG_RUNNING_TIMEOUT_MS);
 }
 
 export async function uninstallSkill(name: string): Promise<ApiActionResponse> {
@@ -958,10 +958,10 @@ export async function clawhubGetSkill(slug: string): Promise<ClawHubSkillDetail>
   return get<ClawHubSkillDetail>(`/api/clawhub/skill/${encodeURIComponent(slug)}`);
 }
 
-export async function clawhubInstall(slug: string, version?: string): Promise<ApiActionResponse> {
+export async function clawhubInstall(slug: string, version?: string, hand?: string): Promise<ApiActionResponse> {
   return post<ApiActionResponse>(
     "/api/clawhub/install",
-    { slug, version: version || "latest" },
+    { slug, version: version || "latest", hand },
     LONG_RUNNING_TIMEOUT_MS
   );
 }
@@ -979,8 +979,8 @@ export async function skillhubBrowse(sort?: string): Promise<ClawHubBrowseRespon
   return get<ClawHubBrowseResponse>(`/api/skillhub/browse?${params}`);
 }
 
-export async function skillhubInstall(slug: string): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>("/api/skillhub/install", { slug }, LONG_RUNNING_TIMEOUT_MS);
+export async function skillhubInstall(slug: string, hand?: string): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>("/api/skillhub/install", { slug, hand }, LONG_RUNNING_TIMEOUT_MS);
 }
 
 export async function skillhubGetSkill(slug: string): Promise<ClawHubSkillDetail> {

@@ -41,6 +41,7 @@ libc = "0.2"
 fluent = "0.17"
 unic-langid = "0.9"
 open = "5.3.3"
+ureq = { workspace = true }
 toml_edit = "0.25.5"
 rustls = "0.23"
 opentelemetry_sdk = { workspace = true, optional = true }
