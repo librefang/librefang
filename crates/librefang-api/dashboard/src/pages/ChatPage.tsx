@@ -714,7 +714,7 @@ export function ChatPage() {
   }, [navigate]);
 
   const agentsQuery = useQuery({ queryKey: ["agents", "list", "chat"], queryFn: listAgents, staleTime: 30000 });
-  const agents = useMemo(() => [...(agentsQuery.data ?? [])].filter(a => !a.is_hand).sort((a, b) => {
+  const agents = useMemo(() => [...(agentsQuery.data ?? [])].sort((a, b) => {
     // Auth missing → sort to bottom
     const aNoAuth = isAuthUnavailable(a.auth_status) ? 1 : 0;
     const bNoAuth = isAuthUnavailable(b.auth_status) ? 1 : 0;
