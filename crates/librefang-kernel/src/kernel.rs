@@ -5465,6 +5465,20 @@ system_prompt = "You are a helpful assistant."
         Ok(())
     }
 
+    /// Update an agent's provider without changing the model.
+    pub fn set_agent_provider(&self, agent_id: AgentId, provider: &str) -> KernelResult<()> {
+        self.registry
+            .update_provider(agent_id, provider.to_string())
+            .map_err(KernelError::LibreFang)?;
+        info!(agent_id = %agent_id, provider = %provider, "Agent provider updated");
+
+        if let Some(entry) = self.registry.get(agent_id) {
+            let _ = self.memory.save_agent(&entry);
+        }
+
+        Ok(())
+    }
+
     /// Update an agent's skill allowlist. Empty = all skills (backward compat).
     pub fn set_agent_skills(&self, agent_id: AgentId, skills: Vec<String>) -> KernelResult<()> {
         // Validate skill names if allowlist is non-empty

@@ -90,6 +90,7 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
         )
         .route("/agents/{id}/stop", axum::routing::post(stop_agent))
         .route("/agents/{id}/model", axum::routing::put(set_model))
+        .route("/agents/{id}/provider", axum::routing::put(set_provider))
         .route(
             "/agents/{id}/traces",
             axum::routing::get(get_agent_traces),
@@ -2322,6 +2323,71 @@ pub async fn set_model(
                     )
                 })
                 .unwrap_or_else(|| (model.to_string(), String::new()));
+            (
+                StatusCode::OK,
+                Json(
+                    serde_json::json!({"status": "ok", "model": resolved_model, "provider": resolved_provider}),
+                ),
+            )
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(
+                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
+            ),
+        ),
+    }
+}
+
+/// PUT /api/agents/{id}/provider — Change an agent's LLM provider without changing the model.
+#[utoipa::path(
+    put,
+    path = "/api/agents/{id}/provider",
+    tag = "agents",
+    params(("id" = String, Path, description = "Agent ID")),
+    request_body(content = serde_json::Value, description = "Provider name"),
+    responses(
+        (status = 200, description = "Change an agent's LLM provider", body = serde_json::Value)
+    )
+)]
+pub async fn set_provider(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    let agent_id: AgentId = match id.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
+            )
+        }
+    };
+    let provider = match body["provider"].as_str() {
+        Some(p) if !p.is_empty() => p,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Missing or empty 'provider' field"})),
+            )
+        }
+    };
+    match state.kernel.set_agent_provider(agent_id, provider) {
+        Ok(()) => {
+            let (resolved_model, resolved_provider) = state
+                .kernel
+                .agent_registry()
+                .get(agent_id)
+                .map(|e| {
+                    (
+                        e.manifest.model.model.clone(),
+                        e.manifest.model.provider.clone(),
+                    )
+                })
+                .unwrap_or_else(|| (String::new(), provider.to_string()));
             (
                 StatusCode::OK,
                 Json(

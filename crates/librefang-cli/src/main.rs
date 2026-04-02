@@ -198,7 +198,7 @@ enum Commands {
     /// Manage agents (new, list, chat, kill, spawn) [*].
     #[command(
         subcommand,
-        long_about = "Manage agents: create, list, chat, kill, and configure.\n\nExamples:\n  librefang agent new              # Interactive template picker\n  librefang agent new coder        # Spawn from template\n  librefang agent list             # List all agents\n  librefang agent chat <ID>        # Chat with an agent\n  librefang agent kill <ID>        # Kill an agent\n  librefang agent set <ID> model gpt-4o  # Change agent model"
+        long_about = "Manage agents: create, list, chat, kill, and configure.\n\nExamples:\n  librefang agent new              # Interactive template picker\n  librefang agent new coder        # Spawn from template\n  librefang agent list             # List all agents\n  librefang agent chat <ID>        # Chat with an agent\n  librefang agent kill <ID>        # Kill an agent\n  librefang agent set <ID> model gpt-4o     # Change agent model\n  librefang agent set <ID> provider groq    # Change agent provider"
     )]
     Agent(AgentCommands),
     /// Manage workflows (list, create, run) [*].
@@ -961,7 +961,7 @@ enum AgentCommands {
     },
     /// Set an agent property (e.g., model).
     #[command(
-        long_about = "Set a property on a running agent.\n\nCurrently supports changing the model.\n\nExamples:\n  librefang agent set <ID> model gpt-4o\n  librefang agent set <ID> model claude-sonnet"
+        long_about = "Set a property on a running agent.\n\nSupports changing the model and provider.\n\nExamples:\n  librefang agent set <ID> model gpt-4o\n  librefang agent set <ID> model claude-sonnet\n  librefang agent set <ID> provider groq\n  librefang agent set <ID> provider default"
     )]
     Set {
         /// Agent ID (UUID).
@@ -3263,8 +3263,32 @@ fn cmd_agent_set(agent_id_str: &str, field: &str, value: &str) {
                 std::process::exit(1);
             }
         }
+        "provider" => {
+            if let Some(base) = find_daemon() {
+                let agent_id = resolve_agent_id(&base, agent_id_str);
+                let client = daemon_client();
+                let body = daemon_json(
+                    client
+                        .put(format!("{base}/api/agents/{agent_id}/provider"))
+                        .json(&serde_json::json!({"provider": value}))
+                        .send(),
+                );
+                if body.get("status").is_some() {
+                    println!("Agent {agent_id} provider set to {value}.");
+                } else {
+                    eprintln!(
+                        "Failed to set provider: {}",
+                        body["error"].as_str().unwrap_or("Unknown error")
+                    );
+                    std::process::exit(1);
+                }
+            } else {
+                eprintln!("No running daemon found. Start one with: librefang start");
+                std::process::exit(1);
+            }
+        }
         _ => {
-            eprintln!("Unknown field: {field}. Supported fields: model");
+            eprintln!("Unknown field: {field}. Supported fields: model, provider");
             std::process::exit(1);
         }
     }
