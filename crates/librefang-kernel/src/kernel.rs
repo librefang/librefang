@@ -4354,8 +4354,10 @@ system_prompt = "You are a helpful assistant."
                 manifest.model.provider.is_empty() || manifest.model.provider == "default";
             let is_default_model =
                 manifest.model.model.is_empty() || manifest.model.model == "default";
-            let is_auto_spawned =
-                entry.name == "assistant" && manifest.description == "General-purpose assistant";
+            let is_auto_spawned = entry.name == "assistant"
+                && manifest
+                    .description
+                    .starts_with("General-purpose assistant");
             if (is_default_provider && is_default_model) || is_auto_spawned {
                 let override_guard = self
                     .default_model_override
