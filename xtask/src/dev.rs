@@ -243,7 +243,6 @@ fn run_watch(
     // Background thread: listen for 'r' key to trigger git pull + rebuild.
     // cargo-watch will then detect the changed files and restart automatically.
     let root_clone = root.to_path_buf();
-    let binary_clone = binary_str.clone();
     std::thread::spawn(move || {
         use std::io::Read;
         // Set terminal to raw mode so we get keypresses without Enter
