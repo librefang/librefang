@@ -229,17 +229,6 @@ impl AgentRegistry {
         Ok(())
     }
 
-    /// Update an agent's provider without changing the model.
-    pub fn update_provider(&self, id: AgentId, new_provider: String) -> LibreFangResult<()> {
-        let mut entry = self
-            .agents
-            .get_mut(&id)
-            .ok_or_else(|| LibreFangError::AgentNotFound(id.to_string()))?;
-        entry.manifest.model.provider = new_provider;
-        entry.last_active = chrono::Utc::now();
-        Ok(())
-    }
-
     /// Update an agent's max_tokens (response length limit).
     pub fn update_max_tokens(&self, id: AgentId, max_tokens: u32) -> LibreFangResult<()> {
         let mut entry = self
