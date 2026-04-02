@@ -534,6 +534,21 @@ impl ClawHubClient {
             .await
             .map_err(|e| SkillError::Network(format!("Failed to read download body: {e}")))?;
 
+        self.install_from_bytes(slug, target_dir, &bytes).await
+    }
+
+    /// Install a skill from raw bytes (zip or SKILL.md).
+    ///
+    /// Shared extraction + security scan logic used by both ClawHub download
+    /// and Skillhub COS download paths.
+    pub async fn install_from_bytes(
+        &self,
+        slug: &str,
+        target_dir: &Path,
+        bytes: &[u8],
+    ) -> Result<ClawHubInstallResult, SkillError> {
+        validate_slug(slug)?;
+
         // Step 1: SHA256 of downloaded content
         let sha256 = {
             let mut hasher = Sha256::new();

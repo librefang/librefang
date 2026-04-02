@@ -116,7 +116,12 @@ impl ModelCatalog {
             }
 
             if !provider.key_required {
-                provider.auth_status = AuthStatus::NotRequired;
+                // Local providers (ollama, vllm, etc.) have their status set by
+                // the async probe at startup. Don't overwrite with NotRequired
+                // here or the probe result gets lost.
+                if !crate::provider_health::is_local_provider(&provider.id) {
+                    provider.auth_status = AuthStatus::NotRequired;
+                }
                 continue;
             }
 
@@ -180,6 +185,24 @@ impl ModelCatalog {
         if let Some(p) = self.providers.iter_mut().find(|p| p.id == provider_id) {
             p.auth_status = status;
         }
+    }
+
+    /// Store the list of models confirmed available via live probe.
+    pub fn set_provider_available_models(&mut self, provider_id: &str, models: Vec<String>) {
+        if let Some(p) = self.providers.iter_mut().find(|p| p.id == provider_id) {
+            p.available_models = models;
+        }
+    }
+
+    /// Check whether a model is confirmed available on its provider.
+    /// Returns `None` if the provider hasn't been probed yet (no data),
+    /// `Some(true)` if the model is in the probed list, `Some(false)` if not.
+    pub fn is_model_available(&self, provider_id: &str, model: &str) -> Option<bool> {
+        let p = self.providers.iter().find(|p| p.id == provider_id)?;
+        if p.available_models.is_empty() {
+            return None; // not probed yet
+        }
+        Some(p.available_models.iter().any(|m| m == model))
     }
 
     /// List all models in the catalog.
@@ -327,6 +350,7 @@ impl ModelCatalog {
                 signup_url: None,
                 regions: std::collections::HashMap::new(),
                 media_capabilities: Vec::new(),
+                available_models: Vec::new(),
             });
             // Re-detect auth for the newly added provider
             self.detect_auth();
@@ -1811,13 +1835,31 @@ supports_streaming = true
 /// - `Some(true)`  — HTTP 2xx or 429 (rate-limited = key is valid)
 /// - `Some(false)` — HTTP 401 or 403 (key rejected by provider)
 /// - `None`        — network error, 404, 5xx, etc. (don't update status)
-pub async fn probe_api_key(provider_id: &str, base_url: &str, api_key: &str) -> Option<bool> {
+/// Result of probing a provider's API key.
+#[derive(Debug)]
+pub struct ProbeResult {
+    /// Whether the key is valid (true), invalid (false), or unknown (None).
+    pub key_valid: Option<bool>,
+    /// Model IDs available on this provider (empty if key invalid or models
+    /// could not be listed, e.g. rate-limited or non-OpenAI-compatible).
+    pub available_models: Vec<String>,
+}
+
+pub async fn probe_api_key(provider_id: &str, base_url: &str, api_key: &str) -> ProbeResult {
     use std::time::Duration;
 
-    let client = crate::http_client::proxied_client_builder()
+    let client = match crate::http_client::proxied_client_builder()
         .timeout(Duration::from_secs(8))
         .build()
-        .ok()?;
+    {
+        Ok(c) => c,
+        Err(_) => {
+            return ProbeResult {
+                key_valid: None,
+                available_models: Vec::new(),
+            }
+        }
+    };
 
     let url = format!("{}/models", base_url.trim_end_matches('/'));
 
@@ -1832,12 +1874,69 @@ pub async fn probe_api_key(provider_id: &str, base_url: &str, api_key: &str) -> 
             .header("Authorization", format!("Bearer {api_key}")),
     };
 
-    let status = req.send().await.ok()?.status().as_u16();
+    let resp = match req.send().await {
+        Ok(r) => r,
+        Err(_) => {
+            return ProbeResult {
+                key_valid: None,
+                available_models: Vec::new(),
+            }
+        }
+    };
+
+    let status = resp.status().as_u16();
     tracing::debug!(provider = %provider_id, http_status = status, "provider key probe");
 
     match status {
-        200..=299 | 429 => Some(true), // 429 = rate-limited, key is still valid
-        401 | 403 => Some(false),
-        _ => None, // transient / unknown — don't penalise
+        200..=299 => {
+            // Key is valid — try to extract model IDs from the response body.
+            let models = resp
+                .json::<serde_json::Value>()
+                .await
+                .ok()
+                .and_then(|body| {
+                    // OpenAI-compatible format: { "data": [{ "id": "gpt-4o" }, ...] }
+                    // Gemini format: { "models": [{ "name": "models/gemini-..." }, ...] }
+                    if let Some(arr) = body.get("data").and_then(|d| d.as_array()) {
+                        Some(
+                            arr.iter()
+                                .filter_map(|m| {
+                                    m.get("id").and_then(|v| v.as_str()).map(String::from)
+                                })
+                                .collect::<Vec<_>>(),
+                        )
+                    } else if let Some(arr) = body.get("models").and_then(|d| d.as_array()) {
+                        Some(
+                            arr.iter()
+                                .filter_map(|m| {
+                                    m.get("name")
+                                        .or_else(|| m.get("id"))
+                                        .and_then(|v| v.as_str())
+                                        .map(|s| s.strip_prefix("models/").unwrap_or(s).to_string())
+                                })
+                                .collect::<Vec<_>>(),
+                        )
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_default();
+            ProbeResult {
+                key_valid: Some(true),
+                available_models: models,
+            }
+        }
+        429 => ProbeResult {
+            key_valid: Some(true), // rate-limited but key is valid
+            available_models: Vec::new(),
+        },
+        401 | 403 => ProbeResult {
+            key_valid: Some(false),
+            available_models: Vec::new(),
+        },
+        _ => ProbeResult {
+            key_valid: None, // transient / unknown — don't penalise
+            available_models: Vec::new(),
+        },
     }
 }

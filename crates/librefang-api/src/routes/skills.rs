@@ -253,11 +253,37 @@ pub async fn install_skill(
             .into_json_tuple();
     }
 
-    let config = librefang_skills::marketplace::MarketplaceConfig::default();
-    let client = librefang_skills::marketplace::MarketplaceClient::new(config);
+    // Install from local registry (~/.librefang/registry/skills/{name}/)
+    let registry_src = home.join("registry").join("skills").join(&req.name);
+    if !registry_src.exists() {
+        return ApiErrorResponse::not_found(format!(
+            "Skill '{}' not found in local registry",
+            req.name
+        ))
+        .into_json_tuple();
+    }
 
-    match client.install(&req.name, &skills_dir).await {
-        Ok(version) => {
+    let dest = skills_dir.join(&req.name);
+    if dest.exists() {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": format!("Skill '{}' is already installed", req.name),
+                "status": "already_installed",
+            })),
+        );
+    }
+
+    // Copy the skill directory from registry to skills
+    match copy_dir_recursive(&registry_src, &dest) {
+        Ok(()) => {
+            // Read version from manifest
+            let version = std::fs::read_to_string(dest.join("skill.toml"))
+                .ok()
+                .and_then(|s| toml::from_str::<librefang_skills::SkillManifest>(&s).ok())
+                .map(|m| m.skill.version)
+                .unwrap_or_else(|| "unknown".to_string());
+
             // Hot-reload so agents see the new skill immediately
             state.kernel.reload_skills();
             (
@@ -272,6 +298,8 @@ pub async fn install_skill(
         }
         Err(e) => {
             tracing::warn!("Skill install failed: {e}");
+            // Clean up partial copy
+            let _ = std::fs::remove_dir_all(&dest);
             ApiErrorResponse::internal(format!("Install failed: {e}")).into_json_tuple()
         }
     }
@@ -383,36 +411,45 @@ pub async fn list_skill_registry(State(state): State<Arc<AppState>>) -> impl Int
     )
 )]
 pub async fn marketplace_search(
+    State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
-    let query = params.get("q").cloned().unwrap_or_default();
-    if query.is_empty() {
-        return Json(serde_json::json!({"results": [], "total": 0}));
+    let query = params.get("q").cloned().unwrap_or_default().to_lowercase();
+    let registry_dir = state.kernel.home_dir().join("registry").join("skills");
+
+    let mut results: Vec<serde_json::Value> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&registry_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let manifest_path = path.join("skill.toml");
+            if !manifest_path.exists() {
+                continue;
+            }
+            if let Ok(content) = std::fs::read_to_string(&manifest_path) {
+                if let Ok(manifest) = toml::from_str::<librefang_skills::SkillManifest>(&content) {
+                    let name = &manifest.skill.name;
+                    let desc = &manifest.skill.description;
+                    if query.is_empty()
+                        || name.to_lowercase().contains(&query)
+                        || desc.to_lowercase().contains(&query)
+                    {
+                        results.push(serde_json::json!({
+                            "name": name,
+                            "description": desc,
+                            "stars": 0,
+                            "url": "",
+                        }));
+                    }
+                }
+            }
+        }
     }
 
-    let config = librefang_skills::marketplace::MarketplaceConfig::default();
-    let client = librefang_skills::marketplace::MarketplaceClient::new(config);
-
-    match client.search(&query).await {
-        Ok(results) => {
-            let items: Vec<serde_json::Value> = results
-                .iter()
-                .map(|r| {
-                    serde_json::json!({
-                        "name": r.name,
-                        "description": r.description,
-                        "stars": r.stars,
-                        "url": r.url,
-                    })
-                })
-                .collect();
-            Json(serde_json::json!({"results": items, "total": items.len()}))
-        }
-        Err(e) => {
-            tracing::warn!("Marketplace search failed: {e}");
-            Json(serde_json::json!({"results": [], "total": 0, "error": format!("{e}")}))
-        }
-    }
+    let total = results.len();
+    Json(serde_json::json!({"results": results, "total": total}))
 }
 
 // ---------------------------------------------------------------------------
@@ -4019,4 +4056,20 @@ pub async fn uninstall_extension(
             "name": name,
         })),
     )
+}
+
+/// Recursively copy a directory tree.
+fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        let dest_path = dst.join(entry.file_name());
+        if ty.is_dir() {
+            copy_dir_recursive(&entry.path(), &dest_path)?;
+        } else {
+            std::fs::copy(entry.path(), &dest_path)?;
+        }
+    }
+    Ok(())
 }

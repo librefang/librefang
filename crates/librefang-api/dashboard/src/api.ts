@@ -360,6 +360,7 @@ export interface SessionListItem {
   message_count?: number;
   created_at?: string;
   label?: string | null;
+  active?: boolean;
 }
 
 export interface SessionDetailResponse {
@@ -1436,6 +1437,20 @@ export async function switchAgentSession(
     `/api/agents/${encodeURIComponent(agentId)}/sessions/${encodeURIComponent(sessionId)}/switch`,
     {}
   );
+}
+
+export async function listAgentSessions(agentId: string): Promise<SessionListItem[]> {
+  const data = await get<{ sessions?: SessionListItem[] }>(
+    `/api/agents/${encodeURIComponent(agentId)}/sessions`
+  );
+  return data.sessions ?? [];
+}
+
+export async function createAgentSession(
+  agentId: string,
+  label?: string
+): Promise<{ session_id: string; agent_id: string; label?: string }> {
+  return post(`/api/agents/${encodeURIComponent(agentId)}/sessions`, label ? { label } : {});
 }
 
 export async function listSessions(): Promise<SessionListItem[]> {

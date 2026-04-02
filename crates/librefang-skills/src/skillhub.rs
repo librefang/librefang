@@ -1,4 +1,4 @@
-//! Skillhub marketplace client — search and install skills from lightmake.site.
+//! Skillhub marketplace client — search and install skills from skillhub.tencent.com.
 //!
 //! Skillhub shares the same API format as ClawHub for search, detail, and download.
 //! Browse uses a static index hosted on Tencent COS.
@@ -18,11 +18,14 @@ use std::path::{Path, PathBuf};
 use tracing::info;
 
 /// Default Skillhub API base URL.
-pub const DEFAULT_SKILLHUB_URL: &str = "https://lightmake.site/api/v1";
+pub const DEFAULT_SKILLHUB_URL: &str = "https://skillhub.tencent.com/api/v1";
 
 /// Static skills index URL (Tencent COS).
 const SKILLHUB_INDEX_URL: &str =
     "https://skillhub-1388575217.cos.ap-guangzhou.myqcloud.com/skills.json";
+
+/// COS accelerate base URL for skill zip downloads.
+const SKILLHUB_COS_BASE: &str = "https://skillhub-1388575217.cos.accelerate.myqcloud.com";
 
 // ---------------------------------------------------------------------------
 // Browse response types (static index format)
@@ -65,7 +68,7 @@ pub struct SkillhubIndexResponse {
 // Client
 // ---------------------------------------------------------------------------
 
-/// Client for the Skillhub marketplace (lightmake.site).
+/// Client for the Skillhub marketplace (skillhub.tencent.com).
 ///
 /// Delegates search, detail, and install to [`ClawHubClient`] (compatible API),
 /// and provides browse via the static COS-hosted skills index.
@@ -79,7 +82,7 @@ pub struct SkillhubClient {
 impl SkillhubClient {
     /// Create a new Skillhub client.
     ///
-    /// `base_url` is the Skillhub API base (default: `https://lightmake.site/api/v1`).
+    /// `base_url` is the Skillhub API base (default: `https://skillhub.tencent.com/api/v1`).
     pub fn new(base_url: &str, cache_dir: PathBuf) -> Self {
         Self {
             inner: ClawHubClient::with_url(base_url, cache_dir),
@@ -113,16 +116,72 @@ impl SkillhubClient {
 
     /// Install a skill from Skillhub.
     ///
-    /// After download and security scan, patches the source provenance to
-    /// `SkillSource::Skillhub` in the generated `skill.toml`.
+    /// Downloads the skill zip directly from Tencent COS (the static index
+    /// provides slug + version, and the zip lives at a predictable COS path).
+    /// After extraction, delegates to ClawHub's install_from_bytes for security
+    /// scanning and manifest generation, then patches source provenance.
     pub async fn install(
         &self,
         slug: &str,
         target_dir: &Path,
     ) -> Result<ClawHubInstallResult, SkillError> {
-        let result = self.inner.install(slug, target_dir).await?;
+        // Step 1: Look up the version from the static index
+        let index_resp = self
+            .http
+            .get(SKILLHUB_INDEX_URL)
+            .header("User-Agent", "LibreFang/0.1")
+            .send()
+            .await
+            .map_err(|e| SkillError::Network(format!("Skillhub index fetch failed: {e}")))?;
+        if !index_resp.status().is_success() {
+            return Err(SkillError::Network(format!(
+                "Skillhub index returned {}",
+                index_resp.status()
+            )));
+        }
+        let index: SkillhubIndexResponse = index_resp
+            .json()
+            .await
+            .map_err(|e| SkillError::Network(format!("Skillhub index parse error: {e}")))?;
 
-        // Post-install fixup: update source provenance from ClawHub -> Skillhub
+        let entry = index
+            .skills
+            .iter()
+            .find(|s| s.slug == slug)
+            .ok_or_else(|| {
+                SkillError::Network(format!("Skill '{slug}' not found in Skillhub index"))
+            })?;
+        let version = &entry.version;
+
+        // Step 2: Download zip from COS
+        let cos_url = format!("{SKILLHUB_COS_BASE}/skills/{slug}/{version}.zip",);
+        info!(slug, version = %version, "Downloading skill from Skillhub COS");
+
+        let dl_resp = self
+            .http
+            .get(&cos_url)
+            .header("User-Agent", "LibreFang/0.1")
+            .send()
+            .await
+            .map_err(|e| SkillError::Network(format!("Skillhub COS download failed: {e}")))?;
+        if !dl_resp.status().is_success() {
+            return Err(SkillError::Network(format!(
+                "Skillhub COS download returned {}",
+                dl_resp.status()
+            )));
+        }
+        let bytes = dl_resp
+            .bytes()
+            .await
+            .map_err(|e| SkillError::Network(format!("Failed to read download body: {e}")))?;
+
+        // Step 3: Delegate to ClawHub client for extraction + security scan
+        let result = self
+            .inner
+            .install_from_bytes(slug, target_dir, &bytes)
+            .await?;
+
+        // Step 4: Patch source provenance to Skillhub
         let skill_dir = target_dir.join(slug);
         let manifest_path = skill_dir.join("skill.toml");
         if manifest_path.exists() {
