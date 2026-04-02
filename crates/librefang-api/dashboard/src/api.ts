@@ -243,7 +243,7 @@ export interface WorkflowStep {
   name: string;
   agent_id?: string;
   agent_name?: string;
-  prompt: string;
+  prompt_template: string;
   timeout_secs?: number;
   inherit_context?: boolean;
   depends_on?: string[];

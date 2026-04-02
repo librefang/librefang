@@ -2144,7 +2144,7 @@ impl WorkflowTemplateRegistry {
                     // Use step name as output_var so subsequent steps can reference via {{step_name}}
                     output_var: Some(ts.name.clone()),
                     inherit_context: None,
-                    depends_on: vec![],
+                    depends_on: ts.depends_on.clone(),
                 }
             })
             .collect();
