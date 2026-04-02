@@ -3,7 +3,7 @@ import { formatTime } from "../lib/datetime";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
-import { listAgents, getAgentDetail, spawnAgent, suspendAgent, resumeAgent, patchAgentConfig, setAgentModel, setAgentProvider,
+import { listAgents, getAgentDetail, spawnAgent, suspendAgent, resumeAgent, patchAgentConfig, setAgentModel,
   listPromptVersions, listExperiments, activatePromptVersion, startExperiment, pauseExperiment, completeExperiment,
   createPromptVersion, createExperiment, deletePromptVersion, PromptVersion, PromptExperiment, ExperimentVariantMetrics, getExperimentMetrics } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
@@ -65,20 +65,20 @@ export function AgentsPage() {
       setEditingModel(false);
       setModelInput("");
       if (detailAgent?.id === agentId) {
-        setDetailAgent((prev: any) => prev ? { ...prev, model: { ...prev.model, model: data.model, provider: data.provider } } : prev);
+        getAgentDetail(agentId).then(setDetailAgent).catch(() => {});
       }
     },
   });
 
   const setAgentProviderMutation = useMutation({
-    mutationFn: ({ agentId, provider }: { agentId: string; provider: string }) =>
-      setAgentProvider(agentId, provider),
+    mutationFn: ({ agentId, provider }: { agentId: string; provider: string }) => 
+      getAgentDetail(agentId).then((current) => setAgentModel(agentId, provider, current.model)),
     onSuccess: (data, { agentId }) => {
       queryClient.invalidateQueries({ queryKey: ["agents"] });
       setEditingProvider(false);
       setProviderInput("");
       if (detailAgent?.id === agentId) {
-        setDetailAgent((prev: any) => prev ? { ...prev, model: { ...prev.model, provider: data.provider } } : prev);
+        getAgentDetail(agentId).then(setDetailAgent).catch(() => {});
       }
     },
   });
