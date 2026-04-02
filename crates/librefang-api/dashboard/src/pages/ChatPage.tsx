@@ -5,7 +5,7 @@ import rehypeKatex from "rehype-katex";
 import remarkMath from "remark-math";
 import { useTranslation } from "react-i18next";
 import { useNavigate, useSearch } from "@tanstack/react-router";
-import { buildAuthenticatedWebSocketUrl, listAgents, sendAgentMessage, loadAgentSession, listPendingApprovals, resolveApproval } from "../api";
+import { buildAuthenticatedWebSocketUrl, listAgents, sendAgentMessage, loadAgentSession, listPendingApprovals, resolveApproval, getFullConfig } from "../api";
 import type { ApprovalItem } from "../api";
 import { normalizeToolOutput } from "../lib/chat";
 import { MessageCircle, Send, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, Zap, ShieldAlert, CheckCircle, XCircle } from "lucide-react";
@@ -366,7 +366,7 @@ function useChatMessages(agentId: string | null, agents: any[] = []) {
 }
 
 // Message bubble component — memoized to skip re-render during streaming of other messages
-const MessageBubble = memo(function MessageBubble({ message }: { message: ChatMessage }) {
+const MessageBubble = memo(function MessageBubble({ message, usageFooter }: { message: ChatMessage; usageFooter: string }) {
   const { t } = useTranslation();
   const isUser = message.role === "user";
 
@@ -435,16 +435,23 @@ const MessageBubble = memo(function MessageBubble({ message }: { message: ChatMe
         {/* Meta info */}
         <div className="flex items-center gap-2 mt-1.5 text-[10px] text-text-dim/50">
           <span>{message.timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
-          {message.tokens?.output && !message.isStreaming && (
-            <span className="px-1.5 py-0.5 rounded bg-brand/10 text-brand/70 font-mono text-[9px]">
-              {message.tokens.output} tok
-            </span>
-          )}
-          {message.cost_usd !== undefined && message.cost_usd > 0 && (
-            <span className="px-1.5 py-0.5 rounded bg-success/10 text-success/70 font-mono text-[9px]">
-              {formatCost(message.cost_usd)}
-            </span>
-          )}
+          {!message.isStreaming && usageFooter !== "Off" && (() => {
+            const showTokens = usageFooter === "Full" || usageFooter === "Tokens";
+            const showCost = (usageFooter === "Full" || usageFooter === "Cost") && message.cost_usd !== undefined && message.cost_usd > 0;
+            const hasInput = message.tokens?.input !== undefined && message.tokens.input > 0;
+            const hasOutput = message.tokens?.output !== undefined && message.tokens.output > 0;
+            if (!showTokens && !showCost) return null;
+            if (showTokens && !hasInput && !hasOutput) return null;
+            const parts: string[] = [];
+            if (showTokens && (hasInput || hasOutput)) parts.push(`${message.tokens?.input ?? 0} in, ${message.tokens?.output ?? 0} out`);
+            if (showCost) parts.push(formatCost(message.cost_usd!));
+            if (parts.length === 0) return null;
+            return (
+              <span className="px-1.5 py-0.5 rounded bg-brand/10 text-brand/70 font-mono text-[9px]">
+                {parts.join(" | ")}
+              </span>
+            );
+          })()}
         </div>
         {message.memories_saved && message.memories_saved.length > 0 && (
           <div className="mt-1 flex flex-wrap gap-1">
@@ -713,6 +720,8 @@ export function ChatPage() {
     navigate({ to: "/chat", search: { agentId: id }, replace: true });
   }, [navigate]);
 
+  const configQuery = useQuery({ queryKey: ["config"], queryFn: getFullConfig, staleTime: 60000 });
+  const usageFooter = (configQuery.data as Record<string, unknown>)?.usage_footer as string | undefined ?? "Full";
   const agentsQuery = useQuery({ queryKey: ["agents", "list", "chat"], queryFn: listAgents, staleTime: 30000 });
   const agents = useMemo(() => [...(agentsQuery.data ?? [])].filter(a => !a.is_hand).sort((a, b) => {
     // Auth missing → sort to bottom
@@ -880,7 +889,7 @@ export function ChatPage() {
               </div>
             ) : (
               <div className="space-y-6">
-                {messages.map(msg => <MessageBubble key={msg.id} message={msg} />)}
+                {messages.map(msg => <MessageBubble key={msg.id} message={msg} usageFooter={usageFooter} />)}
                 {/* Inline approval cards for pending requests */}
                 {pendingApprovals.map(approval => (
                   <ApprovalCard key={approval.id} approval={approval} onResolved={removeApproval} />
