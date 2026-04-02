@@ -7910,9 +7910,12 @@ system_prompt = "You are a helpful assistant."
                 String,
             )> = vec![(primary.clone(), String::new())];
             for fb in &effective_fallbacks {
-                // Resolve "default" to the actual default provider
+                // Resolve "default" to the actual default provider, but if the
+                // model name implies a specific provider (e.g. "gemini-2.0-flash"
+                // → "gemini"), use that instead of blindly falling back to the
+                // default provider which may be a completely different service.
                 let fb_provider = if fb.provider.is_empty() || fb.provider == "default" {
-                    default_provider.clone()
+                    infer_provider_from_model(&fb.model).unwrap_or_else(|| default_provider.clone())
                 } else {
                     fb.provider.clone()
                 };
