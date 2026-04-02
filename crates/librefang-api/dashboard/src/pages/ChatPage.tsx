@@ -5,10 +5,10 @@ import rehypeKatex from "rehype-katex";
 import remarkMath from "remark-math";
 import { useTranslation } from "react-i18next";
 import { useNavigate, useSearch } from "@tanstack/react-router";
-import { buildAuthenticatedWebSocketUrl, listAgents, sendAgentMessage, loadAgentSession, listPendingApprovals, resolveApproval, getFullConfig } from "../api";
-import type { ApprovalItem } from "../api";
+import { buildAuthenticatedWebSocketUrl, listAgents, sendAgentMessage, loadAgentSession, listPendingApprovals, resolveApproval, getFullConfig, listAgentSessions, createAgentSession, switchAgentSession, deleteSession } from "../api";
+import type { ApprovalItem, SessionListItem } from "../api";
 import { normalizeToolOutput } from "../lib/chat";
-import { MessageCircle, Send, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, Zap, ShieldAlert, CheckCircle, XCircle } from "lucide-react";
+import { MessageCircle, Send, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, Zap, ShieldAlert, CheckCircle, XCircle, Clock, Plus, Trash2, ChevronDown } from "lucide-react";
 import { Badge } from "../components/ui/Badge";
 import { MarkdownContent } from "../components/ui/MarkdownContent";
 import { useUIStore } from "../lib/store";
@@ -110,7 +110,8 @@ function useWebSocket(agentId: string | null) {
 const sessionCache = new Map<string, ChatMessage[]>();
 
 // Chat message management - includes history loading and sending (with WS streaming)
-function useChatMessages(agentId: string | null, agents: any[] = []) {
+// sessionVersion: bump to force reload after session switch
+function useChatMessages(agentId: string | null, agents: any[] = [], sessionVersion = 0) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const { ws, wsConnected, onDropRef } = useWebSocket(agentId);
@@ -128,13 +129,18 @@ function useChatMessages(agentId: string | null, agents: any[] = []) {
   useEffect(() => { prevAgentRef.current = agentId; }, [agentId]);
 
   // Load history — use cache if available, otherwise fetch
+  // sessionVersion changes force a fresh load (skip cache)
   useEffect(() => {
     if (!agentId) { setMessages([]); return; }
 
-    const cached = sessionCache.get(agentId);
-    if (cached) {
-      setMessages(cached);
-      return;
+    if (sessionVersion === 0) {
+      const cached = sessionCache.get(agentId);
+      if (cached) {
+        setMessages(cached);
+        return;
+      }
+    } else {
+      sessionCache.delete(agentId);
     }
 
     setMessages([]);
@@ -168,7 +174,7 @@ function useChatMessages(agentId: string | null, agents: any[] = []) {
       })
       .catch(() => {})
       .finally(() => setIsLoading(false));
-  }, [agentId]);
+  }, [agentId, sessionVersion]);
 
   // Send message - WS first, HTTP fallback
   const sendMessage = useCallback(async (content: string) => {
@@ -548,9 +554,28 @@ function ChatInput({ onSend, disabled, placeholder, authMissing, providerName }:
   );
 }
 
-// Connection status bar
-function ConnectionBar({ agentName, isLoading, messageCount, onClear, wsConnected, modelName }: { agentName: string; isLoading: boolean; messageCount: number; onClear: () => void; wsConnected?: boolean; modelName?: string }) {
+// Connection status bar with session dropdown
+function ConnectionBar({ agentName, isLoading, messageCount, onClear, wsConnected, modelName, sessions, activeSessionId, onSwitchSession, onNewSession, onDeleteSession }: {
+  agentName: string; isLoading: boolean; messageCount: number; onClear: () => void; wsConnected?: boolean; modelName?: string;
+  sessions?: SessionListItem[]; activeSessionId?: string;
+  onSwitchSession?: (sessionId: string) => void; onNewSession?: () => void; onDeleteSession?: (sessionId: string) => void;
+}) {
   const { t } = useTranslation();
+  const [sessionOpen, setSessionOpen] = useState(false);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+
+  // Close dropdown on outside click
+  useEffect(() => {
+    if (!sessionOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
+        setSessionOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [sessionOpen]);
+
   return (
     <div className="px-2 sm:px-4 py-2 sm:py-2.5 border-b border-border-subtle/50 bg-gradient-to-r from-surface to-transparent flex items-center justify-between">
       <div className="flex items-center gap-2 sm:gap-3 min-w-0 flex-1">
@@ -576,6 +601,83 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, wsConnecte
       <div className="flex items-center gap-2">
         {modelName && (
           <span className="hidden sm:inline text-[10px] text-text-dim/50 font-mono truncate max-w-[200px]">{modelName}</span>
+        )}
+        {/* Session dropdown */}
+        {sessions && sessions.length > 0 && (
+          <div className="relative" ref={dropdownRef}>
+            <button
+              onClick={() => setSessionOpen(v => !v)}
+              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium text-text-dim/70 hover:text-text hover:bg-surface-hover transition-colors"
+            >
+              <Clock className="h-3 w-3" />
+              <span className="hidden sm:inline truncate max-w-[100px]">
+                {(() => {
+                  const active = sessions.find(s => s.session_id === activeSessionId);
+                  return active?.label || activeSessionId?.slice(0, 8) || t("chat.session");
+                })()}
+              </span>
+              <ChevronDown className={`h-3 w-3 transition-transform ${sessionOpen ? "rotate-180" : ""}`} />
+            </button>
+            {sessionOpen && (
+              <div className="absolute right-0 top-full mt-1 w-72 bg-surface border border-border-subtle rounded-xl shadow-xl z-50 overflow-hidden">
+                <div className="p-2 border-b border-border-subtle/50">
+                  <span className="text-[10px] font-semibold text-text-dim/50 uppercase tracking-wider px-2">{t("chat.sessions_title", { defaultValue: "Sessions" })}</span>
+                </div>
+                <div className="max-h-64 overflow-y-auto scrollbar-thin p-1.5 space-y-0.5">
+                  {sessions.map(session => {
+                    const isActive = session.session_id === activeSessionId;
+                    return (
+                      <div
+                        key={session.session_id}
+                        className={`group flex items-center gap-2 px-2.5 py-2 rounded-lg cursor-pointer transition-colors ${isActive ? "bg-brand/10 text-brand" : "hover:bg-surface-hover text-text-dim"}`}
+                        onClick={() => {
+                          if (!isActive) {
+                            onSwitchSession?.(session.session_id);
+                            setSessionOpen(false);
+                          }
+                        }}
+                      >
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-1.5">
+                            {isActive && <span className="w-1.5 h-1.5 rounded-full bg-success shrink-0" />}
+                            <span className="text-xs font-medium truncate">
+                              {session.label || session.session_id?.slice(0, 12)}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-2 mt-0.5">
+                            <span className="text-[10px] text-text-dim/50">{session.message_count ?? 0} msgs</span>
+                            {session.created_at && (
+                              <span className="text-[10px] text-text-dim/40">{new Date(session.created_at).toLocaleDateString()}</span>
+                            )}
+                          </div>
+                        </div>
+                        {!isActive && onDeleteSession && (
+                          <button
+                            onClick={(e) => { e.stopPropagation(); onDeleteSession(session.session_id); }}
+                            className="opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-error/10 hover:text-error transition-all"
+                            title={t("chat.delete_session", { defaultValue: "Delete session" })}
+                          >
+                            <Trash2 className="h-3 w-3" />
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+                {onNewSession && (
+                  <div className="p-1.5 border-t border-border-subtle/50">
+                    <button
+                      onClick={() => { onNewSession(); setSessionOpen(false); }}
+                      className="w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-xs font-medium text-brand hover:bg-brand/5 transition-colors"
+                    >
+                      <Plus className="h-3.5 w-3.5" />
+                      {t("chat.new_session", { defaultValue: "New session" })}
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
         )}
         {messageCount > 0 && (
           <button onClick={onClear} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-text-dim/60 hover:text-error hover:bg-error/5 transition-colors">
@@ -733,9 +835,45 @@ export function ChatPage() {
     if (aSusp !== bSusp) return aSusp - bSusp;
     return a.name.localeCompare(b.name);
   }), [agentsQuery.data]);
-  const { messages, isLoading, sendMessage, clearHistory, wsConnected } = useChatMessages(selectedAgentId || null, agents);
+  // Session state — bump version to force message reload after switch
+  const [sessionVersion, setSessionVersion] = useState(0);
+  const { messages, isLoading, sendMessage, clearHistory, wsConnected } = useChatMessages(selectedAgentId || null, agents, sessionVersion);
   const { pendingApprovals, removeApproval } = useApprovalPoller(selectedAgentId || null);
   const selectedAgent = agents.find(a => a.id === selectedAgentId);
+
+  // Per-agent session list
+  const sessionsQuery = useQuery({
+    queryKey: ["agent-sessions", selectedAgentId],
+    queryFn: () => listAgentSessions(selectedAgentId!),
+    enabled: !!selectedAgentId,
+    staleTime: 10_000,
+  });
+  const activeSessionId = useMemo(() => {
+    const active = sessionsQuery.data?.find((s: any) => s.active);
+    return active?.session_id;
+  }, [sessionsQuery.data]);
+
+  const handleSwitchSession = useCallback(async (sessionId: string) => {
+    if (!selectedAgentId) return;
+    await switchAgentSession(selectedAgentId, sessionId);
+    queryClient.invalidateQueries({ queryKey: ["agents"] });
+    queryClient.invalidateQueries({ queryKey: ["agent-sessions", selectedAgentId] });
+    setSessionVersion(v => v + 1);
+  }, [selectedAgentId, queryClient]);
+
+  const handleNewSession = useCallback(async () => {
+    if (!selectedAgentId) return;
+    const result = await createAgentSession(selectedAgentId);
+    await switchAgentSession(selectedAgentId, result.session_id);
+    queryClient.invalidateQueries({ queryKey: ["agents"] });
+    queryClient.invalidateQueries({ queryKey: ["agent-sessions", selectedAgentId] });
+    setSessionVersion(v => v + 1);
+  }, [selectedAgentId, queryClient]);
+
+  const handleDeleteSession = useCallback(async (sessionId: string) => {
+    await deleteSession(sessionId);
+    queryClient.invalidateQueries({ queryKey: ["agent-sessions", selectedAgentId] });
+  }, [selectedAgentId, queryClient]);
 
   useEffect(() => {
     // Auto-select first running agent
@@ -862,6 +1000,11 @@ export function ChatPage() {
               onClear={clearHistory}
               wsConnected={wsConnected}
               modelName={selectedAgent?.model_name}
+              sessions={sessionsQuery.data}
+              activeSessionId={activeSessionId}
+              onSwitchSession={handleSwitchSession}
+              onNewSession={handleNewSession}
+              onDeleteSession={handleDeleteSession}
             />
           )}
 

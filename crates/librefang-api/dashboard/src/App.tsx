@@ -394,7 +394,6 @@ export function App() {
         { to: "/overview", label: t("nav.overview"), icon: Home },
         { to: "/chat", label: t("nav.chat"), icon: MessageCircle },
         { to: "/agents", label: t("nav.agents"), icon: Users },
-        { to: "/sessions", label: t("nav.sessions"), icon: Clock },
         { to: "/approvals", label: t("nav.approvals"), icon: CheckCircle },
         { to: "/hands", label: t("nav.hands"), icon: Hand },
       ],
