@@ -110,6 +110,7 @@ async fn start_test_server_with_provider(
         prometheus_handle: None,
         media_drivers: librefang_runtime::media::MediaDriverCache::new(),
         webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
+        api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
     });
 
     let app = Router::new()
@@ -1334,6 +1335,10 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
     let kernel = Arc::new(kernel);
     kernel.set_self_handle();
 
+    let api_key_lock = std::sync::Arc::new(tokio::sync::RwLock::new(
+        kernel.config_ref().api_key.clone(),
+    ));
+
     let state = Arc::new(AppState {
         kernel,
         started_at: Instant::now(),
@@ -1352,12 +1357,11 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
         prometheus_handle: None,
         media_drivers: librefang_runtime::media::MediaDriverCache::new(),
         webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
+        api_key_lock: api_key_lock.clone(),
     });
 
     let api_key_state = middleware::AuthState {
-        api_key_lock: std::sync::Arc::new(tokio::sync::RwLock::new(
-            state.kernel.config_ref().api_key.clone(),
-        )),
+        api_key_lock,
         active_sessions: state.active_sessions.clone(),
     };
 

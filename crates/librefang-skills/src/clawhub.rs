@@ -552,7 +552,7 @@ impl ClawHubClient {
         // Step 1: SHA256 of downloaded content
         let sha256 = {
             let mut hasher = Sha256::new();
-            hasher.update(&bytes);
+            hasher.update(bytes);
             hex::encode(hasher.finalize())
         };
         info!(slug, sha256 = %sha256, "Downloaded skill");
@@ -562,15 +562,15 @@ impl ClawHubClient {
         std::fs::create_dir_all(&skill_dir)?;
 
         // Detect content type and extract accordingly
-        let content_str = String::from_utf8_lossy(&bytes);
+        let content_str = String::from_utf8_lossy(bytes);
         let is_skillmd = content_str.trim_start().starts_with("---");
 
         if is_skillmd {
             let skill_md_path = resolve_skill_child_path(&skill_dir, Path::new("SKILL.md"))?;
-            std::fs::write(skill_md_path, &*bytes)?;
+            std::fs::write(skill_md_path, bytes)?;
         } else if bytes.len() >= 4 && bytes[0] == 0x50 && bytes[1] == 0x4b {
             // Zip archive — extract all files
-            let cursor = std::io::Cursor::new(&*bytes);
+            let cursor = std::io::Cursor::new(bytes);
             match zip::ZipArchive::new(cursor) {
                 Ok(mut archive) => {
                     for i in 0..archive.len() {
@@ -607,12 +607,12 @@ impl ClawHubClient {
                 Err(e) => {
                     warn!(slug, error = %e, "Failed to read zip, saving raw");
                     let zip_path = resolve_skill_child_path(&skill_dir, Path::new("skill.zip"))?;
-                    std::fs::write(zip_path, &*bytes)?;
+                    std::fs::write(zip_path, bytes)?;
                 }
             }
         } else {
             let package_path = resolve_skill_child_path(&skill_dir, Path::new("package.json"))?;
-            std::fs::write(package_path, &*bytes)?;
+            std::fs::write(package_path, bytes)?;
         }
 
         // Step 2-3: Detect format and convert
