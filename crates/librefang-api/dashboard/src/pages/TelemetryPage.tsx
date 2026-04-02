@@ -145,7 +145,7 @@ function parseMetrics(text: string): ParsedMetrics {
     version,
   };
 
-  return { requests, agents: Array.from(agentMap.values()), system };
+  return { requests, agents: Array.from(agentMap.values()).filter(a => !a.agent.includes(":")), system };
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────

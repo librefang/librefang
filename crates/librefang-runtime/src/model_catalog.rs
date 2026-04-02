@@ -116,7 +116,12 @@ impl ModelCatalog {
             }
 
             if !provider.key_required {
-                provider.auth_status = AuthStatus::NotRequired;
+                // Local providers (ollama, vllm, etc.) have their status set by
+                // the async probe at startup. Don't overwrite with NotRequired
+                // here or the probe result gets lost.
+                if !crate::provider_health::is_local_provider(&provider.id) {
+                    provider.auth_status = AuthStatus::NotRequired;
+                }
                 continue;
             }
 

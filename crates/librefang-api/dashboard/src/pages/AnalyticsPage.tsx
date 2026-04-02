@@ -26,7 +26,7 @@ export function AnalyticsPage() {
   const budgetMutation = useMutation({ mutationFn: updateBudget, onSuccess: () => queryClient.invalidateQueries({ queryKey: ["budget"] }) });
 
   const usage = usageQuery.data ?? null;
-  const usageByAgent = useMemo(() => [...(usageByAgentQuery.data ?? [])].sort((a: any, b: any) => (b.total_cost_usd ?? 0) - (a.total_cost_usd ?? 0)), [usageByAgentQuery.data]);
+  const usageByAgent = useMemo(() => [...(usageByAgentQuery.data ?? [])].filter((a: any) => !a.is_hand).sort((a: any, b: any) => (b.total_cost_usd ?? 0) - (a.total_cost_usd ?? 0)), [usageByAgentQuery.data]);
   const usageByModel = usageByModelQuery.data ?? [];
   const daily = dailyQuery.data ?? null;
   const modelPerformance = modelPerformanceQuery.data ?? [];
