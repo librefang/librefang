@@ -256,8 +256,13 @@ fn run_watch(
             }
             if buf[0] == b'r' {
                 println!("\n\x1b[36m↻ git pull...\x1b[0m");
+                // fetch + rebase instead of pull to avoid tracking branch conflicts
+                let _ = Command::new("git")
+                    .args(["fetch", "origin", "main"])
+                    .current_dir(&root_clone)
+                    .status();
                 let status = Command::new("git")
-                    .args(["pull", "--rebase", "origin", "main"])
+                    .args(["rebase", "origin/main"])
                     .current_dir(&root_clone)
                     .status();
                 match status {
