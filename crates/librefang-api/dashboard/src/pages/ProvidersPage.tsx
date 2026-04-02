@@ -993,7 +993,7 @@ export function ProvidersPage() {
                   {keyTesting ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Zap className="w-4 h-4 mr-1" />}
                   {t("providers.test")}
                 </Button>
-                {configProvider.auth_status === "configured" && (
+                {(configProvider.auth_status === "configured" || configProvider.auth_status === "validated_key") && (
                   <Button variant="secondary" onClick={handleDeleteKey} disabled={keySaving || keyTesting}>
                     <XCircle className="w-4 h-4 mr-1 text-error" />
                     {t("providers.remove_key")}
