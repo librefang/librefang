@@ -201,7 +201,7 @@ fn run_watch(
     println!("Starting daemon on port {port} (watch mode)...");
     println!("  Binary: {binary_str}");
     println!("  Watching: crates/");
-    println!("  Press 'r' to git pull, Ctrl+C to stop\n");
+    println!("  Hotkeys: r=pull  o=open  l=logs  s=status  c=clear  ?=help\n");
 
     // Stop any running daemon via the CLI (reads daemon.json, sends SIGTERM,
     // waits for exit) — far more reliable than lsof + kill -9.
@@ -240,9 +240,10 @@ fn run_watch(
         binary = binary_str,
     );
 
-    // Background thread: listen for 'r' key to trigger git pull + rebuild.
-    // cargo-watch will then detect the changed files and restart automatically.
+    // Background thread: hotkey listener for dev workflow shortcuts.
     let root_clone = root.to_path_buf();
+    let hotkey_port = port;
+    let hotkey_binary = binary_str.clone();
     std::thread::spawn(move || {
         use std::io::Read;
         // Set terminal to raw mode so we get keypresses without Enter
@@ -253,27 +254,118 @@ fn run_watch(
             if stdin.lock().read_exact(&mut buf).is_err() {
                 break;
             }
-            if buf[0] == b'r' {
-                println!("\n\x1b[36m↻ git pull...\x1b[0m");
-                // fetch + rebase instead of pull to avoid tracking branch conflicts
-                let _ = Command::new("git")
-                    .args(["fetch", "origin", "main"])
-                    .current_dir(&root_clone)
-                    .status();
-                let status = Command::new("git")
-                    .args(["rebase", "origin/main"])
-                    .current_dir(&root_clone)
-                    .status();
-                match status {
-                    Ok(s) if s.success() => {
-                        println!("\x1b[32m✓ git pull done — cargo-watch will rebuild\x1b[0m")
+            match buf[0] {
+                b'r' => {
+                    println!("\n\x1b[36m↻ git fetch + rebase...\x1b[0m");
+                    let _ = Command::new("git")
+                        .args(["fetch", "origin", "main"])
+                        .current_dir(&root_clone)
+                        .status();
+                    let status = Command::new("git")
+                        .args(["rebase", "origin/main"])
+                        .current_dir(&root_clone)
+                        .status();
+                    match status {
+                        Ok(s) if s.success() => {
+                            println!("\x1b[32m✓ rebase done — cargo-watch will rebuild\x1b[0m")
+                        }
+                        Ok(s) => eprintln!(
+                            "\x1b[31m✗ rebase failed (exit {})\x1b[0m",
+                            s.code().unwrap_or(-1)
+                        ),
+                        Err(e) => eprintln!("\x1b[31m✗ rebase error: {e}\x1b[0m"),
                     }
-                    Ok(s) => eprintln!(
-                        "\x1b[31m✗ git pull failed (exit {})\x1b[0m",
-                        s.code().unwrap_or(-1)
-                    ),
-                    Err(e) => eprintln!("\x1b[31m✗ git pull error: {e}\x1b[0m"),
                 }
+                b'o' => {
+                    println!("\n\x1b[36m↻ opening dashboard...\x1b[0m");
+                    let url = format!("http://127.0.0.1:{hotkey_port}");
+                    let _ = Command::new("open").arg(&url).status();
+                }
+                b'l' => {
+                    println!("\n\x1b[36m── recent logs ──\x1b[0m");
+                    let log_dir = librefang_home().join("logs");
+                    let latest = Command::new("ls")
+                        .args(["-t"])
+                        .current_dir(&log_dir)
+                        .output()
+                        .ok()
+                        .and_then(|o| {
+                            String::from_utf8_lossy(&o.stdout)
+                                .lines()
+                                .next()
+                                .map(String::from)
+                        });
+                    if let Some(file) = latest {
+                        let _ = Command::new("tail")
+                            .args(["-30", &file])
+                            .current_dir(&log_dir)
+                            .status();
+                    } else {
+                        // Fallback: try daemon stdout via the binary
+                        let _ = Command::new(&hotkey_binary)
+                            .args(["logs", "--lines", "30"])
+                            .status();
+                    }
+                    println!("\x1b[36m── end logs ──\x1b[0m");
+                }
+                b's' => {
+                    println!("\n\x1b[36m── status ──\x1b[0m");
+                    // Git branch
+                    if let Ok(out) = Command::new("git")
+                        .args(["branch", "--show-current"])
+                        .current_dir(&root_clone)
+                        .output()
+                    {
+                        let branch = String::from_utf8_lossy(&out.stdout);
+                        println!("  branch: {}", branch.trim());
+                    }
+                    // Git short status
+                    if let Ok(out) = Command::new("git")
+                        .args(["status", "--short"])
+                        .current_dir(&root_clone)
+                        .output()
+                    {
+                        let changes = String::from_utf8_lossy(&out.stdout);
+                        let count = changes.lines().count();
+                        if count > 0 {
+                            println!("  changes: {count} file(s)");
+                        } else {
+                            println!("  changes: clean");
+                        }
+                    }
+                    // Port / process check
+                    if let Ok(out) = Command::new("lsof")
+                        .args(["-ti", &format!(":{hotkey_port}"), "-sTCP:LISTEN"])
+                        .output()
+                    {
+                        let pids = String::from_utf8_lossy(&out.stdout);
+                        let pid_list: Vec<&str> = pids.split_whitespace().collect();
+                        if pid_list.is_empty() {
+                            println!("  daemon: \x1b[31mnot running\x1b[0m");
+                        } else {
+                            println!(
+                                "  daemon: \x1b[32mrunning\x1b[0m (pid {})",
+                                pid_list.join(", ")
+                            );
+                        }
+                    }
+                    println!("\x1b[36m── end ──\x1b[0m");
+                }
+                b'c' => {
+                    // Clear screen (ANSI escape)
+                    print!("\x1b[2J\x1b[H");
+                    let _ = std::io::Write::flush(&mut std::io::stdout());
+                }
+                b'?' | b'h' => {
+                    println!("\n\x1b[36m  Hotkeys:\x1b[0m");
+                    println!("    r  git fetch + rebase origin/main");
+                    println!("    o  open dashboard in browser");
+                    println!("    l  show recent daemon logs");
+                    println!("    s  show status (branch, changes, daemon)");
+                    println!("    c  clear screen");
+                    println!("    ?  show this help");
+                }
+                _ => {}
             }
         }
         // Restore terminal on exit
