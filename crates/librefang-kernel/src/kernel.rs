@@ -1416,6 +1416,20 @@ impl LibreFangKernel {
         // 7. event_bus agent channels — remove channels for dead agents
         total_removed += self.event_bus.gc_stale_channels(&live_agents);
 
+        // 8. sessions — delete orphan sessions for agents no longer in registry
+        {
+            let live_ids: Vec<librefang_types::agent::AgentId> =
+                live_agents.iter().copied().collect();
+            match self.memory_substrate().cleanup_orphan_sessions(&live_ids) {
+                Ok(n) if n > 0 => {
+                    info!(deleted = n, "Cleaned up orphan sessions");
+                    total_removed += n as usize;
+                }
+                Err(e) => warn!("Failed to cleanup orphan sessions: {e}"),
+                _ => {}
+            }
+        }
+
         if total_removed > 0 {
             info!(
                 removed = total_removed,

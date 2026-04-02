@@ -516,6 +516,32 @@ impl SessionStore {
 
         Ok(deleted as u64)
     }
+
+    /// Delete sessions whose agent_id is not in the provided live set.
+    ///
+    /// Returns the number of orphan sessions deleted.
+    pub fn cleanup_orphan_sessions(&self, live_agent_ids: &[AgentId]) -> LibreFangResult<u64> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+
+        if live_agent_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let placeholders: Vec<String> = live_agent_ids
+            .iter()
+            .map(|id| format!("'{}'", id.0))
+            .collect();
+        let in_clause = placeholders.join(",");
+        let sql = format!("DELETE FROM sessions WHERE agent_id NOT IN ({in_clause})");
+        let deleted = conn
+            .execute(&sql, [])
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+
+        Ok(deleted as u64)
+    }
 }
 
 impl SessionStore {

@@ -35,6 +35,8 @@ export function SessionsPage() {
     const list = sessionsQuery.data ?? [];
     return list
       .filter(s => {
+        // Hide sessions for agents that no longer exist
+        if (!agentMap.has(s.agent_id || "")) return false;
         if (!search) return true;
         const agent = agentMap.get(s.agent_id || "");
         return (agent?.name || "").toLowerCase().includes(search.toLowerCase()) || s.session_id.includes(search);
