@@ -32,8 +32,6 @@ use std::time::{Duration, Instant};
 /// Global flag set by the Ctrl+C handler.
 static CTRLC_PRESSED: AtomicBool = AtomicBool::new(false);
 const INIT_DEFAULT_CONFIG_TEMPLATE: &str = include_str!("../templates/init_default_config.toml");
-const PROVIDER_DEFAULT_MODELS_TEMPLATE: &str =
-    include_str!("../templates/provider_default_models.toml");
 
 /// Install a Ctrl+C handler that force-exits the process.
 /// On Windows/MINGW, the default handler doesn't reliably interrupt blocking
@@ -2472,21 +2470,10 @@ fn render_init_default_config(provider: &str, model: &str, api_key_env: &str) ->
         .replace("{{api_key_env}}", api_key_env)
 }
 
-fn configured_default_model(provider: &str) -> Option<String> {
-    let parsed = toml::from_str::<toml::Value>(PROVIDER_DEFAULT_MODELS_TEMPLATE).ok()?;
-    parsed
-        .get("default_models")?
-        .get(provider)?
-        .as_str()
-        .map(|s| s.to_string())
-}
-
 fn default_model_for_provider(provider: &str) -> String {
-    configured_default_model(provider)
-        .or_else(|| {
-            let catalog = librefang_runtime::model_catalog::ModelCatalog::default();
-            catalog.default_model_for_provider(provider)
-        })
+    let catalog = librefang_runtime::model_catalog::ModelCatalog::default();
+    catalog
+        .default_model_for_provider(provider)
         .unwrap_or_else(|| "local-model".to_string())
 }
 

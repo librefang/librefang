@@ -19,8 +19,6 @@ use librefang_types::model_catalog::ModelTier;
 
 const INIT_WIZARD_CONFIG_TEMPLATE: &str =
     include_str!("../../../templates/init_wizard_config.toml");
-const PROVIDER_DEFAULT_MODELS_TEMPLATE: &str =
-    include_str!("../../../templates/provider_default_models.toml");
 
 // ── Provider metadata ──────────────────────────────────────────────────────
 
@@ -593,18 +591,9 @@ fn render_init_wizard_config(
         .replace("{{routing_section}}", routing_section)
 }
 
-fn configured_default_model(provider: &str) -> Option<String> {
-    let parsed = toml::from_str::<toml::Value>(PROVIDER_DEFAULT_MODELS_TEMPLATE).ok()?;
-    parsed
-        .get("default_models")?
-        .get(provider)?
-        .as_str()
-        .map(|s| s.to_string())
-}
-
 fn default_model_for_provider(provider: &str, model_catalog: &ModelCatalog) -> String {
-    configured_default_model(provider)
-        .or_else(|| model_catalog.default_model_for_provider(provider))
+    model_catalog
+        .default_model_for_provider(provider)
         .unwrap_or_else(|| "local-model".to_string())
 }
 

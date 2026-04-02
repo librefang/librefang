@@ -180,6 +180,10 @@ pub struct ProviderInfo {
     /// Populated from `providers/*.toml` in the registry.
     #[serde(default)]
     pub media_capabilities: Vec<String>,
+    /// Model IDs confirmed available via live API probe.
+    /// Empty until background validation completes successfully.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub available_models: Vec<String>,
 }
 
 impl Default for ProviderInfo {
@@ -195,6 +199,7 @@ impl Default for ProviderInfo {
             signup_url: None,
             regions: HashMap::new(),
             media_capabilities: Vec::new(),
+            available_models: Vec::new(),
         }
     }
 }
@@ -246,6 +251,7 @@ impl From<ProviderCatalogToml> for ProviderInfo {
             signup_url: p.signup_url,
             regions: p.regions,
             media_capabilities: p.media_capabilities,
+            available_models: Vec::new(),
         }
     }
 }
