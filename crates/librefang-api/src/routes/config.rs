@@ -709,7 +709,10 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
     set!("network_enabled", config.network_enabled);
     set!("mode", format!("{:?}", config.mode));
     set!("language", config.language);
-    set!("usage_footer", format!("{:?}", config.usage_footer));
+    set!(
+        "usage_footer",
+        serde_json::to_value(&config.usage_footer).unwrap_or_default()
+    );
     set!("stable_prefix_mode", config.stable_prefix_mode);
     set!("prompt_caching", config.prompt_caching);
     set!("max_cron_jobs", config.max_cron_jobs);
