@@ -382,7 +382,7 @@ pub struct LibreFangKernel {
         dashmap::DashMap<AgentId, Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<String>>>>,
     /// Sticky assistant routing per conversation (assistant + sender/thread).
     /// Preserves follow-up context for brief messages after a route to a specialist/hand.
-    assistant_routes: dashmap::DashMap<String, AssistantRouteTarget>,
+    assistant_routes: dashmap::DashMap<String, (AssistantRouteTarget, std::time::Instant)>,
     /// Per-agent decision traces from the most recent message exchange.
     /// Stored for retrieval via `/api/agents/{id}/traces`.
     pub(crate) decision_traces:
@@ -524,6 +524,21 @@ impl DeliveryTracker {
             .take(64)
             .collect();
         s
+    }
+
+    /// Remove receipt entries for agents not in the live set.
+    pub fn gc_stale_agents(&self, live_agents: &std::collections::HashSet<AgentId>) -> usize {
+        let stale: Vec<AgentId> = self
+            .receipts
+            .iter()
+            .filter(|entry| !live_agents.contains(entry.key()))
+            .map(|entry| *entry.key())
+            .collect();
+        let count = stale.len();
+        for id in stale {
+            self.receipts.remove(&id);
+        }
+        count
     }
 }
 
@@ -1294,6 +1309,120 @@ impl LibreFangKernel {
     #[inline]
     pub fn provider_unconfigured_flag(&self) -> &std::sync::atomic::AtomicBool {
         &self.provider_unconfigured_logged
+    }
+
+    /// Periodic garbage collection sweep for unbounded in-memory caches.
+    ///
+    /// Removes stale entries from DashMaps keyed by agent ID (retaining only
+    /// agents still present in the registry), evicts expired assistant route
+    /// cache entries, and caps prompt metadata cache size.
+    pub(crate) fn gc_sweep(&self) {
+        let live_agents: std::collections::HashSet<AgentId> =
+            self.registry.list().iter().map(|e| e.id).collect();
+        let mut total_removed: usize = 0;
+
+        // 1. agent_msg_locks — remove locks for dead agents
+        {
+            let stale: Vec<AgentId> = self
+                .agent_msg_locks
+                .iter()
+                .filter(|e| !live_agents.contains(e.key()))
+                .map(|e| *e.key())
+                .collect();
+            total_removed += stale.len();
+            for id in stale {
+                self.agent_msg_locks.remove(&id);
+            }
+        }
+
+        // 2. injection_senders / injection_receivers — remove for dead agents
+        {
+            let stale: Vec<AgentId> = self
+                .injection_senders
+                .iter()
+                .filter(|e| !live_agents.contains(e.key()))
+                .map(|e| *e.key())
+                .collect();
+            total_removed += stale.len();
+            for id in &stale {
+                self.injection_senders.remove(id);
+                self.injection_receivers.remove(id);
+            }
+        }
+
+        // 3. assistant_routes — evict entries unused for >30 minutes
+        {
+            let ttl = std::time::Duration::from_secs(30 * 60);
+            let stale: Vec<String> = self
+                .assistant_routes
+                .iter()
+                .filter(|e| e.value().1.elapsed() > ttl)
+                .map(|e| e.key().clone())
+                .collect();
+            total_removed += stale.len();
+            for key in stale {
+                self.assistant_routes.remove(&key);
+            }
+        }
+
+        // 4. decision_traces — remove dead agents, cap per-agent at 50
+        {
+            let stale: Vec<AgentId> = self
+                .decision_traces
+                .iter()
+                .filter(|e| !live_agents.contains(e.key()))
+                .map(|e| *e.key())
+                .collect();
+            total_removed += stale.len();
+            for id in stale {
+                self.decision_traces.remove(&id);
+            }
+            // Cap surviving entries
+            for mut entry in self.decision_traces.iter_mut() {
+                let traces = entry.value_mut();
+                if traces.len() > 50 {
+                    let drain = traces.len() - 50;
+                    traces.drain(..drain);
+                }
+            }
+        }
+
+        // 5. prompt_metadata_cache — clear expired + cap at 100 entries
+        {
+            self.prompt_metadata_cache
+                .workspace
+                .retain(|_, v| !v.is_expired());
+            self.prompt_metadata_cache
+                .skills
+                .retain(|_, v| !v.is_expired());
+            self.prompt_metadata_cache
+                .tools
+                .retain(|_, v| !v.is_expired());
+            // Hard cap to prevent unbounded growth under extreme load
+            if self.prompt_metadata_cache.workspace.len() > 100 {
+                self.prompt_metadata_cache.workspace.clear();
+            }
+            if self.prompt_metadata_cache.skills.len() > 100 {
+                self.prompt_metadata_cache.skills.clear();
+            }
+            if self.prompt_metadata_cache.tools.len() > 100 {
+                self.prompt_metadata_cache.tools.clear();
+            }
+        }
+
+        // 6. delivery_tracker — remove receipts for dead agents
+        total_removed += self.delivery_tracker.gc_stale_agents(&live_agents);
+
+        // 7. event_bus agent channels — remove channels for dead agents
+        total_removed += self.event_bus.gc_stale_channels(&live_agents);
+
+        if total_removed > 0 {
+            info!(
+                removed = total_removed,
+                live_agents = live_agents.len(),
+                "GC sweep completed"
+            );
+        }
     }
 }
 
@@ -3972,10 +4101,15 @@ system_prompt = "You are a helpful assistant."
             if let Some(target) = self
                 .assistant_routes
                 .get(&route_key)
-                .map(|entry| entry.value().clone())
+                .map(|entry| entry.value().0.clone())
             {
                 match self.resolve_assistant_route_target(&target) {
                     Ok(routed_id) => {
+                        // Update last-used timestamp for GC
+                        self.assistant_routes.insert(
+                            route_key.clone(),
+                            (target.clone(), std::time::Instant::now()),
+                        );
                         info!(
                             route_type = target.route_type(),
                             target = %target.name(),
@@ -4000,7 +4134,10 @@ system_prompt = "You are a helpful assistant."
             let routed_id = self.resolve_or_spawn_specialist(&specialist)?;
             self.assistant_routes.insert(
                 route_key,
-                AssistantRouteTarget::Specialist(specialist.clone()),
+                (
+                    AssistantRouteTarget::Specialist(specialist.clone()),
+                    std::time::Instant::now(),
+                ),
             );
             return Ok(routed_id);
         }
@@ -4012,7 +4149,8 @@ system_prompt = "You are a helpful assistant."
                 target = %target.name(),
                 "Assistant routed via metadata fallback"
             );
-            self.assistant_routes.insert(route_key, target);
+            self.assistant_routes
+                .insert(route_key, (target, std::time::Instant::now()));
             return Ok(routed_id);
         }
 
@@ -7121,6 +7259,23 @@ system_prompt = "You are a helpful assistant."
                 });
                 info!("Memory decay scheduled every {interval_hours} hour(s)");
             }
+        }
+
+        // Periodic GC sweep for unbounded in-memory caches (every 5 minutes)
+        {
+            let kernel = Arc::clone(self);
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(5 * 60));
+                interval.tick().await; // Skip first immediate tick
+                loop {
+                    interval.tick().await;
+                    if kernel.supervisor.is_shutting_down() {
+                        break;
+                    }
+                    kernel.gc_sweep();
+                }
+            });
+            info!("In-memory GC sweep scheduled every 5 minutes");
         }
 
         // Connect to configured + extension MCP servers

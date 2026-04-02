@@ -363,6 +363,45 @@ jobs:
             generate_cask "$channel"
           done
 
+          # ── Versioned cask (pinned to this exact release) ──────────────
+          # Allows: brew install --cask librefang@2026.4.2-beta7
+          # These accumulate in the tap and are never overwritten.
+          VERSIONED_NAME="librefang@${VERSION}"
+          mkdir -p tap/Casks
+          cat > "tap/Casks/${VERSIONED_NAME}.rb" <<CASK
+          cask "${VERSIONED_NAME}" do
+            arch arm: "aarch64", intel: "x64"
+
+            version "${TAURI_VERSION}"
+
+            on_arm do
+              sha256 "${ARM_SHA}"
+            end
+            on_intel do
+              sha256 "${X86_SHA}"
+            end
+
+            url "https://github.com/librefang/librefang/releases/download/${TAG}/LibreFang_#{version}_#{arch}.dmg",
+                verified: "github.com/librefang/librefang/"
+            name "LibreFang ${VERSION}"
+            desc "Community-Maintained Agent Operating System written in Rust (pinned to ${VERSION})"
+            homepage "https://librefang.ai"
+
+            depends_on macos: ">= :ventura"
+
+            app "LibreFang.app"
+
+            zap trash: [
+              "~/Library/Application Support/ai.librefang.desktop",
+              "~/Library/Caches/ai.librefang.desktop",
+              "~/Library/Preferences/ai.librefang.desktop.plist",
+            ]
+          end
+          CASK
+
+          echo "=== Versioned cask: ${VERSIONED_NAME} ==="
+          cat "tap/Casks/${VERSIONED_NAME}.rb"
+
       - name: Commit and push
         working-directory: tap
         run: |

@@ -134,6 +134,21 @@ impl EventBus {
     pub fn unsubscribe_agent(&self, agent_id: AgentId) {
         self.agent_channels.remove(&agent_id);
     }
+
+    /// Remove channels for agents that no longer exist in the registry.
+    pub fn gc_stale_channels(&self, live_agents: &std::collections::HashSet<AgentId>) -> usize {
+        let stale: Vec<AgentId> = self
+            .agent_channels
+            .iter()
+            .filter(|entry| !live_agents.contains(entry.key()))
+            .map(|entry| *entry.key())
+            .collect();
+        let count = stale.len();
+        for id in stale {
+            self.agent_channels.remove(&id);
+        }
+        count
+    }
 }
 
 impl Default for EventBus {

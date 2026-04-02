@@ -125,7 +125,15 @@ impl BackgroundExecutor {
                     "Starting continuous background loop"
                 );
 
+                let check_interval = *check_interval_secs;
                 let handle = tokio::spawn(async move {
+                    // Stagger first tick: random jitter (0..interval) so agents
+                    // don't all load sessions into memory simultaneously at boot.
+                    let jitter_secs = rand::random::<u64>() % check_interval.max(1);
+                    let jitter = std::time::Duration::from_secs(jitter_secs);
+                    debug!(agent = %name, jitter_secs, "Continuous loop: initial jitter");
+                    tokio::time::sleep(jitter).await;
+
                     loop {
                         tokio::select! {
                             _ = tokio::time::sleep(interval) => {}
@@ -201,6 +209,12 @@ impl BackgroundExecutor {
                 );
 
                 let handle = tokio::spawn(async move {
+                    // Stagger first tick: random jitter so agents don't spike memory together.
+                    let jitter_secs = rand::random::<u64>() % interval_secs.max(1);
+                    let jitter = std::time::Duration::from_secs(jitter_secs);
+                    debug!(agent = %name, jitter_secs, "Periodic loop: initial jitter");
+                    tokio::time::sleep(jitter).await;
+
                     loop {
                         tokio::select! {
                             _ = tokio::time::sleep(interval) => {}

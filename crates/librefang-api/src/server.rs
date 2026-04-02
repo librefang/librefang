@@ -958,6 +958,52 @@ pub async fn run_daemon(
         }));
     }
 
+    // Background: periodic GC for API-layer caches (every 5 minutes)
+    {
+        let st = state.clone();
+        bg_tasks.push(tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5 * 60));
+            interval.tick().await; // Skip first immediate tick
+            loop {
+                interval.tick().await;
+
+                // Evict expired clawhub/skillhub cache entries (120s TTL)
+                let cache_ttl = std::time::Duration::from_secs(120);
+                let before_claw = st.clawhub_cache.len();
+                st.clawhub_cache
+                    .retain(|_, (fetched_at, _)| fetched_at.elapsed() < cache_ttl);
+                let before_skill = st.skillhub_cache.len();
+                st.skillhub_cache
+                    .retain(|_, (fetched_at, _)| fetched_at.elapsed() < cache_ttl);
+
+                // Evict expired session tokens
+                let expired_sessions = {
+                    let mut sessions = st.active_sessions.write().await;
+                    let before = sessions.len();
+                    sessions.retain(|_, token| {
+                        !crate::password_hash::is_token_expired(
+                            token,
+                            crate::password_hash::DEFAULT_SESSION_TTL_SECS,
+                        )
+                    });
+                    before - sessions.len()
+                };
+
+                let claw_removed = before_claw - st.clawhub_cache.len();
+                let skill_removed = before_skill - st.skillhub_cache.len();
+                let total = claw_removed + skill_removed + expired_sessions;
+                if total > 0 {
+                    tracing::info!(
+                        clawhub = claw_removed,
+                        skillhub = skill_removed,
+                        sessions = expired_sessions,
+                        "API cache GC sweep completed"
+                    );
+                }
+            }
+        }));
+    }
+
     // Use SO_REUSEADDR to allow binding immediately after reboot (avoids TIME_WAIT).
     let socket = socket2::Socket::new(
         if addr.is_ipv4() {
