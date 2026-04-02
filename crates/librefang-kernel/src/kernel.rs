@@ -6995,8 +6995,12 @@ system_prompt = "You are a helpful assistant."
         {
             let mut missing: Vec<String> = Vec::new();
 
-            // Default LLM provider
-            let llm_env = cfg.resolve_api_key_env(&cfg.default_model.provider);
+            // Default LLM provider — prefer explicit api_key_env, then resolve
+            let llm_env = if !cfg.default_model.api_key_env.is_empty() {
+                cfg.default_model.api_key_env.clone()
+            } else {
+                cfg.resolve_api_key_env(&cfg.default_model.provider)
+            };
             if std::env::var(&llm_env).unwrap_or_default().is_empty() {
                 missing.push(format!(
                     "LLM ({}): ${}",
@@ -7004,9 +7008,13 @@ system_prompt = "You are a helpful assistant."
                 ));
             }
 
-            // Fallback LLM providers
+            // Fallback LLM providers — prefer explicit api_key_env, then resolve
             for fb in &cfg.fallback_providers {
-                let env_var = cfg.resolve_api_key_env(&fb.provider);
+                let env_var = if !fb.api_key_env.is_empty() {
+                    fb.api_key_env.clone()
+                } else {
+                    cfg.resolve_api_key_env(&fb.provider)
+                };
                 if std::env::var(&env_var).unwrap_or_default().is_empty() {
                     missing.push(format!("LLM fallback ({}): ${}", fb.provider, env_var));
                 }

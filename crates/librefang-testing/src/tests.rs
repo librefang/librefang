@@ -111,6 +111,7 @@ async fn test_mock_llm_driver_recording() {
         thinking: None,
         prompt_caching: false,
         response_format: None,
+        timeout_secs: None,
     };
 
     // First call
@@ -280,6 +281,7 @@ async fn test_mock_llm_driver_custom_tokens_and_stop_reason() {
         thinking: None,
         prompt_caching: false,
         response_format: None,
+        timeout_secs: None,
     };
 
     let resp = driver.complete(request).await.unwrap();
@@ -318,6 +320,7 @@ async fn test_failing_llm_driver() {
         thinking: None,
         prompt_caching: false,
         response_format: None,
+        timeout_secs: None,
     };
 
     let result = driver.complete(request).await;

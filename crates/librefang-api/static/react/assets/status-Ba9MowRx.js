@@ -1,1 +1,0 @@
-function n(r){const e=(r??"").toLowerCase();return e==="running"?"success":e==="suspended"||e==="idle"?"warning":e==="error"||e==="crashed"?"error":"default"}function i(r){return r==="configured"||r==="not_required"||r==="configured_cli"}export{n as g,i};

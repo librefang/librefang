@@ -219,7 +219,7 @@ impl WizardState {
     }
 
     fn build_provider_order(&mut self) {
-        let has_key = |var: &str| std::env::var(var).map_or(false, |v| !v.trim().is_empty());
+        let has_key = |var: &str| std::env::var(var).is_ok_and(|v| !v.trim().is_empty());
         self.provider_order.clear();
         // Detected providers first
         for (i, p) in PROVIDERS.iter().enumerate() {

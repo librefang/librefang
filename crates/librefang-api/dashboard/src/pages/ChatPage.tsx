@@ -447,7 +447,7 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter }: { me
             const hasInput = message.tokens?.input !== undefined && message.tokens.input > 0;
             const hasOutput = message.tokens?.output !== undefined && message.tokens.output > 0;
             if (!showTokens && !showCost) return null;
-            if (showTokens && !hasInput && !hasOutput) return null;
+            if (showTokens && !hasInput && !hasOutput && !showCost) return null;
             const parts: string[] = [];
             if (showTokens && (hasInput || hasOutput)) parts.push(`${message.tokens?.input ?? 0} in, ${message.tokens?.output ?? 0} out`);
             if (showCost) parts.push(formatCost(message.cost_usd!));

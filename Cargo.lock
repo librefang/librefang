@@ -3805,7 +3805,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-api"
-version = "2026.4.2-beta7"
+version = "2026.4.2-beta8"
 dependencies = [
  "argon2",
  "async-trait",
@@ -3861,7 +3861,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-channels"
-version = "2026.4.2-beta7"
+version = "2026.4.2-beta8"
 dependencies = [
  "aes",
  "async-trait",
@@ -3908,7 +3908,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-cli"
-version = "2026.4.2-beta7"
+version = "2026.4.2-beta8"
 dependencies = [
  "clap",
  "clap_complete",
@@ -3944,7 +3944,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-desktop"
-version = "2026.4.2-beta7"
+version = "2026.4.2-beta8"
 dependencies = [
  "axum",
  "dirs 6.0.0",
@@ -3972,7 +3972,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-extensions"
-version = "2026.4.2-beta7"
+version = "2026.4.2-beta8"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -4004,7 +4004,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-hands"
-version = "2026.4.2-beta7"
+version = "2026.4.2-beta8"
 dependencies = [
  "chrono",
  "dashmap",
@@ -4023,7 +4023,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-kernel"
-version = "2026.4.2-beta7"
+version = "2026.4.2-beta8"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -4063,7 +4063,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-memory"
-version = "2026.4.2-beta7"
+version = "2026.4.2-beta8"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4084,7 +4084,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-migrate"
-version = "2026.4.2-beta7"
+version = "2026.4.2-beta8"
 dependencies = [
  "chrono",
  "dirs 6.0.0",
@@ -4103,7 +4103,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-runtime"
-version = "2026.4.2-beta7"
+version = "2026.4.2-beta8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4151,7 +4151,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-skills"
-version = "2026.4.2-beta7"
+version = "2026.4.2-beta8"
 dependencies = [
  "chrono",
  "dirs 6.0.0",
@@ -4178,7 +4178,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-telemetry"
-version = "2026.4.2-beta7"
+version = "2026.4.2-beta8"
 dependencies = [
  "librefang-types",
  "metrics",
@@ -4187,7 +4187,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-testing"
-version = "2026.4.2-beta7"
+version = "2026.4.2-beta8"
 dependencies = [
  "async-trait",
  "axum",
@@ -4214,7 +4214,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-types"
-version = "2026.4.2-beta7"
+version = "2026.4.2-beta8"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4235,7 +4235,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-wire"
-version = "2026.4.2-beta7"
+version = "2026.4.2-beta8"
 dependencies = [
  "async-trait",
  "chrono",
@@ -10520,7 +10520,7 @@ checksum = "b9cc00251562a284751c9973bace760d86c0276c471b4be569fe6b068ee97a56"
 
 [[package]]
 name = "xtask"
-version = "2026.4.2-beta7"
+version = "2026.4.2-beta8"
 dependencies = [
  "base64 0.22.1",
  "chrono",
