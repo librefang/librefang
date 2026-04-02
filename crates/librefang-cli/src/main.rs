@@ -961,7 +961,7 @@ enum AgentCommands {
     },
     /// Set an agent property (e.g., model).
     #[command(
-        long_about = "Set a property on a running agent.\n\nCurrently supports changing the model.\n\nExamples:\n  librefang agent set <ID> model gpt-4o\n  librefang agent set <ID> model claude-sonnet"
+        long_about = "Set a property on a running agent.\n\nCurrently supports changing the model. Provider can be set if provided as a prefix.\n\nExamples:\n  librefang agent set <ID> model gpt-4o\n  librefang agent set <ID> model claude-code/claude-sonnet"
     )]
     Set {
         /// Agent ID (UUID).
