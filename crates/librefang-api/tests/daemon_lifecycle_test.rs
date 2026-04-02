@@ -125,6 +125,7 @@ async fn test_full_daemon_lifecycle() {
         media_drivers: librefang_runtime::media::MediaDriverCache::new(),
         webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
         api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
+        provider_test_cache: dashmap::DashMap::new(),
     });
 
     let app = Router::new()
@@ -262,6 +263,7 @@ async fn test_server_immediate_responsiveness() {
         media_drivers: librefang_runtime::media::MediaDriverCache::new(),
         webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
         api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
+        provider_test_cache: dashmap::DashMap::new(),
     });
 
     let app = Router::new()
