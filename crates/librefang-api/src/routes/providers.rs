@@ -898,17 +898,9 @@ pub async fn test_provider(
         }
     };
 
-    // Treat empty-string env vars the same as missing — an env var set to ""
-    // (e.g. `DEEPSEEK_API_KEY=` in secrets.env) should not bypass the guard.
-    let api_key = std::env::var(&env_var)
-        .ok()
-        .filter(|k| !k.trim().is_empty());
-    // Only require API key for providers that need one (skip local providers like ollama/vllm/lmstudio)
-    if key_required && api_key.is_none() && !env_var.is_empty() {
-        return ApiErrorResponse::bad_request("Provider API key not configured").into_json_tuple();
-    }
-
     // ── CLI-based providers (no HTTP base URL) ──
+    // Check CLI availability BEFORE requiring an API key, since CLI providers
+    // (e.g. claude-code, gemini-cli) don't need API keys at all.
     if base_url.is_empty() {
         let cli_ok = librefang_runtime::drivers::cli_provider_available(name.as_str());
         return if cli_ok {
@@ -924,6 +916,15 @@ pub async fn test_provider(
                 ),
             )
         };
+    }
+
+    // Treat empty-string env vars the same as missing — an env var set to ""
+    // (e.g. `DEEPSEEK_API_KEY=` in secrets.env) should not bypass the guard.
+    let api_key = std::env::var(&env_var)
+        .ok()
+        .filter(|k| !k.trim().is_empty());
+    if key_required && api_key.is_none() && !env_var.is_empty() {
+        return ApiErrorResponse::bad_request("Provider API key not configured").into_json_tuple();
     }
 
     let start = std::time::Instant::now();
