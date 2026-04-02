@@ -711,7 +711,7 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
     set!("language", config.language);
     set!(
         "usage_footer",
-        serde_json::to_value(&config.usage_footer).unwrap_or_default()
+        serde_json::to_value(config.usage_footer).unwrap_or_default()
     );
     set!("stable_prefix_mode", config.stable_prefix_mode);
     set!("prompt_caching", config.prompt_caching);

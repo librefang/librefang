@@ -117,9 +117,13 @@ impl ModelCatalog {
 
             if !provider.key_required {
                 // Local providers (ollama, vllm, etc.) have their status set by
-                // the async probe at startup. Don't overwrite with NotRequired
-                // here or the probe result gets lost.
-                if !crate::provider_health::is_local_provider(&provider.id) {
+                // the async probe at startup. Only set NotRequired as a fallback
+                // when the probe hasn't run yet (status still Missing).
+                if crate::provider_health::is_local_provider(&provider.id) {
+                    if provider.auth_status == AuthStatus::Missing {
+                        provider.auth_status = AuthStatus::NotRequired;
+                    }
+                } else {
                     provider.auth_status = AuthStatus::NotRequired;
                 }
                 continue;
@@ -1835,6 +1839,7 @@ supports_streaming = true
 /// - `Some(true)`  — HTTP 2xx or 429 (rate-limited = key is valid)
 /// - `Some(false)` — HTTP 401 or 403 (key rejected by provider)
 /// - `None`        — network error, 404, 5xx, etc. (don't update status)
+///
 /// Result of probing a provider's API key.
 #[derive(Debug)]
 pub struct ProbeResult {
@@ -1905,8 +1910,8 @@ pub async fn probe_api_key(provider_id: &str, base_url: &str, api_key: &str) -> 
                                 })
                                 .collect::<Vec<_>>(),
                         )
-                    } else if let Some(arr) = body.get("models").and_then(|d| d.as_array()) {
-                        Some(
+                    } else {
+                        body.get("models").and_then(|d| d.as_array()).map(|arr| {
                             arr.iter()
                                 .filter_map(|m| {
                                     m.get("name")
@@ -1914,10 +1919,8 @@ pub async fn probe_api_key(provider_id: &str, base_url: &str, api_key: &str) -> 
                                         .and_then(|v| v.as_str())
                                         .map(|s| s.strip_prefix("models/").unwrap_or(s).to_string())
                                 })
-                                .collect::<Vec<_>>(),
-                        )
-                    } else {
-                        None
+                                .collect::<Vec<_>>()
+                        })
                     }
                 })
                 .unwrap_or_default();
