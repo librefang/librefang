@@ -102,10 +102,6 @@ export function PluginsPage() {
               <FileCode className="h-4 w-4" />
               <span className="hidden sm:inline">{t("plugins.new_plugin")}</span>
             </Button>
-            <Button variant="primary" onClick={() => setShowInstall(true)}>
-              <Download className="h-4 w-4" />
-              <span className="hidden sm:inline">{t("plugins.install")}</span>
-            </Button>
           </div>
         }
       />
