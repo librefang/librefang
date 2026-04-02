@@ -383,36 +383,45 @@ pub async fn list_skill_registry(State(state): State<Arc<AppState>>) -> impl Int
     )
 )]
 pub async fn marketplace_search(
+    State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
-    let query = params.get("q").cloned().unwrap_or_default();
-    if query.is_empty() {
-        return Json(serde_json::json!({"results": [], "total": 0}));
+    let query = params.get("q").cloned().unwrap_or_default().to_lowercase();
+    let registry_dir = state.kernel.home_dir().join("registry").join("skills");
+
+    let mut results: Vec<serde_json::Value> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&registry_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let manifest_path = path.join("skill.toml");
+            if !manifest_path.exists() {
+                continue;
+            }
+            if let Ok(content) = std::fs::read_to_string(&manifest_path) {
+                if let Ok(manifest) = toml::from_str::<librefang_skills::SkillManifest>(&content) {
+                    let name = &manifest.skill.name;
+                    let desc = manifest.skill.description.as_deref().unwrap_or("");
+                    if query.is_empty()
+                        || name.to_lowercase().contains(&query)
+                        || desc.to_lowercase().contains(&query)
+                    {
+                        results.push(serde_json::json!({
+                            "name": name,
+                            "description": desc,
+                            "stars": 0,
+                            "url": "",
+                        }));
+                    }
+                }
+            }
+        }
     }
 
-    let config = librefang_skills::marketplace::MarketplaceConfig::default();
-    let client = librefang_skills::marketplace::MarketplaceClient::new(config);
-
-    match client.search(&query).await {
-        Ok(results) => {
-            let items: Vec<serde_json::Value> = results
-                .iter()
-                .map(|r| {
-                    serde_json::json!({
-                        "name": r.name,
-                        "description": r.description,
-                        "stars": r.stars,
-                        "url": r.url,
-                    })
-                })
-                .collect();
-            Json(serde_json::json!({"results": items, "total": items.len()}))
-        }
-        Err(e) => {
-            tracing::warn!("Marketplace search failed: {e}");
-            Json(serde_json::json!({"results": [], "total": 0, "error": format!("{e}")}))
-        }
-    }
+    let total = results.len();
+    Json(serde_json::json!({"results": results, "total": total}))
 }
 
 // ---------------------------------------------------------------------------
