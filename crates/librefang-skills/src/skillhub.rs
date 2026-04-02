@@ -1,4 +1,4 @@
-//! Skillhub marketplace client — search and install skills from lightmake.site.
+//! Skillhub marketplace client — search and install skills from skillhub.tencent.com.
 //!
 //! Skillhub shares the same API format as ClawHub for search, detail, and download.
 //! Browse uses a static index hosted on Tencent COS.
@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use tracing::info;
 
 /// Default Skillhub API base URL.
-pub const DEFAULT_SKILLHUB_URL: &str = "https://lightmake.site/api/v1";
+pub const DEFAULT_SKILLHUB_URL: &str = "https://skillhub.tencent.com/api/v1";
 
 /// Static skills index URL (Tencent COS).
 const SKILLHUB_INDEX_URL: &str =
@@ -65,7 +65,7 @@ pub struct SkillhubIndexResponse {
 // Client
 // ---------------------------------------------------------------------------
 
-/// Client for the Skillhub marketplace (lightmake.site).
+/// Client for the Skillhub marketplace (skillhub.tencent.com).
 ///
 /// Delegates search, detail, and install to [`ClawHubClient`] (compatible API),
 /// and provides browse via the static COS-hosted skills index.
@@ -79,7 +79,7 @@ pub struct SkillhubClient {
 impl SkillhubClient {
     /// Create a new Skillhub client.
     ///
-    /// `base_url` is the Skillhub API base (default: `https://lightmake.site/api/v1`).
+    /// `base_url` is the Skillhub API base (default: `https://skillhub.tencent.com/api/v1`).
     pub fn new(base_url: &str, cache_dir: PathBuf) -> Self {
         Self {
             inner: ClawHubClient::with_url(base_url, cache_dir),
