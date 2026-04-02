@@ -30,6 +30,9 @@ self.addEventListener("fetch", (e) => {
   // API requests: network only
   if (url.pathname.startsWith("/api/")) return;
 
+  // Only cache GET requests (Cache API does not support POST)
+  if (e.request.method !== "GET") return;
+
   // Static assets: stale-while-revalidate
   e.respondWith(
     caches.open(CACHE_NAME).then(async (cache) => {
