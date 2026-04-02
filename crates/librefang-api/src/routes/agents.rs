@@ -1663,6 +1663,7 @@ pub async fn get_agent(
                 "provider": entry.manifest.model.provider,
                 "model": entry.manifest.model.model,
                 "max_tokens": entry.manifest.model.max_tokens,
+                "temperature": entry.manifest.model.temperature,
             },
             "capabilities": {
                 "tools": entry.manifest.capabilities.tools,

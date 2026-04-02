@@ -726,11 +726,30 @@ export async function loadDashboardSnapshot(): Promise<DashboardSnapshot> {
 }
 
 
-export async function getAgentDetail(agentId: string): Promise<any> {
-  return get<any>(`/api/agents/${encodeURIComponent(agentId)}`);
+export interface AgentModelDetail {
+  provider?: string;
+  model?: string;
+  max_tokens?: number;
+  temperature?: number;
 }
 
-export async function patchAgentConfig(agentId: string, config: { max_tokens?: number; [key: string]: unknown }): Promise<ApiActionResponse> {
+export interface AgentDetail {
+  id: string;
+  name: string;
+  model?: AgentModelDetail;
+  system_prompt?: string;
+  capabilities?: { tools?: boolean; network?: boolean };
+  skills?: string[];
+  tags?: string[];
+  mode?: string;
+  thinking?: { budget_tokens?: number; stream_thinking?: boolean };
+}
+
+export async function getAgentDetail(agentId: string): Promise<AgentDetail> {
+  return get<AgentDetail>(`/api/agents/${encodeURIComponent(agentId)}`);
+}
+
+export async function patchAgentConfig(agentId: string, config: { max_tokens?: number; model?: string; provider?: string }): Promise<ApiActionResponse> {
   return patch<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}/config`, config);
 }
 
