@@ -721,7 +721,7 @@ export function ChatPage() {
   }, [navigate]);
 
   const configQuery = useQuery({ queryKey: ["config"], queryFn: getFullConfig, staleTime: 60000 });
-  const usageFooter = (configQuery.data as Record<string, unknown>)?.usage_footer as string | undefined ?? "Tokens";
+  const usageFooter = (configQuery.data as Record<string, unknown>)?.usage_footer as string | undefined ?? "Full";
   const agentsQuery = useQuery({ queryKey: ["agents", "list", "chat"], queryFn: listAgents, staleTime: 30000 });
   const agents = useMemo(() => [...(agentsQuery.data ?? [])].filter(a => !a.is_hand).sort((a, b) => {
     // Auth missing → sort to bottom
