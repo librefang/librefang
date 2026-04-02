@@ -201,7 +201,7 @@ fn run_watch(
     println!("Starting daemon on port {port} (watch mode)...");
     println!("  Binary: {binary_str}");
     println!("  Watching: crates/");
-    println!("  Press Ctrl+C to stop\n");
+    println!("  Press 'r' to git pull, Ctrl+C to stop\n");
 
     // Stop any running daemon via the CLI (reads daemon.json, sends SIGTERM,
     // waits for exit) — far more reliable than lsof + kill -9.
@@ -240,10 +240,49 @@ fn run_watch(
         binary = binary_str,
     );
 
+    // Background thread: listen for 'r' key to trigger git pull + rebuild.
+    // cargo-watch will then detect the changed files and restart automatically.
+    let root_clone = root.to_path_buf();
+    let binary_clone = binary_str.clone();
+    std::thread::spawn(move || {
+        use std::io::Read;
+        // Set terminal to raw mode so we get keypresses without Enter
+        let _ = Command::new("stty").args(["-icanon", "min", "1"]).status();
+        let stdin = std::io::stdin();
+        let mut buf = [0u8; 1];
+        loop {
+            if stdin.lock().read_exact(&mut buf).is_err() {
+                break;
+            }
+            if buf[0] == b'r' {
+                println!("\n\x1b[36m↻ git pull...\x1b[0m");
+                let status = Command::new("git")
+                    .args(["pull", "--rebase"])
+                    .current_dir(&root_clone)
+                    .status();
+                match status {
+                    Ok(s) if s.success() => {
+                        println!("\x1b[32m✓ git pull done — cargo-watch will rebuild\x1b[0m")
+                    }
+                    Ok(s) => eprintln!(
+                        "\x1b[31m✗ git pull failed (exit {})\x1b[0m",
+                        s.code().unwrap_or(-1)
+                    ),
+                    Err(e) => eprintln!("\x1b[31m✗ git pull error: {e}\x1b[0m"),
+                }
+            }
+        }
+        // Restore terminal on exit
+        let _ = Command::new("stty").arg("sane").status();
+    });
+
     let cargo_watch_status = Command::new("cargo")
         .args(["watch", "--watch", "crates", "-s", &rebuild_and_restart])
         .current_dir(root)
         .status()?;
+
+    // Restore terminal mode
+    let _ = Command::new("stty").arg("sane").status();
 
     // Cleanup dashboard on exit
     if let Some(mut child) = dashboard_child {
