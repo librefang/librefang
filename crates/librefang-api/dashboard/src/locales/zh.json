@@ -228,8 +228,8 @@
         "description": "邮件分类、起草、日程安排和收件箱管理智能体。"
       },
       "hello-world": {
-        "name": "你好世界",
-        "description": "友好的问候智能体，可以读取文件、搜索网络并回答日常问题。"
+        "name": "Hello World",
+        "description": "入门示例智能体，可以读取文件、搜索网络并回答日常问题。"
       },
       "home-automation": {
         "name": "家居自动化",
