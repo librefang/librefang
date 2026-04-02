@@ -441,9 +441,9 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter }: { me
         {/* Meta info */}
         <div className="flex items-center gap-2 mt-1.5 text-[10px] text-text-dim/50">
           <span>{message.timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
-          {!message.isStreaming && usageFooter !== "Off" && (() => {
-            const showTokens = usageFooter === "Full" || usageFooter === "Tokens";
-            const showCost = (usageFooter === "Full" || usageFooter === "Cost") && message.cost_usd !== undefined && message.cost_usd > 0;
+          {!message.isStreaming && usageFooter !== "off" && (() => {
+            const showTokens = usageFooter === "full" || usageFooter === "tokens";
+            const showCost = (usageFooter === "full" || usageFooter === "cost") && message.cost_usd !== undefined && message.cost_usd > 0;
             const hasInput = message.tokens?.input !== undefined && message.tokens.input > 0;
             const hasOutput = message.tokens?.output !== undefined && message.tokens.output > 0;
             if (!showTokens && !showCost) return null;
@@ -823,7 +823,7 @@ export function ChatPage() {
   }, [navigate]);
 
   const configQuery = useQuery({ queryKey: ["config"], queryFn: getFullConfig, staleTime: 60000 });
-  const usageFooter = (configQuery.data as Record<string, unknown>)?.usage_footer as string | undefined ?? "Full";
+  const usageFooter = (configQuery.data as Record<string, unknown>)?.usage_footer as string | undefined ?? "full";
   const agentsQuery = useQuery({ queryKey: ["agents", "list", "chat"], queryFn: listAgents, staleTime: 30000 });
   const agents = useMemo(() => [...(agentsQuery.data ?? [])].filter(a => !a.is_hand).sort((a, b) => {
     // Auth missing → sort to bottom
