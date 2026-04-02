@@ -51,6 +51,7 @@ export function AgentsPage() {
       queryClient.invalidateQueries({ queryKey: ["agent-detail", agentId] });
       setEditingMaxTokens(false);
       setMaxTokensInput("");
+      // Refresh detail panel
       if (detailAgent?.id === agentId) {
         getAgentDetail(agentId).then(setDetailAgent).catch(() => {});
       }
