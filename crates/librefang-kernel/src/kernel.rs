@@ -4354,8 +4354,10 @@ system_prompt = "You are a helpful assistant."
                 manifest.model.provider.is_empty() || manifest.model.provider == "default";
             let is_default_model =
                 manifest.model.model.is_empty() || manifest.model.model == "default";
-            let is_auto_spawned =
-                entry.name == "assistant" && manifest.description == "General-purpose assistant";
+            let is_auto_spawned = entry.name == "assistant"
+                && manifest
+                    .description
+                    .starts_with("General-purpose assistant");
             if (is_default_provider && is_default_model) || is_auto_spawned {
                 let override_guard = self
                     .default_model_override
@@ -7105,6 +7107,13 @@ system_prompt = "You are a helpful assistant."
                             error = result.error.as_deref().unwrap_or("unknown"),
                             "Local provider offline"
                         );
+                        // Mark unreachable local providers so dashboard doesn't show "configured"
+                        if let Ok(mut catalog) = kernel.model_catalog.write() {
+                            catalog.set_provider_auth_status(
+                                provider_id,
+                                librefang_types::model_catalog::AuthStatus::Missing,
+                            );
+                        }
                     }
                 }
             });
@@ -7915,9 +7924,12 @@ system_prompt = "You are a helpful assistant."
                 String,
             )> = vec![(primary.clone(), String::new())];
             for fb in &effective_fallbacks {
-                // Resolve "default" to the actual default provider
+                // Resolve "default" to the actual default provider, but if the
+                // model name implies a specific provider (e.g. "gemini-2.0-flash"
+                // → "gemini"), use that instead of blindly falling back to the
+                // default provider which may be a completely different service.
                 let fb_provider = if fb.provider.is_empty() || fb.provider == "default" {
-                    default_provider.clone()
+                    infer_provider_from_model(&fb.model).unwrap_or_else(|| default_provider.clone())
                 } else {
                     fb.provider.clone()
                 };
