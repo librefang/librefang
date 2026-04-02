@@ -89,6 +89,7 @@ interface ProviderCardProps {
 
 function ProviderCard({ provider: p, isSelected, isDefault, pendingId, viewMode, onSelect, onTest, onSetDefault, onViewDetails, onQuickConfig, onEdit, onDelete, t }: ProviderCardProps) {
   const isConfigured = isProviderAvailable(p.auth_status);
+  const isCli = p.auth_status === "configured_cli" || p.auth_status === "cli_not_installed" || (!p.base_url && !p.key_required);
 
   if (viewMode === "list") {
     return (
@@ -108,6 +109,7 @@ function ProviderCard({ provider: p, isSelected, isDefault, pendingId, viewMode,
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
               <h3 className="font-black truncate">{p.display_name || p.id}</h3>
+              {isCli && <Badge variant="default" className="shrink-0">CLI</Badge>}
               {isConfigured ? (
                 <Badge variant={p.reachable === true ? "success" : p.reachable === false ? "error" : "default"} className="shrink-0">
                   {p.reachable === true ? t("providers.online") : p.reachable === false ? t("providers.offline") : t("providers.not_checked")}
@@ -192,8 +194,15 @@ function ProviderCard({ provider: p, isSelected, isDefault, pendingId, viewMode,
 
   // Grid view
   return (
-    <Card hover padding="none" className={`flex flex-col overflow-hidden group transition-all ${isSelected ? "ring-2 ring-brand" : ""}`}>
-      <div className={`h-1.5 bg-gradient-to-r ${isConfigured ? "from-success via-success/60 to-success/30" : "from-brand via-brand/60 to-brand/30"}`} />
+    <Card hover padding="none" className={`relative flex flex-col overflow-hidden group transition-all ${isSelected ? "ring-2 ring-brand" : ""}`}>
+      {isCli && (
+        <div className="absolute top-1.5 left-0 z-10 overflow-hidden w-20 h-20 pointer-events-none">
+          <div className="absolute top-[12px] left-[-18px] w-[90px] text-center text-[9px] font-black uppercase tracking-wider text-text-dim bg-surface/80 border-y border-border-subtle rotate-[-45deg] py-px">
+            CLI
+          </div>
+        </div>
+      )}
+      <div className={`relative z-20 h-1.5 bg-gradient-to-r ${isConfigured ? "from-success via-success/60 to-success/30" : "from-brand via-brand/60 to-brand/30"}`} />
       <div className="p-5 flex-1 flex flex-col">
         {/* Header */}
         <div className="flex items-start justify-between gap-3 mb-4">
@@ -554,6 +563,10 @@ export function ProvidersPage() {
         return tabMatch && searchMatch && statusMatch;
       })
       .sort((a, b) => {
+        // CLI providers always sort after non-CLI
+        const aCli = a.auth_status === "configured_cli" || a.auth_status === "cli_not_installed" || (!a.base_url && !a.key_required) ? 1 : 0;
+        const bCli = b.auth_status === "configured_cli" || b.auth_status === "cli_not_installed" || (!b.base_url && !b.key_required) ? 1 : 0;
+        if (aCli !== bCli) return aCli - bCli;
         let cmp = 0;
         if (sortField === "name") cmp = a.id.localeCompare(b.id);
         else if (sortField === "models") cmp = (a.model_count ?? 0) - (b.model_count ?? 0);

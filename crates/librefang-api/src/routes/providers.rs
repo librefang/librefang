@@ -411,15 +411,16 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
             entry["is_local"] = serde_json::json!(true);
         }
 
-        // Attach cached manual test result (latency) if no probe already set it.
+        // Attach cached manual test result if no probe already set it.
         // TTL: 10 minutes — stale results are ignored.
-        if entry.get("latency_ms").is_none() || entry["latency_ms"].is_null() {
-            if let Some(ref_entry) = state.provider_test_cache.get(&p.id) {
-                let (tested_at, ms, tested_rfc3339) = ref_entry.value();
-                if tested_at.elapsed() < std::time::Duration::from_secs(600) {
+        if let Some(ref_entry) = state.provider_test_cache.get(&p.id) {
+            let (tested_at, ms, tested_rfc3339, reachable) = ref_entry.value();
+            if tested_at.elapsed() < std::time::Duration::from_secs(600) {
+                if entry.get("latency_ms").is_none() || entry["latency_ms"].is_null() {
                     entry["latency_ms"] = serde_json::json!(ms);
-                    entry["last_tested"] = serde_json::json!(tested_rfc3339);
                 }
+                entry["last_tested"] = serde_json::json!(tested_rfc3339);
+                entry["reachable"] = serde_json::json!(reachable);
             }
         }
 
@@ -903,14 +904,19 @@ pub async fn test_provider(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
-    let (env_var, base_url, key_required) = {
+    let (env_var, base_url, key_required, auth_status) = {
         let catalog = state
             .kernel
             .model_catalog_ref()
             .read()
             .unwrap_or_else(|e| e.into_inner());
         match catalog.get_provider(&name) {
-            Some(p) => (p.api_key_env.clone(), p.base_url.clone(), p.key_required),
+            Some(p) => (
+                p.api_key_env.clone(),
+                p.base_url.clone(),
+                p.key_required,
+                p.auth_status,
+            ),
             None => {
                 return ApiErrorResponse::not_found(format!("Unknown provider '{}'", name))
                     .into_json_tuple();
@@ -928,7 +934,12 @@ pub async fn test_provider(
         let cli_latency = cli_start.elapsed().as_millis();
         state.provider_test_cache.insert(
             name.clone(),
-            (Instant::now(), cli_latency, chrono::Utc::now().to_rfc3339()),
+            (
+                Instant::now(),
+                cli_latency,
+                chrono::Utc::now().to_rfc3339(),
+                cli_ok,
+            ),
         );
         return if cli_ok {
             (
@@ -940,6 +951,45 @@ pub async fn test_provider(
                 StatusCode::OK,
                 Json(
                     serde_json::json!({"status":"error","provider":name,"error":"CLI not found in PATH"}),
+                ),
+            )
+        };
+    }
+
+    // API provider with CLI fallback but no API key — test the CLI instead.
+    if auth_status == librefang_types::model_catalog::AuthStatus::ConfiguredCli {
+        let cli_start = Instant::now();
+        // The CLI name may differ from the provider name (e.g. gemini → gemini-cli)
+        let cli_name = match name.as_str() {
+            "gemini" => "gemini-cli",
+            "anthropic" => "claude-code",
+            "openai" | "codex" => "codex-cli",
+            "qwen" => "qwen-code",
+            _ => name.as_str(),
+        };
+        let cli_ok = librefang_runtime::drivers::cli_provider_available(cli_name);
+        let cli_latency = cli_start.elapsed().as_millis();
+        state.provider_test_cache.insert(
+            name.clone(),
+            (
+                Instant::now(),
+                cli_latency,
+                chrono::Utc::now().to_rfc3339(),
+                cli_ok,
+            ),
+        );
+        return if cli_ok {
+            (
+                StatusCode::OK,
+                Json(
+                    serde_json::json!({"status":"ok","provider":name,"latency_ms":cli_latency,"note":format!("via {cli_name} CLI")}),
+                ),
+            )
+        } else {
+            (
+                StatusCode::OK,
+                Json(
+                    serde_json::json!({"status":"error","provider":name,"error":format!("{cli_name} CLI not found in PATH")}),
                 ),
             )
         };
@@ -970,7 +1020,7 @@ pub async fn test_provider(
     if name == "bedrock" || name == "aws-bedrock" {
         state.provider_test_cache.insert(
             name.clone(),
-            (Instant::now(), 0, chrono::Utc::now().to_rfc3339()),
+            (Instant::now(), 0, chrono::Utc::now().to_rfc3339(), true),
         );
         return (
             StatusCode::OK,
@@ -1018,12 +1068,8 @@ pub async fn test_provider(
 
     let result = req.send().await;
 
-    let (first_status, _first_body) = match result {
-        Ok(resp) => {
-            let sc = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            (sc, body)
-        }
+    let status_code = match result {
+        Ok(resp) => resp.status().as_u16(),
         Err(e) => {
             return (
                 StatusCode::OK,
@@ -1036,51 +1082,23 @@ pub async fn test_provider(
         }
     };
 
-    // If /models returned 404, fall back to base URL (some providers don't expose /models).
-    let status_code = if first_status == 404 {
-        let mut fallback = client.get(&base_url);
-        match name.as_str() {
-            "anthropic" => {
-                fallback = fallback
-                    .header("x-api-key", &api_key_val)
-                    .header("anthropic-version", "2023-06-01");
-            }
-            "gemini" | "google" => {}
-            "github-copilot" => {
-                fallback = fallback.header("Authorization", format!("token {}", api_key_val));
-            }
-            _ => {
-                if !api_key_val.is_empty() {
-                    fallback = fallback.header("Authorization", format!("Bearer {}", api_key_val));
-                }
-            }
-        }
-        match fallback.send().await {
-            Ok(resp) => resp.status().as_u16(),
-            Err(_) => first_status,
-        }
-    } else {
-        first_status
-    };
-
+    // Any HTTP response (even 400/404/500) means the service is reachable.
+    // Only connection failures (handled above as Err) indicate unreachable.
+    // Treat auth errors (401/403) specially — key is wrong.
     let latency_ms = start.elapsed().as_millis();
 
     // Cache test result so GET /api/providers can show latency for all providers.
     state.provider_test_cache.insert(
         name.clone(),
-        (Instant::now(), latency_ms, chrono::Utc::now().to_rfc3339()),
+        (
+            Instant::now(),
+            latency_ms,
+            chrono::Utc::now().to_rfc3339(),
+            true,
+        ),
     );
 
-    if (200..300).contains(&status_code) {
-        (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "status": "ok",
-                "provider": name,
-                "latency_ms": latency_ms,
-            })),
-        )
-    } else if status_code == 401 || status_code == 403 {
+    if status_code == 401 || status_code == 403 {
         (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -1089,22 +1107,15 @@ pub async fn test_provider(
                 "error": format!("Authentication failed (HTTP {})", status_code),
             })),
         )
-    } else if status_code == 429 {
-        (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "status": "error",
-                "provider": name,
-                "error": format!("Rate limited (HTTP 429)"),
-            })),
-        )
     } else {
+        // Any other HTTP response (200, 400, 404, 429, 500, etc.) means
+        // the service is reachable. Report success with the status code.
         (
             StatusCode::OK,
             Json(serde_json::json!({
-                "status": "error",
+                "status": "ok",
                 "provider": name,
-                "error": format!("HTTP {}", status_code),
+                "latency_ms": latency_ms,
             })),
         )
     }
