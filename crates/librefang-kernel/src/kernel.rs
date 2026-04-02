@@ -665,6 +665,43 @@ fn resolve_workspace_dir(
     Ok(root.join(component))
 }
 
+/// Resolve the correct workspace directory for lazy backfill, respecting
+/// hand agents whose workspace lives under `workspaces/hands/<hand>/<role>/`
+/// rather than `workspaces/agents/<name>/`.
+fn backfill_workspace_dir(
+    cfg: &librefang_types::config::KernelConfig,
+    tags: &[String],
+    agent_name: &str,
+    agent_id: AgentId,
+) -> KernelResult<PathBuf> {
+    // Check if this is a hand agent by looking for "hand:<id>" and "hand_role:<role>" tags.
+    let hand_id = tags.iter().find_map(|t| t.strip_prefix("hand:"));
+    let hand_role = tags.iter().find_map(|t| t.strip_prefix("hand_role:"));
+
+    if let (Some(hid), Some(role)) = (hand_id, hand_role) {
+        let safe_hand = safe_path_component(hid, "hand");
+        let safe_role = safe_path_component(role, "agent");
+        let dir = cfg
+            .effective_hands_workspaces_dir()
+            .join(&safe_hand)
+            .join(&safe_role);
+        std::fs::create_dir_all(&dir).map_err(|e| {
+            KernelError::LibreFang(LibreFangError::Internal(format!(
+                "Failed to create hand workspace {}: {e}",
+                dir.display()
+            )))
+        })?;
+        Ok(dir)
+    } else {
+        resolve_workspace_dir(
+            &cfg.effective_agent_workspaces_dir(),
+            None,
+            agent_name,
+            agent_id,
+        )
+    }
+}
+
 /// Generate workspace identity files for an agent (SOUL.md, USER.md, TOOLS.md, MEMORY.md).
 /// Uses `create_new` to never overwrite existing files (preserves user edits).
 fn generate_identity_files(workspace: &Path, manifest: &AgentManifest) {
@@ -2294,7 +2331,7 @@ impl LibreFangKernel {
                                 match toml::from_str::<librefang_types::agent::AgentManifest>(
                                     &toml_str,
                                 ) {
-                                    Ok(disk_manifest) => {
+                                    Ok(mut disk_manifest) => {
                                         // Compare key fields to detect changes
                                         let changed = serde_json::to_value(&disk_manifest).ok()
                                             != serde_json::to_value(&entry.manifest).ok();
@@ -2304,6 +2341,14 @@ impl LibreFangKernel {
                                                 path = %toml_path.display(),
                                                 "Agent TOML on disk differs from DB, updating"
                                             );
+                                            // Preserve runtime-only fields that TOML files don't carry
+                                            if disk_manifest.workspace.is_none() {
+                                                disk_manifest.workspace =
+                                                    entry.manifest.workspace.clone();
+                                            }
+                                            if disk_manifest.tags.is_empty() {
+                                                disk_manifest.tags = entry.manifest.tags.clone();
+                                            }
                                             entry.manifest = disk_manifest;
                                             // Persist the update back to DB
                                             if let Err(e) = kernel.memory.save_agent(&entry) {
@@ -3389,12 +3434,8 @@ system_prompt = "You are a helpful assistant."
 
         // Lazy backfill: create workspace for existing agents spawned before workspaces
         if manifest.workspace.is_none() {
-            let workspace_dir = resolve_workspace_dir(
-                &cfg.effective_agent_workspaces_dir(),
-                None,
-                &manifest.name,
-                agent_id,
-            )?;
+            let workspace_dir =
+                backfill_workspace_dir(&cfg, &manifest.tags, &manifest.name, agent_id)?;
             if let Err(e) = ensure_workspace(&workspace_dir) {
                 warn!(agent_id = %agent_id, "Failed to backfill workspace (streaming): {e}");
             } else {
@@ -4386,12 +4427,8 @@ system_prompt = "You are a helpful assistant."
 
         // Lazy backfill: create workspace for existing agents spawned before workspaces
         if manifest.workspace.is_none() {
-            let workspace_dir = resolve_workspace_dir(
-                &cfg.effective_agent_workspaces_dir(),
-                None,
-                &manifest.name,
-                agent_id,
-            )?;
+            let workspace_dir =
+                backfill_workspace_dir(&cfg, &manifest.tags, &manifest.name, agent_id)?;
             if let Err(e) = ensure_workspace(&workspace_dir) {
                 warn!(agent_id = %agent_id, "Failed to backfill workspace: {e}");
             } else {
