@@ -403,7 +403,7 @@ pub async fn marketplace_search(
             if let Ok(content) = std::fs::read_to_string(&manifest_path) {
                 if let Ok(manifest) = toml::from_str::<librefang_skills::SkillManifest>(&content) {
                     let name = &manifest.skill.name;
-                    let desc = manifest.skill.description.as_deref().unwrap_or("");
+                    let desc = &manifest.skill.description;
                     if query.is_empty()
                         || name.to_lowercase().contains(&query)
                         || desc.to_lowercase().contains(&query)
