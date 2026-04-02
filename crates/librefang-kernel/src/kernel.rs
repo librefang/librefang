@@ -681,7 +681,10 @@ fn backfill_workspace_dir(
     if let (Some(hid), Some(role)) = (hand_id, hand_role) {
         let safe_hand = safe_path_component(hid, "hand");
         let safe_role = safe_path_component(role, "agent");
-        let dir = cfg.effective_hands_workspaces_dir().join(&safe_hand).join(&safe_role);
+        let dir = cfg
+            .effective_hands_workspaces_dir()
+            .join(&safe_hand)
+            .join(&safe_role);
         std::fs::create_dir_all(&dir).map_err(|e| {
             KernelError::LibreFang(LibreFangError::Internal(format!(
                 "Failed to create hand workspace {}: {e}",
@@ -2323,7 +2326,7 @@ impl LibreFangKernel {
                                 match toml::from_str::<librefang_types::agent::AgentManifest>(
                                     &toml_str,
                                 ) {
-                                    Ok(disk_manifest) => {
+                                    Ok(mut disk_manifest) => {
                                         // Compare key fields to detect changes
                                         let changed = serde_json::to_value(&disk_manifest).ok()
                                             != serde_json::to_value(&entry.manifest).ok();
@@ -2333,6 +2336,14 @@ impl LibreFangKernel {
                                                 path = %toml_path.display(),
                                                 "Agent TOML on disk differs from DB, updating"
                                             );
+                                            // Preserve runtime-only fields that TOML files don't carry
+                                            if disk_manifest.workspace.is_none() {
+                                                disk_manifest.workspace =
+                                                    entry.manifest.workspace.clone();
+                                            }
+                                            if disk_manifest.tags.is_empty() {
+                                                disk_manifest.tags = entry.manifest.tags.clone();
+                                            }
                                             entry.manifest = disk_manifest;
                                             // Persist the update back to DB
                                             if let Err(e) = kernel.memory.save_agent(&entry) {
@@ -3418,7 +3429,8 @@ system_prompt = "You are a helpful assistant."
 
         // Lazy backfill: create workspace for existing agents spawned before workspaces
         if manifest.workspace.is_none() {
-            let workspace_dir = backfill_workspace_dir(&cfg, &manifest.tags, &manifest.name, agent_id)?;
+            let workspace_dir =
+                backfill_workspace_dir(&cfg, &manifest.tags, &manifest.name, agent_id)?;
             if let Err(e) = ensure_workspace(&workspace_dir) {
                 warn!(agent_id = %agent_id, "Failed to backfill workspace (streaming): {e}");
             } else {
@@ -4408,7 +4420,8 @@ system_prompt = "You are a helpful assistant."
 
         // Lazy backfill: create workspace for existing agents spawned before workspaces
         if manifest.workspace.is_none() {
-            let workspace_dir = backfill_workspace_dir(&cfg, &manifest.tags, &manifest.name, agent_id)?;
+            let workspace_dir =
+                backfill_workspace_dir(&cfg, &manifest.tags, &manifest.name, agent_id)?;
             if let Err(e) = ensure_workspace(&workspace_dir) {
                 warn!(agent_id = %agent_id, "Failed to backfill workspace: {e}");
             } else {
