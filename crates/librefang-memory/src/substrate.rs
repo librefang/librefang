@@ -291,6 +291,11 @@ impl MemorySubstrate {
         self.sessions.cleanup_excess_sessions(max_per_agent)
     }
 
+    /// Delete sessions whose agent_id is not in the provided live set. Returns count deleted.
+    pub fn cleanup_orphan_sessions(&self, live_agent_ids: &[AgentId]) -> LibreFangResult<u64> {
+        self.sessions.cleanup_orphan_sessions(live_agent_ids)
+    }
+
     /// Full-text search across session content using FTS5.
     pub fn search_sessions(
         &self,
