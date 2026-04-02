@@ -413,6 +413,7 @@ mod tests {
             signup_url: None,
             regions: HashMap::new(),
             media_capabilities: Vec::new(),
+            available_models: Vec::new(),
         };
         let json = serde_json::to_string(&info).unwrap();
         let parsed: ProviderInfo = serde_json::from_str(&json).unwrap();
@@ -625,6 +626,7 @@ aliases = []
                 ),
             ]),
             media_capabilities: Vec::new(),
+            available_models: Vec::new(),
         };
 
         // Simulate region selection: if user picks "us", use that region's base_url

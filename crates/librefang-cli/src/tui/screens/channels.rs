@@ -433,7 +433,7 @@ impl ChannelState {
                 .map(|v| {
                     (
                         v.to_string(),
-                        std::env::var(v).map_or(false, |val| !val.trim().is_empty()),
+                        std::env::var(v).is_ok_and(|val| !val.trim().is_empty()),
                     )
                 })
                 .collect();

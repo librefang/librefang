@@ -371,7 +371,7 @@ impl State {
     }
 
     fn build_provider_order(&mut self) {
-        let has_key = |var: &str| std::env::var(var).map_or(false, |v| !v.trim().is_empty());
+        let has_key = |var: &str| std::env::var(var).is_ok_and(|v| !v.trim().is_empty());
         self.provider_order.clear();
         let gemini_via_google = has_key("GOOGLE_API_KEY");
         for (i, p) in PROVIDERS.iter().enumerate() {
@@ -441,7 +441,7 @@ impl State {
     }
 
     fn is_provider_detected(&self, prov_idx: usize) -> bool {
-        let has_key = |var: &str| std::env::var(var).map_or(false, |v| !v.trim().is_empty());
+        let has_key = |var: &str| std::env::var(var).is_ok_and(|v| !v.trim().is_empty());
         let p = &PROVIDERS[prov_idx];
         if p.name == "claude-code" {
             return librefang_runtime::drivers::claude_code::claude_code_available();
