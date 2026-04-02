@@ -1,17 +1,87 @@
 //! Hand registry — manages hand definitions and active instances.
 
-use crate::bundled;
 use crate::{
     HandDefinition, HandError, HandInstance, HandRequirement, HandResult, HandSettingType,
     HandStatus, RequirementType,
 };
 use dashmap::DashMap;
 use librefang_types::agent::AgentId;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
+use std::path::Path;
 use std::sync::Mutex;
 use tracing::{info, warn};
 use uuid::Uuid;
+
+/// Wrapper struct for HAND.toml files that use the documented `[hand]` section format.
+#[derive(Debug, Clone, Deserialize)]
+struct HandTomlWrapper {
+    hand: HandDefinition,
+}
+
+/// Parse a HAND.toml into a HandDefinition with its skill content attached.
+///
+/// Accepts both formats:
+/// - Flat format: fields at top level
+/// - Wrapped format (shown in docs): fields under `[hand]` section
+pub fn parse_hand_toml(
+    toml_content: &str,
+    skill_content: &str,
+) -> Result<HandDefinition, HandError> {
+    let mut def: HandDefinition = toml::from_str::<HandDefinition>(toml_content)
+        .or_else(|flat_err| {
+            tracing::warn!("Flat parse failed for hand: {flat_err}");
+            toml::from_str::<HandTomlWrapper>(toml_content).map(|w| w.hand)
+        })
+        .map_err(|e| HandError::TomlParse(e.to_string()))?;
+    if !skill_content.is_empty() {
+        def.skill_content = Some(skill_content.to_string());
+    }
+    Ok(def)
+}
+
+/// Scan `home_dir/registry/hands/` for subdirectories containing HAND.toml.
+fn scan_hands_dir(home_dir: &Path) -> Vec<(String, String, String)> {
+    let mut seen = std::collections::HashSet::new();
+    let mut results = Vec::new();
+
+    let dirs = [home_dir.join("registry").join("hands")];
+
+    for hands_dir in &dirs {
+        if let Ok(entries) = std::fs::read_dir(hands_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_dir() {
+                    continue;
+                }
+                let id = match path.file_name().and_then(|n| n.to_str()) {
+                    Some(n) => n.to_string(),
+                    None => continue,
+                };
+                if !seen.insert(id.clone()) {
+                    continue;
+                }
+                let toml_path = path.join("HAND.toml");
+                let skill_path = path.join("SKILL.md");
+                if !toml_path.exists() {
+                    continue;
+                }
+                let toml = match std::fs::read_to_string(&toml_path) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        warn!(path = %toml_path.display(), error = %e, "Failed to read HAND.toml");
+                        continue;
+                    }
+                };
+                let skill = std::fs::read_to_string(&skill_path).unwrap_or_default();
+                results.push((id, toml, skill));
+            }
+        }
+    }
+
+    results.sort_by(|a, b| a.0.cmp(&b.0));
+    results
+}
 
 /// Entry from persisted hand state used during daemon restart.
 #[derive(Debug, Clone)]
@@ -209,35 +279,13 @@ impl HandRegistry {
             .collect()
     }
 
-    /// Load all bundled hand definitions. Returns count of definitions loaded.
-    pub fn load_bundled(&self, home_dir: &std::path::Path) -> usize {
-        let bundled = bundled::bundled_hands(home_dir);
-        let mut count = 0;
-        for (id, toml_content, skill_content) in bundled {
-            match bundled::parse_bundled(id, toml_content, skill_content) {
-                Ok(def) => {
-                    info!(hand = %def.id, name = %def.name, "Loaded bundled hand");
-                    self.definitions.insert(def.id.clone(), def);
-                    count += 1;
-                }
-                Err(e) => {
-                    warn!(hand = %id, error = %e, "Failed to parse bundled hand");
-                }
-            }
-        }
-        count
-    }
-
-    /// Reload hand definitions from disk without restarting.
-    ///
-    /// Unlike `load_bundled` which uses the `OnceLock` cache, this reads
-    /// directly from disk so newly added or modified hands are picked up.
+    /// Load hand definitions from disk. Returns (added, updated) counts.
     pub fn reload_from_disk(&self, home_dir: &std::path::Path) -> (usize, usize) {
-        let fresh = bundled::disk_hands(home_dir);
+        let fresh = scan_hands_dir(home_dir);
         let mut added = 0usize;
         let mut updated = 0usize;
         for (id, toml_content, skill_content) in fresh {
-            match bundled::parse_bundled(&id, &toml_content, &skill_content) {
+            match parse_hand_toml(&toml_content, &skill_content) {
                 Ok(def) => {
                     if self.definitions.contains_key(&def.id) {
                         updated += 1;
@@ -264,7 +312,7 @@ impl HandRegistry {
         })?;
         let skill_content = std::fs::read_to_string(&skill_path).unwrap_or_default();
 
-        let def = bundled::parse_bundled("custom", &toml_content, &skill_content)?;
+        let def = parse_hand_toml(&toml_content, &skill_content)?;
 
         if self.definitions.contains_key(&def.id) {
             return Err(HandError::AlreadyActive(format!(
@@ -284,7 +332,7 @@ impl HandRegistry {
         toml_content: &str,
         skill_content: &str,
     ) -> HandResult<HandDefinition> {
-        let def = bundled::parse_bundled("custom", toml_content, skill_content)?;
+        let def = parse_hand_toml(toml_content, skill_content)?;
 
         if self.definitions.contains_key(&def.id) {
             return Err(HandError::AlreadyActive(format!(
@@ -306,7 +354,7 @@ impl HandRegistry {
         toml_content: &str,
         skill_content: &str,
     ) -> HandResult<HandDefinition> {
-        let def = bundled::parse_bundled("custom", toml_content, skill_content)?;
+        let def = parse_hand_toml(toml_content, skill_content)?;
 
         if self.definitions.contains_key(&def.id) {
             return Err(HandError::AlreadyActive(format!(
@@ -786,10 +834,10 @@ mod tests {
     }
 
     #[test]
-    fn load_bundled_hands() {
+    fn load_hands_from_disk() {
         let reg = HandRegistry::new();
         let home = ensure_test_home();
-        let count = reg.load_bundled(&home);
+        let (count, _) = reg.reload_from_disk(&home);
         assert_eq!(count, 15);
         assert!(!reg.list_definitions().is_empty());
 
@@ -849,7 +897,7 @@ system_prompt = "Test prompt"
     #[test]
     fn activate_and_deactivate() {
         let reg = HandRegistry::new();
-        reg.load_bundled(&ensure_test_home());
+        reg.reload_from_disk(&ensure_test_home());
 
         let instance = reg.activate("clip", HashMap::new()).unwrap();
         assert_eq!(instance.hand_id, "clip");
@@ -871,7 +919,7 @@ system_prompt = "Test prompt"
     #[test]
     fn pause_and_resume() {
         let reg = HandRegistry::new();
-        reg.load_bundled(&ensure_test_home());
+        reg.reload_from_disk(&ensure_test_home());
 
         let instance = reg.activate("clip", HashMap::new()).unwrap();
         let id = instance.instance_id;
@@ -890,7 +938,7 @@ system_prompt = "Test prompt"
     #[test]
     fn load_state_preserves_paused_instances() {
         let reg = HandRegistry::new();
-        reg.load_bundled(&ensure_test_home());
+        reg.reload_from_disk(&ensure_test_home());
 
         let instance = reg.activate("clip", HashMap::new()).unwrap();
         reg.pause(instance.instance_id).unwrap();
@@ -908,7 +956,7 @@ system_prompt = "Test prompt"
     #[test]
     fn set_agent() {
         let reg = HandRegistry::new();
-        reg.load_bundled(&ensure_test_home());
+        reg.reload_from_disk(&ensure_test_home());
 
         let instance = reg.activate("clip", HashMap::new()).unwrap();
         let id = instance.instance_id;
@@ -926,7 +974,7 @@ system_prompt = "Test prompt"
     #[test]
     fn persist_and_load_explicit_coordinator_role() {
         let reg = HandRegistry::new();
-        reg.load_bundled(&ensure_test_home());
+        reg.reload_from_disk(&ensure_test_home());
 
         let instance = reg.activate("clip", HashMap::new()).unwrap();
         let id = instance.instance_id;
@@ -948,7 +996,7 @@ system_prompt = "Test prompt"
     #[test]
     fn check_requirements() {
         let reg = HandRegistry::new();
-        reg.load_bundled(&ensure_test_home());
+        reg.reload_from_disk(&ensure_test_home());
 
         let results = reg.check_requirements("clip").unwrap();
         assert!(!results.is_empty());
@@ -973,7 +1021,7 @@ system_prompt = "Test prompt"
     #[test]
     fn set_error_status() {
         let reg = HandRegistry::new();
-        reg.load_bundled(&ensure_test_home());
+        reg.reload_from_disk(&ensure_test_home());
 
         let instance = reg.activate("clip", HashMap::new()).unwrap();
         let id = instance.instance_id;
@@ -1033,7 +1081,7 @@ system_prompt = "Test prompt"
     #[test]
     fn readiness_inactive_hand() {
         let reg = HandRegistry::new();
-        reg.load_bundled(&ensure_test_home());
+        reg.reload_from_disk(&ensure_test_home());
 
         // Lead hand has no requirements, so requirements_met = true
         let r = reg.readiness("lead").unwrap();
@@ -1045,7 +1093,7 @@ system_prompt = "Test prompt"
     #[test]
     fn readiness_active_hand_all_met() {
         let reg = HandRegistry::new();
-        reg.load_bundled(&ensure_test_home());
+        reg.reload_from_disk(&ensure_test_home());
 
         // Lead hand has no requirements — activate it
         let instance = reg.activate("lead", HashMap::new()).unwrap();
@@ -1060,7 +1108,7 @@ system_prompt = "Test prompt"
     #[test]
     fn readiness_active_hand_degraded() {
         let reg = HandRegistry::new();
-        reg.load_bundled(&ensure_test_home());
+        reg.reload_from_disk(&ensure_test_home());
 
         // Browser hand requires python3 (mandatory) + chromium (optional).
         // Activate it — requirements_met only considers mandatory ones,
@@ -1085,7 +1133,7 @@ system_prompt = "Test prompt"
     #[test]
     fn readiness_paused_hand_not_active() {
         let reg = HandRegistry::new();
-        reg.load_bundled(&ensure_test_home());
+        reg.reload_from_disk(&ensure_test_home());
 
         let instance = reg.activate("lead", HashMap::new()).unwrap();
         reg.pause(instance.instance_id).unwrap();

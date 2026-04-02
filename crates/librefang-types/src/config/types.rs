@@ -838,8 +838,6 @@ impl Default for PairingConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SkillsConfig {
-    /// Whether bundled (compile-time embedded) skills are loaded. Default: true.
-    pub load_bundled: bool,
     /// Whether user-installed skills from the skills directory are loaded. Default: true.
     pub load_user: bool,
     /// Extra skill directories to scan in addition to `~/.librefang/skills/`.
@@ -851,7 +849,6 @@ pub struct SkillsConfig {
 impl Default for SkillsConfig {
     fn default() -> Self {
         Self {
-            load_bundled: true,
             load_user: true,
             extra_dirs: Vec::new(),
         }

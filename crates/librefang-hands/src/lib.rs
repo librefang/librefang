@@ -4,7 +4,6 @@
 //! from a marketplace. Unlike regular agents (you chat with them), Hands work for
 //! you (you check in on them).
 
-pub mod bundled;
 pub mod registry;
 
 use chrono::{DateTime, Utc};

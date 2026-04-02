@@ -340,7 +340,7 @@ pub fn convert_skillmd_str(name_hint: &str, content: &str) -> Result<ConvertedSk
             description: frontmatter.description.clone(),
             author: "LibreFang".to_string(),
             license: "Apache-2.0".to_string(),
-            tags: vec!["bundled".to_string(), "prompt-only".to_string()],
+            tags: vec!["prompt-only".to_string()],
         },
         runtime: SkillRuntimeConfig {
             runtime_type,
@@ -349,7 +349,7 @@ pub fn convert_skillmd_str(name_hint: &str, content: &str) -> Result<ConvertedSk
         tools: SkillTools { provided: tools },
         requirements: SkillRequirements::default(),
         prompt_context: Some(body.clone()),
-        source: Some(SkillSource::Bundled),
+        source: Some(SkillSource::OpenClaw),
         config: std::collections::HashMap::new(),
     };
 
@@ -757,7 +757,7 @@ metadata:
             converted.manifest.runtime.runtime_type,
             SkillRuntime::PromptOnly
         );
-        assert_eq!(converted.manifest.source, Some(SkillSource::Bundled));
+        assert_eq!(converted.manifest.source, Some(SkillSource::OpenClaw));
         assert!(converted.prompt_context.contains("Instructions."));
     }
 

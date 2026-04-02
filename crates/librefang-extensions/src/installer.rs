@@ -309,7 +309,7 @@ mod tests {
         ensure_registry();
         let dir = tempfile::tempdir().unwrap();
         let mut registry = IntegrationRegistry::new(dir.path());
-        registry.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
+        registry.load_templates(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
 
         let mut resolver = CredentialResolver::new(None, None);
 
@@ -333,7 +333,7 @@ mod tests {
         ensure_registry();
         let dir = tempfile::tempdir().unwrap();
         let mut registry = IntegrationRegistry::new(dir.path());
-        registry.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
+        registry.load_templates(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
 
         let mut resolver = CredentialResolver::new(None, None);
 
@@ -350,7 +350,7 @@ mod tests {
         ensure_registry();
         let dir = tempfile::tempdir().unwrap();
         let mut registry = IntegrationRegistry::new(dir.path());
-        registry.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
+        registry.load_templates(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
 
         let mut resolver = CredentialResolver::new(None, None);
 
@@ -365,7 +365,7 @@ mod tests {
         ensure_registry();
         let dir = tempfile::tempdir().unwrap();
         let mut registry = IntegrationRegistry::new(dir.path());
-        registry.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
+        registry.load_templates(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
         let err = remove_integration(&mut registry, "github").unwrap_err();
         assert!(err.to_string().contains("not installed"));
     }
@@ -375,7 +375,7 @@ mod tests {
         ensure_registry();
         let dir = tempfile::tempdir().unwrap();
         let mut registry = IntegrationRegistry::new(dir.path());
-        registry.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
+        registry.load_templates(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
         let resolver = CredentialResolver::new(None, None);
 
         let list = list_integrations(&registry, &resolver);
@@ -390,7 +390,7 @@ mod tests {
         ensure_registry();
         let dir = tempfile::tempdir().unwrap();
         let mut registry = IntegrationRegistry::new(dir.path());
-        registry.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
+        registry.load_templates(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
 
         let results = search_integrations(&registry, "git");
         assert!(results.iter().any(|e| e.id == "github"));

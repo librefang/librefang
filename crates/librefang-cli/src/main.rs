@@ -4267,40 +4267,23 @@ fn cmd_doctor(json: bool, repair: bool) {
         }
         let skills_dir = cli_librefang_home().join("skills");
         let mut skill_reg = librefang_skills::registry::SkillRegistry::new(skills_dir.clone());
-        skill_reg.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
-        let bundled_count = skill_reg.count();
-        if !json {
-            ui::check_ok(&format!("Bundled skills loaded: {bundled_count}"));
-        }
-        checks.push(
-            serde_json::json!({"check": "bundled_skills", "status": "ok", "count": bundled_count}),
-        );
-
-        // Check workspace skills if home dir available
-        if skills_dir.exists() {
-            match skill_reg.load_workspace_skills(&skills_dir) {
-                Ok(_) => {
-                    let total = skill_reg.count();
-                    let ws_count = total.saturating_sub(bundled_count);
-                    if ws_count > 0 {
-                        if !json {
-                            ui::check_ok(&format!("Workspace skills loaded: {ws_count}"));
-                        }
-                        checks.push(serde_json::json!({"check": "workspace_skills", "status": "ok", "count": ws_count}));
-                    }
+        match skill_reg.load_all() {
+            Ok(count) => {
+                if !json {
+                    ui::check_ok(&format!("Skills loaded: {count}"));
                 }
-                Err(e) => {
-                    if !json {
-                        ui::check_warn(&format!("Failed to load workspace skills: {e}"));
-                    }
-                    checks.push(serde_json::json!({"check": "workspace_skills", "status": "warn", "error": e.to_string()}));
+                checks.push(serde_json::json!({"check": "skills", "status": "ok", "count": count}));
+            }
+            Err(e) => {
+                if !json {
+                    ui::check_warn(&format!("Failed to load skills: {e}"));
                 }
+                checks.push(serde_json::json!({"check": "skills", "status": "warn", "error": e.to_string()}));
             }
         }
 
-        // Check for prompt injection issues in skill definitions
-        // Only flag Critical-severity warnings (Warning-level hits are expected
-        // in bundled skills that mention shell commands in educational context).
+        // Check for prompt injection issues in skill definitions.
+        // Only flag Critical-severity warnings.
         let skills = skill_reg.list();
         let mut injection_warnings = 0;
         for skill in &skills {
@@ -4341,7 +4324,8 @@ fn cmd_doctor(json: bool, repair: bool) {
         let librefang_dir = cli_librefang_home();
         let mut ext_registry =
             librefang_extensions::registry::IntegrationRegistry::new(&librefang_dir);
-        ext_registry.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
+        ext_registry
+            .load_templates(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
         let _ = ext_registry.load_installed();
         let template_count = ext_registry.template_count();
         let installed_count = ext_registry.installed_count();
@@ -6992,7 +6976,7 @@ pub(crate) fn copy_dir_recursive(src: &PathBuf, dst: &PathBuf) {
 fn cmd_integration_add(name: &str, key: Option<&str>) {
     let home = librefang_home();
     let mut registry = librefang_extensions::registry::IntegrationRegistry::new(&home);
-    registry.load_bundled(&home);
+    registry.load_templates(&home);
     let _ = registry.load_installed();
 
     // Check template exists
@@ -7078,7 +7062,7 @@ fn cmd_integration_add(name: &str, key: Option<&str>) {
 fn cmd_integration_remove(name: &str) {
     let home = librefang_home();
     let mut registry = librefang_extensions::registry::IntegrationRegistry::new(&home);
-    registry.load_bundled(&home);
+    registry.load_templates(&home);
     let _ = registry.load_installed();
 
     match librefang_extensions::installer::remove_integration(&mut registry, name) {
@@ -7102,7 +7086,7 @@ fn cmd_integration_remove(name: &str) {
 fn cmd_integrations_list(query: Option<&str>) {
     let home = librefang_home();
     let mut registry = librefang_extensions::registry::IntegrationRegistry::new(&home);
-    registry.load_bundled(&home);
+    registry.load_templates(&home);
     let _ = registry.load_installed();
 
     let dotenv_path = home.join(".env");
@@ -9939,23 +9923,20 @@ mod tests {
     }
 
     #[test]
-    fn test_doctor_skill_registry_loads_bundled() {
+    fn test_doctor_skill_registry_loads() {
         let skills_dir = std::env::temp_dir().join("librefang-doctor-test-skills");
         let mut skill_reg = librefang_skills::registry::SkillRegistry::new(skills_dir);
-        let count =
-            skill_reg.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
-        // Skills are loaded from disk at runtime; count depends on registry files being present
+        let count = skill_reg.load_all().unwrap_or(0);
         assert_eq!(skill_reg.count(), count);
     }
 
     #[test]
-    fn test_doctor_extension_registry_loads_bundled() {
+    fn test_doctor_extension_registry_loads_templates() {
         let tmp = std::env::temp_dir().join("librefang-doctor-test-ext");
         let _ = std::fs::create_dir_all(&tmp);
         let mut ext_reg = librefang_extensions::registry::IntegrationRegistry::new(&tmp);
         let count =
-            ext_reg.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
-        // Integrations are loaded from disk at runtime; count depends on registry files being present
+            ext_reg.load_templates(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
         assert_eq!(ext_reg.template_count(), count);
     }
 

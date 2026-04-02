@@ -7,7 +7,6 @@
 //! - TOML + Node.js modules (OpenClaw compatibility)
 //! - Remote skills from FangHub registry
 
-pub mod bundled;
 pub mod clawhub;
 pub(crate) mod http_client;
 pub mod loader;
@@ -75,8 +74,6 @@ pub enum SkillRuntime {
 pub enum SkillSource {
     /// Built into LibreFang or manually installed.
     Native,
-    /// Bundled at compile time (ships with LibreFang binary).
-    Bundled,
     /// User-created workspace or local skill.
     Local,
     /// Converted from OpenClaw format.

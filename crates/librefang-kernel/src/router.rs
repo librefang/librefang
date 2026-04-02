@@ -168,17 +168,8 @@ fn resolve_hand_route_home_dir() -> PathBuf {
 fn build_hand_route_candidates(home_dir: Option<&Path>) -> Vec<HandRouteCandidate> {
     let mut candidates_by_id: HashMap<String, HandRouteCandidate> = HashMap::new();
 
-    let bundled_home = home_dir.unwrap_or_else(|| std::path::Path::new(""));
-    for (id, toml_content, _skill) in librefang_hands::bundled::bundled_hands(bundled_home) {
-        let Ok(def) = librefang_hands::bundled::parse_bundled(id, toml_content, "") else {
-            continue;
-        };
-        let candidate = hand_route_candidate_from_definition(def);
-        candidates_by_id.insert(candidate.hand_id.clone(), candidate);
-    }
-
     if let Some(home_dir) = home_dir {
-        for candidate in load_user_hand_route_candidates(home_dir) {
+        for candidate in load_hand_route_candidates(home_dir) {
             candidates_by_id.insert(candidate.hand_id.clone(), candidate);
         }
     }
@@ -188,7 +179,7 @@ fn build_hand_route_candidates(home_dir: Option<&Path>) -> Vec<HandRouteCandidat
     candidates
 }
 
-fn load_user_hand_route_candidates(home_dir: &Path) -> Vec<HandRouteCandidate> {
+fn load_hand_route_candidates(home_dir: &Path) -> Vec<HandRouteCandidate> {
     let mut seen = std::collections::HashSet::new();
     let mut candidates = Vec::new();
 
@@ -215,8 +206,7 @@ fn load_user_hand_route_candidates(home_dir: &Path) -> Vec<HandRouteCandidate> {
             let Ok(toml_content) = fs::read_to_string(&hand_toml) else {
                 continue;
             };
-            let Ok(def) = librefang_hands::bundled::parse_bundled("custom", &toml_content, "")
-            else {
+            let Ok(def) = librefang_hands::registry::parse_hand_toml(&toml_content, "") else {
                 continue;
             };
             candidates.push(hand_route_candidate_from_definition(def));

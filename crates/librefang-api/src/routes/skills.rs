@@ -199,9 +199,6 @@ pub async fn list_skills(State(state): State<Arc<AppState>>) -> impl IntoRespons
                 Some(librefang_skills::SkillSource::OpenClaw) => {
                     serde_json::json!({"type": "openclaw"})
                 }
-                Some(librefang_skills::SkillSource::Bundled) => {
-                    serde_json::json!({"type": "bundled"})
-                }
                 Some(librefang_skills::SkillSource::Local)
                 | Some(librefang_skills::SkillSource::Native)
                 | None => {

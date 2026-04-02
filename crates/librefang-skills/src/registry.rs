@@ -1,6 +1,5 @@
 //! Skill registry — tracks installed skills and their tools.
 
-use crate::bundled;
 use crate::openclaw_compat;
 use crate::verify::SkillVerifier;
 use crate::{InstalledSkill, SkillError, SkillManifest, SkillToolDef};
@@ -51,55 +50,6 @@ impl SkillRegistry {
     /// Check if the registry is frozen.
     pub fn is_frozen(&self) -> bool {
         self.frozen
-    }
-
-    /// Load all bundled skills (compile-time embedded SKILL.md files).
-    ///
-    /// Called before `load_all()` so that user-installed skills with the same name
-    /// can override bundled ones. Runs prompt injection scan even on bundled skills
-    /// as a defense-in-depth measure.
-    pub fn load_bundled(&mut self, home_dir: &std::path::Path) -> usize {
-        let bundled = bundled::bundled_skills(home_dir);
-        let mut count = 0;
-
-        for (name, content) in &bundled {
-            match bundled::parse_bundled(name, content) {
-                Ok(manifest) => {
-                    // Defense in depth: scan even bundled skill prompt content
-                    if let Some(ref ctx) = manifest.prompt_context {
-                        let warnings = SkillVerifier::scan_prompt_content(ctx);
-                        let has_critical = warnings.iter().any(|w| {
-                            matches!(w.severity, crate::verify::WarningSeverity::Critical)
-                        });
-                        if has_critical {
-                            warn!(
-                                skill = %manifest.skill.name,
-                                "BLOCKED bundled skill: critical prompt injection patterns"
-                            );
-                            continue;
-                        }
-                    }
-
-                    self.skills.insert(
-                        manifest.skill.name.clone(),
-                        InstalledSkill {
-                            manifest,
-                            path: PathBuf::from("<bundled>"),
-                            enabled: true,
-                        },
-                    );
-                    count += 1;
-                }
-                Err(e) => {
-                    warn!("Failed to parse bundled skill '{name}': {e}");
-                }
-            }
-        }
-
-        if count > 0 {
-            info!("Loaded {count} bundled skill(s)");
-        }
-        count
     }
 
     /// Load all installed skills from the skills directory.
