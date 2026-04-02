@@ -3,7 +3,7 @@ import { formatTime } from "../lib/datetime";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
-import { listAgents, getAgentDetail, spawnAgent, suspendAgent, resumeAgent, patchAgentConfig, setAgentModel,
+import { listAgents, getAgentDetail, spawnAgent, suspendAgent, resumeAgent, patchAgentConfig,
   listPromptVersions, listExperiments, activatePromptVersion, startExperiment, pauseExperiment, completeExperiment,
   createPromptVersion, createExperiment, deletePromptVersion, PromptVersion, PromptExperiment, ExperimentVariantMetrics, getExperimentMetrics } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
@@ -44,39 +44,13 @@ export function AgentsPage() {
   });
 
   const patchAgentConfigMutation = useMutation({
-    mutationFn: ({ agentId, config }: { agentId: string; config: { max_tokens?: number } }) =>
+    mutationFn: ({ agentId, config }: { agentId: string; config: { provider?: string, model?: string, max_tokens?: number } }) =>
       patchAgentConfig(agentId, config),
     onSuccess: (_, { agentId }) => {
       queryClient.invalidateQueries({ queryKey: ["agents"] });
       queryClient.invalidateQueries({ queryKey: ["agent-detail", agentId] });
       setEditingMaxTokens(false);
       setMaxTokensInput("");
-      if (detailAgent?.id === agentId) {
-        getAgentDetail(agentId).then(setDetailAgent).catch(() => {});
-      }
-    },
-  });
-
-  const setAgentModelMutation = useMutation({
-    mutationFn: ({ agentId, model }: { agentId: string; model: string }) =>
-      setAgentModel(agentId, model),
-    onSuccess: (data, { agentId }) => {
-      queryClient.invalidateQueries({ queryKey: ["agents"] });
-      setEditingModel(false);
-      setModelInput("");
-      if (detailAgent?.id === agentId) {
-        getAgentDetail(agentId).then(setDetailAgent).catch(() => {});
-      }
-    },
-  });
-
-  const setAgentProviderMutation = useMutation({
-    mutationFn: ({ agentId, provider }: { agentId: string; provider: string }) => 
-      getAgentDetail(agentId).then((current) => setAgentModel(agentId, provider, current.model)),
-    onSuccess: (data, { agentId }) => {
-      queryClient.invalidateQueries({ queryKey: ["agents"] });
-      setEditingProvider(false);
-      setProviderInput("");
       if (detailAgent?.id === agentId) {
         getAgentDetail(agentId).then(setDetailAgent).catch(() => {});
       }
@@ -244,15 +218,15 @@ export function AgentsPage() {
                             value={providerInput}
                             onChange={e => setProviderInput(e.target.value)}
                             onKeyDown={e => {
-                              if (e.key === "Enter" && providerInput.trim()) setAgentProviderMutation.mutate({ agentId: detailAgent.id, provider: providerInput.trim() });
+                              if (e.key === "Enter" && providerInput.trim()) patchAgentConfigMutation.mutate({ agentId: detailAgent.id, config: { provider: providerInput.trim() } });
                               if (e.key === "Escape") { setEditingProvider(false); setProviderInput(""); }
                             }}
                             className="w-32 px-2 py-0.5 rounded bg-main border border-border-subtle text-xs font-mono focus:outline-none focus:border-brand"
                             autoFocus
                           />
                           <button
-                            onClick={() => { if (providerInput.trim()) setAgentProviderMutation.mutate({ agentId: detailAgent.id, provider: providerInput.trim() }); }}
-                            disabled={setAgentProviderMutation.isPending || !providerInput.trim()}
+                            onClick={() => { if (providerInput.trim()) patchAgentConfigMutation.mutate({ agentId: detailAgent.id, config: { provider: providerInput.trim() } }); }}
+                            disabled={patchAgentConfigMutation.isPending || !providerInput.trim()}
                             className="p-0.5 rounded hover:bg-success/10 text-success disabled:opacity-50"
                           ><Check className="w-3 h-3" /></button>
                           <button onClick={() => { setEditingProvider(false); setProviderInput(""); }} className="p-0.5 rounded hover:bg-main text-text-dim">
@@ -276,15 +250,15 @@ export function AgentsPage() {
                             value={modelInput}
                             onChange={e => setModelInput(e.target.value)}
                             onKeyDown={e => {
-                              if (e.key === "Enter" && modelInput.trim()) setAgentModelMutation.mutate({ agentId: detailAgent.id, model: modelInput.trim() });
+                              if (e.key === "Enter" && modelInput.trim()) patchAgentConfigMutation.mutate({ agentId: detailAgent.id, config: { model: modelInput.trim() } });
                               if (e.key === "Escape") { setEditingModel(false); setModelInput(""); }
                             }}
                             className="w-40 px-2 py-0.5 rounded bg-main border border-border-subtle text-xs font-mono focus:outline-none focus:border-brand"
                             autoFocus
                           />
                           <button
-                            onClick={() => { if (modelInput.trim()) setAgentModelMutation.mutate({ agentId: detailAgent.id, model: modelInput.trim() }); }}
-                            disabled={setAgentModelMutation.isPending || !modelInput.trim()}
+                            onClick={() => { if (modelInput.trim()) patchAgentConfigMutation.mutate({ agentId: detailAgent.id, config: { model: modelInput.trim() } }); }}
+                            disabled={patchAgentConfigMutation.isPending || !modelInput.trim()}
                             className="p-0.5 rounded hover:bg-success/10 text-success disabled:opacity-50"
                           ><Check className="w-3 h-3" /></button>
                           <button onClick={() => { setEditingModel(false); setModelInput(""); }} className="p-0.5 rounded hover:bg-main text-text-dim">
