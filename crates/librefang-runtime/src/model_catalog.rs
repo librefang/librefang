@@ -1300,7 +1300,7 @@ mod tests {
     fn test_bedrock_models() {
         let catalog = test_catalog();
         let bedrock = catalog.models_by_provider("bedrock");
-        assert_eq!(bedrock.len(), 8);
+        assert_eq!(bedrock.len(), 11);
     }
 
     #[test]
