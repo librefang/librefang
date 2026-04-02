@@ -7093,8 +7093,12 @@ system_prompt = "You are a helpful assistant."
                             latency_ms = result.latency_ms,
                             "Local provider online"
                         );
-                        if !result.discovered_models.is_empty() {
-                            if let Ok(mut catalog) = kernel.model_catalog.write() {
+                        if let Ok(mut catalog) = kernel.model_catalog.write() {
+                            catalog.set_provider_auth_status(
+                                provider_id,
+                                librefang_types::model_catalog::AuthStatus::NotRequired,
+                            );
+                            if !result.discovered_models.is_empty() {
                                 catalog.merge_discovered_models(
                                     provider_id,
                                     &result.discovered_models,
