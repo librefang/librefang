@@ -20,7 +20,10 @@ export default defineConfig({
       "/api": {
         target: "http://127.0.0.1:4545",
         changeOrigin: true,
+        ws: true,
         configure: (proxy) => {
+          proxy.options.proxyTimeout = 300_000;
+          proxy.options.timeout = 300_000;
           type Emitter = { on(event: string, fn: (...args: never[]) => void): void };
           const p = proxy as unknown as Emitter;
           p.on("error", () => {});
