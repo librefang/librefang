@@ -7105,6 +7105,13 @@ system_prompt = "You are a helpful assistant."
                             error = result.error.as_deref().unwrap_or("unknown"),
                             "Local provider offline"
                         );
+                        // Mark unreachable local providers so dashboard doesn't show "configured"
+                        if let Ok(mut catalog) = kernel.model_catalog.write() {
+                            catalog.set_provider_auth_status(
+                                provider_id,
+                                librefang_types::model_catalog::AuthStatus::Missing,
+                            );
+                        }
                     }
                 }
             });
