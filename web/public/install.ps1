@@ -260,6 +260,10 @@ function Install-LibreFang {
 
     $autoStartRaw = if ($env:LIBREFANG_AUTO_START) { $env:LIBREFANG_AUTO_START } else { "1" }
     if (Test-Enabled $autoStartRaw) {
+        # Register boot service so LibreFang starts on login/reboot
+        Write-Host "  Registering boot service..." -ForegroundColor Cyan
+        try { & $installedExe service install 2>&1 | Out-Null } catch {}
+
         Write-Host "  Starting daemon in background..." -ForegroundColor Cyan
         if (Start-DaemonIfNeeded -InstalledExe $installedExe) {
             Write-Host ""
