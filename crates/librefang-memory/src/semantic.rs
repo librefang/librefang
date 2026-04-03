@@ -96,6 +96,35 @@ impl SemanticStore {
         image_embedding: Option<&[f32]>,
         modality: MemoryModality,
     ) -> LibreFangResult<MemoryId> {
+        self.remember_with_embedding_and_peer(
+            agent_id,
+            content,
+            source,
+            scope,
+            metadata,
+            embedding,
+            image_url,
+            image_embedding,
+            modality,
+            None,
+        )
+    }
+
+    /// Store a new memory fragment with optional embedding, multimodal fields, and peer scoping.
+    #[allow(clippy::too_many_arguments)]
+    pub fn remember_with_embedding_and_peer(
+        &self,
+        agent_id: AgentId,
+        content: &str,
+        source: MemorySource,
+        scope: &str,
+        metadata: HashMap<String, serde_json::Value>,
+        embedding: Option<&[f32]>,
+        image_url: Option<&str>,
+        image_embedding: Option<&[f32]>,
+        modality: MemoryModality,
+        peer_id: Option<&str>,
+    ) -> LibreFangResult<MemoryId> {
         let conn = self
             .conn
             .lock()
@@ -114,8 +143,8 @@ impl SemanticStore {
         let modality_str = modality_str.trim_matches('"');
 
         conn.execute(
-            "INSERT INTO memories (id, agent_id, content, source, scope, confidence, metadata, created_at, accessed_at, access_count, deleted, embedding, image_url, image_embedding, modality)
-             VALUES (?1, ?2, ?3, ?4, ?5, 1.0, ?6, ?7, ?7, 0, 0, ?8, ?9, ?10, ?11)",
+            "INSERT INTO memories (id, agent_id, content, source, scope, confidence, metadata, created_at, accessed_at, access_count, deleted, embedding, image_url, image_embedding, modality, peer_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, 1.0, ?6, ?7, ?7, 0, 0, ?8, ?9, ?10, ?11, ?12)",
             rusqlite::params![
                 id.0.to_string(),
                 agent_id.0.to_string(),
@@ -128,6 +157,7 @@ impl SemanticStore {
                 image_url,
                 image_embedding_bytes,
                 modality_str,
+                peer_id,
             ],
         )
         .map_err(|e| LibreFangError::Memory(e.to_string()))?;
@@ -237,6 +267,11 @@ impl SemanticStore {
                         param_idx += 1;
                     }
                 }
+            }
+            if let Some(ref pid) = f.peer_id {
+                sql.push_str(&format!(" AND peer_id = ?{param_idx}"));
+                params.push(Box::new(pid.clone()));
+                param_idx += 1;
             }
             let _ = param_idx;
         }

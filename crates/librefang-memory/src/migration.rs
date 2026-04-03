@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 15;
+const SCHEMA_VERSION: u32 = 16;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -69,6 +69,10 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
 
     if current_version < 15 {
         migrate_v15(conn)?;
+    }
+
+    if current_version < 16 {
+        migrate_v16(conn)?;
     }
 
     set_schema_version(conn, SCHEMA_VERSION)?;
@@ -533,6 +537,35 @@ fn migrate_v15(conn: &Connection) -> Result<(), rusqlite::Error> {
     }
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) VALUES (15, datetime('now'), 'Add multimodal memory columns (image_url, image_embedding, modality)')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// v16: Add peer_id column to memories and sessions for per-user isolation.
+fn migrate_v16(conn: &Connection) -> Result<(), rusqlite::Error> {
+    if !column_exists(conn, "memories", "peer_id") {
+        conn.execute(
+            "ALTER TABLE memories ADD COLUMN peer_id TEXT DEFAULT NULL",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_memories_peer ON memories(agent_id, peer_id)",
+            [],
+        )?;
+    }
+    if !column_exists(conn, "sessions", "peer_id") {
+        conn.execute(
+            "ALTER TABLE sessions ADD COLUMN peer_id TEXT DEFAULT NULL",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sessions_peer ON sessions(agent_id, peer_id)",
+            [],
+        )?;
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) VALUES (16, datetime('now'), 'Add peer_id to memories and sessions for per-user isolation')",
         [],
     )?;
     Ok(())

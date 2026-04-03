@@ -697,6 +697,7 @@ impl ProactiveMemoryStore {
         &self,
         agent_id: AgentId,
         item: &MemoryItem,
+        peer_id: Option<&str>,
     ) -> LibreFangResult<Option<MemoryAddResult>> {
         // Generate embedding for the new memory (if driver available)
         let query_embedding = if let Some(ref emb) = self.embedding {
@@ -707,7 +708,11 @@ impl ProactiveMemoryStore {
 
         // Search for similar existing memories (top 5 candidates).
         // Use vector search if embedding available, otherwise keyword LIKE.
-        let filter = Some(MemoryFilter::agent(agent_id));
+        let filter = Some({
+            let mut f = MemoryFilter::agent(agent_id);
+            f.peer_id = peer_id.map(String::from);
+            f
+        });
         let existing = if let Some(ref qe) = query_embedding {
             self.semantic
                 .recall_with_embedding(&item.content, 5, filter.clone(), Some(qe))?
@@ -754,7 +759,7 @@ impl ProactiveMemoryStore {
                 let mut metadata = item.metadata.clone();
                 metadata.insert("category".to_string(), serde_json::json!(&item.category));
                 // Store with embedding if available
-                let mem_id = self.semantic.remember_with_embedding(
+                let mem_id = self.semantic.remember_with_embedding_and_peer(
                     agent_id,
                     &item.content,
                     MemorySource::Conversation,
@@ -764,6 +769,7 @@ impl ProactiveMemoryStore {
                     None,
                     None,
                     Default::default(),
+                    peer_id,
                 )?;
                 // Also store in KV using the semantic store's ID for consistency
                 let mut kv_item = item.clone();
@@ -1706,7 +1712,7 @@ impl ProactiveMemory for ProactiveMemoryStore {
         // Step 2-4: For each extracted memory, decide and execute
         let mut results = Vec::new();
         for item in &extraction.memories {
-            let result = self.add_with_decision(agent_id, item).await?;
+            let result = self.add_with_decision(agent_id, item, None).await?;
             if let Some(r) = result {
                 results.push(r.item);
             }
@@ -2102,6 +2108,7 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
         &self,
         user_id: &str,
         conversation: &[serde_json::Value],
+        peer_id: Option<&str>,
     ) -> LibreFangResult<ExtractionResult> {
         let cfg = self
             .config
@@ -2153,7 +2160,7 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
                 .metadata
                 .insert("auto_memorize".to_string(), serde_json::json!(true));
 
-            match self.add_with_decision(agent_id, &enriched).await {
+            match self.add_with_decision(agent_id, &enriched, peer_id).await {
                 Ok(Some(result)) => {
                     if let Some(conflict) = result.conflict {
                         conflicts.push(conflict);
@@ -2219,7 +2226,12 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
     /// Proactively retrieve relevant context before agent execution.
     ///
     /// Also performs session TTL cleanup if configured.
-    async fn auto_retrieve(&self, user_id: &str, query: &str) -> LibreFangResult<Vec<MemoryItem>> {
+    async fn auto_retrieve(
+        &self,
+        user_id: &str,
+        query: &str,
+        peer_id: Option<&str>,
+    ) -> LibreFangResult<Vec<MemoryItem>> {
         let cfg = self
             .config
             .read()
@@ -2234,8 +2246,12 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
 
         let agent_id = Self::parse_agent_id(user_id)?;
 
-        // Create filter for this agent
-        let filter = Some(MemoryFilter::agent(agent_id));
+        // Create filter for this agent, scoped to peer if present
+        let filter = Some({
+            let mut f = MemoryFilter::agent(agent_id);
+            f.peer_id = peer_id.map(String::from);
+            f
+        });
 
         // Search across all memory levels — use vector search if available
         let results = if let Some(ref emb) = self.embedding {
@@ -2328,6 +2344,7 @@ mod tests {
                     "role": "user",
                     "content": "I prefer dark mode for all my editors"
                 })],
+                None,
             )
             .await
             .unwrap();
@@ -2356,6 +2373,7 @@ mod tests {
                     "role": "assistant",
                     "content": "I prefer to help you with that"
                 })],
+                None,
             )
             .await
             .unwrap();
@@ -2379,7 +2397,10 @@ mod tests {
         store.add(&[msg2], &agent_id).await.unwrap();
 
         // Retrieve - should find content from this agent
-        let results = store.auto_retrieve(&agent_id, "dark mode").await.unwrap();
+        let results = store
+            .auto_retrieve(&agent_id, "dark mode", None)
+            .await
+            .unwrap();
         assert!(!results.is_empty());
     }
 
@@ -2825,6 +2846,7 @@ mod tests {
                     "role": "user",
                     "content": "I work at Google"
                 })],
+                None,
             )
             .await
             .unwrap();
@@ -2848,6 +2870,7 @@ mod tests {
                     "role": "user",
                     "content": "I use vim for editing"
                 })],
+                None,
             )
             .await
             .unwrap();
