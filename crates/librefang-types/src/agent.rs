@@ -187,10 +187,28 @@ impl std::str::FromStr for AgentId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SessionId(pub Uuid);
 
+/// Fixed UUID v5 namespace for deriving per-channel session IDs.
+/// Generated once, never changes — ensures deterministic session keys across restarts.
+const CHANNEL_SESSION_NAMESPACE: uuid::Uuid = uuid::Uuid::from_bytes([
+    0x6b, 0xa7, 0xb8, 0x10, 0x9d, 0xad, 0x11, 0xd1, 0x80, 0xb4, 0x00, 0xc0, 0x4f, 0xd4, 0x30, 0xc8,
+]);
+
 impl SessionId {
     /// Create a new random SessionId.
     pub fn new() -> Self {
         Self(Uuid::new_v4())
+    }
+
+    /// Derive a deterministic session ID from an agent ID and channel name.
+    ///
+    /// Uses UUID v5 (SHA-1 based) so the same `(agent_id, channel)` pair always
+    /// produces the same `SessionId`, even across process restarts.
+    pub fn for_channel(agent_id: AgentId, channel: &str) -> Self {
+        let name = format!("{}:{}", agent_id.0, channel.to_lowercase());
+        Self(uuid::Uuid::new_v5(
+            &CHANNEL_SESSION_NAMESPACE,
+            name.as_bytes(),
+        ))
     }
 }
 
@@ -1600,5 +1618,58 @@ model = "llama-3.3-70b-versatile"
         let resolved = manifest.thinking.clone().unwrap_or(global);
         assert_eq!(resolved.budget_tokens, 5_000);
         assert!(resolved.stream_thinking);
+    }
+
+    #[test]
+    fn test_session_id_for_channel_deterministic() {
+        let agent = AgentId(uuid::Uuid::parse_str("a1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6").unwrap());
+        let s1 = SessionId::for_channel(agent, "telegram");
+        let s2 = SessionId::for_channel(agent, "telegram");
+        assert_eq!(
+            s1, s2,
+            "Same (agent, channel) must produce identical SessionId"
+        );
+    }
+
+    #[test]
+    fn test_session_id_for_channel_differs_by_channel() {
+        let agent = AgentId(uuid::Uuid::parse_str("a1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6").unwrap());
+        let telegram = SessionId::for_channel(agent, "telegram");
+        let whatsapp = SessionId::for_channel(agent, "whatsapp");
+        assert_ne!(
+            telegram, whatsapp,
+            "Different channels must produce different SessionIds"
+        );
+    }
+
+    #[test]
+    fn test_session_id_for_channel_differs_by_agent() {
+        let agent_a =
+            AgentId(uuid::Uuid::parse_str("a1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6").unwrap());
+        let agent_b =
+            AgentId(uuid::Uuid::parse_str("f1f2f3f4-b1b2-c1c2-d1d2-e1e2e3e4e5e6").unwrap());
+        let sa = SessionId::for_channel(agent_a, "telegram");
+        let sb = SessionId::for_channel(agent_b, "telegram");
+        assert_ne!(
+            sa, sb,
+            "Different agents must produce different SessionIds for same channel"
+        );
+    }
+
+    #[test]
+    fn test_session_id_for_channel_cron_distinct() {
+        let agent = AgentId(uuid::Uuid::parse_str("a1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6").unwrap());
+        let cron = SessionId::for_channel(agent, "cron");
+        let telegram = SessionId::for_channel(agent, "telegram");
+        let whatsapp = SessionId::for_channel(agent, "whatsapp");
+        assert_ne!(cron, telegram, "Cron session must differ from telegram");
+        assert_ne!(cron, whatsapp, "Cron session must differ from whatsapp");
+    }
+
+    #[test]
+    fn test_session_id_for_channel_is_uuid_v5() {
+        let agent = AgentId(uuid::Uuid::parse_str("a1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6").unwrap());
+        let sid = SessionId::for_channel(agent, "telegram");
+        assert_eq!(sid.0.get_version_num(), 5, "SessionId must be UUID v5");
     }
 }
