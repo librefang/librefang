@@ -6476,6 +6476,10 @@ pub(crate) fn test_api_key(provider: &str, key: &str) -> bool {
             .get("https://openrouter.ai/api/v1/models")
             .bearer_auth(key)
             .send(),
+        "elevenlabs" => client
+            .get("https://api.elevenlabs.io/v1/user")
+            .header("xi-api-key", key)
+            .send(),
         _ => return true, // unknown provider — skip test
     };
 

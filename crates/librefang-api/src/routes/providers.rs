@@ -1043,6 +1043,7 @@ pub async fn test_provider(
         ),
         "chatgpt" => format!("{}/me", base_url.trim_end_matches('/')),
         "github-copilot" => format!("{}/models", base_url.trim_end_matches('/')),
+        "elevenlabs" => format!("{}/user", base_url.trim_end_matches('/')),
         _ => format!("{}/models", base_url.trim_end_matches('/')),
     };
 
@@ -1058,6 +1059,9 @@ pub async fn test_provider(
         }
         "github-copilot" => {
             req = req.header("Authorization", format!("token {}", api_key_val));
+        }
+        "elevenlabs" => {
+            req = req.header("xi-api-key", &api_key_val);
         }
         _ => {
             if !api_key_val.is_empty() {
