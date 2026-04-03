@@ -1,0 +1,53 @@
+{
+  "agents": {
+    "coordinator-1": {
+      "agentId": "coordinator-1",
+      "agentType": "coordinator",
+      "status": "idle",
+      "health": 1,
+      "taskCount": 0,
+      "config": {
+        "swarmId": "swarm-1773976824812",
+        "memoryBackend": "pi-brain",
+        "model": "sonnet"
+      },
+      "createdAt": "2026-03-20T03:20:33.334Z",
+      "domain": "orchestration",
+      "model": "sonnet",
+      "modelRoutedBy": "explicit"
+    },
+    "researcher-1": {
+      "agentId": "researcher-1",
+      "agentType": "researcher",
+      "status": "idle",
+      "health": 1,
+      "taskCount": 0,
+      "config": {
+        "swarmId": "swarm-1773976824812",
+        "memoryBackend": "pi-brain",
+        "model": "haiku"
+      },
+      "createdAt": "2026-03-20T03:20:34.884Z",
+      "domain": "research",
+      "model": "haiku",
+      "modelRoutedBy": "explicit"
+    },
+    "coder-1": {
+      "agentId": "coder-1",
+      "agentType": "coder",
+      "status": "idle",
+      "health": 1,
+      "taskCount": 0,
+      "config": {
+        "swarmId": "swarm-1773976824812",
+        "memoryBackend": "pi-brain",
+        "model": "sonnet"
+      },
+      "createdAt": "2026-03-20T03:20:36.126Z",
+      "domain": "development",
+      "model": "sonnet",
+      "modelRoutedBy": "explicit"
+    }
+  },
+  "version": "3.0.0"
+}
