@@ -1,0 +1,29 @@
+# Claude Flow runtime artifacts (ephemeral)
+daemon.log
+daemon.pid
+daemon-state.json
+.trend-cache.json
+
+# Session logs & metrics (transient)
+sessions/
+logs/
+metrics/
+
+# Runtime memory & data
+data/
+neural/
+
+# Security keys
+security/
+
+# Workflows (auto-generated)
+workflows/
+
+# Temp files
+*.log
+*.tmp
+
+# But keep config & docs
+!config.yaml
+!CAPABILITIES.md
+!SWARM_START.md
