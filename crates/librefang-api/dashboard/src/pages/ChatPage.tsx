@@ -656,9 +656,77 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, wsConnecte
         )}
       </div>
       <div className="flex items-center gap-2">
-        {modelName && (
-          <span className="hidden sm:inline text-[10px] text-text-dim/50 font-mono truncate max-w-[200px]">{modelName}</span>
-        )}
+        {/* Model switcher */}
+        <div className="relative hidden sm:block" ref={modelRef}>
+          <button
+            onClick={() => setModelOpen(v => !v)}
+            className="flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] font-mono text-text-dim/50 hover:text-text hover:bg-surface-hover transition-colors truncate max-w-[200px]"
+            title="Switch model"
+          >
+            <span className="truncate">{optimisticModel ?? modelName ?? "No model"}</span>
+            <ChevronDown className={`h-2.5 w-2.5 shrink-0 transition-transform ${modelOpen ? "rotate-180" : ""}`} />
+          </button>
+          {modelOpen && (
+            <div className="absolute right-0 top-full mt-1 w-80 bg-surface border border-border-subtle rounded-xl shadow-xl z-50 overflow-hidden">
+              <div className="p-2 border-b border-border-subtle/50">
+                <span className="text-[10px] font-semibold text-text-dim/50 uppercase tracking-wider px-2">Switch Model</span>
+              </div>
+              <div className="p-2 border-b border-border-subtle/50">
+                <input
+                  autoFocus
+                  type="text"
+                  value={modelSearch}
+                  onChange={e => setModelSearch(e.target.value)}
+                  placeholder="Search models..."
+                  className="w-full px-2.5 py-1.5 text-xs rounded-lg bg-main border border-border-subtle focus:outline-none focus:border-brand"
+                />
+                {patchError && (
+                  <p className="text-error text-[10px] mt-1.5 px-1">{patchError}</p>
+                )}
+              </div>
+              <div className={`max-h-64 overflow-y-auto scrollbar-thin p-1.5 space-y-0.5 ${patchPending ? "pointer-events-none opacity-60" : ""}`}>
+                {modelLoading && (
+                  <div className="flex items-center gap-2 px-2.5 py-2 text-xs text-text-dim">
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                    Loading…
+                  </div>
+                )}
+                {modelFetchError && (
+                  <div className="px-2.5 py-2 space-y-1.5">
+                    <p className="text-xs text-error">{modelFetchError}</p>
+                    <button
+                      onClick={() => { setModels([]); setModelFetchError(null); }}
+                      className="text-[10px] text-brand hover:underline"
+                    >
+                      Retry
+                    </button>
+                  </div>
+                )}
+                {!modelLoading && !modelFetchError && filteredModels.length === 0 && (
+                  <p className="px-2.5 py-2 text-xs text-text-dim">No models found.</p>
+                )}
+                {!modelLoading && !modelFetchError && filteredModels.map(model => {
+                  const isActive = model.id === (optimisticModel ?? modelName);
+                  return (
+                    <div
+                      key={model.id}
+                      onClick={() => { if (!isActive) handleSelectModel(model); }}
+                      className={`flex items-center gap-2 px-2.5 py-2 rounded-lg cursor-pointer transition-colors ${isActive ? "bg-brand/10 text-brand" : "hover:bg-surface-hover text-text-dim"}`}
+                    >
+                      {isActive && patchPending
+                        ? <Loader2 className="h-3 w-3 animate-spin shrink-0" />
+                        : isActive && <span className="w-1.5 h-1.5 rounded-full bg-success shrink-0" />
+                      }
+                      <span className="text-[10px] text-text-dim/60 shrink-0">{model.provider}</span>
+                      <span className="text-[10px]">·</span>
+                      <span className="text-xs font-medium truncate">{model.id}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
         {/* Session dropdown */}
         {sessions && sessions.length > 0 && (
           <div className="relative" ref={dropdownRef}>
