@@ -923,3 +923,81 @@ librefang config test-key <PROVIDER>
 librefang config test-key groq
 # Testing groq (GROQ_API_KEY)... OK
 ```
+
+---
+
+## Service Commands
+
+Manage the system boot service so LibreFang starts automatically on login or reboot.
+
+### librefang service install
+
+Register a platform-specific auto-start service.
+
+```
+librefang service install
+```
+
+**Behavior:**
+
+- **Linux:** Creates a systemd user service at `~/.config/systemd/user/librefang.service`, then runs `systemctl --user daemon-reload` and `systemctl --user enable librefang.service`.
+- **macOS:** Creates a LaunchAgent at `~/Library/LaunchAgents/ai.librefang.daemon.plist` and loads it with `launchctl load`.
+- **Windows:** Adds a `LibreFang` entry to `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
+
+The binary path is detected from the running executable (`std::env::current_exe`). If you move the binary, re-run `librefang service install` to update the path.
+
+**Example:**
+
+```bash
+librefang service install
+# ✓ Wrote /home/user/.config/systemd/user/librefang.service
+# ✓ Service enabled (will start on next login)
+```
+
+For headless Linux servers (no graphical login session), also enable lingering so the user service starts at boot:
+
+```bash
+loginctl enable-linger
+```
+
+---
+
+### librefang service uninstall
+
+Remove the previously installed auto-start service.
+
+```
+librefang service uninstall
+```
+
+**Behavior:**
+
+- **Linux:** Disables and removes the systemd user service, then reloads the daemon.
+- **macOS:** Unloads and removes the LaunchAgent plist.
+- **Windows:** Deletes the registry Run entry.
+
+**Example:**
+
+```bash
+librefang service uninstall
+# ✓ Removed systemd user service
+```
+
+---
+
+### librefang service status
+
+Check whether the auto-start service is registered and running.
+
+```
+librefang service status
+```
+
+**Example:**
+
+```bash
+librefang service status
+# ✓ Systemd user service is registered
+#   Enabled: enabled
+#   Active: active
+```
