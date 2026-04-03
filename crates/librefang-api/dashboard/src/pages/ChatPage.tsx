@@ -5,10 +5,11 @@ import rehypeKatex from "rehype-katex";
 import remarkMath from "remark-math";
 import { useTranslation } from "react-i18next";
 import { useNavigate, useSearch } from "@tanstack/react-router";
-import { buildAuthenticatedWebSocketUrl, listAgents, sendAgentMessage, loadAgentSession, listPendingApprovals, resolveApproval, getFullConfig, listAgentSessions, createAgentSession, switchAgentSession, deleteSession } from "../api";
+import { buildAuthenticatedWebSocketUrl, listAgents, sendAgentMessage, loadAgentSession, listPendingApprovals, resolveApproval, getFullConfig, listAgentSessions, createAgentSession, switchAgentSession, deleteSession, listMediaProviders } from "../api";
 import type { ApprovalItem, SessionListItem } from "../api";
 import { normalizeToolOutput } from "../lib/chat";
-import { MessageCircle, Send, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, Zap, ShieldAlert, CheckCircle, XCircle, Clock, Plus, Trash2, ChevronDown } from "lucide-react";
+import { useTtsManager } from "../lib/tts";
+import { MessageCircle, Send, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, Zap, ShieldAlert, CheckCircle, XCircle, Clock, Plus, Trash2, ChevronDown, Copy, Volume2, Pause, Loader2 } from "lucide-react";
 import { Badge } from "../components/ui/Badge";
 import { MarkdownContent } from "../components/ui/MarkdownContent";
 import { useUIStore } from "../lib/store";
@@ -372,7 +373,18 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
 }
 
 // Message bubble component — memoized to skip re-render during streaming of other messages
-const MessageBubble = memo(function MessageBubble({ message, usageFooter }: { message: ChatMessage; usageFooter: string }) {
+interface MessageBubbleProps {
+  message: ChatMessage;
+  usageFooter: string;
+  onCopy?: (messageId: string, content: string) => void;
+  copied?: boolean;
+  onSpeak?: (messageId: string, content: string) => void;
+  isSpeaking?: boolean;
+  ttsStatus?: "idle" | "loading" | "playing" | "paused";
+  ttsAvailable?: boolean;
+}
+
+const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy, copied, onSpeak, isSpeaking, ttsStatus, ttsAvailable }: MessageBubbleProps) {
   const { t } = useTranslation();
   const isUser = message.role === "user";
 
@@ -438,26 +450,68 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter }: { me
           )}
         </div>
 
-        {/* Meta info */}
-        <div className="flex items-center gap-2 mt-1.5 text-[10px] text-text-dim/50">
-          <span>{message.timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
-          {!message.isStreaming && usageFooter !== "off" && (() => {
-            const showTokens = usageFooter === "full" || usageFooter === "tokens";
-            const showCost = (usageFooter === "full" || usageFooter === "cost") && message.cost_usd !== undefined && message.cost_usd > 0;
-            const hasInput = message.tokens?.input !== undefined && message.tokens.input > 0;
-            const hasOutput = message.tokens?.output !== undefined && message.tokens.output > 0;
-            if (!showTokens && !showCost) return null;
-            if (showTokens && !hasInput && !hasOutput && !showCost) return null;
-            const parts: string[] = [];
-            if (showTokens && (hasInput || hasOutput)) parts.push(`${message.tokens?.input ?? 0} in, ${message.tokens?.output ?? 0} out`);
-            if (showCost) parts.push(formatCost(message.cost_usd!));
-            if (parts.length === 0) return null;
-            return (
-              <span className="px-1.5 py-0.5 rounded bg-brand/10 text-brand/70 font-mono text-[9px]">
-                {parts.join(" | ")}
-              </span>
-            );
-          })()}
+        {/* Meta info + action buttons */}
+        <div className={`flex items-center justify-between w-full mt-1.5 ${isUser ? "flex-row-reverse" : ""}`}>
+          <div className="flex items-center gap-2 text-[10px] text-text-dim/50">
+            <span>{message.timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
+            {!message.isStreaming && usageFooter !== "off" && (() => {
+              const showTokens = usageFooter === "full" || usageFooter === "tokens";
+              const showCost = (usageFooter === "full" || usageFooter === "cost") && message.cost_usd !== undefined && message.cost_usd > 0;
+              const hasInput = message.tokens?.input !== undefined && message.tokens.input > 0;
+              const hasOutput = message.tokens?.output !== undefined && message.tokens.output > 0;
+              if (!showTokens && !showCost) return null;
+              if (showTokens && !hasInput && !hasOutput && !showCost) return null;
+              const parts: string[] = [];
+              if (showTokens && (hasInput || hasOutput)) parts.push(`${message.tokens?.input ?? 0} in, ${message.tokens?.output ?? 0} out`);
+              if (showCost) parts.push(formatCost(message.cost_usd!));
+              if (parts.length === 0) return null;
+              return (
+                <span className="px-1.5 py-0.5 rounded bg-brand/10 text-brand/70 font-mono text-[9px]">
+                  {parts.join(" | ")}
+                </span>
+              );
+            })()}
+          </div>
+          <div className="flex items-center gap-1">
+            {!message.isStreaming && !message.error && message.role === "assistant" && ttsAvailable && onSpeak && (
+              <button
+                onClick={() => onSpeak(message.id, message.content)}
+                className={`h-6 w-6 rounded-md flex items-center justify-center transition-colors ${
+                  isUser
+                    ? "bg-gradient-to-br from-brand to-accent text-white shadow-sm hover:shadow-md"
+                    : "bg-surface border border-border-subtle text-brand hover:bg-surface-hover"
+                }`}
+                title={
+                  ttsStatus === "loading" ? t("chat.tts_generating") :
+                  isSpeaking && ttsStatus === "playing" ? t("chat.pause") :
+                  isSpeaking && ttsStatus === "paused" ? t("chat.resume") :
+                  t("chat.speak")
+                }
+                disabled={ttsStatus === "loading"}
+              >
+                {ttsStatus === "loading" && isSpeaking ? (
+                  <Loader2 size={12} className="animate-spin" />
+                ) : isSpeaking && ttsStatus === "playing" ? (
+                  <Pause size={12} />
+                ) : (
+                  <Volume2 size={12} />
+                )}
+              </button>
+            )}
+            {!message.error && onCopy && (
+              <button
+                onClick={() => onCopy(message.id, message.content)}
+                className={`h-6 w-6 rounded-md flex items-center justify-center transition-colors ${
+                  isUser
+                    ? "bg-gradient-to-br from-brand to-accent text-white shadow-sm hover:shadow-md"
+                    : "bg-surface border border-border-subtle text-brand hover:bg-surface-hover"
+                }`}
+                title={copied ? t("chat.copied") : t("chat.copy")}
+              >
+                {copied ? <CheckCircle size={12} /> : <Copy size={12} />}
+              </button>
+            )}
+          </div>
         </div>
         {message.memories_saved && message.memories_saved.length > 0 && (
           <div className="mt-1 flex flex-wrap gap-1">
@@ -815,6 +869,7 @@ export function ChatPage() {
   const initialAgentId = search?.agentId || "";
   const [selectedAgentId, setSelectedAgentId] = useState(initialAgentId);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
 
   // Sync agent selection to URL search params
   const selectAgent = useCallback((id: string) => {
@@ -822,8 +877,66 @@ export function ChatPage() {
     navigate({ to: "/chat", search: { agentId: id }, replace: true });
   }, [navigate]);
 
+  // Check TTS provider availability
+  const mediaProvidersQuery = useQuery({
+    queryKey: ["media-providers"],
+    queryFn: listMediaProviders,
+    staleTime: 60000,
+  });
+  const ttsAvailable = useMemo(
+    () => (mediaProvidersQuery.data ?? []).some(p => p.configured && p.capabilities.includes("text_to_speech")),
+    [mediaProvidersQuery.data],
+  );
+
+  const handleCopy = useCallback(async (messageId: string, content: string) => {
+    try {
+      await navigator.clipboard.writeText(content);
+      setCopiedMessageId(messageId);
+      setTimeout(() => setCopiedMessageId(null), 1500);
+    } catch {
+      // Clipboard API not available
+    }
+  }, []);
+
   const configQuery = useQuery({ queryKey: ["config"], queryFn: getFullConfig, staleTime: 60000 });
   const usageFooter = (configQuery.data as Record<string, unknown>)?.usage_footer as string | undefined ?? "full";
+  const ttsConfigRaw = (configQuery.data as Record<string, unknown>)?.tts as Record<string, unknown> | undefined;
+  const ttsProvider = ttsConfigRaw?.provider as string | undefined;
+  const ttsSpeechConfig = useMemo(() => {
+    if (!ttsConfigRaw || !ttsProvider) return undefined;
+    const subKey = ttsProvider === "google_tts" ? "google" : ttsProvider;
+    const sub = ttsConfigRaw[subKey] as Record<string, unknown> | undefined;
+    if (!sub) return { provider: ttsProvider };
+    switch (ttsProvider) {
+      case "google_tts":
+        return {
+          provider: ttsProvider,
+          voice: sub.voice as string | undefined,
+          language: sub.language_code as string | undefined,
+          speed: sub.speaking_rate as number | undefined,
+        };
+      case "openai":
+        return {
+          provider: ttsProvider,
+          voice: sub.voice as string | undefined,
+          speed: sub.speed as number | undefined,
+        };
+      case "elevenlabs":
+        return {
+          provider: ttsProvider,
+          voice: sub.voice_id as string | undefined,
+        };
+      default:
+        return { provider: ttsProvider, voice: sub.voice as string | undefined };
+    }
+  }, [ttsConfigRaw, ttsProvider]);
+  const tts = useTtsManager(ttsSpeechConfig);
+
+  // Stop TTS when agent changes
+  useEffect(() => {
+    tts.stop();
+  }, [selectedAgentId, tts.stop]);
+
   const agentsQuery = useQuery({ queryKey: ["agents", "list", "chat"], queryFn: listAgents, staleTime: 30000 });
   const agents = useMemo(() => [...(agentsQuery.data ?? [])].sort((a, b) => {
     // Auth missing → sort to bottom
@@ -1032,7 +1145,19 @@ export function ChatPage() {
               </div>
             ) : (
               <div className="space-y-6">
-                {messages.map(msg => <MessageBubble key={msg.id} message={msg} usageFooter={usageFooter} />)}
+                {messages.map(msg => (
+                  <MessageBubble
+                    key={msg.id}
+                    message={msg}
+                    usageFooter={usageFooter}
+                    onCopy={handleCopy}
+                    copied={copiedMessageId === msg.id}
+                    onSpeak={ttsAvailable ? tts.toggle : undefined}
+                    isSpeaking={tts.speakingMessageId === msg.id}
+                    ttsStatus={tts.speakingMessageId === msg.id ? tts.status : "idle"}
+                    ttsAvailable={ttsAvailable}
+                  />
+                ))}
                 {/* Inline approval cards for pending requests */}
                 {pendingApprovals.map(approval => (
                   <ApprovalCard key={approval.id} approval={approval} onResolved={removeApproval} />

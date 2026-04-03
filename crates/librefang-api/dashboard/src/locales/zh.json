@@ -979,7 +979,16 @@
     "bot": "Bot",
     "ws_connected": "WS",
     "ws_streaming": "流式",
-    "auth_missing": "供应商 \"{{provider}}\" 的 API Key 未配置，请在 设置 > 供应商 中设置后再对话。"
+    "auth_missing": "供应商 \"{{provider}}\" 的 API Key 未配置，请在 设置 > 供应商 中设置后再对话。",
+    "copy": "复制",
+    "copied": "已复制",
+    "speak": "朗读",
+    "pause": "暂停",
+    "resume": "继续",
+    "tts_unavailable": "未配置 TTS 供应商",
+    "tts_generating": "正在生成语音...",
+    "tts_error": "语音生成失败",
+    "tts_empty": "没有可朗读的文本"
   },
   "goals": {
     "title": "目标",

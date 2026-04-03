@@ -984,7 +984,16 @@
     "bot": "Bot",
     "ws_connected": "WS",
     "ws_streaming": "Streaming",
-    "auth_missing": "API key for provider \"{{provider}}\" is not configured. Please set it in Settings > Providers before chatting."
+    "auth_missing": "API key for provider \"{{provider}}\" is not configured. Please set it in Settings > Providers before chatting.",
+    "copy": "Copy",
+    "copied": "Copied",
+    "speak": "Speak",
+    "pause": "Pause",
+    "resume": "Resume",
+    "tts_unavailable": "No TTS provider configured",
+    "tts_generating": "Generating speech...",
+    "tts_error": "Speech generation failed",
+    "tts_empty": "No readable text"
   },
   "goals": {
     "title": "Goals",

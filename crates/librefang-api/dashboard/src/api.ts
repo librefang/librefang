@@ -50,10 +50,9 @@ export interface ProviderItem {
 }
 
 export interface MediaProvider {
-  id: string;
-  display_name: string;
-  capabilities: string[];
+  name: string;
   configured: boolean;
+  capabilities: string[];
 }
 
 export interface MediaImageResult {
@@ -833,14 +832,16 @@ export async function generateImage(req: { prompt: string; provider?: string; mo
   return post<MediaImageResult>("/api/media/image", req);
 }
 
-export async function synthesizeSpeech(req: { text: string; provider?: string; model?: string; voice?: string; format?: string }): Promise<Blob> {
-  const resp = await fetch("/api/media/speech", {
-    method: "POST",
-    headers: buildHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify(req),
-  });
-  if (!resp.ok) throw await parseError(resp);
-  return resp.blob();
+export interface SpeechResult {
+  url: string;
+  format: string;
+  provider: string;
+  model: string;
+  duration_ms?: number;
+}
+
+export async function synthesizeSpeech(req: { text: string; provider?: string; model?: string; voice?: string; format?: string; language?: string; speed?: number }): Promise<SpeechResult> {
+  return post<SpeechResult>("/api/media/speech", req);
 }
 
 export async function submitVideo(req: { prompt: string; provider?: string; model?: string }): Promise<MediaVideoSubmitResult> {
