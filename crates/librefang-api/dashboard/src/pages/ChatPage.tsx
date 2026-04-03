@@ -565,7 +565,18 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, wsConnecte
   const [sessionOpen, setSessionOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
-  // Close dropdown on outside click
+  // Model popover state
+  const [modelOpen, setModelOpen] = useState(false);
+  const modelRef = useRef<HTMLDivElement>(null);
+  const [models, setModels] = useState<ModelItem[]>([]);
+  const [modelSearch, setModelSearch] = useState("");
+  const [modelLoading, setModelLoading] = useState(false);
+  const [modelFetchError, setModelFetchError] = useState<string | null>(null);
+  const [patchError, setPatchError] = useState<string | null>(null);
+  const [patchPending, setPatchPending] = useState(false);
+  const [optimisticModel, setOptimisticModel] = useState<string | null>(null);
+
+  // Close session dropdown on outside click
   useEffect(() => {
     if (!sessionOpen) return;
     const handler = (e: MouseEvent) => {
@@ -576,6 +587,51 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, wsConnecte
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
   }, [sessionOpen]);
+
+  // Close model popover on outside click
+  useEffect(() => {
+    if (!modelOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (modelRef.current && !modelRef.current.contains(e.target as Node)) {
+        setModelOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [modelOpen]);
+
+  // Fetch available models lazily when popover first opens
+  useEffect(() => {
+    if (!modelOpen || models.length > 0 || modelLoading) return;
+    setModelLoading(true);
+    setModelFetchError(null);
+    listModels({ available: true })
+      .then(res => setModels(res.models))
+      .catch(() => setModelFetchError("Unable to load models"))
+      .finally(() => setModelLoading(false));
+  }, [modelOpen, models.length, modelLoading]);
+
+  const filteredModels = models.filter(m =>
+    (m.provider + " " + (m.id || "")).toLowerCase().includes(modelSearch.toLowerCase())
+  );
+
+  async function handleSelectModel(model: ModelItem) {
+    const prev = optimisticModel ?? modelName ?? null;
+    setOptimisticModel(model.id);
+    setPatchPending(true);
+    setPatchError(null);
+    try {
+      await patchAgentConfig(agentId, { model: model.id, provider: model.provider });
+      setOptimisticModel(null);
+      setModelOpen(false);
+      onModelChange();
+    } catch {
+      setOptimisticModel(prev);
+      setPatchError("Failed to update model. Please try again.");
+    } finally {
+      setPatchPending(false);
+    }
+  }
 
   return (
     <div className="px-2 sm:px-4 py-2 sm:py-2.5 border-b border-border-subtle/50 bg-gradient-to-r from-surface to-transparent flex items-center justify-between">
