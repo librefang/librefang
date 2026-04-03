@@ -555,10 +555,11 @@ function ChatInput({ onSend, disabled, placeholder, authMissing, providerName }:
 }
 
 // Connection status bar with session dropdown
-function ConnectionBar({ agentName, isLoading, messageCount, onClear, wsConnected, modelName, sessions, activeSessionId, onSwitchSession, onNewSession, onDeleteSession }: {
+function ConnectionBar({ agentName, isLoading, messageCount, onClear, wsConnected, modelName, sessions, activeSessionId, onSwitchSession, onNewSession, onDeleteSession, agentId, onModelChange }: {
   agentName: string; isLoading: boolean; messageCount: number; onClear: () => void; wsConnected?: boolean; modelName?: string;
   sessions?: SessionListItem[]; activeSessionId?: string;
   onSwitchSession?: (sessionId: string) => void; onNewSession?: () => void; onDeleteSession?: (sessionId: string) => void;
+  agentId: string; onModelChange: () => void;
 }) {
   const { t } = useTranslation();
   const [sessionOpen, setSessionOpen] = useState(false);
