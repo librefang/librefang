@@ -137,8 +137,18 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
-          # List assets and delete any matching this target
-          gh release view "$TAG" --json assets --jq '.assets[].name' 2>/dev/null | while read -r name; do
+          # Fetch asset list with retry (GitHub API can be transiently unavailable)
+          ASSETS=""
+          for attempt in $(seq 1 5); do
+            if ASSETS=$(gh release view "$TAG" --json assets --jq '.assets[].name' 2>/dev/null); then
+              break
+            fi
+            echo "Failed to fetch release assets (attempt $attempt/5), retrying in 10s..."
+            sleep 10
+          done
+          # Delete any matching this target
+          echo "$ASSETS" | while read -r name; do
+            [ -z "$name" ] && continue
             case "$name" in
               *${{ matrix.platform.rust_target }}*|*latest.json)
                 echo "Deleting existing asset: $name"
