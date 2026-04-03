@@ -3219,8 +3219,17 @@ async fn create_registry_content(
         .into_response();
     }
 
-    // Convert JSON values to TOML
-    let toml_value = json_to_toml_value(&body);
+    // Convert JSON values to TOML.
+    // For providers: the catalog TOML format requires a `[provider]` section header.
+    // If the body is a flat object (fields at the top level), restructure it so that
+    // non-`models` fields are nested under a `"provider"` key, producing the correct
+    // `[provider] … [[models]] …` layout that `ModelCatalogFile` expects.
+    let body_for_toml = if content_type == "provider" {
+        normalize_provider_body(&body)
+    } else {
+        body.clone()
+    };
+    let toml_value = json_to_toml_value(&body_for_toml);
     let toml_string = match toml::to_string_pretty(&toml_value) {
         Ok(s) => s,
         Err(e) => {
@@ -3283,6 +3292,35 @@ async fn update_registry_content(
     create_registry_content(state, path, Query(overwrite), Json(body)).await
 }
 
+/// Ensure a provider JSON body has the `[provider]` wrapper required by
+/// `ModelCatalogFile`. If the body is already wrapped (contains a `"provider"`
+/// key), it is returned unchanged. Otherwise the non-`models` fields are moved
+/// under `"provider"` and `models` is kept at the top level so TOML
+/// serialization produces the correct `[provider] … [[models]] …` structure.
+fn normalize_provider_body(body: &serde_json::Value) -> serde_json::Value {
+    let Some(obj) = body.as_object() else {
+        return body.clone();
+    };
+    if obj.contains_key("provider") {
+        return body.clone();
+    }
+    let models = obj.get("models").cloned();
+    let provider_fields: serde_json::Map<String, serde_json::Value> = obj
+        .iter()
+        .filter(|(k, _)| k.as_str() != "models")
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    let mut restructured = serde_json::Map::new();
+    restructured.insert(
+        "provider".to_string(),
+        serde_json::Value::Object(provider_fields),
+    );
+    if let Some(serde_json::Value::Array(arr)) = models {
+        restructured.insert("models".to_string(), serde_json::Value::Array(arr));
+    }
+    serde_json::Value::Object(restructured)
+}
+
 /// Recursively convert serde_json::Value to toml::Value, stripping empty
 /// strings and empty arrays to keep the generated TOML clean.
 fn json_to_toml_value(json: &serde_json::Value) -> toml::Value {
@@ -3319,6 +3357,94 @@ fn json_to_toml_value(json: &serde_json::Value) -> toml::Value {
             }
             toml::Value::Table(table)
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// normalize_provider_body tests
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod provider_body_tests {
+    use super::*;
+    use librefang_types::model_catalog::ModelCatalogFile;
+
+    fn round_trip(body: serde_json::Value) -> ModelCatalogFile {
+        let normalized = normalize_provider_body(&body);
+        let toml_value = json_to_toml_value(&normalized);
+        let toml_str = toml::to_string_pretty(&toml_value).expect("serialization failed");
+        toml::from_str(&toml_str).expect("TOML did not parse as ModelCatalogFile")
+    }
+
+    #[test]
+    fn flat_body_gets_provider_section() {
+        let body = serde_json::json!({
+            "id": "deepinfra",
+            "display_name": "Deepinfra",
+            "api_key_env": "DEEPINFRA_API_KEY",
+            "base_url": "https://api.deepinfra.com/v1/openai",
+            "key_required": true
+        });
+        let catalog = round_trip(body);
+        let provider = catalog.provider.expect("provider section must be present");
+        assert_eq!(provider.id, "deepinfra");
+        assert_eq!(provider.display_name, "Deepinfra");
+    }
+
+    #[test]
+    fn flat_body_with_models_preserves_models() {
+        let body = serde_json::json!({
+            "id": "deepinfra",
+            "display_name": "Deepinfra",
+            "api_key_env": "DEEPINFRA_API_KEY",
+            "base_url": "https://api.deepinfra.com/v1/openai",
+            "key_required": true,
+            "models": [{
+                "id": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B",
+                "display_name": "Nemotron 3 Super",
+                "tier": "frontier",
+                "context_window": 200000,
+                "max_output_tokens": 16000,
+                "input_cost_per_m": 0.1,
+                "output_cost_per_m": 0.5,
+                "supports_streaming": true,
+                "supports_tools": true,
+                "supports_vision": true
+            }]
+        });
+        let catalog = round_trip(body);
+        assert!(catalog.provider.is_some());
+        assert_eq!(catalog.models.len(), 1);
+        assert_eq!(
+            catalog.models[0].id,
+            "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B"
+        );
+    }
+
+    #[test]
+    fn already_wrapped_body_is_unchanged() {
+        let body = serde_json::json!({
+            "provider": {
+                "id": "deepinfra",
+                "display_name": "Deepinfra",
+                "api_key_env": "DEEPINFRA_API_KEY",
+                "base_url": "https://api.deepinfra.com/v1/openai",
+                "key_required": true
+            }
+        });
+        let normalized = normalize_provider_body(&body);
+        // Should not double-wrap
+        assert!(normalized["provider"].is_object());
+        assert!(normalized
+            .get("provider")
+            .and_then(|p| p.get("provider"))
+            .is_none());
+    }
+
+    #[test]
+    fn non_object_body_is_returned_as_is() {
+        let body = serde_json::json!("not an object");
+        let normalized = normalize_provider_body(&body);
+        assert_eq!(normalized, body);
     }
 }
 
