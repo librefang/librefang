@@ -157,8 +157,15 @@ export function useTtsManager(config?: TtsSpeechConfig): UseTtsManagerReturn {
         currentMessageIdRef.current = null;
       });
 
-      audio.play();
-      setStatus("playing");
+      try {
+        await audio.play();
+        setStatus("playing");
+      } catch {
+        setStatus("idle");
+        setSpeakingMessageId(null);
+        setError("tts_error");
+        currentMessageIdRef.current = null;
+      }
     },
     [status, stop, config?.provider, config?.voice, config?.language, config?.speed],
   );
