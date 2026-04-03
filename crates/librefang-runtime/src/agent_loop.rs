@@ -71,10 +71,38 @@ fn is_no_reply(text: &str) -> bool {
 /// Safely trim message history to `MAX_HISTORY_MESSAGES`, cutting at
 /// conversation-turn boundaries so ToolUse/ToolResult pairs are never split.
 ///
+/// Both the LLM working copy (`messages`) and the canonical session store
+/// (`session_messages`) are trimmed so that the truncated history is
+/// persisted on the next `save_session_async` call — preventing unbounded
+/// growth of the on-disk session blob.
+///
 /// After trim + repair, if fewer than 2 messages survive the function
 /// synthesises a minimal `[user_message]` so the LLM always gets at least
 /// the current question.
-fn safe_trim_messages(messages: &mut Vec<Message>, agent_name: &str, user_message: &str) {
+fn safe_trim_messages(
+    messages: &mut Vec<Message>,
+    session_messages: &mut Vec<Message>,
+    agent_name: &str,
+    user_message: &str,
+) {
+    // Trim the persistent session messages first so the truncated version is
+    // saved back to the database, preventing reload-OOM on next boot.
+    if session_messages.len() > MAX_HISTORY_MESSAGES {
+        let desired = session_messages.len() - MAX_HISTORY_MESSAGES;
+        let trim_point = crate::session_repair::find_safe_trim_point(session_messages, desired)
+            .filter(|&p| p > 0)
+            .unwrap_or(desired);
+
+        info!(
+            agent = %agent_name,
+            total_messages = session_messages.len(),
+            trimming = trim_point,
+            "Trimming persistent session messages"
+        );
+
+        session_messages.drain(..trim_point);
+    }
+
     if messages.len() <= MAX_HISTORY_MESSAGES {
         return;
     }
@@ -752,7 +780,13 @@ pub async fn run_agent_loop(
     // Safety valve: trim excessively long message histories to prevent context
     // overflow. Cuts at conversation-turn boundaries so ToolUse/ToolResult
     // pairs are never split (fixes "EOF while parsing" from empty API responses).
-    safe_trim_messages(&mut messages, &manifest.name, user_message);
+    // Also trims the persistent session so the truncated version is saved to DB.
+    safe_trim_messages(
+        &mut messages,
+        &mut session.messages,
+        &manifest.name,
+        user_message,
+    );
 
     // Proactively strip base64 image data from previous turns.  Images that
     // survived from earlier sessions (e.g. after a crash or daemon restart)
@@ -2253,7 +2287,13 @@ pub async fn run_agent_loop_streaming(
     let final_response;
 
     // Safety valve: trim at conversation-turn boundaries (streaming path).
-    safe_trim_messages(&mut messages, &manifest.name, user_message);
+    // Also trims the persistent session so the truncated version is saved to DB.
+    safe_trim_messages(
+        &mut messages,
+        &mut session.messages,
+        &manifest.name,
+        user_message,
+    );
 
     // Proactively strip stale image data from previous turns (streaming path).
     strip_prior_image_data(&mut messages);
