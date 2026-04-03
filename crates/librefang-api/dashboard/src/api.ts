@@ -759,6 +759,16 @@ export async function listAgents(): Promise<AgentItem[]> {
   return data.items ?? [];
 }
 
+export interface AgentTemplate {
+  name: string;
+  description: string;
+}
+
+export async function listAgentTemplates(): Promise<AgentTemplate[]> {
+  const data = await get<{ templates: AgentTemplate[] }>("/api/templates");
+  return data.templates ?? [];
+}
+
 export async function loadAgentSession(agentId: string): Promise<AgentSessionResponse> {
   return get<AgentSessionResponse>(`/api/agents/${encodeURIComponent(agentId)}/session`);
 }

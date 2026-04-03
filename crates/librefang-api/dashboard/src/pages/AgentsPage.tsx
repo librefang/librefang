@@ -6,7 +6,7 @@ import { useNavigate } from "@tanstack/react-router";
 import { listAgents, getAgentDetail, AgentDetail, spawnAgent, suspendAgent, resumeAgent, patchAgentConfig,
   listPromptVersions, listExperiments, activatePromptVersion, startExperiment, pauseExperiment, completeExperiment,
   createPromptVersion, createExperiment, deletePromptVersion, PromptVersion, PromptExperiment, ExperimentVariantMetrics, getExperimentMetrics,
-  listModels, listProviders } from "../api";
+  listModels, listProviders, listAgentTemplates } from "../api";
 import { isProviderAvailable } from "../lib/status";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
@@ -36,6 +36,7 @@ export function AgentsPage() {
   const [editingModel, setEditingModel] = useState(false);
   const [modelDraft, setModelDraft] = useState({ provider: "", model: "", max_tokens: "", temperature: "" });
   const queryClient = useQueryClient();
+  const templatesQuery = useQuery({ queryKey: ["agent-templates"], queryFn: listAgentTemplates, enabled: showCreate && createMode === "template" });
   const spawnMutation = useMutation({
     mutationFn: spawnAgent,
     onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["agents"] }); setShowCreate(false); setTemplateName(""); setManifestToml(""); }
@@ -498,10 +499,13 @@ export function AgentsPage() {
               {createMode === "template" ? (
                 <div>
                   <label className="text-[10px] font-bold text-text-dim uppercase">{t("agents.template_name")}</label>
-                  <input value={templateName} onChange={e => setTemplateName(e.target.value)}
-                    placeholder={t("agents.template_placeholder")}
-                    className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-brand" />
-                  <p className="text-[9px] text-text-dim/50 mt-1">{t("agents.template_hint")}</p>
+                  <select value={templateName} onChange={e => setTemplateName(e.target.value)}
+                    className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-brand">
+                    <option value="">{t("agents.template_placeholder")}</option>
+                    {(templatesQuery.data ?? []).map(tmpl => (
+                      <option key={tmpl.name} value={tmpl.name}>{tmpl.name}</option>
+                    ))}
+                  </select>
                 </div>
               ) : (
                 <div>

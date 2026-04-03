@@ -210,6 +210,7 @@ async fn resolve_manifest(
                 .kernel
                 .config_ref()
                 .home_dir
+                .join("workspaces")
                 .join("agents")
                 .join(&safe_name)
                 .join("agent.toml");
