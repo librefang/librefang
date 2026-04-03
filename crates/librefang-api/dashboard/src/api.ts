@@ -748,7 +748,7 @@ export async function getAgentDetail(agentId: string): Promise<AgentDetail> {
   return get<AgentDetail>(`/api/agents/${encodeURIComponent(agentId)}`);
 }
 
-export async function patchAgentConfig(agentId: string, config: { max_tokens?: number; model?: string; provider?: string }): Promise<ApiActionResponse> {
+export async function patchAgentConfig(agentId: string, config: { max_tokens?: number; model?: string; provider?: string; temperature?: number }): Promise<ApiActionResponse> {
   return patch<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}/config`, config);
 }
 

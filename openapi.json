@@ -7,7 +7,7 @@
       "name": "Apache-2.0",
       "url": "https://www.apache.org/licenses/LICENSE-2.0"
     },
-    "version": "2026.4.2-beta8"
+    "version": "2026.4.3-beta9"
   },
   "paths": {
     "/.well-known/agent.json": {
@@ -7571,6 +7571,13 @@
               "string",
               "null"
             ]
+          },
+          "temperature": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float"
           },
           "vibe": {
             "type": [

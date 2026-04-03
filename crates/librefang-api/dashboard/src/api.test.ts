@@ -3,6 +3,7 @@ import {
   buildAuthenticatedWebSocketUrl,
   getMetricsText,
   listTools,
+  patchAgentConfig,
   setApiKey,
   verifyStoredAuth,
 } from "./api";
@@ -101,5 +102,28 @@ describe("dashboard auth helpers", () => {
 
     expect(listToolsHeaders.get("authorization")).toBe("Bearer secret-token");
     expect(metricsHeaders.get("authorization")).toBe("Bearer secret-token");
+  });
+
+  it("patchAgentConfig sends temperature in request body", async () => {
+    setApiKey("secret-token");
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ status: "ok" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    await patchAgentConfig("test-agent-id", {
+      temperature: 1.5,
+      max_tokens: 8192,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, options] = fetchMock.mock.calls[0];
+    expect(url).toBe("/api/agents/test-agent-id/config");
+    expect(options.method).toBe("PATCH");
+    const body = JSON.parse(options.body);
+    expect(body.temperature).toBe(1.5);
+    expect(body.max_tokens).toBe(8192);
   });
 });

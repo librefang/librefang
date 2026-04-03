@@ -5,7 +5,9 @@ import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
 import { listAgents, getAgentDetail, AgentDetail, spawnAgent, suspendAgent, resumeAgent, patchAgentConfig,
   listPromptVersions, listExperiments, activatePromptVersion, startExperiment, pauseExperiment, completeExperiment,
-  createPromptVersion, createExperiment, deletePromptVersion, PromptVersion, PromptExperiment, ExperimentVariantMetrics, getExperimentMetrics } from "../api";
+  createPromptVersion, createExperiment, deletePromptVersion, PromptVersion, PromptExperiment, ExperimentVariantMetrics, getExperimentMetrics,
+  listModels, listProviders } from "../api";
+import { isProviderAvailable } from "../lib/status";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -32,7 +34,7 @@ export function AgentsPage() {
   const [manifestToml, setManifestToml] = useState("");
   const [showPrompts, setShowPrompts] = useState(false);
   const [editingModel, setEditingModel] = useState(false);
-  const [modelDraft, setModelDraft] = useState({ provider: "", model: "", max_tokens: "" });
+  const [modelDraft, setModelDraft] = useState({ provider: "", model: "", max_tokens: "", temperature: "" });
   const queryClient = useQueryClient();
   const spawnMutation = useMutation({
     mutationFn: spawnAgent,
@@ -40,7 +42,7 @@ export function AgentsPage() {
   });
 
   const patchAgentConfigMutation = useMutation({
-    mutationFn: ({ agentId, config }: { agentId: string; config: { max_tokens?: number; model?: string; provider?: string } }) =>
+    mutationFn: ({ agentId, config }: { agentId: string; config: { max_tokens?: number; model?: string; provider?: string; temperature?: number } }) =>
       patchAgentConfig(agentId, config),
     onSuccess: (_, { agentId }) => {
       queryClient.invalidateQueries({ queryKey: ["agents"] });
@@ -57,6 +59,7 @@ export function AgentsPage() {
       provider: detailAgent?.model?.provider ?? "",
       model: detailAgent?.model?.model ?? "",
       max_tokens: String(detailAgent?.model?.max_tokens ?? 4096),
+      temperature: String(detailAgent?.model?.temperature ?? 0.7),
     });
     setEditingModel(true);
   }
@@ -73,14 +76,16 @@ export function AgentsPage() {
   function saveModelEdit() {
     if (!detailAgent) return;
     const current = detailAgent.model;
-    const patch: { max_tokens?: number; model?: string; provider?: string } = {};
+    const patch: { max_tokens?: number; model?: string; provider?: string; temperature?: number } = {};
 
     const trimmedProvider = modelDraft.provider.trim();
     const trimmedModel = modelDraft.model.trim();
     const parsedMaxTokens = parseInt(modelDraft.max_tokens, 10);
+    const parsedTemperature = parseFloat(modelDraft.temperature);
 
     if (!trimmedProvider || !trimmedModel) return;
     if (isNaN(parsedMaxTokens) || parsedMaxTokens <= 0) return;
+    if (isNaN(parsedTemperature) || parsedTemperature < 0 || parsedTemperature > 2) return;
 
     const modelChanged = trimmedModel !== current?.model;
     const providerChanged = trimmedProvider !== current?.provider;
@@ -90,6 +95,7 @@ export function AgentsPage() {
       patch.provider = trimmedProvider;
     }
     if (parsedMaxTokens !== current?.max_tokens) patch.max_tokens = parsedMaxTokens;
+    if (parsedTemperature !== current?.temperature) patch.temperature = parsedTemperature;
 
     if (Object.keys(patch).length === 0) {
       setEditingModel(false);
@@ -104,6 +110,24 @@ export function AgentsPage() {
     queryFn: listAgents,
     refetchInterval: REFRESH_MS
   });
+
+  const modelsQuery = useQuery({
+    queryKey: ["models", "list", modelDraft.provider],
+    queryFn: () => listModels({ provider: modelDraft.provider }),
+    enabled: !!modelDraft.provider.trim(),
+    staleTime: 60_000,
+  });
+
+  const providersQuery = useQuery({
+    queryKey: ["providers", "list"],
+    queryFn: listProviders,
+    staleTime: 60_000,
+  });
+
+  const configuredProviders = useMemo(
+    () => (providersQuery.data ?? []).filter(p => isProviderAvailable(p.auth_status)),
+    [providersQuery.data],
+  );
 
   const agents = agentsQuery.data ?? [];
   const filteredAgents = useMemo(() => agents
@@ -255,23 +279,41 @@ export function AgentsPage() {
                       <>
                         <div className="flex justify-between items-center gap-2">
                           <span className="text-text-dim">{t("agents.provider")}</span>
-                          <input
-                            type="text"
+                          <select
                             value={modelDraft.provider}
-                            onChange={e => setModelDraft(d => ({ ...d, provider: e.target.value }))}
+                            onChange={e => setModelDraft(d => ({ ...d, provider: e.target.value, model: "" }))}
                             className="w-40 px-2 py-1 rounded-xl border border-border-subtle bg-main text-xs font-mono outline-none focus:border-brand text-right"
-                            placeholder="e.g. openai"
-                          />
+                            disabled={providersQuery.isLoading}
+                          >
+                            {providersQuery.isLoading && <option value="">Loading...</option>}
+                            {providersQuery.error && <option value="">Error loading</option>}
+                            {!providersQuery.isLoading && configuredProviders.length === 0 && <option value="">No providers</option>}
+                            {modelDraft.provider && !configuredProviders.some(p => p.id === modelDraft.provider) && (
+                              <option value={modelDraft.provider}>{modelDraft.provider}</option>
+                            )}
+                            {configuredProviders.map(p => (
+                              <option key={p.id} value={p.id}>{p.display_name || p.id}</option>
+                            ))}
+                          </select>
                         </div>
                         <div className="flex justify-between items-center gap-2">
                           <span className="text-text-dim">{t("agents.model")}</span>
-                          <input
-                            type="text"
+                          <select
                             value={modelDraft.model}
                             onChange={e => setModelDraft(d => ({ ...d, model: e.target.value }))}
                             className="w-40 px-2 py-1 rounded-xl border border-border-subtle bg-main text-xs font-mono outline-none focus:border-brand text-right"
-                            placeholder="e.g. gpt-4o"
-                          />
+                            disabled={modelsQuery.isLoading || !modelDraft.provider.trim()}
+                          >
+                            {!modelDraft.provider.trim() && <option value="">Select provider first</option>}
+                            {modelDraft.provider.trim() && modelsQuery.isLoading && <option value="">Loading...</option>}
+                            {modelDraft.provider.trim() && !modelsQuery.isLoading && modelsQuery.data?.models?.length === 0 && <option value="">No models</option>}
+                            {modelDraft.model && !modelsQuery.data?.models?.some(m => m.id === modelDraft.model) && (
+                              <option value={modelDraft.model}>{modelDraft.model}</option>
+                            )}
+                            {modelsQuery.data?.models?.map(m => (
+                              <option key={m.id} value={m.id}>{m.display_name || m.id}</option>
+                            ))}
+                          </select>
                         </div>
                         <div className="flex justify-between items-center gap-2">
                           <span className="text-text-dim">{t("agents.max_tokens")}</span>
@@ -284,12 +326,18 @@ export function AgentsPage() {
                             className="w-40 px-2 py-1 rounded-xl border border-border-subtle bg-main text-xs font-mono outline-none focus:border-brand text-right"
                           />
                         </div>
-                        {detailAgent?.model?.temperature != null && (
-                          <div className="flex justify-between items-center gap-2">
-                            <span className="text-text-dim">{t("agents.temperature")}</span>
-                            <span className="font-mono text-text-dim/70">{detailAgent.model.temperature}</span>
-                          </div>
-                        )}
+                        <div className="flex justify-between items-center gap-2">
+                          <span className="text-text-dim">{t("agents.temperature")}</span>
+                          <input
+                            type="number"
+                            min={0}
+                            max={2}
+                            step={0.1}
+                            value={modelDraft.temperature}
+                            onChange={e => setModelDraft(d => ({ ...d, temperature: e.target.value }))}
+                            className="w-40 px-2 py-1 rounded-xl border border-border-subtle bg-main text-xs font-mono outline-none focus:border-brand text-right"
+                          />
+                        </div>
                         <div className="flex justify-end gap-1 pt-1">
                           <button
                             onClick={cancelModelEdit}
@@ -299,7 +347,7 @@ export function AgentsPage() {
                           </button>
                           <button
                             onClick={saveModelEdit}
-                            disabled={patchAgentConfigMutation.isPending || !modelDraft.provider.trim() || !modelDraft.model.trim() || isNaN(parseInt(modelDraft.max_tokens, 10)) || parseInt(modelDraft.max_tokens, 10) <= 0}
+                            disabled={patchAgentConfigMutation.isPending || !modelDraft.provider.trim() || !modelDraft.model.trim() || isNaN(parseInt(modelDraft.max_tokens, 10)) || parseInt(modelDraft.max_tokens, 10) <= 0 || isNaN(parseFloat(modelDraft.temperature)) || parseFloat(modelDraft.temperature) < 0 || parseFloat(modelDraft.temperature) > 2}
                             className="px-3 py-1 rounded text-xs font-bold bg-brand hover:bg-brand/90 text-white disabled:opacity-50"
                           >
                             {patchAgentConfigMutation.isPending ? t("common.saving") : t("common.save")}
