@@ -62,10 +62,11 @@ pub const TIMEOUT_PARTIAL_OUTPUT_MARKER: &str = "[partial_output_delivered]";
 
 /// Check if a response is a NO_REPLY.  Matches:
 /// - Exact `"NO_REPLY"` (original behaviour)
-/// - Text ending with `NO_REPLY` on its own line (model sometimes adds context before it)
+/// - Text ending with `NO_REPLY` anywhere (model sometimes adds context before it,
+///   either on the same line or on a new line)
 fn is_no_reply(text: &str) -> bool {
     let t = text.trim();
-    t == "NO_REPLY" || t.ends_with("\nNO_REPLY") || t.ends_with("\n\nNO_REPLY")
+    t == "NO_REPLY" || t.ends_with("NO_REPLY")
 }
 
 /// Safely trim message history to `MAX_HISTORY_MESSAGES`, cutting at
