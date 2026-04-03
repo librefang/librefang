@@ -156,6 +156,8 @@
     "subtitle": "内核管理的智能体。",
     "model": "模型",
     "provider": "供应商",
+    "max_tokens": "最大令牌数",
+    "temperature": "温度",
     "last_active": "最后活跃",
     "no_matching": "没有匹配的智能体。",
     "system_prompt": "系统提示词",

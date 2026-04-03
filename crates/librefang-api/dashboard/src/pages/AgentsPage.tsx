@@ -3,7 +3,7 @@ import { formatTime } from "../lib/datetime";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
-import { listAgents, getAgentDetail, spawnAgent, suspendAgent, resumeAgent, patchAgentConfig,
+import { listAgents, getAgentDetail, AgentDetail, spawnAgent, suspendAgent, resumeAgent, patchAgentConfig,
   listPromptVersions, listExperiments, activatePromptVersion, startExperiment, pauseExperiment, completeExperiment,
   createPromptVersion, createExperiment, deletePromptVersion, PromptVersion, PromptExperiment, ExperimentVariantMetrics, getExperimentMetrics } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
@@ -24,15 +24,15 @@ export function AgentsPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const [search, setSearch] = useState("");
-  const [detailAgent, setDetailAgent] = useState<any>(null);
+  const [detailAgent, setDetailAgent] = useState<AgentDetail | null>(null);
   const [, setDetailLoading] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
   const [createMode, setCreateMode] = useState<"template" | "toml">("template");
   const [templateName, setTemplateName] = useState("");
   const [manifestToml, setManifestToml] = useState("");
   const [showPrompts, setShowPrompts] = useState(false);
-  const [editingMaxTokens, setEditingMaxTokens] = useState(false);
-  const [maxTokensInput, setMaxTokensInput] = useState("");
+  const [editingModel, setEditingModel] = useState(false);
+  const [modelDraft, setModelDraft] = useState({ provider: "", model: "", max_tokens: "" });
   const queryClient = useQueryClient();
   const spawnMutation = useMutation({
     mutationFn: spawnAgent,
@@ -40,19 +40,64 @@ export function AgentsPage() {
   });
 
   const patchAgentConfigMutation = useMutation({
-    mutationFn: ({ agentId, config }: { agentId: string; config: { max_tokens?: number } }) =>
+    mutationFn: ({ agentId, config }: { agentId: string; config: { max_tokens?: number; model?: string; provider?: string } }) =>
       patchAgentConfig(agentId, config),
     onSuccess: (_, { agentId }) => {
       queryClient.invalidateQueries({ queryKey: ["agents"] });
       queryClient.invalidateQueries({ queryKey: ["agent-detail", agentId] });
-      setEditingMaxTokens(false);
-      setMaxTokensInput("");
-      // Refresh detail panel
+      setEditingModel(false);
       if (detailAgent?.id === agentId) {
         getAgentDetail(agentId).then(setDetailAgent).catch(() => {});
       }
     },
   });
+
+  function startModelEdit() {
+    setModelDraft({
+      provider: detailAgent?.model?.provider ?? "",
+      model: detailAgent?.model?.model ?? "",
+      max_tokens: String(detailAgent?.model?.max_tokens ?? 4096),
+    });
+    setEditingModel(true);
+  }
+
+  function cancelModelEdit() {
+    setEditingModel(false);
+  }
+
+  function closeDetailModal() {
+    setDetailAgent(null);
+    setEditingModel(false);
+  }
+
+  function saveModelEdit() {
+    if (!detailAgent) return;
+    const current = detailAgent.model;
+    const patch: { max_tokens?: number; model?: string; provider?: string } = {};
+
+    const trimmedProvider = modelDraft.provider.trim();
+    const trimmedModel = modelDraft.model.trim();
+    const parsedMaxTokens = parseInt(modelDraft.max_tokens, 10);
+
+    if (!trimmedProvider || !trimmedModel) return;
+    if (isNaN(parsedMaxTokens) || parsedMaxTokens <= 0) return;
+
+    const modelChanged = trimmedModel !== current?.model;
+    const providerChanged = trimmedProvider !== current?.provider;
+
+    if (modelChanged || providerChanged) {
+      patch.model = trimmedModel;
+      patch.provider = trimmedProvider;
+    }
+    if (parsedMaxTokens !== current?.max_tokens) patch.max_tokens = parsedMaxTokens;
+
+    if (Object.keys(patch).length === 0) {
+      setEditingModel(false);
+      return;
+    }
+
+    patchAgentConfigMutation.mutate({ agentId: detailAgent.id, config: patch });
+  }
 
   const agentsQuery = useQuery({
     queryKey: ["agents", "list"],
@@ -179,7 +224,7 @@ export function AgentsPage() {
       )}
       {/* Agent Detail Modal */}
       {detailAgent && (
-        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40 backdrop-blur-sm" onClick={() => setDetailAgent(null)}>
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40 backdrop-blur-sm" onClick={closeDetailModal}>
           <div className="bg-surface rounded-t-2xl sm:rounded-2xl shadow-2xl border border-border-subtle w-full sm:w-[560px] sm:max-w-[90vw] max-h-[85vh] sm:max-h-[80vh] overflow-y-auto animate-fade-in-scale" onClick={e => e.stopPropagation()}>
             {/* Modal Header */}
             <div className="px-6 py-5 border-b border-border-subtle sticky top-0 bg-surface/95 backdrop-blur-sm z-10">
@@ -194,7 +239,7 @@ export function AgentsPage() {
                     <p className="text-[10px] text-text-dim font-mono mt-0.5">{truncateId(detailAgent.id, 16)}</p>
                   </div>
                 </div>
-                <button onClick={() => setDetailAgent(null)} className="p-2 rounded-xl hover:bg-main transition-colors"><X className="w-4 h-4" /></button>
+                <button onClick={closeDetailModal} className="p-2 rounded-xl hover:bg-main transition-colors"><X className="w-4 h-4" /></button>
               </div>
             </div>
             <div className="p-6 space-y-5">
@@ -206,52 +251,74 @@ export function AgentsPage() {
                     {t("agents.model")}
                   </h4>
                   <div className="p-4 rounded-xl bg-main/50 border border-border-subtle/50 space-y-2.5 text-xs">
-                    <div className="flex justify-between items-center"><span className="text-text-dim">{t("agents.provider")}</span><span className="font-black text-brand">{detailAgent.model.provider}</span></div>
-                    <div className="flex justify-between items-center"><span className="text-text-dim">{t("agents.model")}</span><span className="font-black">{detailAgent.model.model}</span></div>
-                    <div className="flex justify-between items-center">
-                      <span className="text-text-dim">{t("agents.max_tokens") || "Max Tokens"}</span>
-                      {editingMaxTokens ? (
-                        <div className="flex items-center gap-1">
+                    {editingModel ? (
+                      <>
+                        <div className="flex justify-between items-center gap-2">
+                          <span className="text-text-dim">{t("agents.provider")}</span>
+                          <input
+                            type="text"
+                            value={modelDraft.provider}
+                            onChange={e => setModelDraft(d => ({ ...d, provider: e.target.value }))}
+                            className="w-40 px-2 py-1 rounded-xl border border-border-subtle bg-main text-xs font-mono outline-none focus:border-brand text-right"
+                            placeholder="e.g. openai"
+                          />
+                        </div>
+                        <div className="flex justify-between items-center gap-2">
+                          <span className="text-text-dim">{t("agents.model")}</span>
+                          <input
+                            type="text"
+                            value={modelDraft.model}
+                            onChange={e => setModelDraft(d => ({ ...d, model: e.target.value }))}
+                            className="w-40 px-2 py-1 rounded-xl border border-border-subtle bg-main text-xs font-mono outline-none focus:border-brand text-right"
+                            placeholder="e.g. gpt-4o"
+                          />
+                        </div>
+                        <div className="flex justify-between items-center gap-2">
+                          <span className="text-text-dim">{t("agents.max_tokens")}</span>
                           <input
                             type="number"
                             min={1}
                             max={200000}
-                            value={maxTokensInput}
-                            onChange={e => setMaxTokensInput(e.target.value)}
-                            onKeyDown={e => {
-                              if (e.key === "Enter") {
-                                const val = parseInt(maxTokensInput, 10);
-                                if (!isNaN(val) && val > 0) patchAgentConfigMutation.mutate({ agentId: detailAgent.id, config: { max_tokens: val } });
-                              }
-                              if (e.key === "Escape") { setEditingMaxTokens(false); setMaxTokensInput(""); }
-                            }}
-                            className="w-24 px-2 py-0.5 rounded bg-main border border-border-subtle text-xs font-mono focus:outline-none focus:border-brand"
-                            autoFocus
+                            value={modelDraft.max_tokens}
+                            onChange={e => setModelDraft(d => ({ ...d, max_tokens: e.target.value }))}
+                            className="w-40 px-2 py-1 rounded-xl border border-border-subtle bg-main text-xs font-mono outline-none focus:border-brand text-right"
                           />
+                        </div>
+                        {detailAgent?.model?.temperature != null && (
+                          <div className="flex justify-between items-center gap-2">
+                            <span className="text-text-dim">{t("agents.temperature")}</span>
+                            <span className="font-mono text-text-dim/70">{detailAgent.model.temperature}</span>
+                          </div>
+                        )}
+                        <div className="flex justify-end gap-1 pt-1">
                           <button
-                            onClick={() => {
-                              const val = parseInt(maxTokensInput, 10);
-                              if (!isNaN(val) && val > 0) patchAgentConfigMutation.mutate({ agentId: detailAgent.id, config: { max_tokens: val } });
-                            }}
-                            disabled={patchAgentConfigMutation.isPending}
-                            className="p-0.5 rounded hover:bg-success/10 text-success disabled:opacity-50"
+                            onClick={cancelModelEdit}
+                            className="px-3 py-1 rounded text-xs font-bold bg-main hover:bg-main/80 text-text-dim border border-border-subtle"
                           >
-                            <Check className="w-3 h-3" />
+                            {t("common.cancel")}
                           </button>
-                          <button onClick={() => { setEditingMaxTokens(false); setMaxTokensInput(""); }} className="p-0.5 rounded hover:bg-main text-text-dim">
-                            <X className="w-3 h-3" />
+                          <button
+                            onClick={saveModelEdit}
+                            disabled={patchAgentConfigMutation.isPending || !modelDraft.provider.trim() || !modelDraft.model.trim() || isNaN(parseInt(modelDraft.max_tokens, 10)) || parseInt(modelDraft.max_tokens, 10) <= 0}
+                            className="px-3 py-1 rounded text-xs font-bold bg-brand hover:bg-brand/90 text-white disabled:opacity-50"
+                          >
+                            {patchAgentConfigMutation.isPending ? t("common.saving") : t("common.save")}
                           </button>
                         </div>
-                      ) : (
-                        <button
-                          onClick={() => { setEditingMaxTokens(true); setMaxTokensInput(String(detailAgent.model.max_tokens ?? 4096)); }}
-                          className="font-black hover:text-brand transition-colors cursor-pointer"
-                          title="Click to edit"
-                        >
-                          {(detailAgent.model.max_tokens ?? 4096).toLocaleString()}
-                        </button>
-                      )}
-                    </div>
+                      </>
+                    ) : (
+                      <>
+                        <div className="flex justify-between items-center"><span className="text-text-dim">{t("agents.provider")}</span><span className="font-black text-brand">{detailAgent.model.provider}</span></div>
+                        <div className="flex justify-between items-center"><span className="text-text-dim">{t("agents.model")}</span><span className="font-black">{detailAgent.model.model}</span></div>
+                        <div className="flex justify-between items-center"><span className="text-text-dim">{t("agents.max_tokens")}</span><span className="font-black">{(detailAgent.model.max_tokens ?? 4096).toLocaleString()}</span></div>
+                        {detailAgent.model.temperature != null && (
+                          <div className="flex justify-between items-center"><span className="text-text-dim">{t("agents.temperature")}</span><span className="font-black">{detailAgent.model.temperature}</span></div>
+                        )}
+                        <div className="flex justify-end pt-1">
+                          <button onClick={startModelEdit} className="px-3 py-1 rounded text-xs font-bold bg-brand/10 hover:bg-brand/20 text-brand">{t("common.edit")}</button>
+                        </div>
+                      </>
+                    )}
                   </div>
                 </div>
               )}
@@ -349,7 +416,7 @@ export function AgentsPage() {
                   <FlaskConical className="w-3.5 h-3.5 mr-1" />
                   {t("agents.prompts") || "Prompts"}
                 </Button>
-                <Button variant="primary" size="sm" className="flex-1" onClick={() => { setDetailAgent(null); navigate({ to: "/chat", search: { agentId: detailAgent.id } }); }}>
+                <Button variant="primary" size="sm" className="flex-1" onClick={() => { closeDetailModal(); navigate({ to: "/chat", search: { agentId: detailAgent.id } }); }}>
                   <MessageCircle className="w-3.5 h-3.5 mr-1" />
                   {t("common.interact")}
                 </Button>

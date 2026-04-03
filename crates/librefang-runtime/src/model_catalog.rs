@@ -123,9 +123,13 @@ impl ModelCatalog {
                     if provider.auth_status == AuthStatus::Missing {
                         provider.auth_status = AuthStatus::NotRequired;
                     }
-                } else {
+                } else if !provider.base_url.is_empty() {
+                    // Has a base_url, no key needed (e.g. custom local proxy).
                     provider.auth_status = AuthStatus::NotRequired;
                 }
+                // Otherwise (no key required, no base_url, not local/CLI):
+                // leave as Missing — these providers are only usable through
+                // hosting platforms like OpenRouter and cannot be called directly.
                 continue;
             }
 

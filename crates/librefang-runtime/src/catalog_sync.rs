@@ -1,8 +1,8 @@
 //! Catalog sync — fetch model catalog updates from the remote repository.
 //!
-//! Downloads TOML files from `github.com/librefang/librefang-registry` and caches
-//! them under `~/.librefang/cache/catalog/`. The cached catalog is loaded at
-//! startup between the builtin fallback and the user's local overrides.
+//! Clones or pulls `github.com/librefang/librefang-registry` and copies TOML
+//! files to `~/.librefang/cache/catalog/`. Uses git directly to avoid CDN
+//! caching delays from `raw.githubusercontent.com`.
 
 use librefang_types::model_catalog::ModelCatalogEntry;
 use serde::{Deserialize, Serialize};
@@ -27,28 +27,124 @@ const CATALOG_REPO: &str = "librefang/librefang-registry";
 
 /// Sync the model catalog from the remote repository.
 ///
-/// Downloads TOML files from GitHub and saves to `home_dir/cache/catalog/`.
+/// Clones or pulls the registry repo via git, then copies TOML files to
+/// `home_dir/cache/catalog/`.
 ///
 /// `registry_mirror` is an optional proxy/mirror prefix for GitHub URLs.
-/// When non-empty, all GitHub API and raw-content URLs are prefixed with
-/// this value (e.g. `"https://ghproxy.cn"` rewrites
-/// `https://api.github.com/...` → `https://ghproxy.cn/https://api.github.com/...`).
+/// When non-empty, the clone URL is prefixed with this value.
 pub async fn sync_catalog_to(
     home_dir: &std::path::Path,
     registry_mirror: &str,
 ) -> Result<CatalogSyncResult, String> {
     let cache_dir = home_dir.join("cache").join("catalog");
     let providers_dir = cache_dir.join("providers");
+    let repo_dir = home_dir.join("cache").join("registry");
 
-    // Create directories
     std::fs::create_dir_all(&providers_dir)
         .map_err(|e| format!("Failed to create cache dir: {e}"))?;
 
+    let mirror = registry_mirror.trim_end_matches('/');
+    let repo_url = if mirror.is_empty() {
+        format!("https://github.com/{CATALOG_REPO}.git")
+    } else {
+        format!("{mirror}/https://github.com/{CATALOG_REPO}.git")
+    };
+
+    // Clone or pull the registry repo
+    let git_ok = if repo_dir.join(".git").exists() {
+        // Pull latest changes
+        tokio::task::spawn_blocking({
+            let repo_dir = repo_dir.clone();
+            move || {
+                std::process::Command::new("git")
+                    .args(["pull", "--ff-only", "-q"])
+                    .current_dir(&repo_dir)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false)
+            }
+        })
+        .await
+        .unwrap_or(false)
+    } else {
+        // Shallow clone (depth=1) to save bandwidth
+        tokio::task::spawn_blocking({
+            let repo_dir = repo_dir.clone();
+            let repo_url = repo_url.clone();
+            move || {
+                std::process::Command::new("git")
+                    .args(["clone", "--depth", "1", "-q", &repo_url])
+                    .arg(&repo_dir)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false)
+            }
+        })
+        .await
+        .unwrap_or(false)
+    };
+
+    if !git_ok {
+        // Fallback to HTTP API if git is not available
+        tracing::warn!("git clone/pull failed, falling back to HTTP API");
+        return sync_catalog_http(home_dir, registry_mirror).await;
+    }
+
+    // Copy TOML files from repo to cache
+    let mut downloaded = 0usize;
+    let mut models_count = 0usize;
+
+    let repo_providers = repo_dir.join("providers");
+    if repo_providers.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(&repo_providers) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().is_some_and(|e| e == "toml") {
+                    if let Ok(content) = std::fs::read_to_string(&path) {
+                        let dest = providers_dir.join(entry.file_name());
+                        if std::fs::write(&dest, &content).is_ok() {
+                            downloaded += 1;
+                            if let Ok(file) = toml::from_str::<ProviderCatalogFile>(&content) {
+                                models_count += file.models.len();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Copy aliases.toml if present
+    let aliases_src = repo_dir.join("aliases.toml");
+    if aliases_src.is_file() {
+        let _ = std::fs::copy(&aliases_src, cache_dir.join("aliases.toml"));
+    }
+
+    let timestamp = chrono::Utc::now().to_rfc3339();
+    let _ = std::fs::write(cache_dir.join(".last_sync"), &timestamp);
+
+    Ok(CatalogSyncResult {
+        files_downloaded: downloaded,
+        models_count,
+        timestamp,
+    })
+}
+
+/// HTTP fallback — original implementation using GitHub API + raw URLs.
+/// Used when git is not available on the system.
+async fn sync_catalog_http(
+    home_dir: &std::path::Path,
+    registry_mirror: &str,
+) -> Result<CatalogSyncResult, String> {
+    let cache_dir = home_dir.join("cache").join("catalog");
     let client = crate::http_client::proxied_client_builder()
         .build()
         .map_err(|e| format!("HTTP client error: {e}"))?;
 
-    // Get the repo tree to find all TOML files
     let mirror = registry_mirror.trim_end_matches('/');
     let tree_url = if mirror.is_empty() {
         format!("https://api.github.com/repos/{CATALOG_REPO}/git/trees/main?recursive=1")
@@ -76,8 +172,6 @@ pub async fn sync_catalog_to(
     if let Some(items) = tree["tree"].as_array() {
         for item in items {
             let path = item["path"].as_str().unwrap_or("");
-            // Download provider TOML files and aliases.toml
-            // Reject paths with ".." to prevent directory traversal from malicious API responses
             if !path.contains("..")
                 && ((path.starts_with("providers/") && path.ends_with(".toml"))
                     || path == "aliases.toml")
@@ -96,7 +190,6 @@ pub async fn sync_catalog_to(
                             }
                             if std::fs::write(&dest, &content).is_ok() {
                                 downloaded += 1;
-                                // Count models in provider files
                                 if path.starts_with("providers/") {
                                     if let Ok(file) =
                                         toml::from_str::<ProviderCatalogFile>(&content)
@@ -115,7 +208,6 @@ pub async fn sync_catalog_to(
         }
     }
 
-    // Write a timestamp so we know when we last synced
     let timestamp = chrono::Utc::now().to_rfc3339();
     let _ = std::fs::write(cache_dir.join(".last_sync"), &timestamp);
 

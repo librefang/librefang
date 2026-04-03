@@ -156,6 +156,8 @@
     "subtitle": "Active autonomous units managed by the LibreFang kernel.",
     "model": "Model",
     "provider": "Provider",
+    "max_tokens": "Max Tokens",
+    "temperature": "Temperature",
     "last_active": "Last Active",
     "no_matching": "No agents matching your search.",
     "system_prompt": "System Prompt",
