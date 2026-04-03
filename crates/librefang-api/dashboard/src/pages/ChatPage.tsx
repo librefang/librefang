@@ -38,7 +38,23 @@ const SLASH_COMMANDS = [
   { cmd: "/clear", desc: "Clear chat history" },
   { cmd: "/agents", desc: "List available agents" },
   { cmd: "/info", desc: "Show current agent info" },
+  { cmd: "/new", desc: "Reset session (clear history)" },
+  { cmd: "/compact", desc: "Compress context to save space" },
+  { cmd: "/reset", desc: "Reset session (clear history)" },
+  { cmd: "/reboot", desc: "Reboot session (clear context)" },
+  { cmd: "/stop", desc: "Cancel current run" },
+  { cmd: "/model", desc: "Show or switch model" },
+  { cmd: "/usage", desc: "Show session token usage" },
+  { cmd: "/context", desc: "Show context pressure" },
+  { cmd: "/verbose", desc: "Toggle verbose level" },
+  { cmd: "/budget", desc: "Show budget status" },
+  { cmd: "/peers", desc: "Show connected peers" },
+  { cmd: "/a2a", desc: "Show A2A agents" },
+  { cmd: "/queue", desc: "Show agent queue status" },
 ];
+
+// Commands that require backend processing via WebSocket command protocol
+const BACKEND_COMMANDS = ["new", "reset", "reboot", "compact", "stop", "model", "usage", "context", "verbose", "budget", "peers", "a2a", "queue"];
 
 
 // WebSocket hook with auto-reconnect
@@ -203,6 +219,42 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
       if (trimmed === "/info") {
         const a = agents.find(a => a.id === agentId);
         sysMsg(a ? `**${a.name}**\nModel: ${a.model_name || "-"}\nProvider: ${a.model_provider || "-"}\nState: ${a.state}` : "No agent selected.");
+        return;
+      }
+
+      // Backend commands: send as {"type": "command"} via WS, bypassing LLM
+      const parts = trimmed.slice(1).split(/\s+/, 2);
+      const cmd = parts[0];
+      const cmdArgs = trimmed.slice(1 + cmd.length).trim();
+      if (BACKEND_COMMANDS.includes(cmd)) {
+        setMessages(prev => [...prev,
+          { id: `user-${Date.now()}`, role: "user" as const, content: trimmed, timestamp: new Date() },
+        ]);
+        if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+          const handleCmdResponse = (event: MessageEvent) => {
+            try {
+              const data = JSON.parse(event.data as string);
+              if (data.type === "command_result" || data.type === "error") {
+                ws.current?.removeEventListener("message", handleCmdResponse);
+                const responseText = data.message || data.content || "";
+                // /new and /reset clear the backend session, so clear frontend too
+                if (data.type === "command_result" && (cmd === "new" || cmd === "reset")) {
+                  setMessages([
+                    { id: `sys-${Date.now()}`, role: "system" as const, content: responseText, timestamp: new Date() },
+                  ]);
+                } else {
+                  setMessages(prev => [...prev,
+                    { id: `sys-${Date.now()}`, role: "system" as const, content: responseText, timestamp: new Date() },
+                  ]);
+                }
+              }
+            } catch { /* ignore non-JSON */ }
+          };
+          ws.current.addEventListener("message", handleCmdResponse);
+          ws.current.send(JSON.stringify({ type: "command", command: cmd, args: cmdArgs }));
+        } else {
+          sysMsg("WebSocket not connected. Please refresh the page.");
+        }
         return;
       }
     }
