@@ -6,7 +6,7 @@ import { useNavigate } from "@tanstack/react-router";
 import { listAgents, getAgentDetail, AgentDetail, spawnAgent, suspendAgent, resumeAgent, patchAgentConfig,
   listPromptVersions, listExperiments, activatePromptVersion, startExperiment, pauseExperiment, completeExperiment,
   createPromptVersion, createExperiment, deletePromptVersion, PromptVersion, PromptExperiment, ExperimentVariantMetrics, getExperimentMetrics,
-  listModels, listProviders, listAgentTemplates } from "../api";
+  listModels, listProviders, listAgentTemplates, deleteAgent, cloneAgent, stopAgent, clearAgentHistory, resetAgentSession } from "../api";
 import { isProviderAvailable } from "../lib/status";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
@@ -16,7 +16,7 @@ import { Input } from "../components/ui/Input";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { Avatar } from "../components/ui/Avatar";
-import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, GitBranch, Trash2, Check, BarChart3 } from "lucide-react";
+import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, GitBranch, Trash2, Check, BarChart3, Copy, RotateCcw } from "lucide-react";
 import { truncateId } from "../lib/string";
 import { getStatusVariant } from "../lib/status";
 
@@ -40,6 +40,10 @@ export function AgentsPage() {
   const spawnMutation = useMutation({
     mutationFn: spawnAgent,
     onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["agents"] }); setShowCreate(false); setTemplateName(""); setManifestToml(""); }
+  });
+  const deleteMutation = useMutation({
+    mutationFn: deleteAgent,
+    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["agents"] }); setDetailAgent(null); }
   });
 
   const patchAgentConfigMutation = useMutation({
@@ -195,6 +199,9 @@ export function AgentsPage() {
           )}
           <Button variant="primary" size="sm" className="flex-1" onClick={(e) => { e.stopPropagation(); navigate({ to: "/chat", search: { agentId: agent.id } }); }}>
             <MessageCircle className="h-3.5 w-3.5 mr-1" /> {t("common.interact")}
+          </Button>
+          <Button variant="secondary" size="sm" onClick={(e) => { e.stopPropagation(); if (confirm(t("agents.delete_confirm", { name: agent.name }))) deleteMutation.mutate(agent.id); }}>
+            <Trash2 className="h-3.5 w-3.5" />
           </Button>
         </div>
       </Card>
@@ -460,15 +467,37 @@ export function AgentsPage() {
               )}
 
               {/* Actions */}
-              <div className="flex gap-2 pt-2 border-t border-border-subtle">
-                <Button variant="secondary" size="sm" className="flex-1" onClick={() => setShowPrompts(true)}>
-                  <FlaskConical className="w-3.5 h-3.5 mr-1" />
-                  {t("agents.prompts") || "Prompts"}
-                </Button>
-                <Button variant="primary" size="sm" className="flex-1" onClick={() => { closeDetailModal(); navigate({ to: "/chat", search: { agentId: detailAgent.id } }); }}>
-                  <MessageCircle className="w-3.5 h-3.5 mr-1" />
-                  {t("common.interact")}
-                </Button>
+              <div className="flex flex-col gap-2 pt-2 border-t border-border-subtle">
+                <div className="flex gap-2">
+                  <Button variant="primary" size="sm" className="flex-1" onClick={() => { closeDetailModal(); navigate({ to: "/chat", search: { agentId: detailAgent.id } }); }}>
+                    <MessageCircle className="w-3.5 h-3.5 mr-1" />
+                    {t("common.interact")}
+                  </Button>
+                  {(detailAgent as any).state?.toLowerCase() === "suspended" ? (
+                    <Button variant="secondary" size="sm" onClick={async () => { await resumeAgent(detailAgent.id); agentsQuery.refetch(); const d = await getAgentDetail(detailAgent.id); setDetailAgent(d); }}>
+                      <Play className="w-3.5 h-3.5 mr-1" /> {t("agents.resume")}
+                    </Button>
+                  ) : (
+                    <Button variant="secondary" size="sm" onClick={async () => { await suspendAgent(detailAgent.id); agentsQuery.refetch(); const d = await getAgentDetail(detailAgent.id); setDetailAgent(d); }}>
+                      <Pause className="w-3.5 h-3.5 mr-1" /> {t("agents.suspend")}
+                    </Button>
+                  )}
+                </div>
+                <div className="flex gap-2">
+                  <Button variant="secondary" size="sm" className="flex-1" onClick={() => setShowPrompts(true)}>
+                    <FlaskConical className="w-3.5 h-3.5 mr-1" />
+                    {t("agents.prompts") || "Prompts"}
+                  </Button>
+                  <Button variant="secondary" size="sm" onClick={async () => { await cloneAgent(detailAgent.id); agentsQuery.refetch(); }}>
+                    <Copy className="w-3.5 h-3.5 mr-1" /> {t("agents.clone")}
+                  </Button>
+                  <Button variant="secondary" size="sm" onClick={async () => { if (confirm(t("agents.reset_confirm"))) { await resetAgentSession(detailAgent.id); const d = await getAgentDetail(detailAgent.id); setDetailAgent(d); } }}>
+                    <RotateCcw className="w-3.5 h-3.5 mr-1" /> {t("agents.reset")}
+                  </Button>
+                  <Button variant="secondary" size="sm" onClick={() => { if (confirm(t("agents.delete_confirm", { name: detailAgent.name }))) { deleteMutation.mutate(detailAgent.id); } }}>
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </Button>
+                </div>
               </div>
             </div>
           </div>

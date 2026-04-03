@@ -769,6 +769,26 @@ export async function listAgentTemplates(): Promise<AgentTemplate[]> {
   return data.templates ?? [];
 }
 
+export async function deleteAgent(agentId: string): Promise<ApiActionResponse> {
+  return del<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}`);
+}
+
+export async function cloneAgent(agentId: string): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}/clone`, {});
+}
+
+export async function stopAgent(agentId: string): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}/stop`, {});
+}
+
+export async function clearAgentHistory(agentId: string): Promise<ApiActionResponse> {
+  return del<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}/history`);
+}
+
+export async function resetAgentSession(agentId: string): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}/reset`, {});
+}
+
 export async function loadAgentSession(agentId: string): Promise<AgentSessionResponse> {
   return get<AgentSessionResponse>(`/api/agents/${encodeURIComponent(agentId)}/session`);
 }
