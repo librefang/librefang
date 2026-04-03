@@ -278,7 +278,7 @@ memory_write = ["self.*"]
 #[tokio::test(flavor = "multi_thread")]
 async fn test_health_endpoint() {
     let server = start_test_server().await;
-    let client = librefang_runtime::http_client::new_client();
+    let client = reqwest::Client::new();
 
     let resp = client
         .get(format!("{}/api/health", server.base_url))
@@ -303,7 +303,7 @@ async fn test_health_endpoint() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_status_endpoint() {
     let server = start_test_server().await;
-    let client = librefang_runtime::http_client::new_client();
+    let client = reqwest::Client::new();
 
     let resp = client
         .get(format!("{}/api/status", server.base_url))
@@ -605,7 +605,7 @@ async fn test_config_reload_hot_reloads_proxy_changes() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_spawn_list_kill_agent() {
     let server = start_test_server().await;
-    let client = librefang_runtime::http_client::new_client();
+    let client = reqwest::Client::new();
 
     // --- Spawn ---
     let resp = client
@@ -661,7 +661,7 @@ async fn test_spawn_list_kill_agent() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_agent_session_empty() {
     let server = start_test_server().await;
-    let client = librefang_runtime::http_client::new_client();
+    let client = reqwest::Client::new();
 
     // Spawn agent
     let resp = client
@@ -691,7 +691,7 @@ async fn test_agent_session_empty() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_agent_monitoring_endpoints() {
     let server = start_test_server().await;
-    let client = librefang_runtime::http_client::new_client();
+    let client = reqwest::Client::new();
 
     let resp = client
         .post(format!("{}/api/agents", server.base_url))
@@ -754,7 +754,7 @@ async fn test_send_message_with_llm() {
     }
 
     let server = start_test_server_with_llm().await;
-    let client = librefang_runtime::http_client::new_client();
+    let client = reqwest::Client::new();
 
     // Spawn
     let resp = client
@@ -802,7 +802,7 @@ async fn test_send_message_with_llm() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_workflow_crud() {
     let server = start_test_server().await;
-    let client = librefang_runtime::http_client::new_client();
+    let client = reqwest::Client::new();
 
     // Spawn agent for workflow
     let resp = client
@@ -855,7 +855,7 @@ async fn test_workflow_crud() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_trigger_crud() {
     let server = start_test_server().await;
-    let client = librefang_runtime::http_client::new_client();
+    let client = reqwest::Client::new();
 
     // Spawn agent for trigger
     let resp = client
@@ -935,7 +935,7 @@ async fn test_trigger_crud() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_invalid_agent_id_returns_400() {
     let server = start_test_server().await;
-    let client = librefang_runtime::http_client::new_client();
+    let client = reqwest::Client::new();
 
     // Send message to invalid ID
     let resp = client
@@ -968,7 +968,7 @@ async fn test_invalid_agent_id_returns_400() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_kill_nonexistent_agent_returns_404() {
     let server = start_test_server().await;
-    let client = librefang_runtime::http_client::new_client();
+    let client = reqwest::Client::new();
 
     let fake_id = uuid::Uuid::new_v4();
     let resp = client
@@ -982,7 +982,7 @@ async fn test_kill_nonexistent_agent_returns_404() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_spawn_invalid_manifest_returns_400() {
     let server = start_test_server().await;
-    let client = librefang_runtime::http_client::new_client();
+    let client = reqwest::Client::new();
 
     let resp = client
         .post(format!("{}/api/agents", server.base_url))
@@ -998,7 +998,7 @@ async fn test_spawn_invalid_manifest_returns_400() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_request_id_header_is_uuid() {
     let server = start_test_server().await;
-    let client = librefang_runtime::http_client::new_client();
+    let client = reqwest::Client::new();
 
     let resp = client
         .get(format!("{}/api/health", server.base_url))
@@ -1021,7 +1021,7 @@ async fn test_request_id_header_is_uuid() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_multiple_agents_lifecycle() {
     let server = start_test_server().await;
-    let client = librefang_runtime::http_client::new_client();
+    let client = reqwest::Client::new();
 
     // Spawn 3 agents
     let mut ids = Vec::new();
@@ -1445,7 +1445,7 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_auth_health_is_public() {
     let server = start_test_server_with_auth("secret-key-123").await;
-    let client = librefang_runtime::http_client::new_client();
+    let client = reqwest::Client::new();
 
     // /api/health should be accessible without auth
     let resp = client
@@ -1459,7 +1459,7 @@ async fn test_auth_health_is_public() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_auth_rejects_no_token() {
     let server = start_test_server_with_auth("secret-key-123").await;
-    let client = librefang_runtime::http_client::new_client();
+    let client = reqwest::Client::new();
 
     // Protected endpoint without auth header → 401
     // Note: /api/status is public (dashboard needs it), so use a protected endpoint
@@ -1476,7 +1476,7 @@ async fn test_auth_rejects_no_token() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_auth_rejects_wrong_token() {
     let server = start_test_server_with_auth("secret-key-123").await;
-    let client = librefang_runtime::http_client::new_client();
+    let client = reqwest::Client::new();
 
     // Wrong bearer token → 401
     // Note: /api/status is public (dashboard needs it), so use a protected endpoint
@@ -1494,7 +1494,7 @@ async fn test_auth_rejects_wrong_token() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_auth_accepts_correct_token() {
     let server = start_test_server_with_auth("secret-key-123").await;
-    let client = librefang_runtime::http_client::new_client();
+    let client = reqwest::Client::new();
 
     // Correct bearer token → 200
     let resp = client
@@ -1512,7 +1512,7 @@ async fn test_auth_accepts_correct_token() {
 async fn test_auth_disabled_when_no_key() {
     // Empty API key = auth disabled
     let server = start_test_server().await;
-    let client = librefang_runtime::http_client::new_client();
+    let client = reqwest::Client::new();
 
     // Protected endpoint accessible without auth when no key is configured
     let resp = client
@@ -1530,7 +1530,7 @@ async fn test_auth_disabled_when_no_key() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_list_tools() {
     let server = start_test_server().await;
-    let client = librefang_runtime::http_client::new_client();
+    let client = reqwest::Client::new();
 
     let resp = client
         .get(format!("{}/api/tools", server.base_url))
@@ -1547,7 +1547,7 @@ async fn test_list_tools() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_get_tool_found() {
     let server = start_test_server().await;
-    let client = librefang_runtime::http_client::new_client();
+    let client = reqwest::Client::new();
 
     // First list tools to get a known tool name
     let resp = client
@@ -1575,7 +1575,7 @@ async fn test_get_tool_found() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_get_tool_not_found() {
     let server = start_test_server().await;
-    let client = librefang_runtime::http_client::new_client();
+    let client = reqwest::Client::new();
 
     let resp = client
         .get(format!(
