@@ -332,6 +332,10 @@ install() {
 
     AUTO_START="${LIBREFANG_AUTO_START:-1}"
     if is_enabled "$AUTO_START"; then
+        # Register boot service so LibreFang starts on login/reboot
+        echo "  Registering boot service..."
+        "$INSTALL_DIR/librefang" service install 2>/dev/null || true
+
         echo "  Starting daemon in background..."
         if start_daemon_if_needed; then
             echo ""

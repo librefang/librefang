@@ -7676,6 +7676,7 @@ system_prompt = "You are a helpful assistant."
     /// publishes `HealthCheckFailed` events for unresponsive agents.
     fn start_heartbeat_monitor(self: &Arc<Self>) {
         use crate::heartbeat::{check_agents, is_quiet_hours, HeartbeatConfig};
+        use std::collections::HashSet;
 
         let kernel = Arc::clone(self);
         let config = HeartbeatConfig::from_toml(&kernel.config.load().heartbeat);
@@ -7684,6 +7685,9 @@ system_prompt = "You are a helpful assistant."
         tokio::spawn(async move {
             let mut interval =
                 tokio::time::interval(std::time::Duration::from_secs(config.check_interval_secs));
+            // Track which agents are already known-unresponsive to avoid
+            // spamming repeated WARN logs and HealthCheckFailed events.
+            let mut known_unresponsive: HashSet<AgentId> = HashSet::new();
 
             loop {
                 interval.tick().await;
@@ -7707,15 +7711,31 @@ system_prompt = "You are a helpful assistant."
                     }
 
                     if status.unresponsive {
-                        let event = Event::new(
-                            status.agent_id,
-                            EventTarget::System,
-                            EventPayload::System(SystemEvent::HealthCheckFailed {
-                                agent_id: status.agent_id,
-                                unresponsive_secs: status.inactive_secs as u64,
-                            }),
-                        );
-                        kernel.event_bus.publish(event).await;
+                        // Only warn and publish event on the *transition* to unresponsive
+                        if known_unresponsive.insert(status.agent_id) {
+                            warn!(
+                                agent = %status.name,
+                                inactive_secs = status.inactive_secs,
+                                "Agent is unresponsive"
+                            );
+                            let event = Event::new(
+                                status.agent_id,
+                                EventTarget::System,
+                                EventPayload::System(SystemEvent::HealthCheckFailed {
+                                    agent_id: status.agent_id,
+                                    unresponsive_secs: status.inactive_secs as u64,
+                                }),
+                            );
+                            kernel.event_bus.publish(event).await;
+                        }
+                    } else {
+                        // Agent recovered — remove from known-unresponsive set
+                        if known_unresponsive.remove(&status.agent_id) {
+                            info!(
+                                agent = %status.name,
+                                "Agent recovered from unresponsive state"
+                            );
+                        }
                     }
                 }
             }
