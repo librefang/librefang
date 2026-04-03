@@ -5,12 +5,42 @@ set -euo pipefail
 # Usage: curl -sL https://raw.githubusercontent.com/librefang/librefang/main/deploy/fly/deploy.sh | bash
 
 REPO="https://github.com/librefang/librefang.git"
+REPO_API="librefang/librefang"
 REGION="nrt"
 
 info()  { printf "\033[1;34m→\033[0m %s\n" "$1"; }
 ok()    { printf "\033[1;32m✓\033[0m %s\n" "$1"; }
 warn()  { printf "\033[1;33m⚠\033[0m %s\n" "$1"; }
 err()   { printf "\033[1;31m✗\033[0m %s\n" "$1" >&2; exit 1; }
+
+# Get latest version with binary assets (skips empty tag-only releases)
+get_latest_version() {
+    local version
+
+    if [ -n "${LIBREFANG_VERSION:-}" ]; then
+        version="$LIBREFANG_VERSION"
+        echo "Using specified version: $version" >&2
+    else
+        echo "Fetching latest release..." >&2
+        # Find the most recent release that has binary assets (skip empty tag-only releases)
+        version=$(curl -fsSL "https://api.github.com/repos/$REPO_API/releases?per_page=10" | \
+            grep -E '"tag_name"|"assets":\[' | \
+            paste - - | \
+            grep -v '"assets":\[\]' | \
+            head -1 | \
+            sed 's/.*"tag_name": *"//' | sed 's/".*//')
+        # Fallback to /releases/latest if the above fails
+        if [ -z "$version" ]; then
+            version=$(curl -fsSL "https://api.github.com/repos/$REPO_API/releases/latest" | grep '"tag_name"' | sed 's/.*"tag_name": *"//' | sed 's/".*//')
+        fi
+    fi
+
+    if [ -z "$version" ]; then
+        err "Failed to fetch latest release version from GitHub"
+    fi
+
+    echo "$version"
+}
 
 # --- 1. Check / Install flyctl ---
 if ! command -v flyctl &>/dev/null; then
@@ -27,8 +57,12 @@ if ! flyctl auth whoami &>/dev/null; then
 fi
 ok "Logged in as $(flyctl auth whoami)"
 
-# --- 3. Clone repo ---
+# --- 3. Get version and clone repo ---
 TMPDIR=$(mktemp -d)
+
+VERSION=$(get_latest_version)
+ok "Found release: $VERSION"
+
 info "Cloning LibreFang..."
 git clone --depth 1 "$REPO" "$TMPDIR/librefang"
 cd "$TMPDIR/librefang"
@@ -56,8 +90,10 @@ while true; do
   fi
 done
 
-# Update fly.toml with generated app name
-sed -i.bak "s/^app = .*/app = \"$APP_NAME\"/" deploy/fly/fly.toml && rm -f deploy/fly/fly.toml.bak
+# Update fly.toml with generated app name and versioned image
+sed -i.bak "s/^app = .*/app = \"$APP_NAME\"/" deploy/fly/fly.toml
+sed -i.bak "s|image = .*|image = \"ghcr.io/librefang/librefang:$VERSION\"|" deploy/fly/fly.toml
+rm -f deploy/fly/fly.toml.bak
 
 # --- 5. Create persistent volume ---
 info "Creating 1GB persistent volume..."
