@@ -1130,6 +1130,8 @@ export function ChatPage() {
               onSwitchSession={handleSwitchSession}
               onNewSession={handleNewSession}
               onDeleteSession={handleDeleteSession}
+              agentId={selectedAgentId}
+              onModelChange={() => queryClient.invalidateQueries({ queryKey: ["agents", "list"] })}
             />
           )}
 
