@@ -319,6 +319,7 @@ fn start_stream_text_bridge(
     kernel_handle: tokio::task::JoinHandle<
         KernelResult<librefang_runtime::agent_loop::AgentLoopResult>,
     >,
+    is_group: bool,
 ) -> mpsc::Receiver<String> {
     let (tx, rx) = mpsc::channel::<String>(64);
     let error_tx = tx.clone();
@@ -391,8 +392,30 @@ fn start_stream_text_bridge(
                         "\n\n---\n[Task timed out. The output above may be incomplete.]"
                             .to_string(),
                     )
+                } else if is_group {
+                    // In groups: suppress all errors (no leaked technical messages)
+                    None
                 } else {
-                    Some(sanitize_channel_error(&err_str))
+                    // In DMs: try to show original rate-limit message with reset time
+                    let lower = err_str.to_lowercase();
+                    if lower.contains("hit your limit")
+                        || lower.contains("out of extra usage")
+                        || lower.contains("resets")
+                    {
+                        // Extract original message after the first ": "
+                        let original =
+                            err_str.split(": ").skip(1).collect::<Vec<_>>().join(": ");
+                        if original.contains("hit your limit")
+                            || original.contains("out of extra usage")
+                            || original.contains("resets")
+                        {
+                            Some(original)
+                        } else {
+                            Some(sanitize_channel_error(&err_str))
+                        }
+                    } else {
+                        Some(sanitize_channel_error(&err_str))
+                    }
                 }
             }
             Ok(Ok(result)) => {
@@ -493,7 +516,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             .send_message_streaming_with_routing(agent_id, message, None)
             .await
             .map_err(|e| format!("{e}"))?;
-        Ok(start_stream_text_bridge(event_rx, kernel_handle))
+        Ok(start_stream_text_bridge(event_rx, kernel_handle, false))
     }
 
     async fn send_message_streaming_with_sender(
@@ -507,7 +530,11 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             .send_message_streaming_with_sender_context_and_routing(agent_id, message, None, sender)
             .await
             .map_err(|e| format!("{e}"))?;
-        Ok(start_stream_text_bridge(event_rx, kernel_handle))
+        Ok(start_stream_text_bridge(
+            event_rx,
+            kernel_handle,
+            sender.is_group,
+        ))
     }
 
     async fn send_message_with_sender(
