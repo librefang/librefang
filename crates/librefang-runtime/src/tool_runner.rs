@@ -301,10 +301,10 @@ pub async fn execute_tool(
         "agent_list" => tool_agent_list(kernel),
         "agent_kill" => tool_agent_kill(input, kernel),
 
-        // Shared memory tools
-        "memory_store" => tool_memory_store(input, kernel),
-        "memory_recall" => tool_memory_recall(input, kernel),
-        "memory_list" => tool_memory_list(kernel),
+        // Shared memory tools (peer-scoped when sender_id is present)
+        "memory_store" => tool_memory_store(input, kernel, sender_id),
+        "memory_recall" => tool_memory_recall(input, kernel, sender_id),
+        "memory_list" => tool_memory_list(kernel, sender_id),
 
         // Collaboration tools
         "agent_find" => tool_agent_find(input, kernel),
@@ -1948,29 +1948,34 @@ fn tool_agent_kill(
 fn tool_memory_store(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
+    peer_id: Option<&str>,
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
     let key = input["key"].as_str().ok_or("Missing 'key' parameter")?;
     let value = input.get("value").ok_or("Missing 'value' parameter")?;
-    kh.memory_store(key, value.clone())?;
+    kh.memory_store(key, value.clone(), peer_id)?;
     Ok(format!("Stored value under key '{key}'."))
 }
 
 fn tool_memory_recall(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
+    peer_id: Option<&str>,
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
     let key = input["key"].as_str().ok_or("Missing 'key' parameter")?;
-    match kh.memory_recall(key)? {
+    match kh.memory_recall(key, peer_id)? {
         Some(val) => Ok(serde_json::to_string_pretty(&val).unwrap_or_else(|_| val.to_string())),
         None => Ok(format!("No value found for key '{key}'.")),
     }
 }
 
-fn tool_memory_list(kernel: Option<&Arc<dyn KernelHandle>>) -> Result<String, String> {
+fn tool_memory_list(
+    kernel: Option<&Arc<dyn KernelHandle>>,
+    peer_id: Option<&str>,
+) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
-    let keys = kh.memory_list()?;
+    let keys = kh.memory_list(peer_id)?;
     if keys.is_empty() {
         return Ok("No entries found in shared memory.".to_string());
     }
@@ -2407,13 +2412,13 @@ async fn tool_schedule_create(
     });
 
     // Load existing schedules from shared memory
-    let mut schedules: Vec<serde_json::Value> = match kh.memory_recall(SCHEDULES_KEY)? {
+    let mut schedules: Vec<serde_json::Value> = match kh.memory_recall(SCHEDULES_KEY, None)? {
         Some(serde_json::Value::Array(arr)) => arr,
         _ => Vec::new(),
     };
 
     schedules.push(entry);
-    kh.memory_store(SCHEDULES_KEY, serde_json::Value::Array(schedules))?;
+    kh.memory_store(SCHEDULES_KEY, serde_json::Value::Array(schedules), None)?;
 
     Ok(format!(
         "Schedule created:\n  ID: {schedule_id}\n  Description: {description}\n  Cron: {cron_expr}\n  Original: {schedule_str}"
@@ -2423,7 +2428,7 @@ async fn tool_schedule_create(
 async fn tool_schedule_list(kernel: Option<&Arc<dyn KernelHandle>>) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
 
-    let schedules: Vec<serde_json::Value> = match kh.memory_recall(SCHEDULES_KEY)? {
+    let schedules: Vec<serde_json::Value> = match kh.memory_recall(SCHEDULES_KEY, None)? {
         Some(serde_json::Value::Array(arr)) => arr,
         _ => Vec::new(),
     };
@@ -2456,7 +2461,7 @@ async fn tool_schedule_delete(
     let kh = require_kernel(kernel)?;
     let id = input["id"].as_str().ok_or("Missing 'id' parameter")?;
 
-    let mut schedules: Vec<serde_json::Value> = match kh.memory_recall(SCHEDULES_KEY)? {
+    let mut schedules: Vec<serde_json::Value> = match kh.memory_recall(SCHEDULES_KEY, None)? {
         Some(serde_json::Value::Array(arr)) => arr,
         _ => Vec::new(),
     };
@@ -2468,7 +2473,7 @@ async fn tool_schedule_delete(
         return Err(format!("Schedule '{id}' not found."));
     }
 
-    kh.memory_store(SCHEDULES_KEY, serde_json::Value::Array(schedules))?;
+    kh.memory_store(SCHEDULES_KEY, serde_json::Value::Array(schedules), None)?;
     Ok(format!("Schedule '{id}' deleted."))
 }
 
@@ -3976,15 +3981,24 @@ mod tests {
             Err("not used".to_string())
         }
 
-        fn memory_store(&self, _key: &str, _value: serde_json::Value) -> Result<(), String> {
+        fn memory_store(
+            &self,
+            _key: &str,
+            _value: serde_json::Value,
+            _peer_id: Option<&str>,
+        ) -> Result<(), String> {
             Err("not used".to_string())
         }
 
-        fn memory_recall(&self, _key: &str) -> Result<Option<serde_json::Value>, String> {
+        fn memory_recall(
+            &self,
+            _key: &str,
+            _peer_id: Option<&str>,
+        ) -> Result<Option<serde_json::Value>, String> {
             Err("not used".to_string())
         }
 
-        fn memory_list(&self) -> Result<Vec<String>, String> {
+        fn memory_list(&self, _peer_id: Option<&str>) -> Result<Vec<String>, String> {
             Err("not used".to_string())
         }
 
@@ -5646,15 +5660,24 @@ mod tests {
             Err("not used".to_string())
         }
 
-        fn memory_store(&self, _key: &str, _value: serde_json::Value) -> Result<(), String> {
+        fn memory_store(
+            &self,
+            _key: &str,
+            _value: serde_json::Value,
+            _peer_id: Option<&str>,
+        ) -> Result<(), String> {
             Err("not used".to_string())
         }
 
-        fn memory_recall(&self, _key: &str) -> Result<Option<serde_json::Value>, String> {
+        fn memory_recall(
+            &self,
+            _key: &str,
+            _peer_id: Option<&str>,
+        ) -> Result<Option<serde_json::Value>, String> {
             Err("not used".to_string())
         }
 
-        fn memory_list(&self) -> Result<Vec<String>, String> {
+        fn memory_list(&self, _peer_id: Option<&str>) -> Result<Vec<String>, String> {
             Err("not used".to_string())
         }
 
