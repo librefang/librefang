@@ -62,3 +62,9 @@ result
 *.swo
 *~
 .gitnexus
+
+# Dev workflow tooling (local only)
+.claude-flow/
+.agentic-qe/
+docs/adr/
+CLAUDE.md
