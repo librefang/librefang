@@ -5,6 +5,25 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
+## [2026.4.4] - 2026-04-04
+
+### Added
+
+- Editable temperature, provider and model dropdowns (#2010) (@leszek3737)
+- Add `librefang service install/uninstall/status` commands (#2014) (@houko)
+- Per-peer memory isolation for multi-user channels (#2015) (@houko)
+- Agent template dropdown + fix resolve path (#2017) (@houko)
+- Add agent actions — delete, clone, reset, suspend/resume (#2018) (@houko)
+
+### Fixed
+
+- Fix Render build by adding root render.yaml with Dockerfile path (#2011) (@houko)
+- Route slash commands via WS command protocol (#2012) (@houko)
+- Suppress repeated unresponsive warnings and event bus overflow (#2013) (@houko)
+- Wait for port release before restarting daemon in dev mode (#2016) (@houko)
+- Add missing agents page i18n keys (#2019) (@houko)
+
+
 ## [2026.4.3] - 2026-04-03
 
 ### Fixed
