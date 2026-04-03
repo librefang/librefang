@@ -255,7 +255,11 @@ export function AgentsPage() {
         </div>
       )}
       {/* Agent Detail Modal */}
-      {detailAgent && (
+      {detailAgent && (() => {
+        const detailState = ((detailAgent as any).state || "").toLowerCase();
+        const isDetailSuspended = detailState === "suspended";
+        const statusColor = isDetailSuspended ? "bg-warning" : detailState === "crashed" ? "bg-error" : "bg-success";
+        return (
         <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40 backdrop-blur-sm" onClick={closeDetailModal}>
           <div className="bg-surface rounded-t-2xl sm:rounded-2xl shadow-2xl border border-border-subtle w-full sm:w-[560px] sm:max-w-[90vw] max-h-[85vh] sm:max-h-[80vh] overflow-y-auto animate-fade-in-scale" onClick={e => e.stopPropagation()}>
             {/* Modal Header */}
@@ -264,17 +268,27 @@ export function AgentsPage() {
                 <div className="flex items-center gap-4">
                   <div className="relative">
                     <Avatar fallback={detailAgent.name} size="lg" />
-                    <span className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full bg-success border-2 border-surface" />
+                    <span className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full ${statusColor} border-2 border-surface ${!isDetailSuspended && detailState !== "crashed" ? "animate-pulse" : ""}`} />
                   </div>
                   <div>
                     <h3 className="text-lg font-black tracking-tight">{t(`agents.builtin.${detailAgent.name}.name`, { defaultValue: detailAgent.name })}</h3>
-                    <p className="text-[10px] text-text-dim font-mono mt-0.5">{truncateId(detailAgent.id, 16)}</p>
+                    <div className="flex items-center gap-2 mt-0.5">
+                      <p className="text-[10px] text-text-dim font-mono">{truncateId(detailAgent.id, 16)}</p>
+                      <Badge variant={isDetailSuspended ? "warning" : "success"} dot>
+                        {(detailAgent as any).state ? t(`common.${detailState}`, { defaultValue: (detailAgent as any).state }) : t("common.running")}
+                      </Badge>
+                    </div>
                   </div>
                 </div>
                 <button onClick={closeDetailModal} className="p-2 rounded-xl hover:bg-main transition-colors"><X className="w-4 h-4" /></button>
               </div>
             </div>
             <div className="p-6 space-y-5">
+
+              {/* Description */}
+              {(detailAgent as any).description && (
+                <p className="text-xs text-text-dim leading-relaxed">{(detailAgent as any).description}</p>
+              )}
               {/* Model */}
               {detailAgent.model && (
                 <div>
@@ -467,42 +481,51 @@ export function AgentsPage() {
               )}
 
               {/* Actions */}
-              <div className="flex flex-col gap-2 pt-2 border-t border-border-subtle">
-                <div className="flex gap-2">
-                  <Button variant="primary" size="sm" className="flex-1" onClick={() => { closeDetailModal(); navigate({ to: "/chat", search: { agentId: detailAgent.id } }); }}>
-                    <MessageCircle className="w-3.5 h-3.5 mr-1" />
-                    {t("common.interact")}
-                  </Button>
-                  {(detailAgent as any).state?.toLowerCase() === "suspended" ? (
-                    <Button variant="secondary" size="sm" onClick={async () => { await resumeAgent(detailAgent.id); agentsQuery.refetch(); const d = await getAgentDetail(detailAgent.id); setDetailAgent(d); }}>
-                      <Play className="w-3.5 h-3.5 mr-1" /> {t("agents.resume")}
+              <div className="space-y-3 pt-3 border-t border-border-subtle">
+                {/* Primary action */}
+                <Button variant="primary" size="sm" className="w-full" onClick={() => { closeDetailModal(); navigate({ to: "/chat", search: { agentId: detailAgent.id } }); }}>
+                  <MessageCircle className="w-3.5 h-3.5 mr-1.5" />
+                  {t("common.interact")}
+                </Button>
+
+                {/* Management actions */}
+                <div className="grid grid-cols-4 gap-2">
+                  {isDetailSuspended ? (
+                    <Button variant="secondary" size="sm" className="flex-col gap-1 py-2.5 h-auto" onClick={async () => { await resumeAgent(detailAgent.id); agentsQuery.refetch(); const d = await getAgentDetail(detailAgent.id); setDetailAgent(d); }}>
+                      <Play className="w-4 h-4" />
+                      <span className="text-[9px]">{t("agents.resume")}</span>
                     </Button>
                   ) : (
-                    <Button variant="secondary" size="sm" onClick={async () => { await suspendAgent(detailAgent.id); agentsQuery.refetch(); const d = await getAgentDetail(detailAgent.id); setDetailAgent(d); }}>
-                      <Pause className="w-3.5 h-3.5 mr-1" /> {t("agents.suspend")}
+                    <Button variant="secondary" size="sm" className="flex-col gap-1 py-2.5 h-auto" onClick={async () => { await suspendAgent(detailAgent.id); agentsQuery.refetch(); const d = await getAgentDetail(detailAgent.id); setDetailAgent(d); }}>
+                      <Pause className="w-4 h-4" />
+                      <span className="text-[9px]">{t("agents.suspend")}</span>
                     </Button>
                   )}
-                </div>
-                <div className="flex gap-2">
-                  <Button variant="secondary" size="sm" className="flex-1" onClick={() => setShowPrompts(true)}>
-                    <FlaskConical className="w-3.5 h-3.5 mr-1" />
-                    {t("agents.prompts") || "Prompts"}
+                  <Button variant="secondary" size="sm" className="flex-col gap-1 py-2.5 h-auto" onClick={async () => { await cloneAgent(detailAgent.id); agentsQuery.refetch(); }}>
+                    <Copy className="w-4 h-4" />
+                    <span className="text-[9px]">{t("agents.clone")}</span>
                   </Button>
-                  <Button variant="secondary" size="sm" onClick={async () => { await cloneAgent(detailAgent.id); agentsQuery.refetch(); }}>
-                    <Copy className="w-3.5 h-3.5 mr-1" /> {t("agents.clone")}
+                  <Button variant="secondary" size="sm" className="flex-col gap-1 py-2.5 h-auto" onClick={async () => { if (confirm(t("agents.reset_confirm"))) { await resetAgentSession(detailAgent.id); const d = await getAgentDetail(detailAgent.id); setDetailAgent(d); } }}>
+                    <RotateCcw className="w-4 h-4" />
+                    <span className="text-[9px]">{t("agents.reset")}</span>
                   </Button>
-                  <Button variant="secondary" size="sm" onClick={async () => { if (confirm(t("agents.reset_confirm"))) { await resetAgentSession(detailAgent.id); const d = await getAgentDetail(detailAgent.id); setDetailAgent(d); } }}>
-                    <RotateCcw className="w-3.5 h-3.5 mr-1" /> {t("agents.reset")}
-                  </Button>
-                  <Button variant="secondary" size="sm" onClick={() => { if (confirm(t("agents.delete_confirm", { name: detailAgent.name }))) { deleteMutation.mutate(detailAgent.id); } }}>
-                    <Trash2 className="w-3.5 h-3.5" />
+                  <Button variant="secondary" size="sm" className="flex-col gap-1 py-2.5 h-auto text-error/70 hover:text-error" onClick={() => { if (confirm(t("agents.delete_confirm", { name: detailAgent.name }))) { deleteMutation.mutate(detailAgent.id); } }}>
+                    <Trash2 className="w-4 h-4" />
+                    <span className="text-[9px]">{t("common.delete")}</span>
                   </Button>
                 </div>
+
+                {/* Prompts link */}
+                <Button variant="secondary" size="sm" className="w-full" onClick={() => setShowPrompts(true)}>
+                  <FlaskConical className="w-3.5 h-3.5 mr-1.5" />
+                  {t("agents.prompts")}
+                </Button>
               </div>
             </div>
           </div>
         </div>
-      )}
+        );
+      })()}
 
       {/* Create Agent Modal */}
       {showCreate && (
