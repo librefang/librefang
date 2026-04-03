@@ -8763,6 +8763,20 @@ fn resolve_binary_path() -> std::path::PathBuf {
 }
 
 fn cmd_service_install() {
+    // Warn if running as root — the service would be installed for root, not
+    // the actual user. This catches `sudo librefang service install` mistakes.
+    #[cfg(unix)]
+    {
+        // SAFETY: geteuid() is always safe to call.
+        if unsafe { libc::geteuid() } == 0 {
+            ui::error(
+                "Running as root — the service will be installed for the root account, \
+                 not your user. Run without sudo instead.",
+            );
+            std::process::exit(1);
+        }
+    }
+
     let binary = resolve_binary_path();
     let librefang_home = cli_librefang_home();
 
