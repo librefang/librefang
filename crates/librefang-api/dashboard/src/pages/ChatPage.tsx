@@ -118,9 +118,16 @@ function useWebSocket(agentId: string | null) {
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
       retriesRef.current = 0;
       onDropRef.current = null;
-      if (wsRef.current) {
-        wsRef.current.onclose = null; // prevent reconnect on intentional close
-        wsRef.current.close();
+      const ws = wsRef.current;
+      if (ws) {
+        ws.onclose = null; // prevent reconnect on intentional close
+        if (ws.readyState === WebSocket.CONNECTING) {
+          // Closing a CONNECTING socket triggers a noisy browser warning;
+          // defer the close until it actually opens.
+          ws.onopen = () => ws.close();
+        } else if (ws.readyState === WebSocket.OPEN) {
+          ws.close();
+        }
         wsRef.current = null;
       }
     };
