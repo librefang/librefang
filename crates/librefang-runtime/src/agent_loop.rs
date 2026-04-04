@@ -1446,6 +1446,7 @@ pub async fn run_agent_loop(
                         && (result
                             .content
                             .contains("requires human approval and was denied")
+                            || result.content.contains("[MODIFY_AND_RETRY]")
                             || result.content.contains(ERR_PATH_TRAVERSAL)
                             || result.content.contains(ERR_SANDBOX_ESCAPE)
                             || result.content.contains("arguments were truncated"));
@@ -1505,6 +1506,26 @@ pub async fn run_agent_loop(
                              Do NOT retry denied tools. Explain to the user what you \
                              wanted to do and that it requires their approval.]",
                             denial_count
+                        ),
+                        provider_metadata: None,
+                    });
+                }
+
+                // Detect modify-and-retry requests and inject guidance
+                let modify_count = tool_result_blocks
+                    .iter()
+                    .filter(|b| {
+                        matches!(b, ContentBlock::ToolResult { content, is_error: true, .. }
+                        if content.contains("[MODIFY_AND_RETRY]"))
+                    })
+                    .count();
+                if modify_count > 0 {
+                    tool_result_blocks.push(ContentBlock::Text {
+                        text: format!(
+                            "[System: {} tool call(s) received human feedback requesting modification. \
+                             Read the feedback carefully, revise your approach, and retry with a \
+                             different strategy. Do NOT repeat the exact same tool call.]",
+                            modify_count
                         ),
                         provider_metadata: None,
                     });
@@ -3018,6 +3039,7 @@ pub async fn run_agent_loop_streaming(
                         && (result
                             .content
                             .contains("requires human approval and was denied")
+                            || result.content.contains("[MODIFY_AND_RETRY]")
                             || result.content.contains(ERR_PATH_TRAVERSAL)
                             || result.content.contains(ERR_SANDBOX_ESCAPE)
                             || result.content.contains("arguments were truncated"));
@@ -3072,6 +3094,26 @@ pub async fn run_agent_loop_streaming(
                              Do NOT retry denied tools. Explain to the user what you \
                              wanted to do and that it requires their approval.]",
                             denial_count
+                        ),
+                        provider_metadata: None,
+                    });
+                }
+
+                // Detect modify-and-retry requests and inject guidance
+                let modify_count = tool_result_blocks
+                    .iter()
+                    .filter(|b| {
+                        matches!(b, ContentBlock::ToolResult { content, is_error: true, .. }
+                        if content.contains("[MODIFY_AND_RETRY]"))
+                    })
+                    .count();
+                if modify_count > 0 {
+                    tool_result_blocks.push(ContentBlock::Text {
+                        text: format!(
+                            "[System: {} tool call(s) received human feedback requesting modification. \
+                             Read the feedback carefully, revise your approach, and retry with a \
+                             different strategy. Do NOT repeat the exact same tool call.]",
+                            modify_count
                         ),
                         provider_metadata: None,
                     });

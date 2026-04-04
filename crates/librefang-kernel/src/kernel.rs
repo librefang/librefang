@@ -9831,7 +9831,7 @@ impl KernelHandle for LibreFangKernel {
         agent_id: &str,
         tool_name: &str,
         action_summary: &str,
-    ) -> Result<bool, String> {
+    ) -> Result<librefang_types::approval::ApprovalDecision, String> {
         use librefang_types::approval::{ApprovalDecision, ApprovalRequest as TypedRequest};
 
         // Hand agents are curated trusted packages — auto-approve tool execution.
@@ -9840,7 +9840,7 @@ impl KernelHandle for LibreFangKernel {
             if let Some(entry) = self.registry.get(aid) {
                 if entry.tags.iter().any(|t| t.starts_with("hand:")) {
                     info!(agent_id, tool_name, "Auto-approved for hand agent");
-                    return Ok(true);
+                    return Ok(ApprovalDecision::Approved);
                 }
             }
         }
@@ -9848,8 +9848,9 @@ impl KernelHandle for LibreFangKernel {
         let policy = self.approval_manager.policy();
         let risk_level = crate::approval::ApprovalManager::classify_risk(tool_name);
         let description = format!("Agent {} requests to execute {}", agent_id, tool_name);
+        let request_id = uuid::Uuid::new_v4();
         let req = TypedRequest {
-            id: uuid::Uuid::new_v4(),
+            id: request_id,
             agent_id: agent_id.to_string(),
             tool_name: tool_name.to_string(),
             description: description.clone(),
@@ -9859,6 +9860,8 @@ impl KernelHandle for LibreFangKernel {
             timeout_secs: policy.timeout_secs,
             sender_id: None,
             channel: None,
+            route_to: Vec::new(),
+            escalation_count: 0,
         };
 
         // Publish an ApprovalRequested event so channel adapters can notify users
@@ -9870,7 +9873,7 @@ impl KernelHandle for LibreFangKernel {
                 agent_id.parse().unwrap_or_default(),
                 EventTarget::System,
                 EventPayload::ApprovalRequested(ApprovalRequestedEvent {
-                    request_id: req.id.to_string(),
+                    request_id: request_id.to_string(),
                     agent_id: agent_id.to_string(),
                     tool_name: tool_name.to_string(),
                     description: description.clone(),
@@ -9880,8 +9883,56 @@ impl KernelHandle for LibreFangKernel {
             self.event_bus.publish(event).await;
         }
 
+        // Push approval notification to configured channels
+        {
+            let cfg = self.config.load_full();
+            for target in &cfg.notification.approval_channels {
+                let msg = format!(
+                    "{} Approval needed: agent \"{}\" wants to run `{}` — {}",
+                    risk_level.emoji(),
+                    agent_id,
+                    tool_name,
+                    description,
+                );
+                if let Err(e) = self
+                    .send_channel_message(
+                        &target.channel_type,
+                        &target.recipient,
+                        &msg,
+                        target.thread_id.as_deref(),
+                    )
+                    .await
+                {
+                    warn!(
+                        channel = %target.channel_type,
+                        recipient = %target.recipient,
+                        error = %e,
+                        "Failed to push approval notification"
+                    );
+                }
+            }
+        }
+
         let decision = self.approval_manager.request_approval(req).await;
-        Ok(decision == ApprovalDecision::Approved)
+
+        // Publish resolved event so channel adapters can notify outcome
+        {
+            use librefang_types::event::{ApprovalResolvedEvent, Event, EventPayload, EventTarget};
+            let event = Event::new(
+                agent_id.parse().unwrap_or_default(),
+                EventTarget::System,
+                EventPayload::ApprovalResolved(ApprovalResolvedEvent {
+                    request_id: request_id.to_string(),
+                    agent_id: agent_id.to_string(),
+                    tool_name: tool_name.to_string(),
+                    decision: decision.as_str().to_string(),
+                    decided_by: None,
+                }),
+            );
+            self.event_bus.publish(event).await;
+        }
+
+        Ok(decision)
     }
 
     fn list_a2a_agents(&self) -> Vec<(String, String)> {

@@ -1775,6 +1775,9 @@ pub struct KernelConfig {
     /// Execution approval policy.
     #[serde(default, alias = "approval_policy")]
     pub approval: crate::approval::ApprovalPolicy,
+    /// Notification engine configuration for approval alerts and task state notifications.
+    #[serde(default)]
+    pub notification: crate::approval::NotificationConfig,
     /// Cron scheduler max total jobs across all agents. Default: 500.
     #[serde(default = "default_max_cron_jobs")]
     pub max_cron_jobs: usize,
@@ -2835,6 +2838,7 @@ impl Default for KernelConfig {
             webhook_triggers: None,
             triggers: TriggersConfig::default(),
             approval: crate::approval::ApprovalPolicy::default(),
+            notification: crate::approval::NotificationConfig::default(),
             max_cron_jobs: default_max_cron_jobs(),
             include: Vec::new(),
             exec_policy: ExecPolicy::default(),

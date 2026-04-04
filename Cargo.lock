@@ -4094,6 +4094,7 @@ dependencies = [
  "rand 0.10.0",
  "regex-lite",
  "reqwest 0.13.2",
+ "rusqlite",
  "serde",
  "serde_json",
  "serde_yaml",

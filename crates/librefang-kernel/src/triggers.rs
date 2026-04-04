@@ -596,6 +596,12 @@ fn describe_event(event: &Event) -> String {
                 ar.agent_id, ar.tool_name, ar.risk_level, ar.description
             )
         }
+        EventPayload::ApprovalResolved(ar) => {
+            format!(
+                "Approval resolved: request {} — {}",
+                ar.request_id, ar.decision
+            )
+        }
         EventPayload::Custom(data) => {
             format!("Custom event ({} bytes)", data.len())
         }

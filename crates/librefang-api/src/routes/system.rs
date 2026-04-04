@@ -54,11 +54,14 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             "/agents/{id}/sessions/by-label/{label}",
             axum::routing::get(find_session_by_label),
         )
-        // Approvals
+        // Approvals — static paths must precede the `{id}` wildcard
         .route(
             "/approvals",
             axum::routing::get(list_approvals).post(create_approval),
         )
+        .route("/approvals/batch", axum::routing::post(batch_resolve))
+        .route("/approvals/audit", axum::routing::get(audit_log))
+        .route("/approvals/count", axum::routing::get(approval_count))
         .route("/approvals/{id}", axum::routing::get(get_approval))
         .route(
             "/approvals/{id}/approve",
@@ -67,6 +70,10 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
         .route(
             "/approvals/{id}/reject",
             axum::routing::post(reject_request),
+        )
+        .route(
+            "/approvals/{id}/modify",
+            axum::routing::post(modify_request),
         )
         // Webhook triggers (external event injection)
         .route("/hooks/wake", axum::routing::post(webhook_wake))
@@ -1221,6 +1228,10 @@ pub async fn list_approvals(State(state): State<Arc<AppState>>) -> impl IntoResp
             librefang_types::approval::ApprovalDecision::Approved => "approved",
             librefang_types::approval::ApprovalDecision::Denied => "rejected",
             librefang_types::approval::ApprovalDecision::TimedOut => "expired",
+            librefang_types::approval::ApprovalDecision::ModifyAndRetry { .. } => {
+                "modify_and_retry"
+            }
+            librefang_types::approval::ApprovalDecision::Skipped => "skipped",
         };
         serde_json::json!({
             "id": request.id,
@@ -1324,6 +1335,8 @@ pub async fn create_approval(
         timeout_secs: policy.timeout_secs,
         sender_id: None,
         channel: None,
+        route_to: Vec::new(),
+        escalation_count: 0,
     };
 
     // Spawn the request in the background (it will block until resolved or timed out)
@@ -1398,6 +1411,141 @@ pub async fn reject_request(
         ),
         Err(e) => ApiErrorResponse::not_found(e).into_json_tuple(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Approval — modify, batch, audit, count
+// ---------------------------------------------------------------------------
+
+/// POST /api/approvals/{id}/modify — Return a pending request with feedback for modification.
+#[derive(serde::Deserialize)]
+pub struct ModifyRequestBody {
+    #[serde(default)]
+    feedback: String,
+}
+
+#[utoipa::path(post, path = "/api/approvals/{id}/modify", tag = "approvals", params(("id" = String, Path, description = "Approval ID")), request_body = serde_json::Value, responses((status = 200, description = "Request modified", body = serde_json::Value)))]
+pub async fn modify_request(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+    Json(body): Json<ModifyRequestBody>,
+) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    let uuid = match uuid::Uuid::parse_str(&id) {
+        Ok(u) => u,
+        Err(_) => {
+            return ApiErrorResponse::bad_request(t.t("api-error-approval-invalid-id"))
+                .into_json_tuple();
+        }
+    };
+
+    match state.kernel.approvals().resolve(
+        uuid,
+        librefang_types::approval::ApprovalDecision::ModifyAndRetry {
+            feedback: body.feedback,
+        },
+        Some("api".to_string()),
+    ) {
+        Ok(resp) => (
+            StatusCode::OK,
+            Json(
+                serde_json::json!({"id": id, "status": "modified", "decided_at": resp.decided_at.to_rfc3339()}),
+            ),
+        ),
+        Err(e) => ApiErrorResponse::not_found(e).into_json_tuple(),
+    }
+}
+
+/// POST /api/approvals/batch — Batch resolve multiple pending requests.
+#[derive(serde::Deserialize)]
+pub struct BatchResolveRequest {
+    ids: Vec<String>,
+    decision: String,
+}
+
+#[utoipa::path(post, path = "/api/approvals/batch", tag = "approvals", request_body = serde_json::Value, responses((status = 200, description = "Batch resolve results", body = serde_json::Value)))]
+pub async fn batch_resolve(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<BatchResolveRequest>,
+) -> impl IntoResponse {
+    let decision = match body.decision.as_str() {
+        "approve" => librefang_types::approval::ApprovalDecision::Approved,
+        "reject" => librefang_types::approval::ApprovalDecision::Denied,
+        other => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(
+                    serde_json::json!({"error": format!("invalid decision: {other}, expected 'approve' or 'reject'")}),
+                ),
+            );
+        }
+    };
+
+    let uuids: Vec<uuid::Uuid> = body
+        .ids
+        .iter()
+        .filter_map(|s| uuid::Uuid::parse_str(s).ok())
+        .collect();
+
+    let results = state
+        .kernel
+        .approvals()
+        .resolve_batch(uuids, decision, Some("api".to_string()));
+
+    let result_json: Vec<serde_json::Value> = results
+        .into_iter()
+        .map(|(id, res)| match res {
+            Ok(_) => serde_json::json!({"id": id.to_string(), "status": "ok"}),
+            Err(e) => serde_json::json!({"id": id.to_string(), "status": "error", "message": e}),
+        })
+        .collect();
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({"results": result_json})),
+    )
+}
+
+/// GET /api/approvals/audit — Query the persistent approval audit log.
+#[derive(serde::Deserialize)]
+pub struct AuditQueryParams {
+    #[serde(default = "default_audit_limit")]
+    limit: usize,
+    #[serde(default)]
+    offset: usize,
+    agent_id: Option<String>,
+    tool_name: Option<String>,
+}
+
+fn default_audit_limit() -> usize {
+    50
+}
+
+#[utoipa::path(get, path = "/api/approvals/audit", tag = "approvals", params(("limit" = Option<usize>, Query, description = "Max entries"), ("offset" = Option<usize>, Query, description = "Offset"), ("agent_id" = Option<String>, Query, description = "Filter by agent"), ("tool_name" = Option<String>, Query, description = "Filter by tool")), responses((status = 200, description = "Audit log entries", body = serde_json::Value)))]
+pub async fn audit_log(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<AuditQueryParams>,
+) -> impl IntoResponse {
+    let entries = state.kernel.approvals().query_audit(
+        params.limit,
+        params.offset,
+        params.agent_id.as_deref(),
+        params.tool_name.as_deref(),
+    );
+    let total = state
+        .kernel
+        .approvals()
+        .audit_count(params.agent_id.as_deref(), params.tool_name.as_deref());
+
+    Json(serde_json::json!({"entries": entries, "total": total}))
+}
+
+/// GET /api/approvals/count — Lightweight pending count for notification badges.
+#[utoipa::path(get, path = "/api/approvals/count", tag = "approvals", responses((status = 200, description = "Pending approval count", body = serde_json::Value)))]
+pub async fn approval_count(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let pending = state.kernel.approvals().pending_count();
+    Json(serde_json::json!({"pending": pending}))
 }
 
 // ---------------------------------------------------------------------------

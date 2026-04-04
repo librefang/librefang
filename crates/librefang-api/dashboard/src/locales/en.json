@@ -1122,7 +1122,31 @@
     },
     "queue_clear": "Queue Clear",
     "queue_clear_desc": "No pending actions.",
-    "help": "Review approval requests. When agents need human confirmation, requests appear here."
+    "help": "Review approval requests. When agents need human confirmation, requests appear here.",
+    "selectAll": "Select All",
+    "approveSelected": "Approve Selected",
+    "rejectSelected": "Reject Selected",
+    "selected": "{{count}} selected",
+    "modify": "Modify",
+    "modifyTitle": "Modify & Retry",
+    "modifyPlaceholder": "Provide feedback for the agent to retry with...",
+    "modifySubmit": "Submit Feedback",
+    "modifiedToast": "Feedback submitted",
+    "batchSuccess": "Batch action completed",
+    "tabPending": "Pending",
+    "tabAuditLog": "Audit Log",
+    "auditLog": {
+      "title": "Approval Audit Log",
+      "tool": "Tool",
+      "agent": "Agent",
+      "decision": "Decision",
+      "decidedBy": "Decided By",
+      "decidedAt": "Decided At",
+      "requestedAt": "Requested At",
+      "feedback": "Feedback",
+      "noEntries": "No audit entries found.",
+      "showing": "Showing {{from}}-{{to}} of {{total}}"
+    }
   },
   "wizard": {
     "welcome": "Welcome",

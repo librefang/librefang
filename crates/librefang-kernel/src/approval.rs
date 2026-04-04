@@ -3,10 +3,14 @@
 use chrono::Utc;
 use dashmap::DashMap;
 use librefang_types::approval::{
-    ApprovalDecision, ApprovalPolicy, ApprovalRequest, ApprovalResponse, RiskLevel,
+    ApprovalAuditEntry, ApprovalDecision, ApprovalPolicy, ApprovalRequest, ApprovalResponse,
+    RiskLevel, TimeoutFallback,
 };
 use librefang_types::capability::glob_matches;
+use rusqlite::Connection;
 use std::collections::VecDeque;
+use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -20,6 +24,7 @@ pub struct ApprovalManager {
     pending: DashMap<Uuid, PendingRequest>,
     recent: std::sync::Mutex<VecDeque<ApprovalRecord>>,
     policy: std::sync::RwLock<ApprovalPolicy>,
+    audit_db: Option<Arc<StdMutex<Connection>>>,
 }
 
 struct PendingRequest {
@@ -41,6 +46,17 @@ impl ApprovalManager {
             pending: DashMap::new(),
             recent: std::sync::Mutex::new(VecDeque::new()),
             policy: std::sync::RwLock::new(policy),
+            audit_db: None,
+        }
+    }
+
+    /// Create an approval manager with persistent audit logging.
+    pub fn new_with_db(policy: ApprovalPolicy, conn: Arc<StdMutex<Connection>>) -> Self {
+        Self {
+            pending: DashMap::new(),
+            recent: std::sync::Mutex::new(VecDeque::new()),
+            policy: std::sync::RwLock::new(policy),
+            audit_db: Some(conn),
         }
     }
 
@@ -167,14 +183,21 @@ impl ApprovalManager {
                 decision
             }
             _ => {
+                let policy = self.policy.read().unwrap_or_else(|e| e.into_inner());
+                let fallback_decision = match &policy.timeout_fallback {
+                    TimeoutFallback::Skip => ApprovalDecision::Skipped,
+                    _ => ApprovalDecision::TimedOut,
+                };
+                drop(policy);
+
                 let request = self
                     .pending
                     .remove(&id)
                     .map(|(_, pending)| pending.request)
                     .unwrap_or(req_for_timeout);
-                self.push_recent(request, ApprovalDecision::TimedOut, None, Utc::now());
-                warn!(request_id = %id, "Approval request timed out");
-                ApprovalDecision::TimedOut
+                self.push_recent(request, fallback_decision.clone(), None, Utc::now());
+                warn!(request_id = %id, decision = ?fallback_decision, "Approval request timed out");
+                fallback_decision
             }
         }
     }
@@ -190,23 +213,40 @@ impl ApprovalManager {
             Some((_, pending)) => {
                 let response = ApprovalResponse {
                     request_id,
-                    decision,
+                    decision: decision.clone(),
                     decided_at: Utc::now(),
                     decided_by,
                 };
                 self.push_recent(
                     pending.request.clone(),
-                    decision,
+                    response.decision.clone(),
                     response.decided_by.clone(),
                     response.decided_at,
                 );
                 // Send decision to waiting agent (ignore error if receiver dropped)
+                info!(request_id = %request_id, decision = ?response.decision, "Approval request resolved");
                 let _ = pending.sender.send(decision);
-                info!(request_id = %request_id, ?decision, "Approval request resolved");
                 Ok(response)
             }
-            None => Err(format!("No pending approval request with id {request_id}")),
+            None => Err(format!(
+                "Approval request {request_id} already resolved or expired"
+            )),
         }
+    }
+
+    /// Resolve multiple pending requests in batch.
+    pub fn resolve_batch(
+        &self,
+        ids: Vec<Uuid>,
+        decision: ApprovalDecision,
+        decided_by: Option<String>,
+    ) -> Vec<(Uuid, Result<ApprovalResponse, String>)> {
+        ids.into_iter()
+            .map(|id| {
+                let result = self.resolve(id, decision.clone(), decided_by.clone());
+                (id, result)
+            })
+            .collect()
     }
 
     /// List all pending requests (for API/dashboard display).
@@ -233,6 +273,94 @@ impl ApprovalManager {
         self.pending.len()
     }
 
+    /// Query the persistent audit log with pagination and optional filters.
+    pub fn query_audit(
+        &self,
+        limit: usize,
+        offset: usize,
+        agent_id: Option<&str>,
+        tool_name: Option<&str>,
+    ) -> Vec<ApprovalAuditEntry> {
+        let Some(db) = &self.audit_db else {
+            return Vec::new();
+        };
+        let Ok(conn) = db.lock() else {
+            return Vec::new();
+        };
+
+        let mut sql = String::from(
+            "SELECT id, request_id, agent_id, tool_name, description, action_summary, risk_level, decision, decided_by, decided_at, requested_at, feedback FROM approval_audit WHERE 1=1",
+        );
+        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+        if let Some(aid) = agent_id {
+            sql.push_str(" AND agent_id = ?");
+            params.push(Box::new(aid.to_string()));
+        }
+        if let Some(tn) = tool_name {
+            sql.push_str(" AND tool_name = ?");
+            params.push(Box::new(tn.to_string()));
+        }
+        sql.push_str(" ORDER BY decided_at DESC LIMIT ? OFFSET ?");
+        params.push(Box::new(limit as i64));
+        params.push(Box::new(offset as i64));
+
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params.iter().map(|p| p.as_ref()).collect();
+
+        let Ok(mut stmt) = conn.prepare(&sql) else {
+            return Vec::new();
+        };
+        let rows = stmt.query_map(param_refs.as_slice(), |row| {
+            Ok(ApprovalAuditEntry {
+                id: row.get(0)?,
+                request_id: row.get(1)?,
+                agent_id: row.get(2)?,
+                tool_name: row.get(3)?,
+                description: row.get(4)?,
+                action_summary: row.get(5)?,
+                risk_level: row.get(6)?,
+                decision: row.get(7)?,
+                decided_by: row.get(8)?,
+                decided_at: row.get(9)?,
+                requested_at: row.get(10)?,
+                feedback: row.get(11)?,
+            })
+        });
+        match rows {
+            Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// Count total audit entries (with optional filters).
+    pub fn audit_count(&self, agent_id: Option<&str>, tool_name: Option<&str>) -> usize {
+        let Some(db) = &self.audit_db else {
+            return 0;
+        };
+        let Ok(conn) = db.lock() else {
+            return 0;
+        };
+
+        let mut sql = String::from("SELECT COUNT(*) FROM approval_audit WHERE 1=1");
+        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+        if let Some(aid) = agent_id {
+            sql.push_str(" AND agent_id = ?");
+            params.push(Box::new(aid.to_string()));
+        }
+        if let Some(tn) = tool_name {
+            sql.push_str(" AND tool_name = ?");
+            params.push(Box::new(tn.to_string()));
+        }
+
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params.iter().map(|p| p.as_ref()).collect();
+
+        conn.query_row(&sql, param_refs.as_slice(), |row| row.get::<_, i64>(0))
+            .unwrap_or(0) as usize
+    }
+
     /// Update the approval policy (for hot-reload).
     pub fn update_policy(&self, policy: ApprovalPolicy) {
         *self.policy.write().unwrap_or_else(|e| e.into_inner()) = policy;
@@ -256,6 +384,32 @@ impl ApprovalManager {
         }
     }
 
+    /// Write an audit entry to the persistent database.
+    fn audit_log_write(&self, entry: &ApprovalAuditEntry) {
+        let Some(db) = &self.audit_db else { return };
+        let Ok(conn) = db.lock() else { return };
+        let result = conn.execute(
+            "INSERT OR IGNORE INTO approval_audit (id, request_id, agent_id, tool_name, description, action_summary, risk_level, decision, decided_by, decided_at, requested_at, feedback) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            rusqlite::params![
+                entry.id,
+                entry.request_id,
+                entry.agent_id,
+                entry.tool_name,
+                entry.description,
+                entry.action_summary,
+                entry.risk_level,
+                entry.decision,
+                entry.decided_by,
+                entry.decided_at,
+                entry.requested_at,
+                entry.feedback,
+            ],
+        );
+        if let Err(e) = result {
+            warn!("Failed to write approval audit entry: {e}");
+        }
+    }
+
     fn push_recent(
         &self,
         request: ApprovalRequest,
@@ -263,6 +417,26 @@ impl ApprovalManager {
         decided_by: Option<String>,
         decided_at: chrono::DateTime<Utc>,
     ) {
+        let feedback = match &decision {
+            ApprovalDecision::ModifyAndRetry { feedback } => Some(feedback.clone()),
+            _ => None,
+        };
+        let entry = ApprovalAuditEntry {
+            id: Uuid::new_v4().to_string(),
+            request_id: request.id.to_string(),
+            agent_id: request.agent_id.clone(),
+            tool_name: request.tool_name.clone(),
+            description: request.description.clone(),
+            action_summary: request.action_summary.clone(),
+            risk_level: request.risk_level.emoji().to_string(),
+            decision: decision.as_str().to_string(),
+            decided_by: decided_by.clone(),
+            decided_at: decided_at.to_rfc3339(),
+            requested_at: request.requested_at.to_rfc3339(),
+            feedback,
+        };
+        self.audit_log_write(&entry);
+
         let mut recent = self.recent.lock().unwrap_or_else(|e| e.into_inner());
         recent.push_front(ApprovalRecord {
             request,
@@ -302,6 +476,8 @@ mod tests {
             timeout_secs,
             sender_id: None,
             channel: None,
+            route_to: Vec::new(),
+            escalation_count: 0,
         }
     }
 
@@ -321,10 +497,7 @@ mod tests {
         let policy = ApprovalPolicy {
             require_approval: vec!["file_write".to_string(), "file_delete".to_string()],
             timeout_secs: 30,
-            auto_approve_autonomous: false,
-            auto_approve: false,
-            trusted_senders: Vec::new(),
-            channel_rules: Vec::new(),
+            ..Default::default()
         };
         let mgr = ApprovalManager::new(policy);
         assert!(mgr.requires_approval("file_write"));
@@ -379,7 +552,7 @@ mod tests {
         let mgr = default_manager();
         let result = mgr.resolve(Uuid::new_v4(), ApprovalDecision::Approved, None);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("No pending approval request"));
+        assert!(result.unwrap_err().contains("already resolved or expired"));
     }
 
     // -----------------------------------------------------------------------
@@ -408,9 +581,7 @@ mod tests {
             require_approval: vec!["file_write".to_string()],
             timeout_secs: 120,
             auto_approve_autonomous: true,
-            auto_approve: false,
-            trusted_senders: Vec::new(),
-            channel_rules: Vec::new(),
+            ..Default::default()
         };
         mgr.update_policy(new_policy);
 

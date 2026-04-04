@@ -1498,6 +1498,54 @@ export async function resolveApproval(id: string, approved: boolean): Promise<vo
   }
 }
 
+export async function fetchApprovalCount(): Promise<number> {
+  const data = await get<{ pending: number }>("/api/approvals/count");
+  return data.pending ?? 0;
+}
+
+export async function batchResolveApprovals(
+  ids: string[],
+  decision: "approve" | "reject"
+): Promise<{ results: Array<{ id: string; status: string; message?: string }> }> {
+  return post("/api/approvals/batch", { ids, decision });
+}
+
+export async function modifyAndRetryApproval(
+  id: string,
+  feedback: string
+): Promise<{ id: string; status: string; decided_at: string }> {
+  return post(`/api/approvals/${encodeURIComponent(id)}/modify`, { feedback });
+}
+
+export interface AuditEntry {
+  id: string;
+  request_id: string;
+  agent_id: string;
+  tool_name: string;
+  description: string;
+  action_summary: string;
+  risk_level: string;
+  decision: string;
+  decided_by?: string;
+  decided_at: string;
+  requested_at: string;
+  feedback?: string;
+}
+
+export async function queryApprovalAudit(params: {
+  limit?: number;
+  offset?: number;
+  agent_id?: string;
+  tool_name?: string;
+}): Promise<{ entries: AuditEntry[]; total: number }> {
+  const query = new URLSearchParams();
+  if (params.limit) query.set("limit", String(params.limit));
+  if (params.offset) query.set("offset", String(params.offset));
+  if (params.agent_id) query.set("agent_id", params.agent_id);
+  if (params.tool_name) query.set("tool_name", params.tool_name);
+  return get(`/api/approvals/audit?${query.toString()}`);
+}
+
 export async function switchAgentSession(
   agentId: string,
   sessionId: string

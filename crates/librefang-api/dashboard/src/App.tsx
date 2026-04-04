@@ -5,6 +5,7 @@ import { Globe, Sun, Moon, Search, ChevronLeft, ChevronRight, ChevronDown, Menu,
 import { useUIStore } from "./lib/store";
 import { CommandPalette, useCommandPalette } from "./components/ui/CommandPalette";
 import { changePassword, checkDashboardAuthMode, clearApiKey, dashboardLogin, getDashboardUsername, getVersionInfo, setApiKey, setOnUnauthorized, verifyStoredAuth, type AuthMode } from "./api";
+import { NotificationCenter } from "./components/NotificationCenter";
 
 function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated: () => void }) {
   const { t } = useTranslation();
@@ -587,6 +588,7 @@ export function App() {
             </div>
           </div>
           <div className="flex items-center gap-1">
+            <NotificationCenter />
             <button
               onClick={() => setLanguage(language === "en" ? "zh" : "en")}
               className="flex h-9 w-9 items-center justify-center rounded-xl text-text-dim hover:text-brand hover:bg-surface-hover transition-colors duration-200"

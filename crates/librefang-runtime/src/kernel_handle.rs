@@ -168,15 +168,14 @@ pub trait KernelHandle: Send + Sync {
     }
 
     /// Request approval for a tool execution. Blocks until approved/denied/timed out.
-    /// Returns `Ok(true)` if approved, `Ok(false)` if denied or timed out.
     async fn request_approval(
         &self,
         agent_id: &str,
         tool_name: &str,
         action_summary: &str,
-    ) -> Result<bool, String> {
+    ) -> Result<librefang_types::approval::ApprovalDecision, String> {
         let _ = (agent_id, tool_name, action_summary);
-        Ok(true) // Default: auto-approve
+        Ok(librefang_types::approval::ApprovalDecision::Approved)
     }
 
     /// List available Hands and their activation status.

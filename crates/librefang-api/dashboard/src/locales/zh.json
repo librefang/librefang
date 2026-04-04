@@ -1097,7 +1097,31 @@
     },
     "queue_clear": "队列清空",
     "queue_clear_desc": "没有需要您审批的操作。",
-    "help": "审批人工审核请求。当智能体需要人类确认时，请求会出现在这里。"
+    "help": "审批人工审核请求。当智能体需要人类确认时，请求会出现在这里。",
+    "selectAll": "全选",
+    "approveSelected": "批量批准",
+    "rejectSelected": "批量拒绝",
+    "selected": "已选 {{count}} 项",
+    "modify": "修改",
+    "modifyTitle": "修改并重试",
+    "modifyPlaceholder": "提供反馈让智能体重新尝试...",
+    "modifySubmit": "提交反馈",
+    "modifiedToast": "反馈已提交",
+    "batchSuccess": "批量操作完成",
+    "tabPending": "待审批",
+    "tabAuditLog": "审计日志",
+    "auditLog": {
+      "title": "审批审计日志",
+      "tool": "工具",
+      "agent": "智能体",
+      "decision": "决定",
+      "decidedBy": "决定者",
+      "decidedAt": "决定时间",
+      "requestedAt": "请求时间",
+      "feedback": "反馈",
+      "noEntries": "暂无审计记录。",
+      "showing": "显示第 {{from}}-{{to}} 条，共 {{total}} 条"
+    }
   },
   "wizard": {
     "welcome": "欢迎",

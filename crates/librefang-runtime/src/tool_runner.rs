@@ -13,7 +13,7 @@ use librefang_types::tool_compat::normalize_tool_name;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 /// Maximum inter-agent call depth to prevent infinite recursion (A->B->C->...).
 #[allow(dead_code)]
@@ -169,10 +169,32 @@ pub async fn execute_tool(
                 librefang_types::truncate_str(&input_str, 200)
             );
             match kh.request_approval(agent_id_str, tool_name, &summary).await {
-                Ok(true) => {
+                Ok(librefang_types::approval::ApprovalDecision::Approved) => {
                     debug!(tool_name, "Approval granted — proceeding with execution");
                 }
-                Ok(false) => {
+                Ok(librefang_types::approval::ApprovalDecision::ModifyAndRetry { feedback }) => {
+                    warn!(tool_name, "Approval: human requested modification");
+                    return ToolResult {
+                        tool_use_id: tool_use_id.to_string(),
+                        content: format!(
+                            "[MODIFY_AND_RETRY] Human feedback for '{}': {}",
+                            tool_name, feedback
+                        ),
+                        is_error: true,
+                    };
+                }
+                Ok(librefang_types::approval::ApprovalDecision::Skipped) => {
+                    info!(tool_name, "Approval timed out — tool skipped by policy");
+                    return ToolResult {
+                        tool_use_id: tool_use_id.to_string(),
+                        content: format!(
+                            "Tool '{}' skipped: approval timed out and policy is set to skip. Continue without this tool.",
+                            tool_name
+                        ),
+                        is_error: false,
+                    };
+                }
+                Ok(_) => {
                     warn!(tool_name, "Approval denied — blocking tool execution");
                     return ToolResult {
                         tool_use_id: tool_use_id.to_string(),
@@ -4093,9 +4115,9 @@ mod tests {
             _agent_id: &str,
             _tool_name: &str,
             _action_summary: &str,
-        ) -> Result<bool, String> {
+        ) -> Result<librefang_types::approval::ApprovalDecision, String> {
             self.approval_requests.fetch_add(1, Ordering::SeqCst);
-            Ok(false)
+            Ok(librefang_types::approval::ApprovalDecision::Denied)
         }
     }
 
