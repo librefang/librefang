@@ -708,7 +708,7 @@ function DetailTabs({ hand, instance, isActive, settings, settingsQuery, stats, 
 
   return (
     <div>
-      {/* Tab bar — underline uses a 2px bottom border that overlaps the container's border-b */}
+      {/* Tab bar — all children are text-only so height is determined purely by padding + line-height */}
       <div className="flex border-b border-border-subtle mb-4 overflow-x-auto scrollbar-thin">
         {visibleTabs.map(tab => {
           const isActive = activeTab === tab.id;
@@ -716,19 +716,15 @@ function DetailTabs({ hand, instance, isActive, settings, settingsQuery, stats, 
             <button
               key={tab.id}
               onClick={() => setActiveTab(tab.id)}
-              className={`flex items-center gap-1.5 h-10 px-3 -mb-px border-b-2 text-xs font-bold whitespace-nowrap transition-colors ${
+              className={`shrink-0 flex items-baseline gap-1.5 px-3 py-3 -mb-px border-b-2 text-xs font-bold leading-none whitespace-nowrap transition-colors ${
                 isActive
                   ? "border-brand text-brand"
                   : "border-transparent text-text-dim/60 hover:text-text"
               }`}
             >
-              {tab.label}
+              <span>{tab.label}</span>
               {tab.count !== undefined && tab.count > 0 && (
-                <span
-                  className={`inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-md text-[10px] font-black ${
-                    isActive ? "bg-brand/15 text-brand" : "bg-main text-text-dim/60"
-                  }`}
-                >
+                <span className={`text-[10px] font-black tabular-nums ${isActive ? "text-brand/70" : "text-text-dim/40"}`}>
                   {tab.count}
                 </span>
               )}
