@@ -9,19 +9,14 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
 ### Added
 
-- Editable temperature, provider and model dropdowns (#2010) (@leszek3737)
-- Add `librefang service install/uninstall/status` commands (#2014) (@houko)
-- Per-peer memory isolation for multi-user channels (#2015) (@houko)
-- Agent template dropdown + fix resolve path (#2017) (@houko)
-- Add agent actions — delete, clone, reset, suspend/resume (#2018) (@houko)
+- Interactive model switcher dropdown in connection bar (#1995) (@neo-wanderer)
+- Custom model management, workflow scheduling, and HandsPage fixes (#2028) (@houko)
+- Wire up channel test/reload and session labels (#2030) (@houko)
 
 ### Fixed
 
-- Fix Render build by adding root render.yaml with Dockerfile path (#2011) (@houko)
-- Route slash commands via WS command protocol (#2012) (@houko)
-- Suppress repeated unresponsive warnings and event bus overflow (#2013) (@houko)
-- Wait for port release before restarting daemon in dev mode (#2016) (@houko)
-- Add missing agents page i18n keys (#2019) (@houko)
+- Prevent duplicate TOML keys during config upgrade (#2025) (@houko)
+- Unify scheduling system, improve dashboard and hand UX (#2026) (@houko)
 
 
 ## [2026.4.3] - 2026-04-03
