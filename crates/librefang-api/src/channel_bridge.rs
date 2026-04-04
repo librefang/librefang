@@ -1167,7 +1167,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                             req.agent_id
                         )
                     }
-                    Err(e) => format!("Failed to resolve approval: {e}"),
+                    Err(e) => e, // e.g. "Already approved by channel"
                 }
             }
             n => format!("{n} approvals match '{id_prefix}'. Be more specific."),

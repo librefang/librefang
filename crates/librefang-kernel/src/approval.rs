@@ -289,9 +289,19 @@ impl ApprovalManager {
                 let _ = pending.sender.send(decision);
                 Ok(response)
             }
-            None => Err(format!(
-                "Approval request {request_id} already resolved or expired"
-            )),
+            None => {
+                // Check recent records for who already handled this
+                let recent = self.recent.lock().unwrap_or_else(|e| e.into_inner());
+                let handler_info = recent.iter().find(|r| r.request.id == request_id).map(|r| {
+                    let who = r.decided_by.as_deref().unwrap_or("unknown");
+                    let decision = r.decision.as_str();
+                    format!("Already {decision} by {who}")
+                });
+                drop(recent);
+                Err(handler_info.unwrap_or_else(|| {
+                    format!("Approval request {request_id} not found or expired")
+                }))
+            }
         }
     }
 

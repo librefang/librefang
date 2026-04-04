@@ -2161,6 +2161,29 @@ impl LibreFangKernel {
             memory.usage_conn(),
         );
 
+        // Validate notification config — warn (not error) on unrecognized values
+        {
+            let known_events = [
+                "approval_requested",
+                "task_completed",
+                "task_failed",
+                "tool_failure",
+            ];
+            for (i, rule) in config.notification.agent_rules.iter().enumerate() {
+                for event in &rule.events {
+                    if !known_events.contains(&event.as_str()) {
+                        warn!(
+                            rule_index = i,
+                            agent_pattern = %rule.agent_pattern,
+                            event = %event,
+                            known = ?known_events,
+                            "Notification agent_rule references unknown event type"
+                        );
+                    }
+                }
+            }
+        }
+
         // Initialize binding/broadcast/auto-reply from config
         let initial_bindings = config.bindings.clone();
         let initial_broadcast = config.broadcast.clone();
