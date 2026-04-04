@@ -9863,8 +9863,6 @@ impl KernelHandle for LibreFangKernel {
             timeout_secs: policy.timeout_secs,
             sender_id: None,
             channel: None,
-            route_to: Vec::new(),
-            escalation_count: 0,
         };
 
         // Publish an ApprovalRequested event so channel adapters can notify users

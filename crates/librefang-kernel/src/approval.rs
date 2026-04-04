@@ -479,8 +479,6 @@ mod tests {
             timeout_secs,
             sender_id: None,
             channel: None,
-            route_to: Vec::new(),
-            escalation_count: 0,
         }
     }
 

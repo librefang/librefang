@@ -1539,8 +1539,8 @@ export async function queryApprovalAudit(params: {
   tool_name?: string;
 }): Promise<{ entries: AuditEntry[]; total: number }> {
   const query = new URLSearchParams();
-  if (params.limit) query.set("limit", String(params.limit));
-  if (params.offset) query.set("offset", String(params.offset));
+  if (params.limit != null) query.set("limit", String(params.limit));
+  if (params.offset != null) query.set("offset", String(params.offset));
   if (params.agent_id) query.set("agent_id", params.agent_id);
   if (params.tool_name) query.set("tool_name", params.tool_name);
   return get(`/api/approvals/audit?${query.toString()}`);
