@@ -1,15 +1,17 @@
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Bell, Check, X } from "lucide-react";
+import { Bell, Check, X, ExternalLink } from "lucide-react";
 import { fetchApprovalCount, listApprovals, approveApproval, rejectApproval } from "../api";
 import { useTranslation } from "react-i18next";
 import { useUIStore } from "../lib/store";
+import { useNavigate } from "@tanstack/react-router";
 
 export function NotificationCenter() {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const queryClient = useQueryClient();
   const addToast = useUIStore((s) => s.addToast);
+  const navigate = useNavigate();
 
   const countQuery = useQuery({
     queryKey: ["approvals", "count"],
@@ -43,6 +45,11 @@ export function NotificationCenter() {
     }
   };
 
+  const goToAgent = (agentId: string) => {
+    setOpen(false);
+    navigate({ to: "/chat", search: { agentId } });
+  };
+
   return (
     <div className="relative">
       <button
@@ -64,13 +71,24 @@ export function NotificationCenter() {
             className="fixed inset-0 z-40"
             onClick={() => setOpen(false)}
           />
-          <div className="absolute right-0 top-full mt-1 z-50 w-80 rounded-xl border border-border-subtle bg-surface shadow-xl">
-            <div className="px-4 py-3 border-b border-border-subtle">
+          <div className="absolute right-0 top-full mt-1 z-50 w-96 rounded-xl border border-border-subtle bg-surface shadow-xl">
+            <div className="px-4 py-3 border-b border-border-subtle flex items-center justify-between">
               <h3 className="text-sm font-bold text-text-main">
                 {t("approvals.pending_review", "Pending Approvals")}
               </h3>
+              {pendingItems.length > 0 && (
+                <button
+                  onClick={() => {
+                    setOpen(false);
+                    navigate({ to: "/approvals" });
+                  }}
+                  className="text-xs text-brand hover:underline"
+                >
+                  {t("common.viewAll", "View all")}
+                </button>
+              )}
             </div>
-            <div className="max-h-80 overflow-y-auto">
+            <div className="max-h-96 overflow-y-auto">
               {pendingItems.length === 0 ? (
                 <div className="px-4 py-6 text-center text-sm text-text-dim">
                   {t("approvals.queue_clear_desc", "All clear")}
@@ -83,12 +101,33 @@ export function NotificationCenter() {
                   >
                     <div className="flex items-start justify-between gap-2">
                       <div className="min-w-0 flex-1">
-                        <p className="text-sm font-medium text-text-main truncate">
-                          {item.tool_name}
-                        </p>
-                        <p className="text-xs text-text-dim truncate">
-                          {item.agent_name ?? item.agent_id}
-                        </p>
+                        <div className="flex items-center gap-1.5">
+                          <p className="text-sm font-medium text-text-main truncate">
+                            {item.tool_name}
+                          </p>
+                          {item.risk_level && (
+                            <span className={`text-[10px] px-1.5 py-0.5 rounded font-bold uppercase ${
+                              item.risk_level === "critical" ? "bg-error/10 text-error" :
+                              item.risk_level === "high" ? "bg-warning/10 text-warning" :
+                              "bg-surface-hover text-text-dim"
+                            }`}>
+                              {item.risk_level}
+                            </span>
+                          )}
+                        </div>
+                        <button
+                          onClick={() => goToAgent(item.agent_id)}
+                          className="flex items-center gap-1 text-xs text-brand hover:underline mt-0.5"
+                          title={t("approvals.goToAgent", "Open agent chat")}
+                        >
+                          <span className="truncate">{item.agent_name ?? item.agent_id}</span>
+                          <ExternalLink className="w-3 h-3 shrink-0" />
+                        </button>
+                        {(item.action_summary || item.description) && (
+                          <p className="text-xs text-text-dim mt-1 line-clamp-2">
+                            {item.action_summary || item.description}
+                          </p>
+                        )}
                       </div>
                       <div className="flex gap-1 shrink-0">
                         <button

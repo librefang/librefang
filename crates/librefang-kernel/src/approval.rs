@@ -18,6 +18,8 @@ use uuid::Uuid;
 const MAX_PENDING_PER_AGENT: usize = 5;
 /// Max recent approval records to retain for history and UI visibility.
 const MAX_RECENT_APPROVALS: usize = 100;
+/// Max escalation rounds before falling back to TimedOut.
+const MAX_ESCALATIONS: u8 = 3;
 
 /// Manages approval requests with oneshot channels for blocking resolution.
 pub struct ApprovalManager {
@@ -149,7 +151,11 @@ impl ApprovalManager {
             .any(|pattern| glob_matches(pattern, tool_name))
     }
 
-    /// Submit an approval request. Returns a future that resolves when approved/denied/timed out.
+    /// Submit an approval request. Blocks until approved, denied, or timed out.
+    ///
+    /// When `timeout_fallback` is `Escalate` and `escalation_count < MAX_ESCALATIONS`,
+    /// a timeout re-inserts the request with bumped `escalation_count` so the caller
+    /// can re-notify and re-call this method.
     pub async fn request_approval(&self, req: ApprovalRequest) -> ApprovalDecision {
         // Check per-agent pending limit
         let agent_pending = self
@@ -162,9 +168,22 @@ impl ApprovalManager {
             return ApprovalDecision::Denied;
         }
 
-        let timeout = std::time::Duration::from_secs(req.timeout_secs);
         let id = req.id;
+        let escalation = req.escalation_count;
         let req_for_timeout = req.clone();
+
+        // Compute timeout: base + extra per escalation for Escalate fallback
+        let base_timeout = std::time::Duration::from_secs(req.timeout_secs);
+        let extra = {
+            let policy = self.policy.read().unwrap_or_else(|e| e.into_inner());
+            match &policy.timeout_fallback {
+                TimeoutFallback::Escalate { extra_timeout_secs } => {
+                    std::time::Duration::from_secs(*extra_timeout_secs) * escalation as u32
+                }
+                _ => std::time::Duration::ZERO,
+            }
+        };
+        let timeout = base_timeout + extra;
 
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.pending.insert(
@@ -175,7 +194,7 @@ impl ApprovalManager {
             },
         );
 
-        info!(request_id = %id, "Approval request submitted, waiting for resolution");
+        info!(request_id = %id, escalation, "Approval request submitted, waiting for resolution");
 
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(decision)) => {
@@ -184,22 +203,72 @@ impl ApprovalManager {
             }
             _ => {
                 let policy = self.policy.read().unwrap_or_else(|e| e.into_inner());
-                let fallback_decision = match &policy.timeout_fallback {
-                    TimeoutFallback::Skip => ApprovalDecision::Skipped,
-                    _ => ApprovalDecision::TimedOut,
-                };
+                let fallback = policy.timeout_fallback.clone();
                 drop(policy);
 
-                let request = self
-                    .pending
-                    .remove(&id)
-                    .map(|(_, pending)| pending.request)
-                    .unwrap_or(req_for_timeout);
-                self.push_recent(request, fallback_decision.clone(), None, Utc::now());
-                warn!(request_id = %id, decision = ?fallback_decision, "Approval request timed out");
-                fallback_decision
+                match fallback {
+                    TimeoutFallback::Escalate { .. } if escalation < MAX_ESCALATIONS => {
+                        // Re-insert with bumped escalation_count so caller can re-notify
+                        let mut escalated_req = self
+                            .pending
+                            .remove(&id)
+                            .map(|(_, p)| p.request)
+                            .unwrap_or(req_for_timeout);
+                        escalated_req.escalation_count += 1;
+                        warn!(
+                            request_id = %id,
+                            escalation = escalated_req.escalation_count,
+                            "Approval timed out — escalating"
+                        );
+                        // Re-insert as pending so it stays visible in dashboard
+                        let (new_tx, _) = tokio::sync::oneshot::channel();
+                        self.pending.insert(
+                            id,
+                            PendingRequest {
+                                request: escalated_req,
+                                sender: new_tx,
+                            },
+                        );
+                        // Return a special sentinel — caller should check and re-wait
+                        ApprovalDecision::TimedOut
+                    }
+                    TimeoutFallback::Skip => {
+                        let request = self
+                            .pending
+                            .remove(&id)
+                            .map(|(_, p)| p.request)
+                            .unwrap_or(req_for_timeout);
+                        self.push_recent(request, ApprovalDecision::Skipped, None, Utc::now());
+                        warn!(request_id = %id, "Approval timed out — skipped");
+                        ApprovalDecision::Skipped
+                    }
+                    _ => {
+                        let request = self
+                            .pending
+                            .remove(&id)
+                            .map(|(_, p)| p.request)
+                            .unwrap_or(req_for_timeout);
+                        self.push_recent(request, ApprovalDecision::TimedOut, None, Utc::now());
+                        warn!(request_id = %id, "Approval timed out — denied");
+                        ApprovalDecision::TimedOut
+                    }
+                }
             }
         }
+    }
+
+    /// Check if a request is pending with an escalation (timed out but re-inserted).
+    /// Returns the escalation count if so, for the caller to decide whether to re-wait.
+    pub fn escalation_count(&self, request_id: Uuid) -> Option<u8> {
+        self.pending
+            .get(&request_id)
+            .map(|p| p.request.escalation_count)
+            .filter(|c| *c > 0)
+    }
+
+    /// Remove and return a pending request (for re-submission after escalation).
+    pub fn take_pending_request(&self, request_id: Uuid) -> Option<ApprovalRequest> {
+        self.pending.remove(&request_id).map(|(_, p)| p.request)
     }
 
     /// Resolve a pending request (called by API/UI).

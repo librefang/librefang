@@ -3244,6 +3244,21 @@ system_prompt = "You are a helpful assistant."
                 // Record the failure in supervisor for health reporting
                 self.supervisor.record_panic();
                 warn!(agent_id = %agent_id, error = %e, "Agent loop failed — recorded in supervisor");
+
+                // Push failure notification to alert_channels
+                let agent_name = self
+                    .registry
+                    .get(agent_id)
+                    .map(|a| a.name.clone())
+                    .unwrap_or_else(|| agent_id.to_string());
+                let fail_msg = format!(
+                    "Agent \"{}\" loop failed: {}",
+                    agent_name,
+                    e.to_string().chars().take(200).collect::<String>()
+                );
+                self.push_notification(&agent_id.to_string(), "task_failed", &fail_msg)
+                    .await;
+
                 Err(e)
             }
         }
@@ -9366,6 +9381,66 @@ impl LibreFangKernel {
             );
         }
     }
+
+    /// Push a notification message to a single [`NotificationTarget`].
+    async fn push_to_target(
+        &self,
+        target: &librefang_types::approval::NotificationTarget,
+        message: &str,
+    ) {
+        if let Err(e) = self
+            .send_channel_message(
+                &target.channel_type,
+                &target.recipient,
+                message,
+                target.thread_id.as_deref(),
+            )
+            .await
+        {
+            warn!(
+                channel = %target.channel_type,
+                recipient = %target.recipient,
+                error = %e,
+                "Failed to push notification"
+            );
+        }
+    }
+
+    /// Push a notification to all configured targets, resolving routing rules.
+    /// Resolution: per-agent rules (matching event) > global channels for that event type.
+    async fn push_notification(&self, agent_id: &str, event_type: &str, message: &str) {
+        use librefang_types::capability::glob_matches;
+        let cfg = self.config.load_full();
+
+        // Check per-agent notification rules first
+        let agent_targets: Vec<librefang_types::approval::NotificationTarget> = cfg
+            .notification
+            .agent_rules
+            .iter()
+            .filter(|rule| {
+                glob_matches(&rule.agent_pattern, agent_id)
+                    && rule.events.iter().any(|e| e == event_type)
+            })
+            .flat_map(|rule| rule.channels.clone())
+            .collect();
+
+        let targets = if !agent_targets.is_empty() {
+            agent_targets
+        } else {
+            // Fallback to global channels based on event type
+            match event_type {
+                "approval_requested" => cfg.notification.approval_channels.clone(),
+                "task_completed" | "task_failed" | "tool_failure" => {
+                    cfg.notification.alert_channels.clone()
+                }
+                _ => Vec::new(),
+            }
+        };
+
+        for target in &targets {
+            self.push_to_target(target, message).await;
+        }
+    }
 }
 
 #[async_trait]
@@ -9884,37 +9959,90 @@ impl KernelHandle for LibreFangKernel {
             self.event_bus.publish(event).await;
         }
 
-        // Push approval notification to configured channels
+        // Push approval notification to configured channels.
+        // Resolution order: per-request route_to > policy routing rules > per-agent rules > global defaults.
         {
+            use librefang_types::capability::glob_matches;
+
             let cfg = self.config.load_full();
-            for target in &cfg.notification.approval_channels {
-                let msg = format!(
-                    "{} Approval needed: agent \"{}\" wants to run `{}` — {}",
-                    risk_level.emoji(),
-                    agent_id,
-                    tool_name,
-                    description,
-                );
-                if let Err(e) = self
-                    .send_channel_message(
-                        &target.channel_type,
-                        &target.recipient,
-                        &msg,
-                        target.thread_id.as_deref(),
-                    )
-                    .await
-                {
-                    warn!(
-                        channel = %target.channel_type,
-                        recipient = %target.recipient,
-                        error = %e,
-                        "Failed to push approval notification"
-                    );
-                }
+            let policy = self.approval_manager.policy();
+            let targets: Vec<librefang_types::approval::NotificationTarget> =
+                if !req.route_to.is_empty() {
+                    // Highest priority: explicitly routed targets on the request itself
+                    req.route_to.clone()
+                } else {
+                    // Check policy routing rules (match tool_pattern)
+                    let routed: Vec<librefang_types::approval::NotificationTarget> = policy
+                        .routing
+                        .iter()
+                        .filter(|r| glob_matches(&r.tool_pattern, tool_name))
+                        .flat_map(|r| r.route_to.clone())
+                        .collect();
+                    if !routed.is_empty() {
+                        routed
+                    } else {
+                        // Check per-agent notification rules
+                        let agent_routed: Vec<librefang_types::approval::NotificationTarget> = cfg
+                            .notification
+                            .agent_rules
+                            .iter()
+                            .filter(|rule| {
+                                glob_matches(&rule.agent_pattern, agent_id)
+                                    && rule.events.iter().any(|e| e == "approval_requested")
+                            })
+                            .flat_map(|rule| rule.channels.clone())
+                            .collect();
+                        if !agent_routed.is_empty() {
+                            agent_routed
+                        } else {
+                            // Fallback: global approval_channels
+                            cfg.notification.approval_channels.clone()
+                        }
+                    }
+                };
+
+            let msg = format!(
+                "{} Approval needed: agent \"{}\" wants to run `{}` — {}",
+                risk_level.emoji(),
+                agent_id,
+                tool_name,
+                description,
+            );
+            for target in &targets {
+                self.push_to_target(target, &msg).await;
             }
         }
 
-        let decision = self.approval_manager.request_approval(req).await;
+        let mut decision = self.approval_manager.request_approval(req).await;
+
+        // Handle Escalate: if timed out but escalation_count was bumped, re-notify and re-wait
+        while decision == ApprovalDecision::TimedOut {
+            let esc_count = self.approval_manager.escalation_count(request_id);
+            match esc_count {
+                Some(count) => {
+                    let esc_msg = format!(
+                        "{} ESCALATION #{}: Approval still needed for \"{}\" — `{}` — {}",
+                        risk_level.emoji(),
+                        count,
+                        agent_id,
+                        tool_name,
+                        description,
+                    );
+                    self.push_notification(agent_id, "approval_requested", &esc_msg)
+                        .await;
+
+                    // Take the escalated request and re-submit for another wait cycle
+                    if let Some(escalated_req) =
+                        self.approval_manager.take_pending_request(request_id)
+                    {
+                        decision = self.approval_manager.request_approval(escalated_req).await;
+                    } else {
+                        break;
+                    }
+                }
+                None => break,
+            }
+        }
 
         // Publish resolved event so channel adapters can notify outcome
         {
