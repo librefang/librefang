@@ -240,6 +240,17 @@ impl AgentRegistry {
         Ok(())
     }
 
+    /// Update an agent's sampling temperature.
+    pub fn update_temperature(&self, id: AgentId, temperature: f32) -> LibreFangResult<()> {
+        let mut entry = self
+            .agents
+            .get_mut(&id)
+            .ok_or_else(|| LibreFangError::AgentNotFound(id.to_string()))?;
+        entry.manifest.model.temperature = temperature;
+        entry.last_active = chrono::Utc::now();
+        Ok(())
+    }
+
     /// Update an agent's fallback model chain.
     pub fn update_fallback_models(
         &self,
@@ -515,5 +526,27 @@ mod tests {
 
         let names: Vec<String> = registry.list().iter().map(|e| e.name.clone()).collect();
         assert_eq!(names, vec!["alpha", "mu", "zeta"]);
+    }
+
+    #[test]
+    fn test_update_temperature() {
+        let registry = AgentRegistry::new();
+        let entry = test_entry("temp-agent");
+        let id = entry.id;
+        registry.register(entry).unwrap();
+
+        // Default temperature is 0.7
+        let before = registry.get(id).unwrap();
+        let old_active = before.last_active;
+        assert!((before.manifest.model.temperature - 0.7).abs() < f32::EPSILON);
+
+        // Wait a tiny bit so last_active changes
+        std::thread::sleep(std::time::Duration::from_millis(1));
+
+        registry.update_temperature(id, 1.5).unwrap();
+
+        let after = registry.get(id).unwrap();
+        assert!((after.manifest.model.temperature - 1.5).abs() < f32::EPSILON);
+        assert!(after.last_active > old_active);
     }
 }

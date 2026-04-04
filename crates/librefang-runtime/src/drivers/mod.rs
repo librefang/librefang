@@ -1090,8 +1090,10 @@ mod tests {
     #[test]
     fn test_custom_provider_no_key_no_url_errors() {
         // Custom provider with neither API key nor base_url should error.
+        // Use a synthetic provider name to avoid env-var races with other tests
+        // that set NVIDIA_API_KEY (e.g. test_custom_provider_convention_env_var).
         let config = DriverConfig {
-            provider: "nvidia".to_string(),
+            provider: "nonexistent-provider-for-test".to_string(),
             api_key: None,
             base_url: None,
             vertex_ai: librefang_types::config::VertexAiConfig::default(),

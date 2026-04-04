@@ -5,10 +5,11 @@ import rehypeKatex from "rehype-katex";
 import remarkMath from "remark-math";
 import { useTranslation } from "react-i18next";
 import { useNavigate, useSearch } from "@tanstack/react-router";
-import { buildAuthenticatedWebSocketUrl, listAgents, sendAgentMessage, loadAgentSession, listPendingApprovals, resolveApproval, getFullConfig, listAgentSessions, createAgentSession, switchAgentSession, deleteSession, listModels, patchAgentConfig } from "../api";
+import { buildAuthenticatedWebSocketUrl, listAgents, sendAgentMessage, loadAgentSession, listPendingApprovals, resolveApproval, getFullConfig, listAgentSessions, createAgentSession, switchAgentSession, deleteSession, listModels, patchAgentConfig, listMediaProviders } from "../api";
 import type { ApprovalItem, SessionListItem, ModelItem } from "../api";
 import { normalizeToolOutput } from "../lib/chat";
-import { MessageCircle, Send, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, Zap, ShieldAlert, CheckCircle, XCircle, Clock, Plus, Trash2, ChevronDown, Loader2 } from "lucide-react";
+import { useTtsManager } from "../lib/tts";
+import { MessageCircle, Send, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, Zap, ShieldAlert, CheckCircle, XCircle, Clock, Plus, Trash2, ChevronDown, Loader2, Copy, Volume2, Pause } from "lucide-react";
 import { Badge } from "../components/ui/Badge";
 import { MarkdownContent } from "../components/ui/MarkdownContent";
 import { useUIStore } from "../lib/store";
@@ -37,7 +38,23 @@ const SLASH_COMMANDS = [
   { cmd: "/clear", desc: "Clear chat history" },
   { cmd: "/agents", desc: "List available agents" },
   { cmd: "/info", desc: "Show current agent info" },
+  { cmd: "/new", desc: "Reset session (clear history)" },
+  { cmd: "/compact", desc: "Compress context to save space" },
+  { cmd: "/reset", desc: "Reset session (clear history)" },
+  { cmd: "/reboot", desc: "Reboot session (clear context)" },
+  { cmd: "/stop", desc: "Cancel current run" },
+  { cmd: "/model", desc: "Show or switch model" },
+  { cmd: "/usage", desc: "Show session token usage" },
+  { cmd: "/context", desc: "Show context pressure" },
+  { cmd: "/verbose", desc: "Toggle verbose level" },
+  { cmd: "/budget", desc: "Show budget status" },
+  { cmd: "/peers", desc: "Show connected peers" },
+  { cmd: "/a2a", desc: "Show A2A agents" },
+  { cmd: "/queue", desc: "Show agent queue status" },
 ];
+
+// Commands that require backend processing via WebSocket command protocol
+const BACKEND_COMMANDS = ["new", "reset", "reboot", "compact", "stop", "model", "usage", "context", "verbose", "budget", "peers", "a2a", "queue"];
 
 
 // WebSocket hook with auto-reconnect
@@ -202,6 +219,42 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
       if (trimmed === "/info") {
         const a = agents.find(a => a.id === agentId);
         sysMsg(a ? `**${a.name}**\nModel: ${a.model_name || "-"}\nProvider: ${a.model_provider || "-"}\nState: ${a.state}` : "No agent selected.");
+        return;
+      }
+
+      // Backend commands: send as {"type": "command"} via WS, bypassing LLM
+      const parts = trimmed.slice(1).split(/\s+/, 2);
+      const cmd = parts[0];
+      const cmdArgs = trimmed.slice(1 + cmd.length).trim();
+      if (BACKEND_COMMANDS.includes(cmd)) {
+        setMessages(prev => [...prev,
+          { id: `user-${Date.now()}`, role: "user" as const, content: trimmed, timestamp: new Date() },
+        ]);
+        if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+          const handleCmdResponse = (event: MessageEvent) => {
+            try {
+              const data = JSON.parse(event.data as string);
+              if (data.type === "command_result" || data.type === "error") {
+                ws.current?.removeEventListener("message", handleCmdResponse);
+                const responseText = data.message || data.content || "";
+                // /new and /reset clear the backend session, so clear frontend too
+                if (data.type === "command_result" && (cmd === "new" || cmd === "reset")) {
+                  setMessages([
+                    { id: `sys-${Date.now()}`, role: "system" as const, content: responseText, timestamp: new Date() },
+                  ]);
+                } else {
+                  setMessages(prev => [...prev,
+                    { id: `sys-${Date.now()}`, role: "system" as const, content: responseText, timestamp: new Date() },
+                  ]);
+                }
+              }
+            } catch { /* ignore non-JSON */ }
+          };
+          ws.current.addEventListener("message", handleCmdResponse);
+          ws.current.send(JSON.stringify({ type: "command", command: cmd, args: cmdArgs }));
+        } else {
+          sysMsg("WebSocket not connected. Please refresh the page.");
+        }
         return;
       }
     }
@@ -372,7 +425,18 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
 }
 
 // Message bubble component — memoized to skip re-render during streaming of other messages
-const MessageBubble = memo(function MessageBubble({ message, usageFooter }: { message: ChatMessage; usageFooter: string }) {
+interface MessageBubbleProps {
+  message: ChatMessage;
+  usageFooter: string;
+  onCopy?: (messageId: string, content: string) => void;
+  copied?: boolean;
+  onSpeak?: (messageId: string, content: string) => void;
+  isSpeaking?: boolean;
+  ttsStatus?: "idle" | "loading" | "playing" | "paused";
+  ttsAvailable?: boolean;
+}
+
+const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy, copied, onSpeak, isSpeaking, ttsStatus, ttsAvailable }: MessageBubbleProps) {
   const { t } = useTranslation();
   const isUser = message.role === "user";
 
@@ -438,26 +502,68 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter }: { me
           )}
         </div>
 
-        {/* Meta info */}
-        <div className="flex items-center gap-2 mt-1.5 text-[10px] text-text-dim/50">
-          <span>{message.timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
-          {!message.isStreaming && usageFooter !== "off" && (() => {
-            const showTokens = usageFooter === "full" || usageFooter === "tokens";
-            const showCost = (usageFooter === "full" || usageFooter === "cost") && message.cost_usd !== undefined && message.cost_usd > 0;
-            const hasInput = message.tokens?.input !== undefined && message.tokens.input > 0;
-            const hasOutput = message.tokens?.output !== undefined && message.tokens.output > 0;
-            if (!showTokens && !showCost) return null;
-            if (showTokens && !hasInput && !hasOutput && !showCost) return null;
-            const parts: string[] = [];
-            if (showTokens && (hasInput || hasOutput)) parts.push(`${message.tokens?.input ?? 0} in, ${message.tokens?.output ?? 0} out`);
-            if (showCost) parts.push(formatCost(message.cost_usd!));
-            if (parts.length === 0) return null;
-            return (
-              <span className="px-1.5 py-0.5 rounded bg-brand/10 text-brand/70 font-mono text-[9px]">
-                {parts.join(" | ")}
-              </span>
-            );
-          })()}
+        {/* Meta info + action buttons */}
+        <div className={`flex items-center justify-between w-full mt-1.5 ${isUser ? "flex-row-reverse" : ""}`}>
+          <div className="flex items-center gap-2 text-[10px] text-text-dim/50">
+            <span>{message.timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
+            {!message.isStreaming && usageFooter !== "off" && (() => {
+              const showTokens = usageFooter === "full" || usageFooter === "tokens";
+              const showCost = (usageFooter === "full" || usageFooter === "cost") && message.cost_usd !== undefined && message.cost_usd > 0;
+              const hasInput = message.tokens?.input !== undefined && message.tokens.input > 0;
+              const hasOutput = message.tokens?.output !== undefined && message.tokens.output > 0;
+              if (!showTokens && !showCost) return null;
+              if (showTokens && !hasInput && !hasOutput && !showCost) return null;
+              const parts: string[] = [];
+              if (showTokens && (hasInput || hasOutput)) parts.push(`${message.tokens?.input ?? 0} in, ${message.tokens?.output ?? 0} out`);
+              if (showCost) parts.push(formatCost(message.cost_usd!));
+              if (parts.length === 0) return null;
+              return (
+                <span className="px-1.5 py-0.5 rounded bg-brand/10 text-brand/70 font-mono text-[9px]">
+                  {parts.join(" | ")}
+                </span>
+              );
+            })()}
+          </div>
+          <div className="flex items-center gap-1">
+            {!message.isStreaming && !message.error && message.role === "assistant" && ttsAvailable && onSpeak && (
+              <button
+                onClick={() => onSpeak(message.id, message.content)}
+                className={`h-6 w-6 rounded-md flex items-center justify-center transition-colors ${
+                  isUser
+                    ? "bg-gradient-to-br from-brand to-accent text-white shadow-sm hover:shadow-md"
+                    : "bg-surface border border-border-subtle text-brand hover:bg-surface-hover"
+                }`}
+                title={
+                  ttsStatus === "loading" ? t("chat.tts_generating") :
+                  isSpeaking && ttsStatus === "playing" ? t("chat.pause") :
+                  isSpeaking && ttsStatus === "paused" ? t("chat.resume") :
+                  t("chat.speak")
+                }
+                disabled={ttsStatus === "loading"}
+              >
+                {ttsStatus === "loading" && isSpeaking ? (
+                  <Loader2 size={12} className="animate-spin" />
+                ) : isSpeaking && ttsStatus === "playing" ? (
+                  <Pause size={12} />
+                ) : (
+                  <Volume2 size={12} />
+                )}
+              </button>
+            )}
+            {!message.error && onCopy && (
+              <button
+                onClick={() => onCopy(message.id, message.content)}
+                className={`h-6 w-6 rounded-md flex items-center justify-center transition-colors ${
+                  isUser
+                    ? "bg-gradient-to-br from-brand to-accent text-white shadow-sm hover:shadow-md"
+                    : "bg-surface border border-border-subtle text-brand hover:bg-surface-hover"
+                }`}
+                title={copied ? t("chat.copied") : t("chat.copy")}
+              >
+                {copied ? <CheckCircle size={12} /> : <Copy size={12} />}
+              </button>
+            )}
+          </div>
         </div>
         {message.memories_saved && message.memories_saved.length > 0 && (
           <div className="mt-1 flex flex-wrap gap-1">
@@ -946,6 +1052,7 @@ export function ChatPage() {
   const initialAgentId = search?.agentId || "";
   const [selectedAgentId, setSelectedAgentId] = useState(initialAgentId);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
 
   // Sync agent selection to URL search params
   const selectAgent = useCallback((id: string) => {
@@ -953,8 +1060,66 @@ export function ChatPage() {
     navigate({ to: "/chat", search: { agentId: id }, replace: true });
   }, [navigate]);
 
+  // Check TTS provider availability
+  const mediaProvidersQuery = useQuery({
+    queryKey: ["media-providers"],
+    queryFn: listMediaProviders,
+    staleTime: 60000,
+  });
+  const ttsAvailable = useMemo(
+    () => (mediaProvidersQuery.data ?? []).some(p => p.configured && p.capabilities.includes("text_to_speech")),
+    [mediaProvidersQuery.data],
+  );
+
+  const handleCopy = useCallback(async (messageId: string, content: string) => {
+    try {
+      await navigator.clipboard.writeText(content);
+      setCopiedMessageId(messageId);
+      setTimeout(() => setCopiedMessageId(null), 1500);
+    } catch {
+      // Clipboard API not available
+    }
+  }, []);
+
   const configQuery = useQuery({ queryKey: ["config"], queryFn: getFullConfig, staleTime: 60000 });
   const usageFooter = (configQuery.data as Record<string, unknown>)?.usage_footer as string | undefined ?? "full";
+  const ttsConfigRaw = (configQuery.data as Record<string, unknown>)?.tts as Record<string, unknown> | undefined;
+  const ttsProvider = ttsConfigRaw?.provider as string | undefined;
+  const ttsSpeechConfig = useMemo(() => {
+    if (!ttsConfigRaw || !ttsProvider) return undefined;
+    const subKey = ttsProvider === "google_tts" ? "google" : ttsProvider;
+    const sub = ttsConfigRaw[subKey] as Record<string, unknown> | undefined;
+    if (!sub) return { provider: ttsProvider };
+    switch (ttsProvider) {
+      case "google_tts":
+        return {
+          provider: ttsProvider,
+          voice: sub.voice as string | undefined,
+          language: sub.language_code as string | undefined,
+          speed: sub.speaking_rate as number | undefined,
+        };
+      case "openai":
+        return {
+          provider: ttsProvider,
+          voice: sub.voice as string | undefined,
+          speed: sub.speed as number | undefined,
+        };
+      case "elevenlabs":
+        return {
+          provider: ttsProvider,
+          voice: sub.voice_id as string | undefined,
+        };
+      default:
+        return { provider: ttsProvider, voice: sub.voice as string | undefined };
+    }
+  }, [ttsConfigRaw, ttsProvider]);
+  const tts = useTtsManager(ttsSpeechConfig);
+
+  // Stop TTS when agent changes
+  useEffect(() => {
+    tts.stop();
+  }, [selectedAgentId, tts.stop]);
+
   const agentsQuery = useQuery({ queryKey: ["agents", "list", "chat"], queryFn: listAgents, staleTime: 30000 });
   const agents = useMemo(() => [...(agentsQuery.data ?? [])].sort((a, b) => {
     // Auth missing → sort to bottom
@@ -1165,7 +1330,19 @@ export function ChatPage() {
               </div>
             ) : (
               <div className="space-y-6">
-                {messages.map(msg => <MessageBubble key={msg.id} message={msg} usageFooter={usageFooter} />)}
+                {messages.map(msg => (
+                  <MessageBubble
+                    key={msg.id}
+                    message={msg}
+                    usageFooter={usageFooter}
+                    onCopy={handleCopy}
+                    copied={copiedMessageId === msg.id}
+                    onSpeak={ttsAvailable ? tts.toggle : undefined}
+                    isSpeaking={tts.speakingMessageId === msg.id}
+                    ttsStatus={tts.speakingMessageId === msg.id ? tts.status : "idle"}
+                    ttsAvailable={ttsAvailable}
+                  />
+                ))}
                 {/* Inline approval cards for pending requests */}
                 {pendingApprovals.map(approval => (
                   <ApprovalCard key={approval.id} approval={approval} onResolved={removeApproval} />

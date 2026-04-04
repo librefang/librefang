@@ -210,6 +210,7 @@ async fn resolve_manifest(
                 .kernel
                 .config_ref()
                 .home_dir
+                .join("workspaces")
                 .join("agents")
                 .join(&safe_name)
                 .join("agent.toml");
@@ -3021,6 +3022,8 @@ pub struct PatchAgentConfigRequest {
     pub base_url: Option<String>,
     /// Maximum tokens for LLM response. Controls conversation window size.
     pub max_tokens: Option<u32>,
+    /// Sampling temperature (0.0–2.0). Lower values are more deterministic.
+    pub temperature: Option<f32>,
     #[schema(value_type = Option<Vec<serde_json::Value>>)]
     pub fallback_models: Option<Vec<librefang_types::agent::FallbackModel>>,
 }
@@ -3244,6 +3247,27 @@ pub async fn patch_agent_config(
                     );
                 }
             }
+        }
+    }
+
+    // Validate and update temperature (sampling randomness)
+    if let Some(temperature) = req.temperature {
+        if !(0.0..=2.0).contains(&temperature) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "temperature must be between 0.0 and 2.0"})),
+            );
+        }
+        if state
+            .kernel
+            .agent_registry()
+            .update_temperature(agent_id, temperature)
+            .is_err()
+        {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+            );
         }
     }
 
@@ -4528,6 +4552,43 @@ mod tests {
         assert_eq!(effective.provider, "openai");
         assert_eq!(effective.model, "gpt-4.1");
         assert_eq!(effective.api_key_env, "OPENAI_API_KEY");
+    }
+
+    #[test]
+    fn test_patch_config_request_temperature_deserialization() {
+        let json = r#"{"temperature": 1.5}"#;
+        let req: PatchAgentConfigRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.temperature, Some(1.5));
+        assert!(req.max_tokens.is_none());
+        assert!(req.model.is_none());
+    }
+
+    #[test]
+    fn test_patch_config_request_temperature_range() {
+        // Valid ranges
+        for temp in [0.0, 0.5, 1.0, 1.5, 2.0] {
+            let json = format!(r#"{{"temperature": {temp}}}"#);
+            let req: PatchAgentConfigRequest = serde_json::from_str(&json).unwrap();
+            assert_eq!(req.temperature, Some(temp));
+        }
+
+        // Out of range values still deserialize (validation happens in handler)
+        let json = r#"{"temperature": 3.0}"#;
+        let req: PatchAgentConfigRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.temperature, Some(3.0));
+
+        // Negative values still deserialize (validation happens in handler)
+        let json = r#"{"temperature": -0.5}"#;
+        let req: PatchAgentConfigRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.temperature, Some(-0.5));
+    }
+
+    #[test]
+    fn test_patch_config_request_without_temperature() {
+        let json = r#"{"max_tokens": 4096}"#;
+        let req: PatchAgentConfigRequest = serde_json::from_str(json).unwrap();
+        assert!(req.temperature.is_none());
+        assert_eq!(req.max_tokens, Some(4096));
     }
 }
 

@@ -212,7 +212,10 @@ fn run_watch(
         "{binary} stop 2>/dev/null; \
          for pid in $(lsof -ti :{port} -sTCP:LISTEN 2>/dev/null); do kill -9 $pid 2>/dev/null; done; \
          rm -f {home}/daemon.json; \
-         sleep 0.5",
+         for _i in 1 2 3 4 5 6 7 8 9 10; do \
+           lsof -ti :{port} -sTCP:LISTEN >/dev/null 2>&1 || break; \
+           sleep 0.3; \
+         done",
         binary = binary_str,
         port = port,
         home = home_dir,

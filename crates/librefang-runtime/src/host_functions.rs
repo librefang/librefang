@@ -435,7 +435,7 @@ fn host_kv_get(state: &GuestState, params: &serde_json::Value) -> serde_json::Va
         Some(k) => k,
         None => return json!({"error": "No kernel handle available"}),
     };
-    match kernel.memory_recall(key) {
+    match kernel.memory_recall(key, None) {
         Ok(Some(val)) => json!({"ok": val}),
         Ok(None) => json!({"ok": null}),
         Err(e) => json!({"error": e}),
@@ -461,7 +461,7 @@ fn host_kv_set(state: &GuestState, params: &serde_json::Value) -> serde_json::Va
         Some(k) => k,
         None => return json!({"error": "No kernel handle available"}),
     };
-    match kernel.memory_store(key, value) {
+    match kernel.memory_store(key, value, None) {
         Ok(()) => json!({"ok": true}),
         Err(e) => json!({"error": e}),
     }
