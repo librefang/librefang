@@ -3364,6 +3364,18 @@ system_prompt = "You are a helpful assistant."
         tokio::sync::mpsc::Receiver<StreamEvent>,
         tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
     )> {
+        // Auto-wire the self kernel handle when the caller did not supply one.
+        // This mirrors the non-streaming `send_message()` path and is required
+        // for inter-agent tools (memory_store, memory_recall, agent_send, …) to
+        // work in streaming mode — channels like Telegram go through
+        // channel_bridge.rs which historically passes `None` here (#2058).
+        let kernel_handle = kernel_handle.or_else(|| {
+            self.self_handle
+                .get()
+                .and_then(|w| w.upgrade())
+                .map(|arc| arc as Arc<dyn KernelHandle>)
+        });
+
         // Try to acquire config reload barrier (non-blocking — this is a sync fn).
         // If a reload is in progress we proceed without the guard.
         let _config_guard = self.config_reload_lock.try_read();
