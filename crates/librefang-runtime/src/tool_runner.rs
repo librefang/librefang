@@ -314,9 +314,9 @@ pub async fn execute_tool(
         "task_list" => tool_task_list(input, kernel).await,
         "event_publish" => tool_event_publish(input, kernel).await,
 
-        // Scheduling tools
-        "schedule_create" => tool_schedule_create(input, kernel).await,
-        "schedule_list" => tool_schedule_list(kernel).await,
+        // Scheduling tools (delegate to CronScheduler via kernel handle)
+        "schedule_create" => tool_schedule_create(input, kernel, caller_agent_id).await,
+        "schedule_list" => tool_schedule_list(kernel, caller_agent_id).await,
         "schedule_delete" => tool_schedule_delete(input, kernel).await,
 
         // Knowledge graph tools
@@ -2383,71 +2383,80 @@ fn parse_time_to_hour(s: &str) -> Result<u32, String> {
     Ok(hour)
 }
 
-const SCHEDULES_KEY: &str = "__librefang_schedules";
+// schedule_* tools — high-level wrappers around the CronScheduler engine.
+// These accept natural language schedules ("daily at 9am") and delegate to
+// kh.cron_create/list/cancel which use the real kernel tick loop (#2024).
 
 async fn tool_schedule_create(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
+    let agent_id = caller_agent_id.ok_or("Agent ID required for schedule_create")?;
     let description = input["description"]
         .as_str()
         .ok_or("Missing 'description' parameter")?;
     let schedule_str = input["schedule"]
         .as_str()
         .ok_or("Missing 'schedule' parameter")?;
-    let agent = input["agent"].as_str().unwrap_or("");
+    let message = input["message"].as_str().unwrap_or(description);
 
     let cron_expr = parse_schedule_to_cron(schedule_str)?;
-    let schedule_id = uuid::Uuid::new_v4().to_string();
 
-    let entry = serde_json::json!({
-        "id": schedule_id,
-        "description": description,
-        "schedule_input": schedule_str,
-        "cron": cron_expr,
-        "agent": agent,
-        "created_at": chrono::Utc::now().to_rfc3339(),
-        "enabled": true,
-    });
-
-    // Load existing schedules from shared memory
-    let mut schedules: Vec<serde_json::Value> = match kh.memory_recall(SCHEDULES_KEY, None)? {
-        Some(serde_json::Value::Array(arr)) => arr,
-        _ => Vec::new(),
+    // CronJob name only allows alphanumeric + space/hyphen/underscore (max 128 chars).
+    // Sanitize the user-provided description to fit these constraints.
+    let name: String = description
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == ' ' || *c == '-' || *c == '_')
+        .take(128)
+        .collect();
+    let name = if name.is_empty() {
+        "scheduled-task".to_string()
+    } else {
+        name
     };
 
-    schedules.push(entry);
-    kh.memory_store(SCHEDULES_KEY, serde_json::Value::Array(schedules), None)?;
+    // Build CronJob JSON compatible with kh.cron_create()
+    let job_json = serde_json::json!({
+        "name": name,
+        "schedule": { "kind": "cron", "expr": cron_expr },
+        "action": { "kind": "agent_turn", "message": message },
+        "delivery": { "kind": "none" },
+    });
 
+    let result = kh.cron_create(agent_id, job_json).await?;
     Ok(format!(
-        "Schedule created:\n  ID: {schedule_id}\n  Description: {description}\n  Cron: {cron_expr}\n  Original: {schedule_str}"
+        "Schedule created and will execute automatically.\n  Cron: {cron_expr}\n  Original: {schedule_str}\n  {result}"
     ))
 }
 
-async fn tool_schedule_list(kernel: Option<&Arc<dyn KernelHandle>>) -> Result<String, String> {
+async fn tool_schedule_list(
+    kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
+) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
+    let agent_id = caller_agent_id.ok_or("Agent ID required for schedule_list")?;
+    let jobs = kh.cron_list(agent_id).await?;
 
-    let schedules: Vec<serde_json::Value> = match kh.memory_recall(SCHEDULES_KEY, None)? {
-        Some(serde_json::Value::Array(arr)) => arr,
-        _ => Vec::new(),
-    };
-
-    if schedules.is_empty() {
+    if jobs.is_empty() {
         return Ok("No scheduled tasks.".to_string());
     }
 
-    let mut output = format!("Scheduled tasks ({}):\n\n", schedules.len());
-    for s in &schedules {
-        let enabled = s["enabled"].as_bool().unwrap_or(true);
+    let mut output = format!("Scheduled tasks ({}):\n\n", jobs.len());
+    for j in &jobs {
+        let enabled = j["enabled"].as_bool().unwrap_or(true);
         let status = if enabled { "active" } else { "paused" };
+        let schedule_display = j["schedule"]["expr"]
+            .as_str()
+            .or_else(|| j["schedule"]["every_secs"].as_u64().map(|_| "interval"))
+            .unwrap_or("?");
         output.push_str(&format!(
-            "  [{status}] {} — {}\n    Cron: {} | Agent: {}\n    Created: {}\n\n",
-            s["id"].as_str().unwrap_or("?"),
-            s["description"].as_str().unwrap_or("?"),
-            s["cron"].as_str().unwrap_or("?"),
-            s["agent"].as_str().unwrap_or("(self)"),
-            s["created_at"].as_str().unwrap_or("?"),
+            "  [{status}] {} — {}\n    Schedule: {}\n    Next run: {}\n\n",
+            j["id"].as_str().unwrap_or("?"),
+            j["name"].as_str().unwrap_or("?"),
+            schedule_display,
+            j["next_run"].as_str().unwrap_or("pending"),
         ));
     }
 
@@ -2459,21 +2468,12 @@ async fn tool_schedule_delete(
     kernel: Option<&Arc<dyn KernelHandle>>,
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
-    let id = input["id"].as_str().ok_or("Missing 'id' parameter")?;
-
-    let mut schedules: Vec<serde_json::Value> = match kh.memory_recall(SCHEDULES_KEY, None)? {
-        Some(serde_json::Value::Array(arr)) => arr,
-        _ => Vec::new(),
-    };
-
-    let before = schedules.len();
-    schedules.retain(|s| s["id"].as_str() != Some(id));
-
-    if schedules.len() == before {
-        return Err(format!("Schedule '{id}' not found."));
-    }
-
-    kh.memory_store(SCHEDULES_KEY, serde_json::Value::Array(schedules), None)?;
+    // Accept either "id" or "job_id" for backward compatibility
+    let id = input["id"]
+        .as_str()
+        .or_else(|| input["job_id"].as_str())
+        .ok_or("Missing 'id' parameter")?;
+    kh.cron_cancel(id).await?;
     Ok(format!("Schedule '{id}' deleted."))
 }
 
