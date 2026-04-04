@@ -8,6 +8,8 @@ on:
       - 'crates/librefang-api/dashboard/package.json'
       - 'crates/librefang-api/dashboard/vite.config.*'
       - 'crates/librefang-api/dashboard/tsconfig.*'
+  release:
+    types: [published]
 
 jobs:
   build:
@@ -34,16 +36,20 @@ jobs:
           cd crates/librefang-api/static/react
           tar -czf /tmp/dashboard-dist.tar.gz .
 
-      - name: Upload to latest release
+      - name: Upload to release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Find latest release tag
-          TAG=$(gh release list --limit 1 --json tagName --jq '.[0].tagName')
+          # Use release event tag if available, otherwise find latest
+          if [ "${{ github.event_name }}" = "release" ]; then
+            TAG="${{ github.event.release.tag_name }}"
+          else
+            TAG=$(gh release list --limit 1 --json tagName --jq '.[0].tagName')
+          fi
           if [ -z "$TAG" ]; then
             echo "No release found, skipping upload"
             exit 0
           fi
-          # Delete old asset if exists, then upload new one
+          echo "Uploading dashboard-dist.tar.gz to $TAG"
           gh release delete-asset "$TAG" dashboard-dist.tar.gz --yes 2>/dev/null || true
           gh release upload "$TAG" /tmp/dashboard-dist.tar.gz --clobber
