@@ -74,16 +74,29 @@ export interface MediaVideoSubmitResult {
   provider: string;
 }
 
+export interface MediaVideoResult {
+  file_url: string;
+  width?: number;
+  height?: number;
+  duration_secs?: number;
+  provider: string;
+  model: string;
+}
+
 export interface MediaVideoStatus {
-  state: string;
+  status: string;
+  task_id?: string;
+  result?: MediaVideoResult;
   error?: string;
 }
 
 export interface MediaMusicResult {
+  url: string;
   format: string;
   provider: string;
   model: string;
   duration_ms?: number;
+  sample_rate?: number;
 }
 
 export interface ChannelField {
@@ -887,6 +900,7 @@ export interface SpeechResult {
   provider: string;
   model: string;
   duration_ms?: number;
+  sample_rate?: number;
 }
 
 export async function synthesizeSpeech(req: { text: string; provider?: string; model?: string; voice?: string; format?: string; language?: string; speed?: number }): Promise<SpeechResult> {
@@ -897,18 +911,12 @@ export async function submitVideo(req: { prompt: string; provider?: string; mode
   return post<MediaVideoSubmitResult>("/api/media/video", req);
 }
 
-export async function pollVideo(taskId: string): Promise<MediaVideoStatus> {
-  return get<MediaVideoStatus>(`/api/media/video/${encodeURIComponent(taskId)}`);
+export async function pollVideo(taskId: string, provider: string): Promise<MediaVideoStatus> {
+  return get<MediaVideoStatus>(`/api/media/video/${encodeURIComponent(taskId)}?provider=${encodeURIComponent(provider)}`);
 }
 
-export async function generateMusic(req: { prompt?: string; lyrics?: string; provider?: string; model?: string; instrumental?: boolean }): Promise<Blob> {
-  const resp = await fetch("/api/media/music", {
-    method: "POST",
-    headers: buildHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify(req),
-  });
-  if (!resp.ok) throw await parseError(resp);
-  return resp.blob();
+export async function generateMusic(req: { prompt?: string; lyrics?: string; provider?: string; model?: string; instrumental?: boolean }): Promise<MediaMusicResult> {
+  return post<MediaMusicResult>("/api/media/music", req);
 }
 
 export async function listChannels(): Promise<ChannelItem[]> {
