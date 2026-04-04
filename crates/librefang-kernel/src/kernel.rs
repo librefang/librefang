@@ -2156,7 +2156,10 @@ impl LibreFangKernel {
         }
 
         // Initialize execution approval manager
-        let approval_manager = crate::approval::ApprovalManager::new(config.approval.clone());
+        let approval_manager = crate::approval::ApprovalManager::new_with_db(
+            config.approval.clone(),
+            memory.usage_conn(),
+        );
 
         // Initialize binding/broadcast/auto-reply from config
         let initial_bindings = config.bindings.clone();

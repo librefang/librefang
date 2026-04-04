@@ -428,7 +428,10 @@ impl ApprovalManager {
             tool_name: request.tool_name.clone(),
             description: request.description.clone(),
             action_summary: request.action_summary.clone(),
-            risk_level: request.risk_level.emoji().to_string(),
+            risk_level: serde_json::to_string(&request.risk_level)
+                .unwrap_or_default()
+                .trim_matches('"')
+                .to_string(),
             decision: decision.as_str().to_string(),
             decided_by: decided_by.clone(),
             decided_at: decided_at.to_rfc3339(),
