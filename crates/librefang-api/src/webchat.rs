@@ -252,18 +252,33 @@ pub async fn sync_dashboard(home_dir: &std::path::Path) {
         &tmp_dir
     };
 
-    // Atomic swap
-    let _ = std::fs::remove_dir_all(&dashboard_dir);
-    if let Err(e) = std::fs::rename(source, &dashboard_dir) {
-        // rename may fail across filesystems, fall back to copy
-        tracing::debug!("rename failed ({e}), falling back to copy");
-        if let Err(e) = copy_dir_recursive(source, &dashboard_dir) {
-            tracing::warn!("Failed to copy dashboard: {e}");
+    // Atomic-ish swap: rename old dir to backup, move new dir in, then clean up.
+    // If the swap fails, the backup is restored so we never lose a working dashboard.
+    let backup_dir = dashboard_dir.with_file_name("dashboard_old");
+    let _ = std::fs::remove_dir_all(&backup_dir);
+    let had_existing = dashboard_dir.exists();
+    if had_existing {
+        if let Err(e) = std::fs::rename(&dashboard_dir, &backup_dir) {
+            tracing::warn!("Failed to back up old dashboard: {e}");
             let _ = std::fs::remove_dir_all(&tmp_dir);
             return;
         }
     }
 
+    if let Err(e) = std::fs::rename(source, &dashboard_dir) {
+        tracing::debug!("rename failed ({e}), falling back to copy");
+        if let Err(e) = copy_dir_recursive(source, &dashboard_dir) {
+            tracing::warn!("Failed to install dashboard: {e}");
+            // Restore backup
+            if had_existing {
+                let _ = std::fs::rename(&backup_dir, &dashboard_dir);
+            }
+            let _ = std::fs::remove_dir_all(&tmp_dir);
+            return;
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(&backup_dir);
     let _ = std::fs::remove_dir_all(&tmp_dir);
 
     // Write version marker

@@ -101,9 +101,10 @@ jobs:
           fetch-depth: 0
       - name: Reject static/react/ in PR
         run: |
-          ASSETS=$(git diff --name-only origin/${{ github.base_ref }}...HEAD -- 'crates/librefang-api/static/react/' || true)
-          if [ -n "$ASSETS" ]; then
-            echo "::error::PR contains dashboard build artifacts (static/react/). These are auto-built by CI — remove them from your commits."
+          # Only flag added or modified files (not deletions — cleanup PRs are OK)
+          ADDED=$(git diff --diff-filter=AM --name-only origin/${{ github.base_ref }}...HEAD -- 'crates/librefang-api/static/react/' || true)
+          if [ -n "$ADDED" ]; then
+            echo "::error::PR adds/modifies dashboard build artifacts (static/react/). These are auto-built by CI — remove them from your commits."
             echo "Fix: git rm --cached crates/librefang-api/static/react/ && git commit --amend"
             exit 1
           fi
