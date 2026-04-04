@@ -447,6 +447,7 @@
     "subtitle": "可组合的功能扩展包。",
     "available": "可用能力",
     "instances": "活跃实例",
+    "running_now": "正在运行",
     "activate": "激活",
     "deactivate": "停用",
     "orchestration": "能力管理",

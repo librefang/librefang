@@ -447,6 +447,7 @@
     "subtitle": "Autonomous capability packages.",
     "available": "Available Hands",
     "instances": "Active Instances",
+    "running_now": "Running Now",
     "activate": "Activate",
     "deactivate": "Deactivate",
     "orchestration": "Capability Orchestration",

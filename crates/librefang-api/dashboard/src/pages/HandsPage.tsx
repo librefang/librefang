@@ -806,7 +806,7 @@ function HandSchedulesTab({ cronJobs, isLoading, onRefresh }: {
 
 /* ── Active hand card (horizontal strip) ─────────────────── */
 
-function ActiveHandCard({
+function ActiveHandChip({
   hand,
   instance,
   onChat,
@@ -828,56 +828,58 @@ function ActiveHandCard({
 
   return (
     <div
-      className={`group relative flex items-center gap-3 px-4 py-3 rounded-2xl border cursor-pointer transition-colors shrink-0 min-w-[240px] max-w-[320px] ${
+      className={`group relative flex flex-col gap-2 p-3 rounded-2xl border cursor-pointer transition-colors shrink-0 w-[260px] ${
         isPaused
-          ? "border-warning/30 bg-warning/5 hover:border-warning/50"
-          : "border-success/30 bg-success/5 hover:border-success/50"
+          ? "border-warning/40 bg-warning/[0.06] hover:border-warning/60"
+          : "border-success/40 bg-success/[0.06] hover:border-success/60"
       }`}
       onClick={() => onDetail(hand)}
     >
-      <div
-        className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${
-          isPaused
-            ? "bg-warning/20 text-warning"
-            : "bg-success/20 text-success"
-        }`}
-      >
-        <Hand className="w-5 h-5" />
-      </div>
-      <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-2">
-          <h4 className="text-sm font-bold truncate">{hand.name || hand.id}</h4>
-          {isPaused && (
-            <span className="w-1.5 h-1.5 rounded-full bg-warning shrink-0" />
-          )}
-          {!isPaused && (
-            <span className="w-1.5 h-1.5 rounded-full bg-success animate-pulse shrink-0" />
-          )}
+      {/* Header row */}
+      <div className="flex items-center gap-2.5">
+        <div
+          className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${
+            isPaused ? "bg-warning/20 text-warning" : "bg-success/20 text-success"
+          }`}
+        >
+          <Hand className="w-4 h-4" />
         </div>
-        {instance.instance_id && (
-          <HandMetricsInline metrics={metrics} />
-        )}
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-1.5">
+            <span
+              className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                isPaused ? "bg-warning" : "bg-success animate-pulse"
+              }`}
+            />
+            <h4 className="text-xs font-extrabold truncate">{hand.name || hand.id}</h4>
+          </div>
+          <p className="text-[10px] text-text-dim/50 font-medium">
+            {isPaused ? t("hands.paused") : t("hands.active_label")}
+          </p>
+        </div>
       </div>
-      <div
-        className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity shrink-0"
-        onClick={(e) => e.stopPropagation()}
-      >
+
+      {/* Metrics */}
+      {metrics && Object.keys(metrics).length > 0 && <HandMetricsInline metrics={metrics} />}
+
+      {/* Actions — always visible */}
+      <div className="flex items-center gap-1.5 pt-2 border-t border-border-subtle/40" onClick={(e) => e.stopPropagation()}>
         {!isPaused && (
           <button
             onClick={() => onChat(instance.instance_id, hand.name || hand.id)}
-            className="p-1.5 rounded-lg text-brand hover:bg-brand/10 transition-colors"
-            title={t("chat.title")}
+            className="flex-1 flex items-center justify-center gap-1 px-2 py-1 rounded-lg text-[10px] font-bold text-brand bg-brand/10 hover:bg-brand/20 transition-colors"
           >
-            <MessageCircle className="w-4 h-4" />
+            <MessageCircle className="w-3 h-3" />
+            {t("chat.title")}
           </button>
         )}
         <button
           onClick={() => onDeactivate(instance.instance_id)}
           disabled={isPending}
-          className="p-1.5 rounded-lg text-text-dim hover:text-error hover:bg-error/10 transition-colors disabled:opacity-40"
+          className="flex items-center justify-center gap-1 px-2 py-1 rounded-lg text-[10px] font-bold text-text-dim hover:text-error hover:bg-error/10 transition-colors disabled:opacity-40"
           title={t("hands.deactivate")}
         >
-          {isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <PowerOff className="w-4 h-4" />}
+          {isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <PowerOff className="w-3 h-3" />}
         </button>
       </div>
     </div>
@@ -890,6 +892,7 @@ function HandCard({
   hand,
   instance,
   isActive,
+  metrics,
   onActivate,
   onDeactivate,
   onDetail,
@@ -899,6 +902,7 @@ function HandCard({
   hand: HandDefinitionItem;
   instance: HandInstanceItem | undefined;
   isActive: boolean;
+  metrics?: Record<string, { value?: unknown; format?: string }>;
   onActivate: (id: string) => void;
   onDeactivate: (id: string) => void;
   onDetail: (hand: HandDefinitionItem) => void;
@@ -907,58 +911,131 @@ function HandCard({
 }) {
   const { t } = useTranslation();
   const isPaused = instance?.status === "paused";
+  const blocked = !isActive && !hand.requirements_met;
+
+  // State-driven styling: color-coded border, background, and icon tint
+  const stateClasses = isActive
+    ? isPaused
+      ? "border-warning/40 bg-warning/[0.04] hover:border-warning/60"
+      : "border-success/40 bg-success/[0.04] hover:border-success/60"
+    : blocked
+      ? "border-border-subtle bg-surface opacity-80 hover:border-warning/30"
+      : "border-border-subtle bg-surface hover:border-brand/40 hover:shadow-sm";
+
+  const iconClasses = isActive
+    ? isPaused
+      ? "bg-warning/15 text-warning"
+      : "bg-success/15 text-success"
+    : blocked
+      ? "bg-warning/10 text-warning/70"
+      : "bg-brand/10 text-brand";
 
   return (
     <div
-      className={`group relative flex items-center gap-3 p-3 rounded-xl border cursor-pointer transition-colors ${
-        isActive
-          ? isPaused
-            ? "border-warning/20 bg-warning/5 hover:border-warning/40"
-            : "border-success/20 bg-success/5 hover:border-success/40"
-          : "border-border-subtle hover:border-brand/30 bg-surface"
-      }`}
+      className={`group relative flex flex-col rounded-2xl border transition-all cursor-pointer ${stateClasses}`}
       onClick={() => onDetail(hand)}
       role="button"
       tabIndex={0}
       onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onDetail(hand); } }}
     >
-      <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${
-        isActive ? isPaused ? "bg-warning/15 text-warning" : "bg-success/15 text-success" : "bg-brand/8 text-brand/60"
-      }`}>
-        <Hand className="w-4 h-4" />
-      </div>
-      <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-2">
-          <h3 className="text-sm font-bold truncate">{hand.name || hand.id}</h3>
-          {isActive ? (
-            isPaused ? <Badge variant="warning" dot>{t("hands.paused")}</Badge> : <Badge variant="success" dot>{t("hands.active_label")}</Badge>
-          ) : !hand.requirements_met ? (
-            <Badge variant="warning">{t("hands.missing_req")}</Badge>
-          ) : null}
+      {/* Header: icon + name + status */}
+      <div className="flex items-start gap-3 p-4 pb-3">
+        <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${iconClasses}`}>
+          <Hand className="w-4 h-4" />
         </div>
-        <div className="flex items-center gap-2 mt-0.5">
-          {hand.category && <span className="text-[10px] text-text-dim/50">{t(`hands.cat_${hand.category}`, { defaultValue: hand.category })}</span>}
-          {hand.tools && hand.tools.length > 0 && (
-            <span className="text-[10px] text-text-dim/40 flex items-center gap-0.5"><Wrench className="w-2.5 h-2.5" />{hand.tools.length}</span>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-1.5">
+            <h3 className="text-sm font-extrabold truncate">{hand.name || hand.id}</h3>
+            {isActive && !isPaused && (
+              <span className="w-1.5 h-1.5 rounded-full bg-success animate-pulse shrink-0" aria-label="running" />
+            )}
+            {isActive && isPaused && (
+              <span className="w-1.5 h-1.5 rounded-full bg-warning shrink-0" aria-label="paused" />
+            )}
+          </div>
+          {hand.category && (
+            <span className="text-[10px] uppercase tracking-wider font-bold text-text-dim/50 mt-0.5 inline-block">
+              {t(`hands.cat_${hand.category}`, { defaultValue: hand.category })}
+            </span>
           )}
         </div>
       </div>
-      <div className="flex items-center gap-1 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity" onClick={(e) => e.stopPropagation()}>
-        {isActive && instance && !isPaused && (
-          <button onClick={() => onChat(instance.instance_id, hand.name || hand.id)}
-            className="p-1.5 rounded-lg text-brand/60 hover:text-brand hover:bg-brand/10 transition-colors" title={t("chat.title")}>
-            <MessageCircle className="w-3.5 h-3.5" />
-          </button>
-        )}
-        {isActive && instance ? (
-          <button onClick={() => onDeactivate(instance.instance_id)} disabled={isPending}
-            className="p-1.5 rounded-lg text-text-dim/40 hover:text-error hover:bg-error/10 transition-colors disabled:opacity-40" title={t("hands.deactivate")}>
-            {isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <PowerOff className="w-3.5 h-3.5" />}
-          </button>
+
+      {/* Description */}
+      <div className="px-4 pb-3 min-h-[40px]">
+        {hand.description ? (
+          <p className="text-xs text-text-dim/80 leading-relaxed line-clamp-2">{hand.description}</p>
         ) : (
-          <button onClick={() => onActivate(hand.id)} disabled={isPending || !hand.requirements_met}
-            className="p-1.5 rounded-lg text-text-dim/40 hover:text-brand hover:bg-brand/10 transition-colors disabled:opacity-40 disabled:cursor-not-allowed" title={t("hands.activate")}>
+          <p className="text-xs text-text-dim/30 italic">{t("hands.subtitle")}</p>
+        )}
+      </div>
+
+      {/* Active: live metrics  |  Inactive: tools + status badges */}
+      <div className="px-4 pb-3">
+        {isActive && metrics && Object.keys(metrics).length > 0 ? (
+          <HandMetricsInline metrics={metrics} />
+        ) : (
+          <div className="flex items-center gap-3 text-[10px] text-text-dim/60 font-medium">
+            {hand.tools && hand.tools.length > 0 && (
+              <span className="flex items-center gap-1">
+                <Wrench className="w-3 h-3" />
+                {hand.tools.length} {t("hands.tools").toLowerCase()}
+              </span>
+            )}
+            {blocked && (
+              <span className="flex items-center gap-1 text-warning">
+                <AlertCircle className="w-3 h-3" />
+                {t("hands.missing_req")}
+              </span>
+            )}
+            {!blocked && !isActive && hand.requirements_met && (
+              <span className="flex items-center gap-1 text-success/70">
+                <CheckCircle2 className="w-3 h-3" />
+                {t("hands.ready")}
+              </span>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Actions — always visible */}
+      <div
+        className="flex items-center gap-1.5 px-3 py-2.5 border-t border-border-subtle/50"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {isActive && instance ? (
+          <>
+            {!isPaused && (
+              <button
+                onClick={() => onChat(instance.instance_id, hand.name || hand.id)}
+                className="flex-1 flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-bold text-brand bg-brand/10 hover:bg-brand/20 transition-colors"
+              >
+                <MessageCircle className="w-3.5 h-3.5" />
+                {t("chat.title")}
+              </button>
+            )}
+            <button
+              onClick={() => onDeactivate(instance.instance_id)}
+              disabled={isPending}
+              className="flex items-center justify-center gap-1 px-2.5 py-1.5 rounded-lg text-[11px] font-bold text-text-dim hover:text-error hover:bg-error/10 transition-colors disabled:opacity-40"
+              title={t("hands.deactivate")}
+            >
+              {isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <PowerOff className="w-3.5 h-3.5" />}
+            </button>
+          </>
+        ) : (
+          <button
+            onClick={() => onActivate(hand.id)}
+            disabled={isPending || blocked}
+            className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-bold transition-colors ${
+              blocked
+                ? "text-text-dim/40 bg-main/50 cursor-not-allowed"
+                : "text-brand bg-brand/10 hover:bg-brand/20"
+            } disabled:opacity-40`}
+            title={blocked ? t("hands.missing_req") : t("hands.activate")}
+          >
             {isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Power className="w-3.5 h-3.5" />}
+            {t("hands.activate")}
           </button>
         )}
       </div>
@@ -975,7 +1052,6 @@ export function HandsPage() {
   const [pendingId, setPendingId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [selectedCategory, setSelectedCategory] = useState<string>("all");
-  const [statusFilter, setStatusFilter] = useState<"all" | "active" | "inactive">("all");
   const [detailHand, setDetailHand] = useState<HandDefinitionItem | null>(null);
   const navigate = useNavigate();
 
@@ -1025,13 +1101,20 @@ export function HandsPage() {
     refetchInterval: REFRESH_MS,
     enabled: activeInstanceIds.length > 0,
   });
-  const _allStats = allStatsQuery.data ?? {};
-  void _allStats;
+  const statsByInstance = allStatsQuery.data ?? {};
 
   const activeHandIds = useMemo(
     () => new Set(instances.map((i) => i.hand_id).filter(Boolean)),
     [instances],
   );
+
+  const instanceByHandId = useMemo(() => {
+    const map = new Map<string, HandInstanceItem>();
+    for (const i of instances) {
+      if (i.hand_id) map.set(i.hand_id, i);
+    }
+    return map;
+  }, [instances]);
 
   // Extract unique categories
   const categories = useMemo(() => {
@@ -1042,32 +1125,23 @@ export function HandsPage() {
     return Array.from(cats).sort();
   }, [hands]);
 
-  // Active hands with their definitions
-  const _activeHands = useMemo(
+  // Active hands paired with their definitions — used by the running strip
+  const activeHandPairs = useMemo(
     () =>
       instances
         .map((inst) => ({
           instance: inst,
           hand: hands.find((h) => h.id === inst.hand_id),
         }))
-        .filter((x) => x.hand != null) as Array<{
-        instance: HandInstanceItem;
-        hand: HandDefinitionItem;
-      }>,
+        .filter((x): x is { instance: HandInstanceItem; hand: HandDefinitionItem } => x.hand != null),
     [instances, hands],
   );
-  void _activeHands;
 
-  // Filtered hands for the grid — exclude hands already shown in active strip
+  // Filtered hands for the catalog grid — all hands pass, active sort first
   const filtered = useMemo(() => {
     return hands
       .filter((h) => {
-        // Status filter
-        if (statusFilter === "active" && !activeHandIds.has(h.id)) return false;
-        if (statusFilter === "inactive" && activeHandIds.has(h.id)) return false;
-        // Category filter
         if (selectedCategory !== "all" && h.category !== selectedCategory) return false;
-        // Search filter
         if (search) {
           const q = search.toLowerCase();
           return (
@@ -1084,7 +1158,7 @@ export function HandsPage() {
         if (aActive !== bActive) return aActive - bActive;
         return (a.name || a.id).localeCompare(b.name || b.id);
       });
-  }, [hands, search, selectedCategory, statusFilter, activeHandIds]);
+  }, [hands, search, selectedCategory, activeHandIds]);
 
   async function handleActivate(id: string) {
     setPendingId(id);
@@ -1180,66 +1254,82 @@ export function HandsPage() {
         }
       />
 
-      {/* Filters */}
-      {hands.length > 0 && (
-        <div className="space-y-3">
-          {/* Row 1: Status tabs + Search */}
-          <div className="flex items-center gap-3">
-            <div className="flex items-center gap-1 shrink-0">
-              {(["all", "active", "inactive"] as const).map((s) => {
-                const label = s === "all" ? t("providers.filter_all") : s === "active" ? t("hands.active_label") : t("hands.inactive_label");
-                const count = s === "all" ? hands.length : s === "active" ? activeCount : hands.length - activeCount;
-                return (
-                  <button key={s} onClick={() => setStatusFilter(s)}
-                    className={`px-3 py-1.5 rounded-lg text-[11px] font-bold whitespace-nowrap transition-colors ${
-                      statusFilter === s
-                        ? "bg-brand text-white shadow-sm"
-                        : "text-text-dim hover:text-text hover:bg-main"
-                    }`}>
-                    {label} <span className="opacity-60">({count})</span>
-                  </button>
-                );
-              })}
+      {/* Running strip — active hands with live metrics, visible actions */}
+      {activeHandPairs.length > 0 && (
+        <section className="flex flex-col gap-2.5">
+          <div className="flex items-center gap-2 px-1">
+            <div className="flex items-center gap-1.5">
+              <span className="w-1.5 h-1.5 rounded-full bg-success animate-pulse" />
+              <h2 className="text-[11px] font-extrabold uppercase tracking-wider text-text-dim/80">
+                {t("hands.running_now")}
+              </h2>
             </div>
-            <div className="flex-1">
-              <Input
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder={t("hands.search_placeholder")}
-                leftIcon={<Search className="h-4 w-4" />}
-              />
-            </div>
+            <span className="text-[11px] text-text-dim/40">·</span>
+            <span className="text-[11px] font-bold text-text-dim/60">{activeHandPairs.length}</span>
           </div>
-          {/* Row 2: Category pills */}
+          <div className="flex gap-2.5 overflow-x-auto scrollbar-thin pb-1 -mx-1 px-1">
+            {activeHandPairs.map(({ hand, instance }) => (
+              <ActiveHandChip
+                key={instance.instance_id}
+                hand={hand}
+                instance={instance}
+                metrics={statsByInstance[instance.instance_id]?.metrics}
+                onChat={(instanceId) => {
+                  const inst = instances.find((i) => i.instance_id === instanceId);
+                  navigate({ to: "/chat", search: { agentId: inst?.agent_id || instanceId } });
+                }}
+                onDeactivate={handleDeactivate}
+                onDetail={setDetailHand}
+                isPending={pendingId === instance.instance_id}
+              />
+            ))}
+          </div>
+        </section>
+      )}
+
+      {/* Search + category filter */}
+      {hands.length > 0 && (
+        <div className="flex flex-col gap-2.5">
+          <Input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder={t("hands.search_placeholder")}
+            leftIcon={<Search className="h-4 w-4" />}
+          />
           <div className="flex items-center gap-1.5 overflow-x-auto scrollbar-thin">
             <button
               onClick={() => setSelectedCategory("all")}
-              className={`px-2.5 py-1 rounded-lg text-[10px] font-bold whitespace-nowrap transition-colors ${
+              className={`px-3 py-1 rounded-lg text-[11px] font-bold whitespace-nowrap transition-colors ${
                 selectedCategory === "all"
-                  ? "bg-brand/10 text-brand border border-brand/30"
-                  : "text-text-dim/60 hover:text-text-dim hover:bg-main border border-transparent"
+                  ? "bg-brand/15 text-brand border border-brand/30"
+                  : "text-text-dim/70 hover:text-text hover:bg-main border border-transparent"
               }`}
             >
               {t("providers.filter_all")}
+              <span className="ml-1 opacity-50">({hands.length})</span>
             </button>
-            {categories.map((cat) => (
-              <button
-                key={cat}
-                onClick={() => setSelectedCategory(selectedCategory === cat ? "all" : cat)}
-                className={`px-2.5 py-1 rounded-lg text-[10px] font-bold whitespace-nowrap transition-colors ${
-                  selectedCategory === cat
-                    ? "bg-brand/10 text-brand border border-brand/30"
-                    : "text-text-dim/60 hover:text-text-dim hover:bg-main border border-transparent"
-                }`}
-              >
-                {t(`hands.cat_${cat}`, { defaultValue: cat })}
-              </button>
-            ))}
+            {categories.map((cat) => {
+              const count = hands.filter((h) => h.category === cat).length;
+              return (
+                <button
+                  key={cat}
+                  onClick={() => setSelectedCategory(selectedCategory === cat ? "all" : cat)}
+                  className={`px-3 py-1 rounded-lg text-[11px] font-bold whitespace-nowrap transition-colors ${
+                    selectedCategory === cat
+                      ? "bg-brand/15 text-brand border border-brand/30"
+                      : "text-text-dim/70 hover:text-text hover:bg-main border border-transparent"
+                  }`}
+                >
+                  {t(`hands.cat_${cat}`, { defaultValue: cat })}
+                  <span className="ml-1 opacity-50">({count})</span>
+                </button>
+              );
+            })}
           </div>
         </div>
       )}
 
-      {/* Hands grid */}
+      {/* All hands grid */}
       {handsQuery.isLoading ? (
         <ListSkeleton rows={6} />
       ) : hands.length === 0 ? (
@@ -1253,26 +1343,25 @@ export function HandsPage() {
       ) : filtered.length === 0 ? (
         <div className="text-center py-16">
           <Search className="w-8 h-8 text-text-dim/20 mx-auto mb-3" />
-          <p className="text-sm text-text-dim/50">
-            {t("agents.no_matching")}
-          </p>
+          <p className="text-sm text-text-dim/50">{t("agents.no_matching")}</p>
         </div>
       ) : (
-        <div className="grid gap-2 grid-cols-1 sm:grid-cols-2 stagger-children">
+        <div className="grid gap-3 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 stagger-children">
           {filtered.map((h) => {
             const isActive = activeHandIds.has(h.id);
-            const instance = instances.find((i) => i.hand_id === h.id);
+            const instance = instanceByHandId.get(h.id);
             return (
               <HandCard
                 key={h.id}
                 hand={h}
                 instance={instance}
                 isActive={isActive}
+                metrics={instance ? statsByInstance[instance.instance_id]?.metrics : undefined}
                 onActivate={handleActivate}
                 onDeactivate={(id) => handleDeactivate(id)}
                 onDetail={setDetailHand}
                 onChat={(instanceId) => {
-                  const inst = instances.find(i => i.instance_id === instanceId);
+                  const inst = instances.find((i) => i.instance_id === instanceId);
                   navigate({ to: "/chat", search: { agentId: inst?.agent_id || instanceId } });
                 }}
                 isPending={pendingId === h.id || (instance ? pendingId === instance.instance_id : false)}
@@ -1306,6 +1395,6 @@ export function HandsPage() {
   );
 }
 
-// Kept for planned integration — referenced to satisfy noUnusedLocals.
+// HandChatPanel is a self-contained side-panel chat; currently unused because
+// the page navigates to /chat instead. Kept for planned re-integration.
 void HandChatPanel;
-void ActiveHandCard;
