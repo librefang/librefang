@@ -16,10 +16,15 @@ import {
   getHandDetail,
   getHandSettings,
   setHandSecret,
+  getHandSession,
+  sendHandMessage,
+  listCronJobs,
   type HandDefinitionItem,
   type HandInstanceItem,
   type HandStatsResponse,
   type HandSettingsResponse,
+  type HandSessionMessage,
+  type CronJobItem,
 } from "../api";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
@@ -94,6 +99,11 @@ interface ChatMsg {
   error?: string;
   tokens?: { input?: number; output?: number };
   cost_usd?: number;
+  blocks?: Array<
+    | { type: "text"; text: string }
+    | { type: "tool_use"; id: string; name: string; input: unknown }
+    | { type: "tool_result"; tool_use_id: string; name: string; content: string; is_error: boolean }
+  >;
 }
 
 function HandChatPanel({
@@ -121,6 +131,7 @@ function HandChatPanel({
             role: m.role === "user" ? "user" as const : "assistant" as const,
             content: m.content || "",
             timestamp: m.timestamp ? new Date(m.timestamp) : new Date(),
+            blocks: m.blocks,
           }));
           setMessages(hist);
         }
@@ -273,6 +284,45 @@ function HandChatPanel({
                     </div>
                   ) : msg.role === "user" ? (
                     <span>{msg.content}</span>
+                  ) : msg.blocks?.length ? (
+                    <div className="space-y-2">
+                      {msg.blocks.map((block, bi) => {
+                        if (block.type === "text") {
+                          return (
+                            <Markdown key={bi} remarkPlugins={[remarkGfm]} components={mdComponents as Record<string, React.ComponentType>}>
+                              {block.text}
+                            </Markdown>
+                          );
+                        }
+                        if (block.type === "tool_use") {
+                          return (
+                            <details key={bi} className="rounded-lg border border-brand/20 bg-brand/5 overflow-hidden">
+                              <summary className="px-2.5 py-1.5 text-[10px] font-bold text-brand cursor-pointer flex items-center gap-1.5 select-none">
+                                <Wrench className="w-3 h-3 shrink-0" />
+                                {block.name}
+                              </summary>
+                              <pre className="px-2.5 pb-2 text-[9px] text-text-dim/70 font-mono overflow-x-auto whitespace-pre-wrap break-all">
+                                {typeof block.input === "string" ? block.input : JSON.stringify(block.input, null, 2)}
+                              </pre>
+                            </details>
+                          );
+                        }
+                        if (block.type === "tool_result") {
+                          return (
+                            <details key={bi} className={`rounded-lg border overflow-hidden ${block.is_error ? "border-error/20 bg-error/5" : "border-success/20 bg-success/5"}`}>
+                              <summary className={`px-2.5 py-1.5 text-[10px] font-bold cursor-pointer flex items-center gap-1.5 select-none ${block.is_error ? "text-error" : "text-success"}`}>
+                                {block.is_error ? <XCircle className="w-3 h-3 shrink-0" /> : <CheckCircle2 className="w-3 h-3 shrink-0" />}
+                                {block.name || "result"}
+                              </summary>
+                              <pre className="px-2.5 pb-2 text-[9px] text-text-dim/70 font-mono overflow-x-auto whitespace-pre-wrap break-all max-h-40 overflow-y-auto">
+                                {block.content}
+                              </pre>
+                            </details>
+                          );
+                        }
+                        return null;
+                      })}
+                    </div>
                   ) : (
                     <Markdown remarkPlugins={[remarkGfm]} components={mdComponents as Record<string, React.ComponentType>}>
                       {msg.content}
@@ -548,9 +598,20 @@ function DetailTabs({ hand, instance, isActive, settings, settingsQuery, stats, 
   const detail = detailQuery.data as Record<string, unknown> | undefined;
   const workspaceAgents = (detail?.agents as { role: string; name: string; description?: string; coordinator?: boolean; provider: string; model: string; steps?: string[] }[] | undefined) ?? [];
 
-  type Tab = "agents" | "settings" | "requirements" | "tools" | "metrics";
+  // Fetch cron jobs for this hand's agent
+  const agentId = instance?.agent_id;
+  const cronJobsQuery = useQuery({
+    queryKey: ["cron-jobs", "hand", agentId],
+    queryFn: () => listCronJobs(agentId!),
+    enabled: isActive && !!agentId,
+    refetchInterval: 30000,
+  });
+  const cronJobs = cronJobsQuery.data ?? [];
+
+  type Tab = "agents" | "settings" | "requirements" | "tools" | "metrics" | "schedules";
   const tabs: { id: Tab; label: string; count?: number; show: boolean }[] = [
     { id: "agents", label: t("nav.agents"), count: workspaceAgents.length, show: workspaceAgents.length > 0 },
+    { id: "schedules", label: t("scheduler.schedules", { defaultValue: "Schedules" }), count: cronJobs.length, show: isActive && !!agentId },
     { id: "settings", label: t("hands.settings"), count: settings.settings?.length, show: true },
     { id: "requirements", label: t("hands.requirements"), count: hand.requirements?.length, show: !!(hand.requirements && hand.requirements.length > 0) },
     { id: "tools", label: t("hands.tools"), count: hand.tools?.length, show: !!(hand.tools && hand.tools.length > 0) },
@@ -663,7 +724,83 @@ function DetailTabs({ hand, instance, isActive, settings, settingsQuery, stats, 
             ))}
           </div>
         )}
+
+        {activeTab === "schedules" && (
+          <HandSchedulesTab cronJobs={cronJobs} isLoading={cronJobsQuery.isLoading} onRefresh={() => cronJobsQuery.refetch()} />
+        )}
       </div>
+    </div>
+  );
+}
+
+/* ── Schedules tab content for a hand ─────────────────────── */
+
+function HandSchedulesTab({ cronJobs, isLoading, onRefresh }: {
+  cronJobs: CronJobItem[];
+  isLoading: boolean;
+  onRefresh: () => void;
+}) {
+  const { t } = useTranslation();
+  const queryClient = useQueryClient();
+  const addToast = useUIStore((s) => s.addToast);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+
+  const handleToggle = async (job: CronJobItem) => {
+    if (!job.id) return;
+    try {
+      const { updateSchedule } = await import("../api");
+      await updateSchedule(job.id, { enabled: !job.enabled });
+      queryClient.invalidateQueries({ queryKey: ["cron-jobs", "hand"] });
+      onRefresh();
+    } catch (err: any) { addToast(err.message || t("common.error"), "error"); }
+  };
+
+  const handleDelete = async (id: string) => {
+    if (confirmDeleteId !== id) { setConfirmDeleteId(id); return; }
+    setConfirmDeleteId(null);
+    try {
+      const { deleteSchedule } = await import("../api");
+      await deleteSchedule(id);
+      queryClient.invalidateQueries({ queryKey: ["cron-jobs", "hand"] });
+      onRefresh();
+    } catch (err: any) { addToast(err.message || t("common.error"), "error"); }
+  };
+
+  if (isLoading) return <div className="flex items-center gap-2 text-text-dim/50 text-[10px]"><Loader2 className="w-3 h-3 animate-spin" /> {t("common.loading")}</div>;
+
+  if (cronJobs.length === 0) return <p className="text-[10px] text-text-dim/50">{t("scheduler.no_schedules", { defaultValue: "No scheduled tasks" })}</p>;
+
+  return (
+    <div className="space-y-2">
+      {cronJobs.map((job) => {
+        const isEnabled = job.enabled !== false;
+        const schedule = typeof job.schedule === "string" ? job.schedule : (job.schedule as any)?.expr || (job.schedule as any)?.every_secs ? `every ${(job.schedule as any).every_secs}s` : "-";
+        return (
+          <div key={job.id} className={`flex items-center gap-2.5 p-2.5 rounded-lg border transition-colors ${isEnabled ? "border-border-subtle" : "border-border-subtle/50 opacity-50"}`}>
+            <Activity className={`w-3.5 h-3.5 shrink-0 ${isEnabled ? "text-brand" : "text-text-dim/30"}`} />
+            <div className="min-w-0 flex-1">
+              <p className="text-[11px] font-semibold truncate">{job.name || "Unnamed"}</p>
+              <p className="text-[9px] font-mono text-text-dim/50">{schedule}</p>
+            </div>
+            <button
+              onClick={() => handleToggle(job)}
+              className={`px-1.5 py-0.5 rounded-full text-[9px] font-bold transition-colors ${isEnabled ? "bg-success/10 text-success hover:bg-success/20" : "bg-main text-text-dim/40 hover:text-text-dim"}`}
+            >
+              {isEnabled ? "ON" : "OFF"}
+            </button>
+            {confirmDeleteId === job.id ? (
+              <div className="flex items-center gap-1">
+                <button onClick={() => handleDelete(job.id!)} className="px-1.5 py-0.5 rounded-md bg-error text-white text-[9px] font-bold">{t("common.confirm")}</button>
+                <button onClick={() => setConfirmDeleteId(null)} className="px-1.5 py-0.5 rounded-md bg-main text-text-dim text-[9px] font-bold">{t("common.cancel")}</button>
+              </div>
+            ) : (
+              <button onClick={() => handleDelete(job.id!)} className="p-1 rounded text-text-dim/30 hover:text-error hover:bg-error/10 transition-colors">
+                <XCircle className="w-3 h-3" />
+              </button>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }

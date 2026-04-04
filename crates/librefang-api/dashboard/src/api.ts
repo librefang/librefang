@@ -274,10 +274,9 @@ export interface ScheduleItem {
   enabled?: boolean;
   created_at?: string;
   last_run?: string | null;
-  run_count?: number;
+  next_run?: string | null;
   agent_id?: string;
-  agent?: string;
-  schedule_input?: string;
+  workflow_id?: string;
 }
 
 export interface TriggerItem {
@@ -1271,8 +1270,9 @@ export async function deleteTrigger(triggerId: string): Promise<ApiActionRespons
   return del<ApiActionResponse>(`/api/triggers/${encodeURIComponent(triggerId)}`);
 }
 
-export async function listCronJobs(): Promise<CronJobItem[]> {
-  const data = await get<{ jobs?: CronJobItem[]; total?: number }>("/api/cron/jobs");
+export async function listCronJobs(agentId?: string): Promise<CronJobItem[]> {
+  const url = agentId ? `/api/cron/jobs?agent_id=${encodeURIComponent(agentId)}` : "/api/cron/jobs";
+  const data = await get<{ jobs?: CronJobItem[]; total?: number }>(url);
   return data.jobs ?? [];
 }
 
@@ -1751,10 +1751,16 @@ export interface HandMessageResponse {
   cost_usd?: number;
 }
 
+export type SessionBlock =
+  | { type: "text"; text: string }
+  | { type: "tool_use"; id: string; name: string; input: unknown }
+  | { type: "tool_result"; tool_use_id: string; name: string; content: string; is_error: boolean };
+
 export interface HandSessionMessage {
   role: string;
   content: string;
   timestamp?: string;
+  blocks?: SessionBlock[];
 }
 
 export async function sendHandMessage(instanceId: string, message: string): Promise<HandMessageResponse> {

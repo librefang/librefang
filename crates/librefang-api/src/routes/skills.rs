@@ -2431,23 +2431,66 @@ pub async fn hand_get_session(
                 .messages
                 .iter()
                 .map(|m| {
-                    let content = match &m.content {
-                        librefang_types::message::MessageContent::Text(t) => t.clone(),
-                        librefang_types::message::MessageContent::Blocks(blocks) => blocks
-                            .iter()
-                            .filter_map(|b| match b {
-                                librefang_types::message::ContentBlock::Text { text, .. } => {
-                                    Some(text.clone())
-                                }
-                                _ => None,
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n"),
+                    let (content, blocks) = match &m.content {
+                        librefang_types::message::MessageContent::Text(t) => (t.clone(), None),
+                        librefang_types::message::MessageContent::Blocks(blocks) => {
+                            // Text-only content for backward compatibility
+                            let text = blocks
+                                .iter()
+                                .filter_map(|b| match b {
+                                    librefang_types::message::ContentBlock::Text {
+                                        text, ..
+                                    } => Some(text.clone()),
+                                    _ => None,
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            // Structured blocks for rich rendering
+                            let structured: Vec<serde_json::Value> = blocks
+                                .iter()
+                                .filter_map(|b| match b {
+                                    librefang_types::message::ContentBlock::Text {
+                                        text, ..
+                                    } => Some(serde_json::json!({
+                                        "type": "text", "text": text
+                                    })),
+                                    librefang_types::message::ContentBlock::ToolUse {
+                                        id,
+                                        name,
+                                        input,
+                                        ..
+                                    } => Some(serde_json::json!({
+                                        "type": "tool_use", "id": id, "name": name, "input": input
+                                    })),
+                                    librefang_types::message::ContentBlock::ToolResult {
+                                        tool_use_id,
+                                        tool_name,
+                                        content,
+                                        is_error,
+                                    } => Some(serde_json::json!({
+                                        "type": "tool_result",
+                                        "tool_use_id": tool_use_id,
+                                        "name": tool_name,
+                                        "content": content,
+                                        "is_error": is_error,
+                                    })),
+                                    _ => None,
+                                })
+                                .collect();
+                            let has_non_text = structured
+                                .iter()
+                                .any(|b| b["type"].as_str() != Some("text"));
+                            (text, if has_non_text { Some(structured) } else { None })
+                        }
                     };
-                    serde_json::json!({
+                    let mut msg = serde_json::json!({
                         "role": format!("{:?}", m.role).to_lowercase(),
                         "content": content,
-                    })
+                    });
+                    if let Some(blocks) = blocks {
+                        msg["blocks"] = serde_json::Value::Array(blocks);
+                    }
+                    msg
                 })
                 .collect();
             (
