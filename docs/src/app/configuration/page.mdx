@@ -767,7 +767,7 @@ poll_interval_secs = 1
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `bot_token_env` | string | `"TELEGRAM_BOT_TOKEN"` | Env var holding the Telegram Bot API token. |
-| `allowed_users` | list of i64 | `[]` | Telegram user IDs allowed to interact. Empty = allow all. |
+| `allowed_users` | list of strings | `[]` | Telegram user IDs or usernames allowed to interact. Accepts numeric user IDs (`"123456789"`), usernames (`"alice"`), or usernames with `@` (`"@alice"`). Case-insensitive. Empty = allow all. |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
 | `poll_interval_secs` | u64 | `1` | Long-polling interval in seconds. |
 | `account_id` | string or null | `null` | Unique bot instance identifier for multi-bot routing. |

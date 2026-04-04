@@ -236,7 +236,7 @@ python -m vllm.entrypoints.openai.api_server --model ...
 **Checklist**:
 1. Bot token is correct: `echo $TELEGRAM_BOT_TOKEN`
 2. Bot has been started (send `/start` in Telegram)
-3. If `allowed_users` is set, your Telegram user ID is in the list
+3. If `allowed_users` is set, your Telegram user ID or username is in the list (accepts `"123456789"`, `"alice"`, or `"@alice"`)
 4. Check logs for "Telegram adapter" messages
 
 ### Discord bot offline

@@ -61,7 +61,7 @@ impl TelegramAdapter {
     /// Create a new Telegram adapter.
     ///
     /// `token` is the raw bot token (read from env by the caller).
-    /// `allowed_users` is the list of Telegram user IDs allowed to interact (empty = allow all).
+    /// `allowed_users` is the list of Telegram user IDs or usernames allowed to interact (empty = allow all).
     /// `api_url` overrides the Telegram Bot API base URL (for proxies/mirrors).
     pub fn new(
         token: String,
@@ -1209,6 +1209,31 @@ fn mime_type_from_telegram_path(url_or_path: &str) -> Option<String> {
     }
 }
 
+/// Check whether a Telegram user is allowed based on the `allowed_users` list.
+///
+/// Matching rules:
+/// 1. Empty list → allow everyone.
+/// 2. Exact match on `user_id` (compared as string).
+/// 3. If `username` is present, normalized case-insensitive match
+///    (both the entry and the username are stripped of a leading `@`).
+fn telegram_user_allowed(allowed_users: &[String], user_id: i64, username: Option<&str>) -> bool {
+    if allowed_users.is_empty() {
+        return true;
+    }
+    let user_id_str = user_id.to_string();
+    if allowed_users.iter().any(|u| u == &user_id_str) {
+        return true;
+    }
+    if let Some(uname) = username {
+        let normalized = uname.trim_start_matches('@').to_lowercase();
+        allowed_users
+            .iter()
+            .any(|u| u.trim_start_matches('@').to_lowercase() == normalized)
+    } else {
+        false
+    }
+}
+
 /// Parse a Telegram `callback_query` update into a `ChannelMessage`.
 ///
 /// Called when a user clicks an inline keyboard button. The callback data
@@ -1224,13 +1249,18 @@ fn parse_telegram_callback_query(
     let callback_query_id = callback["id"].as_str()?;
     let from = callback.get("from")?;
     let user_id = from["id"].as_i64()?;
-    let user_id_str = user_id.to_string();
+    let username = from["username"].as_str();
 
-    // Security: check allowed_users
-    if !allowed_users.is_empty() && !allowed_users.iter().any(|u| u == &user_id_str) {
-        debug!("Telegram callback_query filtered: user {user_id} not in allowed_users");
+    // Security: check allowed_users (supports user ID and username)
+    if !telegram_user_allowed(allowed_users, user_id, username) {
+        debug!(
+            "Telegram callback_query filtered: user {user_id} (username: {}) not in allowed_users",
+            username.unwrap_or("none")
+        );
         return None;
     }
+
+    let user_id_str = user_id.to_string();
 
     let first_name = from["first_name"].as_str().unwrap_or("Unknown");
     let last_name = from["last_name"].as_str().unwrap_or("");
@@ -1326,7 +1356,7 @@ async fn parse_telegram_update(
     };
 
     // Extract sender info: prefer `from` (user), fall back to `sender_chat` (channel/group)
-    let (user_id, display_name) = if let Some(from) = message.get("from") {
+    let (user_id, display_name, username) = if let Some(from) = message.get("from") {
         let uid = match from["id"].as_i64() {
             Some(id) => id,
             None => {
@@ -1342,7 +1372,8 @@ async fn parse_telegram_update(
         } else {
             format!("{first_name} {last_name}")
         };
-        (uid, name)
+        let username = from["username"].as_str().map(String::from);
+        (uid, name, username)
     } else if let Some(sender_chat) = message.get("sender_chat") {
         // Messages sent on behalf of a channel or group have `sender_chat` instead of `from`.
         let uid = match sender_chat["id"].as_i64() {
@@ -1354,18 +1385,18 @@ async fn parse_telegram_update(
             }
         };
         let title = sender_chat["title"].as_str().unwrap_or("Unknown Channel");
-        (uid, title.to_string())
+        (uid, title.to_string(), None)
     } else {
         return Err(DropReason::ParseError(format!(
             "update {update_id} has no from or sender_chat field"
         )));
     };
 
-    // Security: check allowed_users (compare as strings for consistency)
-    let user_id_str = user_id.to_string();
-    if !allowed_users.is_empty() && !allowed_users.iter().any(|u| u == &user_id_str) {
+    // Security: check allowed_users (supports user ID and username)
+    if !telegram_user_allowed(allowed_users, user_id, username.as_deref()) {
         return Err(DropReason::Filtered(format!(
-            "update {update_id}: user {user_id} not in allowed_users list"
+            "update {update_id}: user {user_id} (username: {}) not in allowed_users list",
+            username.as_deref().unwrap_or("none")
         )));
     }
 
@@ -1836,6 +1867,97 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_allowed_users_filter_username() {
+        let update = serde_json::json!({
+            "update_id": 123459,
+            "message": {
+                "message_id": 45,
+                "from": {
+                    "id": 999,
+                    "first_name": "Bob",
+                    "username": "bobuser"
+                },
+                "chat": {
+                    "id": 999,
+                    "type": "private"
+                },
+                "date": 1700000003,
+                "text": "hello"
+            }
+        });
+
+        let client = test_client();
+
+        // Username match (no @)
+        let allowed = vec!["bobuser".to_string()];
+        let msg = parse_telegram_update(
+            &update,
+            &allowed,
+            "fake:token",
+            &client,
+            DEFAULT_API_URL,
+            None,
+        )
+        .await;
+        assert!(msg.is_ok(), "username without @ should match");
+
+        // Username match (with @)
+        let allowed = vec!["@bobuser".to_string()];
+        let msg = parse_telegram_update(
+            &update,
+            &allowed,
+            "fake:token",
+            &client,
+            DEFAULT_API_URL,
+            None,
+        )
+        .await;
+        assert!(msg.is_ok(), "username with @ should match");
+
+        // Case-insensitive username match
+        let allowed = vec!["BoBuSeR".to_string()];
+        let msg = parse_telegram_update(
+            &update,
+            &allowed,
+            "fake:token",
+            &client,
+            DEFAULT_API_URL,
+            None,
+        )
+        .await;
+        assert!(msg.is_ok(), "username match should be case-insensitive");
+
+        // ID mismatch but username match
+        let allowed = vec!["111".to_string(), "bobuser".to_string()];
+        let msg = parse_telegram_update(
+            &update,
+            &allowed,
+            "fake:token",
+            &client,
+            DEFAULT_API_URL,
+            None,
+        )
+        .await;
+        assert!(
+            msg.is_ok(),
+            "should match by username when ID doesn't match"
+        );
+
+        // Wrong username, wrong ID → reject
+        let allowed = vec!["otheruser".to_string()];
+        let msg = parse_telegram_update(
+            &update,
+            &allowed,
+            "fake:token",
+            &client,
+            DEFAULT_API_URL,
+            None,
+        )
+        .await;
+        assert!(msg.is_err(), "wrong username should be rejected");
+    }
+
+    #[tokio::test]
     async fn test_parse_telegram_edited_message() {
         let update = serde_json::json!({
             "update_id": 123459,
@@ -2170,6 +2292,56 @@ mod tests {
         assert_eq!(msg.sender.platform_id, "-1001234567890");
         assert!(
             matches!(msg.content, ChannelContent::Text(ref t) if t == "Forwarded from channel")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sender_chat_allowed_users_id_only() {
+        // sender_chat path should only match by numeric ID, not by channel name/username.
+        let update = serde_json::json!({
+            "update_id": 501,
+            "message": {
+                "message_id": 81,
+                "sender_chat": {
+                    "id": -1001999888777_i64,
+                    "title": "My Channel",
+                    "type": "channel"
+                },
+                "chat": { "id": -1001234567890_i64, "type": "supergroup" },
+                "date": 1700000000,
+                "text": "Channel post"
+            }
+        });
+
+        let client = test_client();
+
+        // Allowed by sender_chat ID (as string)
+        let allowed = vec!["-1001999888777".to_string()];
+        let msg = parse_telegram_update(
+            &update,
+            &allowed,
+            "fake:token",
+            &client,
+            DEFAULT_API_URL,
+            None,
+        )
+        .await;
+        assert!(msg.is_ok(), "sender_chat should be allowed by numeric ID");
+
+        // NOT allowed by channel title alone — sender_chat has no username field
+        let allowed = vec!["My Channel".to_string()];
+        let msg = parse_telegram_update(
+            &update,
+            &allowed,
+            "fake:token",
+            &client,
+            DEFAULT_API_URL,
+            None,
+        )
+        .await;
+        assert!(
+            msg.is_err(),
+            "sender_chat should NOT match by channel title"
         );
     }
 
@@ -2653,6 +2825,78 @@ mod tests {
             &client,
         );
         assert!(msg.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_parse_telegram_callback_query_username_filter() {
+        let client = crate::http_client::new_client();
+        let callback = serde_json::json!({
+            "id": "cb_100",
+            "from": { "id": 42, "first_name": "Alice", "username": "alicebot" },
+            "data": "approve",
+            "message": {
+                "message_id": 2,
+                "chat": { "id": 100, "type": "private" },
+                "text": "Some prompt",
+                "date": 1700000000
+            }
+        });
+
+        // Username match (no @) — should allow
+        let msg = parse_telegram_callback_query(
+            &callback,
+            &["alicebot".to_string()],
+            "fake_token",
+            "https://api.telegram.org",
+            &client,
+        );
+        assert!(msg.is_some(), "callback: username without @ should match");
+
+        // Username match (with @) — should allow
+        let msg = parse_telegram_callback_query(
+            &callback,
+            &["@alicebot".to_string()],
+            "fake_token",
+            "https://api.telegram.org",
+            &client,
+        );
+        assert!(msg.is_some(), "callback: username with @ should match");
+
+        // Case-insensitive username — should allow
+        let msg = parse_telegram_callback_query(
+            &callback,
+            &["AlIcEbOt".to_string()],
+            "fake_token",
+            "https://api.telegram.org",
+            &client,
+        );
+        assert!(
+            msg.is_some(),
+            "callback: case-insensitive username should match"
+        );
+
+        // ID mismatch but username match — should allow
+        let msg = parse_telegram_callback_query(
+            &callback,
+            &["999".to_string(), "alicebot".to_string()],
+            "fake_token",
+            "https://api.telegram.org",
+            &client,
+        );
+        assert!(
+            msg.is_some(),
+            "callback: should match by username when ID doesn't match"
+        );
+
+        // Wrong username — should reject
+        let msg = parse_telegram_callback_query(
+            &callback,
+            &["wronguser".to_string()],
+            "fake_token",
+            "https://api.telegram.org",
+            &client,
+        );
+        assert!(msg.is_none(), "callback: wrong username should be rejected");
     }
 
     #[tokio::test]
