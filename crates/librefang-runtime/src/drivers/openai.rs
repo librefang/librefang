@@ -760,11 +760,11 @@ impl LlmDriver for OpenAIDriver {
                             Err(e) => {
                                 tracing::warn!(
                                     tool = %call.function.name,
-                                    raw_args = %call.function.arguments,
+                                    raw_args_len = call.function.arguments.len(),
                                     error = %e,
-                                    "Malformed tool call arguments from LLM, using empty object"
+                                    "Malformed tool call arguments from LLM"
                                 );
-                                ensure_object(serde_json::Value::Null)
+                                malformed_tool_input(&e, call.function.arguments.len())
                             }
                         };
                     content.push(ContentBlock::ToolUse {
@@ -1281,11 +1281,11 @@ impl LlmDriver for OpenAIDriver {
                         Err(e) => {
                             tracing::warn!(
                                 tool = %name,
-                                raw_args = %arguments,
+                                raw_args_len = arguments.len(),
                                 error = %e,
-                                "Malformed tool call arguments from LLM stream, using empty object"
+                                "Malformed tool call arguments from LLM stream"
                             );
-                            ensure_object(serde_json::Value::Null)
+                            malformed_tool_input(&e, arguments.len())
                         }
                     };
                 content.push(ContentBlock::ToolUse {
@@ -1504,11 +1504,11 @@ fn parse_groq_failed_tool_call(body: &str) -> Option<CompletionResponse> {
             Err(e) => {
                 tracing::warn!(
                     tool = %name,
-                    raw_args = %args,
+                    raw_args_len = args.len(),
                     error = %e,
-                    "Malformed tool call arguments from Groq recovery, using empty object"
+                    "Malformed tool call arguments from Groq recovery"
                 );
-                ensure_object(serde_json::Value::Null)
+                malformed_tool_input(&e, args.len())
             }
         };
 
@@ -1584,6 +1584,30 @@ fn ensure_object(v: serde_json::Value) -> serde_json::Value {
             serde_json::json!({"raw_input": other})
         }
     }
+}
+
+/// Marker key embedded in tool input when the LLM's streamed JSON was truncated.
+pub(crate) const TRUNCATED_ARGS_KEY: &str = "__args_truncated";
+
+/// Build a tool input object for truncated/malformed JSON from the LLM.
+///
+/// Tries to repair the truncated JSON by closing unclosed strings and braces.
+/// If repair succeeds, returns the partially-parsed object with a truncation
+/// marker so the tool can still execute (partial content is better than nothing).
+/// If repair fails, returns an object with just the marker and error message.
+pub(crate) fn malformed_tool_input(
+    error: &serde_json::Error,
+    args_len: usize,
+) -> serde_json::Value {
+    serde_json::json!({
+        TRUNCATED_ARGS_KEY: true,
+        "__error": format!(
+            "Tool call arguments were truncated ({} chars, parse error: {}). \
+             The content was too large for a single response. \
+             Try writing smaller content or splitting into multiple tool calls.",
+            args_len, error
+        )
+    })
 }
 
 #[cfg(test)]

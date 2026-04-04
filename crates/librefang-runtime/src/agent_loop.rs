@@ -1447,7 +1447,8 @@ pub async fn run_agent_loop(
                             .content
                             .contains("requires human approval and was denied")
                             || result.content.contains(ERR_PATH_TRAVERSAL)
-                            || result.content.contains(ERR_SANDBOX_ESCAPE));
+                            || result.content.contains(ERR_SANDBOX_ESCAPE)
+                            || result.content.contains("arguments were truncated"));
                     if result.is_error && !is_soft_error {
                         warn!(
                             tool = %tool_call.name,
@@ -3018,7 +3019,8 @@ pub async fn run_agent_loop_streaming(
                             .content
                             .contains("requires human approval and was denied")
                             || result.content.contains(ERR_PATH_TRAVERSAL)
-                            || result.content.contains(ERR_SANDBOX_ESCAPE));
+                            || result.content.contains(ERR_SANDBOX_ESCAPE)
+                            || result.content.contains("arguments were truncated"));
                     if result.is_error && !is_soft_error {
                         warn!(
                             tool = %tool_call.name,

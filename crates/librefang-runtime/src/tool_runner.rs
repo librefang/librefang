@@ -195,6 +195,25 @@ pub async fn execute_tool(
         }
     }
 
+    // Check for truncated tool call arguments from the LLM driver (#2027).
+    // When the LLM's response is cut off mid-JSON (max_tokens exceeded), the
+    // driver marks the input with __args_truncated. Return a helpful error
+    // so the LLM can retry with smaller content.
+    if input
+        .get(crate::drivers::openai::TRUNCATED_ARGS_KEY)
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        let error_msg = input["__error"].as_str().unwrap_or(
+            "Tool call arguments were truncated. Try smaller content or split into multiple calls.",
+        );
+        return ToolResult {
+            tool_use_id: tool_use_id.to_string(),
+            content: error_msg.to_string(),
+            is_error: true,
+        };
+    }
+
     debug!(tool_name, "Executing tool");
     let result = match tool_name {
         // Filesystem tools
