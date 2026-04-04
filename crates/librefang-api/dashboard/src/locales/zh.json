@@ -470,6 +470,7 @@
     "metrics_no_data": "暂无指标数据。",
     "settings": "设置",
     "settings_empty": "暂无可用设置。",
+    "tab_schedules": "定时任务",
     "requirements": "依赖项",
     "tools": "工具",
     "cat_communication": "通信",

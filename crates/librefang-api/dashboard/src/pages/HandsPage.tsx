@@ -696,7 +696,7 @@ function DetailTabs({ hand, instance, isActive, settings, settingsQuery, stats, 
   type Tab = "agents" | "settings" | "requirements" | "tools" | "schedules";
   const tabs: { id: Tab; label: string; count?: number; show: boolean }[] = [
     { id: "agents", label: t("nav.agents"), count: workspaceAgents.length, show: workspaceAgents.length > 0 },
-    { id: "schedules", label: t("scheduler.schedules", { defaultValue: "Schedules" }), count: cronJobs.length, show: isActive && !!agentId },
+    { id: "schedules", label: t("hands.tab_schedules"), count: cronJobs.length, show: isActive && !!agentId },
     { id: "settings", label: t("hands.settings"), count: settings.settings?.length, show: true },
     { id: "requirements", label: t("hands.requirements"), count: hand.requirements?.length, show: !!(hand.requirements && hand.requirements.length > 0) },
     { id: "tools", label: t("hands.tools"), count: hand.tools?.length, show: !!(hand.tools && hand.tools.length > 0) },
@@ -708,16 +708,18 @@ function DetailTabs({ hand, instance, isActive, settings, settingsQuery, stats, 
 
   return (
     <div>
-      {/* Tab bar */}
-      <div className="flex gap-0.5 border-b border-border-subtle mb-4 overflow-x-auto scrollbar-thin">
+      {/* Tab bar — underline uses a 2px bottom border that overlaps the container's border-b */}
+      <div className="flex border-b border-border-subtle mb-4 overflow-x-auto scrollbar-thin">
         {visibleTabs.map(tab => {
           const isActive = activeTab === tab.id;
           return (
             <button
               key={tab.id}
               onClick={() => setActiveTab(tab.id)}
-              className={`relative flex items-center gap-1.5 px-3 py-2.5 text-xs font-bold whitespace-nowrap transition-colors ${
-                isActive ? "text-brand" : "text-text-dim/60 hover:text-text"
+              className={`flex items-center gap-1.5 h-10 px-3 -mb-px border-b-2 text-xs font-bold whitespace-nowrap transition-colors ${
+                isActive
+                  ? "border-brand text-brand"
+                  : "border-transparent text-text-dim/60 hover:text-text"
               }`}
             >
               {tab.label}
@@ -729,9 +731,6 @@ function DetailTabs({ hand, instance, isActive, settings, settingsQuery, stats, 
                 >
                   {tab.count}
                 </span>
-              )}
-              {isActive && (
-                <span className="absolute -bottom-px left-0 right-0 h-0.5 bg-brand rounded-full" />
               )}
             </button>
           );
