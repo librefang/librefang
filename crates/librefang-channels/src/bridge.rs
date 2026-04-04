@@ -1821,11 +1821,16 @@ async fn dispatch_message(
             ref action,
             ref message_text,
         } => {
-            // A user clicked an interactive button — pass the callback action
-            // as the message text so the agent can handle it.
-            match message_text {
-                Some(mt) => format!("[Button clicked: {action}] (on message: {mt})"),
-                None => format!("[Button clicked: {action}]"),
+            // If action starts with '/', treat it as a slash command directly.
+            // This allows interactive buttons (e.g. Approve/Reject on approval
+            // notifications) to trigger commands like /approve or /reject.
+            if action.starts_with('/') {
+                action.clone()
+            } else {
+                match message_text {
+                    Some(mt) => format!("[Button clicked: {action}] (on message: {mt})"),
+                    None => format!("[Button clicked: {action}]"),
+                }
             }
         }
     };

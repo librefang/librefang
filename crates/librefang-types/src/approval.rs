@@ -209,6 +209,15 @@ pub enum TimeoutFallback {
     Deny,
     /// Skip the tool — agent continues without executing it.
     Skip,
+    /// Extend timeout and re-notify. `extra_timeout_secs` is added each escalation.
+    Escalate {
+        #[serde(default = "default_escalation_timeout")]
+        extra_timeout_secs: u64,
+    },
+}
+
+fn default_escalation_timeout() -> u64 {
+    120
 }
 
 // ---------------------------------------------------------------------------
@@ -234,6 +243,12 @@ pub struct ApprovalRequest {
     /// Channel name (e.g. "telegram", "discord") that originated the request.
     #[serde(default)]
     pub channel: Option<String>,
+    /// Notification targets for this specific request (overrides policy defaults).
+    #[serde(default)]
+    pub route_to: Vec<NotificationTarget>,
+    /// Number of times this request has been escalated (max 3).
+    #[serde(default)]
+    pub escalation_count: u8,
 }
 
 impl ApprovalRequest {
@@ -462,6 +477,15 @@ pub struct NotificationConfig {
     pub agent_rules: Vec<AgentNotificationRule>,
 }
 
+/// Rule for routing approval requests to specific notification targets.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ApprovalRoutingRule {
+    /// Tool name glob pattern (e.g. "shell_*", "file_delete").
+    pub tool_pattern: String,
+    /// Targets to route matching approval requests to.
+    pub route_to: Vec<NotificationTarget>,
+}
+
 /// Persistent audit log entry for an approval decision.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApprovalAuditEntry {
@@ -517,6 +541,9 @@ pub struct ApprovalPolicy {
     /// Behavior when an approval request times out.
     #[serde(default)]
     pub timeout_fallback: TimeoutFallback,
+    /// Rules for routing approval requests to specific notification targets.
+    #[serde(default)]
+    pub routing: Vec<ApprovalRoutingRule>,
 }
 
 impl Default for ApprovalPolicy {
@@ -534,6 +561,7 @@ impl Default for ApprovalPolicy {
             trusted_senders: Vec::new(),
             channel_rules: Vec::new(),
             timeout_fallback: TimeoutFallback::default(),
+            routing: Vec::new(),
         }
     }
 }
@@ -681,6 +709,8 @@ mod tests {
             timeout_secs: 60,
             sender_id: None,
             channel: None,
+            route_to: Vec::new(),
+            escalation_count: 0,
         }
     }
 
@@ -1129,6 +1159,7 @@ mod tests {
                 denied_tools: vec!["shell_exec".into()],
             }],
             timeout_fallback: TimeoutFallback::default(),
+            routing: Vec::new(),
         };
         let json = serde_json::to_string(&policy).unwrap();
         let back: ApprovalPolicy = serde_json::from_str(&json).unwrap();

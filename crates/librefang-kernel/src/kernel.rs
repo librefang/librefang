@@ -3230,6 +3230,21 @@ system_prompt = "You are a helpful assistant."
                     "ok",
                 );
 
+                // Push task_completed notification for autonomous (hand) agents
+                if let Some(entry) = self.registry.get(agent_id) {
+                    let is_autonomous = entry.tags.iter().any(|t| t.starts_with("hand:"))
+                        || entry.manifest.autonomous.is_some();
+                    if is_autonomous {
+                        let name = &entry.name;
+                        let msg = format!(
+                            "Agent \"{}\" completed task (in={}, out={} tokens)",
+                            name, result.total_usage.input_tokens, result.total_usage.output_tokens,
+                        );
+                        self.push_notification(&agent_id.to_string(), "task_completed", &msg)
+                            .await;
+                    }
+                }
+
                 Ok(result)
             }
             Err(e) => {
@@ -9406,6 +9421,53 @@ impl LibreFangKernel {
         }
     }
 
+    /// Push an interactive approval notification with Approve/Reject buttons.
+    async fn push_approval_interactive(
+        &self,
+        target: &librefang_types::approval::NotificationTarget,
+        message: &str,
+        request_id: &str,
+    ) {
+        let short_id = &request_id[..std::cmp::min(8, request_id.len())];
+        let interactive = librefang_channels::types::InteractiveMessage {
+            text: message.to_string(),
+            buttons: vec![vec![
+                librefang_channels::types::InteractiveButton {
+                    label: "Approve".to_string(),
+                    action: format!("/approve {short_id}"),
+                    style: Some("primary".to_string()),
+                    url: None,
+                },
+                librefang_channels::types::InteractiveButton {
+                    label: "Reject".to_string(),
+                    action: format!("/reject {short_id}"),
+                    style: Some("danger".to_string()),
+                    url: None,
+                },
+            ]],
+        };
+
+        if let Some(adapter) = self.channel_adapters.get(&target.channel_type) {
+            let user = librefang_channels::types::ChannelUser {
+                platform_id: target.recipient.clone(),
+                display_name: target.recipient.clone(),
+                librefang_user: None,
+            };
+            if let Err(e) = adapter.send_interactive(&user, &interactive).await {
+                warn!(
+                    channel = %target.channel_type,
+                    error = %e,
+                    "Failed to send interactive approval notification, falling back to text"
+                );
+                // Fallback to plain text
+                self.push_to_target(target, message).await;
+            }
+        } else {
+            // No adapter found — fall back to send_channel_message
+            self.push_to_target(target, message).await;
+        }
+    }
+
     /// Push a notification to all configured targets, resolving routing rules.
     /// Resolution: per-agent rules (matching event) > global channels for that event type.
     async fn push_notification(&self, agent_id: &str, event_type: &str, message: &str) {
@@ -9938,6 +10000,8 @@ impl KernelHandle for LibreFangKernel {
             timeout_secs: policy.timeout_secs,
             sender_id: None,
             channel: None,
+            route_to: Vec::new(),
+            escalation_count: 0,
         };
 
         // Publish an ApprovalRequested event so channel adapters can notify users
@@ -10008,8 +10072,10 @@ impl KernelHandle for LibreFangKernel {
                 tool_name,
                 description,
             );
+            let req_id_str = request_id.to_string();
             for target in &targets {
-                self.push_to_target(target, &msg).await;
+                self.push_approval_interactive(target, &msg, &req_id_str)
+                    .await;
             }
         }
 

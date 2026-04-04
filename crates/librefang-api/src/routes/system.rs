@@ -1335,6 +1335,8 @@ pub async fn create_approval(
         timeout_secs: policy.timeout_secs,
         sender_id: None,
         channel: None,
+        route_to: Vec::new(),
+        escalation_count: 0,
     };
 
     // Spawn the request in the background (it will block until resolved or timed out)
