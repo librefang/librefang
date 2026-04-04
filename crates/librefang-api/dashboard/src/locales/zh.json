@@ -398,7 +398,12 @@
     "no_results": "没有匹配的通道",
     "no_configured": "暂无已配置的通道",
     "no_unconfigured": "暂无未配置的通道",
-    "help": "配置消息通道适配器和集成网关。设置 Slack、Discord、Telegram 等通道。"
+    "help": "配置消息通道适配器和集成网关。设置 Slack、Discord、Telegram 等通道。",
+    "test": "测试",
+    "test_success": "通道测试通过",
+    "test_failed": "通道测试失败",
+    "reload": "重新加载",
+    "reload_success": "通道已重新加载"
   },
   "skills": {
     "title": "技能",
@@ -1068,7 +1073,10 @@
     "empty_desc": "智能体开始对话时会话将出现在这里。",
     "unknown_agent": "未知智能体",
     "just_now": "刚刚",
-    "help": "查看和管理智能体对话会话。切换活跃会话、删除旧会话，监控会话活动。"
+    "help": "查看和管理智能体对话会话。切换活跃会话、删除旧会话，监控会话活动。",
+    "set_label": "设置标签",
+    "no_label": "添加标签",
+    "label_placeholder": "标签..."
   },
   "approvals": {
     "title": "审批",
