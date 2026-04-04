@@ -1,0 +1,49 @@
+name: Dashboard Build
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/librefang-api/dashboard/src/**'
+      - 'crates/librefang-api/dashboard/package.json'
+      - 'crates/librefang-api/dashboard/vite.config.*'
+      - 'crates/librefang-api/dashboard/tsconfig.*'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        working-directory: crates/librefang-api/dashboard
+        run: npm ci
+
+      - name: Build dashboard
+        working-directory: crates/librefang-api/dashboard
+        run: npm run build
+
+      - name: Package dashboard assets
+        run: |
+          cd crates/librefang-api/static/react
+          tar -czf /tmp/dashboard-dist.tar.gz .
+
+      - name: Upload to latest release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Find latest release tag
+          TAG=$(gh release list --limit 1 --json tagName --jq '.[0].tagName')
+          if [ -z "$TAG" ]; then
+            echo "No release found, skipping upload"
+            exit 0
+          fi
+          # Delete old asset if exists, then upload new one
+          gh release delete-asset "$TAG" dashboard-dist.tar.gz --yes 2>/dev/null || true
+          gh release upload "$TAG" /tmp/dashboard-dist.tar.gz --clobber
