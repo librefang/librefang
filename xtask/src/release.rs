@@ -1,4 +1,3 @@
-use crate::build_web;
 use crate::changelog;
 use crate::common::repo_root;
 use crate::sync_versions;
@@ -593,17 +592,7 @@ pip install librefang-sdk
         None
     };
 
-    // --- Build dashboard ---
-    println!();
-    println!("Building React dashboard...");
-    let build_result = build_web::run(build_web::BuildWebArgs {
-        dashboard: true,
-        web: false,
-        docs: false,
-    });
-    if let Err(e) = build_result {
-        println!("  Warning: dashboard build failed: {}", e);
-    }
+    // Dashboard is built by CI (dashboard-build.yml), not embedded in release commits.
 
     // --- Git add + commit + tag ---
     println!();
@@ -619,7 +608,6 @@ pip install librefang-sdk
         "sdk/rust/README.md",
         "packages/whatsapp-gateway/package.json",
         "crates/librefang-desktop/tauri.conf.json",
-        "crates/librefang-api/static/react/",
     ];
 
     for file in &files_to_add {

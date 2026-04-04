@@ -283,7 +283,7 @@ script-src 'self' 'unsafe-inline'
 内嵌 Web UI 由 axum API 服务器提供服务，包含两套并存的前端实现：
 
 - **旧版 Alpine.js dashboard** -- 从 `crates/librefang-api/static/` 以单个 HTML 文件形式提供。始终可用，无需构建步骤。
-- **React dashboard** -- 位于 `crates/librefang-api/dashboard-react/`。基于 Vite + React + TanStack Router + TanStack Query 构建。编译产物提交至 `crates/librefang-api/static/react/`，通过 `/react/` 路由访问。
+- **React dashboard** -- 位于 `crates/librefang-api/dashboard/`。基于 Vite + React + TanStack Router + TanStack Query 构建。构建产物输出到 `crates/librefang-api/static/react/`（已 gitignore）；CI 自动构建并上传到 release assets。
 
 修改前端代码后，重新构建 React dashboard：
 
@@ -293,7 +293,7 @@ npm install
 npm run build
 ```
 
-输出写入 `../static/react/`，下次启动内嵌 axum 服务器时自动加载。
+输出写入 `../static/react/`（已 gitignore）。本地构建时 `include_dir!` 会嵌入到二进制；生产环境中，daemon 启动时从 release assets 下载 dashboard 资源。
 
 ### 开发模式
 
