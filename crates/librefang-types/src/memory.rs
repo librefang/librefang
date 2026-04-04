@@ -856,6 +856,8 @@ pub struct MemoryFilter {
     pub before: Option<DateTime<Utc>>,
     /// Metadata key-value filters.
     pub metadata: HashMap<String, serde_json::Value>,
+    /// Filter by peer ID (for per-user memory isolation in multi-user channels).
+    pub peer_id: Option<String>,
 }
 
 impl MemoryFilter {
@@ -1162,17 +1164,21 @@ pub trait ProactiveMemory: Send + Sync {
 #[async_trait]
 pub trait ProactiveMemoryHooks: Send + Sync {
     /// Extract and store important information after agent execution.
+    /// When `peer_id` is `Some`, memories are scoped to that peer for isolation.
     async fn auto_memorize(
         &self,
         user_id: &str,
         conversation: &[serde_json::Value],
+        peer_id: Option<&str>,
     ) -> crate::error::LibreFangResult<ExtractionResult>;
 
     /// Proactively retrieve relevant context before agent execution.
+    /// When `peer_id` is `Some`, only retrieves memories for that peer.
     async fn auto_retrieve(
         &self,
         user_id: &str,
         query: &str,
+        peer_id: Option<&str>,
     ) -> crate::error::LibreFangResult<Vec<MemoryItem>>;
 }
 

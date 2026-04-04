@@ -5,31 +5,32 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
-## [2026.4.3] - 2026-04-03
+## [2026.4.4] - 2026-04-04
 
 ### Added
 
-- Add agent provider and model update support (#1977) (@j5bart)
-- Editable model section in agent detail modal (#1986) (@houko)
+- Editable temperature, provider and model dropdowns (#2010) (@leszek3737)
+- Add `librefang service install/uninstall/status` commands (#2014) (@houko)
+- Per-peer memory isolation for multi-user channels (#2015) (@houko)
+- Agent template dropdown + fix resolve path (#2017) (@houko)
+- Add agent actions — delete, clone, reset, suspend/resume (#2018) (@houko)
 
 ### Fixed
 
-- Usage footer not showing cost when tokens are zero (#1975) (@houko)
-- Providers dashboard, auth, test, catalog sync, and CLI ribbon (#1976) (@houko)
-- Update bedrock model count assertion from 8 to 11 (#1980) (@houko)
-- Persist trimmed messages to prevent OOM on reload (#1987) (@houko)
+- Fix Render build by adding root render.yaml with Dockerfile path (#2011) (@houko)
+- Route slash commands via WS command protocol (#2012) (@houko)
+- Suppress repeated unresponsive warnings and event bus overflow (#2013) (@houko)
+- Wait for port release before restarting daemon in dev mode (#2016) (@houko)
+- Add missing agents page i18n keys (#2019) (@houko)
 
-### Maintenance
 
-- Bump hmac from 0.12.1 to 0.13.0 (#1981) (@app/dependabot)
-- Bump toml_edit from 0.22.27 to 0.25.8+spec-1.1.0 (#1982) (@app/dependabot)
-- Bump sha1 from 0.10.6 to 0.11.0 (#1983) (@app/dependabot)
-- Bump zip from 8.4.0 to 8.5.0 (#1984) (@app/dependabot)
-- Bump libc from 0.2.183 to 0.2.184 (#1985) (@app/dependabot)
+## [2026.4.3] - 2026-04-03
 
-### Other
+### Fixed
 
-- Create intelligent agent pop-up prompt text modification (#1988) (@Jengro777)
+- Use plain reqwest client in integration tests (#2000) (@houko)
+- Add elevenlabs support to API key test endpoints (#2005) (@Chukwuebuka-2003)
+- Add retry logic to release asset upload steps (#2007) (@houko)
 
 
 ## [2026.4.2] - 2026-04-02

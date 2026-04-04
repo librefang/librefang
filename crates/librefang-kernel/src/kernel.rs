@@ -7676,6 +7676,7 @@ system_prompt = "You are a helpful assistant."
     /// publishes `HealthCheckFailed` events for unresponsive agents.
     fn start_heartbeat_monitor(self: &Arc<Self>) {
         use crate::heartbeat::{check_agents, is_quiet_hours, HeartbeatConfig};
+        use std::collections::HashSet;
 
         let kernel = Arc::clone(self);
         let config = HeartbeatConfig::from_toml(&kernel.config.load().heartbeat);
@@ -7684,6 +7685,9 @@ system_prompt = "You are a helpful assistant."
         tokio::spawn(async move {
             let mut interval =
                 tokio::time::interval(std::time::Duration::from_secs(config.check_interval_secs));
+            // Track which agents are already known-unresponsive to avoid
+            // spamming repeated WARN logs and HealthCheckFailed events.
+            let mut known_unresponsive: HashSet<AgentId> = HashSet::new();
 
             loop {
                 interval.tick().await;
@@ -7707,15 +7711,31 @@ system_prompt = "You are a helpful assistant."
                     }
 
                     if status.unresponsive {
-                        let event = Event::new(
-                            status.agent_id,
-                            EventTarget::System,
-                            EventPayload::System(SystemEvent::HealthCheckFailed {
-                                agent_id: status.agent_id,
-                                unresponsive_secs: status.inactive_secs as u64,
-                            }),
-                        );
-                        kernel.event_bus.publish(event).await;
+                        // Only warn and publish event on the *transition* to unresponsive
+                        if known_unresponsive.insert(status.agent_id) {
+                            warn!(
+                                agent = %status.name,
+                                inactive_secs = status.inactive_secs,
+                                "Agent is unresponsive"
+                            );
+                            let event = Event::new(
+                                status.agent_id,
+                                EventTarget::System,
+                                EventPayload::System(SystemEvent::HealthCheckFailed {
+                                    agent_id: status.agent_id,
+                                    unresponsive_secs: status.inactive_secs as u64,
+                                }),
+                            );
+                            kernel.event_bus.publish(event).await;
+                        }
+                    } else {
+                        // Agent recovered — remove from known-unresponsive set
+                        if known_unresponsive.remove(&status.agent_id) {
+                            info!(
+                                agent = %status.name,
+                                "Agent recovered from unresponsive state"
+                            );
+                        }
                     }
                 }
             }
@@ -9177,6 +9197,16 @@ pub fn shared_memory_agent_id() -> AgentId {
     ]))
 }
 
+/// Namespace a memory key by peer ID for per-user isolation.
+/// When `peer_id` is `Some`, returns `"peer:{peer_id}:{key}"`.
+/// When `None`, returns the key unchanged (global scope).
+fn peer_scoped_key(key: &str, peer_id: Option<&str>) -> String {
+    match peer_id {
+        Some(pid) => format!("peer:{pid}:{key}"),
+        None => key.to_string(),
+    }
+}
+
 /// Deliver a cron job's agent response to the configured delivery target.
 async fn cron_deliver_response(
     kernel: &LibreFangKernel,
@@ -9403,25 +9433,53 @@ impl KernelHandle for LibreFangKernel {
         LibreFangKernel::kill_agent(self, id).map_err(|e| format!("Kill failed: {e}"))
     }
 
-    fn memory_store(&self, key: &str, value: serde_json::Value) -> Result<(), String> {
+    fn memory_store(
+        &self,
+        key: &str,
+        value: serde_json::Value,
+        peer_id: Option<&str>,
+    ) -> Result<(), String> {
         let agent_id = shared_memory_agent_id();
+        let scoped = peer_scoped_key(key, peer_id);
         self.memory
-            .structured_set(agent_id, key, value)
+            .structured_set(agent_id, &scoped, value)
             .map_err(|e| format!("Memory store failed: {e}"))
     }
 
-    fn memory_recall(&self, key: &str) -> Result<Option<serde_json::Value>, String> {
+    fn memory_recall(
+        &self,
+        key: &str,
+        peer_id: Option<&str>,
+    ) -> Result<Option<serde_json::Value>, String> {
         let agent_id = shared_memory_agent_id();
+        let scoped = peer_scoped_key(key, peer_id);
         self.memory
-            .structured_get(agent_id, key)
+            .structured_get(agent_id, &scoped)
             .map_err(|e| format!("Memory recall failed: {e}"))
     }
 
-    fn memory_list(&self) -> Result<Vec<String>, String> {
+    fn memory_list(&self, peer_id: Option<&str>) -> Result<Vec<String>, String> {
         let agent_id = shared_memory_agent_id();
-        self.memory
+        let all_keys = self
+            .memory
             .list_keys(agent_id)
-            .map_err(|e| format!("Memory list failed: {e}"))
+            .map_err(|e| format!("Memory list failed: {e}"))?;
+        match peer_id {
+            Some(pid) => {
+                let prefix = format!("peer:{pid}:");
+                Ok(all_keys
+                    .into_iter()
+                    .filter_map(|k| k.strip_prefix(&prefix).map(|s| s.to_string()))
+                    .collect())
+            }
+            None => {
+                // When no peer context, return only non-peer-scoped keys
+                Ok(all_keys
+                    .into_iter()
+                    .filter(|k| !k.starts_with("peer:"))
+                    .collect())
+            }
+        }
     }
 
     fn find_agents(&self, query: &str) -> Vec<kernel_handle::AgentInfo> {
@@ -11107,5 +11165,22 @@ mod tests {
             &Some("some.unknown.expression".to_string()),
             &tags,
         ));
+    }
+
+    #[test]
+    fn test_peer_scoped_key() {
+        // With peer_id: key is namespaced
+        assert_eq!(
+            peer_scoped_key("car", Some("user-123")),
+            "peer:user-123:car"
+        );
+        assert_eq!(
+            peer_scoped_key("prefs.color", Some("u:456")),
+            "peer:u:456:prefs.color"
+        );
+
+        // Without peer_id: key is unchanged
+        assert_eq!(peer_scoped_key("car", None), "car");
+        assert_eq!(peer_scoped_key("global_setting", None), "global_setting");
     }
 }

@@ -42,7 +42,7 @@ pub async fn build_prompt_context_with_memory(
     user_message: &str,
 ) -> Option<String> {
     let result: Result<Vec<librefang_memory::MemoryItem>, LibreFangError> =
-        memory.auto_retrieve(user_id, user_message).await;
+        memory.auto_retrieve(user_id, user_message, None).await;
     match result {
         Ok(memories) if !memories.is_empty() => {
             Some(memory.format_context_with_query(&memories, user_message))

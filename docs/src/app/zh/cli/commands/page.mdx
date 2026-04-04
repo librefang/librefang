@@ -923,3 +923,81 @@ librefang config test-key <PROVIDER>
 librefang config test-key groq
 # Testing groq (GROQ_API_KEY)... OK
 ```
+
+---
+
+## 服务管理命令
+
+管理系统启动服务，使 LibreFang 在登录或重启时自动启动。
+
+### librefang service install
+
+注册平台特定的自启动服务。
+
+```
+librefang service install
+```
+
+**行为：**
+
+- **Linux：** 在 `~/.config/systemd/user/librefang.service` 创建 systemd 用户服务，然后执行 `systemctl --user daemon-reload` 和 `systemctl --user enable librefang.service`。
+- **macOS：** 在 `~/Library/LaunchAgents/ai.librefang.daemon.plist` 创建 LaunchAgent，并通过 `launchctl load` 加载。
+- **Windows：** 在 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 添加 `LibreFang` 注册表项。
+
+二进制路径通过当前运行的可执行文件自动检测。如果移动了二进制文件，重新运行 `librefang service install` 即可更新路径。
+
+**示例：**
+
+```bash
+librefang service install
+# ✓ Wrote /home/user/.config/systemd/user/librefang.service
+# ✓ Service enabled (will start on next login)
+```
+
+对于无图形界面的 Linux 服务器（无登录会话），还需要启用 lingering 以便用户服务在开机时启动：
+
+```bash
+loginctl enable-linger
+```
+
+---
+
+### librefang service uninstall
+
+移除已安装的自启动服务。
+
+```
+librefang service uninstall
+```
+
+**行为：**
+
+- **Linux：** 禁用并移除 systemd 用户服务，然后重新加载守护进程。
+- **macOS：** 卸载并移除 LaunchAgent plist 文件。
+- **Windows：** 删除注册表 Run 项。
+
+**示例：**
+
+```bash
+librefang service uninstall
+# ✓ Removed systemd user service
+```
+
+---
+
+### librefang service status
+
+检查自启动服务是否已注册并正在运行。
+
+```
+librefang service status
+```
+
+**示例：**
+
+```bash
+librefang service status
+# ✓ Systemd user service is registered
+#   Enabled: enabled
+#   Active: active
+```

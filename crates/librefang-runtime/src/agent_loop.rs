@@ -62,10 +62,11 @@ pub const TIMEOUT_PARTIAL_OUTPUT_MARKER: &str = "[partial_output_delivered]";
 
 /// Check if a response is a NO_REPLY.  Matches:
 /// - Exact `"NO_REPLY"` (original behaviour)
-/// - Text ending with `NO_REPLY` on its own line (model sometimes adds context before it)
+/// - Text ending with `NO_REPLY` anywhere (model sometimes adds context before it,
+///   either on the same line or on a new line)
 fn is_no_reply(text: &str) -> bool {
     let t = text.trim();
-    t == "NO_REPLY" || t.ends_with("\nNO_REPLY") || t.ends_with("\n\nNO_REPLY")
+    t == "NO_REPLY" || t.ends_with("NO_REPLY")
 }
 
 /// Safely trim message history to `MAX_HISTORY_MESSAGES`, cutting at
@@ -598,7 +599,10 @@ pub async fn run_agent_loop(
         if let Some(ref pm_store_arc) = proactive_memory {
             let user_id = session.agent_id.0.to_string();
 
-            match pm_store_arc.auto_retrieve(&user_id, user_message).await {
+            match pm_store_arc
+                .auto_retrieve(&user_id, user_message, sender_user_id.as_deref())
+                .await
+            {
                 Ok(pm_memories) if !pm_memories.is_empty() => {
                     debug!("Proactive memory retrieved {} items", pm_memories.len());
                     let pm_fragments: Vec<_> = pm_memories
@@ -1160,7 +1164,10 @@ pub async fn run_agent_loop(
                     let user_id = session.agent_id.0.to_string();
                     let new_messages = &session.messages[messages_before..];
                     let messages_json = serialize_session_messages(new_messages);
-                    match pm_store.auto_memorize(&user_id, &messages_json).await {
+                    match pm_store
+                        .auto_memorize(&user_id, &messages_json, sender_user_id.as_deref())
+                        .await
+                    {
                         Ok(result) if result.has_content => {
                             debug!(
                                 "Proactive memory: stored {} memories, {} relations",
@@ -2106,7 +2113,10 @@ pub async fn run_agent_loop_streaming(
         if let Some(ref pm_store_arc) = proactive_memory {
             let user_id = session.agent_id.0.to_string();
 
-            match pm_store_arc.auto_retrieve(&user_id, user_message).await {
+            match pm_store_arc
+                .auto_retrieve(&user_id, user_message, sender_user_id.as_deref())
+                .await
+            {
                 Ok(pm_memories) if !pm_memories.is_empty() => {
                     debug!(
                         "Proactive memory (streaming) retrieved {} items",
@@ -2713,7 +2723,10 @@ pub async fn run_agent_loop_streaming(
                     let user_id = session.agent_id.0.to_string();
                     let new_messages = &session.messages[messages_before..];
                     let messages_json = serialize_session_messages(new_messages);
-                    match pm_store.auto_memorize(&user_id, &messages_json).await {
+                    match pm_store
+                        .auto_memorize(&user_id, &messages_json, sender_user_id.as_deref())
+                        .await
+                    {
                         Ok(result) if result.has_content => {
                             debug!(
                                 "Proactive memory (streaming): stored {} memories, {} relations",

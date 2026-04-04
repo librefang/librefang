@@ -956,6 +956,16 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
                 "similarity_boost": config.tts.elevenlabs.similarity_boost,
             }),
         );
+        tts.insert(
+            "google".into(),
+            serde_json::json!({
+                "voice": config.tts.google.voice,
+                "language_code": config.tts.google.language_code,
+                "speaking_rate": config.tts.google.speaking_rate,
+                "pitch": config.tts.google.pitch,
+                "format": config.tts.google.format,
+            }),
+        );
     }
 
     // ── Docker Sandbox ──

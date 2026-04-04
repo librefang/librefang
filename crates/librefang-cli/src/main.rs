@@ -476,6 +476,12 @@ enum Commands {
         long_about = "Display system information and version details.\n\nExamples:\n  librefang system info          # Detailed system info\n  librefang system version       # Version information"
     )]
     System(SystemCommands),
+    /// Manage boot service (systemd/launchd/Windows autostart) [*].
+    #[command(
+        subcommand,
+        long_about = "Install, remove, or check the status of a system boot service so LibreFang\nstarts automatically on login/boot.\n\nExamples:\n  librefang service install      # Register auto-start service\n  librefang service uninstall    # Remove auto-start service\n  librefang service status       # Check if the service is registered"
+    )]
+    Service(ServiceCommands),
     /// Reset local config and state.
     #[command(
         long_about = "Reset local configuration and state to defaults.\n\nRemoves the ~/.librefang/ directory and all its contents. You will be\nprompted for confirmation unless --confirm is passed.\n\nExamples:\n  librefang reset            # Interactive confirmation\n  librefang reset --confirm  # Skip confirmation (for scripts)"
@@ -1369,6 +1375,25 @@ enum SystemCommands {
     },
 }
 
+#[derive(Subcommand)]
+enum ServiceCommands {
+    /// Register auto-start service so LibreFang starts on boot/login.
+    #[command(
+        long_about = "Register a system service so LibreFang starts automatically.\n\nOn Linux:   creates a systemd user service (~/.config/systemd/user/librefang.service)\nOn macOS:   creates a LaunchAgent (~/Library/LaunchAgents/ai.librefang.daemon.plist)\nOn Windows: adds a registry entry (HKCU\\...\\Run)\n\nExamples:\n  librefang service install"
+    )]
+    Install,
+    /// Remove the auto-start service.
+    #[command(
+        long_about = "Remove the previously installed auto-start service.\n\nExamples:\n  librefang service uninstall"
+    )]
+    Uninstall,
+    /// Show whether the auto-start service is registered.
+    #[command(
+        long_about = "Check whether the auto-start service is currently registered.\n\nExamples:\n  librefang service status"
+    )]
+    Status,
+}
+
 fn init_tracing_stderr(log_level: &str) {
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
@@ -1766,6 +1791,11 @@ fn main() {
         Some(Commands::System(sub)) => match sub {
             SystemCommands::Info { json } => cmd_system_info(json),
             SystemCommands::Version { json } => cmd_system_version(json),
+        },
+        Some(Commands::Service(sub)) => match sub {
+            ServiceCommands::Install => cmd_service_install(),
+            ServiceCommands::Uninstall => cmd_service_uninstall(),
+            ServiceCommands::Status => cmd_service_status(),
         },
         Some(Commands::Reset { confirm }) => cmd_reset(confirm),
         Some(Commands::Uninstall {
@@ -6476,6 +6506,10 @@ pub(crate) fn test_api_key(provider: &str, key: &str) -> bool {
             .get("https://openrouter.ai/api/v1/models")
             .bearer_auth(key)
             .send(),
+        "elevenlabs" => client
+            .get("https://api.elevenlabs.io/v1/user")
+            .header("xi-api-key", key)
+            .send(),
         _ => return true, // unknown provider — skip test
     };
 
@@ -8714,6 +8748,360 @@ fn cmd_system_version(json: bool) {
         return;
     }
     println!("librefang {}", env!("CARGO_PKG_VERSION"));
+}
+
+// ---------------------------------------------------------------------------
+// Service management (boot auto-start)
+// ---------------------------------------------------------------------------
+
+/// Resolve the absolute path to the current librefang binary.
+fn resolve_binary_path() -> std::path::PathBuf {
+    std::env::current_exe()
+        .unwrap_or_else(|_| std::path::PathBuf::from("librefang"))
+        .canonicalize()
+        .unwrap_or_else(|_| std::env::current_exe().unwrap_or_else(|_| "librefang".into()))
+}
+
+fn cmd_service_install() {
+    // Warn if running as root — the service would be installed for root, not
+    // the actual user. This catches `sudo librefang service install` mistakes.
+    #[cfg(unix)]
+    {
+        // SAFETY: geteuid() is always safe to call.
+        if unsafe { libc::geteuid() } == 0 {
+            ui::error(
+                "Running as root — the service will be installed for the root account, \
+                 not your user. Run without sudo instead.",
+            );
+            std::process::exit(1);
+        }
+    }
+
+    let binary = resolve_binary_path();
+    let librefang_home = cli_librefang_home();
+
+    #[cfg(target_os = "linux")]
+    {
+        service_install_linux(&binary, &librefang_home);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        service_install_macos(&binary, &librefang_home);
+    }
+    #[cfg(windows)]
+    {
+        service_install_windows(&binary);
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    {
+        let _ = (&binary, &librefang_home);
+        ui::error("Auto-start service is not supported on this platform.");
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn service_install_linux(binary: &std::path::Path, librefang_home: &std::path::Path) {
+    let home = match dirs::home_dir() {
+        Some(h) => h,
+        None => {
+            ui::error("Cannot determine home directory.");
+            return;
+        }
+    };
+    let service_dir = home.join(".config/systemd/user");
+    if let Err(e) = std::fs::create_dir_all(&service_dir) {
+        ui::error(&format!("Failed to create {}: {e}", service_dir.display()));
+        return;
+    }
+
+    let unit = format!(
+        "[Unit]\n\
+         Description=LibreFang Agent OS Daemon\n\
+         Documentation=https://librefang.ai\n\
+         After=network-online.target\n\
+         Wants=network-online.target\n\
+         \n\
+         [Service]\n\
+         Type=simple\n\
+         ExecStart={binary} start --foreground\n\
+         Restart=on-failure\n\
+         RestartSec=5\n\
+         WorkingDirectory={home}\n\
+         EnvironmentFile=-{home}/env\n\
+         \n\
+         [Install]\n\
+         WantedBy=default.target\n",
+        binary = binary.display(),
+        home = librefang_home.display(),
+    );
+
+    let service_path = service_dir.join("librefang.service");
+    if let Err(e) = std::fs::write(&service_path, &unit) {
+        ui::error(&format!("Failed to write {}: {e}", service_path.display()));
+        return;
+    }
+    ui::success(&format!("Wrote {}", service_path.display()));
+
+    // Reload and enable
+    let reload = std::process::Command::new("systemctl")
+        .args(["--user", "daemon-reload"])
+        .output();
+    if let Ok(o) = &reload {
+        if !o.status.success() {
+            ui::error("systemctl --user daemon-reload failed");
+            return;
+        }
+    }
+    let enable = std::process::Command::new("systemctl")
+        .args(["--user", "enable", "librefang.service"])
+        .output();
+    match enable {
+        Ok(o) if o.status.success() => {
+            ui::success("Service enabled (will start on next login)");
+            ui::hint("Start now with: systemctl --user start librefang.service");
+            // Enable lingering so the user service runs without an active login session
+            ui::hint("For headless servers, also run: loginctl enable-linger");
+        }
+        _ => ui::error("systemctl --user enable librefang.service failed"),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn service_install_macos(binary: &std::path::Path, librefang_home: &std::path::Path) {
+    let home = match dirs::home_dir() {
+        Some(h) => h,
+        None => {
+            ui::error("Cannot determine home directory.");
+            return;
+        }
+    };
+    let agents_dir = home.join("Library/LaunchAgents");
+    if let Err(e) = std::fs::create_dir_all(&agents_dir) {
+        ui::error(&format!("Failed to create {}: {e}", agents_dir.display()));
+        return;
+    }
+
+    let plist = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>ai.librefang.daemon</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{binary}</string>
+        <string>start</string>
+        <string>--foreground</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>WorkingDirectory</key>
+    <string>{home}</string>
+    <key>StandardOutPath</key>
+    <string>{home}/daemon.log</string>
+    <key>StandardErrorPath</key>
+    <string>{home}/daemon.log</string>
+</dict>
+</plist>
+"#,
+        binary = binary.display(),
+        home = librefang_home.display(),
+    );
+
+    let plist_path = agents_dir.join("ai.librefang.daemon.plist");
+
+    // Unload existing service first (if any) to avoid launchctl errors
+    if plist_path.exists() {
+        let _ = std::process::Command::new("launchctl")
+            .args(["unload", &plist_path.to_string_lossy()])
+            .output();
+    }
+
+    if let Err(e) = std::fs::write(&plist_path, &plist) {
+        ui::error(&format!("Failed to write {}: {e}", plist_path.display()));
+        return;
+    }
+    ui::success(&format!("Wrote {}", plist_path.display()));
+
+    let load = std::process::Command::new("launchctl")
+        .args(["load", &plist_path.to_string_lossy()])
+        .output();
+    match load {
+        Ok(o) if o.status.success() => {
+            ui::success("LaunchAgent loaded (will start on login and now)");
+        }
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            ui::error(&format!("launchctl load failed: {stderr}"));
+        }
+        Err(e) => ui::error(&format!("Failed to run launchctl: {e}")),
+    }
+}
+
+#[cfg(windows)]
+fn service_install_windows(binary: &std::path::Path) {
+    let value = format!("\"{}\" start", binary.display());
+    let output = std::process::Command::new("reg")
+        .args([
+            "add",
+            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+            "/v",
+            "LibreFang",
+            "/t",
+            "REG_SZ",
+            "/d",
+            &value,
+            "/f",
+        ])
+        .output();
+    match output {
+        Ok(o) if o.status.success() => {
+            ui::success("Added to Windows startup (HKCU\\...\\Run)");
+        }
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            ui::error(&format!("Failed to write registry: {stderr}"));
+        }
+        Err(e) => ui::error(&format!("Failed to run reg.exe: {e}")),
+    }
+}
+
+fn cmd_service_uninstall() {
+    #[cfg(target_os = "linux")]
+    {
+        let home = dirs::home_dir().unwrap_or_default();
+        let service_path = home.join(".config/systemd/user/librefang.service");
+        if service_path.exists() {
+            let _ = std::process::Command::new("systemctl")
+                .args(["--user", "disable", "--now", "librefang.service"])
+                .output();
+            match std::fs::remove_file(&service_path) {
+                Ok(()) => {
+                    let _ = std::process::Command::new("systemctl")
+                        .args(["--user", "daemon-reload"])
+                        .output();
+                    ui::success("Removed systemd user service");
+                }
+                Err(e) => ui::error(&format!("Failed to remove service file: {e}")),
+            }
+        } else {
+            ui::hint("No systemd user service found — nothing to remove.");
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let home = dirs::home_dir().unwrap_or_default();
+        let plist_path = home.join("Library/LaunchAgents/ai.librefang.daemon.plist");
+        if plist_path.exists() {
+            let _ = std::process::Command::new("launchctl")
+                .args(["unload", &plist_path.to_string_lossy()])
+                .output();
+            match std::fs::remove_file(&plist_path) {
+                Ok(()) => ui::success("Removed LaunchAgent"),
+                Err(e) => ui::error(&format!("Failed to remove plist: {e}")),
+            }
+        } else {
+            ui::hint("No LaunchAgent found — nothing to remove.");
+        }
+    }
+    #[cfg(windows)]
+    {
+        let output = std::process::Command::new("reg")
+            .args([
+                "delete",
+                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+                "/v",
+                "LibreFang",
+                "/f",
+            ])
+            .output();
+        match output {
+            Ok(o) if o.status.success() => {
+                ui::success("Removed from Windows startup");
+            }
+            _ => ui::hint("No startup entry found — nothing to remove."),
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    {
+        ui::error("Auto-start service is not supported on this platform.");
+    }
+}
+
+fn cmd_service_status() {
+    #[cfg(target_os = "linux")]
+    {
+        let home = dirs::home_dir().unwrap_or_default();
+        let service_path = home.join(".config/systemd/user/librefang.service");
+        if service_path.exists() {
+            ui::success("Systemd user service is registered");
+            // Show enabled/active status
+            if let Ok(output) = std::process::Command::new("systemctl")
+                .args(["--user", "is-enabled", "librefang.service"])
+                .output()
+            {
+                let status = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                ui::kv("  Enabled", &status);
+            }
+            if let Ok(output) = std::process::Command::new("systemctl")
+                .args(["--user", "is-active", "librefang.service"])
+                .output()
+            {
+                let status = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                ui::kv("  Active", &status);
+            }
+        } else {
+            ui::hint("No systemd user service registered.");
+            ui::hint("Run `librefang service install` to set it up.");
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let home = dirs::home_dir().unwrap_or_default();
+        let plist_path = home.join("Library/LaunchAgents/ai.librefang.daemon.plist");
+        if plist_path.exists() {
+            ui::success("LaunchAgent is registered");
+            if let Ok(output) = std::process::Command::new("launchctl")
+                .args(["list"])
+                .output()
+            {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let running = stdout.lines().any(|l| l.contains("ai.librefang.daemon"));
+                ui::kv("  Loaded", if running { "yes" } else { "not loaded" });
+            }
+        } else {
+            ui::hint("No LaunchAgent registered.");
+            ui::hint("Run `librefang service install` to set it up.");
+        }
+    }
+    #[cfg(windows)]
+    {
+        let output = std::process::Command::new("reg")
+            .args([
+                "query",
+                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+                "/v",
+                "LibreFang",
+            ])
+            .output();
+        match output {
+            Ok(o) if o.status.success() => {
+                ui::success("Windows startup entry is registered");
+            }
+            _ => {
+                ui::hint("No startup entry registered.");
+                ui::hint("Run `librefang service install` to set it up.");
+            }
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    {
+        ui::error("Auto-start service is not supported on this platform.");
+    }
 }
 
 fn cmd_reset(confirm: bool) {

@@ -5,7 +5,9 @@ import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
 import { listAgents, getAgentDetail, AgentDetail, spawnAgent, suspendAgent, resumeAgent, patchAgentConfig,
   listPromptVersions, listExperiments, activatePromptVersion, startExperiment, pauseExperiment, completeExperiment,
-  createPromptVersion, createExperiment, deletePromptVersion, PromptVersion, PromptExperiment, ExperimentVariantMetrics, getExperimentMetrics } from "../api";
+  createPromptVersion, createExperiment, deletePromptVersion, PromptVersion, PromptExperiment, ExperimentVariantMetrics, getExperimentMetrics,
+  listModels, listProviders, listAgentTemplates, deleteAgent, cloneAgent, stopAgent, clearAgentHistory, resetAgentSession } from "../api";
+import { isProviderAvailable } from "../lib/status";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -14,7 +16,7 @@ import { Input } from "../components/ui/Input";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { Avatar } from "../components/ui/Avatar";
-import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, GitBranch, Trash2, Check, BarChart3 } from "lucide-react";
+import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, GitBranch, Trash2, Check, BarChart3, Copy, RotateCcw } from "lucide-react";
 import { truncateId } from "../lib/string";
 import { getStatusVariant } from "../lib/status";
 
@@ -32,15 +34,20 @@ export function AgentsPage() {
   const [manifestToml, setManifestToml] = useState("");
   const [showPrompts, setShowPrompts] = useState(false);
   const [editingModel, setEditingModel] = useState(false);
-  const [modelDraft, setModelDraft] = useState({ provider: "", model: "", max_tokens: "" });
+  const [modelDraft, setModelDraft] = useState({ provider: "", model: "", max_tokens: "", temperature: "" });
   const queryClient = useQueryClient();
+  const templatesQuery = useQuery({ queryKey: ["agent-templates"], queryFn: listAgentTemplates, enabled: showCreate && createMode === "template" });
   const spawnMutation = useMutation({
     mutationFn: spawnAgent,
     onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["agents"] }); setShowCreate(false); setTemplateName(""); setManifestToml(""); }
   });
+  const deleteMutation = useMutation({
+    mutationFn: deleteAgent,
+    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["agents"] }); setDetailAgent(null); }
+  });
 
   const patchAgentConfigMutation = useMutation({
-    mutationFn: ({ agentId, config }: { agentId: string; config: { max_tokens?: number; model?: string; provider?: string } }) =>
+    mutationFn: ({ agentId, config }: { agentId: string; config: { max_tokens?: number; model?: string; provider?: string; temperature?: number } }) =>
       patchAgentConfig(agentId, config),
     onSuccess: (_, { agentId }) => {
       queryClient.invalidateQueries({ queryKey: ["agents"] });
@@ -57,6 +64,7 @@ export function AgentsPage() {
       provider: detailAgent?.model?.provider ?? "",
       model: detailAgent?.model?.model ?? "",
       max_tokens: String(detailAgent?.model?.max_tokens ?? 4096),
+      temperature: String(detailAgent?.model?.temperature ?? 0.7),
     });
     setEditingModel(true);
   }
@@ -73,14 +81,16 @@ export function AgentsPage() {
   function saveModelEdit() {
     if (!detailAgent) return;
     const current = detailAgent.model;
-    const patch: { max_tokens?: number; model?: string; provider?: string } = {};
+    const patch: { max_tokens?: number; model?: string; provider?: string; temperature?: number } = {};
 
     const trimmedProvider = modelDraft.provider.trim();
     const trimmedModel = modelDraft.model.trim();
     const parsedMaxTokens = parseInt(modelDraft.max_tokens, 10);
+    const parsedTemperature = parseFloat(modelDraft.temperature);
 
     if (!trimmedProvider || !trimmedModel) return;
     if (isNaN(parsedMaxTokens) || parsedMaxTokens <= 0) return;
+    if (isNaN(parsedTemperature) || parsedTemperature < 0 || parsedTemperature > 2) return;
 
     const modelChanged = trimmedModel !== current?.model;
     const providerChanged = trimmedProvider !== current?.provider;
@@ -90,6 +100,7 @@ export function AgentsPage() {
       patch.provider = trimmedProvider;
     }
     if (parsedMaxTokens !== current?.max_tokens) patch.max_tokens = parsedMaxTokens;
+    if (parsedTemperature !== current?.temperature) patch.temperature = parsedTemperature;
 
     if (Object.keys(patch).length === 0) {
       setEditingModel(false);
@@ -104,6 +115,24 @@ export function AgentsPage() {
     queryFn: listAgents,
     refetchInterval: REFRESH_MS
   });
+
+  const modelsQuery = useQuery({
+    queryKey: ["models", "list", modelDraft.provider],
+    queryFn: () => listModels({ provider: modelDraft.provider }),
+    enabled: !!modelDraft.provider.trim(),
+    staleTime: 60_000,
+  });
+
+  const providersQuery = useQuery({
+    queryKey: ["providers", "list"],
+    queryFn: listProviders,
+    staleTime: 60_000,
+  });
+
+  const configuredProviders = useMemo(
+    () => (providersQuery.data ?? []).filter(p => isProviderAvailable(p.auth_status)),
+    [providersQuery.data],
+  );
 
   const agents = agentsQuery.data ?? [];
   const filteredAgents = useMemo(() => agents
@@ -171,6 +200,9 @@ export function AgentsPage() {
           <Button variant="primary" size="sm" className="flex-1" onClick={(e) => { e.stopPropagation(); navigate({ to: "/chat", search: { agentId: agent.id } }); }}>
             <MessageCircle className="h-3.5 w-3.5 mr-1" /> {t("common.interact")}
           </Button>
+          <Button variant="secondary" size="sm" onClick={(e) => { e.stopPropagation(); if (confirm(t("agents.delete_confirm", { name: agent.name }))) deleteMutation.mutate(agent.id); }}>
+            <Trash2 className="h-3.5 w-3.5" />
+          </Button>
         </div>
       </Card>
     );
@@ -223,7 +255,11 @@ export function AgentsPage() {
         </div>
       )}
       {/* Agent Detail Modal */}
-      {detailAgent && (
+      {detailAgent && (() => {
+        const detailState = ((detailAgent as any).state || "").toLowerCase();
+        const isDetailSuspended = detailState === "suspended";
+        const statusColor = isDetailSuspended ? "bg-warning" : detailState === "crashed" ? "bg-error" : "bg-success";
+        return (
         <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40 backdrop-blur-sm" onClick={closeDetailModal}>
           <div className="bg-surface rounded-t-2xl sm:rounded-2xl shadow-2xl border border-border-subtle w-full sm:w-[560px] sm:max-w-[90vw] max-h-[85vh] sm:max-h-[80vh] overflow-y-auto animate-fade-in-scale" onClick={e => e.stopPropagation()}>
             {/* Modal Header */}
@@ -232,17 +268,27 @@ export function AgentsPage() {
                 <div className="flex items-center gap-4">
                   <div className="relative">
                     <Avatar fallback={detailAgent.name} size="lg" />
-                    <span className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full bg-success border-2 border-surface" />
+                    <span className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full ${statusColor} border-2 border-surface ${!isDetailSuspended && detailState !== "crashed" ? "animate-pulse" : ""}`} />
                   </div>
                   <div>
                     <h3 className="text-lg font-black tracking-tight">{t(`agents.builtin.${detailAgent.name}.name`, { defaultValue: detailAgent.name })}</h3>
-                    <p className="text-[10px] text-text-dim font-mono mt-0.5">{truncateId(detailAgent.id, 16)}</p>
+                    <div className="flex items-center gap-2 mt-0.5">
+                      <p className="text-[10px] text-text-dim font-mono">{truncateId(detailAgent.id, 16)}</p>
+                      <Badge variant={isDetailSuspended ? "warning" : "success"} dot>
+                        {(detailAgent as any).state ? t(`common.${detailState}`, { defaultValue: (detailAgent as any).state }) : t("common.running")}
+                      </Badge>
+                    </div>
                   </div>
                 </div>
                 <button onClick={closeDetailModal} className="p-2 rounded-xl hover:bg-main transition-colors"><X className="w-4 h-4" /></button>
               </div>
             </div>
             <div className="p-6 space-y-5">
+
+              {/* Description */}
+              {(detailAgent as any).description && (
+                <p className="text-xs text-text-dim leading-relaxed">{(detailAgent as any).description}</p>
+              )}
               {/* Model */}
               {detailAgent.model && (
                 <div>
@@ -255,23 +301,41 @@ export function AgentsPage() {
                       <>
                         <div className="flex justify-between items-center gap-2">
                           <span className="text-text-dim">{t("agents.provider")}</span>
-                          <input
-                            type="text"
+                          <select
                             value={modelDraft.provider}
-                            onChange={e => setModelDraft(d => ({ ...d, provider: e.target.value }))}
+                            onChange={e => setModelDraft(d => ({ ...d, provider: e.target.value, model: "" }))}
                             className="w-40 px-2 py-1 rounded-xl border border-border-subtle bg-main text-xs font-mono outline-none focus:border-brand text-right"
-                            placeholder="e.g. openai"
-                          />
+                            disabled={providersQuery.isLoading}
+                          >
+                            {providersQuery.isLoading && <option value="">Loading...</option>}
+                            {providersQuery.error && <option value="">Error loading</option>}
+                            {!providersQuery.isLoading && configuredProviders.length === 0 && <option value="">No providers</option>}
+                            {modelDraft.provider && !configuredProviders.some(p => p.id === modelDraft.provider) && (
+                              <option value={modelDraft.provider}>{modelDraft.provider}</option>
+                            )}
+                            {configuredProviders.map(p => (
+                              <option key={p.id} value={p.id}>{p.display_name || p.id}</option>
+                            ))}
+                          </select>
                         </div>
                         <div className="flex justify-between items-center gap-2">
                           <span className="text-text-dim">{t("agents.model")}</span>
-                          <input
-                            type="text"
+                          <select
                             value={modelDraft.model}
                             onChange={e => setModelDraft(d => ({ ...d, model: e.target.value }))}
                             className="w-40 px-2 py-1 rounded-xl border border-border-subtle bg-main text-xs font-mono outline-none focus:border-brand text-right"
-                            placeholder="e.g. gpt-4o"
-                          />
+                            disabled={modelsQuery.isLoading || !modelDraft.provider.trim()}
+                          >
+                            {!modelDraft.provider.trim() && <option value="">Select provider first</option>}
+                            {modelDraft.provider.trim() && modelsQuery.isLoading && <option value="">Loading...</option>}
+                            {modelDraft.provider.trim() && !modelsQuery.isLoading && modelsQuery.data?.models?.length === 0 && <option value="">No models</option>}
+                            {modelDraft.model && !modelsQuery.data?.models?.some(m => m.id === modelDraft.model) && (
+                              <option value={modelDraft.model}>{modelDraft.model}</option>
+                            )}
+                            {modelsQuery.data?.models?.map(m => (
+                              <option key={m.id} value={m.id}>{m.display_name || m.id}</option>
+                            ))}
+                          </select>
                         </div>
                         <div className="flex justify-between items-center gap-2">
                           <span className="text-text-dim">{t("agents.max_tokens")}</span>
@@ -284,12 +348,18 @@ export function AgentsPage() {
                             className="w-40 px-2 py-1 rounded-xl border border-border-subtle bg-main text-xs font-mono outline-none focus:border-brand text-right"
                           />
                         </div>
-                        {detailAgent?.model?.temperature != null && (
-                          <div className="flex justify-between items-center gap-2">
-                            <span className="text-text-dim">{t("agents.temperature")}</span>
-                            <span className="font-mono text-text-dim/70">{detailAgent.model.temperature}</span>
-                          </div>
-                        )}
+                        <div className="flex justify-between items-center gap-2">
+                          <span className="text-text-dim">{t("agents.temperature")}</span>
+                          <input
+                            type="number"
+                            min={0}
+                            max={2}
+                            step={0.1}
+                            value={modelDraft.temperature}
+                            onChange={e => setModelDraft(d => ({ ...d, temperature: e.target.value }))}
+                            className="w-40 px-2 py-1 rounded-xl border border-border-subtle bg-main text-xs font-mono outline-none focus:border-brand text-right"
+                          />
+                        </div>
                         <div className="flex justify-end gap-1 pt-1">
                           <button
                             onClick={cancelModelEdit}
@@ -299,7 +369,7 @@ export function AgentsPage() {
                           </button>
                           <button
                             onClick={saveModelEdit}
-                            disabled={patchAgentConfigMutation.isPending || !modelDraft.provider.trim() || !modelDraft.model.trim() || isNaN(parseInt(modelDraft.max_tokens, 10)) || parseInt(modelDraft.max_tokens, 10) <= 0}
+                            disabled={patchAgentConfigMutation.isPending || !modelDraft.provider.trim() || !modelDraft.model.trim() || isNaN(parseInt(modelDraft.max_tokens, 10)) || parseInt(modelDraft.max_tokens, 10) <= 0 || isNaN(parseFloat(modelDraft.temperature)) || parseFloat(modelDraft.temperature) < 0 || parseFloat(modelDraft.temperature) > 2}
                             className="px-3 py-1 rounded text-xs font-bold bg-brand hover:bg-brand/90 text-white disabled:opacity-50"
                           >
                             {patchAgentConfigMutation.isPending ? t("common.saving") : t("common.save")}
@@ -411,20 +481,51 @@ export function AgentsPage() {
               )}
 
               {/* Actions */}
-              <div className="flex gap-2 pt-2 border-t border-border-subtle">
-                <Button variant="secondary" size="sm" className="flex-1" onClick={() => setShowPrompts(true)}>
-                  <FlaskConical className="w-3.5 h-3.5 mr-1" />
-                  {t("agents.prompts") || "Prompts"}
-                </Button>
-                <Button variant="primary" size="sm" className="flex-1" onClick={() => { closeDetailModal(); navigate({ to: "/chat", search: { agentId: detailAgent.id } }); }}>
-                  <MessageCircle className="w-3.5 h-3.5 mr-1" />
+              <div className="space-y-3 pt-3 border-t border-border-subtle">
+                {/* Primary action */}
+                <Button variant="primary" size="sm" className="w-full" onClick={() => { closeDetailModal(); navigate({ to: "/chat", search: { agentId: detailAgent.id } }); }}>
+                  <MessageCircle className="w-3.5 h-3.5 mr-1.5" />
                   {t("common.interact")}
+                </Button>
+
+                {/* Management actions */}
+                <div className="grid grid-cols-4 gap-2">
+                  {isDetailSuspended ? (
+                    <Button variant="secondary" size="sm" className="flex-col gap-1 py-2.5 h-auto" onClick={async () => { await resumeAgent(detailAgent.id); agentsQuery.refetch(); const d = await getAgentDetail(detailAgent.id); setDetailAgent(d); }}>
+                      <Play className="w-4 h-4" />
+                      <span className="text-[9px]">{t("agents.resume")}</span>
+                    </Button>
+                  ) : (
+                    <Button variant="secondary" size="sm" className="flex-col gap-1 py-2.5 h-auto" onClick={async () => { await suspendAgent(detailAgent.id); agentsQuery.refetch(); const d = await getAgentDetail(detailAgent.id); setDetailAgent(d); }}>
+                      <Pause className="w-4 h-4" />
+                      <span className="text-[9px]">{t("agents.suspend")}</span>
+                    </Button>
+                  )}
+                  <Button variant="secondary" size="sm" className="flex-col gap-1 py-2.5 h-auto" onClick={async () => { await cloneAgent(detailAgent.id); agentsQuery.refetch(); }}>
+                    <Copy className="w-4 h-4" />
+                    <span className="text-[9px]">{t("agents.clone")}</span>
+                  </Button>
+                  <Button variant="secondary" size="sm" className="flex-col gap-1 py-2.5 h-auto" onClick={async () => { if (confirm(t("agents.reset_confirm"))) { await resetAgentSession(detailAgent.id); const d = await getAgentDetail(detailAgent.id); setDetailAgent(d); } }}>
+                    <RotateCcw className="w-4 h-4" />
+                    <span className="text-[9px]">{t("agents.reset")}</span>
+                  </Button>
+                  <Button variant="secondary" size="sm" className="flex-col gap-1 py-2.5 h-auto text-error/70 hover:text-error" onClick={() => { if (confirm(t("agents.delete_confirm", { name: detailAgent.name }))) { deleteMutation.mutate(detailAgent.id); } }}>
+                    <Trash2 className="w-4 h-4" />
+                    <span className="text-[9px]">{t("common.delete")}</span>
+                  </Button>
+                </div>
+
+                {/* Prompts link */}
+                <Button variant="secondary" size="sm" className="w-full" onClick={() => setShowPrompts(true)}>
+                  <FlaskConical className="w-3.5 h-3.5 mr-1.5" />
+                  {t("agents.prompts")}
                 </Button>
               </div>
             </div>
           </div>
         </div>
-      )}
+        );
+      })()}
 
       {/* Create Agent Modal */}
       {showCreate && (
@@ -450,10 +551,13 @@ export function AgentsPage() {
               {createMode === "template" ? (
                 <div>
                   <label className="text-[10px] font-bold text-text-dim uppercase">{t("agents.template_name")}</label>
-                  <input value={templateName} onChange={e => setTemplateName(e.target.value)}
-                    placeholder={t("agents.template_placeholder")}
-                    className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-brand" />
-                  <p className="text-[9px] text-text-dim/50 mt-1">{t("agents.template_hint")}</p>
+                  <select value={templateName} onChange={e => setTemplateName(e.target.value)}
+                    className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-brand">
+                    <option value="">{t("agents.template_placeholder")}</option>
+                    {(templatesQuery.data ?? []).map(tmpl => (
+                      <option key={tmpl.name} value={tmpl.name}>{tmpl.name}</option>
+                    ))}
+                  </select>
                 </div>
               ) : (
                 <div>
