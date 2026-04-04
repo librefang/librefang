@@ -996,6 +996,9 @@
     "nav_layout": "Navigation Layout",
     "nav_grouped": "Grouped",
     "nav_collapsible": "Collapsible",
+    "theme_desc": "Switch between light and dark mode",
+    "language_desc": "Interface display language",
+    "nav_layout_desc": "Sidebar navigation style",
     "tools_title": "Tools",
     "tools_search": "Search tools...",
     "change_password": "Change Credentials",
@@ -1224,5 +1227,11 @@
     "load_error": "Failed to load form schema",
     "required_missing": "Please fill in all required fields",
     "from_schema": "From Schema"
+  },
+  "command_palette": {
+    "search_placeholder": "Search pages...",
+    "navigate": "Navigate",
+    "open": "Open",
+    "close": "Close"
   }
 }

@@ -6,12 +6,10 @@ import type { LucideIcon } from "lucide-react";
 
 interface CommandItem {
   id: string;
-  label: string;
-  labelZh: string;
+  labelKey: string;
   icon: LucideIcon;
   action: () => void;
-  category: string;
-  categoryZh: string;
+  categoryKey: string;
 }
 
 interface CommandPaletteProps {
@@ -20,40 +18,40 @@ interface CommandPaletteProps {
 }
 
 export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
-  const { t, i18n } = useTranslation();
+  const { t } = useTranslation();
   const navigate = useNavigate();
   const [search, setSearch] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
-  const isZh = i18n.language === "zh";
 
   const commands = useMemo<CommandItem[]>(() => [
-    { id: "overview", label: "Overview", labelZh: "概览", category: "Core", categoryZh: "核心", icon: Home, action: () => navigate({ to: "/overview" }) },
-    { id: "workflows", label: "Workflows", labelZh: "工作流", category: "Core", categoryZh: "核心", icon: Layers, action: () => navigate({ to: "/workflows" }) },
-    { id: "canvas", label: "Canvas", labelZh: "画布", category: "Core", categoryZh: "核心", icon: Layers, action: () => navigate({ to: "/canvas", search: { t: Date.now(), wf: undefined } }) },
-    { id: "chat", label: "Chat", labelZh: "对话", category: "Core", categoryZh: "核心", icon: MessageCircle, action: () => navigate({ to: "/chat", search: { agentId: undefined } }) },
-    { id: "sessions", label: "Sessions", labelZh: "会话", category: "Core", categoryZh: "核心", icon: Clock, action: () => navigate({ to: "/sessions" }) },
-    { id: "approvals", label: "Approvals", labelZh: "审批", category: "Core", categoryZh: "核心", icon: CheckCircle, action: () => navigate({ to: "/approvals" }) },
-    { id: "scheduler", label: "Scheduler", labelZh: "调度器", category: "Automation", categoryZh: "自动化", icon: Calendar, action: () => navigate({ to: "/scheduler" }) },
-    { id: "goals", label: "Goals", labelZh: "目标", category: "Automation", categoryZh: "自动化", icon: Shield, action: () => navigate({ to: "/goals" }) },
-    { id: "agents", label: "Agents", labelZh: "智能体", category: "Resources", categoryZh: "资源", icon: Bot, action: () => navigate({ to: "/agents" }) },
-    { id: "providers", label: "Providers", labelZh: "供应商", category: "Resources", categoryZh: "资源", icon: Server, action: () => navigate({ to: "/providers" }) },
-    { id: "channels", label: "Channels", labelZh: "通道", category: "Resources", categoryZh: "资源", icon: Network, action: () => navigate({ to: "/channels" }) },
-    { id: "skills", label: "Skills", labelZh: "技能", category: "Resources", categoryZh: "资源", icon: Shield, action: () => navigate({ to: "/skills" }) },
-    { id: "hands", label: "Hands", labelZh: "Hands", category: "Resources", categoryZh: "资源", icon: Hand, action: () => navigate({ to: "/hands" }) },
-    { id: "plugins", label: "Plugins", labelZh: "插件", category: "Resources", categoryZh: "资源", icon: Puzzle, action: () => navigate({ to: "/plugins" }) },
-    { id: "models", label: "Models", labelZh: "模型", category: "Resources", categoryZh: "资源", icon: Cpu, action: () => navigate({ to: "/models" }) },
-    { id: "analytics", label: "Analytics", labelZh: "分析", category: "System", categoryZh: "系统", icon: BarChart3, action: () => navigate({ to: "/analytics" }) },
-    { id: "memory", label: "Memory", labelZh: "记忆", category: "System", categoryZh: "系统", icon: Database, action: () => navigate({ to: "/memory" }) },
-    { id: "comms", label: "Comms", labelZh: "通信", category: "System", categoryZh: "系统", icon: Radio, action: () => navigate({ to: "/comms" }) },
-    { id: "runtime", label: "Runtime", labelZh: "运行时", category: "System", categoryZh: "系统", icon: Activity, action: () => navigate({ to: "/runtime" }) },
-    { id: "logs", label: "Logs", labelZh: "日志", category: "System", categoryZh: "系统", icon: FileText, action: () => navigate({ to: "/logs" }) },
-    { id: "settings", label: "Settings", labelZh: "设置", category: "System", categoryZh: "系统", icon: Settings, action: () => navigate({ to: "/settings" }) },
+    { id: "overview", labelKey: "nav.overview", categoryKey: "nav.core", icon: Home, action: () => navigate({ to: "/overview" }) },
+    { id: "workflows", labelKey: "nav.workflows", categoryKey: "nav.core", icon: Layers, action: () => navigate({ to: "/workflows" }) },
+    { id: "canvas", labelKey: "nav.canvas", categoryKey: "nav.core", icon: Layers, action: () => navigate({ to: "/canvas", search: { t: Date.now(), wf: undefined } }) },
+    { id: "chat", labelKey: "nav.chat", categoryKey: "nav.core", icon: MessageCircle, action: () => navigate({ to: "/chat", search: { agentId: undefined } }) },
+    { id: "sessions", labelKey: "nav.sessions", categoryKey: "nav.core", icon: Clock, action: () => navigate({ to: "/sessions" }) },
+    { id: "approvals", labelKey: "nav.approvals", categoryKey: "nav.core", icon: CheckCircle, action: () => navigate({ to: "/approvals" }) },
+    { id: "scheduler", labelKey: "nav.scheduler", categoryKey: "nav.automation", icon: Calendar, action: () => navigate({ to: "/scheduler" }) },
+    { id: "goals", labelKey: "nav.goals", categoryKey: "nav.automation", icon: Shield, action: () => navigate({ to: "/goals" }) },
+    { id: "agents", labelKey: "nav.agents", categoryKey: "nav.resources", icon: Bot, action: () => navigate({ to: "/agents" }) },
+    { id: "providers", labelKey: "nav.providers", categoryKey: "nav.resources", icon: Server, action: () => navigate({ to: "/providers" }) },
+    { id: "channels", labelKey: "nav.channels", categoryKey: "nav.resources", icon: Network, action: () => navigate({ to: "/channels" }) },
+    { id: "skills", labelKey: "nav.skills", categoryKey: "nav.resources", icon: Shield, action: () => navigate({ to: "/skills" }) },
+    { id: "hands", labelKey: "nav.hands", categoryKey: "nav.resources", icon: Hand, action: () => navigate({ to: "/hands" }) },
+    { id: "plugins", labelKey: "nav.plugins", categoryKey: "nav.resources", icon: Puzzle, action: () => navigate({ to: "/plugins" }) },
+    { id: "models", labelKey: "nav.models", categoryKey: "nav.resources", icon: Cpu, action: () => navigate({ to: "/models" }) },
+    { id: "analytics", labelKey: "nav.analytics", categoryKey: "nav.system", icon: BarChart3, action: () => navigate({ to: "/analytics" }) },
+    { id: "memory", labelKey: "nav.memory", categoryKey: "nav.system", icon: Database, action: () => navigate({ to: "/memory" }) },
+    { id: "comms", labelKey: "nav.comms", categoryKey: "nav.system", icon: Radio, action: () => navigate({ to: "/comms" }) },
+    { id: "runtime", labelKey: "nav.runtime", categoryKey: "nav.system", icon: Activity, action: () => navigate({ to: "/runtime" }) },
+    { id: "logs", labelKey: "nav.logs", categoryKey: "nav.system", icon: FileText, action: () => navigate({ to: "/logs" }) },
+    { id: "settings", labelKey: "nav.settings", categoryKey: "nav.system", icon: Settings, action: () => navigate({ to: "/settings" }) },
   ], [navigate]);
 
   const filteredCommands = useMemo(() => commands.filter(cmd => {
     const q = search.toLowerCase();
-    return cmd.label.toLowerCase().includes(q) || cmd.labelZh.includes(search) || cmd.id.includes(q);
-  }), [commands, search]);
+    const label = t(cmd.labelKey).toLowerCase();
+    return label.includes(q) || cmd.id.includes(q);
+  }), [commands, search, t]);
 
   const filteredRef = useRef(filteredCommands);
   filteredRef.current = filteredCommands;
@@ -93,7 +91,7 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
   if (!isOpen) return null;
 
   const groupedCommands = filteredCommands.reduce((acc, cmd) => {
-    const key = isZh ? cmd.categoryZh : cmd.category;
+    const key = t(cmd.categoryKey);
     if (!acc[key]) acc[key] = [];
     acc[key].push(cmd);
     return acc;
@@ -109,16 +107,16 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
             type="text"
             value={search}
             onChange={(e) => { setSearch(e.target.value); setSelectedIndex(0); }}
-            placeholder={isZh ? "搜索页面..." : "Search pages..."}
+            placeholder={t("command_palette.search_placeholder")}
             className="flex-1 bg-transparent text-sm font-medium outline-none placeholder:text-text-dim/40"
             autoFocus
           />
           <kbd className="hidden sm:inline-flex h-5 items-center gap-1 rounded border border-border-subtle bg-main px-1.5 text-[10px] font-medium text-text-dim">ESC</kbd>
         </div>
         <div className="px-4 py-2 border-b border-border-subtle/50 flex items-center gap-4 text-[10px] text-text-dim/50">
-          <span className="flex items-center gap-1"><kbd className="px-1 py-0.5 rounded bg-main text-[9px] font-mono">↑↓</kbd> {isZh ? "导航" : "Navigate"}</span>
-          <span className="flex items-center gap-1"><kbd className="px-1 py-0.5 rounded bg-main text-[9px] font-mono">↵</kbd> {isZh ? "打开" : "Open"}</span>
-          <span className="flex items-center gap-1"><kbd className="px-1 py-0.5 rounded bg-main text-[9px] font-mono">esc</kbd> {isZh ? "关闭" : "Close"}</span>
+          <span className="flex items-center gap-1"><kbd className="px-1 py-0.5 rounded bg-main text-[9px] font-mono">↑↓</kbd> {t("command_palette.navigate")}</span>
+          <span className="flex items-center gap-1"><kbd className="px-1 py-0.5 rounded bg-main text-[9px] font-mono">↵</kbd> {t("command_palette.open")}</span>
+          <span className="flex items-center gap-1"><kbd className="px-1 py-0.5 rounded bg-main text-[9px] font-mono">esc</kbd> {t("command_palette.close")}</span>
         </div>
         <div className="max-h-[50vh] overflow-y-auto p-2 scrollbar-thin">
           {filteredCommands.length === 0 ? (
@@ -136,8 +134,7 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
                       className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-left transition-colors duration-200 ${globalIndex === selectedIndex ? 'bg-brand/10 text-brand' : 'hover:bg-surface-hover'}`}
                     >
                       <cmd.icon className="h-4 w-4 shrink-0" />
-                      <span className="flex-1 text-sm font-medium">{isZh ? cmd.labelZh : cmd.label}</span>
-                      {!isZh && <span className="text-[10px] text-text-dim/40">{cmd.labelZh}</span>}
+                      <span className="flex-1 text-sm font-medium">{t(cmd.labelKey)}</span>
                     </button>
                   );
                 })}

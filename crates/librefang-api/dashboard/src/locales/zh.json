@@ -971,6 +971,9 @@
     "nav_layout": "导航菜单布局",
     "nav_grouped": "分组",
     "nav_collapsible": "二级菜单",
+    "theme_desc": "切换界面明暗模式",
+    "language_desc": "界面显示语言",
+    "nav_layout_desc": "侧边栏导航折叠方式",
     "tools_title": "工具",
     "tools_search": "搜索工具...",
     "change_password": "修改凭证",
@@ -1231,5 +1234,11 @@
     "load_error": "加载表单定义失败",
     "required_missing": "请填写所有必填字段",
     "from_schema": "从 Schema"
+  },
+  "command_palette": {
+    "search_placeholder": "搜索页面...",
+    "navigate": "导航",
+    "open": "打开",
+    "close": "关闭"
   }
 }
