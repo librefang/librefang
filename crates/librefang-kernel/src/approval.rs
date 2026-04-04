@@ -24,6 +24,9 @@ const MAX_ESCALATIONS: u8 = 3;
 /// Manages approval requests with oneshot channels for blocking resolution.
 pub struct ApprovalManager {
     pending: DashMap<Uuid, PendingRequest>,
+    /// Requests that timed out but need escalation (re-notification + re-wait).
+    /// Stored separately to avoid dead oneshot channels in the pending map.
+    escalated: DashMap<Uuid, ApprovalRequest>,
     recent: std::sync::Mutex<VecDeque<ApprovalRecord>>,
     policy: std::sync::RwLock<ApprovalPolicy>,
     audit_db: Option<Arc<StdMutex<Connection>>>,
@@ -46,6 +49,7 @@ impl ApprovalManager {
     pub fn new(policy: ApprovalPolicy) -> Self {
         Self {
             pending: DashMap::new(),
+            escalated: DashMap::new(),
             recent: std::sync::Mutex::new(VecDeque::new()),
             policy: std::sync::RwLock::new(policy),
             audit_db: None,
@@ -56,6 +60,7 @@ impl ApprovalManager {
     pub fn new_with_db(policy: ApprovalPolicy, conn: Arc<StdMutex<Connection>>) -> Self {
         Self {
             pending: DashMap::new(),
+            escalated: DashMap::new(),
             recent: std::sync::Mutex::new(VecDeque::new()),
             policy: std::sync::RwLock::new(policy),
             audit_db: Some(conn),
@@ -208,7 +213,8 @@ impl ApprovalManager {
 
                 match fallback {
                     TimeoutFallback::Escalate { .. } if escalation < MAX_ESCALATIONS => {
-                        // Re-insert with bumped escalation_count so caller can re-notify
+                        // Remove from pending and store in escalated map for the caller
+                        // to pick up atomically. No dead oneshot channel.
                         let mut escalated_req = self
                             .pending
                             .remove(&id)
@@ -220,16 +226,7 @@ impl ApprovalManager {
                             escalation = escalated_req.escalation_count,
                             "Approval timed out — escalating"
                         );
-                        // Re-insert as pending so it stays visible in dashboard
-                        let (new_tx, _) = tokio::sync::oneshot::channel();
-                        self.pending.insert(
-                            id,
-                            PendingRequest {
-                                request: escalated_req,
-                                sender: new_tx,
-                            },
-                        );
-                        // Return a special sentinel — caller should check and re-wait
+                        self.escalated.insert(id, escalated_req);
                         ApprovalDecision::TimedOut
                     }
                     TimeoutFallback::Skip => {
@@ -257,18 +254,13 @@ impl ApprovalManager {
         }
     }
 
-    /// Check if a request is pending with an escalation (timed out but re-inserted).
-    /// Returns the escalation count if so, for the caller to decide whether to re-wait.
-    pub fn escalation_count(&self, request_id: Uuid) -> Option<u8> {
-        self.pending
-            .get(&request_id)
-            .map(|p| p.request.escalation_count)
-            .filter(|c| *c > 0)
-    }
-
-    /// Remove and return a pending request (for re-submission after escalation).
-    pub fn take_pending_request(&self, request_id: Uuid) -> Option<ApprovalRequest> {
-        self.pending.remove(&request_id).map(|(_, p)| p.request)
+    /// Atomically take an escalated request (if any) for re-notification and re-wait.
+    /// Returns `Some((escalation_count, request))` if the request was escalated,
+    /// `None` if it was resolved by a human or not escalated.
+    pub fn take_escalated(&self, request_id: Uuid) -> Option<(u8, ApprovalRequest)> {
+        self.escalated
+            .remove(&request_id)
+            .map(|(_, req)| (req.escalation_count, req))
     }
 
     /// Resolve a pending request (called by API/UI).

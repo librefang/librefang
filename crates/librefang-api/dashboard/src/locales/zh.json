@@ -1121,7 +1121,8 @@
       "feedback": "反馈",
       "noEntries": "暂无审计记录。",
       "showing": "显示第 {{from}}-{{to}} 条，共 {{total}} 条"
-    }
+    },
+    "loadError": "加载审批列表失败，请检查网络连接。"
   },
   "wizard": {
     "welcome": "欢迎",

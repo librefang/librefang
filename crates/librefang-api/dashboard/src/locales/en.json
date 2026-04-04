@@ -1146,7 +1146,8 @@
       "feedback": "Feedback",
       "noEntries": "No audit entries found.",
       "showing": "Showing {{from}}-{{to}} of {{total}}"
-    }
+    },
+    "loadError": "Failed to load approvals. Check your connection."
   },
   "wizard": {
     "welcome": "Welcome",

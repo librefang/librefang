@@ -10081,11 +10081,11 @@ impl KernelHandle for LibreFangKernel {
 
         let mut decision = self.approval_manager.request_approval(req).await;
 
-        // Handle Escalate: if timed out but escalation_count was bumped, re-notify and re-wait
+        // Handle Escalate: atomically take escalated request, re-notify, re-wait.
+        // No TOCTOU: single `take_escalated()` call is the only decision point.
         while decision == ApprovalDecision::TimedOut {
-            let esc_count = self.approval_manager.escalation_count(request_id);
-            match esc_count {
-                Some(count) => {
+            match self.approval_manager.take_escalated(request_id) {
+                Some((count, escalated_req)) => {
                     let esc_msg = format!(
                         "{} ESCALATION #{}: Approval still needed for \"{}\" — `{}` — {}",
                         risk_level.emoji(),
@@ -10096,17 +10096,9 @@ impl KernelHandle for LibreFangKernel {
                     );
                     self.push_notification(agent_id, "approval_requested", &esc_msg)
                         .await;
-
-                    // Take the escalated request and re-submit for another wait cycle
-                    if let Some(escalated_req) =
-                        self.approval_manager.take_pending_request(request_id)
-                    {
-                        decision = self.approval_manager.request_approval(escalated_req).await;
-                    } else {
-                        break;
-                    }
+                    decision = self.approval_manager.request_approval(escalated_req).await;
                 }
-                None => break,
+                None => break, // Normal timeout, not an escalation
             }
         }
 

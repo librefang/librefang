@@ -58,11 +58,13 @@ export function NotificationCenter() {
         aria-label={t("approvals.pending_review", "Notifications")}
       >
         <Bell className="h-4 w-4" />
-        {pendingCount > 0 && (
+        {countQuery.isError ? (
+          <span className="absolute -top-0.5 -right-0.5 h-2.5 w-2.5 rounded-full bg-error/60 ring-2 ring-surface" title={t("common.error", "Connection error")} />
+        ) : pendingCount > 0 ? (
           <span className="absolute -top-0.5 -right-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-error px-1 text-[10px] font-bold text-white">
             {pendingCount > 99 ? "99+" : pendingCount}
           </span>
-        )}
+        ) : null}
       </button>
 
       {open && (

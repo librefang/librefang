@@ -1431,7 +1431,10 @@ pub async fn modify_request(
     lang: Option<axum::Extension<RequestLanguage>>,
     Json(body): Json<ModifyRequestBody>,
 ) -> impl IntoResponse {
+    const MAX_FEEDBACK_LEN: usize = 4096;
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    // Truncate feedback to prevent database bloat
+    let feedback: String = body.feedback.chars().take(MAX_FEEDBACK_LEN).collect();
     let uuid = match uuid::Uuid::parse_str(&id) {
         Ok(u) => u,
         Err(_) => {
@@ -1442,9 +1445,7 @@ pub async fn modify_request(
 
     match state.kernel.approvals().resolve(
         uuid,
-        librefang_types::approval::ApprovalDecision::ModifyAndRetry {
-            feedback: body.feedback,
-        },
+        librefang_types::approval::ApprovalDecision::ModifyAndRetry { feedback },
         Some("api".to_string()),
     ) {
         Ok(resp) => (
@@ -1469,6 +1470,17 @@ pub async fn batch_resolve(
     State(state): State<Arc<AppState>>,
     Json(body): Json<BatchResolveRequest>,
 ) -> impl IntoResponse {
+    const MAX_BATCH_SIZE: usize = 100;
+
+    if body.ids.len() > MAX_BATCH_SIZE {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(
+                serde_json::json!({"error": format!("batch size {} exceeds maximum {MAX_BATCH_SIZE}", body.ids.len())}),
+            ),
+        );
+    }
+
     let decision = match body.decision.as_str() {
         "approve" => librefang_types::approval::ApprovalDecision::Approved,
         "reject" => librefang_types::approval::ApprovalDecision::Denied,
@@ -1482,24 +1494,30 @@ pub async fn batch_resolve(
         }
     };
 
-    let uuids: Vec<uuid::Uuid> = body
-        .ids
-        .iter()
-        .filter_map(|s| uuid::Uuid::parse_str(s).ok())
-        .collect();
+    // Parse UUIDs, returning error entries for invalid ones
+    let mut result_json: Vec<serde_json::Value> = Vec::with_capacity(body.ids.len());
+    let mut valid_uuids = Vec::new();
+    for id_str in &body.ids {
+        match uuid::Uuid::parse_str(id_str) {
+            Ok(uuid) => valid_uuids.push(uuid),
+            Err(_) => {
+                result_json.push(serde_json::json!({
+                    "id": id_str, "status": "error", "message": "invalid UUID"
+                }));
+            }
+        }
+    }
 
-    let results = state
-        .kernel
-        .approvals()
-        .resolve_batch(uuids, decision, Some("api".to_string()));
+    let results =
+        state
+            .kernel
+            .approvals()
+            .resolve_batch(valid_uuids, decision, Some("api".to_string()));
 
-    let result_json: Vec<serde_json::Value> = results
-        .into_iter()
-        .map(|(id, res)| match res {
-            Ok(_) => serde_json::json!({"id": id.to_string(), "status": "ok"}),
-            Err(e) => serde_json::json!({"id": id.to_string(), "status": "error", "message": e}),
-        })
-        .collect();
+    result_json.extend(results.into_iter().map(|(id, res)| match res {
+        Ok(_) => serde_json::json!({"id": id.to_string(), "status": "ok"}),
+        Err(e) => serde_json::json!({"id": id.to_string(), "status": "error", "message": e}),
+    }));
 
     (
         StatusCode::OK,
@@ -1527,8 +1545,10 @@ pub async fn audit_log(
     State(state): State<Arc<AppState>>,
     Query(params): Query<AuditQueryParams>,
 ) -> impl IntoResponse {
+    const MAX_AUDIT_LIMIT: usize = 500;
+    let limit = params.limit.min(MAX_AUDIT_LIMIT);
     let entries = state.kernel.approvals().query_audit(
-        params.limit,
+        limit,
         params.offset,
         params.agent_id.as_deref(),
         params.tool_name.as_deref(),

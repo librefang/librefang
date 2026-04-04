@@ -1517,7 +1517,7 @@ export async function modifyAndRetryApproval(
   return post(`/api/approvals/${encodeURIComponent(id)}/modify`, { feedback });
 }
 
-export interface AuditEntry {
+export interface ApprovalAuditEntry {
   id: string;
   request_id: string;
   agent_id: string;
@@ -1537,7 +1537,7 @@ export async function queryApprovalAudit(params: {
   offset?: number;
   agent_id?: string;
   tool_name?: string;
-}): Promise<{ entries: AuditEntry[]; total: number }> {
+}): Promise<{ entries: ApprovalAuditEntry[]; total: number }> {
   const query = new URLSearchParams();
   if (params.limit != null) query.set("limit", String(params.limit));
   if (params.offset != null) query.set("offset", String(params.offset));

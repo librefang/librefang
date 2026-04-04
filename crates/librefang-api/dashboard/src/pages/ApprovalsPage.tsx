@@ -8,7 +8,7 @@ import {
   batchResolveApprovals,
   modifyAndRetryApproval,
   queryApprovalAudit,
-  type AuditEntry,
+  type ApprovalAuditEntry,
 } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
 import { ListSkeleton } from "../components/ui/Skeleton";
@@ -148,7 +148,7 @@ function AuditLogTab() {
     queryFn: () => queryApprovalAudit({ limit: AUDIT_PAGE_SIZE, offset }),
   });
 
-  const entries: AuditEntry[] = auditQuery.data?.entries ?? [];
+  const entries: ApprovalAuditEntry[] = auditQuery.data?.entries ?? [];
   const total = auditQuery.data?.total ?? 0;
   const from = total === 0 ? 0 : offset + 1;
   const to = Math.min(offset + AUDIT_PAGE_SIZE, total);
@@ -407,6 +407,17 @@ export function ApprovalsPage() {
 
           {approvalsQuery.isLoading ? (
             <ListSkeleton rows={3} />
+          ) : approvalsQuery.isError ? (
+            <div className="flex flex-col items-center py-20">
+              <div className="w-20 h-20 rounded-3xl bg-error/10 flex items-center justify-center mb-6">
+                <XCircle className="h-10 w-10 text-error" />
+              </div>
+              <h3 className="text-xl font-black tracking-tight">{t("common.error", "Error")}</h3>
+              <p className="text-sm text-text-dim mt-2 max-w-xs text-center">{t("approvals.loadError", "Failed to load approvals. Check your connection.")}</p>
+              <Button variant="secondary" size="sm" className="mt-4" onClick={() => approvalsQuery.refetch()}>
+                {t("common.retry", "Retry")}
+              </Button>
+            </div>
           ) : approvals.length === 0 ? (
             <div className="flex flex-col items-center py-20">
               <div className="relative mb-6">
