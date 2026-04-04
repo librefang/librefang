@@ -890,6 +890,19 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, wsConnecte
                 {!modelLoading && !modelFetchError && filteredModels.length === 0 && (
                   <p className="px-2.5 py-2 text-xs text-text-dim">{t("chat.no_models_found")}</p>
                 )}
+                {!modelLoading && !modelFetchError && modelName && !filteredModels.some(m => m.id === modelName) && (
+                  <div
+                    key={`fallback/${modelName}`}
+                    onClick={() => {}}
+                    className="flex items-center gap-2 px-2.5 py-2 rounded-lg cursor-pointer transition-colors bg-brand/10 text-brand"
+                  >
+                    {patchPending
+                      ? <Loader2 className="h-3 w-3 animate-spin shrink-0" />
+                      : <span className="w-1.5 h-1.5 rounded-full bg-success shrink-0" />
+                    }
+                    <span className="text-xs font-medium truncate">{modelName}</span>
+                  </div>
+                )}
                 {!modelLoading && !modelFetchError && filteredModels.map(model => {
                   const isActive = model.id === (optimisticModel ?? modelName);
                   return (

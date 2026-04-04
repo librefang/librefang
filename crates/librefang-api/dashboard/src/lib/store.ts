@@ -40,6 +40,7 @@ interface UIState {
   clearSkillOutputs: () => void;
   hideModel: (key: string) => void;
   unhideModel: (key: string) => void;
+  pruneHiddenKeys: (validKeys: Set<string>) => void;
 }
 
 export const useUIStore = create<UIState>()(
@@ -93,6 +94,10 @@ export const useUIStore = create<UIState>()(
       unhideModel: (key) =>
         set((state) => ({
           hiddenModelKeys: state.hiddenModelKeys.filter((k) => k !== key),
+        })),
+      pruneHiddenKeys: (validKeys) =>
+        set((state) => ({
+          hiddenModelKeys: state.hiddenModelKeys.filter((k) => validKeys.has(k)),
         })),
     }),
     {

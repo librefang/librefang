@@ -29,6 +29,7 @@ export function ModelsPage() {
   const hiddenModelKeys = useUIStore((s) => s.hiddenModelKeys);
   const hideModelAction = useUIStore((s) => s.hideModel);
   const unhideModelAction = useUIStore((s) => s.unhideModel);
+  const pruneHiddenKeys = useUIStore((s) => s.pruneHiddenKeys);
 
   // Form state
   const [formId, setFormId] = useState("");
@@ -130,11 +131,8 @@ export function ModelsPage() {
 
   useEffect(() => {
     if (allModels.length === 0) return;
-    const validKeys = new Set(allModels.map(modelKey));
-    hiddenModelKeys.forEach((k) => {
-      if (!validKeys.has(k)) unhideModelAction(k);
-    });
-  }, [allModels, hiddenModelKeys, unhideModelAction]);
+    pruneHiddenKeys(new Set(allModels.map(modelKey)));
+  }, [allModels, pruneHiddenKeys]);
 
   const filtered = useMemo(
     () => allModels.filter(m => {
