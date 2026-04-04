@@ -46,7 +46,8 @@ import {
   AlertCircle,
 } from "lucide-react";
 import { PageHeader } from "../components/ui/PageHeader";
-import { ListSkeleton } from "../components/ui/Skeleton";
+import { Skeleton } from "../components/ui/Skeleton";
+import { EmptyState } from "../components/ui/EmptyState";
 import { MarkdownContent } from "../components/ui/MarkdownContent";
 import { truncateId } from "../lib/string";
 
@@ -825,11 +826,13 @@ function ActiveHandChip({
 }) {
   const { t } = useTranslation();
   const isPaused = instance.status === "paused";
+  const isDegraded = !isPaused && hand.degraded === true;
+  const warnState = isPaused || isDegraded;
 
   return (
     <div
       className={`group relative flex flex-col gap-2 p-3 rounded-2xl border cursor-pointer transition-colors shrink-0 w-[260px] ${
-        isPaused
+        warnState
           ? "border-warning/40 bg-warning/[0.06] hover:border-warning/60"
           : "border-success/40 bg-success/[0.06] hover:border-success/60"
       }`}
@@ -839,7 +842,7 @@ function ActiveHandChip({
       <div className="flex items-center gap-2.5">
         <div
           className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${
-            isPaused ? "bg-warning/20 text-warning" : "bg-success/20 text-success"
+            warnState ? "bg-warning/20 text-warning" : "bg-success/20 text-success"
           }`}
         >
           <Hand className="w-4 h-4" />
@@ -848,13 +851,13 @@ function ActiveHandChip({
           <div className="flex items-center gap-1.5">
             <span
               className={`w-1.5 h-1.5 rounded-full shrink-0 ${
-                isPaused ? "bg-warning" : "bg-success animate-pulse"
+                isPaused ? "bg-warning" : isDegraded ? "bg-warning animate-pulse" : "bg-success animate-pulse"
               }`}
             />
             <h4 className="text-xs font-extrabold truncate">{hand.name || hand.id}</h4>
           </div>
-          <p className="text-[10px] text-text-dim/50 font-medium">
-            {isPaused ? t("hands.paused") : t("hands.active_label")}
+          <p className={`text-[10px] font-medium ${warnState ? "text-warning/80" : "text-text-dim/50"}`}>
+            {isPaused ? t("hands.paused") : isDegraded ? t("hands.degraded") : t("hands.active_label")}
           </p>
         </div>
       </div>
@@ -886,6 +889,37 @@ function ActiveHandChip({
   );
 }
 
+/* ── Grid skeleton matching HandCard layout ──────────────── */
+
+function HandCardGridSkeleton() {
+  return (
+    <div className="grid gap-3 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3">
+      {Array.from({ length: 6 }).map((_, i) => (
+        <div key={i} className="flex flex-col rounded-2xl border border-border-subtle bg-surface">
+          <div className="flex items-start gap-3 p-4 pb-3">
+            <Skeleton className="w-10 h-10 rounded-xl shrink-0" />
+            <div className="min-w-0 flex-1 space-y-2">
+              <Skeleton className="h-4 w-32" />
+              <Skeleton className="h-2.5 w-16" />
+            </div>
+          </div>
+          <div className="px-4 pb-3 space-y-1.5">
+            <Skeleton className="h-3 w-full" />
+            <Skeleton className="h-3 w-5/6" />
+          </div>
+          <div className="px-4 pb-3 flex items-center gap-3">
+            <Skeleton className="h-3 w-16" />
+            <Skeleton className="h-3 w-12" />
+          </div>
+          <div className="px-3 py-2.5 border-t border-border-subtle/50">
+            <Skeleton className="h-7 w-full rounded-lg" />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 /* ── Hand card (grid item) ───────────────────────────────── */
 
 function HandCard({
@@ -911,19 +945,21 @@ function HandCard({
 }) {
   const { t } = useTranslation();
   const isPaused = instance?.status === "paused";
+  const isDegraded = isActive && !isPaused && hand.degraded === true;
   const blocked = !isActive && !hand.requirements_met;
 
-  // State-driven styling: color-coded border, background, and icon tint
+  // State-driven styling: color-coded border, background, and icon tint.
+  // Degraded promotes to warning tint even though the hand is technically running.
   const stateClasses = isActive
-    ? isPaused
-      ? "border-warning/40 bg-warning/[0.04] hover:border-warning/60"
-      : "border-success/40 bg-success/[0.04] hover:border-success/60"
+    ? isPaused || isDegraded
+      ? "border-warning/40 bg-warning/[0.04] hover:border-warning/60 hover:shadow-sm"
+      : "border-success/40 bg-success/[0.04] hover:border-success/60 hover:shadow-sm"
     : blocked
       ? "border-border-subtle bg-surface opacity-80 hover:border-warning/30"
-      : "border-border-subtle bg-surface hover:border-brand/40 hover:shadow-sm";
+      : "border-border-subtle bg-surface hover:border-brand/40 hover:shadow-md";
 
   const iconClasses = isActive
-    ? isPaused
+    ? isPaused || isDegraded
       ? "bg-warning/15 text-warning"
       : "bg-success/15 text-success"
     : blocked
@@ -946,8 +982,11 @@ function HandCard({
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5">
             <h3 className="text-sm font-extrabold truncate">{hand.name || hand.id}</h3>
-            {isActive && !isPaused && (
+            {isActive && !isPaused && !isDegraded && (
               <span className="w-1.5 h-1.5 rounded-full bg-success animate-pulse shrink-0" aria-label="running" />
+            )}
+            {isActive && isDegraded && (
+              <span className="w-1.5 h-1.5 rounded-full bg-warning animate-pulse shrink-0" aria-label="degraded" />
             )}
             {isActive && isPaused && (
               <span className="w-1.5 h-1.5 rounded-full bg-warning shrink-0" aria-label="paused" />
@@ -970,16 +1009,30 @@ function HandCard({
         )}
       </div>
 
-      {/* Active: live metrics  |  Inactive: tools + status badges */}
+      {/* Active: degraded hint + live metrics  |  Inactive: tools + status badges */}
       <div className="px-4 pb-3">
         {isActive && metrics && Object.keys(metrics).length > 0 ? (
-          <HandMetricsInline metrics={metrics} />
+          <>
+            {isDegraded && (
+              <div className="flex items-center gap-1 text-[10px] font-bold text-warning mb-1.5">
+                <AlertCircle className="w-3 h-3" />
+                {t("hands.degraded")}
+              </div>
+            )}
+            <HandMetricsInline metrics={metrics} />
+          </>
         ) : (
           <div className="flex items-center gap-3 text-[10px] text-text-dim/60 font-medium">
             {hand.tools && hand.tools.length > 0 && (
               <span className="flex items-center gap-1">
                 <Wrench className="w-3 h-3" />
                 {hand.tools.length} {t("hands.tools").toLowerCase()}
+              </span>
+            )}
+            {isDegraded && (
+              <span className="flex items-center gap-1 text-warning">
+                <AlertCircle className="w-3 h-3" />
+                {t("hands.degraded")}
               </span>
             )}
             {blocked && (
@@ -1331,20 +1384,29 @@ export function HandsPage() {
 
       {/* All hands grid */}
       {handsQuery.isLoading ? (
-        <ListSkeleton rows={6} />
+        <HandCardGridSkeleton />
       ) : hands.length === 0 ? (
-        <div className="text-center py-20">
-          <div className="w-16 h-16 rounded-3xl bg-brand/8 flex items-center justify-center mx-auto mb-4">
-            <Hand className="w-8 h-8 text-brand/30" />
-          </div>
-          <p className="text-sm font-bold text-text-dim/60">{t("common.no_data")}</p>
-          <p className="text-xs text-text-dim/40 mt-1">{t("hands.subtitle")}</p>
-        </div>
+        <EmptyState
+          icon={<Hand className="w-7 h-7" />}
+          title={t("common.no_data")}
+          description={t("hands.subtitle")}
+        />
       ) : filtered.length === 0 ? (
-        <div className="text-center py-16">
-          <Search className="w-8 h-8 text-text-dim/20 mx-auto mb-3" />
-          <p className="text-sm text-text-dim/50">{t("agents.no_matching")}</p>
-        </div>
+        <EmptyState
+          icon={<Search className="w-7 h-7" />}
+          title={t("agents.no_matching")}
+          description={t("hands.no_matching_hint")}
+          action={
+            (search || selectedCategory !== "all") && (
+              <button
+                onClick={() => { setSearch(""); setSelectedCategory("all"); }}
+                className="px-4 py-2 rounded-xl text-xs font-bold text-brand bg-brand/10 hover:bg-brand/20 transition-colors"
+              >
+                {t("hands.clear_filters")}
+              </button>
+            )
+          }
+        />
       ) : (
         <div className="grid gap-3 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 stagger-children">
           {filtered.map((h) => {
