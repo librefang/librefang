@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { FormEvent, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { createSchedule, deleteSchedule, updateSchedule, listAgents, listSchedules, listTriggers, updateTrigger, deleteTrigger, runSchedule } from "../api";
+import { createSchedule, deleteSchedule, updateSchedule, listAgents, listSchedules, listTriggers, listWorkflows, updateTrigger, deleteTrigger, runSchedule } from "../api";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { PageHeader } from "../components/ui/PageHeader";
@@ -21,13 +21,16 @@ export function SchedulerPage() {
   const [showCronPicker, setShowCronPicker] = useState(false);
   const [name, setName] = useState("");
   const [cron, setCron] = useState("0 9 * * *");
+  const [targetType, setTargetType] = useState<"agent" | "workflow">("agent");
   const [agentId, setAgentId] = useState("");
+  const [workflowId, setWorkflowId] = useState("");
   const [message, setMessage] = useState("");
   const [confirmDelete, setConfirmDelete] = useState<{ type: "schedule" | "trigger"; id: string } | null>(null);
 
   const agentsQuery = useQuery({ queryKey: ["agents", "list", "scheduler"], queryFn: listAgents });
   const schedulesQuery = useQuery({ queryKey: ["schedules", "list"], queryFn: listSchedules, refetchInterval: REFRESH_MS });
   const triggersQuery = useQuery({ queryKey: ["triggers", "list"], queryFn: listTriggers });
+  const workflowsQuery = useQuery({ queryKey: ["workflows", "list", "scheduler"], queryFn: listWorkflows });
 
   const createMut = useMutation({ mutationFn: createSchedule });
   const runMut = useMutation({ mutationFn: runSchedule });
@@ -43,6 +46,7 @@ export function SchedulerPage() {
   const deleteTriggerMut = useMutation({ mutationFn: deleteTrigger });
 
   const agents = agentsQuery.data ?? [];
+  const workflows = workflowsQuery.data ?? [];
   const agentMap = useMemo(() => new Map(agents.map(a => [a.id, a])), [agents]);
   const schedules = useMemo(() => [...(schedulesQuery.data ?? [])].sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? "")), [schedulesQuery.data]);
   const triggers = triggersQuery.data ?? [];
@@ -51,8 +55,11 @@ export function SchedulerPage() {
     e.preventDefault();
     if (!name.trim()) return;
     try {
-      await createMut.mutateAsync({ name, cron, agent_id: agentId, message, enabled: true });
-      setShowCreate(false); setName(""); setMessage(""); setCron("0 9 * * *"); setAgentId("");
+      await createMut.mutateAsync({
+        name, cron, message, enabled: true,
+        ...(targetType === "agent" ? { agent_id: agentId } : { workflow_id: workflowId }),
+      });
+      setShowCreate(false); setName(""); setMessage(""); setCron("0 9 * * *"); setAgentId(""); setWorkflowId(""); setTargetType("agent");
       await queryClient.invalidateQueries({ queryKey: ["schedules"] });
     } catch (err: any) { addToast(err.message || t("common.error"), "error"); }
   };
@@ -277,11 +284,28 @@ export function SchedulerPage() {
                 />
               )}
               <div>
-                <label className="text-[10px] font-bold text-text-dim uppercase">{t("scheduler.target_agent")}</label>
-                <select value={agentId} onChange={e => setAgentId(e.target.value)} className={inputClass}>
-                  <option value="">{t("scheduler.select_agent")}</option>
-                  {agents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
-                </select>
+                <label className="text-[10px] font-bold text-text-dim uppercase">{t("scheduler.target", { defaultValue: "Target" })}</label>
+                <div className="flex gap-1 mb-2">
+                  <button type="button" onClick={() => setTargetType("agent")}
+                    className={`flex-1 py-1.5 rounded-lg text-[11px] font-bold transition-colors ${targetType === "agent" ? "bg-brand text-white" : "bg-main text-text-dim"}`}>
+                    {t("scheduler.target_agent")}
+                  </button>
+                  <button type="button" onClick={() => setTargetType("workflow")}
+                    className={`flex-1 py-1.5 rounded-lg text-[11px] font-bold transition-colors ${targetType === "workflow" ? "bg-brand text-white" : "bg-main text-text-dim"}`}>
+                    {t("scheduler.target_workflow", { defaultValue: "Workflow" })}
+                  </button>
+                </div>
+                {targetType === "agent" ? (
+                  <select value={agentId} onChange={e => setAgentId(e.target.value)} className={inputClass}>
+                    <option value="">{t("scheduler.select_agent")}</option>
+                    {agents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+                  </select>
+                ) : (
+                  <select value={workflowId} onChange={e => setWorkflowId(e.target.value)} className={inputClass}>
+                    <option value="">{t("scheduler.select_workflow", { defaultValue: "Select workflow..." })}</option>
+                    {workflows.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}
+                  </select>
+                )}
               </div>
               <div>
                 <label className="text-[10px] font-bold text-text-dim uppercase">{t("scheduler.message")}</label>

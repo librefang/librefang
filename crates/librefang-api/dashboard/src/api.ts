@@ -834,6 +834,25 @@ export async function listModels(params?: { provider?: string; tier?: string; av
   return get<{ models: ModelItem[]; total: number; available: number }>(`/api/models${qs ? `?${qs}` : ""}`);
 }
 
+export async function addCustomModel(model: {
+  id: string;
+  provider: string;
+  display_name?: string;
+  context_window?: number;
+  max_output_tokens?: number;
+  input_cost_per_m?: number;
+  output_cost_per_m?: number;
+  supports_tools?: boolean;
+  supports_vision?: boolean;
+  supports_streaming?: boolean;
+}): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>("/api/models/custom", model);
+}
+
+export async function removeCustomModel(modelId: string): Promise<ApiActionResponse> {
+  return del<ApiActionResponse>(`/api/models/custom/${encodeURIComponent(modelId)}`);
+}
+
 export async function setProviderKey(providerId: string, key: string): Promise<ApiActionResponse> {
   return post<ApiActionResponse>(`/api/providers/${encodeURIComponent(providerId)}/key`, { key });
 }

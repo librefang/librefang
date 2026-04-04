@@ -1,5 +1,4 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { formatDateTime } from "../lib/datetime";
 import { formatCost } from "../lib/format";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -26,7 +25,6 @@ import {
   type HandSessionMessage,
   type CronJobItem,
 } from "../api";
-import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { useUIStore } from "../lib/store";
 import { Input } from "../components/ui/Input";
@@ -37,18 +35,19 @@ import {
   PowerOff,
   Loader2,
   X,
-  Pause,
-  Play,
-  BarChart3,
-  Settings,
   CheckCircle2,
   XCircle,
   Wrench,
   Activity,
   MessageCircle,
+  Send,
+  Bot,
+  User,
+  AlertCircle,
 } from "lucide-react";
 import { PageHeader } from "../components/ui/PageHeader";
 import { ListSkeleton } from "../components/ui/Skeleton";
+import { MarkdownContent } from "../components/ui/MarkdownContent";
 import { truncateId } from "../lib/string";
 
 const REFRESH_MS = 15000;
@@ -289,9 +288,9 @@ function HandChatPanel({
                       {msg.blocks.map((block, bi) => {
                         if (block.type === "text") {
                           return (
-                            <Markdown key={bi} remarkPlugins={[remarkGfm]} components={mdComponents as Record<string, React.ComponentType>}>
+                            <MarkdownContent key={bi}>
                               {block.text}
-                            </Markdown>
+                            </MarkdownContent>
                           );
                         }
                         if (block.type === "tool_use") {
@@ -324,9 +323,9 @@ function HandChatPanel({
                       })}
                     </div>
                   ) : (
-                    <Markdown remarkPlugins={[remarkGfm]} components={mdComponents as Record<string, React.ComponentType>}>
+                    <MarkdownContent>
                       {msg.content}
-                    </Markdown>
+                    </MarkdownContent>
                   )}
                 </div>
                 {msg.tokens?.output && !msg.isLoading && (
@@ -1026,7 +1025,7 @@ export function HandsPage() {
     refetchInterval: REFRESH_MS,
     enabled: activeInstanceIds.length > 0,
   });
-  const allStats = allStatsQuery.data ?? {};
+  const _allStats = allStatsQuery.data ?? {};
 
   const activeHandIds = useMemo(
     () => new Set(instances.map((i) => i.hand_id).filter(Boolean)),
@@ -1043,7 +1042,7 @@ export function HandsPage() {
   }, [hands]);
 
   // Active hands with their definitions
-  const activeHands = useMemo(
+  const _activeHands = useMemo(
     () =>
       instances
         .map((inst) => ({
