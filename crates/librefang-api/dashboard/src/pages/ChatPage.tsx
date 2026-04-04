@@ -576,6 +576,13 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, wsConnecte
   const [patchPending, setPatchPending] = useState(false);
   const [optimisticModel, setOptimisticModel] = useState<string | null>(null);
 
+  // Clear optimistic model once the real modelName catches up
+  useEffect(() => {
+    if (optimisticModel && modelName === optimisticModel) {
+      setOptimisticModel(null);
+    }
+  }, [modelName, optimisticModel]);
+
   // Close session dropdown on outside click
   useEffect(() => {
     if (!sessionOpen) return;
@@ -607,7 +614,7 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, wsConnecte
     setModelFetchError(null);
     listModels({ available: true })
       .then(res => setModels(res.models))
-      .catch(() => setModelFetchError("Unable to load models"))
+      .catch(() => setModelFetchError(t("chat.unable_to_load_models")))
       .finally(() => setModelLoading(false));
   }, [modelOpen, models.length, modelLoading]);
 
@@ -622,12 +629,11 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, wsConnecte
     setPatchError(null);
     try {
       await patchAgentConfig(agentId, { model: model.id, provider: model.provider });
-      setOptimisticModel(null);
       setModelOpen(false);
-      onModelChange();
+      onModelChange(); // invalidates queries; useEffect clears optimisticModel when modelName catches up
     } catch {
       setOptimisticModel(prev);
-      setPatchError("Failed to update model. Please try again.");
+      setPatchError(t("chat.model_update_failed"));
     } finally {
       setPatchPending(false);
     }
@@ -663,13 +669,13 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, wsConnecte
             className="flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] font-mono text-text-dim/50 hover:text-text hover:bg-surface-hover transition-colors truncate max-w-[200px]"
             title="Switch model"
           >
-            <span className="truncate">{optimisticModel ?? modelName ?? "No model"}</span>
+            <span className="truncate">{optimisticModel ?? modelName ?? t("chat.no_model")}</span>
             <ChevronDown className={`h-2.5 w-2.5 shrink-0 transition-transform ${modelOpen ? "rotate-180" : ""}`} />
           </button>
           {modelOpen && (
             <div className="absolute right-0 top-full mt-1 w-80 bg-surface border border-border-subtle rounded-xl shadow-xl z-50 overflow-hidden">
               <div className="p-2 border-b border-border-subtle/50">
-                <span className="text-[10px] font-semibold text-text-dim/50 uppercase tracking-wider px-2">Switch Model</span>
+                <span className="text-[10px] font-semibold text-text-dim/50 uppercase tracking-wider px-2">{t("chat.switch_model")}</span>
               </div>
               <div className="p-2 border-b border-border-subtle/50">
                 <input
@@ -677,7 +683,7 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, wsConnecte
                   type="text"
                   value={modelSearch}
                   onChange={e => setModelSearch(e.target.value)}
-                  placeholder="Search models..."
+                  placeholder={t("chat.search_models")}
                   className="w-full px-2.5 py-1.5 text-xs rounded-lg bg-main border border-border-subtle focus:outline-none focus:border-brand"
                 />
                 {patchError && (
@@ -688,7 +694,7 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, wsConnecte
                 {modelLoading && (
                   <div className="flex items-center gap-2 px-2.5 py-2 text-xs text-text-dim">
                     <Loader2 className="h-3 w-3 animate-spin" />
-                    Loading…
+                    {t("chat.loading_models")}
                   </div>
                 )}
                 {modelFetchError && (
@@ -698,18 +704,18 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, wsConnecte
                       onClick={() => { setModels([]); setModelFetchError(null); }}
                       className="text-[10px] text-brand hover:underline"
                     >
-                      Retry
+                      {t("chat.retry")}
                     </button>
                   </div>
                 )}
                 {!modelLoading && !modelFetchError && filteredModels.length === 0 && (
-                  <p className="px-2.5 py-2 text-xs text-text-dim">No models found.</p>
+                  <p className="px-2.5 py-2 text-xs text-text-dim">{t("chat.no_models_found")}</p>
                 )}
                 {!modelLoading && !modelFetchError && filteredModels.map(model => {
                   const isActive = model.id === (optimisticModel ?? modelName);
                   return (
                     <div
-                      key={model.id}
+                      key={`${model.provider}/${model.id}`}
                       onClick={() => { if (!isActive) handleSelectModel(model); }}
                       className={`flex items-center gap-2 px-2.5 py-2 rounded-lg cursor-pointer transition-colors ${isActive ? "bg-brand/10 text-brand" : "hover:bg-surface-hover text-text-dim"}`}
                     >

@@ -984,7 +984,15 @@
     "bot": "Bot",
     "ws_connected": "WS",
     "ws_streaming": "Streaming",
-    "auth_missing": "API key for provider \"{{provider}}\" is not configured. Please set it in Settings > Providers before chatting."
+    "auth_missing": "API key for provider \"{{provider}}\" is not configured. Please set it in Settings > Providers before chatting.",
+    "switch_model": "Switch Model",
+    "search_models": "Search models...",
+    "loading_models": "Loading…",
+    "no_models_found": "No models found.",
+    "unable_to_load_models": "Unable to load models",
+    "model_update_failed": "Failed to update model. Please try again.",
+    "retry": "Retry",
+    "no_model": "No model"
   },
   "goals": {
     "title": "Goals",
