@@ -8778,6 +8778,8 @@ fn cmd_service_install() {
     }
 
     let binary = resolve_binary_path();
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     let librefang_home = cli_librefang_home();
 
     #[cfg(target_os = "linux")]
@@ -8794,7 +8796,7 @@ fn cmd_service_install() {
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
-        let _ = (&binary, &librefang_home);
+        let _ = &binary;
         ui::error("Auto-start service is not supported on this platform.");
     }
 }
