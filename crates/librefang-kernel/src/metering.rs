@@ -184,7 +184,19 @@ impl MeteringEngine {
     /// | mistral-large         |     2.00  |      6.00  |
     /// | mistral-small         |     0.10  |      0.30  |
     /// | command-r-plus        |     2.50  |     10.00  |
+    /// | alibaba-coding-plan   |subscription| (request-based quota) |
     /// | Default (unknown)     |     1.00  |      3.00  |
+    ///
+    /// **Subscription-based providers** (e.g., alibaba-coding-plan):
+    /// These providers use request-based quotas instead of token-based billing.
+    /// Models are registered with zero cost-per-token, so cost tracking in metering
+    /// will show $0.00. Users should monitor usage via the provider's console.
+    ///
+    /// For alibaba-coding-plan specifically:
+    /// - Pricing: $50/month (subscription)
+    /// - Quotas: 90,000 requests/month, 45,000/week, 6,000 per 5 hours (sliding window)
+    /// - Token usage: Still tracked for analytics, but cost = $0
+    ///
     /// Estimate cost using default rates ($1/$3 per million tokens).
     ///
     /// Prefer [`estimate_cost_with_catalog`] which reads pricing from the

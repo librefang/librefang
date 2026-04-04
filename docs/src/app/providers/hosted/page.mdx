@@ -20,6 +20,7 @@ This page covers internet-hosted model providers that authenticate with an API k
 - SambaNova
 - Hugging Face
 - xAI
+- Alibaba Coding Plan
 
 ---
 
@@ -429,3 +430,47 @@ This page covers internet-hosted model providers that authenticate with an API k
 1. Sign up at [console.x.ai](https://console.x.ai)
 2. Create an API key
 3. `export XAI_API_KEY="xai-..."`
+
+---
+
+## Alibaba Coding Plan
+
+| | |
+|---|---|
+| **Display Name** | Alibaba Coding Plan (Intl) |
+| **Driver** | OpenAI-compatible |
+| **Env Var** | `ALIBABA_CODING_PLAN_API_KEY` |
+| **Base URL** | `https://coding-intl.dashscope.aliyuncs.com/v1` |
+| **Key Required** | Yes |
+| **Pricing** | $50/month (subscription) |
+| **Free Tier** | No (subscription only) |
+| **Auth** | `Authorization: Bearer` header |
+| **Models** | 8 |
+
+**Available Models:**
+- `alibaba-coding-plan/qwen3.5-plus` (Smart) — vision support, 1M context
+- `alibaba-coding-plan/qwen3-coder-plus` (Smart) — 1M context
+- `alibaba-coding-plan/qwen3-coder-next` (Frontier) — 262K context
+- `alibaba-coding-plan/qwen3-max-2026-01-23` (Frontier) — 262K context
+- `alibaba-coding-plan/glm-5` (Frontier) — 202K context
+- `alibaba-coding-plan/glm-4.7` (Smart) — 202K context
+- `alibaba-coding-plan/kimi-k2.5` (Smart) — vision support, 262K context
+- `alibaba-coding-plan/MiniMax-M2.5` (Balanced) — 196K context
+
+**Setup:**
+1. Subscribe at [Coding Plan page](https://modelstudio.console.alibabacloud.com/ap-southeast-1/?tab=globalset#/efm/coding_plan)
+2. Get plan-specific API key (format: `sk-sp-xxxxx`)
+3. `export ALIBABA_CODING_PLAN_API_KEY="sk-sp-..."`
+
+**Quota Limits** (subscription-based, not token-based):
+- 90,000 requests/month (resets on subscription anniversary date at 00:00 UTC+8)
+- 45,000 requests/week (resets every Monday at 00:00 UTC+8)
+- 6,000 requests per 5 hours (sliding window — each request resets exactly 5 hours after use)
+
+**Notes:**
+- Uses OpenAI-compatible API format
+- Plan-specific API key (`sk-sp-xxxxx`) differs from pay-as-you-go DashScope key
+- Metering shows $0 cost (subscription-based), but token usage still tracked
+- Monitor request quotas via Alibaba Cloud console
+- Not for automated scripts or batch API calls — coding tools only
+- For more info: [Official Documentation](https://www.alibabacloud.com/help/en/model-studio/coding-plan)

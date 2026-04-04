@@ -1220,6 +1220,7 @@ mod tests {
         assert!(catalog.get_provider("zai").is_some());
         assert!(catalog.get_provider("zai_coding").is_some());
         assert!(catalog.get_provider("kimi_coding").is_some());
+        assert!(catalog.get_provider("alibaba-coding-plan").is_some());
     }
 
     #[test]
@@ -1830,6 +1831,93 @@ supports_streaming = true
         let providers = catalog.list_providers();
         assert_eq!(providers.len(), 1);
         assert!(providers[0].media_capabilities.is_empty());
+    }
+
+    #[test]
+    fn test_alibaba_coding_plan_provider() {
+        let catalog = test_catalog();
+        let provider = catalog
+            .get_provider("alibaba-coding-plan")
+            .expect("alibaba-coding-plan provider should be registered");
+        assert_eq!(provider.display_name, "Alibaba Coding Plan (Intl)");
+        assert_eq!(provider.api_key_env, "ALIBABA_CODING_PLAN_API_KEY");
+        assert_eq!(
+            provider.base_url,
+            "https://coding-intl.dashscope.aliyuncs.com/v1"
+        );
+        assert!(provider.key_required);
+    }
+
+    #[test]
+    fn test_alibaba_coding_plan_models_count() {
+        let catalog = test_catalog();
+        let models = catalog.models_by_provider("alibaba-coding-plan");
+        assert_eq!(
+            models.len(),
+            8,
+            "alibaba-coding-plan should have exactly 8 models"
+        );
+    }
+
+    #[test]
+    fn test_alibaba_coding_plan_zero_cost() {
+        let catalog = test_catalog();
+        let model = catalog
+            .find_model("alibaba-coding-plan/qwen3.5-plus")
+            .expect("qwen3.5-plus model should be registered");
+        assert_eq!(model.input_cost_per_m, 0.0);
+        assert_eq!(model.output_cost_per_m, 0.0);
+    }
+
+    #[test]
+    fn test_alibaba_coding_plan_vision_models() {
+        let catalog = test_catalog();
+        let qwen_plus = catalog
+            .find_model("alibaba-coding-plan/qwen3.5-plus")
+            .expect("qwen3.5-plus model should be registered");
+        assert!(qwen_plus.supports_vision);
+        assert_eq!(qwen_plus.tier, ModelTier::Smart);
+        assert_eq!(qwen_plus.context_window, 1_000_000);
+
+        let kimi = catalog
+            .find_model("alibaba-coding-plan/kimi-k2.5")
+            .expect("kimi-k2.5 model should be registered");
+        assert!(kimi.supports_vision);
+        assert_eq!(kimi.tier, ModelTier::Smart);
+    }
+
+    #[test]
+    fn test_alibaba_coding_plan_coder_models() {
+        let catalog = test_catalog();
+        let coder_plus = catalog
+            .find_model("alibaba-coding-plan/qwen3-coder-plus")
+            .expect("qwen3-coder-plus model should be registered");
+        assert_eq!(coder_plus.tier, ModelTier::Smart);
+        assert_eq!(coder_plus.context_window, 1_000_000);
+
+        let coder_next = catalog
+            .find_model("alibaba-coding-plan/qwen3-coder-next")
+            .expect("qwen3-coder-next model should be registered");
+        assert_eq!(coder_next.tier, ModelTier::Frontier);
+        assert_eq!(coder_next.context_window, 262_144);
+    }
+
+    #[test]
+    fn test_alibaba_coding_plan_all_models_support_tools() {
+        let catalog = test_catalog();
+        let models = catalog.models_by_provider("alibaba-coding-plan");
+        for model in models {
+            assert!(
+                model.supports_tools,
+                "Model {} should support tools",
+                model.id
+            );
+            assert!(
+                model.supports_streaming,
+                "Model {} should support streaming",
+                model.id
+            );
+        }
     }
 }
 
