@@ -2092,22 +2092,54 @@ fn cmd_init_upgrade() {
     if added.is_empty() {
         ui::success("Config is already up to date — no new fields added");
     } else {
-        // Build TOML snippets for each missing key and append to existing file
-        let mut appendix =
-            String::from("\n# ── Added by upgrade ────────────────────────────────────\n");
-        for key in &added {
-            if let Some(val) = defaults.get(key) {
-                // Serialize just this key as a standalone TOML fragment
-                let mut fragment = toml::map::Map::new();
-                fragment.insert(key.clone(), val.clone());
-                if let Ok(snippet) = toml::to_string_pretty(&toml::Value::Table(fragment)) {
-                    appendix.push('\n');
-                    appendix.push_str(&snippet);
+        // Partition into scalars (must stay in TOML root scope) and tables.
+        // Scalars appended after a [table] header would be absorbed into that
+        // table's scope, potentially colliding with same-named sub-keys (#2021).
+        let (scalar_keys, table_keys): (Vec<_>, Vec<_>) = added
+            .iter()
+            .partition(|k| defaults.get(*k).is_none_or(|v| !v.is_table()));
+
+        let mut content = existing_raw.clone();
+
+        // Insert scalar keys before the first [table] header so they remain
+        // top-level in the TOML document.
+        if !scalar_keys.is_empty() {
+            let mut scalar_snippet = String::new();
+            for key in &scalar_keys {
+                if let Some(val) = defaults.get(*key) {
+                    let mut fragment = toml::map::Map::new();
+                    fragment.insert((*key).clone(), val.clone());
+                    if let Ok(s) = toml::to_string_pretty(&toml::Value::Table(fragment)) {
+                        scalar_snippet.push_str(&s);
+                    }
+                }
+            }
+            // Find the first line that starts with '[' (a table header).
+            // We search for "\n[" then insert just before the '['.
+            if let Some(pos) = content.find("\n[").map(|p| p + 1) {
+                content.insert_str(pos, &format!("{scalar_snippet}\n"));
+            } else {
+                // No table headers in file — appending is safe.
+                content.push('\n');
+                content.push_str(&scalar_snippet);
+            }
+        }
+
+        // Append table sections at the end of the file.
+        if !table_keys.is_empty() {
+            content.push_str("\n# ── Added by upgrade ────────────────────────────────────\n");
+            for key in &table_keys {
+                if let Some(val) = defaults.get(*key) {
+                    let mut fragment = toml::map::Map::new();
+                    fragment.insert((*key).clone(), val.clone());
+                    if let Ok(snippet) = toml::to_string_pretty(&toml::Value::Table(fragment)) {
+                        content.push('\n');
+                        content.push_str(&snippet);
+                    }
                 }
             }
         }
-        let mut content = existing_raw.clone();
-        content.push_str(&appendix);
+
         if let Err(e) = std::fs::write(&config_path, &content) {
             ui::error(&format!("Failed to write config: {e}"));
             ui::hint(&format!("Your original config was saved to {backup_name}"));
