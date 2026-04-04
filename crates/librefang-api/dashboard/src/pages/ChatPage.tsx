@@ -6,18 +6,23 @@ import remarkMath from "remark-math";
 import { useTranslation } from "react-i18next";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { buildAuthenticatedWebSocketUrl, listAgents, sendAgentMessage, loadAgentSession, listPendingApprovals, resolveApproval, getFullConfig, listAgentSessions, createAgentSession, switchAgentSession, deleteSession, listModels, patchAgentConfig, listMediaProviders } from "../api";
-import type { ApprovalItem, SessionListItem, ModelItem } from "../api";
+import type { ApprovalItem, SessionListItem, ModelItem, AgentTool } from "../api";
 import { normalizeToolOutput } from "../lib/chat";
 import { useTtsManager } from "../lib/tts";
 import { MessageCircle, Send, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, Zap, ShieldAlert, CheckCircle, XCircle, Clock, Plus, Trash2, ChevronDown, Loader2, Copy, Volume2, Pause } from "lucide-react";
 import { Badge } from "../components/ui/Badge";
 import { MarkdownContent } from "../components/ui/MarkdownContent";
 import { useUIStore } from "../lib/store";
+import { ToolCallCard } from "../components/ui/ToolCallCard";
 import { Typewriter_v2 } from "../components/Typewriter_v2";
 import "katex/dist/katex.min.css";
 
 const isAuthUnavailable = (status?: string) =>
   !!status && status !== "configured" && status !== "validated_key" && status !== "configured_cli" && status !== "not_required";
+
+interface ChatToolCall extends AgentTool {
+  _call_id?: string;
+}
 
 interface ChatMessage {
   id: string;
@@ -30,6 +35,7 @@ interface ChatMessage {
   cost_usd?: number;
   memories_saved?: string[];
   memories_used?: string[];
+  tools?: ChatToolCall[];
 }
 
 // Slash commands
@@ -172,7 +178,8 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
                 ? ""
                 : JSON.stringify(msg.content);
 
-            if (!content.trim()) return [];
+            const hasTools = msg.tools && msg.tools.length > 0;
+            if (!content.trim() && !hasTools) return [];
 
             return [{
               id: `hist-${idx}`,
@@ -183,6 +190,7 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
                   : "assistant",
               content,
               timestamp: new Date(),
+              tools: msg.tools,
             }];
           });
           setMessages(historical);
@@ -351,7 +359,47 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
                   m.id === botMsg.id ? { ...m, isStreaming: false } : m
                 ));
               }
+            } else if (data.type === "tool_start") {
+              // Agent started a tool call — add a running tool entry
+              const toolName = typeof data.tool === "string" ? data.tool : "unknown";
+              const toolId = data.id || `tool-${Date.now()}`;
+              setMessages(prev => prev.map(m =>
+                m.id === botMsg.id
+                  ? { ...m, tools: [...(m.tools || []), { name: toolName, running: true, expanded: false, is_error: false, input: undefined, result: undefined, _call_id: toolId }] }
+                  : m
+              ));
+            } else if (data.type === "tool_end") {
+              // LLM finished specifying the tool call — attach input but keep running
+              // (tool_end means the LLM output is complete, NOT that the tool finished executing;
+              // the tool stays "running" until tool_result arrives)
+              const toolId = data.id;
+              let parsedInput: unknown;
+              try { parsedInput = typeof data.input === "string" ? JSON.parse(data.input) : data.input; } catch { parsedInput = data.input; }
+              setMessages(prev => prev.map(m => {
+                if (m.id !== botMsg.id) return m;
+                const tools = (m.tools || []).map(t =>
+                  t._call_id === toolId ? { ...t, input: parsedInput } : t
+                );
+                return { ...m, tools };
+              }));
             } else if (data.type === "tool_result") {
+              // Attach result to the most recent tool matching by name
+              const toolName = typeof data.tool === "string" ? data.tool : "";
+              const isError = Boolean(data.is_error);
+              const result = typeof data.result === "string" ? data.result : data.result != null ? JSON.stringify(data.result) : "";
+              setMessages(prev => prev.map(m => {
+                if (m.id !== botMsg.id) return m;
+                const tools = [...(m.tools || [])];
+                // Find last tool with this name that has no result yet
+                for (let i = tools.length - 1; i >= 0; i--) {
+                  if (tools[i].name === toolName && tools[i].result === undefined) {
+                    tools[i] = { ...tools[i], result, is_error: isError, running: false };
+                    break;
+                  }
+                }
+                return { ...m, tools };
+              }));
+              // Also keep the skill output panel behavior
               const entry = normalizeToolOutput(data);
               if (entry) {
                 addSkillOutput({ skillName: entry.tool, agentId: agentId || undefined, content: entry.content });
@@ -452,6 +500,15 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
     );
   }
 
+  // Strip <tool_call>...</tool_call> XML blocks and orphaned closing tags from LLM output
+  const displayContent = useMemo(() => {
+    if (isUser) return message.content;
+    return message.content
+      .replace(/<tool_call>[\s\S]*?<\/tool_call>/g, "")
+      .replace(/<\/?tool_calls?>/g, "")
+      .trim();
+  }, [message.content, isUser]);
+
   return (
     <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
       <div className={`flex flex-col max-w-[90%] sm:max-w-[75%] ${isUser ? "items-end" : "items-start"}`}>
@@ -467,7 +524,17 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
           </span>
         </div>
 
+        {/* Tool calls — rendered above text for assistant messages */}
+        {!isUser && message.tools && message.tools.length > 0 && (
+          <div className="w-full mb-1">
+            {message.tools.map((tool, i) => (
+              <ToolCallCard key={`${tool.name}-${i}`} tool={tool} />
+            ))}
+          </div>
+        )}
+
         {/* Message content */}
+        {(displayContent || isUser || message.isStreaming || message.error) && (
         <div className={`relative px-4 py-3 rounded-2xl text-sm leading-relaxed shadow-sm transition-colors ${
           isUser
             ? "bg-gradient-to-br from-brand to-brand/90 text-white rounded-tr-md"
@@ -476,8 +543,8 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
               : "bg-surface border border-border-subtle rounded-tl-md"
         }`}>
           {message.isStreaming ? (
-            message.content ? (
-              <Typewriter_v2 text={message.content} speed={10} />
+            displayContent ? (
+              <Typewriter_v2 text={displayContent} speed={10} />
             ) : (
               <div className="flex items-center gap-1">
                 <span className="w-1.5 h-1.5 bg-brand/60 rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
@@ -491,16 +558,17 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
               <span>{message.error}</span>
             </div>
           ) : isUser ? (
-            <p className="whitespace-pre-line break-words">{message.content}</p>
+            <p className="whitespace-pre-line break-words">{displayContent}</p>
           ) : (
             <MarkdownContent
               remarkPlugins={[remarkMath]}
               rehypePlugins={[rehypeKatex]}
             >
-              {message.content}
+              {displayContent}
             </MarkdownContent>
           )}
         </div>
+        )}
 
         {/* Meta info + action buttons */}
         <div className={`flex items-center justify-between w-full mt-1.5 ${isUser ? "flex-row-reverse" : ""}`}>
