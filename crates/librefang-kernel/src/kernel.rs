@@ -8022,7 +8022,7 @@ system_prompt = "You are a helpful assistant."
                     message_timeout_secs: cfg.default_model.message_timeout_secs,
                 };
                 match self.driver_cache.get_or_create(&config) {
-                    Ok(d) => chain.push((d, fb.model.clone())),
+                    Ok(d) => chain.push((d, strip_provider_prefix(&fb.model, &fb_provider))),
                     Err(e) => {
                         warn!("Fallback driver '{}' failed to init: {e}", fb_provider);
                     }
