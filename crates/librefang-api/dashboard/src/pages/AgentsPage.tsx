@@ -6,7 +6,7 @@ import { useNavigate } from "@tanstack/react-router";
 import { listAgents, getAgentDetail, AgentDetail, spawnAgent, suspendAgent, resumeAgent, patchAgentConfig,
   listPromptVersions, listExperiments, activatePromptVersion, startExperiment, pauseExperiment, completeExperiment,
   createPromptVersion, createExperiment, deletePromptVersion, PromptVersion, PromptExperiment, ExperimentVariantMetrics, getExperimentMetrics,
-  listModels, listProviders, listAgentTemplates, deleteAgent, cloneAgent, stopAgent, clearAgentHistory, resetAgentSession } from "../api";
+  listModels, listProviders, listAgentTemplates, deleteAgent, cloneAgent, resetAgentSession } from "../api";
 import { isProviderAvailable } from "../lib/status";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
@@ -458,8 +458,8 @@ export function AgentsPage() {
                   <div className="p-4 rounded-xl bg-main/50 border border-border-subtle/50 space-y-2.5 text-xs">
                     <div className="flex justify-between items-center">
                       <span className="text-text-dim">{t("agents.thinking_enabled")}</span>
-                      <Badge variant={detailAgent.thinking.budget_tokens > 0 ? "success" : "default"}>
-                        {detailAgent.thinking.budget_tokens > 0 ? t("common.yes") : t("common.no")}
+                      <Badge variant={(detailAgent.thinking.budget_tokens ?? 0) > 0 ? "success" : "default"}>
+                        {(detailAgent.thinking.budget_tokens ?? 0) > 0 ? t("common.yes") : t("common.no")}
                       </Badge>
                     </div>
                     <div className="flex justify-between items-center">
@@ -604,7 +604,6 @@ export function AgentsPage() {
 }
 
 function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: string; agentName: string; onClose: () => void }) {
-  const { t } = useTranslation();
   const queryClient = useQueryClient();
   const [activeTab, setActiveTab] = useState<"versions" | "experiments">("versions");
   const [showCreateVersion, setShowCreateVersion] = useState(false);

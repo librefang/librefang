@@ -117,14 +117,16 @@ export function NotificationCenter() {
                             </span>
                           )}
                         </div>
-                        <button
-                          onClick={() => goToAgent(item.agent_id)}
-                          className="flex items-center gap-1 text-xs text-brand hover:underline mt-0.5"
-                          title={t("approvals.goToAgent", "Open agent chat")}
-                        >
-                          <span className="truncate">{item.agent_name ?? item.agent_id}</span>
-                          <ExternalLink className="w-3 h-3 shrink-0" />
-                        </button>
+                        {item.agent_id && (
+                          <button
+                            onClick={() => goToAgent(item.agent_id!)}
+                            className="flex items-center gap-1 text-xs text-brand hover:underline mt-0.5"
+                            title={t("approvals.goToAgent", "Open agent chat")}
+                          >
+                            <span className="truncate">{item.agent_name ?? item.agent_id}</span>
+                            <ExternalLink className="w-3 h-3 shrink-0" />
+                          </button>
+                        )}
                         {(item.action_summary || item.description) && (
                           <p className="text-xs text-text-dim mt-1 line-clamp-2">
                             {item.action_summary || item.description}

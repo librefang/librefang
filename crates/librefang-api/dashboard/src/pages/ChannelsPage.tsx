@@ -457,7 +457,6 @@ function QrLoginDialog({ channel, onClose, t }: { channel: Channel; onClose: () 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const cancelledRef = useRef(false);
   const [phase, setPhase] = useState<"idle" | "loading" | "scanning" | "success" | "error">("idle");
-  const [qrCode, setQrCode] = useState("");
   const [message, setMessage] = useState("");
 
   const cleanup = useCallback(() => {
@@ -482,7 +481,6 @@ function QrLoginDialog({ channel, onClose, t }: { channel: Channel; onClose: () 
         setMessage(res.message || "Failed to get QR code");
         return;
       }
-      setQrCode(res.qr_code);
       setPhase("scanning");
       setMessage(res.message || `Scan this QR code with your ${displayName} app`);
 

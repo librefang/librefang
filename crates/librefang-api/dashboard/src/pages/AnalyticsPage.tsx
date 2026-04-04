@@ -184,7 +184,7 @@ export function AnalyticsPage() {
                       <CartesianGrid strokeDasharray="3 3" opacity={0.2} horizontal={false} />
                       <XAxis type="number" tick={{ fontSize: 10 }} tickFormatter={v => `${v}ms`} axisLine={false} tickLine={false} />
                       <YAxis type="category" dataKey="name" tick={{ fontSize: 10 }} width={120} axisLine={false} tickLine={false} />
-                      <Tooltip contentStyle={{ borderRadius: 12, fontSize: 12 }} formatter={(v: any, name: string) => [`${v}ms`, name]} />
+                      <Tooltip contentStyle={{ borderRadius: 12, fontSize: 12 }} formatter={(v: any, name: any) => [`${v}ms`, name]} />
                       <Legend />
                       <Bar dataKey="avg" name="Avg" radius={[0, 4, 4, 0]} fill="#3b82f6" />
                       <Bar dataKey="min" name="Min" radius={[0, 4, 4, 0]} fill="#22c55e" />

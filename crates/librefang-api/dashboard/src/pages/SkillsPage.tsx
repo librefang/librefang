@@ -774,7 +774,7 @@ export function SkillsPage() {
       ) : (
         /* viewMode === "fanghub" — official LibreFang registry skills */
         fanghubQuery.isLoading ? (
-          <CardSkeleton count={3} />
+          <div className="grid gap-2 sm:gap-4 md:grid-cols-2 xl:grid-cols-3">{[1, 2, 3].map(i => <CardSkeleton key={i} />)}</div>
         ) : filteredFanghub.length === 0 ? (
           <EmptyState title={t("skills.no_results")} icon={<Zap className="h-6 w-6" />} />
         ) : (

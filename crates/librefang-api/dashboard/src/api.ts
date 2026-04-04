@@ -181,6 +181,7 @@ export interface AgentItem {
   ready?: boolean;
   profile?: string;
   identity?: AgentIdentity;
+  is_hand?: boolean;
 }
 
 export interface PaginatedResponse<T> {
@@ -2158,7 +2159,7 @@ export interface PromptExperiment {
 }
 
 export interface ExperimentVariant {
-  id: string;
+  id?: string;
   name: string;
   prompt_version_id: string;
   description?: string;
@@ -2180,7 +2181,7 @@ export async function listPromptVersions(agentId: string): Promise<PromptVersion
   return get<PromptVersion[]>(`/api/agents/${encodeURIComponent(agentId)}/prompts/versions`);
 }
 
-export async function createPromptVersion(agentId: string, version: Omit<PromptVersion, "id" | "agent_id">): Promise<PromptVersion> {
+export async function createPromptVersion(agentId: string, version: Omit<PromptVersion, "id" | "agent_id" | "created_at" | "is_active">): Promise<PromptVersion> {
   return post<PromptVersion>(`/api/agents/${encodeURIComponent(agentId)}/prompts/versions`, version);
 }
 
@@ -2196,7 +2197,7 @@ export async function listExperiments(agentId: string): Promise<PromptExperiment
   return get<PromptExperiment[]>(`/api/agents/${encodeURIComponent(agentId)}/prompts/experiments`);
 }
 
-export async function createExperiment(agentId: string, experiment: Omit<PromptExperiment, "id" | "agent_id">): Promise<PromptExperiment> {
+export async function createExperiment(agentId: string, experiment: Omit<PromptExperiment, "id" | "agent_id" | "created_at">): Promise<PromptExperiment> {
   return post<PromptExperiment>(`/api/agents/${encodeURIComponent(agentId)}/prompts/experiments`, experiment);
 }
 

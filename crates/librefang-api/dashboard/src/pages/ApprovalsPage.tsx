@@ -28,9 +28,9 @@ function statusBadge(status: string | undefined, t: (key: string) => string) {
     case "approved":
       return <Badge variant="success">{t("approvals.status.approved")}</Badge>;
     case "rejected":
-      return <Badge variant="danger">{t("approvals.status.rejected")}</Badge>;
+      return <Badge variant="error">{t("approvals.status.rejected")}</Badge>;
     case "expired":
-      return <Badge variant="neutral">{t("approvals.status.expired")}</Badge>;
+      return <Badge variant="default">{t("approvals.status.expired")}</Badge>;
     default:
       return <Badge variant="warning">{t("approvals.pending_review")}</Badge>;
   }

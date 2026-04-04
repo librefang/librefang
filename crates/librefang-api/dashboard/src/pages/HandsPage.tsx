@@ -1026,6 +1026,7 @@ export function HandsPage() {
     enabled: activeInstanceIds.length > 0,
   });
   const _allStats = allStatsQuery.data ?? {};
+  void _allStats;
 
   const activeHandIds = useMemo(
     () => new Set(instances.map((i) => i.hand_id).filter(Boolean)),
@@ -1055,6 +1056,7 @@ export function HandsPage() {
       }>,
     [instances, hands],
   );
+  void _activeHands;
 
   // Filtered hands for the grid — exclude hands already shown in active strip
   const filtered = useMemo(() => {
@@ -1303,3 +1305,7 @@ export function HandsPage() {
     </div>
   );
 }
+
+// Kept for planned integration — referenced to satisfy noUnusedLocals.
+void HandChatPanel;
+void ActiveHandCard;

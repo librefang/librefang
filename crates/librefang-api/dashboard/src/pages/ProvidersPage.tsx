@@ -641,7 +641,7 @@ export function ProvidersPage() {
     try {
       const result = await testMutation.mutateAsync(id);
       if (result.status === "error") {
-        addToast(result.error_message || result.error || t("common.error"), "error");
+        addToast(String(result.error_message || result.error || t("common.error")), "error");
       } else {
         addToast(t("common.success"), "success");
       }
