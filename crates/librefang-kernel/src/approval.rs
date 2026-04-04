@@ -626,7 +626,7 @@ mod tests {
         let mgr = default_manager();
         let result = mgr.resolve(Uuid::new_v4(), ApprovalDecision::Approved, None);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("already resolved or expired"));
+        assert!(result.unwrap_err().contains("not found or expired"));
     }
 
     // -----------------------------------------------------------------------

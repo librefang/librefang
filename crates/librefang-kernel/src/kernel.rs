@@ -10117,8 +10117,33 @@ impl KernelHandle for LibreFangKernel {
                         tool_name,
                         description,
                     );
-                    self.push_notification(agent_id, "approval_requested", &esc_msg)
-                        .await;
+                    // Use interactive buttons for escalation too (same as initial notification)
+                    {
+                        use librefang_types::capability::glob_matches;
+                        let cfg = self.config.load_full();
+                        let esc_targets: Vec<_> = {
+                            let agent_routed: Vec<_> = cfg
+                                .notification
+                                .agent_rules
+                                .iter()
+                                .filter(|rule| {
+                                    glob_matches(&rule.agent_pattern, agent_id)
+                                        && rule.events.iter().any(|e| e == "approval_requested")
+                                })
+                                .flat_map(|rule| rule.channels.clone())
+                                .collect();
+                            if !agent_routed.is_empty() {
+                                agent_routed
+                            } else {
+                                cfg.notification.approval_channels.clone()
+                            }
+                        };
+                        let req_id_str = request_id.to_string();
+                        for target in &esc_targets {
+                            self.push_approval_interactive(target, &esc_msg, &req_id_str)
+                                .await;
+                        }
+                    }
                     decision = self.approval_manager.request_approval(escalated_req).await;
                 }
                 None => break, // Normal timeout, not an escalation
