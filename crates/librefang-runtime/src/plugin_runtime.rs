@@ -156,12 +156,12 @@ fn build_command(
 ) -> Result<(String, Vec<String>), PluginRuntimeError> {
     match runtime {
         PluginRuntime::Python => {
-            // Python delegates to the existing python_runtime which has
-            // its own validation, interpreter discovery, env scrubbing.
-            // This branch is never hit in practice (we dispatch to
-            // python_runtime::run_python_json before reaching here) but
-            // keeping it for symmetry makes the fallback path obvious.
-            Ok(("python3".to_string(), vec![script_path.to_string()]))
+            // Probe for python3 / python / py at spawn time — matches the
+            // interpreter discovery the python_runtime module has always done.
+            Ok((
+                crate::python_runtime::find_python_interpreter(),
+                vec![script_path.to_string()],
+            ))
         }
         PluginRuntime::Native => {
             // Exec the file directly — no interpreter. We rely on the
@@ -193,6 +193,29 @@ fn build_command(
     }
 }
 
+/// Env vars a given runtime needs from the parent process to function.
+///
+/// These land on top of the baseline (PATH, HOME, LIBREFANG_*) that every
+/// runtime gets. They're passthrough only — we never synthesize values,
+/// just forward whatever the user had.
+fn runtime_passthrough_vars(runtime: PluginRuntime) -> &'static [&'static str] {
+    match runtime {
+        // Python: venv activation + module search path.
+        PluginRuntime::Python => &["PYTHONPATH", "VIRTUAL_ENV", "PYTHONIOENCODING"],
+        // V: module lookup dir.
+        PluginRuntime::V => &["VMODULES"],
+        // Node: CommonJS resolver roots.
+        PluginRuntime::Node => &["NODE_PATH"],
+        // Deno: dep cache.
+        PluginRuntime::Deno => &["DENO_DIR"],
+        // Go: toolchain + module cache.
+        PluginRuntime::Go => &["GOPATH", "GOMODCACHE", "GOCACHE"],
+        // Native binaries get nothing runtime-specific — any needed env
+        // has to be listed in `config.allowed_env_vars`.
+        PluginRuntime::Native => &[],
+    }
+}
+
 /// Run a hook script and parse the last JSON line of stdout.
 ///
 /// This is the main entry point — picks the right launcher based on
@@ -209,28 +232,6 @@ pub async fn run_hook_json(
         return Err(PluginRuntimeError::ScriptNotFound(script_path.to_string()));
     }
 
-    // Python gets the battle-tested path for backwards compat.
-    if runtime == PluginRuntime::Python {
-        let py_config = crate::python_runtime::PythonConfig {
-            timeout_secs: config.timeout_secs,
-            working_dir: config
-                .working_dir
-                .as_ref()
-                .map(|p| p.to_string_lossy().into_owned()),
-            allowed_env_vars: config.allowed_env_vars.clone(),
-            ..Default::default()
-        };
-        let result = crate::python_runtime::run_python_json(script_path, input, &py_config)
-            .await
-            .map_err(|e| PluginRuntimeError::ScriptError {
-                code: None,
-                stderr: e.to_string(),
-            })?;
-        return Ok(serde_json::from_str(&result.response)
-            .unwrap_or_else(|_| serde_json::json!({ "text": result.response })));
-    }
-
-    // Non-Python runtimes share this spawn path.
     let input_line =
         serde_json::to_string(input).map_err(|e| PluginRuntimeError::Io(e.to_string()))?;
     let (launcher, args) = build_command(runtime, script_path)?;
@@ -281,15 +282,10 @@ pub async fn run_hook_json(
             }
         }
     }
-    // Runtime-specific extras (Go modules, V cache, Deno dir, Node paths).
-    for var in &[
-        "GOPATH",
-        "GOMODCACHE",
-        "GOCACHE",
-        "VMODULES",
-        "DENO_DIR",
-        "NODE_PATH",
-    ] {
+    // Runtime-specific passthrough (venv vars for Python, module cache
+    // paths for Go/V, etc.). Table-driven so adding a new runtime is a
+    // one-line append.
+    for var in runtime_passthrough_vars(runtime) {
         if let Ok(val) = std::env::var(var) {
             cmd.env(var, val);
         }
@@ -534,6 +530,52 @@ mod tests {
         .expect("native hook ran");
         assert_eq!(out["type"], "ingest_result");
         assert!(out["memories"].is_array());
+    }
+
+    /// Python runtime goes through the same unified spawn path as V/Go/Node —
+    /// proves there's no special-case shim anymore.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn python_runtime_round_trip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hook = tmp.path().join("ingest.py");
+        std::fs::write(
+            &hook,
+            "import json, sys\n\
+             req = json.loads(sys.stdin.read())\n\
+             print(json.dumps({\"type\": \"ingest_result\", \"echo\": req[\"message\"]}))\n",
+        )
+        .unwrap();
+
+        // Skip test if no python interpreter is on PATH (CI can vary).
+        let have_python = ["python3", "python"].iter().any(|bin| {
+            std::process::Command::new(bin)
+                .arg("--version")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok()
+        });
+        if !have_python {
+            eprintln!("skipping python_runtime_round_trip: no python on PATH");
+            return;
+        }
+
+        let input = serde_json::json!({
+            "type": "ingest",
+            "agent_id": "agent-1",
+            "message": "ping",
+        });
+        let out = run_hook_json(
+            hook.to_str().unwrap(),
+            PluginRuntime::Python,
+            &input,
+            &HookConfig::default(),
+        )
+        .await
+        .expect("python hook ran");
+        assert_eq!(out["type"], "ingest_result");
+        assert_eq!(out["echo"], "ping");
     }
 
     /// Timeout path: a hook that sleeps forever should be killed.

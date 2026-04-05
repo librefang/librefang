@@ -95,7 +95,7 @@ pub fn validate_script_path(path: &str) -> Result<(), PythonError> {
 }
 
 /// Find the Python interpreter on this system.
-fn find_python_interpreter() -> String {
+pub fn find_python_interpreter() -> String {
     // Try python3 first, then python
     for cmd in &["python3", "python"] {
         if std::process::Command::new(cmd)
@@ -140,7 +140,16 @@ pub async fn run_python_agent(
 /// Run a Python script with a raw JSON payload written directly to stdin.
 ///
 /// This is used for hook-style scripts where the runtime should avoid wrapping
-/// payloads in the agent `{\"type\":\"message\", ...}` envelope.
+/// payloads in the agent `{"type":"message", ...}` envelope.
+///
+/// Prefer [`crate::plugin_runtime::run_hook_json`] for new code — it drives
+/// the same protocol for every supported runtime (Python, V, Go, Deno, ...)
+/// through a single dispatcher. This function is kept for external callers
+/// that depended on the Python-specific API.
+#[deprecated(
+    since = "2026.4.6",
+    note = "use plugin_runtime::run_hook_json with PluginRuntime::Python instead"
+)]
 pub async fn run_python_json(
     script_path: &str,
     input: &serde_json::Value,
@@ -448,6 +457,7 @@ mod tests {
         assert!(matches!(result, Err(PythonError::ScriptNotFound(_))));
     }
 
+    #[allow(deprecated)]
     #[tokio::test]
     async fn test_run_python_json_writes_raw_payload() {
         let config = PythonConfig::default();
