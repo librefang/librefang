@@ -12,6 +12,7 @@ import { Badge } from "../components/ui/Badge";
 import { PageHeader } from "../components/ui/PageHeader";
 import { ListSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
+import { useUIStore } from "../lib/store";
 import {
   Puzzle, Plus, Download, Trash2, Package, FolderOpen,
   GitBranch, X, Loader2, Check, AlertCircle, FileCode
@@ -43,20 +44,43 @@ export function PluginsPage() {
   const pluginsQuery = useQuery({ queryKey: ["plugins"], queryFn: listPlugins, refetchInterval: REFRESH_MS });
   const registriesQuery = useQuery({ queryKey: ["plugins", "registries"], queryFn: listPluginRegistries, enabled: tab === "registry" });
 
+  const addToast = useUIStore((s) => s.addToast);
   const installMutation = useMutation({
     mutationFn: installPlugin,
-    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["plugins"] }); setShowInstall(false); resetInstallForm(); },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["plugins"] });
+      setShowInstall(false);
+      resetInstallForm();
+      addToast(t("plugins.install_success", { defaultValue: "Plugin installed" }), "success");
+    },
+    onError: (e: any) => addToast(e?.message || t("plugins.install_failed", { defaultValue: "Install failed" }), "error"),
     onSettled: () => { setInstallingName(null); },
   });
   const uninstallMutation = useMutation({
     mutationFn: uninstallPlugin,
-    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["plugins"] }); setConfirmDelete(null); }
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["plugins"] });
+      setConfirmDelete(null);
+      addToast(t("plugins.uninstall_success", { defaultValue: "Plugin removed" }), "success");
+    },
+    onError: (e: any) => addToast(e?.message || t("plugins.uninstall_failed", { defaultValue: "Uninstall failed" }), "error"),
   });
   const scaffoldMutation = useMutation({
     mutationFn: ({ name, desc }: { name: string; desc: string }) => scaffoldPlugin(name, desc),
-    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["plugins"] }); setShowScaffold(false); setScaffoldName(""); setScaffoldDesc(""); }
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["plugins"] });
+      setShowScaffold(false);
+      setScaffoldName("");
+      setScaffoldDesc("");
+      addToast(t("plugins.scaffold_success", { defaultValue: "Plugin created" }), "success");
+    },
+    onError: (e: any) => addToast(e?.message || t("plugins.scaffold_failed", { defaultValue: "Create failed" }), "error"),
   });
-  const depsMutation = useMutation({ mutationFn: installPluginDeps });
+  const depsMutation = useMutation({
+    mutationFn: installPluginDeps,
+    onSuccess: () => addToast(t("plugins.deps_installed", { defaultValue: "Dependencies installed" }), "success"),
+    onError: (e: any) => addToast(e?.message || t("plugins.deps_failed", { defaultValue: "Dependency install failed" }), "error"),
+  });
 
   const plugins = pluginsQuery.data?.plugins ?? [];
   const registries = registriesQuery.data?.registries ?? [];

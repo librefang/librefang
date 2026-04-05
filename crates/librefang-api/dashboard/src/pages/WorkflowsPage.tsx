@@ -21,6 +21,7 @@ import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
 import { PageHeader } from "../components/ui/PageHeader";
+import { useUIStore } from "../lib/store";
 import { ListSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
 import { ScheduleModal } from "../components/ui/ScheduleModal";
@@ -56,13 +57,23 @@ export function WorkflowsPage() {
     queryFn: () => getWorkflowRun(selectedRunId!),
     enabled: Boolean(selectedRunId),
   });
-  const runMutation = useMutation({ mutationFn: ({ workflowId, input }: any) => runWorkflow(workflowId, input) });
+  const addToast = useUIStore((s) => s.addToast);
+  const runMutation = useMutation({
+    mutationFn: ({ workflowId, input }: any) => runWorkflow(workflowId, input),
+    onSuccess: () => addToast(t("workflows.run_started", { defaultValue: "Workflow run started" }), "success"),
+    onError: (e: any) => addToast(e?.message || t("workflows.run_failed", { defaultValue: "Failed to start workflow" }), "error"),
+  });
   const dryRunMutation = useMutation({
     mutationFn: ({ workflowId, input }: { workflowId: string; input: string }) =>
       dryRunWorkflow(workflowId, input),
     onSuccess: (data) => setDryRunResult(data),
+    onError: (e: any) => addToast(e?.message || t("workflows.dry_run_failed", { defaultValue: "Dry run failed" }), "error"),
   });
-  const deleteMutation = useMutation({ mutationFn: deleteWorkflow });
+  const deleteMutation = useMutation({
+    mutationFn: deleteWorkflow,
+    onSuccess: () => addToast(t("workflows.deleted", { defaultValue: "Workflow deleted" }), "success"),
+    onError: (e: any) => addToast(e?.message || t("workflows.delete_failed", { defaultValue: "Failed to delete workflow" }), "error"),
+  });
 
   const workflows = useMemo(() =>
     [...(workflowsQuery.data ?? [])]

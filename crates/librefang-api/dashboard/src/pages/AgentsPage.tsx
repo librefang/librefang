@@ -48,15 +48,28 @@ export function AgentsPage() {
     tone?: "default" | "destructive";
   } | null>(null);
   const [stateFilter, setStateFilter] = useState<"all" | "running" | "suspended">("all");
+  const addToast = useUIStore((s) => s.addToast);
   const queryClient = useQueryClient();
   const templatesQuery = useQuery({ queryKey: ["agent-templates"], queryFn: listAgentTemplates, enabled: showCreate && createMode === "template" });
   const spawnMutation = useMutation({
     mutationFn: spawnAgent,
-    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["agents"] }); setShowCreate(false); setTemplateName(""); setManifestToml(""); }
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["agents"] });
+      setShowCreate(false);
+      setTemplateName("");
+      setManifestToml("");
+      addToast(t("agents.spawn_success", { defaultValue: "Agent created" }), "success");
+    },
+    onError: (e: any) => addToast(e?.message || t("agents.spawn_failed", { defaultValue: "Failed to create agent" }), "error"),
   });
   const deleteMutation = useMutation({
     mutationFn: deleteAgent,
-    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["agents"] }); setDetailAgent(null); }
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["agents"] });
+      setDetailAgent(null);
+      addToast(t("agents.delete_success", { defaultValue: "Agent deleted" }), "success");
+    },
+    onError: (e: any) => addToast(e?.message || t("agents.delete_failed", { defaultValue: "Failed to delete agent" }), "error"),
   });
 
   const patchAgentConfigMutation = useMutation({
@@ -69,7 +82,9 @@ export function AgentsPage() {
       if (detailAgent?.id === agentId) {
         getAgentDetail(agentId).then(setDetailAgent).catch(() => {});
       }
+      addToast(t("agents.model_saved", { defaultValue: "Model updated" }), "success");
     },
+    onError: (e: any) => addToast(e?.message || t("agents.model_save_failed", { defaultValue: "Failed to update model" }), "error"),
   });
 
   function startModelEdit() {
