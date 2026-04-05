@@ -9562,14 +9562,33 @@ impl KernelHandle for LibreFangKernel {
     }
 
     async fn send_to_agent(&self, agent_id: &str, message: &str) -> Result<String, String> {
-        // Try UUID first, then fall back to name lookup
-        let id: AgentId = match agent_id.parse() {
-            Ok(id) => id,
-            Err(_) => self
+        // Try UUID first, then fall back to name lookup. A valid-UUID-format
+        // string that doesn't resolve to a live agent still falls through to
+        // name lookup — otherwise a stale/hallucinated UUID would bypass the
+        // name path and surface a bare "Agent not found" with no hint about
+        // which agents actually exist.
+        let id: AgentId = match agent_id.parse::<AgentId>() {
+            Ok(uid) if self.registry.get(uid).is_some() => uid,
+            _ => self
                 .registry
                 .find_by_name(agent_id)
                 .map(|e| e.id)
-                .ok_or_else(|| format!("Agent not found: {agent_id}"))?,
+                .ok_or_else(|| {
+                    let available: Vec<String> = self
+                        .registry
+                        .list()
+                        .iter()
+                        .map(|a| format!("{} ({})", a.name, a.id))
+                        .collect();
+                    if available.is_empty() {
+                        format!("Agent not found: '{agent_id}'. No agents are currently registered.")
+                    } else {
+                        format!(
+                            "Agent not found: '{agent_id}'. Call agent_list to see valid agents. Currently registered: [{}]",
+                            available.join(", ")
+                        )
+                    }
+                })?,
         };
         let result = self
             .send_message(id, message)
