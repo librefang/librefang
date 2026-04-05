@@ -270,7 +270,7 @@ jobs:
         run: cargo test --workspace --no-run -j 2
       - name: Run tests per crate
         env:
-          RUST_TEST_THREADS: "2"
+          RUST_TEST_THREADS: "1"
         run: |
           CRATES="${{ needs.changes.outputs.crates }}"
           if [ -z "$CRATES" ]; then
