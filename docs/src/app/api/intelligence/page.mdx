@@ -476,7 +476,11 @@ Uninstall a plugin by name.
 
 ### POST /api/plugins/scaffold
 
-Scaffold a new plugin project from a template.
+Scaffold a new plugin project from a template. Body: `{"name": "...", "description": "...", "runtime": "python" | "native" | "v" | "node" | "deno" | "go" | "ruby" | "bash" | "bun" | "php" | "lua"}`. Emits hook scaffolding in the chosen language.
+
+### GET /api/plugins/doctor
+
+Probe every supported runtime for its launcher on PATH and cross-reference with every installed plugin. Response includes each runtime's detected version + install hint, and flags any plugin whose declared runtime is unavailable. Use this to debug plugins that silently do nothing.
 
 ### POST /api/plugins/&lbrace;name&rbrace;/install-deps
 
