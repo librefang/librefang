@@ -56,6 +56,11 @@ const MAX_CONTINUATIONS: u32 = 5;
 /// 7-10 real conversation turns instead of the previous 3-5.
 const MAX_HISTORY_MESSAGES: usize = 40;
 
+/// Maximum consecutive iterations where every executed tool failed before
+/// the loop exits with `RepeatedToolFailures`. Catches expensive wheel-spinning
+/// when the LLM cannot fix a tool call (bad auth, permanent 404, etc.).
+const MAX_CONSECUTIVE_ALL_FAILED: u32 = 3;
+
 /// Marker included in timeout error messages when partial output was delivered.
 /// Used by channel_bridge to detect this case without fragile string matching.
 pub const TIMEOUT_PARTIAL_OUTPUT_MARKER: &str = "[partial_output_delivered]";
@@ -67,6 +72,18 @@ pub const TIMEOUT_PARTIAL_OUTPUT_MARKER: &str = "[partial_output_delivered]";
 fn is_no_reply(text: &str) -> bool {
     let t = text.trim();
     t == "NO_REPLY" || t.ends_with("NO_REPLY")
+}
+
+/// Returns true if this tool-error content is a "soft" error — one the LLM is
+/// expected to recover from cheaply on the next iteration (approval denials,
+/// sandbox rejections, modify-and-retry hints, argument-truncation nudges).
+/// Hard errors (unrecognized tool, network failure, etc.) are caller's problem.
+fn is_soft_error_content(content: &str) -> bool {
+    content.contains("requires human approval and was denied")
+        || content.contains("[MODIFY_AND_RETRY]")
+        || content.contains(ERR_PATH_TRAVERSAL)
+        || content.contains(ERR_SANDBOX_ESCAPE)
+        || content.contains("arguments were truncated")
 }
 
 /// Safely trim message history to `MAX_HISTORY_MESSAGES`, cutting at
@@ -339,6 +356,12 @@ pub struct AgentLoopResult {
     pub experiment_context: Option<ExperimentContext>,
     /// Latency in milliseconds for this request.
     pub latency_ms: u64,
+    /// Index in `session.messages` where messages appended during this turn
+    /// begin. Callers use this to slice out the turn's new messages (e.g. for
+    /// writing to a canonical cross-channel session) without tracking their
+    /// own index — which would go stale if the loop trims session history.
+    /// Always in range [0, session.messages.len()] after the loop returns.
+    pub new_messages_start: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -467,11 +490,20 @@ pub async fn run_agent_loop(
 ) -> LibreFangResult<AgentLoopResult> {
     info!(agent = %manifest.name, "Starting agent loop");
 
+    // Start index of new messages added during this turn. Initialized to
+    // current session length so early returns (before the user message is
+    // pushed) expose an empty slice to callers. Updated after
+    // safe_trim_messages to point at the post-trim position of the just-
+    // pushed user message (len-1) so slicing stays in-bounds even when the
+    // trim drains deeper than (len - MAX_HISTORY_MESSAGES). Fixes #2067.
+    let mut new_messages_start = session.messages.len();
+
     // Early return if driver is not configured
     if !driver.is_configured() {
         return Ok(AgentLoopResult {
             silent: true,
             provider_not_configured: true,
+            new_messages_start,
             ..Default::default()
         });
     }
@@ -699,9 +731,6 @@ pub async fn run_agent_loop(
         None
     };
 
-    // Track message count before this turn so auto_memorize only processes new messages.
-    let messages_before = session.messages.len();
-
     // Mutable collector for memories saved during this turn (populated by auto_memorize).
     let mut memories_saved: Vec<String> = Vec::new();
     // Mutable collector for memory conflicts detected during this turn.
@@ -796,6 +825,11 @@ pub async fn run_agent_loop(
         user_message,
     );
 
+    // Update new_messages_start now that trim has run and the user message
+    // has been pushed. The trim drains only from the front and
+    // find_safe_trim_point keeps len >= 1, so the user msg sits at len-1.
+    new_messages_start = session.messages.len().saturating_sub(1);
+
     // Proactively strip base64 image data from previous turns.  Images that
     // survived from earlier sessions (e.g. after a crash or daemon restart)
     // would otherwise waste ~56K tokens per image on every subsequent LLM
@@ -829,6 +863,7 @@ pub async fn run_agent_loop(
     let mut decision_traces: Vec<DecisionTrace> = Vec::new();
     let mut hallucination_retried = false;
     let mut action_nudge_retried = false;
+    let mut consecutive_all_failed: u32 = 0;
 
     for iteration in 0..max_iterations {
         debug!(iteration, "Agent loop iteration");
@@ -984,6 +1019,7 @@ pub async fn run_agent_loop(
                         provider_not_configured: false,
                         experiment_context: experiment_context.clone(),
                         latency_ms: 0,
+                        new_messages_start,
                     });
                 }
 
@@ -1166,7 +1202,7 @@ pub async fn run_agent_loop(
                 // Only send new messages from this turn, not the full session history.
                 if let Some(ref pm_store) = proactive_memory {
                     let user_id = session.agent_id.0.to_string();
-                    let new_messages = &session.messages[messages_before..];
+                    let new_messages = &session.messages[new_messages_start..];
                     let messages_json = serialize_session_messages(new_messages);
                     match pm_store
                         .auto_memorize(&user_id, &messages_json, sender_user_id.as_deref())
@@ -1217,6 +1253,7 @@ pub async fn run_agent_loop(
                     provider_not_configured: false,
                     experiment_context: experiment_context.clone(),
                     latency_ms: 0,
+                    new_messages_start,
                 });
             }
             StopReason::ToolUse => {
@@ -1446,14 +1483,7 @@ pub async fn run_agent_loop(
                     // Stop executing remaining tool calls on failure (#948)
                     // but not for approval denials or sandbox security rejections —
                     // those should let the LLM recover and retry with a valid path (#1861)
-                    let is_soft_error = result.is_error
-                        && (result
-                            .content
-                            .contains("requires human approval and was denied")
-                            || result.content.contains("[MODIFY_AND_RETRY]")
-                            || result.content.contains(ERR_PATH_TRAVERSAL)
-                            || result.content.contains(ERR_SANDBOX_ESCAPE)
-                            || result.content.contains("arguments were truncated"));
+                    let is_soft_error = result.is_error && is_soft_error_content(&result.content);
                     if result.is_error && !is_soft_error {
                         warn!(
                             tool = %tool_call.name,
@@ -1554,15 +1584,6 @@ pub async fn run_agent_loop(
                     });
                 }
 
-                // Check if ALL tool results are non-denial errors — stop the loop (#948)
-                let total_tool_results = tool_result_blocks
-                    .iter()
-                    .filter(|b| matches!(b, ContentBlock::ToolResult { .. }))
-                    .count();
-                let all_failed = total_tool_results > 0
-                    && non_denial_errors > 0
-                    && non_denial_errors == total_tool_results - denial_count;
-
                 // Add tool results as a user message (Anthropic API requirement)
                 let tool_results_msg = Message {
                     role: Role::User,
@@ -1576,69 +1597,64 @@ pub async fn run_agent_loop(
                 if let Err(e) = memory.save_session_async(session).await {
                     warn!("Failed to interim-save session: {e}");
                 }
-
-                // When all tool calls failed, stop the agent loop and report errors (#948)
-                if all_failed {
-                    warn!(
-                        agent = %manifest.name,
-                        error_count,
-                        "All tool calls failed — stopping agent loop"
-                    );
-                    // Collect error messages from tool results
-                    let error_details: Vec<String> = tool_result_blocks
-                        .iter()
-                        .filter_map(|b| match b {
+                // Track consecutive all-failed iterations to cap wasted retries.
+                // (soft errors — approval denials, sandbox rejections, truncation —
+                //  do NOT count; the LLM is expected to recover from those cheaply.)
+                // NOTE: keep in sync with run_agent_loop_streaming.
+                let hard_error_count = tool_result_blocks
+                    .iter()
+                    .filter(|b| match b {
+                        ContentBlock::ToolResult {
+                            content,
+                            is_error: true,
+                            ..
+                        } => !is_soft_error_content(content),
+                        _ => false,
+                    })
+                    .count() as u32;
+                let success_count = tool_result_blocks
+                    .iter()
+                    .filter(|b| {
+                        matches!(
+                            b,
                             ContentBlock::ToolResult {
-                                tool_name,
-                                content,
-                                is_error: true,
+                                is_error: false,
                                 ..
-                            } => Some(format!("Tool '{}' failed: {}", tool_name, content)),
-                            _ => None,
-                        })
-                        .collect();
-                    let error_response = format!(
-                        "Tool execution failed. {}\n\n{}",
-                        if error_count == 1 {
-                            "The tool call returned an error.".to_string()
-                        } else {
-                            format!("All {} tool calls returned errors.", error_count)
-                        },
-                        error_details.join("\n")
-                    );
-                    session.messages.push(Message::assistant(&error_response));
-                    if let Err(e) = memory.save_session_async(session).await {
-                        warn!("Failed to save session on tool failure stop: {e}");
+                            }
+                        )
+                    })
+                    .count() as u32;
+
+                if success_count == 0 && hard_error_count > 0 {
+                    consecutive_all_failed += 1;
+                    if consecutive_all_failed >= MAX_CONSECUTIVE_ALL_FAILED {
+                        warn!(
+                            agent = %manifest.name,
+                            consecutive_all_failed,
+                            hard_error_count,
+                            "Tool failures in {MAX_CONSECUTIVE_ALL_FAILED} consecutive iterations — exiting loop"
+                        );
+                        if let Some(hook_reg) = hooks {
+                            let ctx = crate::hooks::HookContext {
+                                agent_name: &manifest.name,
+                                agent_id: agent_id_str.as_str(),
+                                event: librefang_types::agent::HookEvent::AgentLoopEnd,
+                                data: serde_json::json!({
+                                    "iterations": iteration + 1,
+                                    "reason": "tool_failure",
+                                    "error_count": hard_error_count,
+                                    "consecutive_all_failed": consecutive_all_failed,
+                                }),
+                            };
+                            let _ = hook_reg.fire(&ctx);
+                        }
+                        return Err(LibreFangError::RepeatedToolFailures {
+                            iterations: consecutive_all_failed,
+                            error_count: hard_error_count,
+                        });
                     }
-                    // Fire AgentLoopEnd hook
-                    if let Some(hook_reg) = hooks {
-                        let ctx = crate::hooks::HookContext {
-                            agent_name: &manifest.name,
-                            agent_id: agent_id_str.as_str(),
-                            event: librefang_types::agent::HookEvent::AgentLoopEnd,
-                            data: serde_json::json!({
-                                "iterations": iteration + 1,
-                                "reason": "tool_failure",
-                                "error_count": error_count,
-                            }),
-                        };
-                        let _ = hook_reg.fire(&ctx);
-                    }
-                    return Ok(AgentLoopResult {
-                        response: error_response,
-                        total_usage,
-                        iterations: iteration + 1,
-                        cost_usd: None,
-                        silent: false,
-                        directives: Default::default(),
-                        decision_traces,
-                        memories_saved: Vec::new(),
-                        memories_used: memories_used.clone(),
-                        memory_conflicts: Vec::new(),
-                        provider_not_configured: false,
-                        experiment_context: experiment_context.clone(),
-                        latency_ms: 0,
-                    });
+                } else {
+                    consecutive_all_failed = 0;
                 }
             }
             StopReason::MaxTokens => {
@@ -1687,6 +1703,7 @@ pub async fn run_agent_loop(
                         provider_not_configured: false,
                         experiment_context: experiment_context.clone(),
                         latency_ms: 0,
+                        new_messages_start,
                     });
                 }
                 // Model hit token limit — add partial response and continue
@@ -2005,6 +2022,11 @@ pub async fn run_agent_loop_streaming(
 ) -> LibreFangResult<AgentLoopResult> {
     info!(agent = %manifest.name, "Starting streaming agent loop");
 
+    // Start index of new messages added during this turn. See the matching
+    // comment in run_agent_loop for details. Initialized to the current
+    // session length, updated post-trim to len-1. Fixes #2067.
+    let mut new_messages_start = session.messages.len();
+
     // Skip streaming agent loop if no LLM provider is configured.
     if !driver.is_configured() {
         info!(agent = %manifest.name, "Skipping streaming agent loop — no LLM provider configured");
@@ -2012,6 +2034,7 @@ pub async fn run_agent_loop_streaming(
             silent: true,
             provider_not_configured: true,
             experiment_context: None,
+            new_messages_start,
             ..Default::default()
         });
     }
@@ -2242,9 +2265,6 @@ pub async fn run_agent_loop_streaming(
         None
     };
 
-    // Track message count before this turn so auto_memorize only processes new messages.
-    let messages_before = session.messages.len();
-
     // Mutable collector for memories saved during this turn (populated by auto_memorize).
     let mut memories_saved: Vec<String> = Vec::new();
     // Mutable collector for memory conflicts detected during this turn.
@@ -2335,6 +2355,10 @@ pub async fn run_agent_loop_streaming(
         user_message,
     );
 
+    // Update new_messages_start now that trim has run and the user message
+    // has been pushed. See iterative-path comment for details.
+    new_messages_start = session.messages.len().saturating_sub(1);
+
     // Proactively strip stale image data from previous turns (streaming path).
     strip_prior_image_data(&mut messages);
     strip_prior_image_data(&mut session.messages);
@@ -2364,6 +2388,7 @@ pub async fn run_agent_loop_streaming(
     let mut decision_traces: Vec<DecisionTrace> = Vec::new();
     let mut hallucination_retried = false;
     let mut action_nudge_retried = false;
+    let mut consecutive_all_failed: u32 = 0;
 
     for iteration in 0..max_iterations {
         debug!(iteration, "Streaming agent loop iteration");
@@ -2573,6 +2598,7 @@ pub async fn run_agent_loop_streaming(
                         provider_not_configured: false,
                         experiment_context: experiment_context.clone(),
                         latency_ms: 0,
+                        new_messages_start,
                     });
                 }
 
@@ -2751,7 +2777,7 @@ pub async fn run_agent_loop_streaming(
                 // Only send new messages from this turn, not the full session history.
                 if let Some(ref pm_store) = proactive_memory {
                     let user_id = session.agent_id.0.to_string();
-                    let new_messages = &session.messages[messages_before..];
+                    let new_messages = &session.messages[new_messages_start..];
                     let messages_json = serialize_session_messages(new_messages);
                     match pm_store
                         .auto_memorize(&user_id, &messages_json, sender_user_id.as_deref())
@@ -2805,6 +2831,7 @@ pub async fn run_agent_loop_streaming(
                     provider_not_configured: false,
                     experiment_context,
                     latency_ms: 0,
+                    new_messages_start,
                 });
             }
             StopReason::ToolUse => {
@@ -3043,14 +3070,7 @@ pub async fn run_agent_loop_streaming(
                     // Stop executing remaining tool calls on failure (#948)
                     // but not for approval denials or sandbox security rejections —
                     // those should let the LLM recover and retry with a valid path (#1861)
-                    let is_soft_error = result.is_error
-                        && (result
-                            .content
-                            .contains("requires human approval and was denied")
-                            || result.content.contains("[MODIFY_AND_RETRY]")
-                            || result.content.contains(ERR_PATH_TRAVERSAL)
-                            || result.content.contains(ERR_SANDBOX_ESCAPE)
-                            || result.content.contains("arguments were truncated"));
+                    let is_soft_error = result.is_error && is_soft_error_content(&result.content);
                     if result.is_error && !is_soft_error {
                         warn!(
                             tool = %tool_call.name,
@@ -3146,15 +3166,7 @@ pub async fn run_agent_loop_streaming(
                     });
                 }
 
-                // Check if ALL tool results are non-denial errors — stop the loop (#948)
-                let total_tool_results = tool_result_blocks
-                    .iter()
-                    .filter(|b| matches!(b, ContentBlock::ToolResult { .. }))
-                    .count();
-                let all_failed = total_tool_results > 0
-                    && non_denial_errors > 0
-                    && non_denial_errors == total_tool_results - denial_count;
-
+                // Save tool results to session (removed early return that blocked retries)
                 let tool_results_msg = Message {
                     role: Role::User,
                     content: MessageContent::Blocks(tool_result_blocks.clone()),
@@ -3166,75 +3178,64 @@ pub async fn run_agent_loop_streaming(
                 if let Err(e) = memory.save_session_async(session).await {
                     warn!("Failed to interim-save session: {e}");
                 }
-
-                // When all tool calls failed, stop the agent loop and report errors (#948)
-                if all_failed {
-                    warn!(
-                        agent = %manifest.name,
-                        error_count,
-                        "All tool calls failed — stopping agent loop (streaming)"
-                    );
-                    // Collect error messages from tool results
-                    let error_details: Vec<String> = tool_result_blocks
-                        .iter()
-                        .filter_map(|b| match b {
+                // Track consecutive all-failed iterations to cap wasted retries.
+                // (soft errors — approval denials, sandbox rejections, truncation —
+                //  do NOT count; the LLM is expected to recover from those cheaply.)
+                // NOTE: keep in sync with run_agent_loop (non-streaming).
+                let hard_error_count = tool_result_blocks
+                    .iter()
+                    .filter(|b| match b {
+                        ContentBlock::ToolResult {
+                            content,
+                            is_error: true,
+                            ..
+                        } => !is_soft_error_content(content),
+                        _ => false,
+                    })
+                    .count() as u32;
+                let success_count = tool_result_blocks
+                    .iter()
+                    .filter(|b| {
+                        matches!(
+                            b,
                             ContentBlock::ToolResult {
-                                tool_name,
-                                content,
-                                is_error: true,
+                                is_error: false,
                                 ..
-                            } => Some(format!("Tool '{}' failed: {}", tool_name, content)),
-                            _ => None,
-                        })
-                        .collect();
-                    let error_response = format!(
-                        "Tool execution failed. {}\n\n{}",
-                        if error_count == 1 {
-                            "The tool call returned an error.".to_string()
-                        } else {
-                            format!("All {} tool calls returned errors.", error_count)
-                        },
-                        error_details.join("\n")
-                    );
-                    session.messages.push(Message::assistant(&error_response));
-                    if let Err(e) = memory.save_session_async(session).await {
-                        warn!("Failed to save session on tool failure stop: {e}");
+                            }
+                        )
+                    })
+                    .count() as u32;
+
+                if success_count == 0 && hard_error_count > 0 {
+                    consecutive_all_failed += 1;
+                    if consecutive_all_failed >= MAX_CONSECUTIVE_ALL_FAILED {
+                        warn!(
+                            agent = %manifest.name,
+                            consecutive_all_failed,
+                            hard_error_count,
+                            "Tool failures in {MAX_CONSECUTIVE_ALL_FAILED} consecutive iterations — exiting streaming loop"
+                        );
+                        if let Some(hook_reg) = hooks {
+                            let ctx = crate::hooks::HookContext {
+                                agent_name: &manifest.name,
+                                agent_id: agent_id_str.as_str(),
+                                event: librefang_types::agent::HookEvent::AgentLoopEnd,
+                                data: serde_json::json!({
+                                    "iterations": iteration + 1,
+                                    "reason": "tool_failure",
+                                    "error_count": hard_error_count,
+                                    "consecutive_all_failed": consecutive_all_failed,
+                                }),
+                            };
+                            let _ = hook_reg.fire(&ctx);
+                        }
+                        return Err(LibreFangError::RepeatedToolFailures {
+                            iterations: consecutive_all_failed,
+                            error_count: hard_error_count,
+                        });
                     }
-                    // Stream the error to the client
-                    let _ = stream_tx
-                        .send(StreamEvent::TextDelta {
-                            text: error_response.clone(),
-                        })
-                        .await;
-                    // Fire AgentLoopEnd hook
-                    if let Some(hook_reg) = hooks {
-                        let ctx = crate::hooks::HookContext {
-                            agent_name: &manifest.name,
-                            agent_id: agent_id_str.as_str(),
-                            event: librefang_types::agent::HookEvent::AgentLoopEnd,
-                            data: serde_json::json!({
-                                "iterations": iteration + 1,
-                                "reason": "tool_failure",
-                                "error_count": error_count,
-                            }),
-                        };
-                        let _ = hook_reg.fire(&ctx);
-                    }
-                    return Ok(AgentLoopResult {
-                        response: error_response,
-                        total_usage,
-                        iterations: iteration + 1,
-                        cost_usd: None,
-                        silent: false,
-                        directives: Default::default(),
-                        decision_traces,
-                        memories_saved: Vec::new(),
-                        memories_used: memories_used.clone(),
-                        memory_conflicts: Vec::new(),
-                        provider_not_configured: false,
-                        experiment_context: experiment_context.clone(),
-                        latency_ms: 0,
-                    });
+                } else {
+                    consecutive_all_failed = 0;
                 }
             }
             StopReason::MaxTokens => {
@@ -3282,6 +3283,7 @@ pub async fn run_agent_loop_streaming(
                         provider_not_configured: false,
                         experiment_context: experiment_context.clone(),
                         latency_ms: 0,
+                        new_messages_start,
                     });
                 }
                 let text = response.text();
@@ -4106,6 +4108,116 @@ mod tests {
         assert_eq!(MAX_HISTORY_MESSAGES, 40);
     }
 
+    /// Regression for issue #2067: auto_memorize sliced `session.messages`
+    /// with an index captured **before** `safe_trim_messages` ran, so when
+    /// `find_safe_trim_point` scanned forward and trimmed deeper than
+    /// `len - MAX_HISTORY_MESSAGES`, the slice went out of range and the
+    /// agent_loop task panicked ("range start index 42 out of range for
+    /// slice of length 36").
+    ///
+    /// After the fix, `new_messages_start` is captured POST-trim as
+    /// `len.saturating_sub(1)`, pointing at the user message that was just
+    /// pushed — which must always be the last message in the session because
+    /// safe_trim_messages only drains from the front. This test pins both
+    /// halves: it shows the OLD index would have been out of bounds for the
+    /// trimmed session, AND that the NEW index yields a valid slice
+    /// containing exactly the just-pushed user message. The same index is
+    /// exposed via `AgentLoopResult::new_messages_start` so kernel-side
+    /// callers (e.g. canonical-session append) don't need to track their own
+    /// stale index.
+    #[test]
+    fn test_safe_trim_leaves_user_message_sliceable_after_deep_trim() {
+        // Build 42 messages where the tail forms tool-pair chains that
+        // force find_safe_trim_point to scan past the minimum trim depth.
+        // Pattern: user question -> assistant(tool_use) -> user(tool_result)
+        // repeated. A safe boundary is a User msg that is NOT a tool-result.
+        let mut session_messages: Vec<Message> = Vec::new();
+        for i in 0..13 {
+            // Plain turn: user question + assistant reply.
+            session_messages.push(Message::user(format!("q{i}")));
+            session_messages.push(Message::assistant(format!("a{i}")));
+        }
+        // Push a run of tool-pair messages so indices near min_trim are NOT
+        // safe boundaries, forcing the forward scan to skip ahead.
+        for i in 0..7 {
+            let tool_use_id = format!("tu-{i}");
+            session_messages.push(Message {
+                role: Role::Assistant,
+                content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+                    id: tool_use_id.clone(),
+                    name: "noop".to_string(),
+                    input: serde_json::json!({}),
+                    provider_metadata: None,
+                }]),
+                pinned: false,
+            });
+            session_messages.push(Message {
+                role: Role::User,
+                content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                    tool_use_id,
+                    tool_name: "noop".to_string(),
+                    content: format!("r{i}"),
+                    is_error: false,
+                }]),
+                pinned: false,
+            });
+        }
+        // Capture the OLD (buggy) index: len BEFORE pushing the current
+        // turn's user message, which is what the old code used.
+        let old_messages_before = session_messages.len();
+
+        // Push the current turn's user message. At this point
+        // len = 26 + 14 + 1 = 41, which is > MAX_HISTORY_MESSAGES=40 and
+        // will trigger safe_trim_messages.
+        session_messages.push(Message::user("current turn"));
+        assert!(session_messages.len() > MAX_HISTORY_MESSAGES);
+
+        let mut llm_messages = session_messages.clone();
+        safe_trim_messages(
+            &mut llm_messages,
+            &mut session_messages,
+            "test-agent",
+            "current turn",
+        );
+
+        // The forward scan in find_safe_trim_point skipped past the tool-pair
+        // run, so the trim drained deeper than (old_len+1) - MAX_HISTORY.
+        // This is the exact shape that produced the issue #2067 panic.
+        assert!(
+            session_messages.len() < old_messages_before,
+            "expected deep trim to put old_messages_before out of bounds \
+             (old_before={old_messages_before}, post_trim_len={})",
+            session_messages.len()
+        );
+
+        // Post-trim invariants used by the fix at the auto_memorize call
+        // site: session is non-empty, the just-pushed user msg is the last
+        // element, and slicing at len-1 yields exactly that one message.
+        assert!(!session_messages.is_empty());
+        let new_messages_start = session_messages.len().saturating_sub(1);
+        let tail = &session_messages[new_messages_start..];
+        assert_eq!(tail.len(), 1);
+        assert_eq!(tail[0].role, Role::User);
+        match &tail[0].content {
+            MessageContent::Text(t) => assert_eq!(t, "current turn"),
+            other => panic!("expected text user msg, got {other:?}"),
+        }
+    }
+
+    /// Verifies that AgentLoopResult exposes a usable `new_messages_start`
+    /// by default so kernel-side callers can always rely on the field
+    /// existing without worrying about uninitialized state.
+    #[test]
+    fn test_agent_loop_result_new_messages_start_default_is_zero() {
+        let result = AgentLoopResult::default();
+        assert_eq!(result.new_messages_start, 0);
+        // Defensively clamping against an empty vec must yield an empty slice.
+        let empty: Vec<Message> = Vec::new();
+        let start = result.new_messages_start.min(empty.len());
+        assert_eq!(start, 0);
+        assert!(empty[start..].is_empty());
+    }
+
     #[test]
     fn test_stable_prefix_mode_disabled_by_default() {
         let manifest = test_manifest();
@@ -4199,6 +4311,97 @@ mod tests {
                     },
                 })
             }
+        }
+    }
+
+    /// Mock driver: iteration 0 emits a tool call, iteration 1 emits text.
+    /// Used to verify the loop retries after a tool failure instead of exiting.
+    struct FailThenTextDriver {
+        call_count: AtomicU32,
+    }
+
+    impl FailThenTextDriver {
+        fn new() -> Self {
+            Self {
+                call_count: AtomicU32::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmDriver for FailThenTextDriver {
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            let call = self.call_count.fetch_add(1, Ordering::Relaxed);
+            if call == 0 {
+                Ok(CompletionResponse {
+                    content: vec![ContentBlock::ToolUse {
+                        id: "tool_1".to_string(),
+                        name: "fake_tool".to_string(),
+                        input: serde_json::json!({"q": "test"}),
+                        provider_metadata: None,
+                    }],
+                    stop_reason: StopReason::ToolUse,
+                    tool_calls: vec![ToolCall {
+                        id: "tool_1".to_string(),
+                        name: "fake_tool".to_string(),
+                        input: serde_json::json!({"q": "test"}),
+                    }],
+                    usage: TokenUsage {
+                        input_tokens: 10,
+                        output_tokens: 5,
+                        ..Default::default()
+                    },
+                })
+            } else {
+                Ok(CompletionResponse {
+                    content: vec![ContentBlock::Text {
+                        text: "Recovered after tool failure".to_string(),
+                        provider_metadata: None,
+                    }],
+                    stop_reason: StopReason::EndTurn,
+                    tool_calls: vec![],
+                    usage: TokenUsage {
+                        input_tokens: 10,
+                        output_tokens: 5,
+                        ..Default::default()
+                    },
+                })
+            }
+        }
+    }
+
+    /// Mock driver: every iteration emits a tool call that will fail (unregistered tool).
+    /// Used to verify the consecutive_all_failed cap triggers RepeatedToolFailures.
+    struct AlwaysFailingToolDriver;
+
+    #[async_trait]
+    impl LlmDriver for AlwaysFailingToolDriver {
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            Ok(CompletionResponse {
+                content: vec![ContentBlock::ToolUse {
+                    id: "tool_x".to_string(),
+                    name: "nonexistent_tool".to_string(),
+                    input: serde_json::json!({}),
+                    provider_metadata: None,
+                }],
+                stop_reason: StopReason::ToolUse,
+                tool_calls: vec![ToolCall {
+                    id: "tool_x".to_string(),
+                    name: "nonexistent_tool".to_string(),
+                    input: serde_json::json!({}),
+                }],
+                usage: TokenUsage {
+                    input_tokens: 10,
+                    output_tokens: 5,
+                    ..Default::default()
+                },
+            })
         }
     }
 
@@ -5870,6 +6073,232 @@ mod tests {
                 "Expected action intent for keyword '{}'",
                 kw
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tool_failure_allows_retry_on_next_iteration() {
+        let memory = librefang_memory::MemorySubstrate::open_in_memory(0.01).unwrap();
+        let agent_id = librefang_types::agent::AgentId::new();
+        let mut session = librefang_memory::session::Session {
+            id: librefang_types::agent::SessionId::new(),
+            agent_id,
+            messages: Vec::new(),
+            context_window_tokens: 0,
+            label: None,
+        };
+        let manifest = test_manifest();
+        let driver: Arc<dyn LlmDriver> = Arc::new(FailThenTextDriver::new());
+
+        let result = run_agent_loop(
+            &manifest,
+            "Do something",
+            &mut session,
+            &memory,
+            driver,
+            &[],
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None, // on_phase
+            None, // media_engine
+            None, // media_drivers
+            None, // tts_engine
+            None, // docker_config
+            None, // hooks
+            None, // context_window_tokens
+            None, // process_manager
+            None, // user_content_blocks
+            None, // proactive_memory
+            None, // context_engine
+            None, // pending_messages
+        )
+        .await
+        .expect("Loop should complete after retry");
+
+        assert_eq!(
+            result.iterations, 2,
+            "Loop must run 2 iterations (fail + retry), got {}",
+            result.iterations
+        );
+        assert!(
+            result.response.contains("Recovered after tool failure"),
+            "Expected retry text response, got: {:?}",
+            result.response
+        );
+    }
+
+    #[tokio::test]
+    async fn test_repeated_tool_failures_cap_exits_loop() {
+        let memory = librefang_memory::MemorySubstrate::open_in_memory(0.01).unwrap();
+        let agent_id = librefang_types::agent::AgentId::new();
+        let mut session = librefang_memory::session::Session {
+            id: librefang_types::agent::SessionId::new(),
+            agent_id,
+            messages: Vec::new(),
+            context_window_tokens: 0,
+            label: None,
+        };
+        let manifest = test_manifest();
+        let driver: Arc<dyn LlmDriver> = Arc::new(AlwaysFailingToolDriver);
+
+        let err = run_agent_loop(
+            &manifest,
+            "Do something",
+            &mut session,
+            &memory,
+            driver,
+            &[],
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None, // on_phase
+            None, // media_engine
+            None, // media_drivers
+            None, // tts_engine
+            None, // docker_config
+            None, // hooks
+            None, // context_window_tokens
+            None, // process_manager
+            None, // user_content_blocks
+            None, // proactive_memory
+            None, // context_engine
+            None, // pending_messages
+        )
+        .await
+        .expect_err("Loop must exit with RepeatedToolFailures");
+
+        match err {
+            LibreFangError::RepeatedToolFailures { iterations, .. } => {
+                assert_eq!(
+                    iterations, MAX_CONSECUTIVE_ALL_FAILED,
+                    "Cap should trigger after MAX_CONSECUTIVE_ALL_FAILED consecutive all-failed iterations"
+                );
+            }
+            other => panic!("Expected RepeatedToolFailures, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_streaming_tool_failure_allows_retry() {
+        let memory = librefang_memory::MemorySubstrate::open_in_memory(0.01).unwrap();
+        let agent_id = librefang_types::agent::AgentId::new();
+        let mut session = librefang_memory::session::Session {
+            id: librefang_types::agent::SessionId::new(),
+            agent_id,
+            messages: Vec::new(),
+            context_window_tokens: 0,
+            label: None,
+        };
+        let manifest = test_manifest();
+        let driver: Arc<dyn LlmDriver> = Arc::new(FailThenTextDriver::new());
+        let (tx, _rx) = mpsc::channel(64);
+
+        let result = run_agent_loop_streaming(
+            &manifest,
+            "Do something",
+            &mut session,
+            &memory,
+            driver,
+            &[],
+            None,
+            tx,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None, // on_phase
+            None, // media_engine
+            None, // media_drivers
+            None, // tts_engine
+            None, // docker_config
+            None, // hooks
+            None, // context_window_tokens
+            None, // process_manager
+            None, // user_content_blocks
+            None, // proactive_memory
+            None, // context_engine
+            None, // pending_messages
+        )
+        .await
+        .expect("Streaming loop should complete after retry");
+
+        assert_eq!(
+            result.iterations, 2,
+            "Streaming loop must run 2 iterations (fail + retry), got {}",
+            result.iterations
+        );
+        assert!(
+            result.response.contains("Recovered after tool failure"),
+            "Expected retry text in streaming, got: {:?}",
+            result.response
+        );
+    }
+
+    #[tokio::test]
+    async fn test_streaming_repeated_tool_failures_cap_exits() {
+        let memory = librefang_memory::MemorySubstrate::open_in_memory(0.01).unwrap();
+        let agent_id = librefang_types::agent::AgentId::new();
+        let mut session = librefang_memory::session::Session {
+            id: librefang_types::agent::SessionId::new(),
+            agent_id,
+            messages: Vec::new(),
+            context_window_tokens: 0,
+            label: None,
+        };
+        let manifest = test_manifest();
+        let driver: Arc<dyn LlmDriver> = Arc::new(AlwaysFailingToolDriver);
+        let (tx, _rx) = mpsc::channel(64);
+
+        let err = run_agent_loop_streaming(
+            &manifest,
+            "Do something",
+            &mut session,
+            &memory,
+            driver,
+            &[],
+            None,
+            tx,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None, // on_phase
+            None, // media_engine
+            None, // media_drivers
+            None, // tts_engine
+            None, // docker_config
+            None, // hooks
+            None, // context_window_tokens
+            None, // process_manager
+            None, // user_content_blocks
+            None, // proactive_memory
+            None, // context_engine
+            None, // pending_messages
+        )
+        .await
+        .expect_err("Streaming loop must exit with RepeatedToolFailures");
+
+        match err {
+            LibreFangError::RepeatedToolFailures { iterations, .. } => {
+                assert_eq!(
+                    iterations, MAX_CONSECUTIVE_ALL_FAILED,
+                    "Cap should trigger after MAX_CONSECUTIVE_ALL_FAILED consecutive all-failed iterations"
+                );
+            }
+            other => panic!("Expected RepeatedToolFailures, got {other:?}"),
         }
     }
 }
