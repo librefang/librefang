@@ -1318,6 +1318,14 @@ pub async fn run_migrate(
 
     match librefang_migrate::run_migration(&options) {
         Ok(report) => {
+            // Migrate writes agent manifests under `<target>/agents/<name>/`
+            // (legacy schema). Relocate them into the canonical
+            // `workspaces/agents/<name>/` layout immediately so the running
+            // daemon can use them without a restart.
+            if !req.dry_run {
+                state.kernel.relocate_legacy_agent_dirs();
+            }
+
             let imported: Vec<serde_json::Value> = report
                 .imported
                 .iter()

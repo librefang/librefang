@@ -188,7 +188,7 @@ const count: number = await invoke("get_agent_count");
 
 ### `import_agent_toml`
 
-打开原生文件选择器用于选择 `.toml` 文件。验证所选文件是否为有效的 `AgentManifest`，将其复制到 `~/.librefang/agents/{name}/agent.toml`，并启动该 Agent。成功时返回 Agent 名称。
+打开原生文件选择器用于选择 `.toml` 文件。验证所选文件是否为有效的 `AgentManifest`，将其复制到 `~/.librefang/workspaces/agents/{name}/agent.toml`，并启动该 Agent。成功时返回 Agent 名称。
 
 ### `import_skill_file`
 

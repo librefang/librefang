@@ -14,7 +14,7 @@ pub struct AgentTemplate {
 
 /// Discover template directories. Checks:
 /// 1. The repo `agents/` dir (for dev builds)
-/// 2. `~/.librefang/agents/` (installed templates)
+/// 2. `~/.librefang/workspaces/agents/` (installed templates)
 /// 3. `LIBREFANG_AGENTS_DIR` env var
 pub fn discover_template_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();

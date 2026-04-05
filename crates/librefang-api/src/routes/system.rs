@@ -3361,7 +3361,11 @@ async fn create_registry_content(
         "provider" => home_dir
             .join("providers")
             .join(format!("{identifier}.toml")),
-        "agent" => home_dir.join("agents").join(&identifier).join("agent.toml"),
+        "agent" => home_dir
+            .join("workspaces")
+            .join("agents")
+            .join(&identifier)
+            .join("agent.toml"),
         "hand" => home_dir.join("hands").join(&identifier).join("HAND.toml"),
         "integration" => home_dir
             .join("integrations")

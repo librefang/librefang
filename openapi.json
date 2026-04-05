@@ -7663,7 +7663,7 @@
               "string",
               "null"
             ],
-            "description": "Template name from `~/.librefang/agents/{template}/agent.toml`.\nWhen provided and `manifest_toml` is empty, the template is loaded automatically."
+            "description": "Template name from `~/.librefang/workspaces/agents/{template}/agent.toml`.\nWhen provided and `manifest_toml` is empty, the template is loaded automatically."
           }
         }
       },

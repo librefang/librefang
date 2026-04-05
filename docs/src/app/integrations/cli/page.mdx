@@ -89,7 +89,7 @@ Press `Ctrl+C` to exit. A second `Ctrl+C` force-exits the process.
 
 ### librefang init
 
-Initialize the LibreFang workspace. Creates `~/.librefang/` with subdirectories (`data/`, `agents/`) and a default `config.toml`.
+Initialize the LibreFang workspace. Creates `~/.librefang/` with subdirectories (`data/`, `workspaces/agents/`) and a default `config.toml`.
 
 ```
 librefang init [--quick]
@@ -224,7 +224,7 @@ librefang doctor [--json] [--repair]
 6. **Stale daemon.json** -- leftover `daemon.json` from a crashed daemon
 7. **Database file** -- SQLite magic bytes validation
 8. **Disk space** -- warns if less than 100MB available (Unix only)
-9. **Agent manifests** -- validates all `.toml` files in `~/.librefang/agents/`
+9. **Agent manifests** -- validates all `.toml` files in `~/.librefang/workspaces/agents/`
 10. **LLM provider keys** -- checks env vars for 10 providers (Groq, OpenRouter, Anthropic, OpenAI, DeepSeek, Gemini, Google, Together, Mistral, Fireworks), performs live validation (401/403 detection)
 11. **Channel tokens** -- format validation for Telegram, Discord, Slack tokens
 12. **Config consistency** -- checks that `api_key_env` references in config match actual environment variables

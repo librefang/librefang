@@ -24,7 +24,7 @@ librefang agent new [<TEMPLATE>]
 
 **行为：**
 
-- 从以下位置发现模板：仓库 `agents/` 目录（开发构建）、`~/.librefang/agents/`（assistant 预装，其他模板从仪表板安装）、以及 `LIBREFANG_AGENTS_DIR`（环境变量覆盖）。
+- 从以下位置发现模板：仓库 `agents/` 目录（开发构建）、`~/.librefang/workspaces/agents/`（assistant 预装，其他模板从仪表板安装）、以及 `LIBREFANG_AGENTS_DIR`（环境变量覆盖）。
 - 每个模板是一个包含 `agent.toml` 清单文件的目录。
 - 守护进程模式下：发送 `POST /api/agents` 请求附带清单内容。Agent 将被持久化。
 - 独立模式下：启动进程内核。Agent 是临时的。

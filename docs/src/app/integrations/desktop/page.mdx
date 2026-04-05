@@ -188,7 +188,7 @@ const count: number = await invoke("get_agent_count");
 
 ### `import_agent_toml`
 
-Opens a native file picker for `.toml` files. Validates the selected file as an `AgentManifest`, copies it to `~/.librefang/agents/{name}/agent.toml`, and spawns the agent. Returns the agent name on success.
+Opens a native file picker for `.toml` files. Validates the selected file as an `AgentManifest`, copies it to `~/.librefang/workspaces/agents/{name}/agent.toml`, and spawns the agent. Returns the agent name on success.
 
 ### `import_skill_file`
 

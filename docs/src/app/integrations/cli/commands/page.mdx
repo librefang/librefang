@@ -24,7 +24,7 @@ librefang agent new [<TEMPLATE>]
 
 **Behavior:**
 
-- Templates are discovered from: the repo `agents/` directory (dev builds), `~/.librefang/agents/` (assistant pre-installed, others installed from dashboard), and `LIBREFANG_AGENTS_DIR` (env override).
+- Templates are discovered from: the repo `agents/` directory (dev builds), `~/.librefang/workspaces/agents/` (assistant pre-installed, others installed from dashboard), and `LIBREFANG_AGENTS_DIR` (env override).
 - Each template is a directory containing an `agent.toml` manifest.
 - In daemon mode: sends `POST /api/agents` with the manifest. Agent is persistent.
 - In standalone mode: boots an in-process kernel. Agent is ephemeral.

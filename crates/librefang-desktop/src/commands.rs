@@ -38,7 +38,7 @@ pub fn get_agent_count(kernel_state: tauri::State<'_, KernelState>) -> usize {
 /// Open a native file picker to import an agent TOML manifest.
 ///
 /// Validates the TOML as a valid `AgentManifest`, copies it to
-/// `~/.librefang/agents/{name}/agent.toml`, then spawns the agent.
+/// `~/.librefang/workspaces/agents/{name}/agent.toml`, then spawns the agent.
 #[tauri::command]
 pub fn import_agent_toml(
     app: tauri::AppHandle,
