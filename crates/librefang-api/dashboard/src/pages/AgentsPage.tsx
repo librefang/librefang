@@ -47,6 +47,7 @@ export function AgentsPage() {
     onConfirm: () => void;
     tone?: "default" | "destructive";
   } | null>(null);
+  const [stateFilter, setStateFilter] = useState<"all" | "running" | "suspended">("all");
   const queryClient = useQueryClient();
   const templatesQuery = useQuery({ queryKey: ["agent-templates"], queryFn: listAgentTemplates, enabled: showCreate && createMode === "template" });
   const spawnMutation = useMutation({
@@ -155,15 +156,27 @@ export function AgentsPage() {
   );
 
   const agents = agentsQuery.data ?? [];
+  // Counts for the filter chips so operators can see "5 running / 2
+  // suspended" without running through the filter first.
+  const agentCounts = useMemo(() => {
+    const visible = agents.filter(a => !a.is_hand);
+    const running = visible.filter(a => (a.state || "").toLowerCase() === "running").length;
+    const suspended = visible.filter(a => (a.state || "").toLowerCase() === "suspended").length;
+    return { all: visible.length, running, suspended };
+  }, [agents]);
   const filteredAgents = useMemo(() => agents
     .filter(a => !a.is_hand)
+    .filter(a => {
+      if (stateFilter === "all") return true;
+      return (a.state || "").toLowerCase() === stateFilter;
+    })
     .filter(a => a.name.toLowerCase().includes(search.toLowerCase()) || a.id.toLowerCase().includes(search.toLowerCase()))
     .sort((a, b) => {
       const aSusp = (a.state || "").toLowerCase() === "suspended" ? 1 : 0;
       const bSusp = (b.state || "").toLowerCase() === "suspended" ? 1 : 0;
       if (aSusp !== bSusp) return aSusp - bSusp;
       return a.name.localeCompare(b.name);
-    }), [agents, search]);
+    }), [agents, search, stateFilter]);
 
   const coreAgents = filteredAgents;
 
@@ -265,15 +278,59 @@ export function AgentsPage() {
         leftIcon={<Search className="h-4 w-4" />}
       />
 
+      <div className="flex items-center gap-2 -mt-2">
+        {(["all", "running", "suspended"] as const).map((key) => {
+          const isActive = stateFilter === key;
+          const count = agentCounts[key];
+          const label = t(`agents.filter_${key}`, {
+            defaultValue: key === "all" ? "All" : key === "running" ? "Running" : "Suspended",
+          });
+          return (
+            <button
+              key={key}
+              onClick={() => setStateFilter(key)}
+              className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-[11px] font-bold transition-colors ${
+                isActive
+                  ? "border-brand/30 bg-brand/10 text-brand"
+                  : "border-border-subtle bg-surface text-text-dim hover:border-brand/20 hover:text-brand"
+              }`}
+            >
+              <span>{label}</span>
+              <span
+                className={`inline-flex items-center justify-center rounded-full px-1.5 min-w-[18px] h-[18px] text-[9px] font-mono ${
+                  isActive ? "bg-brand/20" : "bg-main"
+                }`}
+              >
+                {count}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+
       {agentsQuery.isLoading ? (
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
           {[1, 2, 3, 4, 5, 6].map((i) => <CardSkeleton key={i} />)}
         </div>
       ) : filteredAgents.length === 0 ? (
-        search ? (
+        search || stateFilter !== "all" ? (
           <EmptyState
             title={t("agents.no_matching")}
             icon={<Search className="h-6 w-6" />}
+            action={
+              (search || stateFilter !== "all") && (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => {
+                    setSearch("");
+                    setStateFilter("all");
+                  }}
+                >
+                  {t("common.clear_filters", { defaultValue: "Clear filters" })}
+                </Button>
+              )
+            }
           />
         ) : (
           <EmptyState
