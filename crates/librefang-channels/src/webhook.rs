@@ -262,7 +262,12 @@ impl ChannelAdapter for WebhookAdapter {
                                 msg.metadata
                                     .insert("account_id".to_string(), serde_json::json!(aid));
                             }
-                            let _ = tx.send(msg).await;
+                            if tx.send(msg).await.is_err() {
+                                // Bridge receiver closed — the message is lost
+                                // even though we're about to return 200 OK to
+                                // the upstream. Log so operators can notice.
+                                warn!("Webhook: bridge channel closed, incoming message dropped");
+                            }
                         }
 
                         (axum::http::StatusCode::OK, "ok")
