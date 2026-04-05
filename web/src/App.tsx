@@ -591,7 +591,7 @@ function Hands({ t }: SectionProps) {
                 return (
                   <a
                     key={hand.id}
-                    href={`https://docs.librefang.ai/hands#${hand.id}`}
+                    href={`https://docs.librefang.ai/agent/hands#${hand.id}`}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="group w-56 bg-surface-100 border border-black/10 dark:border-white/5 hover:border-cyan-500/20 px-4 py-3 hover:bg-surface-200 hover:scale-[1.02] transition-all duration-200"
