@@ -760,8 +760,8 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
               )}
 
               {showCreateVersion && (
-                <div className="fixed inset-0 z-60 flex items-center justify-center bg-black/50" onClick={() => setShowCreateVersion(false)}>
-                  <div className="bg-surface rounded-xl shadow-2xl border border-border-subtle p-6 w-full max-w-lg mx-4" onClick={e => e.stopPropagation()}>
+                <div className="fixed inset-0 z-60 flex items-end sm:items-center justify-center bg-black/50 p-0 sm:p-4" onClick={() => setShowCreateVersion(false)}>
+                  <div className="bg-surface rounded-t-2xl sm:rounded-xl shadow-2xl border border-border-subtle p-6 w-full max-w-lg" onClick={e => e.stopPropagation()}>
                     <h4 className="font-bold mb-4">Create Prompt Version</h4>
                     <div className="space-y-4">
                       <div>
@@ -861,8 +861,8 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
               )}
 
               {showCreateExperiment && (
-                <div className="fixed inset-0 z-60 flex items-center justify-center bg-black/50" onClick={() => setShowCreateExperiment(false)}>
-                  <div className="bg-surface rounded-xl shadow-2xl border border-border-subtle p-6 w-full max-w-lg mx-4" onClick={e => e.stopPropagation()}>
+                <div className="fixed inset-0 z-60 flex items-end sm:items-center justify-center bg-black/50 p-0 sm:p-4" onClick={() => setShowCreateExperiment(false)}>
+                  <div className="bg-surface rounded-t-2xl sm:rounded-xl shadow-2xl border border-border-subtle p-6 w-full max-w-lg" onClick={e => e.stopPropagation()}>
                     <h4 className="font-bold mb-4">Create Experiment</h4>
                     <div className="space-y-4">
                       <div>

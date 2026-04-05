@@ -297,8 +297,8 @@ function TemplateBrowser({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm" onClick={onClose}>
-      <div className="bg-surface rounded-2xl shadow-2xl border border-border-subtle w-[640px] max-w-[90vw] max-h-[80vh] flex flex-col animate-fade-in-scale" onClick={e => e.stopPropagation()}>
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/30 backdrop-blur-sm p-0 sm:p-4" onClick={onClose}>
+      <div className="bg-surface rounded-t-2xl sm:rounded-2xl shadow-2xl border border-border-subtle w-full sm:w-[640px] sm:max-w-[90vw] max-h-[85vh] sm:max-h-[80vh] flex flex-col animate-fade-in-scale" onClick={e => e.stopPropagation()}>
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-3 border-b border-border-subtle shrink-0">
           <div className="flex items-center gap-2">
@@ -2135,8 +2135,8 @@ function CanvasPageInner() {
 
       {/* Shortcut help panel */}
       {showHelp && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm" onClick={() => setShowHelp(false)}>
-          <div className="bg-surface rounded-2xl shadow-2xl border border-border-subtle w-140 max-w-[90vw] max-h-[80vh] overflow-y-auto animate-fade-in-scale" onClick={e => e.stopPropagation()}>
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/30 backdrop-blur-sm p-0 sm:p-4" onClick={() => setShowHelp(false)}>
+          <div className="bg-surface rounded-t-2xl sm:rounded-2xl shadow-2xl border border-border-subtle w-full sm:w-140 sm:max-w-[90vw] max-h-[85vh] sm:max-h-[80vh] overflow-y-auto animate-fade-in-scale" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between px-5 py-3 border-b border-border-subtle">
               <h3 className="text-sm font-bold">{t("canvas.shortcuts_title")}</h3>
               <button onClick={() => setShowHelp(false)} className="p-1 rounded hover:bg-main"><X className="w-4 h-4" /></button>

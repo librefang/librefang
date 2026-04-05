@@ -28,9 +28,9 @@ export function ShortcutsHelp({ isOpen, onClose }: ShortcutsHelpProps) {
   const navEntries = Object.entries(G_NAV_SHORTCUTS);
 
   return (
-    <div className="fixed inset-0 z-100 flex items-start justify-center pt-[10vh]">
+    <div className="fixed inset-0 z-100 flex items-end sm:items-start justify-center sm:pt-[10vh] p-0 sm:p-4">
       <div className="fixed inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
-      <div className="relative w-full max-w-2xl max-w-[90vw] rounded-2xl border border-border-subtle bg-surface shadow-2xl overflow-hidden animate-fade-in-scale">
+      <div className="relative w-full sm:max-w-2xl rounded-t-2xl sm:rounded-2xl border border-border-subtle bg-surface shadow-2xl overflow-hidden animate-fade-in-scale">
         <div className="flex items-center justify-between border-b border-border-subtle px-5 py-4">
           <div className="flex items-center gap-2.5">
             <div className="h-8 w-8 rounded-xl bg-brand/10 flex items-center justify-center text-brand">
