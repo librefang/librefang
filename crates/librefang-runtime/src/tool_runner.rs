@@ -4981,10 +4981,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_image_analyze_missing_file() {
+        let workspace = tempfile::tempdir().expect("tempdir");
         let result = execute_tool(
             "test-id",
             "image_analyze",
-            &serde_json::json!({"path": "/nonexistent/image.png"}),
+            &serde_json::json!({"path": "nonexistent_image.png"}),
             None,
             None,
             None,
@@ -4993,7 +4994,7 @@ mod tests {
             None,
             None,
             None,
-            None,
+            Some(workspace.path()),
             None, // media_engine
             None, // media_drivers
             None, // exec_policy
@@ -5005,7 +5006,11 @@ mod tests {
         )
         .await;
         assert!(result.is_error);
-        assert!(result.content.contains("Failed to read"));
+        assert!(
+            result.content.contains("Failed to read"),
+            "unexpected error content: {}",
+            result.content
+        );
     }
 
     #[test]
