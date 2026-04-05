@@ -1,5 +1,18 @@
 name: Dashboard Build
 
+# The dashboard is shipped as a `dashboard-dist.tar.gz` asset on each GitHub
+# Release. The `librefang` daemon downloads this tarball from the latest
+# release on first boot and extracts it into `~/.librefang/dashboard/`. If
+# the asset is missing, new installs see a plain-text "React dashboard build
+# missing" error on `/` because the binary no longer embeds the dashboard.
+#
+# Triggering:
+#   * release: published — fires when release-create.yml publishes a new
+#     release. This requires release-create.yml to use a PAT (not
+#     GITHUB_TOKEN), otherwise GitHub suppresses the downstream trigger.
+#   * push to main touching dashboard sources — refreshes the asset on the
+#     most recent release between binary releases.
+#   * workflow_dispatch — manual backfill for older releases.
 on:
   push:
     branches: [main]
@@ -10,6 +23,12 @@ on:
       - 'crates/librefang-api/dashboard/tsconfig.*'
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to upload dashboard asset to (e.g. v2026.4.5-beta14)'
+        required: true
+        type: string
 
 jobs:
   build:
@@ -40,16 +59,21 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Use release event tag if available, otherwise find latest
-          if [ "${{ github.event_name }}" = "release" ]; then
-            TAG="${{ github.event.release.tag_name }}"
-          else
-            TAG=$(gh release list --limit 1 --json tagName --jq '.[0].tagName')
-          fi
+          case "${{ github.event_name }}" in
+            release)
+              TAG="${{ github.event.release.tag_name }}"
+              ;;
+            workflow_dispatch)
+              TAG="${{ github.event.inputs.tag }}"
+              ;;
+            *)
+              # push to main — upload to the most recent release
+              TAG=$(gh release list --limit 1 --json tagName --jq '.[0].tagName')
+              ;;
+          esac
           if [ -z "$TAG" ]; then
             echo "No release found, skipping upload"
             exit 0
           fi
           echo "Uploading dashboard-dist.tar.gz to $TAG"
-          gh release delete-asset "$TAG" dashboard-dist.tar.gz --yes 2>/dev/null || true
           gh release upload "$TAG" /tmp/dashboard-dist.tar.gz --clobber
