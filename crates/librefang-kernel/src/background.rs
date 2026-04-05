@@ -174,12 +174,20 @@ impl BackgroundExecutor {
                         );
                         debug!(agent = %name, "Continuous loop: sending self-prompt");
                         let busy_clone = busy.clone();
+                        let watcher_name = name.clone();
                         let jh = (send_message)(agent_id, prompt);
                         // Spawn a watcher with RAII guard — busy flag clears even on panic
                         tokio::spawn(async move {
                             let _guard = BusyGuard { flag: busy_clone };
                             let _permit = permit; // drop permit when watcher exits
-                            let _ = jh.await;
+                            if let Err(e) = jh.await {
+                                warn!(
+                                    agent = %watcher_name,
+                                    id = %agent_id,
+                                    error = %e,
+                                    "Continuous loop: agent tick task panicked or was aborted",
+                                );
+                            }
                         });
                     }
                 });
@@ -253,12 +261,20 @@ impl BackgroundExecutor {
                         );
                         debug!(agent = %name, "Periodic loop: sending scheduled prompt");
                         let busy_clone = busy.clone();
+                        let watcher_name = name.clone();
                         let jh = (send_message)(agent_id, prompt);
                         // Spawn a watcher with RAII guard — busy flag clears even on panic
                         tokio::spawn(async move {
                             let _guard = BusyGuard { flag: busy_clone };
                             let _permit = permit; // drop permit when watcher exits
-                            let _ = jh.await;
+                            if let Err(e) = jh.await {
+                                warn!(
+                                    agent = %watcher_name,
+                                    id = %agent_id,
+                                    error = %e,
+                                    "Periodic loop: agent tick task panicked or was aborted",
+                                );
+                            }
                         });
                     }
                 });
