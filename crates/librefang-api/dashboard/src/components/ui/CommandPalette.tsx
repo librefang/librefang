@@ -117,6 +117,7 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
           <span className="flex items-center gap-1"><kbd className="px-1 py-0.5 rounded bg-main text-[9px] font-mono">↑↓</kbd> {t("command_palette.navigate")}</span>
           <span className="flex items-center gap-1"><kbd className="px-1 py-0.5 rounded bg-main text-[9px] font-mono">↵</kbd> {t("command_palette.open")}</span>
           <span className="flex items-center gap-1"><kbd className="px-1 py-0.5 rounded bg-main text-[9px] font-mono">esc</kbd> {t("command_palette.close")}</span>
+          <span className="hidden sm:flex items-center gap-1 ml-auto"><kbd className="px-1 py-0.5 rounded bg-main text-[9px] font-mono">?</kbd> {t("command_palette.all_shortcuts", { defaultValue: "all shortcuts" })}</span>
         </div>
         <div className="max-h-[50vh] overflow-y-auto p-2 scrollbar-thin">
           {filteredCommands.length === 0 ? (

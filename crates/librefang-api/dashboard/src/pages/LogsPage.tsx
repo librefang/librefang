@@ -7,7 +7,8 @@ import { PageHeader } from "../components/ui/PageHeader";
 import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
-import { FileText, Search, Download } from "lucide-react";
+import { InlineEmpty } from "../components/ui/InlineEmpty";
+import { FileText, Search, Download, Loader2 } from "lucide-react";
 import { truncateId } from "../lib/string";
 
 const REFRESH_MS = 5000;
@@ -79,6 +80,7 @@ export function LogsPage() {
               placeholder={t("common.search")}
               leftIcon={<Search className="h-4 w-4" />}
               className="py-1.5!"
+              data-shortcut-search
             />
           </div>
           <select
@@ -100,9 +102,15 @@ export function LogsPage() {
         </div>
         <div className="p-2 sm:p-4 font-mono text-xs space-y-1 max-h-[60vh] overflow-y-auto scrollbar-thin">
           {auditQuery.isLoading ? (
-            <div className="text-center py-8 text-text-dim">{t("common.loading")}</div>
+            <InlineEmpty
+              icon={<Loader2 className="w-5 h-5 animate-spin" />}
+              message={t("common.loading")}
+            />
           ) : filteredLogs.length === 0 ? (
-            <div className="text-center py-8 text-text-dim">{t("common.no_data")}</div>
+            <InlineEmpty
+              icon={<FileText className="w-5 h-5" />}
+              message={t("common.no_data")}
+            />
           ) : (
             filteredLogs.map((l: any, i: any) => {
               const outcome = l.outcome || "";

@@ -165,6 +165,23 @@ impl AgentRegistry {
         Ok(())
     }
 
+    /// Replace an agent's manifest wholesale. The caller is responsible for
+    /// preserving runtime-only fields (workspace, tags) and invalidating any
+    /// caches that depend on the manifest. Used by `reload_agent_from_disk`.
+    pub fn replace_manifest(
+        &self,
+        id: AgentId,
+        manifest: librefang_types::agent::AgentManifest,
+    ) -> LibreFangResult<()> {
+        let mut entry = self
+            .agents
+            .get_mut(&id)
+            .ok_or_else(|| LibreFangError::AgentNotFound(id.to_string()))?;
+        entry.manifest = manifest;
+        entry.last_active = chrono::Utc::now();
+        Ok(())
+    }
+
     /// Update an agent's visual identity (emoji, avatar, color).
     pub fn update_identity(
         &self,
