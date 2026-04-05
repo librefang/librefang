@@ -9,7 +9,7 @@ import { buildAuthenticatedWebSocketUrl, listAgents, sendAgentMessage, loadAgent
 import type { ApprovalItem, SessionListItem, ModelItem, AgentTool } from "../api";
 import { normalizeToolOutput } from "../lib/chat";
 import { useTtsManager } from "../lib/tts";
-import { MessageCircle, Send, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, Zap, ShieldAlert, CheckCircle, XCircle, Clock, Plus, Trash2, ChevronDown, Loader2, Copy, Volume2, Pause } from "lucide-react";
+import { MessageCircle, Send, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, Zap, ShieldAlert, CheckCircle, XCircle, Clock, Plus, Trash2, ChevronDown, Loader2, Copy, Volume2, Pause, Download } from "lucide-react";
 import { Badge } from "../components/ui/Badge";
 import { MarkdownContent } from "../components/ui/MarkdownContent";
 import { useUIStore } from "../lib/store";
@@ -737,8 +737,8 @@ function ChatInput({ onSend, disabled, placeholder, authMissing, providerName }:
 }
 
 // Connection status bar with session dropdown
-function ConnectionBar({ agentName, isLoading, messageCount, onClear, wsConnected, modelName, sessions, activeSessionId, onSwitchSession, onNewSession, onDeleteSession, agentId, onModelChange }: {
-  agentName: string; isLoading: boolean; messageCount: number; onClear: () => void; wsConnected?: boolean; modelName?: string;
+function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, wsConnected, modelName, sessions, activeSessionId, onSwitchSession, onNewSession, onDeleteSession, agentId, onModelChange }: {
+  agentName: string; isLoading: boolean; messageCount: number; onClear: () => void; onExport: () => void; wsConnected?: boolean; modelName?: string;
   sessions?: SessionListItem[]; activeSessionId?: string;
   onSwitchSession?: (sessionId: string) => void; onNewSession?: () => void; onDeleteSession?: (sessionId: string) => void;
   agentId: string; onModelChange: () => void;
@@ -1010,10 +1010,20 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, wsConnecte
           </div>
         )}
         {messageCount > 0 && (
-          <button onClick={onClear} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-text-dim/60 hover:text-error hover:bg-error/5 transition-colors">
-            <X className="h-3 w-3" />
-            {t("chat.clear_chat")}
-          </button>
+          <>
+            <button
+              onClick={onExport}
+              title={t("chat.export_markdown", { defaultValue: "Export as Markdown" })}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-text-dim/60 hover:text-brand hover:bg-brand/5 transition-colors"
+            >
+              <Download className="h-3 w-3" />
+              <span className="hidden sm:inline">{t("chat.export", { defaultValue: "Export" })}</span>
+            </button>
+            <button onClick={onClear} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-text-dim/60 hover:text-error hover:bg-error/5 transition-colors">
+              <X className="h-3 w-3" />
+              {t("chat.clear_chat")}
+            </button>
+          </>
         )}
       </div>
     </div>
@@ -1227,6 +1237,47 @@ export function ChatPage() {
   // Session state — bump version to force message reload after switch
   const [sessionVersion, setSessionVersion] = useState(0);
   const { messages, isLoading, sendMessage, clearHistory, wsConnected } = useChatMessages(selectedAgentId || null, agents, sessionVersion);
+
+  // Export current conversation as a markdown file. Keeps the local
+  // timestamp, role, content, and (when present) tool call summaries
+  // so operators can archive or share transcripts.
+  const handleExport = useCallback(() => {
+    if (messages.length === 0) return;
+    const agentName = agents.find(a => a.id === selectedAgentId)?.name ?? selectedAgentId;
+    const lines: string[] = [
+      `# Conversation with ${agentName}`,
+      "",
+      `_Exported: ${new Date().toISOString()}_`,
+      `_${messages.length} messages_`,
+      "",
+      "---",
+      "",
+    ];
+    for (const m of messages) {
+      const ts = m.timestamp instanceof Date ? m.timestamp.toISOString() : new Date(m.timestamp as any).toISOString();
+      const role = m.role === "assistant" ? agentName : m.role;
+      lines.push(`### ${role} · ${ts}`);
+      lines.push("");
+      if (m.content) {
+        lines.push(m.content);
+        lines.push("");
+      }
+      if (m.tools && m.tools.length > 0) {
+        lines.push(`_Tools: ${m.tools.map(t => t.name).join(", ")}_`);
+        lines.push("");
+      }
+    }
+    const blob = new Blob([lines.join("\n")], { type: "text/markdown;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    const date = new Date().toISOString().slice(0, 10);
+    a.download = `chat-${agentName.replace(/[^a-zA-Z0-9-_]/g, "_")}-${date}.md`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }, [messages, agents, selectedAgentId]);
   const { pendingApprovals, removeApproval } = useApprovalPoller(selectedAgentId || null);
   const selectedAgent = agents.find(a => a.id === selectedAgentId);
 
@@ -1387,6 +1438,7 @@ export function ChatPage() {
               isLoading={isLoading}
               messageCount={messages.length}
               onClear={clearHistory}
+              onExport={handleExport}
               wsConnected={wsConnected}
               modelName={selectedAgent?.model_name}
               sessions={sessionsQuery.data}

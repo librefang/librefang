@@ -12,6 +12,8 @@ import {
 } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
 import { ListSkeleton } from "../components/ui/Skeleton";
+import { EmptyState } from "../components/ui/EmptyState";
+import { ErrorState } from "../components/ui/ErrorState";
 import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
@@ -159,12 +161,10 @@ function AuditLogTab() {
 
   if (entries.length === 0) {
     return (
-      <div className="flex flex-col items-center py-20">
-        <div className="w-20 h-20 rounded-3xl bg-surface-hover flex items-center justify-center mb-6">
-          <Clock className="h-10 w-10 text-text-dim" />
-        </div>
-        <h3 className="text-xl font-black tracking-tight">{t("approvals.auditLog.noEntries")}</h3>
-      </div>
+      <EmptyState
+        icon={<Clock className="w-7 h-7" />}
+        title={t("approvals.auditLog.noEntries")}
+      />
     );
   }
 
@@ -408,27 +408,16 @@ export function ApprovalsPage() {
           {approvalsQuery.isLoading ? (
             <ListSkeleton rows={3} />
           ) : approvalsQuery.isError ? (
-            <div className="flex flex-col items-center py-20">
-              <div className="w-20 h-20 rounded-3xl bg-error/10 flex items-center justify-center mb-6">
-                <XCircle className="h-10 w-10 text-error" />
-              </div>
-              <h3 className="text-xl font-black tracking-tight">{t("common.error", "Error")}</h3>
-              <p className="text-sm text-text-dim mt-2 max-w-xs text-center">{t("approvals.loadError", "Failed to load approvals. Check your connection.")}</p>
-              <Button variant="secondary" size="sm" className="mt-4" onClick={() => approvalsQuery.refetch()}>
-                {t("common.retry", "Retry")}
-              </Button>
-            </div>
+            <ErrorState
+              message={t("approvals.loadError", "Failed to load approvals. Check your connection.")}
+              onRetry={() => approvalsQuery.refetch()}
+            />
           ) : approvals.length === 0 ? (
-            <div className="flex flex-col items-center py-20">
-              <div className="relative mb-6">
-                <div className="w-20 h-20 rounded-3xl bg-success/10 flex items-center justify-center">
-                  <CheckCircle className="h-10 w-10 text-success" />
-                </div>
-                <span className="absolute inset-0 rounded-3xl bg-success/5 animate-pulse" style={{ animationDuration: "3s" }} />
-              </div>
-              <h3 className="text-xl font-black tracking-tight">{t("approvals.queue_clear")}</h3>
-              <p className="text-sm text-text-dim mt-2 max-w-xs text-center">{t("approvals.queue_clear_desc")}</p>
-            </div>
+            <EmptyState
+              icon={<CheckCircle className="w-7 h-7" />}
+              title={t("approvals.queue_clear")}
+              description={t("approvals.queue_clear_desc")}
+            />
           ) : (
             <div className="grid gap-4">
               {approvals.map((a) => {
