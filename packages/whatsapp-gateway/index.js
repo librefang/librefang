@@ -1896,6 +1896,57 @@ async function sendImage(to, imageUrl, caption) {
   });
 }
 
+async function sendAudio(to, audioUrl, ptt = true) {
+  if (!sock || connStatus !== 'connected') {
+    throw new Error('WhatsApp not connected');
+  }
+
+  // Preserve group JIDs (@g.us) as-is; normalize phone → JID for individuals
+  const jid = to.includes('@g.us') ? to
+    : to.replace(/^\+/, '').replace(/@.*$/, '') + '@s.whatsapp.net';
+
+  // Fetch audio into buffer (Baileys needs buffer or local file)
+  const buffer = await new Promise((resolve, reject) => {
+    const MAX_REDIRECTS = 5;
+    const request = (url, redirectCount = 0) => {
+      if (redirectCount > MAX_REDIRECTS) {
+        return reject(new Error(`Too many redirects (max ${MAX_REDIRECTS})`));
+      }
+      const mod = url.startsWith('https') ? require('node:https') : require('node:http');
+      mod.get(url, (resp) => {
+        if (resp.statusCode >= 300 && resp.statusCode < 400 && resp.headers.location) {
+          return request(resp.headers.location, redirectCount + 1);
+        }
+        if (resp.statusCode !== 200) {
+          return reject(new Error(`Failed to fetch audio: HTTP ${resp.statusCode}`));
+        }
+        const chunks = [];
+        resp.on('data', (c) => chunks.push(c));
+        resp.on('end', () => resolve(Buffer.concat(chunks)));
+        resp.on('error', reject);
+      }).on('error', reject);
+    };
+    request(audioUrl);
+  });
+
+  // ptt: true sends as a voice note (push-to-talk bubble); false sends as audio file
+  const audioMsg = { audio: buffer, mimetype: 'audio/ogg; codecs=opus', ptt };
+
+  const sent = await sock.sendMessage(jid, audioMsg);
+  dbSaveMessage({
+    id: sent?.key?.id || randomUUID(),
+    jid,
+    senderJid: ownJid || null,
+    pushName: null,
+    phone: to,
+    text: ptt ? '[Voice message]' : '[Audio]',
+    direction: 'outbound',
+    timestamp: Date.now(),
+    processed: 1,
+    rawType: 'audio',
+  });
+}
+
 // ---------------------------------------------------------------------------
 // HTTP server
 // ---------------------------------------------------------------------------
@@ -2024,6 +2075,20 @@ const server = http.createServer(async (req, res) => {
 
       await sendImage(to, image_url, caption || '');
       return jsonResponse(req, res, 200, { success: true, message: 'Image sent' });
+    }
+
+    // POST /message/send-audio — send audio file or voice note via URL
+    if (req.method === 'POST' && path === '/message/send-audio') {
+      const body = await parseBody(req);
+      const { to, audio_url, ptt } = body;
+
+      if (!to || !audio_url) {
+        return jsonResponse(req, res, 400, { error: 'Missing "to" or "audio_url" field' });
+      }
+
+      // ptt (push-to-talk) defaults to true — sends as voice note bubble
+      await sendAudio(to, audio_url, ptt !== false);
+      return jsonResponse(req, res, 200, { success: true, message: 'Audio sent' });
     }
 
     // GET /conversations — list active stranger conversations (Step B)
