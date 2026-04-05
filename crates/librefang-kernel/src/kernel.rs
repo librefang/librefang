@@ -5603,17 +5603,22 @@ system_prompt = "You are a helpful assistant."
                 )))
             })?;
 
-        // Preserve runtime-only fields that don't live in the TOML file.
+        // Preserve workspace if TOML leaves it unset — workspace is
+        // populated at spawn time with the real directory path.
         if disk_manifest.workspace.is_none() {
             disk_manifest.workspace = entry.manifest.workspace.clone();
         }
-        if disk_manifest.tags.is_empty() {
-            disk_manifest.tags = entry.manifest.tags.clone();
-        }
-        // Never rename via reload — renaming needs to also update
-        // `entry.name` and the registry's name_index, which reload does
-        // not touch. Users who want to rename should use the rename API.
+        // Always preserve the name. Renaming would also need to update
+        // `entry.name` and the registry's `name_index`, which reload does
+        // not touch — a renamed manifest without those updates would
+        // silently break `find_by_name` lookups. Use the rename API.
         disk_manifest.name = entry.manifest.name.clone();
+        // Always preserve tags for the same reason: there is no runtime
+        // API to update `entry.tags` or the registry's `tag_index`, both
+        // of which are a snapshot taken at spawn time. Letting reload
+        // change `manifest.tags` would desync manifest tags from the
+        // tag index used by `find_by_tag()`.
+        disk_manifest.tags = entry.manifest.tags.clone();
 
         self.registry
             .replace_manifest(agent_id, disk_manifest)
