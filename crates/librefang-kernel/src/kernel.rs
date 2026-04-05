@@ -6427,11 +6427,18 @@ system_prompt = "You are a helpful assistant."
 
         // Read and parse config file (using load_config to process $include directives)
         let config_path = self.home_dir_boot.join("config.toml");
-        let new_config = if config_path.exists() {
+        let mut new_config = if config_path.exists() {
             crate::config::load_config(Some(&config_path))
         } else {
             return Err("Config file not found".to_string());
         };
+
+        // Clamp bounds on the new config before validating or applying.
+        // Initial boot calls clamp_bounds() at kernel construction time,
+        // so without this call the reload path would apply out-of-range
+        // values (e.g. max_cron_jobs=0, timeouts=0) that the initial
+        // startup path normally corrects.
+        new_config.clamp_bounds();
 
         // Validate new config
         if let Err(errors) = validate_config_for_reload(&new_config) {

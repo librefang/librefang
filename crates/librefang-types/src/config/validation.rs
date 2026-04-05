@@ -725,5 +725,15 @@ impl KernelConfig {
         } else if self.triggers.max_workflow_secs > 86400 {
             self.triggers.max_workflow_secs = 86400;
         }
+
+        // max_cron_jobs: min 1 (0 silently disables all cron job creation —
+        // CronScheduler's limit check is `len >= max`, so 0 rejects every
+        // create). Max 10_000 matches the validation warning threshold.
+        // Clamp upward to the same default used by serde (500).
+        if self.max_cron_jobs == 0 {
+            self.max_cron_jobs = 500;
+        } else if self.max_cron_jobs > 10_000 {
+            self.max_cron_jobs = 10_000;
+        }
     }
 }
