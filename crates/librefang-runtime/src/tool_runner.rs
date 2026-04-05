@@ -398,7 +398,7 @@ pub async fn execute_tool(
         // Cron scheduling tools
         "cron_create" => tool_cron_create(input, kernel, caller_agent_id).await,
         "cron_list" => tool_cron_list(kernel, caller_agent_id).await,
-        "cron_cancel" => tool_cron_cancel(input, kernel).await,
+        "cron_cancel" => tool_cron_cancel(input, kernel, caller_agent_id).await,
 
         // Channel send tool (proactive outbound messaging)
         "channel_send" => tool_channel_send(input, kernel, workspace_root).await,
@@ -2270,7 +2270,14 @@ async fn tool_knowledge_query(
     let source = input["source"].as_str().map(|s| s.to_string());
     let target = input["target"].as_str().map(|s| s.to_string());
     let relation = input["relation"].as_str().map(parse_relation_type);
-    let max_depth = input["max_depth"].as_u64().unwrap_or(1) as u32;
+    // Cap depth to prevent LLM-triggered DoS via exponential graph
+    // traversal. Knowledge graphs rarely benefit from depth > 5 and
+    // the backend traversal is O(branching_factor^depth).
+    const MAX_KNOWLEDGE_DEPTH: u64 = 10;
+    let max_depth = input["max_depth"]
+        .as_u64()
+        .unwrap_or(1)
+        .min(MAX_KNOWLEDGE_DEPTH) as u32;
 
     let pattern = librefang_types::memory::GraphPattern {
         source,
@@ -2545,11 +2552,28 @@ async fn tool_cron_list(
 async fn tool_cron_cancel(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
     let job_id = input["job_id"]
         .as_str()
         .ok_or("Missing 'job_id' parameter")?;
+    let agent_id = caller_agent_id.ok_or("Agent ID required for cron_cancel")?;
+    // Authorize: the caller may only cancel jobs that belong to them.
+    // Otherwise an agent with the cron_cancel tool could delete any other
+    // agent's jobs as long as it learns their UUID (via side-channel or
+    // social engineering).
+    let owned = kh.cron_list(agent_id).await?;
+    let owns_job = owned.iter().any(|job| {
+        job.get("id")
+            .and_then(|v| v.as_str())
+            .is_some_and(|id| id == job_id)
+    });
+    if !owns_job {
+        return Err(format!(
+            "Cron job '{job_id}' not found or not owned by this agent"
+        ));
+    }
     kh.cron_cancel(job_id).await?;
     Ok(format!("Cron job '{job_id}' cancelled."))
 }
