@@ -3289,12 +3289,29 @@ system_prompt = "You are a helpful assistant."
                     .get(agent_id)
                     .map(|a| a.name.clone())
                     .unwrap_or_else(|| agent_id.to_string());
-                let fail_msg = format!(
-                    "Agent \"{}\" loop failed: {}",
-                    agent_name,
-                    e.to_string().chars().take(200).collect::<String>()
-                );
-                self.push_notification(&agent_id.to_string(), "task_failed", &fail_msg)
+                // Push notification — use "tool_failure" for the repeated-tool-failure
+                // exit path so operators with tool_failure agent_rules get alerted.
+                let (event_type, fail_msg) = match &e {
+                    KernelError::LibreFang(LibreFangError::RepeatedToolFailures {
+                        iterations,
+                        error_count,
+                    }) => (
+                        "tool_failure",
+                        format!(
+                            "Agent \"{}\" exited after {} consecutive tool failures ({} errors in final iteration)",
+                            agent_name, iterations, error_count
+                        ),
+                    ),
+                    other => (
+                        "task_failed",
+                        format!(
+                            "Agent \"{}\" loop failed: {}",
+                            agent_name,
+                            other.to_string().chars().take(200).collect::<String>()
+                        ),
+                    ),
+                };
+                self.push_notification(&agent_id.to_string(), event_type, &fail_msg)
                     .await;
 
                 Err(e)
@@ -3692,7 +3709,6 @@ system_prompt = "You are a helpful assistant."
                 }
             }
 
-            let messages_before = session.messages.len();
             let mut skill_snapshot = kernel_clone
                 .skill_registry
                 .read()
@@ -3782,9 +3798,13 @@ system_prompt = "You are a helpful assistant."
 
             match result {
                 Ok(result) => {
-                    // Append new messages to canonical session for cross-channel memory
-                    if session.messages.len() > messages_before {
-                        let new_messages = session.messages[messages_before..].to_vec();
+                    // Append new messages to canonical session for cross-channel memory.
+                    // Use run_agent_loop_streaming's own start index (post-trim) instead
+                    // of one captured here — the loop may trim session history and make
+                    // a locally-captured index stale (see #2067). Clamp defensively.
+                    let start = result.new_messages_start.min(session.messages.len());
+                    if start < session.messages.len() {
+                        let new_messages = session.messages[start..].to_vec();
                         if let Err(e) = memory.append_canonical(agent_id, &new_messages, None) {
                             warn!(agent_id = %agent_id, "Failed to update canonical session (streaming): {e}");
                         }
@@ -3991,6 +4011,8 @@ system_prompt = "You are a helpful assistant."
             provider_not_configured: false,
             experiment_context: None,
             latency_ms: 0,
+            // WASM agents don't mutate the session; N/A.
+            new_messages_start: 0,
         })
     }
 
@@ -4059,6 +4081,8 @@ system_prompt = "You are a helpful assistant."
             provider_not_configured: false,
             experiment_context: None,
             latency_ms: 0,
+            // Python agents don't mutate the session; N/A.
+            new_messages_start: 0,
         })
     }
 
@@ -4436,8 +4460,6 @@ system_prompt = "You are a helpful assistant."
                 label: None,
             });
 
-        let messages_before = session.messages.len();
-
         let tools = self.available_tools(agent_id);
         let tools = entry.mode.filter_tools((*tools).clone());
 
@@ -4805,9 +4827,13 @@ system_prompt = "You are a helpful assistant."
 
         let latency_ms = start_time.elapsed().as_millis() as u64;
 
-        // Append new messages to canonical session for cross-channel memory
-        if session.messages.len() > messages_before {
-            let new_messages = session.messages[messages_before..].to_vec();
+        // Append new messages to canonical session for cross-channel memory.
+        // Use run_agent_loop's own start index (post-trim) instead of one
+        // captured here — the loop may trim session history and make a
+        // locally-captured index stale (see #2067). Clamp defensively.
+        let start = result.new_messages_start.min(session.messages.len());
+        if start < session.messages.len() {
+            let new_messages = session.messages[start..].to_vec();
             if let Err(e) = self.memory.append_canonical(agent_id, &new_messages, None) {
                 warn!("Failed to update canonical session: {e}");
             }
