@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { useTranslation } from "react-i18next";
 import { Keyboard, X } from "lucide-react";
 import { G_NAV_SHORTCUTS } from "../../lib/useKeyboardShortcuts";
 import { useFocusTrap } from "../../lib/useFocusTrap";
@@ -17,6 +18,7 @@ const GENERAL_SHORTCUTS: Array<{ keys: string[]; label: string }> = [
 ];
 
 export function ShortcutsHelp({ isOpen, onClose }: ShortcutsHelpProps) {
+  const { t } = useTranslation();
   const dialogRef = useRef<HTMLDivElement>(null);
   useFocusTrap(isOpen, dialogRef);
 
@@ -53,6 +55,7 @@ export function ShortcutsHelp({ isOpen, onClose }: ShortcutsHelpProps) {
           <button
             onClick={onClose}
             className="h-7 w-7 flex items-center justify-center rounded-lg text-text-dim hover:text-brand hover:bg-surface-hover transition-colors"
+            aria-label={t("common.close")}
           >
             <X className="h-3.5 w-3.5" />
           </button>
