@@ -55,7 +55,9 @@ export function NotificationCenter() {
       <button
         onClick={() => setOpen(!open)}
         className="relative flex h-9 w-9 items-center justify-center rounded-xl text-text-dim hover:text-brand hover:bg-surface-hover transition-colors duration-200"
-        aria-label={t("approvals.pending_review", "Notifications")}
+        aria-label={pendingCount > 0 ? `${t("approvals.pending_review", "Notifications")} (${pendingCount})` : t("approvals.pending_review", "Notifications")}
+        aria-expanded={open}
+        aria-haspopup="menu"
       >
         <Bell className="h-4 w-4" />
         {countQuery.isError ? (
@@ -138,6 +140,7 @@ export function NotificationCenter() {
                           onClick={() => handleAction(item.id, "approve")}
                           className="p-1 rounded hover:bg-success/10 text-success transition-colors"
                           title={t("approvals.approve")}
+                          aria-label={t("approvals.approve")}
                         >
                           <Check className="w-4 h-4" />
                         </button>
@@ -145,6 +148,7 @@ export function NotificationCenter() {
                           onClick={() => handleAction(item.id, "reject")}
                           className="p-1 rounded hover:bg-error/10 text-error transition-colors"
                           title={t("approvals.reject")}
+                          aria-label={t("approvals.reject")}
                         >
                           <X className="w-4 h-4" />
                         </button>

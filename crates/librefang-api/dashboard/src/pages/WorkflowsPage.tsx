@@ -341,7 +341,8 @@ export function WorkflowsPage() {
                     </div>
                   ) : (
                     <button onClick={() => handleDelete(wf.id)}
-                      className="p-2 rounded-lg text-text-dim/30 hover:text-error hover:bg-error/10 transition-colors">
+                      className="p-2 rounded-lg text-text-dim/30 hover:text-error hover:bg-error/10 transition-colors"
+                      aria-label={t("common.delete")}>
                       <Trash2 className="w-3.5 h-3.5" />
                     </button>
                   )}
