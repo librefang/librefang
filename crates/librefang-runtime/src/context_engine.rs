@@ -385,18 +385,20 @@ impl ContextEngine for DefaultContextEngine {
 // ---------------------------------------------------------------------------
 
 /// Context engine that delegates to a [`DefaultContextEngine`] for heavy
-/// operations (assemble, compact) and optionally invokes Python scripts
-/// for light lifecycle hooks (ingest, after_turn).
+/// operations (assemble, compact) and optionally invokes scripts for
+/// light lifecycle hooks (ingest, after_turn).
 ///
-/// This allows users to customize context management without recompiling:
+/// Hook scripts are language-agnostic — they speak JSON over stdin/stdout.
+/// The `runtime` field on the hooks config picks the launcher (`python`
+/// stays the default; `native`, `v`, `node`, `deno`, `go` are also
+/// supported). See [`crate::plugin_runtime`] for the full protocol.
 ///
 /// ```toml
 /// [context_engine.hooks]
 /// ingest = "~/.librefang/plugins/my_recall.py"
 /// after_turn = "~/.librefang/plugins/my_indexer.py"
+/// runtime = "python"  # or "v", "node", "go", "native", ...
 /// ```
-///
-/// Scripts use the same JSON stdin/stdout protocol as Python agents:
 ///
 /// **ingest hook** receives:
 /// ```json
@@ -419,6 +421,7 @@ pub struct ScriptableContextEngine {
     inner: DefaultContextEngine,
     ingest_script: Option<String>,
     after_turn_script: Option<String>,
+    runtime: crate::plugin_runtime::PluginRuntime,
 }
 
 impl ScriptableContextEngine {
@@ -431,6 +434,7 @@ impl ScriptableContextEngine {
             inner,
             ingest_script: hooks.ingest.clone(),
             after_turn_script: hooks.after_turn.clone(),
+            runtime: crate::plugin_runtime::PluginRuntime::from_tag(hooks.runtime.as_deref()),
         }
     }
 
@@ -444,33 +448,28 @@ impl ScriptableContextEngine {
         path.to_string()
     }
 
-    /// Run a Python hook script with JSON input, return parsed JSON output.
+    /// Run a hook script with JSON input, return parsed JSON output.
+    ///
+    /// Dispatches to the runtime picked in config (Python by default).
     async fn run_hook(
         script_path: &str,
+        runtime: crate::plugin_runtime::PluginRuntime,
         input: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
         let resolved = Self::resolve_script_path(script_path);
-
-        // Validate path safety
-        crate::python_runtime::validate_script_path(&resolved)
-            .map_err(|e| format!("Hook script validation failed: {e}"))?;
 
         if !std::path::Path::new(&resolved).exists() {
             return Err(format!("Hook script not found: {resolved}"));
         }
 
-        let config = crate::python_runtime::PythonConfig {
+        let config = crate::plugin_runtime::HookConfig {
             timeout_secs: 30, // hooks should be fast
             ..Default::default()
         };
 
-        let result = crate::python_runtime::run_python_json(&resolved, &input, &config)
+        crate::plugin_runtime::run_hook_json(&resolved, runtime, &input, &config)
             .await
-            .map_err(|e| format!("Hook script failed: {e}"))?;
-
-        // Parse response as JSON; wrap plain-text output gracefully
-        Ok(serde_json::from_str(&result.response)
-            .unwrap_or_else(|_| serde_json::json!({"text": result.response})))
+            .map_err(|e| format!("Hook script failed: {e}"))
     }
 }
 
@@ -526,7 +525,7 @@ impl ContextEngine for ScriptableContextEngine {
             "peer_id": peer_id,
         });
 
-        match Self::run_hook(script, input).await {
+        match Self::run_hook(script, self.runtime, input).await {
             Ok(output) => {
                 // Merge hook memories with default memories
                 let mut memories = default_result.recalled_memories;
@@ -619,8 +618,9 @@ impl ContextEngine for ScriptableContextEngine {
         // Spawn as fire-and-forget — after_turn is best-effort, don't block the agent.
         // Log if the task panics so failures aren't silently swallowed.
         let script = script.clone();
+        let runtime = self.runtime;
         let handle = tokio::spawn(async move {
-            match Self::run_hook(&script, input).await {
+            match Self::run_hook(&script, runtime, input).await {
                 Ok(_) => debug!("After-turn hook completed"),
                 Err(e) => warn!("After-turn hook failed: {e}"),
             }
@@ -735,6 +735,9 @@ pub fn load_plugin(
             .as_ref()
             .map(|p| resolve_and_sandbox(p))
             .transpose()?,
+        // Propagate the runtime tag from the plugin manifest. `None` means
+        // "use the default" which resolves to Python in PluginRuntime::from_tag.
+        runtime: manifest.hooks.runtime.clone(),
     };
 
     debug!(
@@ -981,6 +984,7 @@ print(json.dumps({"type": payload.get("type"), "message": payload.get("message")
 
         let output = ScriptableContextEngine::run_hook(
             script_path.to_str().unwrap(),
+            crate::plugin_runtime::PluginRuntime::Python,
             serde_json::json!({
                 "type": "ingest",
                 "agent_id": "agent-123",

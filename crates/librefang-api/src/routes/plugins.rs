@@ -224,7 +224,14 @@ pub async fn uninstall_plugin(Json(body): Json<serde_json::Value>) -> impl IntoR
 
 /// POST /api/plugins/scaffold — Create a new plugin from template.
 ///
-/// Request body: `{"name": "my-plugin", "description": "My custom plugin"}`
+/// Request body:
+/// ```json
+/// {
+///   "name": "my-plugin",
+///   "description": "My custom plugin",
+///   "runtime": "python"  // optional: python (default) | v | node | deno | go | native
+/// }
+/// ```
 #[utoipa::path(
     post,
     path = "/api/plugins/scaffold",
@@ -244,8 +251,10 @@ pub async fn scaffold_plugin(Json(body): Json<serde_json::Value>) -> impl IntoRe
         .get("description")
         .and_then(|d| d.as_str())
         .unwrap_or("");
+    // Optional runtime tag — defaults to "python" when omitted for BC.
+    let runtime = body.get("runtime").and_then(|r| r.as_str());
 
-    match librefang_runtime::plugin_manager::scaffold_plugin(name, description) {
+    match librefang_runtime::plugin_manager::scaffold_plugin(name, description, runtime) {
         Ok(path) => (
             StatusCode::CREATED,
             Json(serde_json::json!({

@@ -2199,18 +2199,30 @@ fn default_plugin_registries() -> Vec<PluginRegistrySource> {
     }]
 }
 
-/// Python script overrides for individual context engine lifecycle hooks.
+/// Script overrides for individual context engine lifecycle hooks.
+///
+/// Hook scripts speak a language-agnostic JSON-over-stdin/stdout protocol —
+/// they read one JSON object from stdin and emit one JSON line on stdout.
+/// The `runtime` field picks which interpreter / launcher to use; it defaults
+/// to `"python"` so existing Python plugins keep working without edits.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ContextEngineHooks {
-    /// Python script for the `ingest` hook (called on new user message).
+    /// Script for the `ingest` hook (called on new user message).
     /// Receives: `{"type": "ingest", "agent_id": "...", "message": "..."}`
     /// Returns: `{"type": "ingest_result", "memories": [{"content": "..."}]}`
     pub ingest: Option<String>,
-    /// Python script for the `after_turn` hook (called after each turn).
+    /// Script for the `after_turn` hook (called after each turn).
     /// Receives: `{"type": "after_turn", "agent_id": "...", "messages": [...]}`
     /// Returns: `{"type": "ok"}` (acknowledgement)
     pub after_turn: Option<String>,
+    /// Which runtime launches the hook scripts.
+    ///
+    /// Supported: `"python"` (default, runs `.py` via `python3`), `"native"`
+    /// (exec a pre-compiled binary directly), `"v"` (`v run *.v`), `"node"`,
+    /// `"deno"`, `"go"` (`go run *.go`). Unknown values fall back to
+    /// `"python"` with a warning.
+    pub runtime: Option<String>,
 }
 
 /// Plugin manifest — parsed from `~/.librefang/plugins/<name>/plugin.toml`.
@@ -2242,7 +2254,8 @@ pub struct PluginManifest {
     /// Hook script paths, relative to the plugin directory.
     #[serde(default)]
     pub hooks: ContextEngineHooks,
-    /// Python dependencies file (relative to plugin dir, default: `requirements.txt`).
+    /// Dependencies file (relative to plugin dir). For Python: `requirements.txt`.
+    /// Other runtimes ignore this field (use `go.mod`, `package.json`, etc. directly).
     #[serde(default)]
     pub requirements: Option<String>,
 }
