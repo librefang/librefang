@@ -188,9 +188,11 @@ impl std::str::FromStr for AgentId {
 pub struct SessionId(pub Uuid);
 
 /// Fixed UUID v5 namespace for deriving per-channel session IDs.
-/// Generated once, never changes — ensures deterministic session keys across restarts.
+/// Generated once via `uuidgen`, never changes — ensures deterministic session
+/// keys across restarts. Intentionally NOT an RFC 4122 well-known namespace
+/// (DNS/URL/OID/X500) to avoid collisions with other UUID v5 consumers.
 const CHANNEL_SESSION_NAMESPACE: uuid::Uuid = uuid::Uuid::from_bytes([
-    0x6b, 0xa7, 0xb8, 0x10, 0x9d, 0xad, 0x11, 0xd1, 0x80, 0xb4, 0x00, 0xc0, 0x4f, 0xd4, 0x30, 0xc8,
+    0xa3, 0x4e, 0x7c, 0x01, 0x8f, 0x2b, 0x4d, 0x6a, 0x91, 0x5c, 0xd7, 0x3e, 0xf4, 0x0a, 0xb8, 0x52,
 ]);
 
 impl SessionId {

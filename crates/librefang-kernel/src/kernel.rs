@@ -5098,10 +5098,15 @@ system_prompt = "You are a helpful assistant."
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
         })?;
 
-        // Auto-save session context to workspace memory before clearing
-        if let Ok(Some(old_session)) = self.memory.get_session(entry.session_id) {
-            if old_session.messages.len() >= 2 {
-                self.save_session_summary(agent_id, &entry, &old_session);
+        // Auto-save session summaries for ALL sessions (default + per-channel)
+        // before clearing, so no channel's conversation history is silently lost.
+        if let Ok(session_ids) = self.memory.get_agent_session_ids(agent_id) {
+            for sid in session_ids {
+                if let Ok(Some(old_session)) = self.memory.get_session(sid) {
+                    if old_session.messages.len() >= 2 {
+                        self.save_session_summary(agent_id, &entry, &old_session);
+                    }
+                }
             }
         }
 
@@ -5132,7 +5137,7 @@ system_prompt = "You are a helpful assistant."
     /// More aggressive than `reset_session` (which auto-saves a summary) but less
     /// destructive than `clear_agent_history` (which wipes ALL sessions).
     pub fn reboot_session(&self, agent_id: AgentId) -> KernelResult<()> {
-        let entry = self.registry.get(agent_id).ok_or_else(|| {
+        let _entry = self.registry.get(agent_id).ok_or_else(|| {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
         })?;
 
