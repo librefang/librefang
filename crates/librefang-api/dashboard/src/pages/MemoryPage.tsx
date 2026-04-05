@@ -12,6 +12,7 @@ import { Input } from "../components/ui/Input";
 import { Button } from "../components/ui/Button";
 import { MarkdownContent } from "../components/ui/MarkdownContent";
 import { useUIStore } from "../lib/store";
+import { useCreateShortcut } from "../lib/useCreateShortcut";
 import { Database, Search, Trash2, Plus, X, Sparkles, Zap, Clock, Edit2, Loader2, Settings } from "lucide-react";
 
 const REFRESH_MS = 30000;
@@ -323,6 +324,7 @@ export function MemoryPage() {
   const [levelFilter, setLevelFilter] = useState<string>("all");
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [showConfigDialog, setShowConfigDialog] = useState(false);
+  useCreateShortcut(() => setShowAddDialog(true));
   const [editingMemory, setEditingMemory] = useState<{ id: string; content?: string } | null>(null);
 
 

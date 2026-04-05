@@ -9,6 +9,7 @@ import { Input } from "../components/ui/Input";
 import { PageHeader } from "../components/ui/PageHeader";
 import { ListSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
+import { useCreateShortcut } from "../lib/useCreateShortcut";
 import { useUIStore } from "../lib/store";
 import {
   Cpu, Search, Check, X, Eye, EyeOff, Wrench, Zap, AlertCircle, Lock, Plus, Trash2, Loader2, Sparkles
@@ -26,6 +27,7 @@ export function ModelsPage() {
   const [availableOnly, setAvailableOnly] = useState(false);
   const [showAdd, setShowAdd] = useState(false);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  useCreateShortcut(() => setShowAdd(true));
   const [showHidden, setShowHidden] = useState(false);
   const hiddenModelKeys = useUIStore((s) => s.hiddenModelKeys);
   const hideModelAction = useUIStore((s) => s.hideModel);

@@ -13,6 +13,7 @@ import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { Input } from "../components/ui/Input";
 import { useUIStore } from "../lib/store";
+import { useCreateShortcut } from "../lib/useCreateShortcut";
 import {
   Server, Zap, Clock, Key, Globe, CheckCircle2, XCircle, Loader2, AlertCircle, Search,
   SortAsc, SortDesc, CheckSquare, Square, ChevronRight, X, Grid3X3, List, Filter,
@@ -530,6 +531,7 @@ export function ProvidersPage() {
   const [detailsProvider, setDetailsProvider] = useState<Provider | null>(null);
   const [configProvider, setConfigProvider] = useState<Provider | null>(null);
   const [showCreateForm, setShowCreateForm] = useState(false);
+  useCreateShortcut(() => setShowCreateForm(true));
   const [keyInput, setKeyInput] = useState("");
   const [urlInput, setUrlInput] = useState("");
   const [keySaving, setKeySaving] = useState(false);
