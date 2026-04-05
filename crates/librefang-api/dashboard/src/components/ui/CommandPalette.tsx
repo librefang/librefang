@@ -3,6 +3,7 @@ import { useNavigate } from "@tanstack/react-router";
 import { useTranslation } from "react-i18next";
 import { Search, Home, Layers, MessageCircle, Server, Network, Calendar, Shield, BarChart3, FileText, Settings, Bot, Clock, CheckCircle, Database, Activity, Hand, Puzzle, Cpu, Radio } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
+import { useFocusTrap } from "../../lib/useFocusTrap";
 
 interface CommandItem {
   id: string;
@@ -22,6 +23,8 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
   const navigate = useNavigate();
   const [search, setSearch] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useFocusTrap(isOpen, dialogRef);
 
   const commands = useMemo<CommandItem[]>(() => [
     { id: "overview", labelKey: "nav.overview", categoryKey: "nav.core", icon: Home, action: () => navigate({ to: "/overview" }) },
@@ -100,7 +103,13 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
   return (
     <div className="fixed inset-0 z-100 flex items-start justify-center pt-[15vh]">
       <div className="fixed inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
-      <div className="relative w-full max-w-xl max-w-[90vw] rounded-2xl border border-border-subtle bg-surface shadow-2xl overflow-hidden animate-fade-in-scale">
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label={t("command_palette.search_placeholder")}
+        className="relative w-full max-w-xl max-w-[90vw] rounded-2xl border border-border-subtle bg-surface shadow-2xl overflow-hidden animate-fade-in-scale"
+      >
         <div className="flex items-center gap-3 border-b border-border-subtle px-4 py-4">
           <Search className="h-5 w-5 text-text-dim shrink-0" />
           <input

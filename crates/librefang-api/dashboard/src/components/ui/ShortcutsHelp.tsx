@@ -1,6 +1,7 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { Keyboard, X } from "lucide-react";
 import { G_NAV_SHORTCUTS } from "../../lib/useKeyboardShortcuts";
+import { useFocusTrap } from "../../lib/useFocusTrap";
 
 interface ShortcutsHelpProps {
   isOpen: boolean;
@@ -16,6 +17,9 @@ const GENERAL_SHORTCUTS: Array<{ keys: string[]; label: string }> = [
 ];
 
 export function ShortcutsHelp({ isOpen, onClose }: ShortcutsHelpProps) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useFocusTrap(isOpen, dialogRef);
+
   useEffect(() => {
     if (!isOpen) return;
     const handleKey = (e: KeyboardEvent) => {
@@ -32,13 +36,19 @@ export function ShortcutsHelp({ isOpen, onClose }: ShortcutsHelpProps) {
   return (
     <div className="fixed inset-0 z-100 flex items-end sm:items-start justify-center sm:pt-[10vh] p-0 sm:p-4">
       <div className="fixed inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
-      <div className="relative w-full sm:max-w-2xl rounded-t-2xl sm:rounded-2xl border border-border-subtle bg-surface shadow-2xl overflow-hidden animate-fade-in-scale">
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="shortcuts-help-title"
+        className="relative w-full sm:max-w-2xl rounded-t-2xl sm:rounded-2xl border border-border-subtle bg-surface shadow-2xl overflow-hidden animate-fade-in-scale"
+      >
         <div className="flex items-center justify-between border-b border-border-subtle px-5 py-4">
           <div className="flex items-center gap-2.5">
             <div className="h-8 w-8 rounded-xl bg-brand/10 flex items-center justify-center text-brand">
               <Keyboard className="h-4 w-4" />
             </div>
-            <h2 className="text-sm font-black tracking-tight">Keyboard shortcuts</h2>
+            <h2 id="shortcuts-help-title" className="text-sm font-black tracking-tight">Keyboard shortcuts</h2>
           </div>
           <button
             onClick={onClose}
