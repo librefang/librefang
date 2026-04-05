@@ -138,6 +138,72 @@ pub fn get_plugin_info(plugin_name: &str) -> Result<PluginInfo, String> {
     })
 }
 
+/// Doctor entry for a single installed plugin.
+///
+/// Tells the user whether the plugin is structurally valid (hook scripts
+/// exist) *and* whether the runtime it asks for is usable on this host.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PluginDoctorEntry {
+    pub name: String,
+    /// Canonical runtime tag (`python`, `v`, ...). Falls back to the
+    /// dispatcher's default (`python`) for plugins that don't declare one.
+    pub runtime: String,
+    /// `true` when the declared runtime's launcher resolved on PATH
+    /// (or for `native`, always `true`).
+    pub runtime_available: bool,
+    /// `true` when every hook script declared in `plugin.toml` exists.
+    pub hooks_valid: bool,
+    /// Install hint surfaced when `runtime_available` is `false`.
+    pub install_hint: String,
+}
+
+/// Aggregate doctor report: per-runtime availability + per-plugin readiness.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DoctorReport {
+    /// Availability of every supported runtime, in stable order.
+    pub runtimes: Vec<crate::plugin_runtime::RuntimeStatus>,
+    /// One entry per installed plugin.
+    pub plugins: Vec<PluginDoctorEntry>,
+}
+
+/// Probe the environment and return a diagnostic report.
+///
+/// Spawns one subprocess per runtime (`{launcher} --version`) — caller
+/// should wrap in `tokio::task::spawn_blocking` if used from async.
+pub fn run_doctor() -> DoctorReport {
+    use crate::plugin_runtime::{check_runtime_status, PluginRuntime};
+
+    let runtimes: Vec<_> = PluginRuntime::all()
+        .iter()
+        .map(|r| check_runtime_status(*r))
+        .collect();
+
+    // Index by runtime tag so per-plugin entries can look up availability
+    // without re-probing subprocesses.
+    let availability: std::collections::HashMap<&str, (bool, &str)> = runtimes
+        .iter()
+        .map(|s| (s.runtime.as_str(), (s.available, s.install_hint.as_str())))
+        .collect();
+
+    let plugins = list_plugins()
+        .into_iter()
+        .map(|info| {
+            let runtime_kind = PluginRuntime::from_tag(info.manifest.hooks.runtime.as_deref());
+            let tag = runtime_kind.label();
+            let (available, hint) = availability.get(tag).copied().unwrap_or((false, ""));
+            PluginDoctorEntry {
+                name: info.manifest.name,
+                runtime: tag.to_string(),
+                runtime_available: available,
+                hooks_valid: info.hooks_valid,
+                install_hint: hint.to_string(),
+            }
+        })
+        .collect();
+
+    DoctorReport { runtimes, plugins }
+}
+
 /// List all installed plugins.
 pub fn list_plugins() -> Vec<PluginInfo> {
     let dir = plugins_dir();
@@ -448,8 +514,14 @@ pub fn remove_plugin(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Create a scaffold for a new plugin.
-pub fn scaffold_plugin(name: &str, description: &str) -> Result<PathBuf, String> {
+/// Create a scaffold for a new plugin. `runtime` defaults to `"python"`;
+/// pass `"v"` / `"node"` / `"go"` / `"deno"` / `"native"` to generate a
+/// template for that language instead.
+pub fn scaffold_plugin(
+    name: &str,
+    description: &str,
+    runtime: Option<&str>,
+) -> Result<PathBuf, String> {
     validate_plugin_name(name)?;
     let plugins = ensure_plugins_dir().map_err(|e| format!("Cannot create plugins dir: {e}"))?;
     let plugin_dir = plugins.join(name);
@@ -462,6 +534,15 @@ pub fn scaffold_plugin(name: &str, description: &str) -> Result<PathBuf, String>
     std::fs::create_dir_all(&hooks_dir)
         .map_err(|e| format!("Failed to create plugin directory: {e}"))?;
 
+    // Normalize the runtime tag via PluginRuntime so aliases (py/js/golang/...)
+    // resolve the same way the hook dispatcher will at runtime.
+    let runtime_kind = crate::plugin_runtime::PluginRuntime::from_tag(runtime);
+    let runtime_tag = runtime_kind.label();
+
+    // Each runtime declares its own hook filenames + template body so the
+    // manifest + files stay in sync.
+    let (ingest_file, ingest_body, after_file, after_body) = hook_templates(runtime_kind);
+
     // Write plugin.toml — use toml serialization to avoid injection
     let manifest = PluginManifest {
         name: name.to_string(),
@@ -469,18 +550,105 @@ pub fn scaffold_plugin(name: &str, description: &str) -> Result<PathBuf, String>
         description: Some(description.to_string()),
         author: None,
         hooks: librefang_types::config::ContextEngineHooks {
-            ingest: Some("hooks/ingest.py".to_string()),
-            after_turn: Some("hooks/after_turn.py".to_string()),
+            ingest: Some(format!("hooks/{ingest_file}")),
+            after_turn: Some(format!("hooks/{after_file}")),
+            // Only persist the runtime tag when it's non-default — Python
+            // plugins keep their old one-line `[hooks]` section.
+            runtime: if matches!(runtime_kind, crate::plugin_runtime::PluginRuntime::Python) {
+                None
+            } else {
+                Some(runtime_tag.to_string())
+            },
         },
-        requirements: None,
+        requirements: if matches!(runtime_kind, crate::plugin_runtime::PluginRuntime::Python) {
+            Some("requirements.txt".to_string())
+        } else {
+            None
+        },
     };
     let manifest_toml =
         toml::to_string_pretty(&manifest).map_err(|e| format!("Failed to serialize TOML: {e}"))?;
     std::fs::write(plugin_dir.join("plugin.toml"), manifest_toml)
         .map_err(|e| format!("Failed to write plugin.toml: {e}"))?;
 
-    // Write template ingest hook
-    let ingest_template = r#"#!/usr/bin/env python3
+    let ingest_path = hooks_dir.join(ingest_file);
+    let after_path = hooks_dir.join(after_file);
+    std::fs::write(&ingest_path, ingest_body)
+        .map_err(|e| format!("Failed to write {ingest_file}: {e}"))?;
+    std::fs::write(&after_path, after_body)
+        .map_err(|e| format!("Failed to write {after_file}: {e}"))?;
+
+    // Native plugins exec the file directly, so the scaffolded shell wrapper
+    // needs the executable bit. No-op on Windows (which uses extension-based
+    // execution) and on other runtimes (interpreter handles execution).
+    if runtime_kind.requires_executable_bit() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for path in [&ingest_path, &after_path] {
+                if let Ok(meta) = std::fs::metadata(path) {
+                    let mut perms = meta.permissions();
+                    perms.set_mode(0o755);
+                    let _ = std::fs::set_permissions(path, perms);
+                }
+            }
+        }
+    }
+
+    // Python plugins get requirements.txt; other runtimes manage deps
+    // their own way (go.mod, package.json, v.mod, ...).
+    if matches!(runtime_kind, crate::plugin_runtime::PluginRuntime::Python) {
+        std::fs::write(
+            plugin_dir.join("requirements.txt"),
+            "# Python dependencies\n",
+        )
+        .map_err(|e| format!("Failed to write requirements.txt: {e}"))?;
+    }
+
+    info!(
+        plugin = name,
+        runtime = runtime_tag,
+        "Scaffolded new plugin"
+    );
+    Ok(plugin_dir)
+}
+
+/// Return scaffolded hook filenames + body content for a given runtime.
+///
+/// Returns `(ingest_filename, ingest_body, after_turn_filename, after_turn_body)`.
+/// The scaffolded code is deliberately minimal — it shows the stdin/stdout
+/// protocol, picks "no-op" defaults, and leaves a `TODO` comment.
+fn hook_templates(
+    runtime: crate::plugin_runtime::PluginRuntime,
+) -> (&'static str, &'static str, &'static str, &'static str) {
+    use crate::plugin_runtime::PluginRuntime as R;
+    match runtime {
+        R::Python => ("ingest.py", PY_INGEST, "after_turn.py", PY_AFTER_TURN),
+        R::V => ("ingest.v", V_INGEST, "after_turn.v", V_AFTER_TURN),
+        R::Node => ("ingest.js", NODE_INGEST, "after_turn.js", NODE_AFTER_TURN),
+        R::Deno => ("ingest.ts", DENO_INGEST, "after_turn.ts", DENO_AFTER_TURN),
+        R::Go => ("ingest.go", GO_INGEST, "after_turn.go", GO_AFTER_TURN),
+        R::Ruby => ("ingest.rb", RUBY_INGEST, "after_turn.rb", RUBY_AFTER_TURN),
+        R::Bash => ("ingest.sh", BASH_INGEST, "after_turn.sh", BASH_AFTER_TURN),
+        // Bun uses TypeScript by convention; same format Deno uses.
+        R::Bun => ("ingest.ts", BUN_INGEST, "after_turn.ts", BUN_AFTER_TURN),
+        R::Php => ("ingest.php", PHP_INGEST, "after_turn.php", PHP_AFTER_TURN),
+        R::Lua => ("ingest.lua", LUA_INGEST, "after_turn.lua", LUA_AFTER_TURN),
+        R::Native => (
+            // For native, we scaffold a shell wrapper so the plugin works
+            // out of the box; users replace the script body with a real
+            // pre-compiled binary (or a shebang'd interpreted script).
+            "ingest",
+            NATIVE_INGEST,
+            "after_turn",
+            NATIVE_AFTER_TURN,
+        ),
+    }
+}
+
+// --- Python templates (the original, kept verbatim for backwards compat) ---
+
+const PY_INGEST: &str = r#"#!/usr/bin/env python3
 """Context engine ingest hook.
 
 Receives via stdin:
@@ -507,11 +675,8 @@ def main():
 if __name__ == "__main__":
     main()
 "#;
-    std::fs::write(hooks_dir.join("ingest.py"), ingest_template)
-        .map_err(|e| format!("Failed to write ingest.py: {e}"))?;
 
-    // Write template after_turn hook
-    let after_turn_template = r#"#!/usr/bin/env python3
+const PY_AFTER_TURN: &str = r#"#!/usr/bin/env python3
 """Context engine after_turn hook.
 
 Receives via stdin:
@@ -536,19 +701,421 @@ def main():
 if __name__ == "__main__":
     main()
 "#;
-    std::fs::write(hooks_dir.join("after_turn.py"), after_turn_template)
-        .map_err(|e| format!("Failed to write after_turn.py: {e}"))?;
 
-    // Write empty requirements.txt
-    std::fs::write(
-        plugin_dir.join("requirements.txt"),
-        "# Python dependencies\n",
-    )
-    .map_err(|e| format!("Failed to write requirements.txt: {e}"))?;
+// --- V language templates ---
 
-    info!(plugin = name, "Scaffolded new plugin");
-    Ok(plugin_dir)
+const V_INGEST: &str = r#"// Context engine ingest hook (V).
+//
+// Receives on stdin:
+//   {"type": "ingest", "agent_id": "...", "message": "user message text"}
+// Emits on stdout:
+//   {"type": "ingest_result", "memories": [{"content": "recalled fact"}]}
+//
+// Run with: `v run ingest.v` (or pre-compile: `v ingest.v`)
+module main
+
+import os
+import json
+
+struct IngestRequest {
+	@type     string @[json: 'type']
+	agent_id  string
+	message   string
 }
+
+struct Memory {
+	content string
+}
+
+struct IngestResult {
+	@type    string   @[json: 'type']
+	memories []Memory
+}
+
+fn main() {
+	input := os.get_raw_stdin().bytestr()
+	req := json.decode(IngestRequest, input) or {
+		eprintln('ingest: invalid JSON on stdin: ${err}')
+		exit(1)
+	}
+	_ := req.agent_id
+	_ := req.message
+
+	// TODO: Implement your custom recall logic here.
+	result := IngestResult{
+		@type: 'ingest_result'
+		memories: []
+	}
+	println(json.encode(result))
+}
+"#;
+
+const V_AFTER_TURN: &str = r#"// Context engine after_turn hook (V).
+//
+// Receives on stdin:
+//   {"type": "after_turn", "agent_id": "...", "messages": [...]}
+// Emits on stdout:
+//   {"type": "ok"}
+module main
+
+import os
+import json
+
+struct AfterTurnRequest {
+	@type    string @[json: 'type']
+	agent_id string
+}
+
+struct Ok {
+	@type string @[json: 'type']
+}
+
+fn main() {
+	input := os.get_raw_stdin().bytestr()
+	_ := json.decode(AfterTurnRequest, input) or {
+		eprintln('after_turn: invalid JSON on stdin: ${err}')
+		exit(1)
+	}
+
+	// TODO: persist state, update indexes, log analytics, ...
+
+	println(json.encode(Ok{ @type: 'ok' }))
+}
+"#;
+
+// --- Node templates ---
+
+const NODE_INGEST: &str = r#"#!/usr/bin/env node
+// Context engine ingest hook (Node.js).
+//
+// Receives on stdin:
+//   {"type": "ingest", "agent_id": "...", "message": "user message text"}
+// Emits on stdout:
+//   {"type": "ingest_result", "memories": [{"content": "recalled fact"}]}
+
+"use strict";
+
+let buf = "";
+process.stdin.on("data", (chunk) => { buf += chunk.toString("utf8"); });
+process.stdin.on("end", () => {
+  const req = JSON.parse(buf);
+  const agentId = req.agent_id;
+  const message = req.message;
+
+  // TODO: Implement your custom recall logic here.
+  const memories = [];
+
+  process.stdout.write(JSON.stringify({ type: "ingest_result", memories }) + "\n");
+});
+"#;
+
+const NODE_AFTER_TURN: &str = r#"#!/usr/bin/env node
+// Context engine after_turn hook (Node.js).
+
+"use strict";
+
+let buf = "";
+process.stdin.on("data", (chunk) => { buf += chunk.toString("utf8"); });
+process.stdin.on("end", () => {
+  const req = JSON.parse(buf);
+  const _agentId = req.agent_id;
+  const _messages = req.messages;
+
+  // TODO: persist state, update indexes, log analytics, ...
+
+  process.stdout.write(JSON.stringify({ type: "ok" }) + "\n");
+});
+"#;
+
+// --- Deno / TypeScript templates ---
+
+const DENO_INGEST: &str = r#"// Context engine ingest hook (Deno / TypeScript).
+//
+// Run via `deno run --allow-read ingest.ts`.
+
+interface IngestRequest { type: "ingest"; agent_id: string; message: string; }
+interface Memory { content: string; }
+interface IngestResult { type: "ingest_result"; memories: Memory[]; }
+
+const raw = new TextDecoder().decode(await Deno.readAll(Deno.stdin));
+const req = JSON.parse(raw) as IngestRequest;
+void req.agent_id; void req.message;
+
+// TODO: Implement your custom recall logic here.
+const result: IngestResult = { type: "ingest_result", memories: [] };
+console.log(JSON.stringify(result));
+"#;
+
+const DENO_AFTER_TURN: &str = r#"// Context engine after_turn hook (Deno / TypeScript).
+
+const raw = new TextDecoder().decode(await Deno.readAll(Deno.stdin));
+void JSON.parse(raw);
+
+// TODO: persist state, update indexes, log analytics, ...
+
+console.log(JSON.stringify({ type: "ok" }));
+"#;
+
+// --- Go templates ---
+
+const GO_INGEST: &str = r#"// Context engine ingest hook (Go).
+//
+// Run with: `go run ingest.go`
+package main
+
+import (
+	"encoding/json"
+	"io"
+	"os"
+)
+
+type IngestRequest struct {
+	Type    string `json:"type"`
+	AgentID string `json:"agent_id"`
+	Message string `json:"message"`
+}
+
+type Memory struct {
+	Content string `json:"content"`
+}
+
+type IngestResult struct {
+	Type     string   `json:"type"`
+	Memories []Memory `json:"memories"`
+}
+
+func main() {
+	raw, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		os.Exit(1)
+	}
+	var req IngestRequest
+	if err := json.Unmarshal(raw, &req); err != nil {
+		os.Exit(1)
+	}
+	_ = req.AgentID
+	_ = req.Message
+
+	// TODO: Implement your custom recall logic here.
+	out, _ := json.Marshal(IngestResult{Type: "ingest_result", Memories: []Memory{}})
+	os.Stdout.Write(out)
+	os.Stdout.Write([]byte("\n"))
+}
+"#;
+
+const GO_AFTER_TURN: &str = r#"// Context engine after_turn hook (Go).
+package main
+
+import (
+	"encoding/json"
+	"io"
+	"os"
+)
+
+func main() {
+	raw, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		os.Exit(1)
+	}
+	var req map[string]any
+	_ = json.Unmarshal(raw, &req)
+
+	// TODO: persist state, update indexes, log analytics, ...
+
+	out, _ := json.Marshal(map[string]string{"type": "ok"})
+	os.Stdout.Write(out)
+	os.Stdout.Write([]byte("\n"))
+}
+"#;
+
+// --- Native (bring-your-own-binary) templates ---
+
+const NATIVE_INGEST: &str = r#"#!/bin/sh
+# Native plugin ingest hook.
+#
+# Replace this shell wrapper with your own pre-compiled binary
+# (V / Rust / Go / Zig / C++ — anything that speaks the JSON
+# stdin/stdout protocol).
+#
+# Receives on stdin:
+#   {"type": "ingest", "agent_id": "...", "message": "..."}
+# Emits on stdout:
+#   {"type": "ingest_result", "memories": [...]}
+#
+# chmod +x hooks/ingest to make this executable.
+
+read -r _input
+printf '{"type":"ingest_result","memories":[]}\n'
+"#;
+
+const NATIVE_AFTER_TURN: &str = r#"#!/bin/sh
+# Native plugin after_turn hook — replace with your binary.
+read -r _input
+printf '{"type":"ok"}\n'
+"#;
+
+// --- Ruby templates ---
+
+const RUBY_INGEST: &str = r#"# Context engine ingest hook (Ruby).
+#
+# Receives on stdin:
+#   {"type": "ingest", "agent_id": "...", "message": "..."}
+# Emits on stdout:
+#   {"type": "ingest_result", "memories": [{"content": "..."}]}
+require "json"
+
+req = JSON.parse($stdin.read)
+_agent_id = req["agent_id"]
+_message  = req["message"]
+
+# TODO: Implement your custom recall logic here.
+memories = []
+
+puts JSON.generate({ "type" => "ingest_result", "memories" => memories })
+"#;
+
+const RUBY_AFTER_TURN: &str = r#"# Context engine after_turn hook (Ruby).
+require "json"
+
+req = JSON.parse($stdin.read)
+_agent_id = req["agent_id"]
+_messages = req["messages"]
+
+# TODO: Implement your post-turn logic here.
+
+puts JSON.generate({ "type" => "ok" })
+"#;
+
+// --- Bash templates ---
+
+const BASH_INGEST: &str = r#"#!/usr/bin/env bash
+# Context engine ingest hook (Bash).
+#
+# Receives on stdin:
+#   {"type":"ingest","agent_id":"...","message":"..."}
+# Emits on stdout:
+#   {"type":"ingest_result","memories":[]}
+#
+# For non-trivial logic, pipe stdin through `jq` or call out to a helper binary.
+set -euo pipefail
+
+_input=$(cat)
+# TODO: parse "$_input" and build your recall result.
+printf '{"type":"ingest_result","memories":[]}\n'
+"#;
+
+const BASH_AFTER_TURN: &str = r#"#!/usr/bin/env bash
+# Context engine after_turn hook (Bash).
+set -euo pipefail
+
+_input=$(cat)
+# TODO: persist state, update indexes, etc.
+printf '{"type":"ok"}\n'
+"#;
+
+// --- Bun templates (TypeScript via Bun) ---
+
+const BUN_INGEST: &str = r#"// Context engine ingest hook (Bun / TypeScript).
+//
+// Receives on stdin:
+//   {"type": "ingest", "agent_id": "...", "message": "..."}
+// Emits on stdout:
+//   {"type": "ingest_result", "memories": [{"content": "..."}]}
+//
+// Run with: `bun run ingest.ts`
+
+interface IngestRequest {
+  type: "ingest";
+  agent_id: string;
+  message: string;
+}
+
+interface Memory { content: string }
+
+const input = await Bun.stdin.text();
+const req = JSON.parse(input) as IngestRequest;
+void req.agent_id;
+void req.message;
+
+// TODO: Implement your custom recall logic here.
+const memories: Memory[] = [];
+
+console.log(JSON.stringify({ type: "ingest_result", memories }));
+"#;
+
+const BUN_AFTER_TURN: &str = r#"// Context engine after_turn hook (Bun / TypeScript).
+const input = await Bun.stdin.text();
+const _req = JSON.parse(input);
+
+// TODO: Implement your post-turn logic here.
+
+console.log(JSON.stringify({ type: "ok" }));
+"#;
+
+// --- PHP templates ---
+
+const PHP_INGEST: &str = r#"<?php
+// Context engine ingest hook (PHP).
+//
+// Receives on stdin:
+//   {"type": "ingest", "agent_id": "...", "message": "..."}
+// Emits on stdout:
+//   {"type": "ingest_result", "memories": [{"content": "..."}]}
+
+$raw = stream_get_contents(STDIN);
+$req = json_decode($raw, true);
+$_agentId = $req["agent_id"] ?? null;
+$_message = $req["message"] ?? null;
+
+// TODO: Implement your custom recall logic here.
+$memories = [];
+
+echo json_encode(["type" => "ingest_result", "memories" => $memories]), "\n";
+"#;
+
+const PHP_AFTER_TURN: &str = r#"<?php
+// Context engine after_turn hook (PHP).
+$raw = stream_get_contents(STDIN);
+$_req = json_decode($raw, true);
+
+// TODO: Implement your post-turn logic here.
+
+echo json_encode(["type" => "ok"]), "\n";
+"#;
+
+// --- Lua templates ---
+
+const LUA_INGEST: &str = r#"-- Context engine ingest hook (Lua).
+--
+-- Receives on stdin:
+--   {"type": "ingest", "agent_id": "...", "message": "..."}
+-- Emits on stdout:
+--   {"type": "ingest_result", "memories": [{"content": "..."}]}
+--
+-- Requires a JSON library on LUA_PATH (`luarocks install dkjson`).
+local json = require("dkjson")
+
+local raw = io.read("*a")
+local req = json.decode(raw)
+local _agent_id = req.agent_id
+local _message  = req.message
+
+-- TODO: Implement your custom recall logic here.
+local memories = {}
+
+io.write(json.encode({ type = "ingest_result", memories = memories }), "\n")
+"#;
+
+const LUA_AFTER_TURN: &str = r#"-- Context engine after_turn hook (Lua).
+local json = require("dkjson")
+
+local raw = io.read("*a")
+local _req = json.decode(raw)
+
+-- TODO: Implement your post-turn logic here.
+
+io.write(json.encode({ type = "ok" }), "\n")
+"#;
 
 /// Install Python requirements for a plugin.
 pub async fn install_requirements(plugin_name: &str) -> Result<String, String> {
@@ -886,6 +1453,7 @@ after_turn = "hooks/after_turn.py"
             hooks: librefang_types::config::ContextEngineHooks {
                 ingest: Some("hooks/ingest.py".to_string()),
                 after_turn: Some("hooks/after_turn.py".to_string()), // missing
+                runtime: None,
             },
             requirements: None,
         };
@@ -905,6 +1473,7 @@ after_turn = "hooks/after_turn.py"
             hooks: librefang_types::config::ContextEngineHooks {
                 ingest: Some("../../etc/passwd".to_string()),
                 after_turn: None,
+                runtime: None,
             },
             requirements: None,
         };
