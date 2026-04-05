@@ -245,40 +245,50 @@ pub async fn execute_tool(
         "apply_patch" => tool_apply_patch(input, workspace_root).await,
 
         // Web tools (upgraded: multi-provider search, SSRF-protected fetch)
-        "web_fetch" => {
-            // Taint check: block URLs containing secrets/PII from being exfiltrated
-            let url = input["url"].as_str().unwrap_or("");
-            if let Some(violation) = check_taint_net_fetch(url) {
-                return ToolResult {
-                    tool_use_id: tool_use_id.to_string(),
-                    content: format!("Taint violation: {violation}"),
-                    is_error: true,
-                };
+        "web_fetch" => match input["url"].as_str() {
+            None => Err("Missing 'url' parameter".to_string()),
+            Some(url) => {
+                // Taint check: block URLs containing secrets/PII from being exfiltrated
+                if let Some(violation) = check_taint_net_fetch(url) {
+                    return ToolResult {
+                        tool_use_id: tool_use_id.to_string(),
+                        content: format!("Taint violation: {violation}"),
+                        is_error: true,
+                    };
+                }
+                let method = input["method"].as_str().unwrap_or("GET");
+                let headers = input.get("headers").and_then(|v| v.as_object());
+                let body = input["body"].as_str();
+                if let Some(ctx) = web_ctx {
+                    ctx.fetch
+                        .fetch_with_options(url, method, headers, body)
+                        .await
+                } else {
+                    tool_web_fetch_legacy(input).await
+                }
             }
-            let method = input["method"].as_str().unwrap_or("GET");
-            let headers = input.get("headers").and_then(|v| v.as_object());
-            let body = input["body"].as_str();
-            if let Some(ctx) = web_ctx {
-                ctx.fetch
-                    .fetch_with_options(url, method, headers, body)
-                    .await
-            } else {
-                tool_web_fetch_legacy(input).await
-            }
-        }
-        "web_search" => {
-            if let Some(ctx) = web_ctx {
-                let query = input["query"].as_str().unwrap_or("");
+        },
+        "web_search" => match input["query"].as_str() {
+            None => Err("Missing 'query' parameter".to_string()),
+            Some(query) => {
                 let max_results = input["max_results"].as_u64().unwrap_or(5) as usize;
-                ctx.search.search(query, max_results).await
-            } else {
-                tool_web_search_legacy(input).await
+                if let Some(ctx) = web_ctx {
+                    ctx.search.search(query, max_results).await
+                } else {
+                    tool_web_search_legacy(input).await
+                }
             }
-        }
+        },
 
         // Shell tool — exec policy + metacharacter check + taint check
         "shell_exec" => {
-            let command = input["command"].as_str().unwrap_or("");
+            let Some(command) = input["command"].as_str() else {
+                return ToolResult {
+                    tool_use_id: tool_use_id.to_string(),
+                    content: "Missing 'command' parameter".to_string(),
+                    is_error: true,
+                };
+            };
 
             let is_full_exec = exec_policy
                 .is_some_and(|p| p.mode == librefang_types::config::ExecSecurityMode::Full);
@@ -425,7 +435,13 @@ pub async fn execute_tool(
 
         // Browser automation tools
         "browser_navigate" => {
-            let url = input["url"].as_str().unwrap_or("");
+            let Some(url) = input["url"].as_str() else {
+                return ToolResult {
+                    tool_use_id: tool_use_id.to_string(),
+                    content: "Missing 'url' parameter".to_string(),
+                    is_error: true,
+                };
+            };
             if let Some(violation) = check_taint_net_fetch(url) {
                 return ToolResult {
                     tool_use_id: tool_use_id.to_string(),
@@ -2076,7 +2092,7 @@ async fn tool_task_claim(
     caller_agent_id: Option<&str>,
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
-    let agent_id = caller_agent_id.unwrap_or("");
+    let agent_id = caller_agent_id.ok_or("task_claim requires a calling agent context")?;
     match kh.task_claim(agent_id).await? {
         Some(task) => {
             serde_json::to_string_pretty(&task).map_err(|e| format!("Serialize error: {e}"))
