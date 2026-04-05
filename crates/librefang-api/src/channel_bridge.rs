@@ -403,8 +403,7 @@ fn start_stream_text_bridge(
                         || lower.contains("resets")
                     {
                         // Extract original message after the first ": "
-                        let original =
-                            err_str.split(": ").skip(1).collect::<Vec<_>>().join(": ");
+                        let original = err_str.split(": ").skip(1).collect::<Vec<_>>().join(": ");
                         if original.contains("hit your limit")
                             || original.contains("out of extra usage")
                             || original.contains("resets")
