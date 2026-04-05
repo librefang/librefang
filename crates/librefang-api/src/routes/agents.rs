@@ -2309,6 +2309,15 @@ pub async fn set_model(
         }
     };
     let explicit_provider = body["provider"].as_str();
+    // Check agent exists — kernel returns a generic error for missing
+    // agents that the match arm below would wrap as 500. Validate up
+    // front so the caller gets a 404 for the common case.
+    if state.kernel.agent_registry().get(agent_id).is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+        );
+    }
     match state
         .kernel
         .set_agent_model(agent_id, model, explicit_provider)
@@ -2486,6 +2495,16 @@ pub async fn set_agent_tools(
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": t.t("api-error-agent-missing-tools")})),
+        );
+    }
+
+    // Check agent exists — kernel returns a generic error for missing
+    // agents that the match arm below would wrap as 500. Validate up
+    // front so the caller gets a 404 for the common case.
+    if state.kernel.agent_registry().get(agent_id).is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
         );
     }
 

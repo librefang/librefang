@@ -954,10 +954,21 @@ pub async fn create_trigger(
     let max_fires = req["max_fires"].as_u64().unwrap_or(0);
 
     // Optional cross-session target: route triggered message to a different agent.
-    let target_agent: Option<AgentId> = req
-        .get("target_agent_id")
-        .and_then(|v| v.as_str())
-        .and_then(|s| s.parse().ok());
+    // If the caller supplied a value but it is malformed, reject explicitly —
+    // otherwise the trigger would silently register without any target and the
+    // caller would assume the routing was accepted.
+    let target_agent: Option<AgentId> = match req.get("target_agent_id").and_then(|v| v.as_str()) {
+        None => None,
+        Some(s) => match s.parse() {
+            Ok(id) => Some(id),
+            Err(_) => {
+                return ApiErrorResponse::bad_request(format!(
+                    "Invalid 'target_agent_id': '{s}' is not a valid UUID"
+                ))
+                .into_json_tuple();
+            }
+        },
+    };
 
     match state.kernel.register_trigger_with_target(
         agent_id,
