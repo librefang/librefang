@@ -13,6 +13,7 @@ import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { Input } from "../components/ui/Input";
 import { useUIStore } from "../lib/store";
+import { useCreateShortcut } from "../lib/useCreateShortcut";
 import {
   Server, Zap, Clock, Key, Globe, CheckCircle2, XCircle, Loader2, AlertCircle, Search,
   SortAsc, SortDesc, CheckSquare, Square, ChevronRight, X, Grid3X3, List, Filter,
@@ -530,6 +531,7 @@ export function ProvidersPage() {
   const [detailsProvider, setDetailsProvider] = useState<Provider | null>(null);
   const [configProvider, setConfigProvider] = useState<Provider | null>(null);
   const [showCreateForm, setShowCreateForm] = useState(false);
+  useCreateShortcut(() => setShowCreateForm(true));
   const [keyInput, setKeyInput] = useState("");
   const [urlInput, setUrlInput] = useState("");
   const [keySaving, setKeySaving] = useState(false);
@@ -766,8 +768,9 @@ export function ProvidersPage() {
         helpText={t("providers.help")}
         actions={
           <div className="flex items-center gap-2">
-            <Button variant="primary" size="sm" onClick={() => setShowCreateForm(true)} leftIcon={<Plus className="w-3.5 h-3.5" />}>
-              {t("providers.add")}
+            <Button variant="primary" size="sm" onClick={() => setShowCreateForm(true)} leftIcon={<Plus className="w-3.5 h-3.5" />} title={t("providers.add") + " (n)"}>
+              <span>{t("providers.add")}</span>
+              <kbd className="hidden sm:inline-flex h-4 min-w-[16px] items-center justify-center rounded border border-white/30 bg-white/10 px-1 text-[8px] font-mono font-semibold ml-1.5">n</kbd>
             </Button>
             <div className="hidden rounded-full border border-border-subtle bg-surface px-3 py-1.5 text-[10px] font-bold uppercase text-text-dim sm:block">
               {t("providers.configured_count", { configured: configuredCount, total: providers.length })}

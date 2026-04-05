@@ -82,22 +82,29 @@ impl ConsolidationEngine {
                     let sim = text_similarity(&rows[i].1.to_lowercase(), &rows[j].1.to_lowercase());
                     if sim > 0.9 {
                         // Keep the one with higher confidence (rows are sorted desc),
-                        // so rows[i] is the keeper. Soft-delete rows[j].
-                        conn.execute(
+                        // so rows[i] is the keeper. Soft-delete rows[j] and, if the
+                        // absorbed memory had higher confidence somehow, lift the
+                        // keeper to that value. Wrap both writes in a savepoint so
+                        // we never leave a keeper un-updated after its duplicate
+                        // was already soft-deleted.
+                        let tx = conn
+                            .unchecked_transaction()
+                            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                        tx.execute(
                             "UPDATE memories SET deleted = 1 WHERE id = ?1",
                             rusqlite::params![rows[j].0],
                         )
                         .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
-                        // If the absorbed memory had higher confidence somehow,
-                        // update the keeper.
                         if rows[j].2 > rows[i].2 {
-                            conn.execute(
+                            tx.execute(
                                 "UPDATE memories SET confidence = ?1 WHERE id = ?2",
                                 rusqlite::params![rows[j].2, rows[i].0],
                             )
                             .map_err(|e| LibreFangError::Memory(e.to_string()))?;
                         }
+                        tx.commit()
+                            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
                         absorbed.insert(rows[j].0.clone());
                         memories_merged += 1;

@@ -306,17 +306,56 @@ impl StructuredStore {
         }
     }
 
-    /// Remove an agent from the database.
+    /// Remove an agent from the database, cascading to all agent-scoped tables.
+    ///
+    /// SQLite foreign keys are not enforced (`PRAGMA foreign_keys=OFF` default)
+    /// and none of these tables declared `ON DELETE CASCADE`, so prior to
+    /// this function rows keyed by `agent_id` would accumulate indefinitely
+    /// after agent deletion. All DELETEs run inside a single transaction so
+    /// a mid-cascade failure leaves no half-removed state.
+    ///
+    /// Tables covered: agents, kv_store, task_queue, memories,
+    /// canonical_sessions, audit_entries, usage_events, entities, relations,
+    /// approval_audit, prompt_versions, prompt_experiments (plus their
+    /// dependent experiment_variants and experiment_metrics rows), and
+    /// events via source_agent. sessions / sessions_fts are handled by
+    /// the caller (MemorySubstrate::remove_agent via SessionStore).
     pub fn remove_agent(&self, agent_id: AgentId) -> LibreFangResult<()> {
         let conn = self
             .conn
             .lock()
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
-        conn.execute(
+        let id = agent_id.0.to_string();
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+
+        // Subquery-scoped deletes must happen BEFORE prompt_experiments
+        // is cleared, otherwise the IN (SELECT ...) matches nothing.
+        for stmt in [
+            "DELETE FROM experiment_metrics \
+             WHERE experiment_id IN (SELECT id FROM prompt_experiments WHERE agent_id = ?1)",
+            "DELETE FROM experiment_variants \
+             WHERE experiment_id IN (SELECT id FROM prompt_experiments WHERE agent_id = ?1)",
+            "DELETE FROM prompt_experiments WHERE agent_id = ?1",
+            "DELETE FROM prompt_versions WHERE agent_id = ?1",
+            "DELETE FROM approval_audit WHERE agent_id = ?1",
+            "DELETE FROM audit_entries WHERE agent_id = ?1",
+            "DELETE FROM usage_events WHERE agent_id = ?1",
+            "DELETE FROM memories WHERE agent_id = ?1",
+            "DELETE FROM canonical_sessions WHERE agent_id = ?1",
+            "DELETE FROM kv_store WHERE agent_id = ?1",
+            "DELETE FROM task_queue WHERE agent_id = ?1",
+            "DELETE FROM entities WHERE agent_id = ?1",
+            "DELETE FROM relations WHERE agent_id = ?1",
+            "DELETE FROM events WHERE source_agent = ?1",
             "DELETE FROM agents WHERE id = ?1",
-            rusqlite::params![agent_id.0.to_string()],
-        )
-        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        ] {
+            tx.execute(stmt, rusqlite::params![id])
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        }
+        tx.commit()
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(())
     }
 
