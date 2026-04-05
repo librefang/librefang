@@ -1581,6 +1581,7 @@ pub async fn run_agent_loop(
                 // Track consecutive all-failed iterations to cap wasted retries.
                 // (soft errors — approval denials, sandbox rejections, truncation —
                 //  do NOT count; the LLM is expected to recover from those cheaply.)
+                // NOTE: keep in sync with run_agent_loop_streaming.
                 let hard_error_count = tool_result_blocks
                     .iter()
                     .filter(|b| match b {
@@ -2360,6 +2361,7 @@ pub async fn run_agent_loop_streaming(
     let mut decision_traces: Vec<DecisionTrace> = Vec::new();
     let mut hallucination_retried = false;
     let mut action_nudge_retried = false;
+    let mut consecutive_all_failed: u32 = 0;
 
     for iteration in 0..max_iterations {
         debug!(iteration, "Streaming agent loop iteration");
@@ -3146,6 +3148,65 @@ pub async fn run_agent_loop_streaming(
 
                 if let Err(e) = memory.save_session_async(session).await {
                     warn!("Failed to interim-save session: {e}");
+                }
+                // Track consecutive all-failed iterations to cap wasted retries.
+                // (soft errors — approval denials, sandbox rejections, truncation —
+                //  do NOT count; the LLM is expected to recover from those cheaply.)
+                // NOTE: keep in sync with run_agent_loop (non-streaming).
+                let hard_error_count = tool_result_blocks
+                    .iter()
+                    .filter(|b| match b {
+                        ContentBlock::ToolResult {
+                            content,
+                            is_error: true,
+                            ..
+                        } => !is_soft_error_content(content),
+                        _ => false,
+                    })
+                    .count() as u32;
+                let success_count = tool_result_blocks
+                    .iter()
+                    .filter(|b| {
+                        matches!(
+                            b,
+                            ContentBlock::ToolResult {
+                                is_error: false,
+                                ..
+                            }
+                        )
+                    })
+                    .count() as u32;
+
+                if success_count == 0 && hard_error_count > 0 {
+                    consecutive_all_failed += 1;
+                    if consecutive_all_failed >= MAX_CONSECUTIVE_ALL_FAILED {
+                        warn!(
+                            agent = %manifest.name,
+                            consecutive_all_failed,
+                            hard_error_count,
+                            "Tool failures in {MAX_CONSECUTIVE_ALL_FAILED} consecutive iterations — exiting streaming loop"
+                        );
+                        if let Some(hook_reg) = hooks {
+                            let ctx = crate::hooks::HookContext {
+                                agent_name: &manifest.name,
+                                agent_id: agent_id_str.as_str(),
+                                event: librefang_types::agent::HookEvent::AgentLoopEnd,
+                                data: serde_json::json!({
+                                    "iterations": iteration + 1,
+                                    "reason": "tool_failure",
+                                    "error_count": hard_error_count,
+                                    "consecutive_all_failed": consecutive_all_failed,
+                                }),
+                            };
+                            let _ = hook_reg.fire(&ctx);
+                        }
+                        return Err(LibreFangError::RepeatedToolFailures {
+                            iterations: consecutive_all_failed,
+                            error_count: hard_error_count,
+                        });
+                    }
+                } else {
+                    consecutive_all_failed = 0;
                 }
             }
             StopReason::MaxTokens => {
@@ -5978,8 +6039,123 @@ mod tests {
         match err {
             LibreFangError::RepeatedToolFailures { iterations, .. } => {
                 assert_eq!(
-                    iterations, 3,
-                    "Cap should trigger after 3 consecutive all-failed iterations"
+                    iterations, MAX_CONSECUTIVE_ALL_FAILED,
+                    "Cap should trigger after MAX_CONSECUTIVE_ALL_FAILED consecutive all-failed iterations"
+                );
+            }
+            other => panic!("Expected RepeatedToolFailures, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_streaming_tool_failure_allows_retry() {
+        let memory = librefang_memory::MemorySubstrate::open_in_memory(0.01).unwrap();
+        let agent_id = librefang_types::agent::AgentId::new();
+        let mut session = librefang_memory::session::Session {
+            id: librefang_types::agent::SessionId::new(),
+            agent_id,
+            messages: Vec::new(),
+            context_window_tokens: 0,
+            label: None,
+        };
+        let manifest = test_manifest();
+        let driver: Arc<dyn LlmDriver> = Arc::new(FailThenTextDriver::new());
+        let (tx, _rx) = mpsc::channel(64);
+
+        let result = run_agent_loop_streaming(
+            &manifest,
+            "Do something",
+            &mut session,
+            &memory,
+            driver,
+            &[],
+            None,
+            tx,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None, // on_phase
+            None, // media_engine
+            None, // media_drivers
+            None, // tts_engine
+            None, // docker_config
+            None, // hooks
+            None, // context_window_tokens
+            None, // process_manager
+            None, // user_content_blocks
+            None, // proactive_memory
+            None, // context_engine
+            None, // pending_messages
+        )
+        .await
+        .expect("Streaming loop should complete after retry");
+
+        assert_eq!(
+            result.iterations, 2,
+            "Streaming loop must run 2 iterations (fail + retry), got {}",
+            result.iterations
+        );
+        assert!(
+            result.response.contains("Recovered after tool failure"),
+            "Expected retry text in streaming, got: {:?}",
+            result.response
+        );
+    }
+
+    #[tokio::test]
+    async fn test_streaming_repeated_tool_failures_cap_exits() {
+        let memory = librefang_memory::MemorySubstrate::open_in_memory(0.01).unwrap();
+        let agent_id = librefang_types::agent::AgentId::new();
+        let mut session = librefang_memory::session::Session {
+            id: librefang_types::agent::SessionId::new(),
+            agent_id,
+            messages: Vec::new(),
+            context_window_tokens: 0,
+            label: None,
+        };
+        let manifest = test_manifest();
+        let driver: Arc<dyn LlmDriver> = Arc::new(AlwaysFailingToolDriver);
+        let (tx, _rx) = mpsc::channel(64);
+
+        let err = run_agent_loop_streaming(
+            &manifest,
+            "Do something",
+            &mut session,
+            &memory,
+            driver,
+            &[],
+            None,
+            tx,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None, // on_phase
+            None, // media_engine
+            None, // media_drivers
+            None, // tts_engine
+            None, // docker_config
+            None, // hooks
+            None, // context_window_tokens
+            None, // process_manager
+            None, // user_content_blocks
+            None, // proactive_memory
+            None, // context_engine
+            None, // pending_messages
+        )
+        .await
+        .expect_err("Streaming loop must exit with RepeatedToolFailures");
+
+        match err {
+            LibreFangError::RepeatedToolFailures { iterations, .. } => {
+                assert_eq!(
+                    iterations, MAX_CONSECUTIVE_ALL_FAILED,
+                    "Cap should trigger after MAX_CONSECUTIVE_ALL_FAILED consecutive all-failed iterations"
                 );
             }
             other => panic!("Expected RepeatedToolFailures, got {other:?}"),
