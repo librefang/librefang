@@ -5610,6 +5610,10 @@ system_prompt = "You are a helpful assistant."
         if disk_manifest.tags.is_empty() {
             disk_manifest.tags = entry.manifest.tags.clone();
         }
+        // Never rename via reload — renaming needs to also update
+        // `entry.name` and the registry's name_index, which reload does
+        // not touch. Users who want to rename should use the rename API.
+        disk_manifest.name = entry.manifest.name.clone();
 
         self.registry
             .replace_manifest(agent_id, disk_manifest)
