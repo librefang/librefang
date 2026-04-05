@@ -1,0 +1,363 @@
+# Context Engine Plugins
+
+Context engine plugins customize what goes *into* an agent's context window: they recall memories relevant to the current user message, and they react to each completed turn. Plugins speak a tiny JSON-over-stdin/stdout protocol, so they can be written in almost any language that can read stdin and print stdout.
+
+This page covers the protocol, the manifest format, every supported runtime, and a full worked example.
+
+## Table of Contents
+
+- [Overview](#overview)
+- [Hook Lifecycle](#hook-lifecycle)
+- [Protocol Specification](#protocol-specification)
+- [`plugin.toml` Manifest](#plugin-toml-manifest)
+- [Supported Runtimes](#supported-runtimes)
+- [Writing Your First Plugin](#writing-your-first-plugin)
+- [Scaffolding via Dashboard or API](#scaffolding-via-dashboard-or-api)
+- [Testing Locally](#testing-locally)
+- [Debugging with the Doctor Endpoint](#debugging-with-the-doctor-endpoint)
+- [Error Handling, Timeouts, and Logs](#error-handling-timeouts-and-logs)
+- [Plugins vs. Skills](#plugins-vs-skills)
+
+---
+
+## Overview
+
+A plugin is a directory under `~/.librefang/plugins/<name>/` containing:
+
+```
+my-recall-plugin/
+├── plugin.toml          # manifest
+└── hooks/
+    ├── ingest.py        # (or .js / .go / .rb / ...)
+    └── after_turn.py
+```
+
+LibreFang loads the manifest, wires the declared hook scripts into the context engine, and runs them as subprocesses at well-defined lifecycle points. Each hook invocation is a fresh subprocess: one JSON object in on stdin, one JSON object out on stdout.
+
+Plugins are sandboxed by default — env vars are scrubbed to a safe baseline, the working directory is controlled, and a 30-second timeout kills runaway hooks.
+
+---
+
+## Hook Lifecycle
+
+Two hooks are supported today:
+
+| Hook | When it fires | Purpose | Blocks turn? |
+|------|---------------|---------|--------------|
+| `ingest` | A new user message enters the session, before the LLM is called | Recall memories / inject custom context | Yes |
+| `after_turn` | After an LLM turn completes (response sent) | Index, persist, trigger background work | No (fire-and-forget) |
+
+**Key properties:**
+
+- `ingest` runs *in addition to* the built-in memory recall — its returned memories are merged with the default ones, not a replacement.
+- `after_turn` is best-effort: a failure here is logged, never surfaced to the user.
+- If `stable_prefix_mode` is on in context engine config, the `ingest` hook is skipped.
+- Each hook runs in a fresh subprocess — there is no persistent state between invocations. Use an external store (SQLite, vector DB, HTTP service) if you need continuity.
+
+---
+
+## Protocol Specification
+
+### `ingest` hook
+
+**Request** (one line of JSON written to the hook's stdin, then stdin is closed):
+
+```json
+{
+  "type": "ingest",
+  "agent_id": "0f3b…-uuid",
+  "message": "What was the last thing I asked about Kafka?",
+  "peer_id": "user_12345"
+}
+```
+
+| Field | Type | Always present | Notes |
+|-------|------|----------------|-------|
+| `type` | `"ingest"` | yes | Constant, lets a single script dispatch on hook kind. |
+| `agent_id` | string (UUID) | yes | Use to scope lookups per agent. |
+| `message` | string | yes | Raw user message text. |
+| `peer_id` | string or `null` | yes | Platform user ID when the message came from a channel (Telegram, Discord, WhatsApp…). **Always scope your recall to `peer_id` when present** to avoid cross-user context leaks. |
+
+**Response** (one line of JSON on stdout, last JSON-parseable line wins):
+
+```json
+{
+  "type": "ingest_result",
+  "memories": [
+    { "content": "User asked about Kafka consumer groups on 2026-04-01." },
+    { "content": "Previously decided to standardize on Kafka over RabbitMQ." }
+  ]
+}
+```
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `type` | `"ingest_result"` | Constant. |
+| `memories` | array of objects | May be empty. Each object requires `content` (string). Extra keys are ignored. |
+
+### `after_turn` hook
+
+**Request:**
+
+```json
+{
+  "type": "after_turn",
+  "agent_id": "0f3b…-uuid",
+  "messages": [
+    { "role": "user", "content": "What was the last thing I asked about Kafka?" },
+    { "role": "assistant", "content": "You asked about consumer groups on…" }
+  ]
+}
+```
+
+Each message `content` is truncated to the first 500 characters to keep the hook fast. If you need the full message, store it from a tool call or a separate webhook.
+
+**Response:**
+
+```json
+{ "type": "ok" }
+```
+
+The return value is ignored — it just signals completion. Return anything valid and exit with code 0.
+
+### Errors
+
+Exit with a non-zero code and write an error to stderr. LibreFang logs the stderr at `warn` level and falls back to the default context engine result. The turn still proceeds.
+
+---
+
+## `plugin.toml` Manifest
+
+Every plugin needs a `plugin.toml` at its root:
+
+```toml
+name = "qdrant-recall"
+version = "0.1.0"
+description = "Recall from a Qdrant vector store"
+author = "Evan"
+
+[hooks]
+ingest = "hooks/ingest.py"
+after_turn = "hooks/after_turn.py"
+runtime = "python"
+
+requirements = "requirements.txt"
+```
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `name` | string | yes | Must match the directory name under `plugins/`. |
+| `version` | string | yes | Semver. |
+| `description` | string | no | Shown in the dashboard plugin list. |
+| `author` | string | no | Free-form. |
+| `hooks.ingest` | string | no | Path relative to the plugin directory. Omit if you only use `after_turn`. |
+| `hooks.after_turn` | string | no | Path relative to the plugin directory. |
+| `hooks.runtime` | string | no | One of `python`, `native`, `v`, `node`, `deno`, `go`, `ruby`, `bash`, `bun`, `php`, `lua`. Defaults to `python`. Unknown values fall back to `python` with a warning. |
+| `requirements` | string | no | Only read for `python` runtime; path to `requirements.txt` installable via `pip3 install --user -r …`. Other runtimes manage deps out-of-band (`go.mod`, `package.json`, `Gemfile`, etc.). |
+
+---
+
+## Supported Runtimes
+
+| Runtime | Command | Works out of the box in Docker? |
+|---------|---------|-------|
+| `python` | `python3 script.py` (falls back to `python`, `py`) | Yes |
+| `native` | Exec the file directly (requires exec bit + valid binary or shebang) | Yes |
+| `node` | `node script.js` | Yes |
+| `bash` | `bash script.sh` | Yes |
+| `deno` | `deno run --allow-read --allow-env script.ts` | No |
+| `bun` | `bun run script.ts` | No |
+| `go` | `go run script.go` | No |
+| `v` | `v -no-retry-compilation run script.v` | No |
+| `ruby` | `ruby script.rb` | No |
+| `php` | `php script.php` | No |
+| `lua` | `lua script.lua` | No |
+
+Runtimes marked "No" aren't bundled in the official Docker image — extend the image with the snippets in [Configuration → Plugins](./configuration#context_engine) or `apt install` them on bare-metal deploys.
+
+**Env passthrough:** a minimal PATH/HOME baseline plus runtime-specific vars (e.g. `PYTHONPATH`/`VIRTUAL_ENV` for Python, `GEM_HOME`/`GEM_PATH` for Ruby, `LUA_PATH` for Lua) are forwarded. Any custom env var the script needs must be declared in the agent's `allowed_env_vars` config.
+
+---
+
+## Writing Your First Plugin
+
+Let's build a plugin that remembers user preferences from a SQLite file. Python, for brevity.
+
+### 1. Scaffold the plugin
+
+From the dashboard Plugins page, click **Create Plugin**, pick `python`, name it `prefs`. Or via API:
+
+```bash
+curl -X POST http://127.0.0.1:4545/api/plugins/scaffold \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"prefs","description":"User preference recall","runtime":"python"}'
+```
+
+This creates `~/.librefang/plugins/prefs/` with `plugin.toml`, `hooks/ingest.py`, `hooks/after_turn.py`, and a blank `requirements.txt`.
+
+### 2. Edit `hooks/ingest.py`
+
+```python
+#!/usr/bin/env python3
+"""Recall user preferences keyed by peer_id from a local SQLite DB."""
+import json
+import sqlite3
+import sys
+from pathlib import Path
+
+DB_PATH = Path.home() / ".librefang" / "plugins" / "prefs" / "prefs.db"
+
+def main():
+    request = json.loads(sys.stdin.read())
+    peer_id = request.get("peer_id")          # may be None for direct API calls
+    if not peer_id:
+        print(json.dumps({"type": "ingest_result", "memories": []}))
+        return
+
+    # Open the per-plugin DB and read anything keyed to this peer.
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("CREATE TABLE IF NOT EXISTS prefs (peer_id TEXT, fact TEXT)")
+    rows = conn.execute(
+        "SELECT fact FROM prefs WHERE peer_id = ?", (peer_id,)
+    ).fetchall()
+    conn.close()
+
+    memories = [{"content": f"User preference: {row[0]}"} for row in rows]
+    print(json.dumps({"type": "ingest_result", "memories": memories}))
+
+if __name__ == "__main__":
+    main()
+```
+
+### 3. Edit `hooks/after_turn.py`
+
+For this plugin we don't need post-turn work — just acknowledge:
+
+```python
+#!/usr/bin/env python3
+import json
+import sys
+
+_ = json.loads(sys.stdin.read())
+print(json.dumps({"type": "ok"}))
+```
+
+Or delete the `after_turn` field from `plugin.toml` entirely to skip the hook.
+
+### 4. Wire it to an agent
+
+Edit `~/.librefang/config.toml`:
+
+```toml
+[context_engine]
+plugin = "prefs"
+```
+
+Or configure hooks manually (same effect, without installing a plugin dir):
+
+```toml
+[context_engine.hooks]
+ingest = "~/.librefang/plugins/prefs/hooks/ingest.py"
+after_turn = "~/.librefang/plugins/prefs/hooks/after_turn.py"
+runtime = "python"
+```
+
+### 5. Restart LibreFang
+
+```bash
+librefang start
+```
+
+The next time a message arrives with a `peer_id`, your `ingest` hook runs and the returned memories get merged into the agent's context window.
+
+---
+
+## Scaffolding via Dashboard or API
+
+The dashboard's Plugins page has a **Create Plugin** form with a runtime dropdown — pick your language and it emits a matching template (`ingest.rb` for Ruby, `ingest.go` for Go, etc.) that already speaks the protocol.
+
+The HTTP equivalent:
+
+```bash
+curl -X POST http://127.0.0.1:4545/api/plugins/scaffold \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "my-plugin",
+    "description": "What it does",
+    "runtime": "go"
+  }'
+```
+
+---
+
+## Testing Locally
+
+Every hook is just a script that reads JSON from stdin and writes JSON to stdout — you can test it without LibreFang running:
+
+```bash
+echo '{"type":"ingest","agent_id":"test","message":"hello","peer_id":"u1"}' \
+  | python3 ~/.librefang/plugins/prefs/hooks/ingest.py
+```
+
+Expected output:
+
+```json
+{"type": "ingest_result", "memories": [...]}
+```
+
+If the script hangs, you forgot to close stdin or the script is blocking on input other than stdin. If it prints non-JSON lines, only the *last* JSON-parseable line is used as the response — log lines printed earlier are fine.
+
+---
+
+## Debugging with the Doctor Endpoint
+
+`GET /api/plugins/doctor` probes every supported runtime on the host and cross-references it with every installed plugin:
+
+```bash
+curl http://127.0.0.1:4545/api/plugins/doctor
+```
+
+```json
+{
+  "runtimes": [
+    { "runtime": "python", "launcher": "python3", "available": true,
+      "version": "Python 3.12.3", "install_hint": "..." },
+    { "runtime": "go", "launcher": null, "available": false,
+      "version": null, "install_hint": "Install Go from https://go.dev/dl/ ..." }
+  ],
+  "plugins": [
+    { "name": "prefs", "runtime": "python",
+      "runtime_available": true, "hooks_valid": true,
+      "install_hint": "..." }
+  ]
+}
+```
+
+Call this whenever a plugin mysteriously does nothing — `runtime_available: false` means the launcher isn't on PATH, and `hooks_valid: false` means a declared hook script is missing on disk.
+
+---
+
+## Error Handling, Timeouts, and Logs
+
+- **Timeout**: 30 seconds per hook invocation. If your hook exceeds that, the subprocess is killed and a `Timeout` error is logged.
+- **Exit codes**: non-zero exits are logged with the script's stderr at `warn` level, and the default context engine result is used instead.
+- **Empty output**: if the script exits 0 but prints nothing, `EmptyOutput` is returned and the default result is used.
+- **Malformed JSON**: the runtime walks stdout lines from the bottom up, taking the first JSON-parseable one. If none are parseable, it wraps the last line of stdout as `{ "text": "..." }`.
+- **Path traversal**: `..` components in script paths are rejected at load time.
+- **Env scrubbing**: the spawned process inherits only PATH, HOME, LIBREFANG_* vars, the runtime's passthrough set, and anything explicitly listed in `allowed_env_vars`.
+
+Hook stderr is captured and printed to LibreFang's own logs — use it liberally for debug logging from inside your hook.
+
+---
+
+## Plugins vs. Skills
+
+| | Plugins | Skills |
+|---|---------|--------|
+| What they customize | Memory recall / context assembly | Tool catalog (things the agent can *do*) |
+| Lifecycle hook | `ingest`, `after_turn` | Tool invocations from the LLM |
+| Scope | Per-agent, via `context_engine` config | Global or per-agent |
+| Language support | 11 runtimes via JSON stdin/stdout | Python, WASM, Node, prompt-only, built-in |
+| Sandboxing | env scrub + timeout + path validation | WASM runtime is fully sandboxed; Python/Node are subprocess |
+
+Use a **plugin** when you want to change *what the agent remembers* or run post-turn bookkeeping. Use a **skill** when you want to give the agent a new *tool* it can call during a conversation.

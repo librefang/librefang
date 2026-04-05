@@ -1,0 +1,362 @@
+# Context Engine 插件
+
+Context engine 插件用来自定义 agent 上下文窗口里放什么：在处理新用户消息时召回相关记忆，以及在每一轮对话结束后做后续处理。插件走一个极简的 JSON-over-stdin/stdout 协议，几乎任何能读 stdin、写 stdout 的语言都能写。
+
+本页讲协议、manifest 格式、所有支持的 runtime，以及一个从零到跑通的完整例子。
+
+## 目录
+
+- [概览](#overview)
+- [Hook 生命周期](#hook-lifecycle)
+- [协议规范](#protocol-specification)
+- [`plugin.toml` manifest](#plugin-toml-manifest)
+- [支持的 Runtime](#supported-runtimes)
+- [写你的第一个插件](#writing-your-first-plugin)
+- [通过 Dashboard 或 API 生成脚手架](#scaffolding-via-dashboard-or-api)
+- [本地测试](#testing-locally)
+- [用 Doctor 端点调试](#debugging-with-the-doctor-endpoint)
+- [错误处理、超时与日志](#error-handling-timeouts-and-logs)
+- [Plugin vs. Skill](#plugins-vs-skills)
+
+---
+
+## 概览
+
+一个插件就是 `~/.librefang/plugins/<name>/` 下的目录：
+
+```
+my-recall-plugin/
+├── plugin.toml          # manifest
+└── hooks/
+    ├── ingest.py        # （或 .js / .go / .rb / ...）
+    └── after_turn.py
+```
+
+LibreFang 加载 manifest，把声明的 hook 脚本挂到 context engine 上，在预定义的生命周期点作为子进程执行。每次调用都是一个全新的子进程：stdin 进一个 JSON 对象，stdout 出一个 JSON 对象。
+
+插件默认沙箱化 —— 环境变量被洗成最小集合，工作目录受控，30 秒超时会 kill 掉跑飞的 hook。
+
+---
+
+## Hook 生命周期
+
+目前支持两个 hook：
+
+| Hook | 触发时机 | 用途 | 阻塞当前轮？ |
+|------|----------|------|-------------|
+| `ingest` | 新用户消息进入会话，LLM 调用之前 | 召回记忆 / 注入自定义上下文 | 是 |
+| `after_turn` | LLM 完成一轮（响应发出后） | 索引、持久化、触发后台任务 | 否（fire-and-forget） |
+
+**关键特性：**
+
+- `ingest` 是**叠加**在内置召回之上的 —— 它返回的 memories 会和默认召回的结果合并，不是替代。
+- `after_turn` 是尽力而为：失败只记日志，不会反馈给用户。
+- 如果 context engine 配置开了 `stable_prefix_mode`，`ingest` hook 会被跳过。
+- 每个 hook 跑在全新子进程里 —— 调用之间**没有任何内存状态**。需要持久状态请用外部存储（SQLite、向量库、HTTP 服务）。
+
+---
+
+## 协议规范
+
+### `ingest` hook
+
+**请求**（一行 JSON 写到 hook 的 stdin，然后关闭 stdin）：
+
+```json
+{
+  "type": "ingest",
+  "agent_id": "0f3b…-uuid",
+  "message": "我上次问的 Kafka 那件事是什么？",
+  "peer_id": "user_12345"
+}
+```
+
+| 字段 | 类型 | 总是存在 | 说明 |
+|------|------|---------|------|
+| `type` | `"ingest"` | 是 | 固定值，让一个脚本可以按 hook 类型分派。 |
+| `agent_id` | string (UUID) | 是 | 用它限定 agent 维度的查询。 |
+| `message` | string | 是 | 原始用户消息文本。 |
+| `peer_id` | string 或 `null` | 是 | 消息来自 channel（Telegram、Discord、WhatsApp…）时的平台用户 ID。**`peer_id` 存在时务必用它隔离召回**，防止跨用户上下文串漏。 |
+
+**响应**（stdout 输出 JSON，只有**最后**一行能 parse 成 JSON 的会被采纳）：
+
+```json
+{
+  "type": "ingest_result",
+  "memories": [
+    { "content": "用户在 2026-04-01 问过 Kafka consumer groups 相关问题。" },
+    { "content": "之前决定标准化使用 Kafka 而不是 RabbitMQ。" }
+  ]
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `type` | `"ingest_result"` | 固定值。 |
+| `memories` | 对象数组 | 可以为空。每项必须有 `content`（字符串）。其他字段被忽略。 |
+
+### `after_turn` hook
+
+**请求：**
+
+```json
+{
+  "type": "after_turn",
+  "agent_id": "0f3b…-uuid",
+  "messages": [
+    { "role": "user", "content": "我上次问的 Kafka 那件事是什么？" },
+    { "role": "assistant", "content": "你问过 consumer groups…" }
+  ]
+}
+```
+
+每条消息的 `content` 被截断到前 500 字符以保证 hook 跑得快。需要完整消息的话从 tool call 或独立 webhook 里自己拿。
+
+**响应：**
+
+```json
+{ "type": "ok" }
+```
+
+返回值被忽略 —— 只是表示完成。吐任何合法 JSON、退出码 0 即可。
+
+### 错误
+
+以非 0 退出码结束，并把错误写到 stderr。LibreFang 会把 stderr 以 `warn` 级别记日志，然后回退到默认 context engine 的结果，当前这一轮继续。
+
+---
+
+## `plugin.toml` manifest
+
+每个插件根目录必须有 `plugin.toml`：
+
+```toml
+name = "qdrant-recall"
+version = "0.1.0"
+description = "从 Qdrant 向量库召回"
+author = "Evan"
+
+[hooks]
+ingest = "hooks/ingest.py"
+after_turn = "hooks/after_turn.py"
+runtime = "python"
+
+requirements = "requirements.txt"
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `name` | string | 是 | 必须和 `plugins/` 下的目录名一致。 |
+| `version` | string | 是 | Semver。 |
+| `description` | string | 否 | Dashboard 插件列表显示用。 |
+| `author` | string | 否 | 自由文本。 |
+| `hooks.ingest` | string | 否 | 相对插件目录的路径。只用 `after_turn` 的话可以省略。 |
+| `hooks.after_turn` | string | 否 | 相对插件目录的路径。 |
+| `hooks.runtime` | string | 否 | 取值：`python`、`native`、`v`、`node`、`deno`、`go`、`ruby`、`bash`、`bun`、`php`、`lua`。默认 `python`。未知值回退到 `python` 并打 warning。 |
+| `requirements` | string | 否 | 只有 `python` runtime 会读；指向 `requirements.txt`，通过 `pip3 install --user -r …` 安装。其他 runtime 各自管各自的依赖（`go.mod`、`package.json`、`Gemfile` 等）。 |
+
+---
+
+## 支持的 Runtime
+
+| Runtime | 调用命令 | 官方 Docker 镜像自带？ |
+|---------|---------|-------|
+| `python` | `python3 script.py`（回退 `python`、`py`） | 是 |
+| `native` | 直接 exec 文件（需要可执行位 + 有效二进制或 shebang） | 是 |
+| `node` | `node script.js` | 是 |
+| `bash` | `bash script.sh` | 是 |
+| `deno` | `deno run --allow-read --allow-env script.ts` | 否 |
+| `bun` | `bun run script.ts` | 否 |
+| `go` | `go run script.go` | 否 |
+| `v` | `v -no-retry-compilation run script.v` | 否 |
+| `ruby` | `ruby script.rb` | 否 |
+| `php` | `php script.php` | 否 |
+| `lua` | `lua script.lua` | 否 |
+
+标"否"的没打进官方 Docker 镜像 —— 请参考 [Configuration → Plugins](./configuration#context_engine) 里的 snippets 自己 extend 镜像，或者裸机部署用 `apt install` 自己装。
+
+**环境变量透传：**PATH/HOME 基础集 + 各 runtime 专属变量（Python 的 `PYTHONPATH`/`VIRTUAL_ENV`、Ruby 的 `GEM_HOME`/`GEM_PATH`、Lua 的 `LUA_PATH` 等）会自动透传。其他业务环境变量必须在 agent 的 `allowed_env_vars` 里显式声明。
+
+---
+
+## 写你的第一个插件
+
+做一个按 `peer_id` 从 SQLite 文件召回用户偏好的插件。为了简洁用 Python。
+
+### 1. 生成脚手架
+
+Dashboard Plugins 页面 → Create Plugin → 选 `python`，名字填 `prefs`。或者调 API：
+
+```bash
+curl -X POST http://127.0.0.1:4545/api/plugins/scaffold \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"prefs","description":"User preference recall","runtime":"python"}'
+```
+
+这会创建 `~/.librefang/plugins/prefs/`，里面带好 `plugin.toml`、`hooks/ingest.py`、`hooks/after_turn.py` 和一个空的 `requirements.txt`。
+
+### 2. 修改 `hooks/ingest.py`
+
+```python
+#!/usr/bin/env python3
+"""按 peer_id 从本地 SQLite 召回用户偏好。"""
+import json
+import sqlite3
+import sys
+from pathlib import Path
+
+DB_PATH = Path.home() / ".librefang" / "plugins" / "prefs" / "prefs.db"
+
+def main():
+    request = json.loads(sys.stdin.read())
+    peer_id = request.get("peer_id")          # 直接调 API 时可能是 None
+    if not peer_id:
+        print(json.dumps({"type": "ingest_result", "memories": []}))
+        return
+
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("CREATE TABLE IF NOT EXISTS prefs (peer_id TEXT, fact TEXT)")
+    rows = conn.execute(
+        "SELECT fact FROM prefs WHERE peer_id = ?", (peer_id,)
+    ).fetchall()
+    conn.close()
+
+    memories = [{"content": f"User preference: {row[0]}"} for row in rows]
+    print(json.dumps({"type": "ingest_result", "memories": memories}))
+
+if __name__ == "__main__":
+    main()
+```
+
+### 3. 修改 `hooks/after_turn.py`
+
+这个插件不需要 turn 后处理 —— 直接 ack 就行：
+
+```python
+#!/usr/bin/env python3
+import json
+import sys
+
+_ = json.loads(sys.stdin.read())
+print(json.dumps({"type": "ok"}))
+```
+
+或者直接把 `plugin.toml` 里的 `after_turn` 字段删掉，就根本不会调这个 hook。
+
+### 4. 挂给 agent
+
+编辑 `~/.librefang/config.toml`：
+
+```toml
+[context_engine]
+plugin = "prefs"
+```
+
+或者手动配 hook（效果一样，不用装插件目录）：
+
+```toml
+[context_engine.hooks]
+ingest = "~/.librefang/plugins/prefs/hooks/ingest.py"
+after_turn = "~/.librefang/plugins/prefs/hooks/after_turn.py"
+runtime = "python"
+```
+
+### 5. 重启 LibreFang
+
+```bash
+librefang start
+```
+
+下次带 `peer_id` 的消息进来时，你的 `ingest` hook 就会跑，返回的 memories 会被合并进 agent 的 context window。
+
+---
+
+## 通过 Dashboard 或 API 生成脚手架
+
+Dashboard 的 Plugins 页面有 **Create Plugin** 表单，runtime 下拉框选语言，会生成对应语言的模板（Ruby 就是 `ingest.rb`、Go 就是 `ingest.go`），已经按协议写好了。
+
+HTTP 等价调用：
+
+```bash
+curl -X POST http://127.0.0.1:4545/api/plugins/scaffold \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "my-plugin",
+    "description": "用途",
+    "runtime": "go"
+  }'
+```
+
+---
+
+## 本地测试
+
+每个 hook 本质就是一个读 stdin 写 stdout 的脚本 —— 不用启动 LibreFang 就能测：
+
+```bash
+echo '{"type":"ingest","agent_id":"test","message":"hello","peer_id":"u1"}' \
+  | python3 ~/.librefang/plugins/prefs/hooks/ingest.py
+```
+
+期望输出：
+
+```json
+{"type": "ingest_result", "memories": [...]}
+```
+
+如果脚本 hang 住，那是你没关 stdin 或者在读 stdin 以外的东西。如果打印了非 JSON 的行，只有**最后**一个能 parse 成 JSON 的行会被当作响应 —— 前面打的 log 行不影响。
+
+---
+
+## 用 Doctor 端点调试
+
+`GET /api/plugins/doctor` 扫描所有支持的 runtime，然后和已安装的插件交叉比对：
+
+```bash
+curl http://127.0.0.1:4545/api/plugins/doctor
+```
+
+```json
+{
+  "runtimes": [
+    { "runtime": "python", "launcher": "python3", "available": true,
+      "version": "Python 3.12.3", "install_hint": "..." },
+    { "runtime": "go", "launcher": null, "available": false,
+      "version": null, "install_hint": "Install Go from https://go.dev/dl/ ..." }
+  ],
+  "plugins": [
+    { "name": "prefs", "runtime": "python",
+      "runtime_available": true, "hooks_valid": true,
+      "install_hint": "..." }
+  ]
+}
+```
+
+插件莫名其妙不生效时先调这个 —— `runtime_available: false` 意味着 launcher 不在 PATH 上，`hooks_valid: false` 意味着声明的 hook 脚本在磁盘上不存在。
+
+---
+
+## 错误处理、超时与日志
+
+- **超时**：每次 hook 调用 30 秒。超了会被 kill，记 `Timeout` 错误。
+- **退出码**：非 0 退出会把脚本的 stderr 以 `warn` 级别记日志，然后用默认 context engine 的结果。
+- **空输出**：脚本 0 退出但没输出任何东西会返回 `EmptyOutput`，用默认结果。
+- **JSON 格式错**：runtime 从 stdout 最后一行往前扫，取第一个能 parse 的。都 parse 不了的话，把最后一行包成 `{ "text": "..." }` 兜底。
+- **路径穿越**：脚本路径里带 `..` 组件会在加载时被拒。
+- **环境变量洗白**：子进程只继承 PATH、HOME、LIBREFANG_*、runtime 的透传集合，以及 `allowed_env_vars` 里显式列出的变量。
+
+Hook 的 stderr 会被捕获后打印到 LibreFang 自己的日志里 —— 想打 debug log 直接往 stderr 写就行。
+
+---
+
+## Plugin vs. Skill
+
+| | Plugin | Skill |
+|---|--------|-------|
+| 自定义的对象 | 记忆召回 / 上下文组装 | 工具目录（agent 能**做**什么） |
+| 生命周期 hook | `ingest`、`after_turn` | LLM 主动调工具时 |
+| 作用域 | 每 agent，通过 `context_engine` 配 | 全局或每 agent |
+| 语言支持 | 11 个 runtime，JSON stdin/stdout | Python、WASM、Node、prompt-only、built-in |
+| 沙箱 | 环境变量洗白 + 超时 + 路径校验 | WASM 完整沙箱；Python/Node 是子进程 |
+
+要改**agent 记住什么**或做 turn 后记账，用 **plugin**。要给 agent 加**新工具**让它在对话中调用，用 **skill**。
