@@ -39,6 +39,7 @@ pub enum BackendRef {
 // ── AppEvent ────────────────────────────────────────────────────────────────
 
 /// Unified application event.
+#[allow(clippy::large_enum_variant)] // AgentLoopResult is inherently large
 pub enum AppEvent {
     /// A crossterm key press event (filtered to Press only).
     Key(KeyEvent),
@@ -448,6 +449,8 @@ pub fn spawn_daemon_stream(
             provider_not_configured: false,
             experiment_context: None,
             latency_ms: 0,
+            // TUI doesn't use the session-slice index; N/A.
+            new_messages_start: 0,
         })));
     });
 }
@@ -492,6 +495,8 @@ fn daemon_fallback(
             provider_not_configured: false,
             experiment_context: None,
             latency_ms: 0,
+            // TUI doesn't use the session-slice index; N/A.
+            new_messages_start: 0,
         })
     } else {
         Err(body["error"]
