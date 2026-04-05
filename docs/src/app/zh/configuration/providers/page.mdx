@@ -1,0 +1,46 @@
+# LLM 提供商
+
+LibreFang 内置了完整的模型目录，覆盖 **3 个原生 LLM 驱动**、**49 个提供商**、**230+ 个内置模型** 和 **23 个别名**。所有提供商最终都走三类成熟驱动之一：原生 **Anthropic** 驱动、原生 **Gemini** 驱动，或通用的 **OpenAI-compatible** 驱动。
+
+本章节按用途拆成了独立子页，便于你直接进入托管 API、本地运行时、平台集成、开发工具后端或提供商运维能力。模型目录同时支持**动态加载**：官方提供商定义会预装到 `~/.librefang/providers/`，你放进去的自定义 `*.toml` 文件会在启动时一并合并进目录。
+
+---
+
+## 目录
+
+- [托管 API](/zh/configuration/providers/hosted) -- Anthropic、OpenAI、Gemini、DeepSeek、Groq、OpenRouter、Mistral、Together、Fireworks、Perplexity、Cohere、AI21、Cerebras、SambaNova、Hugging Face、xAI
+- [本地与自托管](/zh/configuration/providers/local) -- Ollama、vLLM、LM Studio
+- [平台与托管端点](/zh/configuration/providers/platforms) -- Replicate、NVIDIA NIM、Voyage AI、Anyscale、DeepInfra、Azure OpenAI、Amazon Bedrock、Qwen (DashScope)、MiniMax、Vertex AI
+- [开发工具](/zh/configuration/providers/tools) -- Claude Code、GitHub Copilot、Aider、Claude Code CLI、Codex CLI、Gemini CLI、Qwen Code
+- [提供商管理](/zh/configuration/providers/management) -- 动态加载、模型目录、别名、路由、配额、后备、API 端点、频道命令、环境变量、安全说明
+
+---
+
+## 快速设置
+
+从零开始最快的方式：
+
+```bash
+# 选择一个提供商 - 设置对应的环境变量即可
+export GEMINI_API_KEY="your-key"        # 有免费额度
+# 或
+export GROQ_API_KEY="your-key"          # 有免费额度
+# 或
+export ANTHROPIC_API_KEY="your-key"
+# 或
+export OPENAI_API_KEY="your-key"
+```
+
+LibreFang 在启动时自动检测哪些提供商已配置 API 密钥。已认证的提供商下的所有模型会立即可用。本地提供商（Ollama、vLLM、LM Studio）无需任何密钥。
+
+对于 Gemini，`GEMINI_API_KEY` 和 `GOOGLE_API_KEY` 均可使用。
+
+---
+
+## 如何选择子页
+
+- 需要常规云端 LLM API 和 API Key 时，查看 [托管 API](/zh/configuration/providers/hosted)。
+- 模型跑在本机或你自己的推理服务器上时，查看 [本地与自托管](/zh/configuration/providers/local)。
+- 模型挂在云平台、企业集成或区域网关之后时，查看 [平台与托管端点](/zh/configuration/providers/platforms)。
+- LibreFang 对接的是本地编码助手运行时或 CLI 包装层，而不是普通模型端点时，查看 [开发工具](/zh/configuration/providers/tools)。
+- 需要看目录加载、别名、路由、成本控制，以及 REST/频道查询能力时，查看 [提供商管理](/zh/configuration/providers/management)。

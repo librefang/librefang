@@ -1,0 +1,1003 @@
+# CLI 命令参考
+
+LibreFang CLI 所有命令组的详细参考：Agent、Hand、工作流、触发器、技能、通道和配置。
+
+有关 CLI 概述、安装说明和全局选项，请参阅 [CLI 参考](/zh/integrations/cli)。有关使用示例和指南，请参阅 [CLI 示例与指南](/zh/integrations/cli/examples)。
+
+---
+
+## Agent 命令
+
+### librefang agent new
+
+从内置模板生成 Agent。
+
+```
+librefang agent new [<TEMPLATE>]
+```
+
+**参数：**
+
+| 参数 | 说明 |
+|---|---|
+| `<TEMPLATE>` | 模板名称（如 `coder`、`assistant`、`researcher`）。如果省略，将显示交互式选择器列出所有可用模板。 |
+
+**行为：**
+
+- 从以下位置发现模板：仓库 `agents/` 目录（开发构建）、`~/.librefang/agents/`（assistant 预装，其他模板从仪表板安装）、以及 `LIBREFANG_AGENTS_DIR`（环境变量覆盖）。
+- 每个模板是一个包含 `agent.toml` 清单文件的目录。
+- 守护进程模式下：发送 `POST /api/agents` 请求附带清单内容。Agent 将被持久化。
+- 独立模式下：启动进程内核。Agent 是临时的。
+
+**示例：**
+
+```bash
+# 交互式选择器
+librefang agent new
+
+# 按名称生成
+librefang agent new coder
+
+# 生成 assistant 模板
+librefang agent new assistant
+```
+
+---
+
+### librefang agent spawn
+
+从自定义清单文件生成 Agent。
+
+```
+librefang agent spawn <MANIFEST>
+```
+
+**参数：**
+
+| 参数 | 说明 |
+|---|---|
+| `<MANIFEST>` | Agent 清单 TOML 文件的路径。 |
+
+**行为：**
+
+- 读取并解析 TOML 清单文件。
+- 守护进程模式下：将原始 TOML 发送到 `POST /api/agents`。
+- 独立模式下：启动进程内核并在本地生成 Agent。
+
+**示例：**
+
+```bash
+librefang agent spawn ./my-agent/agent.toml
+```
+
+---
+
+### librefang agent list
+
+列出所有正在运行的 Agent。
+
+```
+librefang agent list [--json]
+```
+
+**选项：**
+
+| 选项 | 说明 |
+|---|---|
+| `--json` | 以 JSON 数组格式输出，便于脚本处理。 |
+
+**输出列：** ID、NAME、STATE、PROVIDER、MODEL（守护进程模式）或 ID、NAME、STATE、CREATED（进程内模式）。
+
+**示例：**
+
+```bash
+librefang agent list
+
+librefang agent list --json | jq '.[].name'
+```
+
+---
+
+### librefang agent chat
+
+与指定 Agent 启动交互式聊天会话。
+
+```
+librefang agent chat <AGENT_ID>
+```
+
+**参数：**
+
+| 参数 | 说明 |
+|---|---|
+| `<AGENT_ID>` | Agent UUID。可通过 `librefang agent list` 获取。 |
+
+**行为：**
+
+- 打开 REPL 风格的聊天循环。
+- 在 `you>` 提示符处输入消息。
+- Agent 回复显示在 `agent>` 提示符处，后跟令牌用量和迭代次数。
+- 输入 `exit`、`quit` 或按 `Ctrl+C` 结束会话。
+
+**示例：**
+
+```bash
+librefang agent chat a1b2c3d4-e5f6-7890-abcd-ef1234567890
+```
+
+---
+
+### librefang agent kill
+
+终止正在运行的 Agent。
+
+```
+librefang agent kill <AGENT_ID>
+```
+
+**参数：**
+
+| 参数 | 说明 |
+|---|---|
+| `<AGENT_ID>` | 要终止的 Agent UUID。 |
+
+**示例：**
+
+```bash
+librefang agent kill a1b2c3d4-e5f6-7890-abcd-ef1234567890
+```
+
+---
+
+## Hand 管理
+
+Hand 是自主执行模块，赋予 Agent 在真实世界中执行操作的能力 -- 浏览网页、管理文件、调用 API 等。所有 Hand 命令需要守护进程正在运行。
+
+### librefang hand list
+
+列出所有可用的 Hand（内置和已安装）。
+
+```
+librefang hand list
+```
+
+**输出列：** ID、NAME、VERSION、STATUS、DESCRIPTION。
+
+从 `~/.librefang/workspaces/hands/`（首次启动时从注册表预装）发现 Hand。用户可以从仪表板激活 Hand。
+
+---
+
+### librefang hand active
+
+显示当前活跃的 Hand 实例及其运行时状态。
+
+```
+librefang hand active
+```
+
+**输出列：** INSTANCE ID、HAND ID、AGENT、STATE、STARTED。
+
+---
+
+### librefang hand activate \<name\>
+
+激活 Hand，使其可供 Agent 使用。
+
+```
+librefang hand activate <NAME>
+```
+
+**参数：**
+
+| 参数 | 说明 |
+|---|---|
+| `<NAME>` | Hand ID（如 `clip`、`lead`、`researcher`）。 |
+
+**示例：**
+
+```bash
+librefang hand activate clip
+librefang hand activate researcher
+```
+
+---
+
+### librefang hand deactivate \<name\>
+
+停用正在运行的 Hand，停止其执行。
+
+```
+librefang hand deactivate <NAME>
+```
+
+**参数：**
+
+| 参数 | 说明 |
+|---|---|
+| `<NAME>` | 要停用的 Hand ID。 |
+
+**示例：**
+
+```bash
+librefang hand deactivate clip
+```
+
+---
+
+### librefang hand status [name]
+
+显示指定 Hand 或所有活跃 Hand 的状态。
+
+```
+librefang hand status [<NAME>]
+```
+
+**参数：**
+
+| 参数 | 说明 |
+|---|---|
+| `<NAME>` | 可选的 Hand ID。如果省略，显示所有活跃 Hand。 |
+
+**示例：**
+
+```bash
+# 显示所有活跃 Hand
+librefang hand status
+
+# 显示指定 Hand 的状态
+librefang hand status clip
+```
+
+---
+
+### librefang hand install \<path\>
+
+从包含 `HAND.toml` 清单文件的本地目录安装 Hand。
+
+```
+librefang hand install <PATH>
+```
+
+**参数：**
+
+| 参数 | 说明 |
+|---|---|
+| `<PATH>` | Hand 目录路径（必须包含 `HAND.toml`）。 |
+
+**示例：**
+
+```bash
+librefang hand install ./my-hand
+```
+
+---
+
+### librefang hand info \<name\>
+
+显示 Hand 的详细信息，包括其能力、依赖和配置。
+
+```
+librefang hand info <NAME>
+```
+
+**参数：**
+
+| 参数 | 说明 |
+|---|---|
+| `<NAME>` | Hand ID。 |
+
+**示例：**
+
+```bash
+librefang hand info clip
+```
+
+---
+
+### librefang hand check-deps \<name\>
+
+检查 Hand 所需的所有依赖是否已安装。
+
+```
+librefang hand check-deps <NAME>
+```
+
+**参数：**
+
+| 参数 | 说明 |
+|---|---|
+| `<NAME>` | Hand ID。 |
+
+**示例：**
+
+```bash
+librefang hand check-deps clip
+```
+
+---
+
+### librefang hand install-deps \<name\>
+
+安装 Hand 所需的缺失依赖。
+
+```
+librefang hand install-deps <NAME>
+```
+
+**参数：**
+
+| 参数 | 说明 |
+|---|---|
+| `<NAME>` | Hand ID。 |
+
+**示例：**
+
+```bash
+librefang hand install-deps clip
+```
+
+---
+
+### librefang hand pause \<name\>
+
+暂停正在运行的 Hand，但不完全停用。之后可以恢复运行。
+
+```
+librefang hand pause <NAME>
+```
+
+**参数：**
+
+| 参数 | 说明 |
+|---|---|
+| `<NAME>` | Hand ID 或实例 ID。 |
+
+**示例：**
+
+```bash
+librefang hand pause clip
+```
+
+---
+
+### librefang hand resume \<name\>
+
+恢复先前暂停的 Hand。
+
+```
+librefang hand resume <NAME>
+```
+
+**参数：**
+
+| 参数 | 说明 |
+|---|---|
+| `<NAME>` | Hand ID 或实例 ID。 |
+
+**示例：**
+
+```bash
+librefang hand resume clip
+```
+
+---
+
+## 工作流命令
+
+所有工作流命令需要守护进程正在运行。
+
+### librefang workflow list
+
+列出所有已注册的工作流。
+
+```
+librefang workflow list
+```
+
+**输出列：** ID、NAME、STEPS、CREATED。
+
+---
+
+### librefang workflow create
+
+从 JSON 定义文件创建工作流。
+
+```
+librefang workflow create <FILE>
+```
+
+**参数：**
+
+| 参数 | 说明 |
+|---|---|
+| `<FILE>` | 描述工作流步骤的 JSON 文件路径。 |
+
+**示例：**
+
+```bash
+librefang workflow create ./my-workflow.json
+```
+
+---
+
+### librefang workflow run
+
+通过 ID 执行工作流。
+
+```
+librefang workflow run <WORKFLOW_ID> <INPUT>
+```
+
+**参数：**
+
+| 参数 | 说明 |
+|---|---|
+| `<WORKFLOW_ID>` | 工作流 UUID。可通过 `librefang workflow list` 获取。 |
+| `<INPUT>` | 传递给工作流的输入文本。 |
+
+**示例：**
+
+```bash
+librefang workflow run abc123 "Analyze this code for security issues"
+```
+
+---
+
+## 触发器命令
+
+所有触发器命令需要守护进程正在运行。
+
+### librefang trigger list
+
+列出所有事件触发器。
+
+```
+librefang trigger list [--agent-id <ID>]
+```
+
+**选项：**
+
+| 选项 | 说明 |
+|---|---|
+| `--agent-id <ID>` | 按所属 Agent 的 UUID 筛选触发器。 |
+
+**输出列：** TRIGGER ID、AGENT ID、ENABLED、FIRES、PATTERN。
+
+---
+
+### librefang trigger create
+
+为 Agent 创建事件触发器。
+
+```
+librefang trigger create <AGENT_ID> <PATTERN_JSON> [--prompt <TEMPLATE>] [--max-fires <N>]
+```
+
+**参数：**
+
+| 参数 | 说明 |
+|---|---|
+| `<AGENT_ID>` | 拥有该触发器的 Agent 的 UUID。 |
+| `<PATTERN_JSON>` | 触发器模式，以 JSON 字符串形式提供。 |
+
+**选项：**
+
+| 选项 | 默认值 | 说明 |
+|---|---|---|
+| `--prompt <TEMPLATE>` | `"Event: {{event}}"` | 提示模板。使用 `{{event}}` 作为事件数据的占位符。 |
+| `--max-fires <N>` | `0`（无限制） | 触发器最大触发次数。 |
+
+**模式示例：**
+
+```bash
+# 在任何生命周期事件时触发
+librefang trigger create <AGENT_ID> '{"lifecycle":{}}'
+
+# 在指定 Agent 生成时触发
+librefang trigger create <AGENT_ID> '{"agent_spawned":{"name_pattern":"*"}}'
+
+# 在 Agent 终止时触发
+librefang trigger create <AGENT_ID> '{"agent_terminated":{}}'
+
+# 在所有事件时触发（限制触发 10 次）
+librefang trigger create <AGENT_ID> '{"all":{}}' --max-fires 10
+```
+
+---
+
+### librefang trigger delete
+
+通过 ID 删除触发器。
+
+```
+librefang trigger delete <TRIGGER_ID>
+```
+
+**参数：**
+
+| 参数 | 说明 |
+|---|---|
+| `<TRIGGER_ID>` | 要删除的触发器 UUID。 |
+
+---
+
+## 技能命令
+
+### librefang skill list
+
+列出所有已安装的技能。
+
+```
+librefang skill list
+```
+
+**输出列：** NAME、VERSION、TOOLS、DESCRIPTION。
+
+从 `~/.librefang/skills/`（从仪表板安装或用户自定义）加载技能。
+
+---
+
+### librefang skill install
+
+从本地目录、Git URL 或 FangHub 市场安装技能。
+
+```
+librefang skill install <SOURCE>
+```
+
+**参数：**
+
+| 参数 | 说明 |
+|---|---|
+| `<SOURCE>` | 技能名称（FangHub）、本地目录路径或 Git URL。 |
+
+**行为：**
+
+- **本地目录：** 在目录中查找 `skill.toml`。如果未找到，检查 OpenClaw 格式技能（带有 YAML frontmatter 的 SKILL.md）并自动转换。
+- **远程（FangHub）：** 从 FangHub 市场获取并安装。技能通过 SHA256 验证和提示注入扫描。
+
+**示例：**
+
+```bash
+# 从本地目录安装
+librefang skill install ./my-skill/
+
+# 从 FangHub 安装
+librefang skill install web-search
+
+# 安装 OpenClaw 格式技能
+librefang skill install ./openclaw-skill/
+```
+
+---
+
+### librefang skill remove
+
+移除已安装的技能。
+
+```
+librefang skill remove <NAME>
+```
+
+**参数：**
+
+| 参数 | 说明 |
+|---|---|
+| `<NAME>` | 要移除的技能名称。 |
+
+**示例：**
+
+```bash
+librefang skill remove web-search
+```
+
+---
+
+### librefang skill search
+
+在 FangHub 市场中搜索技能。
+
+```
+librefang skill search <QUERY>
+```
+
+**参数：**
+
+| 参数 | 说明 |
+|---|---|
+| `<QUERY>` | 搜索查询字符串。 |
+
+**示例：**
+
+```bash
+librefang skill search "docker kubernetes"
+```
+
+---
+
+### librefang skill create
+
+交互式创建新技能项目脚手架。
+
+```
+librefang skill create
+```
+
+**行为：**
+
+提示输入：
+- 技能名称
+- 描述
+- 运行时（`python`、`node` 或 `wasm`；默认为 `python`）
+
+在 `~/.librefang/skills/<name>/` 下创建目录，包含：
+- `skill.toml` -- 清单文件
+- `src/main.py`（或 `src/index.js`）-- 带有样板代码的入口文件
+
+**示例：**
+
+```bash
+librefang skill create
+# Skill name: my-tool
+# Description: A custom analysis tool
+# Runtime (python/node/wasm) [python]: python
+```
+
+---
+
+## 通道命令
+
+### librefang channel list
+
+列出已配置的通道及其状态。
+
+```
+librefang channel list
+```
+
+**输出列：** CHANNEL、ENV VAR、STATUS。
+
+检查 `config.toml` 中的通道配置部分和所需令牌的环境变量。状态为以下之一：`Ready`、`Missing env`、`Not configured`。
+
+**检查的通道：** webchat、telegram、discord、slack、whatsapp、signal、matrix、email。
+
+---
+
+### librefang channel setup
+
+通道集成的交互式设置向导。
+
+```
+librefang channel setup [<CHANNEL>]
+```
+
+**参数：**
+
+| 参数 | 说明 |
+|---|---|
+| `<CHANNEL>` | 通道名称。如果省略，显示交互式选择器。 |
+
+**支持的通道：** `telegram`、`discord`、`slack`、`whatsapp`、`email`、`signal`、`matrix`。
+
+每个向导会：
+1. 显示获取凭证的分步说明。
+2. 提示输入令牌/凭证。
+3. 将令牌保存到 `~/.librefang/.env`，并设置仅所有者权限。
+4. 将通道配置块追加到 `config.toml`（会提示确认）。
+5. 如果守护进程正在运行，提醒重启。
+
+**示例：**
+
+```bash
+# 交互式选择器
+librefang channel setup
+
+# 直接设置
+librefang channel setup telegram
+librefang channel setup discord
+librefang channel setup slack
+```
+
+---
+
+### librefang channel test
+
+通过已配置的通道发送测试消息。
+
+```
+librefang channel test <CHANNEL>
+```
+
+**参数：**
+
+| 参数 | 说明 |
+|---|---|
+| `<CHANNEL>` | 要测试的通道名称。 |
+
+需要守护进程正在运行。发送 `POST /api/channels/<channel>/test`。
+
+**示例：**
+
+```bash
+librefang channel test telegram
+```
+
+---
+
+### librefang channel enable
+
+启用通道集成。
+
+```
+librefang channel enable <CHANNEL>
+```
+
+**参数：**
+
+| 参数 | 说明 |
+|---|---|
+| `<CHANNEL>` | 要启用的通道名称。 |
+
+守护进程模式下：发送 `POST /api/channels/<channel>/enable`。无守护进程时：提示更改将在下次启动时生效。
+
+---
+
+### librefang channel disable
+
+禁用通道，但不删除其配置。
+
+```
+librefang channel disable <CHANNEL>
+```
+
+**参数：**
+
+| 参数 | 说明 |
+|---|---|
+| `<CHANNEL>` | 要禁用的通道名称。 |
+
+守护进程模式下：发送 `POST /api/channels/<channel>/disable`。无守护进程时：提示编辑 `config.toml`。
+
+---
+
+## 配置命令
+
+### librefang config show
+
+显示当前配置文件内容。
+
+```
+librefang config show
+```
+
+以文件路径作为头部注释，打印 `~/.librefang/config.toml` 的内容。
+
+---
+
+### librefang config edit
+
+在编辑器中打开配置文件。
+
+```
+librefang config edit
+```
+
+优先使用 `$EDITOR`，然后 `$VISUAL`，回退到 `notepad`（Windows）或 `vi`（Unix）。
+
+---
+
+### librefang config get
+
+通过点分隔键路径获取单个配置值。
+
+```
+librefang config get <KEY>
+```
+
+**参数：**
+
+| 参数 | 说明 |
+|---|---|
+| `<KEY>` | TOML 结构中的点分隔键路径。 |
+
+**示例：**
+
+```bash
+librefang config get default_model.provider
+# groq
+
+librefang config get api_listen
+# 127.0.0.1:4545
+
+librefang config get memory.decay_rate
+# 0.05
+```
+
+---
+
+### librefang config set
+
+通过点分隔键路径设置配置值。
+
+```
+librefang config set <KEY> <VALUE>
+```
+
+**参数：**
+
+| 参数 | 说明 |
+|---|---|
+| `<KEY>` | 点分隔键路径。 |
+| `<VALUE>` | 新值。类型根据现有值推断（整数、浮点数、布尔值或字符串）。 |
+
+**注意：** 此命令会重新序列化 TOML 文件，所有注释将被删除。
+
+**示例：**
+
+```bash
+librefang config set default_model.provider anthropic
+librefang config set default_model.model claude-sonnet-4-20250514
+librefang config set api_listen "0.0.0.0:4545"
+```
+
+---
+
+### librefang config set-key
+
+将 LLM 提供商 API 密钥保存到 `~/.librefang/.env`。
+
+```
+librefang config set-key <PROVIDER>
+```
+
+**参数：**
+
+| 参数 | 说明 |
+|---|---|
+| `<PROVIDER>` | 提供商名称（如 `groq`、`anthropic`、`openai`、`gemini`、`deepseek`、`openrouter`、`together`、`mistral`、`fireworks`、`perplexity`、`cohere`、`xai`、`brave`、`tavily`）。 |
+
+**行为：**
+
+- 交互式提示输入 API 密钥。
+- 以 `<PROVIDER_NAME>_API_KEY=<value>` 格式保存到 `~/.librefang/.env`。
+- 对提供商 API 执行在线验证测试。
+- 在 Unix 上，文件权限限制为仅所有者访问。
+
+**示例：**
+
+```bash
+librefang config set-key groq
+# Paste your groq API key: gsk_...
+# [ok] Saved GROQ_API_KEY to ~/.librefang/.env
+# Testing key... OK
+```
+
+---
+
+### librefang config delete-key
+
+从 `~/.librefang/.env` 中删除 API 密钥。
+
+```
+librefang config delete-key <PROVIDER>
+```
+
+**参数：**
+
+| 参数 | 说明 |
+|---|---|
+| `<PROVIDER>` | 提供商名称。 |
+
+**示例：**
+
+```bash
+librefang config delete-key openai
+```
+
+---
+
+### librefang config test-key
+
+使用已存储的 API 密钥测试提供商连接。
+
+```
+librefang config test-key <PROVIDER>
+```
+
+**参数：**
+
+| 参数 | 说明 |
+|---|---|
+| `<PROVIDER>` | 提供商名称。 |
+
+**行为：**
+
+- 从环境中读取 API 密钥（从 `~/.librefang/.env` 加载）。
+- 请求提供商的模型/健康检查端点。
+- 报告 `OK`（密钥已接受）或 `FAILED (401/403)`（密钥被拒绝）。
+- 失败时以退出码 1 退出。
+
+**示例：**
+
+```bash
+librefang config test-key groq
+# Testing groq (GROQ_API_KEY)... OK
+```
+
+---
+
+## 服务管理命令
+
+管理系统启动服务，使 LibreFang 在登录或重启时自动启动。
+
+### librefang service install
+
+注册平台特定的自启动服务。
+
+```
+librefang service install
+```
+
+**行为：**
+
+- **Linux：** 在 `~/.config/systemd/user/librefang.service` 创建 systemd 用户服务，然后执行 `systemctl --user daemon-reload` 和 `systemctl --user enable librefang.service`。
+- **macOS：** 在 `~/Library/LaunchAgents/ai.librefang.daemon.plist` 创建 LaunchAgent，并通过 `launchctl load` 加载。
+- **Windows：** 在 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 添加 `LibreFang` 注册表项。
+
+二进制路径通过当前运行的可执行文件自动检测。如果移动了二进制文件，重新运行 `librefang service install` 即可更新路径。
+
+**示例：**
+
+```bash
+librefang service install
+# ✓ Wrote /home/user/.config/systemd/user/librefang.service
+# ✓ Service enabled (will start on next login)
+```
+
+对于无图形界面的 Linux 服务器（无登录会话），还需要启用 lingering 以便用户服务在开机时启动：
+
+```bash
+loginctl enable-linger
+```
+
+---
+
+### librefang service uninstall
+
+移除已安装的自启动服务。
+
+```
+librefang service uninstall
+```
+
+**行为：**
+
+- **Linux：** 禁用并移除 systemd 用户服务，然后重新加载守护进程。
+- **macOS：** 卸载并移除 LaunchAgent plist 文件。
+- **Windows：** 删除注册表 Run 项。
+
+**示例：**
+
+```bash
+librefang service uninstall
+# ✓ Removed systemd user service
+```
+
+---
+
+### librefang service status
+
+检查自启动服务是否已注册并正在运行。
+
+```
+librefang service status
+```
+
+**示例：**
+
+```bash
+librefang service status
+# ✓ Systemd user service is registered
+#   Enabled: enabled
+#   Active: active
+```
