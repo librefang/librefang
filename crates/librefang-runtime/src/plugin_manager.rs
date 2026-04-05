@@ -138,6 +138,72 @@ pub fn get_plugin_info(plugin_name: &str) -> Result<PluginInfo, String> {
     })
 }
 
+/// Doctor entry for a single installed plugin.
+///
+/// Tells the user whether the plugin is structurally valid (hook scripts
+/// exist) *and* whether the runtime it asks for is usable on this host.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PluginDoctorEntry {
+    pub name: String,
+    /// Canonical runtime tag (`python`, `v`, ...). Falls back to the
+    /// dispatcher's default (`python`) for plugins that don't declare one.
+    pub runtime: String,
+    /// `true` when the declared runtime's launcher resolved on PATH
+    /// (or for `native`, always `true`).
+    pub runtime_available: bool,
+    /// `true` when every hook script declared in `plugin.toml` exists.
+    pub hooks_valid: bool,
+    /// Install hint surfaced when `runtime_available` is `false`.
+    pub install_hint: String,
+}
+
+/// Aggregate doctor report: per-runtime availability + per-plugin readiness.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DoctorReport {
+    /// Availability of every supported runtime, in stable order.
+    pub runtimes: Vec<crate::plugin_runtime::RuntimeStatus>,
+    /// One entry per installed plugin.
+    pub plugins: Vec<PluginDoctorEntry>,
+}
+
+/// Probe the environment and return a diagnostic report.
+///
+/// Spawns one subprocess per runtime (`{launcher} --version`) — caller
+/// should wrap in `tokio::task::spawn_blocking` if used from async.
+pub fn run_doctor() -> DoctorReport {
+    use crate::plugin_runtime::{check_runtime_status, PluginRuntime};
+
+    let runtimes: Vec<_> = PluginRuntime::all()
+        .iter()
+        .map(|r| check_runtime_status(*r))
+        .collect();
+
+    // Index by runtime tag so per-plugin entries can look up availability
+    // without re-probing subprocesses.
+    let availability: std::collections::HashMap<&str, (bool, &str)> = runtimes
+        .iter()
+        .map(|s| (s.runtime.as_str(), (s.available, s.install_hint.as_str())))
+        .collect();
+
+    let plugins = list_plugins()
+        .into_iter()
+        .map(|info| {
+            let runtime_kind = PluginRuntime::from_tag(info.manifest.hooks.runtime.as_deref());
+            let tag = runtime_kind.label();
+            let (available, hint) = availability.get(tag).copied().unwrap_or((false, ""));
+            PluginDoctorEntry {
+                name: info.manifest.name,
+                runtime: tag.to_string(),
+                runtime_available: available,
+                hooks_valid: info.hooks_valid,
+                install_hint: hint.to_string(),
+            }
+        })
+        .collect();
+
+    DoctorReport { runtimes, plugins }
+}
+
 /// List all installed plugins.
 pub fn list_plugins() -> Vec<PluginInfo> {
     let dir = plugins_dir();
@@ -562,6 +628,12 @@ fn hook_templates(
         R::Node => ("ingest.js", NODE_INGEST, "after_turn.js", NODE_AFTER_TURN),
         R::Deno => ("ingest.ts", DENO_INGEST, "after_turn.ts", DENO_AFTER_TURN),
         R::Go => ("ingest.go", GO_INGEST, "after_turn.go", GO_AFTER_TURN),
+        R::Ruby => ("ingest.rb", RUBY_INGEST, "after_turn.rb", RUBY_AFTER_TURN),
+        R::Bash => ("ingest.sh", BASH_INGEST, "after_turn.sh", BASH_AFTER_TURN),
+        // Bun uses TypeScript by convention; same format Deno uses.
+        R::Bun => ("ingest.ts", BUN_INGEST, "after_turn.ts", BUN_AFTER_TURN),
+        R::Php => ("ingest.php", PHP_INGEST, "after_turn.php", PHP_AFTER_TURN),
+        R::Lua => ("ingest.lua", LUA_INGEST, "after_turn.lua", LUA_AFTER_TURN),
         R::Native => (
             // For native, we scaffold a shell wrapper so the plugin works
             // out of the box; users replace the script body with a real
@@ -880,6 +952,169 @@ const NATIVE_AFTER_TURN: &str = r#"#!/bin/sh
 # Native plugin after_turn hook — replace with your binary.
 read -r _input
 printf '{"type":"ok"}\n'
+"#;
+
+// --- Ruby templates ---
+
+const RUBY_INGEST: &str = r#"# Context engine ingest hook (Ruby).
+#
+# Receives on stdin:
+#   {"type": "ingest", "agent_id": "...", "message": "..."}
+# Emits on stdout:
+#   {"type": "ingest_result", "memories": [{"content": "..."}]}
+require "json"
+
+req = JSON.parse($stdin.read)
+_agent_id = req["agent_id"]
+_message  = req["message"]
+
+# TODO: Implement your custom recall logic here.
+memories = []
+
+puts JSON.generate({ "type" => "ingest_result", "memories" => memories })
+"#;
+
+const RUBY_AFTER_TURN: &str = r#"# Context engine after_turn hook (Ruby).
+require "json"
+
+req = JSON.parse($stdin.read)
+_agent_id = req["agent_id"]
+_messages = req["messages"]
+
+# TODO: Implement your post-turn logic here.
+
+puts JSON.generate({ "type" => "ok" })
+"#;
+
+// --- Bash templates ---
+
+const BASH_INGEST: &str = r#"#!/usr/bin/env bash
+# Context engine ingest hook (Bash).
+#
+# Receives on stdin:
+#   {"type":"ingest","agent_id":"...","message":"..."}
+# Emits on stdout:
+#   {"type":"ingest_result","memories":[]}
+#
+# For non-trivial logic, pipe stdin through `jq` or call out to a helper binary.
+set -euo pipefail
+
+_input=$(cat)
+# TODO: parse "$_input" and build your recall result.
+printf '{"type":"ingest_result","memories":[]}\n'
+"#;
+
+const BASH_AFTER_TURN: &str = r#"#!/usr/bin/env bash
+# Context engine after_turn hook (Bash).
+set -euo pipefail
+
+_input=$(cat)
+# TODO: persist state, update indexes, etc.
+printf '{"type":"ok"}\n'
+"#;
+
+// --- Bun templates (TypeScript via Bun) ---
+
+const BUN_INGEST: &str = r#"// Context engine ingest hook (Bun / TypeScript).
+//
+// Receives on stdin:
+//   {"type": "ingest", "agent_id": "...", "message": "..."}
+// Emits on stdout:
+//   {"type": "ingest_result", "memories": [{"content": "..."}]}
+//
+// Run with: `bun run ingest.ts`
+
+interface IngestRequest {
+  type: "ingest";
+  agent_id: string;
+  message: string;
+}
+
+interface Memory { content: string }
+
+const input = await Bun.stdin.text();
+const req = JSON.parse(input) as IngestRequest;
+void req.agent_id;
+void req.message;
+
+// TODO: Implement your custom recall logic here.
+const memories: Memory[] = [];
+
+console.log(JSON.stringify({ type: "ingest_result", memories }));
+"#;
+
+const BUN_AFTER_TURN: &str = r#"// Context engine after_turn hook (Bun / TypeScript).
+const input = await Bun.stdin.text();
+const _req = JSON.parse(input);
+
+// TODO: Implement your post-turn logic here.
+
+console.log(JSON.stringify({ type: "ok" }));
+"#;
+
+// --- PHP templates ---
+
+const PHP_INGEST: &str = r#"<?php
+// Context engine ingest hook (PHP).
+//
+// Receives on stdin:
+//   {"type": "ingest", "agent_id": "...", "message": "..."}
+// Emits on stdout:
+//   {"type": "ingest_result", "memories": [{"content": "..."}]}
+
+$raw = stream_get_contents(STDIN);
+$req = json_decode($raw, true);
+$_agentId = $req["agent_id"] ?? null;
+$_message = $req["message"] ?? null;
+
+// TODO: Implement your custom recall logic here.
+$memories = [];
+
+echo json_encode(["type" => "ingest_result", "memories" => $memories]), "\n";
+"#;
+
+const PHP_AFTER_TURN: &str = r#"<?php
+// Context engine after_turn hook (PHP).
+$raw = stream_get_contents(STDIN);
+$_req = json_decode($raw, true);
+
+// TODO: Implement your post-turn logic here.
+
+echo json_encode(["type" => "ok"]), "\n";
+"#;
+
+// --- Lua templates ---
+
+const LUA_INGEST: &str = r#"-- Context engine ingest hook (Lua).
+--
+-- Receives on stdin:
+--   {"type": "ingest", "agent_id": "...", "message": "..."}
+-- Emits on stdout:
+--   {"type": "ingest_result", "memories": [{"content": "..."}]}
+--
+-- Requires a JSON library on LUA_PATH (`luarocks install dkjson`).
+local json = require("dkjson")
+
+local raw = io.read("*a")
+local req = json.decode(raw)
+local _agent_id = req.agent_id
+local _message  = req.message
+
+-- TODO: Implement your custom recall logic here.
+local memories = {}
+
+io.write(json.encode({ type = "ingest_result", memories = memories }), "\n")
+"#;
+
+const LUA_AFTER_TURN: &str = r#"-- Context engine after_turn hook (Lua).
+local json = require("dkjson")
+
+local raw = io.read("*a")
+local _req = json.decode(raw)
+
+-- TODO: Implement your post-turn logic here.
+
+io.write(json.encode({ type = "ok" }), "\n")
 "#;
 
 /// Install Python requirements for a plugin.

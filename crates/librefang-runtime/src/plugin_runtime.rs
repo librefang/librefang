@@ -52,6 +52,16 @@ pub enum PluginRuntime {
     Deno,
     /// `go run script.go` — compile-and-run a single Go file.
     Go,
+    /// `ruby script.rb`
+    Ruby,
+    /// `bash script.sh` — portable shell scripts without needing an exec bit.
+    Bash,
+    /// `bun run script.ts` — modern JS/TS runtime.
+    Bun,
+    /// `php script.php` — CLI PHP.
+    Php,
+    /// `lua script.lua`
+    Lua,
 }
 
 impl PluginRuntime {
@@ -65,10 +75,15 @@ impl PluginRuntime {
             Some("node") | Some("nodejs") | Some("js") => Self::Node,
             Some("deno") | Some("ts") | Some("typescript") => Self::Deno,
             Some("go") | Some("golang") => Self::Go,
+            Some("ruby") | Some("rb") => Self::Ruby,
+            Some("bash") | Some("sh") | Some("shell") => Self::Bash,
+            Some("bun") => Self::Bun,
+            Some("php") => Self::Php,
+            Some("lua") => Self::Lua,
             Some(other) => {
                 warn!(
                     "Unknown plugin runtime '{other}', falling back to 'python'. \
-                     Valid values: python, native, v, node, deno, go."
+                     Valid values: python, native, v, node, deno, go, ruby, bash, bun, php, lua."
                 );
                 Self::Python
             }
@@ -84,6 +99,11 @@ impl PluginRuntime {
             Self::Node => "node",
             Self::Deno => "deno",
             Self::Go => "go",
+            Self::Ruby => "ruby",
+            Self::Bash => "bash",
+            Self::Bun => "bun",
+            Self::Php => "php",
+            Self::Lua => "lua",
         }
     }
 
@@ -91,6 +111,144 @@ impl PluginRuntime {
     /// bit (only `Native` does — everything else is fed to an interpreter).
     pub fn requires_executable_bit(&self) -> bool {
         matches!(self, Self::Native)
+    }
+
+    /// Canonical launcher binary to probe on PATH. `Native` has no launcher
+    /// (the script *is* the binary), so it returns `None`.
+    pub fn launcher_binary(&self) -> Option<&'static str> {
+        match self {
+            // Python has a fallback chain (python3 → python → py). The doctor
+            // probes all three so a host with only `python` still reports OK.
+            Self::Python => Some("python3"),
+            Self::Native => None,
+            Self::V => Some("v"),
+            Self::Node => Some("node"),
+            Self::Deno => Some("deno"),
+            Self::Go => Some("go"),
+            Self::Ruby => Some("ruby"),
+            Self::Bash => Some("bash"),
+            Self::Bun => Some("bun"),
+            Self::Php => Some("php"),
+            Self::Lua => Some("lua"),
+        }
+    }
+
+    /// Install hint shown when a runtime's launcher is missing.
+    pub fn install_hint(&self) -> &'static str {
+        match self {
+            Self::Python => "Install Python 3 from https://www.python.org/downloads/ or your OS package manager",
+            Self::Native => "Native runtimes have no launcher — make sure the script is executable",
+            Self::V => "Install V from https://vlang.io/#install (`v` must be on PATH)",
+            Self::Node => "Install Node.js from https://nodejs.org/ (or via nvm/fnm/volta)",
+            Self::Deno => "Install Deno from https://deno.com/ (`curl -fsSL https://deno.land/install.sh | sh`)",
+            Self::Go => "Install Go from https://go.dev/dl/ (`go` must be on PATH)",
+            Self::Ruby => "Install Ruby from https://www.ruby-lang.org/en/downloads/ (or via rbenv/rvm/asdf)",
+            Self::Bash => "Install bash via your OS package manager (pre-installed on most Unix-like systems)",
+            Self::Bun => "Install Bun from https://bun.sh/ (`curl -fsSL https://bun.sh/install | bash`)",
+            Self::Php => "Install PHP from https://www.php.net/downloads.php or your OS package manager",
+            Self::Lua => "Install Lua from https://www.lua.org/download.html or your OS package manager",
+        }
+    }
+
+    /// All runtime variants, in a stable order (useful for diagnostics).
+    pub fn all() -> &'static [Self] {
+        &[
+            Self::Python,
+            Self::Native,
+            Self::V,
+            Self::Node,
+            Self::Deno,
+            Self::Go,
+            Self::Ruby,
+            Self::Bash,
+            Self::Bun,
+            Self::Php,
+            Self::Lua,
+        ]
+    }
+}
+
+/// Availability + version info for a single runtime on this host.
+///
+/// Returned by [`check_runtime_status`] and aggregated into the doctor
+/// endpoint. `Native` is always reported as available — nothing to probe.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RuntimeStatus {
+    /// Canonical runtime tag (`python`, `native`, `v`, ...).
+    pub runtime: String,
+    /// Launcher binary actually resolved on PATH, if any.
+    pub launcher: Option<String>,
+    /// `true` if the launcher was found and responded to `--version`.
+    pub available: bool,
+    /// First non-empty line of the launcher's `--version` output, trimmed.
+    pub version: Option<String>,
+    /// Human-facing install hint. Empty for `Native`.
+    pub install_hint: String,
+}
+
+/// Probe one runtime by shelling out to `{launcher} --version`.
+///
+/// Blocking — call from `spawn_blocking` if invoking from an async handler.
+/// Cheap enough (<100ms per launcher on a warm cache) that the doctor
+/// endpoint probes every runtime on every call without caching.
+pub fn check_runtime_status(runtime: PluginRuntime) -> RuntimeStatus {
+    let tag = runtime.label().to_string();
+    let hint = runtime.install_hint().to_string();
+
+    // Native has no launcher — report as available unconditionally.
+    let Some(primary) = runtime.launcher_binary() else {
+        return RuntimeStatus {
+            runtime: tag,
+            launcher: None,
+            available: true,
+            version: None,
+            install_hint: hint,
+        };
+    };
+
+    // Python gets a fallback chain (python3 → python → py) to match
+    // `find_python_interpreter`'s discovery path.
+    let candidates: &[&str] = match runtime {
+        PluginRuntime::Python => &["python3", "python", "py"],
+        _ => std::slice::from_ref(&primary),
+    };
+
+    for candidate in candidates {
+        match std::process::Command::new(candidate)
+            .arg("--version")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output()
+        {
+            Ok(output) if output.status.success() => {
+                // `--version` may write to stdout OR stderr (e.g. old python2).
+                let raw = if !output.stdout.is_empty() {
+                    output.stdout
+                } else {
+                    output.stderr
+                };
+                let version = String::from_utf8_lossy(&raw)
+                    .lines()
+                    .find(|l| !l.trim().is_empty())
+                    .map(|l| l.trim().to_string());
+                return RuntimeStatus {
+                    runtime: tag,
+                    launcher: Some((*candidate).to_string()),
+                    available: true,
+                    version,
+                    install_hint: hint,
+                };
+            }
+            _ => continue,
+        }
+    }
+
+    RuntimeStatus {
+        runtime: tag,
+        launcher: None,
+        available: false,
+        version: None,
+        install_hint: hint,
     }
 }
 
@@ -190,6 +348,14 @@ fn build_command(
             "go".to_string(),
             vec!["run".to_string(), script_path.to_string()],
         )),
+        PluginRuntime::Ruby => Ok(("ruby".to_string(), vec![script_path.to_string()])),
+        PluginRuntime::Bash => Ok(("bash".to_string(), vec![script_path.to_string()])),
+        PluginRuntime::Bun => Ok((
+            "bun".to_string(),
+            vec!["run".to_string(), script_path.to_string()],
+        )),
+        PluginRuntime::Php => Ok(("php".to_string(), vec![script_path.to_string()])),
+        PluginRuntime::Lua => Ok(("lua".to_string(), vec![script_path.to_string()])),
     }
 }
 
@@ -210,6 +376,16 @@ fn runtime_passthrough_vars(runtime: PluginRuntime) -> &'static [&'static str] {
         PluginRuntime::Deno => &["DENO_DIR"],
         // Go: toolchain + module cache.
         PluginRuntime::Go => &["GOPATH", "GOMODCACHE", "GOCACHE"],
+        // Ruby: load path + gem dirs.
+        PluginRuntime::Ruby => &["RUBYLIB", "RUBYOPT", "GEM_HOME", "GEM_PATH"],
+        // Bash: nothing beyond baseline — scripts read their own env.
+        PluginRuntime::Bash => &[],
+        // Bun: install + dep cache location.
+        PluginRuntime::Bun => &["BUN_INSTALL"],
+        // PHP: INI scan dir (user-level php.ini).
+        PluginRuntime::Php => &["PHP_INI_SCAN_DIR"],
+        // Lua: module search paths.
+        PluginRuntime::Lua => &["LUA_PATH", "LUA_CPATH"],
         // Native binaries get nothing runtime-specific — any needed env
         // has to be listed in `config.allowed_env_vars`.
         PluginRuntime::Native => &[],
@@ -444,7 +620,21 @@ mod tests {
 
     #[test]
     fn from_tag_unknown_falls_back_to_python() {
-        assert_eq!(PluginRuntime::from_tag(Some("ruby")), PluginRuntime::Python);
+        assert_eq!(
+            PluginRuntime::from_tag(Some("brainfuck")),
+            PluginRuntime::Python
+        );
+    }
+
+    #[test]
+    fn from_tag_new_runtimes() {
+        assert_eq!(PluginRuntime::from_tag(Some("ruby")), PluginRuntime::Ruby);
+        assert_eq!(PluginRuntime::from_tag(Some("rb")), PluginRuntime::Ruby);
+        assert_eq!(PluginRuntime::from_tag(Some("bash")), PluginRuntime::Bash);
+        assert_eq!(PluginRuntime::from_tag(Some("sh")), PluginRuntime::Bash);
+        assert_eq!(PluginRuntime::from_tag(Some("bun")), PluginRuntime::Bun);
+        assert_eq!(PluginRuntime::from_tag(Some("php")), PluginRuntime::Php);
+        assert_eq!(PluginRuntime::from_tag(Some("lua")), PluginRuntime::Lua);
     }
 
     #[test]

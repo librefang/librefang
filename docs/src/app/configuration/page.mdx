@@ -2577,7 +2577,7 @@ engine = "default"
 [context_engine.hooks]
 # ingest = "~/.librefang/scripts/my_recall.py"
 # after_turn = "~/.librefang/scripts/my_indexer.py"
-# runtime = "python"   # python (default) | v | node | deno | go | native
+# runtime = "python"   # python (default) | native | v | node | deno | go | ruby | bash | bun | php | lua
 
 [[context_engine.plugin_registries]]
 name = "Official"
@@ -2590,7 +2590,7 @@ github_repo = "librefang/librefang-registry"
 | `plugin` | string or null | `null` | Plugin name. Resolves to `~/.librefang/plugins/<name>/plugin.toml`. Takes precedence over manual `hooks` if set. |
 | `hooks.ingest` | string or null | `null` | Script path for the `ingest` hook (called on new user message). |
 | `hooks.after_turn` | string or null | `null` | Script path for the `after_turn` hook (called after each completed turn). |
-| `hooks.runtime` | string or null | `"python"` | Which launcher runs the hook scripts. Supported: `python`, `v`, `node`, `deno`, `go`, `native` (exec a pre-compiled binary). Unknown values fall back to `python`. |
+| `hooks.runtime` | string or null | `"python"` | Which launcher runs the hook scripts. Supported: `python`, `native` (exec a pre-compiled binary), `v`, `node`, `deno`, `go`, `ruby`, `bash`, `bun`, `php`, `lua`. Unknown values fall back to `python` with a warning. |
 | `plugin_registries` | list of objects | Official registry | Plugin registries (GitHub `owner/repo`) to browse for installable plugins. |
 
 Hooks speak a language-agnostic JSON-over-stdin/stdout protocol — pick the runtime that matches your script:
@@ -2606,6 +2606,41 @@ runtime = "go"
 ingest = "~/.librefang/plugins/fast-recall/hooks/ingest"
 runtime = "native"
 ```
+
+#### Checking runtime availability
+
+Call `GET /api/plugins/doctor` to probe every runtime on the host and see which ones are missing — the response includes each runtime's detected version and an install hint. It also cross-references installed plugins and flags any whose declared runtime is not usable on this host.
+
+#### Runtimes in the official Docker image
+
+The official image (`node:lts-bookworm-slim` base) ships with **`python`, `node`, `bash`, `native`** ready to go. Other runtimes are not bundled to keep the image small — if you need them, extend the image with one of these snippets:
+
+```dockerfile
+# V
+RUN git clone --depth 1 https://github.com/vlang/v /opt/v \
+    && make -C /opt/v && ln -s /opt/v/v /usr/local/bin/v
+
+# Deno
+RUN curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh
+
+# Go
+RUN curl -fsSL https://go.dev/dl/go1.23.0.linux-amd64.tar.gz | tar -C /usr/local -xz \
+    && ln -s /usr/local/go/bin/go /usr/local/bin/go
+
+# Ruby
+RUN apt-get update && apt-get install -y --no-install-recommends ruby && rm -rf /var/lib/apt/lists/*
+
+# Bun
+RUN curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash
+
+# PHP
+RUN apt-get update && apt-get install -y --no-install-recommends php-cli && rm -rf /var/lib/apt/lists/*
+
+# Lua (with dkjson for the Lua scaffold template)
+RUN apt-get update && apt-get install -y --no-install-recommends lua5.4 lua-dkjson && rm -rf /var/lib/apt/lists/*
+```
+
+If a plugin's declared runtime is not on PATH, the hook returns a `LauncherNotFound` error with the install hint — existing plugins keep running, only the misconfigured one is affected.
 
 ---
 

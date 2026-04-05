@@ -348,10 +348,15 @@ export function PluginsPage() {
             <label className="text-[10px] font-bold text-text-dim uppercase">{t("plugins.runtime", { defaultValue: "Runtime" })}</label>
             <select value={scaffoldRuntime} onChange={e => setScaffoldRuntime(e.target.value)} className={inputClass}>
               <option value="python">Python</option>
-              <option value="v">V (vlang)</option>
               <option value="node">Node.js</option>
               <option value="deno">Deno (TypeScript)</option>
+              <option value="bun">Bun (TypeScript)</option>
               <option value="go">Go</option>
+              <option value="v">V (vlang)</option>
+              <option value="ruby">Ruby</option>
+              <option value="php">PHP</option>
+              <option value="lua">Lua</option>
+              <option value="bash">Bash</option>
               <option value="native">Native binary</option>
             </select>
           </div>

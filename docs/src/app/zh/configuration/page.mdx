@@ -2576,7 +2576,7 @@ engine = "default"
 [context_engine.hooks]
 # ingest = "~/.librefang/scripts/my_recall.py"
 # after_turn = "~/.librefang/scripts/my_indexer.py"
-# runtime = "python"   # python（默认）| v | node | deno | go | native
+# runtime = "python"   # python（默认）| native | v | node | deno | go | ruby | bash | bun | php | lua
 
 [[context_engine.plugin_registries]]
 name = "Official"
@@ -2589,7 +2589,7 @@ github_repo = "librefang/librefang-registry"
 | `plugin` | string 或 null | `null` | 插件名称。解析为 `~/.librefang/plugins/<name>/plugin.toml`。设置时优先于手动 `hooks`。 |
 | `hooks.ingest` | string 或 null | `null` | `ingest` 钩子的脚本路径（在收到新用户消息时调用）。 |
 | `hooks.after_turn` | string 或 null | `null` | `after_turn` 钩子的脚本路径（在每轮对话完成后调用）。 |
-| `hooks.runtime` | string 或 null | `"python"` | 运行钩子脚本的启动器。可选：`python`、`v`、`node`、`deno`、`go`、`native`（直接执行预编译二进制）。未知值回退到 `python`。 |
+| `hooks.runtime` | string 或 null | `"python"` | 运行钩子脚本的启动器。可选：`python`、`native`（直接执行预编译二进制）、`v`、`node`、`deno`、`go`、`ruby`、`bash`、`bun`、`php`、`lua`。未知值回退到 `python` 并打印 warning。 |
 | `plugin_registries` | list of objects | 官方注册表 | 插件注册表（GitHub `owner/repo`），用于浏览可安装的插件。 |
 
 钩子脚本使用语言无关的 JSON-over-stdin/stdout 协议 —— 根据脚本选对应的 runtime：
@@ -2605,6 +2605,41 @@ runtime = "go"
 ingest = "~/.librefang/plugins/fast-recall/hooks/ingest"
 runtime = "native"
 ```
+
+#### 检查 runtime 可用性
+
+调用 `GET /api/plugins/doctor` 会扫描主机上所有支持的 runtime，返回每个 runtime 检测到的版本和缺失时的安装提示，并把已安装的插件和它们声明的 runtime 对照起来，标出哪些插件因为 runtime 缺失无法运行。
+
+#### 官方 Docker 镜像里的 runtime
+
+官方镜像（基于 `node:lts-bookworm-slim`）默认带了 **`python`、`node`、`bash`、`native`**，开箱即用。其他 runtime 为了控制镜像体积没打包，需要的话自己 `FROM` 后 extend：
+
+```dockerfile
+# V
+RUN git clone --depth 1 https://github.com/vlang/v /opt/v \
+    && make -C /opt/v && ln -s /opt/v/v /usr/local/bin/v
+
+# Deno
+RUN curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh
+
+# Go
+RUN curl -fsSL https://go.dev/dl/go1.23.0.linux-amd64.tar.gz | tar -C /usr/local -xz \
+    && ln -s /usr/local/go/bin/go /usr/local/bin/go
+
+# Ruby
+RUN apt-get update && apt-get install -y --no-install-recommends ruby && rm -rf /var/lib/apt/lists/*
+
+# Bun
+RUN curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash
+
+# PHP
+RUN apt-get update && apt-get install -y --no-install-recommends php-cli && rm -rf /var/lib/apt/lists/*
+
+# Lua（Lua 脚手架模板用到 dkjson）
+RUN apt-get update && apt-get install -y --no-install-recommends lua5.4 lua-dkjson && rm -rf /var/lib/apt/lists/*
+```
+
+如果插件声明的 runtime 不在 PATH 上，对应的 hook 会返回 `LauncherNotFound` 错误并附上安装提示 —— 其他插件继续正常运行，只有配置不对的那个受影响。
 
 ---
 

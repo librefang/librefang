@@ -20,6 +20,7 @@ pub fn router() -> axum::Router<Arc<AppState>> {
         .route("/plugins/install", axum::routing::post(install_plugin))
         .route("/plugins/uninstall", axum::routing::post(uninstall_plugin))
         .route("/plugins/scaffold", axum::routing::post(scaffold_plugin))
+        .route("/plugins/doctor", axum::routing::get(plugin_doctor))
         .route("/plugins/{name}", axum::routing::get(get_plugin))
         .route(
             "/plugins/{name}/install-deps",
@@ -272,6 +273,33 @@ pub async fn scaffold_plugin(Json(body): Json<serde_json::Value>) -> impl IntoRe
             (status, Json(serde_json::json!({"error": e})))
         }
     }
+}
+
+/// GET /api/plugins/doctor — Diagnose runtime availability + per-plugin readiness.
+///
+/// Probes every supported runtime (`python`, `node`, `go`, ...) for its
+/// launcher on PATH, then cross-references with every installed plugin to
+/// flag which ones will fail at hook time because their runtime is missing.
+#[utoipa::path(
+    get,
+    path = "/api/plugins/doctor",
+    tag = "plugins",
+    responses(
+        (status = 200, description = "Runtime availability + per-plugin diagnostics", body = serde_json::Value)
+    )
+)]
+pub async fn plugin_doctor() -> impl IntoResponse {
+    // `run_doctor` spawns subprocesses — keep it off the async runtime.
+    let report = tokio::task::spawn_blocking(librefang_runtime::plugin_manager::run_doctor)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::error!(error = %e, "plugin doctor task panicked");
+            librefang_runtime::plugin_manager::DoctorReport {
+                runtimes: Vec::new(),
+                plugins: Vec::new(),
+            }
+        });
+    Json(report)
 }
 
 /// POST /api/plugins/:name/install-deps — Install Python dependencies for a plugin.
