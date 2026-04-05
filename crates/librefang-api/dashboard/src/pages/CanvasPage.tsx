@@ -28,6 +28,7 @@ import { Card } from "../components/ui/Card";
 import { ScheduleModal } from "../components/ui/ScheduleModal";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
+import { InlineEmpty } from "../components/ui/InlineEmpty";
 import { useUIStore } from "../lib/store";
 import {
   Play, Save, Trash2, Plus, FolderOpen, Loader2,
@@ -377,9 +378,10 @@ function TemplateBrowser({
                 <Loader2 className="w-5 h-5 animate-spin text-brand" />
               </div>
             ) : templates.length === 0 ? (
-              <div className="text-center py-12">
-                <p className="text-xs text-text-dim">{t("canvas.no_templates")}</p>
-              </div>
+              <InlineEmpty
+                icon={<LayoutTemplate className="w-5 h-5" />}
+                message={t("canvas.no_templates")}
+              />
             ) : (
               <div className="px-5 pb-4 grid gap-2">
                 {templates.map(tmpl => (
