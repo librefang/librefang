@@ -8,6 +8,8 @@ import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
 import { PageHeader } from "../components/ui/PageHeader";
 import { ListSkeleton } from "../components/ui/Skeleton";
+import { EmptyState } from "../components/ui/EmptyState";
+import { useCreateShortcut } from "../lib/useCreateShortcut";
 import { useUIStore } from "../lib/store";
 import {
   Cpu, Search, Check, X, Eye, EyeOff, Wrench, Zap, AlertCircle, Lock, Plus, Trash2, Loader2, Sparkles
@@ -25,6 +27,7 @@ export function ModelsPage() {
   const [availableOnly, setAvailableOnly] = useState(false);
   const [showAdd, setShowAdd] = useState(false);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  useCreateShortcut(() => setShowAdd(true));
   const [showHidden, setShowHidden] = useState(false);
   const hiddenModelKeys = useUIStore((s) => s.hiddenModelKeys);
   const hideModelAction = useUIStore((s) => s.hideModel);
@@ -190,8 +193,10 @@ export function ModelsPage() {
         actions={
           <div className="flex items-center gap-2">
             {allModels.length > 0 && <Badge variant="brand">{totalAvailable} / {allModels.length} {t("models.available")}</Badge>}
-            <Button variant="primary" onClick={() => setShowAdd(true)}>
-              <Plus className="w-4 h-4" /> {t("models.add_model")}
+            <Button variant="primary" onClick={() => setShowAdd(true)} title={t("models.add_model") + " (n)"}>
+              <Plus className="w-4 h-4" />
+              <span>{t("models.add_model")}</span>
+              <kbd className="hidden sm:inline-flex h-5 min-w-[20px] items-center justify-center rounded border border-white/30 bg-white/10 px-1 text-[9px] font-mono font-semibold">n</kbd>
             </Button>
           </div>
         }
@@ -209,7 +214,8 @@ export function ModelsPage() {
         <div className="flex-1 min-w-[160px] sm:min-w-[200px] max-w-sm">
           <Input value={search} onChange={e => setSearch(e.target.value)}
             placeholder={t("models.search_placeholder")}
-            leftIcon={<Search className="h-4 w-4" />} />
+            leftIcon={<Search className="h-4 w-4" />}
+            data-shortcut-search />
         </div>
 
         <select value={providerFilter} onChange={e => setProviderFilter(e.target.value)}
@@ -254,10 +260,10 @@ export function ModelsPage() {
       {modelsQuery.isLoading ? (
         <ListSkeleton rows={5} />
       ) : filtered.length === 0 ? (
-        <div className="text-center py-16">
-          <Cpu className="w-10 h-10 text-text-dim/20 mx-auto mb-3" />
-          <p className="text-sm text-text-dim">{allModels.length === 0 ? t("models.no_models") : t("models.no_results")}</p>
-        </div>
+        <EmptyState
+          icon={<Cpu className="w-7 h-7" />}
+          title={allModels.length === 0 ? t("models.no_models") : t("models.no_results")}
+        />
       ) : (
         <div className="rounded-2xl border border-border-subtle overflow-hidden overflow-x-auto">
           <div className="grid grid-cols-[minmax(160px,1fr)_100px_80px_80px_80px_50px_50px_50px_80px] min-w-[780px] gap-3 px-5 py-3 bg-main text-[11px] font-bold text-text-dim/60 uppercase">

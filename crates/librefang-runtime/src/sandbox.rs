@@ -219,10 +219,14 @@ impl WasmSandbox {
             .call(&mut store, input_bytes.len() as i32)
             .map_err(|e| SandboxError::AbiError(format!("alloc call failed: {e}")))?;
 
-        // Write input into guest memory
+        // Write input into guest memory. Use checked_add so a malicious or
+        // buggy guest returning an out-of-range alloc pointer can't wrap
+        // the bounds check (reachable on 32-bit hosts, defensive on 64-bit).
         let mem_data = memory.data_mut(&mut store);
         let start = input_ptr as usize;
-        let end = start + input_bytes.len();
+        let end = start.checked_add(input_bytes.len()).ok_or_else(|| {
+            SandboxError::AbiError("Input pointer + length overflows usize".into())
+        })?;
         if end > mem_data.len() {
             return Err(SandboxError::AbiError("Input exceeds memory bounds".into()));
         }
@@ -251,14 +255,19 @@ impl WasmSandbox {
         let result_ptr = (packed >> 32) as usize;
         let result_len = (packed & 0xFFFF_FFFF) as usize;
 
-        // Read output JSON from guest memory
+        // Read output JSON from guest memory. checked_add so a malicious
+        // or buggy guest can't wrap `ptr + len` and silently pass the
+        // bounds check (reachable on 32-bit hosts; defensive on 64-bit).
         let mem_data = memory.data(&store);
-        if result_ptr + result_len > mem_data.len() {
+        let end = result_ptr.checked_add(result_len).ok_or_else(|| {
+            SandboxError::AbiError("Result pointer + length overflows usize".into())
+        })?;
+        if end > mem_data.len() {
             return Err(SandboxError::AbiError(
                 "Result pointer out of bounds".into(),
             ));
         }
-        let output_bytes = &mem_data[result_ptr..result_ptr + result_len];
+        let output_bytes = &mem_data[result_ptr..end];
 
         let output: serde_json::Value = serde_json::from_slice(output_bytes)
             .map_err(|e| SandboxError::AbiError(format!("Invalid JSON output from guest: {e}")))?;
