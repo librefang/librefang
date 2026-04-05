@@ -23,7 +23,7 @@
 
 use crate::report::{ItemKind, MigrateItem, MigrationReport, SkippedItem};
 use crate::{MigrateError, MigrateOptions};
-use librefang_types::config::DEFAULT_API_LISTEN;
+use librefang_types::config::{CONFIG_VERSION, DEFAULT_API_LISTEN};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tracing::{info, warn};
@@ -482,11 +482,18 @@ struct LegacyYamlChannelConfig {
 // ---------------------------------------------------------------------------
 
 /// LibreFang config.toml structure for serialization.
+///
+/// This is a minimal subset of `librefang_types::config::KernelConfig` — the
+/// kernel's `#[serde(default)]` on every field means any LibreFang struct field
+/// we omit will simply take its default value at load time. We only emit the
+/// fields carried over from OpenClaw plus `config_version` so the kernel
+/// recognises this as an up-to-date file and skips the versioned-migration step.
 #[derive(Serialize)]
 struct LibreFangConfig {
+    config_version: u32,
+    api_listen: String,
     default_model: LibreFangModelConfig,
     memory: LibreFangMemorySection,
-    network: LibreFangNetworkSection,
     #[serde(skip_serializing_if = "Option::is_none")]
     channels: Option<toml::Value>,
 }
@@ -503,11 +510,6 @@ struct LibreFangModelConfig {
 #[derive(Serialize)]
 struct LibreFangMemorySection {
     decay_rate: f32,
-}
-
-#[derive(Serialize)]
-struct LibreFangNetworkSection {
-    listen_addr: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -565,59 +567,68 @@ fn map_dm_policy(oc: &str) -> &'static str {
 }
 
 /// Map OpenClaw group policy to LibreFang group policy string.
+///
+/// LibreFang `GroupPolicy` variants: `all | mention_only | commands_only | ignore`.
 fn map_group_policy(oc: &str) -> &'static str {
     match oc.to_lowercase().as_str() {
-        "open" => "respond",
+        "open" | "all" => "all",
         "mention" | "mention_only" => "mention_only",
-        "disabled" => "ignore",
-        _ => "respond",
+        "commands" | "commands_only" | "slash_only" => "commands_only",
+        "disabled" | "ignore" => "ignore",
+        _ => "mention_only",
     }
 }
 
 /// Build a TOML table for a channel with the given fields and optional overrides.
+///
+/// The returned table has the shape:
+/// ```toml
+/// { ...fields, overrides = { dm_policy, group_policy } }
+/// ```
+///
+/// Allow-lists must be written by the caller into the channel-specific
+/// top-level field (e.g. `allowed_users`, `allowed_guilds`, `allowed_channels`),
+/// because `ChannelOverrides` has no `allowed_users` field.
 fn build_channel_table(
     fields: Vec<(&str, toml::Value)>,
     dm_policy: Option<&str>,
     group_policy: Option<&str>,
-    allow_from: Option<&serde_json::Value>,
 ) -> toml::Value {
     let mut table = toml::map::Map::new();
     for (key, val) in fields {
         table.insert(key.to_string(), val);
     }
 
-    let allow_list = allow_from.map(extract_string_list).unwrap_or_default();
-
-    // Add overrides sub-table if any policy is set
-    let has_overrides = dm_policy.is_some() || group_policy.is_some() || !allow_list.is_empty();
-
+    let has_overrides = dm_policy.is_some() || group_policy.is_some();
     if has_overrides {
         let mut overrides = toml::map::Map::new();
         if let Some(dp) = dm_policy {
-            let mapped = map_dm_policy(dp);
             overrides.insert(
                 "dm_policy".to_string(),
-                toml::Value::String(mapped.to_string()),
+                toml::Value::String(map_dm_policy(dp).to_string()),
             );
         }
         if let Some(gp) = group_policy {
-            let mapped = map_group_policy(gp);
             overrides.insert(
                 "group_policy".to_string(),
-                toml::Value::String(mapped.to_string()),
+                toml::Value::String(map_group_policy(gp).to_string()),
             );
-        }
-        if !allow_list.is_empty() {
-            let arr: Vec<toml::Value> = allow_list
-                .iter()
-                .map(|u| toml::Value::String(u.clone()))
-                .collect();
-            overrides.insert("allowed_users".to_string(), toml::Value::Array(arr));
         }
         table.insert("overrides".to_string(), toml::Value::Table(overrides));
     }
 
     toml::Value::Table(table)
+}
+
+/// Convert an OpenClaw `allow_from` list into a TOML array of strings.
+/// Returns `None` if the list is empty or not present.
+fn allow_from_to_toml_array(allow_from: Option<&serde_json::Value>) -> Option<toml::Value> {
+    let list = allow_from.map(extract_string_list).unwrap_or_default();
+    if list.is_empty() {
+        return None;
+    }
+    let arr: Vec<toml::Value> = list.into_iter().map(toml::Value::String).collect();
+    Some(toml::Value::Array(arr))
 }
 
 /// Split an OpenClaw model reference like `"provider/model"` into `(provider, model)`.
@@ -1254,6 +1265,8 @@ fn migrate_config_from_json(
     let channels = migrate_channels_from_json(root, target, dry_run, report);
 
     let of_config = LibreFangConfig {
+        config_version: CONFIG_VERSION,
+        api_listen: DEFAULT_API_LISTEN.to_string(),
         default_model: LibreFangModelConfig {
             provider,
             model,
@@ -1261,9 +1274,6 @@ fn migrate_config_from_json(
             base_url: None,
         },
         memory: LibreFangMemorySection { decay_rate: 0.05 },
-        network: LibreFangNetworkSection {
-            listen_addr: DEFAULT_API_LISTEN.to_string(),
-        },
         channels,
     };
 
@@ -1344,24 +1354,12 @@ fn migrate_channels_from_json(
                 "bot_token_env",
                 toml::Value::String("TELEGRAM_BOT_TOKEN".into()),
             )];
-            if let Some(ref users_val) = tg.allow_from {
-                let users = extract_string_list(users_val);
-                if !users.is_empty() {
-                    let arr: Vec<toml::Value> = users
-                        .iter()
-                        .map(|u| toml::Value::String(u.clone()))
-                        .collect();
-                    fields.push(("allowed_users", toml::Value::Array(arr)));
-                }
+            if let Some(arr) = allow_from_to_toml_array(tg.allow_from.as_ref()) {
+                fields.push(("allowed_users", arr));
             }
             channels_table.insert(
                 "telegram".to_string(),
-                build_channel_table(
-                    fields,
-                    tg.dm_policy.as_deref(),
-                    tg.group_policy.as_deref(),
-                    tg.allow_from.as_ref(),
-                ),
+                build_channel_table(fields, tg.dm_policy.as_deref(), tg.group_policy.as_deref()),
             );
             report.imported.push(MigrateItem {
                 kind: ItemKind::Channel,
@@ -1377,18 +1375,16 @@ fn migrate_channels_from_json(
             if let Some(ref token) = dc.token {
                 emit_secret(&secrets_path, dry_run, "DISCORD_BOT_TOKEN", token, report);
             }
-            let fields: Vec<(&str, toml::Value)> = vec![(
+            let mut fields: Vec<(&str, toml::Value)> = vec![(
                 "bot_token_env",
                 toml::Value::String("DISCORD_BOT_TOKEN".into()),
             )];
+            if let Some(arr) = allow_from_to_toml_array(dc.allow_from.as_ref()) {
+                fields.push(("allowed_users", arr));
+            }
             channels_table.insert(
                 "discord".to_string(),
-                build_channel_table(
-                    fields,
-                    dc.dm_policy.as_deref(),
-                    dc.group_policy.as_deref(),
-                    dc.allow_from.as_ref(),
-                ),
+                build_channel_table(fields, dc.dm_policy.as_deref(), dc.group_policy.as_deref()),
             );
             report.imported.push(MigrateItem {
                 kind: ItemKind::Channel,
@@ -1417,14 +1413,17 @@ fn migrate_channels_from_json(
                     toml::Value::String("SLACK_APP_TOKEN".into()),
                 ),
             ];
+            if allow_from_to_toml_array(sl.allow_from.as_ref()).is_some() {
+                report.warnings.push(
+                    "Slack: OpenClaw 'allow_from' (per-user allowlist) could not be \
+                     auto-mapped — SlackConfig has no per-user allowlist, only \
+                     'allowed_channels' (channel IDs)."
+                        .to_string(),
+                );
+            }
             channels_table.insert(
                 "slack".to_string(),
-                build_channel_table(
-                    fields,
-                    sl.dm_policy.as_deref(),
-                    sl.group_policy.as_deref(),
-                    sl.allow_from.as_ref(),
-                ),
+                build_channel_table(fields, sl.dm_policy.as_deref(), sl.group_policy.as_deref()),
             );
             report.imported.push(MigrateItem {
                 kind: ItemKind::Channel,
@@ -1464,24 +1463,12 @@ fn migrate_channels_from_json(
                 "access_token_env",
                 toml::Value::String("WHATSAPP_ACCESS_TOKEN".into()),
             )];
-            if let Some(ref users_val) = wa.allow_from {
-                let users = extract_string_list(users_val);
-                if !users.is_empty() {
-                    let arr: Vec<toml::Value> = users
-                        .iter()
-                        .map(|u| toml::Value::String(u.clone()))
-                        .collect();
-                    fields.push(("allowed_users", toml::Value::Array(arr)));
-                }
+            if let Some(arr) = allow_from_to_toml_array(wa.allow_from.as_ref()) {
+                fields.push(("allowed_users", arr));
             }
             channels_table.insert(
                 "whatsapp".to_string(),
-                build_channel_table(
-                    fields,
-                    wa.dm_policy.as_deref(),
-                    wa.group_policy.as_deref(),
-                    wa.allow_from.as_ref(),
-                ),
+                build_channel_table(fields, wa.dm_policy.as_deref(), wa.group_policy.as_deref()),
             );
             report.imported.push(MigrateItem {
                 kind: ItemKind::Channel,
@@ -1505,14 +1492,12 @@ fn migrate_channels_from_json(
             if let Some(ref account) = sig.account {
                 fields.push(("phone_number", toml::Value::String(account.clone())));
             }
+            if let Some(arr) = allow_from_to_toml_array(sig.allow_from.as_ref()) {
+                fields.push(("allowed_users", arr));
+            }
             channels_table.insert(
                 "signal".to_string(),
-                build_channel_table(
-                    fields,
-                    sig.dm_policy.as_deref(),
-                    None,
-                    sig.allow_from.as_ref(),
-                ),
+                build_channel_table(fields, sig.dm_policy.as_deref(), None),
             );
             report.imported.push(MigrateItem {
                 kind: ItemKind::Channel,
@@ -1538,24 +1523,19 @@ fn migrate_channels_from_json(
             if let Some(ref uid) = mx.user_id {
                 fields.push(("user_id", toml::Value::String(uid.clone())));
             }
-            if let Some(ref rooms_val) = mx.rooms {
-                let rooms = extract_string_list(rooms_val);
-                if !rooms.is_empty() {
-                    let arr: Vec<toml::Value> = rooms
-                        .iter()
-                        .map(|r| toml::Value::String(r.clone()))
-                        .collect();
-                    fields.push(("rooms", toml::Value::Array(arr)));
-                }
+            if let Some(arr) = allow_from_to_toml_array(mx.rooms.as_ref()) {
+                fields.push(("allowed_rooms", arr));
+            }
+            if allow_from_to_toml_array(mx.allow_from.as_ref()).is_some() {
+                report.warnings.push(
+                    "Matrix: OpenClaw 'allow_from' could not be auto-mapped — \
+                     MatrixConfig has no per-user allowlist, only 'allowed_rooms' (room IDs)."
+                        .to_string(),
+                );
             }
             channels_table.insert(
                 "matrix".to_string(),
-                build_channel_table(
-                    fields,
-                    mx.dm_policy.as_deref(),
-                    None,
-                    mx.allow_from.as_ref(),
-                ),
+                build_channel_table(fields, mx.dm_policy.as_deref(), None),
             );
             report.imported.push(MigrateItem {
                 kind: ItemKind::Channel,
@@ -1596,7 +1576,7 @@ fn migrate_channels_from_json(
             )];
             channels_table.insert(
                 "google_chat".to_string(),
-                build_channel_table(fields, gc.dm_policy.as_deref(), None, None),
+                build_channel_table(fields, gc.dm_policy.as_deref(), None),
             );
             report.imported.push(MigrateItem {
                 kind: ItemKind::Channel,
@@ -1620,16 +1600,21 @@ fn migrate_channels_from_json(
                 fields.push(("app_id", toml::Value::String(id.clone())));
             }
             if let Some(ref tenant) = tm.tenant_id {
-                fields.push(("tenant_id", toml::Value::String(tenant.clone())));
+                fields.push((
+                    "allowed_tenants",
+                    toml::Value::Array(vec![toml::Value::String(tenant.clone())]),
+                ));
+            }
+            if allow_from_to_toml_array(tm.allow_from.as_ref()).is_some() {
+                report.warnings.push(
+                    "Teams: OpenClaw 'allow_from' could not be auto-mapped — \
+                     TeamsConfig has no per-user allowlist, only 'allowed_tenants' (tenant IDs)."
+                        .to_string(),
+                );
             }
             channels_table.insert(
                 "teams".to_string(),
-                build_channel_table(
-                    fields,
-                    tm.dm_policy.as_deref(),
-                    None,
-                    tm.allow_from.as_ref(),
-                ),
+                build_channel_table(fields, tm.dm_policy.as_deref(), None),
             );
             report.imported.push(MigrateItem {
                 kind: ItemKind::Channel,
@@ -1653,7 +1638,7 @@ fn migrate_channels_from_json(
                 fields.push(("port", toml::Value::Integer(port as i64)));
             }
             if let Some(ref nick) = irc.nick {
-                fields.push(("nickname", toml::Value::String(nick.clone())));
+                fields.push(("nick", toml::Value::String(nick.clone())));
             }
             if let Some(tls) = irc.tls {
                 fields.push(("use_tls", toml::Value::Boolean(tls)));
@@ -1671,14 +1656,16 @@ fn migrate_channels_from_json(
                     fields.push(("channels", toml::Value::Array(arr)));
                 }
             }
+            if allow_from_to_toml_array(irc.allow_from.as_ref()).is_some() {
+                report.warnings.push(
+                    "IRC: OpenClaw 'allow_from' could not be auto-mapped — \
+                     IrcConfig has no per-user allowlist field."
+                        .to_string(),
+                );
+            }
             channels_table.insert(
                 "irc".to_string(),
-                build_channel_table(
-                    fields,
-                    irc.dm_policy.as_deref(),
-                    None,
-                    irc.allow_from.as_ref(),
-                ),
+                build_channel_table(fields, irc.dm_policy.as_deref(), None),
             );
             report.imported.push(MigrateItem {
                 kind: ItemKind::Channel,
@@ -1694,21 +1681,21 @@ fn migrate_channels_from_json(
             if let Some(ref token) = mm.bot_token {
                 emit_secret(&secrets_path, dry_run, "MATTERMOST_TOKEN", token, report);
             }
-            let mut fields: Vec<(&str, toml::Value)> = vec![(
-                "bot_token_env",
-                toml::Value::String("MATTERMOST_TOKEN".into()),
-            )];
+            let mut fields: Vec<(&str, toml::Value)> =
+                vec![("token_env", toml::Value::String("MATTERMOST_TOKEN".into()))];
             if let Some(ref url) = mm.base_url {
                 fields.push(("server_url", toml::Value::String(url.clone())));
             }
+            if allow_from_to_toml_array(mm.allow_from.as_ref()).is_some() {
+                report.warnings.push(
+                    "Mattermost: OpenClaw 'allow_from' could not be auto-mapped — \
+                     MattermostConfig has no per-user allowlist, only 'allowed_channels' (channel IDs)."
+                        .to_string(),
+                );
+            }
             channels_table.insert(
                 "mattermost".to_string(),
-                build_channel_table(
-                    fields,
-                    mm.dm_policy.as_deref(),
-                    None,
-                    mm.allow_from.as_ref(),
-                ),
+                build_channel_table(fields, mm.dm_policy.as_deref(), None),
             );
             report.imported.push(MigrateItem {
                 kind: ItemKind::Channel,
@@ -1732,11 +1719,18 @@ fn migrate_channels_from_json(
                 fields.push(("app_id", toml::Value::String(id.clone())));
             }
             if let Some(ref domain) = fs.domain {
-                fields.push(("domain", toml::Value::String(domain.clone())));
+                // Map OpenClaw 'domain' to LibreFang 'region': any non-CN domain
+                // (e.g. lark.com / larksuite.com) → "intl", otherwise "cn".
+                let region = if domain.contains("lark") || domain.contains("intl") {
+                    "intl"
+                } else {
+                    "cn"
+                };
+                fields.push(("region", toml::Value::String(region.to_string())));
             }
             channels_table.insert(
                 "feishu".to_string(),
-                build_channel_table(fields, fs.dm_policy.as_deref(), None, None),
+                build_channel_table(fields, fs.dm_policy.as_deref(), None),
             );
             report.imported.push(MigrateItem {
                 kind: ItemKind::Channel,
@@ -1929,6 +1923,16 @@ fn convert_agent_from_json(
             )
         });
 
+    // Resolve profile name to a valid LibreFang ToolProfile variant (snake_case).
+    // Must be written BEFORE any [section] header so it lands at the top level
+    // of the agent manifest, not inside a section.
+    let profile_name: Option<&'static str> = entry
+        .tools
+        .as_ref()
+        .and_then(|t| t.profile.as_ref())
+        .and_then(extract_profile)
+        .map(|p| map_profile_to_librefang(&p));
+
     // Build agent TOML
     let mut toml_str = String::new();
     toml_str.push_str(&format!(
@@ -1944,6 +1948,9 @@ fn convert_agent_from_json(
     ));
     toml_str.push_str("author = \"librefang\"\n");
     toml_str.push_str("module = \"builtin:chat\"\n");
+    if let Some(p) = profile_name {
+        toml_str.push_str(&format!("profile = \"{p}\"\n"));
+    }
 
     toml_str.push_str("\n[model]\n");
     toml_str.push_str(&format!("provider = \"{provider}\"\n"));
@@ -1995,16 +2002,22 @@ fn convert_agent_from_json(
         toml_str.push_str("agent_spawn = true\n");
     }
 
-    // Tool profile hint
-    if let Some(ref agent_tools) = entry.tools {
-        if let Some(ref profile_val) = agent_tools.profile {
-            if let Some(profile) = extract_profile(profile_val) {
-                toml_str.push_str(&format!("\nprofile = \"{profile}\"\n"));
-            }
-        }
-    }
-
     Ok((toml_str, unmapped_tools))
+}
+
+/// Map an OpenClaw tool-profile name to the snake_case string LibreFang
+/// expects for the `profile` field on an agent manifest. Unknown names map
+/// to `"full"` (the LibreFang `ToolProfile::Full` default).
+fn map_profile_to_librefang(openclaw_profile: &str) -> &'static str {
+    match openclaw_profile.to_lowercase().as_str() {
+        "minimal" => "minimal",
+        "coding" | "coder" | "developer" | "dev" => "coding",
+        "research" | "researcher" => "research",
+        "messaging" | "chat" | "messenger" => "messaging",
+        "automation" | "automator" => "automation",
+        "custom" => "custom",
+        _ => "full",
+    }
 }
 
 fn resolve_default_tools(defaults: Option<&OpenClawAgentDefaults>) -> Vec<String> {
@@ -2474,6 +2487,8 @@ fn migrate_legacy_config(
         .unwrap_or_else(|| default_api_key_env(&provider));
 
     let of_config = LibreFangConfig {
+        config_version: CONFIG_VERSION,
+        api_listen: DEFAULT_API_LISTEN.to_string(),
         default_model: LibreFangModelConfig {
             provider,
             model: oc_config.model,
@@ -2486,9 +2501,6 @@ fn migrate_legacy_config(
                 .as_ref()
                 .and_then(|m| m.decay_rate)
                 .unwrap_or(0.05),
-        },
-        network: LibreFangNetworkSection {
-            listen_addr: DEFAULT_API_LISTEN.to_string(),
         },
         channels,
     };
@@ -2578,7 +2590,7 @@ fn parse_legacy_channels(
                 }
                 channels_table.insert(
                     "telegram".to_string(),
-                    build_channel_table(fields, None, None, None),
+                    build_channel_table(fields, None, None),
                 );
                 report.imported.push(MigrateItem {
                     kind: ItemKind::Channel,
@@ -2597,7 +2609,7 @@ fn parse_legacy_channels(
                 }
                 channels_table.insert(
                     "discord".to_string(),
-                    build_channel_table(fields, None, None, None),
+                    build_channel_table(fields, None, None),
                 );
                 report.imported.push(MigrateItem {
                     kind: ItemKind::Channel,
@@ -2617,10 +2629,7 @@ fn parse_legacy_channels(
                 if let Some(ref da) = ch.default_agent {
                     fields.push(("default_agent", toml::Value::String(da.clone())));
                 }
-                channels_table.insert(
-                    "slack".to_string(),
-                    build_channel_table(fields, None, None, None),
-                );
+                channels_table.insert("slack".to_string(), build_channel_table(fields, None, None));
                 report.imported.push(MigrateItem {
                     kind: ItemKind::Channel,
                     name: "slack".to_string(),
@@ -2636,7 +2645,7 @@ fn parse_legacy_channels(
                     vec![("access_token_env", toml::Value::String(token_env))];
                 channels_table.insert(
                     "whatsapp".to_string(),
-                    build_channel_table(fields, None, None, None),
+                    build_channel_table(fields, None, None),
                 );
                 report.imported.push(MigrateItem {
                     kind: ItemKind::Channel,
@@ -2651,7 +2660,7 @@ fn parse_legacy_channels(
                 )];
                 channels_table.insert(
                     "signal".to_string(),
-                    build_channel_table(fields, None, None, None),
+                    build_channel_table(fields, None, None),
                 );
                 report.imported.push(MigrateItem {
                     kind: ItemKind::Channel,
@@ -2668,7 +2677,7 @@ fn parse_legacy_channels(
                     vec![("access_token_env", toml::Value::String(token_env))];
                 channels_table.insert(
                     "matrix".to_string(),
-                    build_channel_table(fields, None, None, None),
+                    build_channel_table(fields, None, None),
                 );
                 report.imported.push(MigrateItem {
                     kind: ItemKind::Channel,
@@ -2681,10 +2690,7 @@ fn parse_legacy_channels(
                 if let Some(ref tok) = ch.bot_token_env {
                     fields.push(("password_env", toml::Value::String(tok.clone())));
                 }
-                channels_table.insert(
-                    "irc".to_string(),
-                    build_channel_table(fields, None, None, None),
-                );
+                channels_table.insert("irc".to_string(), build_channel_table(fields, None, None));
                 report.imported.push(MigrateItem {
                     kind: ItemKind::Channel,
                     name: "irc".to_string(),
@@ -2696,10 +2702,10 @@ fn parse_legacy_channels(
                     .bot_token_env
                     .unwrap_or_else(|| "MATTERMOST_TOKEN".to_string());
                 let fields: Vec<(&str, toml::Value)> =
-                    vec![("bot_token_env", toml::Value::String(token_env))];
+                    vec![("token_env", toml::Value::String(token_env))];
                 channels_table.insert(
                     "mattermost".to_string(),
-                    build_channel_table(fields, None, None, None),
+                    build_channel_table(fields, None, None),
                 );
                 report.imported.push(MigrateItem {
                     kind: ItemKind::Channel,
@@ -2714,7 +2720,7 @@ fn parse_legacy_channels(
                 )];
                 channels_table.insert(
                     "feishu".to_string(),
-                    build_channel_table(fields, None, None, None),
+                    build_channel_table(fields, None, None),
                 );
                 report.imported.push(MigrateItem {
                     kind: ItemKind::Channel,
@@ -2729,7 +2735,7 @@ fn parse_legacy_channels(
                 )];
                 channels_table.insert(
                     "google_chat".to_string(),
-                    build_channel_table(fields, None, None, None),
+                    build_channel_table(fields, None, None),
                 );
                 report.imported.push(MigrateItem {
                     kind: ItemKind::Channel,
@@ -2742,10 +2748,7 @@ fn parse_legacy_channels(
                     "app_password_env",
                     toml::Value::String("TEAMS_APP_PASSWORD".into()),
                 )];
-                channels_table.insert(
-                    "teams".to_string(),
-                    build_channel_table(fields, None, None, None),
-                );
+                channels_table.insert("teams".to_string(), build_channel_table(fields, None, None));
                 report.imported.push(MigrateItem {
                     kind: ItemKind::Channel,
                     name: "teams".to_string(),
@@ -3468,6 +3471,177 @@ mod tests {
         assert!(target.path().join("migration_report.md").exists());
     }
 
+    /// Round-trip: the migrated `config.toml` and `agent.toml` must parse
+    /// cleanly into the real `KernelConfig` / `AgentManifest` types from
+    /// `librefang-types`. If any field we emit has drifted from the real
+    /// schema (wrong name, wrong type, removed field), this test fails —
+    /// that's the whole point. It's the structural guardrail that the
+    /// manual-string-building tests don't provide.
+    #[test]
+    fn test_roundtrip_migrate_output_into_real_structs() {
+        use librefang_types::agent::AgentManifest;
+        use librefang_types::config::KernelConfig;
+
+        let source = TempDir::new().unwrap();
+        let target = TempDir::new().unwrap();
+
+        // Minimal OpenClaw JSON5 workspace — exercises every channel code
+        // path plus one agent with identity + tool profile.
+        // (r##"..."## used because the fixture contains `"#test"` for IRC.)
+        let json5 = r##"{
+  channels: {
+    telegram: {
+      botToken: "tg-token",
+      dmPolicy: "allowlist",
+      groupPolicy: "open",
+      allowFrom: ["123", "456"]
+    },
+    discord: { token: "dc-token", allowFrom: ["user-1"] },
+    slack: { botToken: "xoxb", appToken: "xapp" },
+    whatsapp: { allowFrom: ["+1555"] },
+    signal: { httpHost: "localhost", httpPort: 8080, account: "+1555", allowFrom: ["+1556"] },
+    matrix: { homeserver: "https://matrix.org", userId: "@bot:matrix.org", accessToken: "mx-token", rooms: ["!room:matrix.org"] },
+    irc: { host: "irc.libera.chat", port: 6697, nick: "bot", tls: true, password: "pw", channels: ["#test"] },
+    mattermost: { botToken: "mm-token", baseUrl: "https://mm.example" },
+    feishu: { appId: "app1", appSecret: "sec1", domain: "lark.com" },
+    teams: { appId: "teams-app", appPassword: "teams-pw", tenantId: "tenant-xyz" },
+    googleChat: { serviceAccountFile: "/nonexistent/sa.json" }
+  },
+  agents: {
+    list: [
+      {
+        id: "coder",
+        name: "Coder",
+        model: "anthropic/claude-sonnet-4-20250514",
+        tools: { profile: "coding" },
+        identity: "You are a coding assistant."
+      }
+    ]
+  }
+}"##;
+        std::fs::write(source.path().join("openclaw.json"), json5).unwrap();
+
+        let options = MigrateOptions {
+            source: crate::MigrateSource::OpenClaw,
+            source_dir: source.path().to_path_buf(),
+            target_dir: target.path().to_path_buf(),
+            dry_run: false,
+        };
+        let _ = migrate(&options).unwrap();
+
+        // ---- config.toml round-trip ----
+        let config_str = std::fs::read_to_string(target.path().join("config.toml")).unwrap();
+
+        // 1. Parse as raw TOML to detect unknown top-level fields.
+        let raw: toml::Value = toml::from_str(&config_str).unwrap_or_else(|e| {
+            panic!("migrated config.toml is not valid TOML: {e}\n\n{config_str}")
+        });
+        let unknown = KernelConfig::detect_unknown_fields(&raw);
+        assert!(
+            unknown.is_empty(),
+            "migrate wrote unknown top-level fields to config.toml: {unknown:?}\n\n{config_str}"
+        );
+
+        // 2. Parse into the real KernelConfig — fails on type mismatches.
+        let cfg: KernelConfig = toml::from_str(&config_str).unwrap_or_else(|e| {
+            panic!(
+                "migrated config.toml does not deserialize into KernelConfig: {e}\n\n{config_str}"
+            )
+        });
+
+        // 3. api_listen went to the right place.
+        assert!(!cfg.api_listen.is_empty(), "api_listen must be populated");
+
+        // 4. config_version is current (no best-effort migration needed).
+        assert_eq!(
+            cfg.config_version,
+            librefang_types::config::CONFIG_VERSION,
+            "migrate must stamp the current CONFIG_VERSION"
+        );
+
+        // 5. Channel top-level allowlists are populated (not stuffed into overrides).
+        let tg = cfg
+            .channels
+            .telegram
+            .iter()
+            .next()
+            .expect("telegram configured");
+        assert_eq!(tg.allowed_users, vec!["123".to_string(), "456".to_string()]);
+        let dc = cfg
+            .channels
+            .discord
+            .iter()
+            .next()
+            .expect("discord configured");
+        assert_eq!(dc.allowed_users, vec!["user-1".to_string()]);
+        let wa = cfg
+            .channels
+            .whatsapp
+            .iter()
+            .next()
+            .expect("whatsapp configured");
+        assert_eq!(wa.allowed_users, vec!["+1555".to_string()]);
+        let sig = cfg
+            .channels
+            .signal
+            .iter()
+            .next()
+            .expect("signal configured");
+        assert_eq!(sig.allowed_users, vec!["+1556".to_string()]);
+        let mx = cfg
+            .channels
+            .matrix
+            .iter()
+            .next()
+            .expect("matrix configured");
+        assert_eq!(mx.allowed_rooms, vec!["!room:matrix.org".to_string()]);
+
+        // 6. Policy mappings land on valid enum variants (no "respond" on group_policy).
+        use librefang_types::config::{DmPolicy, GroupPolicy};
+        assert_eq!(tg.overrides.dm_policy, DmPolicy::AllowedOnly);
+        assert_eq!(tg.overrides.group_policy, GroupPolicy::All);
+
+        // 7. Per-struct field-name corrections.
+        let irc = cfg.channels.irc.iter().next().expect("irc configured");
+        assert_eq!(irc.nick, "bot"); // was "nickname" before the fix
+        let mm = cfg
+            .channels
+            .mattermost
+            .iter()
+            .next()
+            .expect("mattermost configured");
+        assert_eq!(mm.token_env, "MATTERMOST_TOKEN"); // was "bot_token_env" before
+        let teams = cfg.channels.teams.iter().next().expect("teams configured");
+        assert_eq!(teams.allowed_tenants, vec!["tenant-xyz".to_string()]); // was "tenant_id" scalar before
+        let feishu = cfg
+            .channels
+            .feishu
+            .iter()
+            .next()
+            .expect("feishu configured");
+        assert_eq!(feishu.region, "intl"); // domain "lark.com" → region "intl"
+
+        // ---- agent.toml round-trip ----
+        let agent_str =
+            std::fs::read_to_string(target.path().join("agents/coder/agent.toml")).unwrap();
+        let manifest: AgentManifest = toml::from_str(&agent_str).unwrap_or_else(|e| {
+            panic!(
+                "migrated agent.toml does not deserialize into AgentManifest: {e}\n\n{agent_str}"
+            )
+        });
+
+        // profile is a root-level field, not inside [capabilities].
+        assert!(
+            manifest.profile.is_some(),
+            "agent.toml 'profile' must be at root, not buried inside [capabilities]\n\n{agent_str}"
+        );
+        assert_eq!(manifest.name, "Coder");
+        assert!(manifest
+            .capabilities
+            .tools
+            .contains(&"file_read".to_string()));
+    }
+
     #[test]
     fn test_json5_agent_model_parsing() {
         // Simple model ref
@@ -4007,6 +4181,56 @@ mod tests {
         assert!(target.path().join("migration_report.md").exists());
     }
 
+    /// Round-trip for the **legacy YAML** migration path — parallel to
+    /// `test_roundtrip_migrate_output_into_real_structs` which covers the
+    /// JSON5 path. `convert_legacy_agent` and `parse_legacy_channels` write
+    /// their own TOML by hand, so they need the same structural guardrail.
+    #[test]
+    fn test_roundtrip_legacy_yaml_output_into_real_structs() {
+        use librefang_types::agent::AgentManifest;
+        use librefang_types::config::KernelConfig;
+
+        let source = TempDir::new().unwrap();
+        let target = TempDir::new().unwrap();
+
+        create_legacy_yaml_workspace(source.path());
+
+        let options = MigrateOptions {
+            source: crate::MigrateSource::OpenClaw,
+            source_dir: source.path().to_path_buf(),
+            target_dir: target.path().to_path_buf(),
+            dry_run: false,
+        };
+        let _ = migrate(&options).unwrap();
+
+        // config.toml round-trip
+        let config_str = std::fs::read_to_string(target.path().join("config.toml")).unwrap();
+        let raw: toml::Value = toml::from_str(&config_str).unwrap_or_else(|e| {
+            panic!("legacy config.toml is not valid TOML: {e}\n\n{config_str}")
+        });
+        let unknown = KernelConfig::detect_unknown_fields(&raw);
+        assert!(
+            unknown.is_empty(),
+            "legacy YAML path wrote unknown top-level fields: {unknown:?}\n\n{config_str}"
+        );
+        let cfg: KernelConfig = toml::from_str(&config_str).unwrap_or_else(|e| {
+            panic!("legacy config.toml does not deserialize into KernelConfig: {e}\n\n{config_str}")
+        });
+        assert_eq!(cfg.config_version, librefang_types::config::CONFIG_VERSION);
+        assert!(!cfg.api_listen.is_empty());
+
+        // agent.toml round-trip — legacy YAML writes `tags` at top level +
+        // `base_url` inside [model] (neither is written by the JSON5 path,
+        // so this is fresh coverage).
+        let agent_str =
+            std::fs::read_to_string(target.path().join("agents/coder/agent.toml")).unwrap();
+        let manifest: AgentManifest = toml::from_str(&agent_str).unwrap_or_else(|e| {
+            panic!("legacy agent.toml does not deserialize into AgentManifest: {e}\n\n{agent_str}")
+        });
+        assert_eq!(manifest.name, "coder");
+        assert_eq!(manifest.module, "builtin:chat");
+    }
+
     #[test]
     fn test_dry_run() {
         let source = TempDir::new().unwrap();
@@ -4285,12 +4509,21 @@ mod tests {
         let ch_table = channels.unwrap();
         let table = ch_table.as_table().unwrap();
 
-        // Telegram should have overrides with mapped policies
+        // Telegram should have overrides with mapped policies.
+        // OpenClaw group_policy "open" → LibreFang "all" (was incorrectly
+        // mapped to "respond" before the 2026-04 sync fix).
         let tg = table["telegram"].as_table().unwrap();
         let overrides = tg["overrides"].as_table().unwrap();
         assert_eq!(overrides["dm_policy"].as_str().unwrap(), "allowed_only");
-        assert_eq!(overrides["group_policy"].as_str().unwrap(), "respond");
-        let users = overrides["allowed_users"].as_array().unwrap();
+        assert_eq!(overrides["group_policy"].as_str().unwrap(), "all");
+        // allowed_users lives at the top level of the channel table, not inside
+        // overrides (ChannelOverrides has no allowed_users field).
+        assert!(
+            !overrides.contains_key("allowed_users"),
+            "allowed_users must not be written inside overrides — it's not a \
+             ChannelOverrides field"
+        );
+        let users = tg["allowed_users"].as_array().unwrap();
         assert_eq!(users.len(), 2);
 
         // Discord should have overrides with mapped dm_policy
