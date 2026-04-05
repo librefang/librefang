@@ -25,8 +25,37 @@ pub struct ToolCall {
     pub input: serde_json::Value,
 }
 
+/// Execution status of a tool call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolExecutionStatus {
+    #[default]
+    Completed,
+    Error,
+    WaitingApproval,
+    Denied,
+    Expired,
+    ModifyAndRetry,
+    Skipped,
+}
+
+impl ToolExecutionStatus {
+    pub fn is_error(&self) -> bool {
+        matches!(
+            self,
+            Self::Error | Self::Denied | Self::Expired | Self::ModifyAndRetry
+        )
+    }
+
+    /// Errors that should NOT abort the remaining tool calls —
+    /// the LLM can recover by retrying a valid path.
+    pub fn is_soft_error(&self) -> bool {
+        matches!(self, Self::Denied | Self::ModifyAndRetry | Self::Skipped)
+    }
+}
+
 /// Result of a tool execution.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ToolResult {
     /// The tool_use ID this result corresponds to.
     pub tool_use_id: String,
@@ -34,6 +63,97 @@ pub struct ToolResult {
     pub content: String,
     /// Whether the tool execution resulted in an error.
     pub is_error: bool,
+    /// Detailed execution status.
+    #[serde(default)]
+    pub status: ToolExecutionStatus,
+    /// Approval request ID, set when status is WaitingApproval.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_request_id: Option<String>,
+    /// Tool name, set when status is WaitingApproval.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
+}
+
+impl ToolResult {
+    pub fn ok(tool_use_id: String, content: String) -> Self {
+        Self {
+            tool_use_id,
+            content,
+            is_error: false,
+            status: ToolExecutionStatus::Completed,
+            ..Default::default()
+        }
+    }
+
+    pub fn error(tool_use_id: String, content: String) -> Self {
+        Self {
+            tool_use_id,
+            content,
+            is_error: true,
+            status: ToolExecutionStatus::Error,
+            ..Default::default()
+        }
+    }
+
+    pub fn waiting_approval(tool_use_id: String, request_id: String, tool_name: String) -> Self {
+        Self {
+            tool_use_id,
+            content: format!(
+                "Tool '{}' requires human approval. Request submitted (ID: {}). Continue with other tasks — you will be notified when resolved.",
+                tool_name, request_id
+            ),
+            is_error: false,
+            status: ToolExecutionStatus::WaitingApproval,
+            approval_request_id: Some(request_id),
+            tool_name: Some(tool_name),
+        }
+    }
+
+    pub fn with_status(tool_use_id: String, content: String, status: ToolExecutionStatus) -> Self {
+        Self {
+            tool_use_id,
+            content,
+            is_error: status.is_error(),
+            status,
+            ..Default::default()
+        }
+    }
+}
+
+/// Captures everything needed to execute (or build a terminal result for) a tool
+/// after an approval decision. Stored in the approval manager while awaiting human decision.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeferredToolExecution {
+    pub agent_id: String,
+    pub tool_use_id: String,
+    pub tool_name: String,
+    pub input: serde_json::Value,
+    pub allowed_tools: Option<Vec<String>>,
+    pub sender_id: Option<String>,
+    pub channel: Option<String>,
+    pub workspace_root: Option<std::path::PathBuf>,
+}
+
+/// Outcome of submitting a deferred tool for approval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolApprovalSubmission {
+    Pending { request_id: uuid::Uuid },
+    AutoApproved,
+}
+
+/// Mid-turn signal sent into a running agent loop.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AgentLoopSignal {
+    Message {
+        content: String,
+    },
+    ApprovalResolved {
+        tool_name: String,
+        decision: String,
+        result_preview: String,
+    },
 }
 
 /// A structured trace of a tool selection decision during agent execution.
@@ -721,5 +841,123 @@ mod tests {
         // type array flattened
         assert_eq!(result["properties"]["tags"]["type"], "string");
         assert_eq!(result["properties"]["tags"]["nullable"], true);
+    }
+
+    // -----------------------------------------------------------------------
+    // ToolResult tests (Step 1 from plan)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_tool_result_ok_constructor() {
+        let result = ToolResult::ok("toolu_abc".to_string(), "Success".to_string());
+        assert_eq!(result.tool_use_id, "toolu_abc");
+        assert_eq!(result.content, "Success");
+        assert!(!result.is_error);
+        assert_eq!(result.status, ToolExecutionStatus::Completed);
+    }
+
+    #[test]
+    fn test_tool_result_error_constructor() {
+        let result = ToolResult::error("toolu_abc".to_string(), "Failed".to_string());
+        assert_eq!(result.tool_use_id, "toolu_abc");
+        assert_eq!(result.content, "Failed");
+        assert!(result.is_error);
+        assert_eq!(result.status, ToolExecutionStatus::Error);
+    }
+
+    #[test]
+    fn test_tool_result_waiting_approval_constructor() {
+        let result = ToolResult::waiting_approval(
+            "toolu_abc".to_string(),
+            "req-123".to_string(),
+            "shell_exec".to_string(),
+        );
+        assert_eq!(result.tool_use_id, "toolu_abc");
+        assert!(!result.is_error);
+        assert_eq!(result.status, ToolExecutionStatus::WaitingApproval);
+        assert_eq!(result.approval_request_id, Some("req-123".to_string()));
+        assert_eq!(result.tool_name, Some("shell_exec".to_string()));
+    }
+
+    #[test]
+    fn test_tool_result_serde_roundtrip() {
+        let original = ToolResult::waiting_approval(
+            "toolu_abc".to_string(),
+            "req-123".to_string(),
+            "shell_exec".to_string(),
+        );
+        let json = serde_json::to_string(&original).unwrap();
+        let deserialized: ToolResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.tool_use_id, original.tool_use_id);
+        assert_eq!(deserialized.status, original.status);
+        assert_eq!(
+            deserialized.approval_request_id,
+            original.approval_request_id
+        );
+        assert_eq!(deserialized.tool_name, original.tool_name);
+    }
+
+    #[test]
+    fn test_tool_result_deserialization_old_format() {
+        // Old format without status field
+        let json = r#"{
+            "tool_use_id": "toolu_old",
+            "content": "Old result",
+            "is_error": false
+        }"#;
+        let result: ToolResult = serde_json::from_str(json).unwrap();
+        assert_eq!(result.tool_use_id, "toolu_old");
+        assert_eq!(result.content, "Old result");
+        assert!(!result.is_error);
+        assert_eq!(result.status, ToolExecutionStatus::Completed); // Default
+    }
+
+    #[test]
+    fn test_tool_result_default() {
+        let result = ToolResult::default();
+        assert_eq!(result.status, ToolExecutionStatus::Completed);
+        assert!(!result.is_error);
+    }
+
+    #[test]
+    fn test_tool_execution_status_is_error() {
+        assert!(!ToolExecutionStatus::Completed.is_error());
+        assert!(ToolExecutionStatus::Error.is_error());
+        assert!(!ToolExecutionStatus::WaitingApproval.is_error());
+        assert!(ToolExecutionStatus::Denied.is_error());
+        assert!(ToolExecutionStatus::Expired.is_error());
+        assert!(ToolExecutionStatus::ModifyAndRetry.is_error());
+        assert!(!ToolExecutionStatus::Skipped.is_error());
+    }
+
+    #[test]
+    fn test_tool_execution_status_is_soft_error() {
+        assert!(!ToolExecutionStatus::Completed.is_soft_error());
+        assert!(!ToolExecutionStatus::Error.is_soft_error());
+        assert!(!ToolExecutionStatus::WaitingApproval.is_soft_error());
+        assert!(ToolExecutionStatus::Denied.is_soft_error());
+        assert!(!ToolExecutionStatus::Expired.is_soft_error());
+        assert!(ToolExecutionStatus::ModifyAndRetry.is_soft_error());
+        assert!(ToolExecutionStatus::Skipped.is_soft_error());
+    }
+
+    #[test]
+    fn test_deferred_tool_execution_serialization() {
+        let deferred = DeferredToolExecution {
+            agent_id: "agent-1".to_string(),
+            tool_use_id: "toolu_abc".to_string(),
+            tool_name: "shell_exec".to_string(),
+            input: serde_json::json!({"cmd": "ls -la"}),
+            allowed_tools: Some(vec!["shell_exec".to_string()]),
+            sender_id: Some("user-123".to_string()),
+            channel: Some("telegram".to_string()),
+            workspace_root: Some(std::path::PathBuf::from("/tmp")),
+        };
+        let json = serde_json::to_string(&deferred).unwrap();
+        let deserialized: DeferredToolExecution = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.agent_id, "agent-1");
+        assert_eq!(deserialized.tool_use_id, "toolu_abc");
+        assert_eq!(deserialized.tool_name, "shell_exec");
+        assert_eq!(deserialized.sender_id, Some("user-123".to_string()));
     }
 }

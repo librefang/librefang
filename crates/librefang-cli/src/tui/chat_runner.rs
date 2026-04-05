@@ -194,6 +194,8 @@ impl StandaloneChat {
     fn handle_kernel_ready(&mut self, kernel: Arc<LibreFangKernel>) {
         self.booting = false;
         self.boot_error = None;
+        // Spawn approval expiry sweep task
+        kernel.clone().spawn_approval_sweep_task();
         self.backend = Backend::InProcess { kernel };
         // Spawn or find the agent
         self.resolve_inprocess_agent();

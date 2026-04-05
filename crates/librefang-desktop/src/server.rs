@@ -92,6 +92,8 @@ pub fn start_server() -> Result<ServerHandle, Box<dyn std::error::Error>> {
                 // start_background_agents() uses tokio::spawn/bootstrap async work, so it must
                 // run inside a tokio runtime context.
                 kernel_clone.start_background_agents().await;
+                // Spawn approval expiry sweep task
+                kernel_clone.clone().spawn_approval_sweep_task();
                 run_embedded_server(kernel_clone, std_listener, listen_addr, shutdown_rx).await;
             });
         })?;

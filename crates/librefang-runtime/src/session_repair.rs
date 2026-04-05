@@ -12,6 +12,7 @@
 //! - Oversized or potentially malicious tool result content
 
 use librefang_types::message::{ContentBlock, Message, MessageContent, Role};
+use librefang_types::tool::ToolExecutionStatus;
 use std::collections::{HashMap, HashSet};
 use tracing::{debug, warn};
 
@@ -375,6 +376,8 @@ fn insert_synthetic_results(messages: &mut Vec<Message>) -> usize {
                 tool_name: String::new(),
                 content: "[Tool execution was interrupted or lost]".to_string(),
                 is_error: true,
+                status: ToolExecutionStatus::Error,
+                approval_request_id: None,
             });
     }
 
@@ -415,8 +418,33 @@ fn insert_synthetic_results(messages: &mut Vec<Message>) -> usize {
 /// Phase 2d: Drop duplicate ToolResults for the same tool_use_id.
 ///
 /// If multiple ToolResult blocks exist for the same tool_use_id across the
-/// message history, only the first one is kept. Returns the count of duplicates removed.
+/// message history, keep the strongest result so approval placeholders can be
+/// replaced by their later terminal outcome. Returns the count of duplicates removed.
 fn deduplicate_tool_results(messages: &mut Vec<Message>) -> usize {
+    let mut kept_results: HashMap<String, ToolExecutionStatus> = HashMap::new();
+
+    for msg in messages.iter() {
+        if let MessageContent::Blocks(blocks) = &msg.content {
+            for block in blocks {
+                if let ContentBlock::ToolResult {
+                    tool_use_id,
+                    status,
+                    ..
+                } = block
+                {
+                    kept_results
+                        .entry(tool_use_id.clone())
+                        .and_modify(|kept_status| {
+                            if should_replace_kept_tool_result(*kept_status, *status) {
+                                *kept_status = *status;
+                            }
+                        })
+                        .or_insert(*status);
+                }
+            }
+        }
+    }
+
     let mut seen_ids: HashSet<String> = HashSet::new();
     let mut removed = 0usize;
 
@@ -424,8 +452,14 @@ fn deduplicate_tool_results(messages: &mut Vec<Message>) -> usize {
         if let MessageContent::Blocks(blocks) = &mut msg.content {
             let before_len = blocks.len();
             blocks.retain(|b| {
-                if let ContentBlock::ToolResult { tool_use_id, .. } = b {
-                    if seen_ids.contains(tool_use_id) {
+                if let ContentBlock::ToolResult {
+                    tool_use_id,
+                    status,
+                    ..
+                } = b
+                {
+                    let keep_status = kept_results.get(tool_use_id).copied().unwrap_or(*status);
+                    if seen_ids.contains(tool_use_id) || *status != keep_status {
                         return false;
                     }
                     seen_ids.insert(tool_use_id.clone());
@@ -443,6 +477,14 @@ fn deduplicate_tool_results(messages: &mut Vec<Message>) -> usize {
     });
 
     removed
+}
+
+fn should_replace_kept_tool_result(
+    kept_status: ToolExecutionStatus,
+    candidate_status: ToolExecutionStatus,
+) -> bool {
+    kept_status == ToolExecutionStatus::WaitingApproval
+        && candidate_status != ToolExecutionStatus::WaitingApproval
 }
 
 /// Phase 2e: Remove aborted assistant messages.
@@ -791,6 +833,8 @@ mod tests {
                     tool_name: String::new(),
                     content: "some result".to_string(),
                     is_error: false,
+                    status: librefang_types::tool::ToolExecutionStatus::default(),
+                    approval_request_id: None,
                 }]),
                 pinned: false,
             },
@@ -856,6 +900,8 @@ mod tests {
                     tool_name: String::new(),
                     content: "Results found".to_string(),
                     is_error: false,
+                    status: librefang_types::tool::ToolExecutionStatus::default(),
+                    approval_request_id: None,
                 }]),
                 pinned: false,
             },
@@ -891,6 +937,8 @@ mod tests {
                     tool_name: String::new(),
                     content: "Search results".to_string(),
                     is_error: false,
+                    status: librefang_types::tool::ToolExecutionStatus::default(),
+                    approval_request_id: None,
                 }]),
                 pinned: false,
             },
@@ -985,6 +1033,8 @@ mod tests {
                     tool_name: String::new(),
                     content: "First result".to_string(),
                     is_error: false,
+                    status: librefang_types::tool::ToolExecutionStatus::default(),
+                    approval_request_id: None,
                 }]),
                 pinned: false,
             },
@@ -995,6 +1045,8 @@ mod tests {
                     tool_name: String::new(),
                     content: "Duplicate result".to_string(),
                     is_error: false,
+                    status: librefang_types::tool::ToolExecutionStatus::default(),
+                    approval_request_id: None,
                 }]),
                 pinned: false,
             },
@@ -1086,6 +1138,8 @@ mod tests {
                     tool_name: String::new(),
                     content: "lost".to_string(),
                     is_error: false,
+                    status: librefang_types::tool::ToolExecutionStatus::default(),
+                    approval_request_id: None,
                 }]),
                 pinned: false,
             },
@@ -1173,6 +1227,8 @@ mod tests {
                     tool_name: String::new(),
                     content: "search result".to_string(),
                     is_error: false,
+                    status: librefang_types::tool::ToolExecutionStatus::default(),
+                    approval_request_id: None,
                 }]),
                 pinned: false,
             },
@@ -1184,6 +1240,8 @@ mod tests {
                     tool_name: String::new(),
                     content: "ghost result".to_string(),
                     is_error: false,
+                    status: librefang_types::tool::ToolExecutionStatus::default(),
+                    approval_request_id: None,
                 }]),
                 pinned: false,
             },
@@ -1235,12 +1293,16 @@ mod tests {
                         tool_name: String::new(),
                         content: "lost 1".to_string(),
                         is_error: false,
+                        status: librefang_types::tool::ToolExecutionStatus::default(),
+                        approval_request_id: None,
                     },
                     ContentBlock::ToolResult {
                         tool_use_id: "orphan-2".to_string(),
                         tool_name: String::new(),
                         content: "lost 2".to_string(),
                         is_error: false,
+                        status: librefang_types::tool::ToolExecutionStatus::default(),
+                        approval_request_id: None,
                     },
                 ]),
                 pinned: false,
@@ -1253,6 +1315,74 @@ mod tests {
         assert_eq!(repaired.len(), 2);
         assert_eq!(repaired[0].role, Role::User);
         assert_eq!(repaired[1].role, Role::Assistant);
+    }
+
+    #[test]
+    fn test_deduplicate_prefers_final_result_over_waiting_approval() {
+        let messages = vec![
+            Message {
+                role: Role::Assistant,
+                content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+                    id: "tu-approval".to_string(),
+                    name: "bash".to_string(),
+                    input: serde_json::json!({"command": "ls"}),
+                    provider_metadata: None,
+                }]),
+                pinned: false,
+            },
+            Message {
+                role: Role::User,
+                content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                    tool_use_id: "tu-approval".to_string(),
+                    tool_name: "bash".to_string(),
+                    content: "waiting".to_string(),
+                    is_error: false,
+                    status: ToolExecutionStatus::WaitingApproval,
+                    approval_request_id: Some("req-1".to_string()),
+                }]),
+                pinned: false,
+            },
+            Message {
+                role: Role::User,
+                content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                    tool_use_id: "tu-approval".to_string(),
+                    tool_name: "bash".to_string(),
+                    content: "approved output".to_string(),
+                    is_error: false,
+                    status: ToolExecutionStatus::Completed,
+                    approval_request_id: None,
+                }]),
+                pinned: false,
+            },
+        ];
+
+        let (repaired, stats) = validate_and_repair_with_stats(&messages);
+
+        assert_eq!(stats.duplicates_removed, 1);
+
+        let kept_results: Vec<&ContentBlock> = repaired
+            .iter()
+            .flat_map(|m| match &m.content {
+                MessageContent::Blocks(blocks) => blocks.iter().collect::<Vec<_>>(),
+                _ => Vec::new(),
+            })
+            .filter(|b| matches!(b, ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "tu-approval"))
+            .collect();
+
+        assert_eq!(kept_results.len(), 1);
+        match kept_results[0] {
+            ContentBlock::ToolResult {
+                content,
+                status,
+                approval_request_id,
+                ..
+            } => {
+                assert_eq!(content, "approved output");
+                assert_eq!(*status, ToolExecutionStatus::Completed);
+                assert!(approval_request_id.is_none());
+            }
+            _ => unreachable!(),
+        }
     }
 
     #[test]
@@ -1376,6 +1506,8 @@ mod tests {
                     tool_name: "shell".into(),
                     content: "ok".into(),
                     is_error: false,
+                    status: librefang_types::tool::ToolExecutionStatus::default(),
+                    approval_request_id: None,
                 }]),
                 pinned: false,
             },
@@ -1411,6 +1543,8 @@ mod tests {
                     tool_name: "shell".into(),
                     content: "ok".into(),
                     is_error: false,
+                    status: librefang_types::tool::ToolExecutionStatus::default(),
+                    approval_request_id: None,
                 }]),
                 pinned: false,
             },

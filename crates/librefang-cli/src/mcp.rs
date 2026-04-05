@@ -9,6 +9,7 @@
 use librefang_kernel::LibreFangKernel;
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
+use std::sync::Arc;
 
 /// Backend for MCP: either a running daemon or an in-process kernel.
 enum McpBackend {
@@ -17,7 +18,7 @@ enum McpBackend {
         client: reqwest::blocking::Client,
     },
     InProcess {
-        kernel: Box<LibreFangKernel>,
+        kernel: Arc<LibreFangKernel>,
         rt: tokio::runtime::Runtime,
     },
 }
@@ -160,11 +161,16 @@ fn create_backend(config: Option<std::path::PathBuf>) -> McpBackend {
             std::process::exit(1);
         }
     };
+    let kernel = Arc::new(kernel);
     let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
-    McpBackend::InProcess {
-        kernel: Box::new(kernel),
-        rt,
-    }
+
+    // Spawn approval expiry sweep task on the runtime
+    let kernel_clone = kernel.clone();
+    rt.spawn(async move {
+        kernel_clone.spawn_approval_sweep_task();
+    });
+
+    McpBackend::InProcess { kernel, rt }
 }
 
 /// Read a Content-Length framed JSON-RPC message from the reader.

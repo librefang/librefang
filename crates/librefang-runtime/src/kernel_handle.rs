@@ -178,6 +178,44 @@ pub trait KernelHandle: Send + Sync {
         Ok(librefang_types::approval::ApprovalDecision::Approved)
     }
 
+    /// Submit a tool for approval without blocking. Returns request UUID immediately.
+    async fn submit_tool_approval(
+        &self,
+        agent_id: &str,
+        tool_name: &str,
+        action_summary: &str,
+        deferred: librefang_types::tool::DeferredToolExecution,
+    ) -> Result<librefang_types::tool::ToolApprovalSubmission, String> {
+        let _ = (agent_id, tool_name, action_summary, deferred);
+        Err("Approval system not available".to_string())
+    }
+
+    /// Resolve an approval request and get the deferred payload.
+    async fn resolve_tool_approval(
+        &self,
+        request_id: uuid::Uuid,
+        decision: librefang_types::approval::ApprovalDecision,
+        decided_by: Option<String>,
+    ) -> Result<
+        (
+            librefang_types::approval::ApprovalResponse,
+            Option<librefang_types::tool::DeferredToolExecution>,
+        ),
+        String,
+    > {
+        let _ = (request_id, decision, decided_by);
+        Err("Approval system not available".to_string())
+    }
+
+    /// Check current status of an approval request.
+    fn get_approval_status(
+        &self,
+        request_id: uuid::Uuid,
+    ) -> Result<Option<librefang_types::approval::ApprovalDecision>, String> {
+        let _ = request_id;
+        Ok(None)
+    }
+
     /// List available Hands and their activation status.
     async fn hand_list(&self) -> Result<Vec<serde_json::Value>, String> {
         Err("Hands system not available".to_string())

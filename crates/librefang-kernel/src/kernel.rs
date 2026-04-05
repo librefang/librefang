@@ -37,13 +37,14 @@ use librefang_types::config::{AuthProfile, KernelConfig};
 use librefang_types::error::LibreFangError;
 use librefang_types::event::*;
 use librefang_types::memory::Memory;
-use librefang_types::tool::ToolDefinition;
+use librefang_types::tool::{AgentLoopSignal, ToolApprovalSubmission, ToolDefinition};
 
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use librefang_channels::types::SenderContext;
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
 use tracing::{debug, info, warn};
 
@@ -376,10 +377,13 @@ pub struct LibreFangKernel {
     /// Per-agent mid-turn message injection senders (#956).
     /// When an agent loop is running, it holds the receiver; callers use the sender
     /// to inject messages between tool calls.
-    pub(crate) injection_senders: dashmap::DashMap<AgentId, tokio::sync::mpsc::Sender<String>>,
+    pub(crate) injection_senders:
+        dashmap::DashMap<AgentId, tokio::sync::mpsc::Sender<AgentLoopSignal>>,
     /// Per-agent injection receivers, created alongside senders and consumed by the agent loop.
-    injection_receivers:
-        dashmap::DashMap<AgentId, Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<String>>>>,
+    injection_receivers: dashmap::DashMap<
+        AgentId,
+        Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<AgentLoopSignal>>>,
+    >,
     /// Sticky assistant routing per conversation (assistant + sender/thread).
     /// Preserves follow-up context for brief messages after a route to a specialist/hand.
     assistant_routes: dashmap::DashMap<String, (AssistantRouteTarget, std::time::Instant)>,
@@ -397,6 +401,7 @@ pub struct LibreFangKernel {
     self_handle: OnceLock<Weak<LibreFangKernel>>,
     /// Whether we've already logged the "no provider" audit entry (prevents spam).
     pub(crate) provider_unconfigured_logged: std::sync::atomic::AtomicBool,
+    approval_sweep_started: AtomicBool,
     /// Config reload barrier — write-locked during `apply_hot_actions_inner` to prevent
     /// concurrent readers from seeing a half-updated configuration (e.g. new provider
     /// URLs but old default model). Read-locked in message hot paths so multiple
@@ -419,6 +424,8 @@ pub struct LibreFangKernel {
     /// boot and mutated safely via [`update_budget_config`] from the API layer,
     /// replacing the previous `unsafe` raw-pointer mutation pattern.
     budget_config: std::sync::RwLock<librefang_types::config::BudgetConfig>,
+    /// Shutdown signal sender for background tasks (e.g., approval expiry sweep).
+    shutdown_tx: tokio::sync::watch::Sender<bool>,
 }
 
 /// Bounded in-memory delivery receipt tracker.
@@ -1073,6 +1080,45 @@ impl LibreFangKernel {
         self.driver_cache.clear();
     }
 
+    /// Spawn the approval expiry sweep task.
+    ///
+    /// This periodically checks for expired pending approval requests and
+    /// handles their resolution (e.g., timing out deferred tool executions).
+    pub fn spawn_approval_sweep_task(self: Arc<Self>) {
+        if self.approval_sweep_started.swap(true, Ordering::AcqRel) {
+            debug!("Approval expiry sweep task already running");
+            return;
+        }
+
+        let kernel = Arc::clone(&self);
+        let mut shutdown_rx = self.shutdown_tx.subscribe();
+
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        let expired = kernel.approval_manager.expire_pending_requests();
+                        for (request_id, decision, deferred) in expired {
+                            kernel.handle_approval_resolution(
+                                request_id, decision, deferred
+                            ).await;
+                        }
+                    }
+                    _ = shutdown_rx.changed() => {
+                        if *shutdown_rx.borrow() {
+                            break;
+                        }
+                    }
+                }
+            }
+            kernel
+                .approval_sweep_started
+                .store(false, Ordering::Release);
+            tracing::debug!("Approval expiry sweep task stopped");
+        });
+    }
+
     /// Skill registry (RwLock — hot-reload on install/uninstall).
     #[inline]
     pub fn skill_registry_ref(
@@ -1323,7 +1369,7 @@ impl LibreFangKernel {
     #[inline]
     pub fn injection_senders_ref(
         &self,
-    ) -> &dashmap::DashMap<AgentId, tokio::sync::mpsc::Sender<String>> {
+    ) -> &dashmap::DashMap<AgentId, tokio::sync::mpsc::Sender<AgentLoopSignal>> {
         &self.injection_senders
     }
 
@@ -2289,6 +2335,8 @@ impl LibreFangKernel {
             mcp_generation: std::sync::atomic::AtomicU64::new(0),
             driver_cache: librefang_runtime::drivers::DriverCache::new(),
             budget_config: std::sync::RwLock::new(initial_budget),
+            approval_sweep_started: AtomicBool::new(false),
+            shutdown_tx: tokio::sync::watch::channel(false).0,
         };
 
         // Initialize proactive memory system (mem0-style) from config.
@@ -4922,7 +4970,9 @@ system_prompt = "You are a helpful assistant."
             )));
         }
         if let Some(tx) = self.injection_senders.get(&agent_id) {
-            match tx.try_send(message.to_string()) {
+            match tx.try_send(AgentLoopSignal::Message {
+                content: message.to_string(),
+            }) {
                 Ok(()) => {
                     info!(agent_id = %agent_id, "Mid-turn message injected");
                     Ok(true)
@@ -4948,8 +4998,8 @@ system_prompt = "You are a helpful assistant."
     fn setup_injection_channel(
         &self,
         agent_id: AgentId,
-    ) -> Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<String>>> {
-        let (tx, rx) = tokio::sync::mpsc::channel::<String>(8);
+    ) -> Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<AgentLoopSignal>>> {
+        let (tx, rx) = tokio::sync::mpsc::channel::<AgentLoopSignal>(8);
         self.injection_senders.insert(agent_id, tx);
         let rx = Arc::new(tokio::sync::Mutex::new(rx));
         self.injection_receivers.insert(agent_id, Arc::clone(&rx));
@@ -7976,6 +8026,9 @@ system_prompt = "You are a helpful assistant."
     pub fn shutdown(&self) {
         info!("Shutting down LibreFang kernel...");
 
+        // Signal background tasks to stop (e.g., approval expiry sweep)
+        let _ = self.shutdown_tx.send(true);
+
         // Kill WhatsApp gateway child process if running
         if let Ok(guard) = self.whatsapp_gateway_pid.lock() {
             if let Some(pid) = *guard {
@@ -10255,53 +10308,7 @@ impl KernelHandle for LibreFangKernel {
             }
         }
 
-        let mut decision = self.approval_manager.request_approval(req).await;
-
-        // Handle Escalate: atomically take escalated request, re-notify, re-wait.
-        // No TOCTOU: single `take_escalated()` call is the only decision point.
-        while decision == ApprovalDecision::TimedOut {
-            match self.approval_manager.take_escalated(request_id) {
-                Some((count, escalated_req)) => {
-                    let esc_msg = format!(
-                        "{} ESCALATION #{}: Approval still needed for \"{}\" — `{}` — {}",
-                        risk_level.emoji(),
-                        count,
-                        agent_id,
-                        tool_name,
-                        description,
-                    );
-                    // Use interactive buttons for escalation too (same as initial notification)
-                    {
-                        use librefang_types::capability::glob_matches;
-                        let cfg = self.config.load_full();
-                        let esc_targets: Vec<_> = {
-                            let agent_routed: Vec<_> = cfg
-                                .notification
-                                .agent_rules
-                                .iter()
-                                .filter(|rule| {
-                                    glob_matches(&rule.agent_pattern, agent_id)
-                                        && rule.events.iter().any(|e| e == "approval_requested")
-                                })
-                                .flat_map(|rule| rule.channels.clone())
-                                .collect();
-                            if !agent_routed.is_empty() {
-                                agent_routed
-                            } else {
-                                cfg.notification.approval_channels.clone()
-                            }
-                        };
-                        let req_id_str = request_id.to_string();
-                        for target in &esc_targets {
-                            self.push_approval_interactive(target, &esc_msg, &req_id_str)
-                                .await;
-                        }
-                    }
-                    decision = self.approval_manager.request_approval(escalated_req).await;
-                }
-                None => break, // Normal timeout, not an escalation
-            }
-        }
+        let decision = self.approval_manager.request_approval(req).await;
 
         // Publish resolved event so channel adapters can notify outcome
         {
@@ -10321,6 +10328,159 @@ impl KernelHandle for LibreFangKernel {
         }
 
         Ok(decision)
+    }
+
+    async fn submit_tool_approval(
+        &self,
+        agent_id: &str,
+        tool_name: &str,
+        action_summary: &str,
+        deferred: librefang_types::tool::DeferredToolExecution,
+    ) -> Result<ToolApprovalSubmission, String> {
+        use librefang_types::approval::ApprovalRequest as TypedRequest;
+
+        // Hand agents are curated trusted packages — auto-approve for non-blocking execution.
+        if let Ok(aid) = agent_id.parse::<AgentId>() {
+            if let Some(entry) = self.registry.get(aid) {
+                if entry.tags.iter().any(|t| t.starts_with("hand:")) {
+                    info!(
+                        agent_id,
+                        tool_name, "Auto-approved for hand agent (non-blocking)"
+                    );
+                    return Ok(ToolApprovalSubmission::AutoApproved);
+                }
+            }
+        }
+
+        let policy = self.approval_manager.policy();
+        let risk_level = crate::approval::ApprovalManager::classify_risk(tool_name);
+        let description = format!("Agent {} requests to execute {}", agent_id, tool_name);
+        let request_id = uuid::Uuid::new_v4();
+        let req = TypedRequest {
+            id: request_id,
+            agent_id: agent_id.to_string(),
+            tool_name: tool_name.to_string(),
+            description: description.clone(),
+            action_summary: action_summary.chars().take(512).collect(),
+            risk_level,
+            requested_at: chrono::Utc::now(),
+            timeout_secs: policy.timeout_secs,
+            sender_id: None,
+            channel: None,
+            route_to: Vec::new(),
+            escalation_count: 0,
+        };
+
+        // Publish event + push notification (same as blocking path)
+        {
+            use librefang_types::event::{
+                ApprovalRequestedEvent, Event, EventPayload, EventTarget,
+            };
+            let event = Event::new(
+                agent_id.parse().unwrap_or_default(),
+                EventTarget::System,
+                EventPayload::ApprovalRequested(ApprovalRequestedEvent {
+                    request_id: request_id.to_string(),
+                    agent_id: agent_id.to_string(),
+                    tool_name: tool_name.to_string(),
+                    description: description.clone(),
+                    risk_level: format!("{:?}", risk_level),
+                }),
+            );
+            self.event_bus.publish(event).await;
+        }
+        {
+            use librefang_types::capability::glob_matches;
+            let cfg = self.config.load_full();
+            let targets: Vec<librefang_types::approval::NotificationTarget> = {
+                let routed: Vec<_> = policy
+                    .routing
+                    .iter()
+                    .filter(|r| glob_matches(&r.tool_pattern, tool_name))
+                    .flat_map(|r| r.route_to.clone())
+                    .collect();
+                if !routed.is_empty() {
+                    routed
+                } else {
+                    let agent_routed: Vec<_> = cfg
+                        .notification
+                        .agent_rules
+                        .iter()
+                        .filter(|rule| {
+                            glob_matches(&rule.agent_pattern, agent_id)
+                                && rule.events.iter().any(|e| e == "approval_requested")
+                        })
+                        .flat_map(|rule| rule.channels.clone())
+                        .collect();
+                    if !agent_routed.is_empty() {
+                        agent_routed
+                    } else {
+                        cfg.notification.approval_channels.clone()
+                    }
+                }
+            };
+            let msg = format!(
+                "{} Approval needed: agent \"{}\" wants to run `{}` — {}",
+                risk_level.emoji(),
+                agent_id,
+                tool_name,
+                description,
+            );
+            let req_id_str = request_id.to_string();
+            for target in &targets {
+                self.push_approval_interactive(target, &msg, &req_id_str)
+                    .await;
+            }
+        }
+
+        self.approval_manager
+            .submit_request(req, deferred)
+            .map(|request_id| ToolApprovalSubmission::Pending { request_id })
+    }
+
+    async fn resolve_tool_approval(
+        &self,
+        request_id: uuid::Uuid,
+        decision: librefang_types::approval::ApprovalDecision,
+        decided_by: Option<String>,
+    ) -> Result<
+        (
+            librefang_types::approval::ApprovalResponse,
+            Option<librefang_types::tool::DeferredToolExecution>,
+        ),
+        String,
+    > {
+        let (response, deferred) = self
+            .approval_manager
+            .resolve(request_id, decision, decided_by)?;
+
+        // 5.1: If we got a deferred execution payload, handle the resolution
+        // (execute approved tool / build terminal result, update session, notify agent).
+        if let Some(ref def) = deferred {
+            let decision_clone = response.decision.clone();
+            self.handle_approval_resolution(request_id, decision_clone, def.clone())
+                .await;
+        }
+
+        Ok((response, deferred))
+    }
+
+    fn get_approval_status(
+        &self,
+        request_id: uuid::Uuid,
+    ) -> Result<Option<librefang_types::approval::ApprovalDecision>, String> {
+        // If still pending, no decision yet.
+        if self.approval_manager.get_pending(request_id).is_some() {
+            return Ok(None);
+        }
+        // Check recent resolved records.
+        let recent = self.approval_manager.list_recent(200);
+        for record in &recent {
+            if record.request.id == request_id {
+                return Ok(Some(record.decision.clone()));
+            }
+        }
+        Ok(None)
     }
 
     fn list_a2a_agents(&self) -> Vec<(String, String)> {
@@ -10882,6 +11042,303 @@ impl KernelHandle for LibreFangKernel {
             .map_err(|e| format!("Failed to save goals: {e}"))?;
 
         Ok(result)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Approval resolution helpers (Step 5)
+// ---------------------------------------------------------------------------
+
+impl LibreFangKernel {
+    /// Handle the aftermath of an approval decision: execute tool (if approved),
+    /// build terminal result (if denied/expired/skipped), update session, notify agent.
+    pub(crate) async fn handle_approval_resolution(
+        &self,
+        _request_id: uuid::Uuid,
+        decision: librefang_types::approval::ApprovalDecision,
+        deferred: librefang_types::tool::DeferredToolExecution,
+    ) {
+        use librefang_types::approval::ApprovalDecision;
+        use librefang_types::tool::{ToolExecutionStatus, ToolResult};
+
+        let agent_id = match uuid::Uuid::parse_str(&deferred.agent_id) {
+            Ok(u) => AgentId(u),
+            Err(e) => {
+                warn!(
+                    "handle_approval_resolution: invalid agent_id '{}': {e}",
+                    deferred.agent_id
+                );
+                return;
+            }
+        };
+
+        let result = match &decision {
+            ApprovalDecision::Approved => match self.execute_deferred_tool(&deferred).await {
+                Ok(r) => r,
+                Err(e) => ToolResult::error(
+                    deferred.tool_use_id.clone(),
+                    format!("Failed to execute approved tool: {e}"),
+                ),
+            },
+            ApprovalDecision::Denied => ToolResult::with_status(
+                deferred.tool_use_id.clone(),
+                format!(
+                    "Tool '{}' was denied by human operator.",
+                    deferred.tool_name
+                ),
+                ToolExecutionStatus::Denied,
+            ),
+            ApprovalDecision::TimedOut => ToolResult::with_status(
+                deferred.tool_use_id.clone(),
+                format!("Tool '{}' approval request expired.", deferred.tool_name),
+                ToolExecutionStatus::Expired,
+            ),
+            ApprovalDecision::ModifyAndRetry { feedback } => ToolResult::with_status(
+                deferred.tool_use_id.clone(),
+                format!(
+                    "[MODIFY_AND_RETRY] Tool '{}': {}",
+                    deferred.tool_name, feedback
+                ),
+                ToolExecutionStatus::ModifyAndRetry,
+            ),
+            ApprovalDecision::Skipped => ToolResult::with_status(
+                deferred.tool_use_id.clone(),
+                format!("Tool '{}' was skipped.", deferred.tool_name),
+                ToolExecutionStatus::Skipped,
+            ),
+        };
+
+        // 5.2: Replace WaitingApproval result in session with the final result.
+        self.replace_tool_result_in_session(&agent_id, &deferred.tool_use_id, &result)
+            .await;
+
+        // 5.3: Notify the running agent loop via injection channel.
+        self.notify_agent_of_resolution(&agent_id, &deferred, &decision, &result);
+    }
+
+    fn build_deferred_tool_exec_context<'a>(
+        &'a self,
+        kernel_handle: &'a Arc<dyn librefang_runtime::kernel_handle::KernelHandle>,
+        skill_snapshot: &'a librefang_skills::registry::SkillRegistry,
+        deferred: &'a librefang_types::tool::DeferredToolExecution,
+    ) -> librefang_runtime::tool_runner::ToolExecContext<'a> {
+        librefang_runtime::tool_runner::ToolExecContext {
+            kernel: Some(kernel_handle),
+            allowed_tools: deferred.allowed_tools.as_deref(),
+            caller_agent_id: Some(deferred.agent_id.as_str()),
+            skill_registry: Some(skill_snapshot),
+            mcp_connections: Some(&self.mcp_connections),
+            web_ctx: Some(&self.web_ctx),
+            browser_ctx: Some(&self.browser_ctx),
+            allowed_env_vars: None,
+            workspace_root: deferred.workspace_root.as_deref(),
+            media_engine: Some(&self.media_engine),
+            media_drivers: Some(&self.media_drivers),
+            exec_policy: None,
+            tts_engine: Some(&self.tts_engine),
+            docker_config: None,
+            process_manager: Some(&self.process_manager),
+            sender_id: deferred.sender_id.as_deref(),
+            channel: deferred.channel.as_deref(),
+        }
+    }
+
+    /// Execute a deferred tool after it has been approved.
+    async fn execute_deferred_tool(
+        &self,
+        deferred: &librefang_types::tool::DeferredToolExecution,
+    ) -> Result<librefang_types::tool::ToolResult, String> {
+        use librefang_runtime::tool_runner::execute_tool_raw;
+
+        // Build a kernel handle reference so tools can call back into the kernel.
+        let kernel_handle: Arc<dyn librefang_runtime::kernel_handle::KernelHandle> =
+            match self.self_handle.get().and_then(|w| w.upgrade()) {
+                Some(arc) => arc,
+                None => {
+                    return Err("Kernel self-handle unavailable".to_string());
+                }
+            };
+
+        // Snapshot the skill registry (drops the read lock before the async await).
+        let skill_snapshot = self
+            .skill_registry
+            .read()
+            .map_err(|e| format!("skill_registry lock poisoned: {e}"))?
+            .snapshot();
+
+        let ctx = self.build_deferred_tool_exec_context(&kernel_handle, &skill_snapshot, deferred);
+
+        let result = execute_tool_raw(
+            &deferred.tool_use_id,
+            &deferred.tool_name,
+            &deferred.input,
+            &ctx,
+        )
+        .await;
+
+        Ok(result)
+    }
+
+    /// Replace a `WaitingApproval` `ToolResult` in the agent's session with the
+    /// final resolved result. Uses `tool_use_id` to locate the placeholder block.
+    async fn replace_tool_result_in_session(
+        &self,
+        agent_id: &AgentId,
+        tool_use_id: &str,
+        result: &librefang_types::tool::ToolResult,
+    ) {
+        use librefang_types::message::{ContentBlock, MessageContent};
+        use librefang_types::tool::ToolExecutionStatus;
+
+        // Resolve the agent's session_id from the registry.
+        let session_id = match self.registry.get(*agent_id) {
+            Some(entry) => entry.session_id,
+            None => {
+                warn!(
+                    agent_id = %agent_id,
+                    "replace_tool_result_in_session: agent not found in registry"
+                );
+                return;
+            }
+        };
+
+        let mut session = match self.memory.get_session(session_id) {
+            Ok(Some(s)) => s,
+            Ok(None) => {
+                warn!(
+                    agent_id = %agent_id,
+                    "replace_tool_result_in_session: session not found"
+                );
+                return;
+            }
+            Err(e) => {
+                warn!(
+                    agent_id = %agent_id,
+                    error = %e,
+                    "replace_tool_result_in_session: failed to load session"
+                );
+                return;
+            }
+        };
+
+        let mut replaced = false;
+        let mut already_final = false;
+        'outer: for msg in &mut session.messages {
+            let blocks = match &mut msg.content {
+                MessageContent::Blocks(blocks) => blocks,
+                _ => continue,
+            };
+            for block in blocks.iter_mut() {
+                if let ContentBlock::ToolResult {
+                    tool_use_id: ref id,
+                    content,
+                    is_error,
+                    status,
+                    approval_request_id,
+                    ..
+                } = block
+                {
+                    if id == tool_use_id {
+                        if *status == ToolExecutionStatus::WaitingApproval {
+                            *content = result.content.clone();
+                            *is_error = result.is_error;
+                            *status = result.status;
+                            *approval_request_id = None;
+                            replaced = true;
+                            break 'outer;
+                        }
+
+                        if *status == result.status && *content == result.content {
+                            already_final = true;
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+        }
+
+        if !replaced && !already_final {
+            if let Some(last_message) = session.messages.last_mut() {
+                let block = ContentBlock::ToolResult {
+                    tool_use_id: result.tool_use_id.clone(),
+                    tool_name: result.tool_name.clone().unwrap_or_default(),
+                    content: result.content.clone(),
+                    is_error: result.is_error,
+                    status: result.status,
+                    approval_request_id: None,
+                };
+
+                match &mut last_message.content {
+                    MessageContent::Blocks(blocks) => blocks.push(block),
+                    MessageContent::Text(text) => {
+                        let prior = std::mem::take(text);
+                        last_message.content = MessageContent::Blocks(vec![
+                            ContentBlock::Text {
+                                text: prior,
+                                provider_metadata: None,
+                            },
+                            block,
+                        ]);
+                    }
+                }
+                replaced = true;
+            }
+        }
+
+        if replaced {
+            if let Err(e) = self.memory.save_session(&session) {
+                warn!(
+                    agent_id = %agent_id,
+                    error = %e,
+                    "replace_tool_result_in_session: failed to save session"
+                );
+            }
+        } else {
+            debug!(
+                agent_id = %agent_id,
+                tool_use_id,
+                "replace_tool_result_in_session: terminal result already present or no writable message found"
+            );
+        }
+    }
+
+    /// Notify the running agent loop about an approval resolution via an explicit
+    /// mid-turn signal.
+    fn notify_agent_of_resolution(
+        &self,
+        agent_id: &AgentId,
+        deferred: &librefang_types::tool::DeferredToolExecution,
+        decision: &librefang_types::approval::ApprovalDecision,
+        result: &librefang_types::tool::ToolResult,
+    ) {
+        if let Some(tx) = self.injection_senders.get(agent_id) {
+            match tx.try_send(AgentLoopSignal::ApprovalResolved {
+                tool_name: deferred.tool_name.clone(),
+                decision: decision.as_str().to_string(),
+                result_preview: librefang_types::truncate_str(&result.content, 300).to_string(),
+            }) {
+                Ok(()) => {
+                    debug!(agent_id = %agent_id, "Approval resolution injected into agent loop");
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    warn!(
+                        agent_id = %agent_id,
+                        "Approval resolution injection channel full — notification dropped"
+                    );
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    debug!(
+                        agent_id = %agent_id,
+                        "Approval resolution: agent loop is not running (injection channel closed)"
+                    );
+                }
+            }
+        } else {
+            debug!(
+                agent_id = %agent_id,
+                "Approval resolution: no active agent loop to notify"
+            );
+        }
     }
 }
 
@@ -11561,6 +12018,33 @@ mod tests {
         );
 
         kernel.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_spawn_approval_sweep_task_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let home_dir = dir.path().to_path_buf();
+        std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            ..KernelConfig::default()
+        };
+
+        let kernel =
+            Arc::new(LibreFangKernel::boot_with_config(config).expect("Kernel should boot"));
+
+        Arc::clone(&kernel).spawn_approval_sweep_task();
+        assert!(kernel.approval_sweep_started.load(Ordering::Acquire));
+
+        Arc::clone(&kernel).spawn_approval_sweep_task();
+        assert!(kernel.approval_sweep_started.load(Ordering::Acquire));
+
+        kernel.shutdown();
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+
+        assert!(!kernel.approval_sweep_started.load(Ordering::Acquire));
     }
 
     #[test]

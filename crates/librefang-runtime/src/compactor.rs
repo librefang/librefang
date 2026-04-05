@@ -977,6 +977,8 @@ mod tests {
                 tool_name: String::new(),
                 content: "Search results here".to_string(),
                 is_error: false,
+                status: librefang_types::tool::ToolExecutionStatus::default(),
+                approval_request_id: None,
             }]),
             pinned: false,
         };
@@ -1320,6 +1322,8 @@ mod tests {
                     tool_name: String::new(),
                     content: "Results found".to_string(),
                     is_error: false,
+                    status: librefang_types::tool::ToolExecutionStatus::default(),
+                    approval_request_id: None,
                 }]),
                 pinned: false,
             },
@@ -1492,6 +1496,8 @@ mod tests {
                 tool_name: String::new(),
                 content: tool_content,
                 is_error: false,
+                status: librefang_types::tool::ToolExecutionStatus::default(),
+                approval_request_id: None,
             }]),
             pinned: false,
         }];
@@ -1513,6 +1519,8 @@ mod tests {
                 tool_name: String::new(),
                 content: large_result,
                 is_error: false,
+                status: librefang_types::tool::ToolExecutionStatus::default(),
+                approval_request_id: None,
             }]),
             pinned: false,
         }];
@@ -1538,6 +1546,8 @@ mod tests {
                 tool_name: String::new(),
                 content: short_result.to_string(),
                 is_error: false,
+                status: librefang_types::tool::ToolExecutionStatus::default(),
+                approval_request_id: None,
             }]),
             pinned: false,
         }];

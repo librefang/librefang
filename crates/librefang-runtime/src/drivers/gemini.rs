@@ -1529,6 +1529,8 @@ mod tests {
                     tool_name: "web_search".to_string(),
                     content: "Results about Rust programming".to_string(),
                     is_error: false,
+                    status: librefang_types::tool::ToolExecutionStatus::default(),
+                    approval_request_id: None,
                 }]),
                 pinned: false,
             },

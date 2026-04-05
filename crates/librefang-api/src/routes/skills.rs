@@ -2494,6 +2494,7 @@ pub async fn hand_get_session(
                                         tool_name,
                                         content,
                                         is_error,
+                                        ..
                                     } => Some(serde_json::json!({
                                         "type": "tool_result",
                                         "tool_use_id": tool_use_id,

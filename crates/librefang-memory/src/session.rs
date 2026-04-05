@@ -879,6 +879,7 @@ impl SessionStore {
                                 tool_name: _,
                                 content,
                                 is_error,
+                                ..
                             } => {
                                 tool_parts.push(serde_json::json!({
                                     "type": "tool_result",
