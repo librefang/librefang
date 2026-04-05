@@ -247,7 +247,7 @@ function DetailsModal({ skill, onClose, onInstall, pendingId, source = "clawhub"
                 <p className="text-xs font-black uppercase tracking-widest text-text-dim/60">v{skill.version || "1.0.0"}</p>
               </div>
             </div>
-            <button onClick={onClose} className="p-2 hover:bg-main/30 rounded-lg transition-colors">
+            <button onClick={onClose} className="p-2 hover:bg-main/30 rounded-lg transition-colors" aria-label={t("common.close", { defaultValue: "Close" })}>
               <X className="w-5 h-5 text-text-dim" />
             </button>
           </div>
@@ -688,7 +688,7 @@ export function SkillsPage() {
           placeholder={selectedCategory ? categories.find(c => c.id === selectedCategory)?.name + "..." : t("skills.search_placeholder")}
           leftIcon={<Search className="w-4 h-4" />}
           rightIcon={search ? (
-            <button onClick={() => setSearch("")} className="hover:text-text-main">
+            <button onClick={() => setSearch("")} className="hover:text-text-main" aria-label={t("common.clear_search", { defaultValue: "Clear search" })}>
               <X className="w-3 h-3" />
             </button>
           ) : undefined}

@@ -191,7 +191,7 @@ function DetailsModal({ channel, onClose, onConfigure, onTest, t }: {
                 <p className="text-xs font-black uppercase tracking-widest text-text-dim/60">{channel.category || channel.name}</p>
               </div>
             </div>
-            <button onClick={onClose} className="p-2 hover:bg-main/30 rounded-lg transition-colors">
+            <button onClick={onClose} className="p-2 hover:bg-main/30 rounded-lg transition-colors" aria-label={t("common.close")}>
               <X className="w-5 h-5 text-text-dim" />
             </button>
           </div>
@@ -380,7 +380,7 @@ function ConfigDialog({ channel, onClose, t }: { channel: Channel; onClose: () =
                 <p className="text-[10px] text-text-dim mt-0.5">{t("channels.configure")}</p>
               </div>
             </div>
-            <button onClick={onClose} className="p-2 rounded-xl hover:bg-main transition-colors"><X className="w-4 h-4" /></button>
+            <button onClick={onClose} className="p-2 rounded-xl hover:bg-main transition-colors" aria-label={t("common.close")}><X className="w-4 h-4" /></button>
           </div>
         </div>
         <div className="p-6">
@@ -543,7 +543,7 @@ function QrLoginDialog({ channel, onClose, t }: { channel: Channel; onClose: () 
                 <p className="text-[10px] text-text-dim mt-0.5">{t("channels.qr_login") || "QR Code Login"}</p>
               </div>
             </div>
-            <button onClick={onClose} className="p-2 rounded-xl hover:bg-main transition-colors"><X className="w-4 h-4" /></button>
+            <button onClick={onClose} className="p-2 rounded-xl hover:bg-main transition-colors" aria-label={t("common.close")}><X className="w-4 h-4" /></button>
           </div>
         </div>
 
@@ -706,7 +706,7 @@ export function ChannelsPage() {
             placeholder={t("common.search")}
             leftIcon={<Search className="w-4 h-4" />}
             rightIcon={search && (
-              <button onClick={() => setSearch("")} className="hover:text-text-main">
+              <button onClick={() => setSearch("")} className="hover:text-text-main" aria-label={t("common.clear_search", { defaultValue: "Clear search" })}>
                 <X className="w-3 h-3" />
               </button>
             )}

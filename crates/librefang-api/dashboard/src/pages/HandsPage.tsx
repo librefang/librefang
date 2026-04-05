@@ -225,6 +225,7 @@ function HandChatPanel({
           <button
             onClick={onClose}
             className="p-1.5 rounded-lg text-text-dim hover:text-text hover:bg-main transition-colors"
+            aria-label={t("common.close", { defaultValue: "Close" })}
           >
             <X className="w-4 h-4" />
           </button>

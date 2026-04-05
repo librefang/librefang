@@ -417,7 +417,7 @@ export function AgentsPage() {
                     </div>
                   </div>
                 </div>
-                <button onClick={closeDetailModal} className="p-2 rounded-xl hover:bg-main transition-colors"><X className="w-4 h-4" /></button>
+                <button onClick={closeDetailModal} className="p-2 rounded-xl hover:bg-main transition-colors" aria-label={t("common.close", { defaultValue: "Close" })}><X className="w-4 h-4" /></button>
               </div>
             </div>
             <div className="p-6 space-y-5">
@@ -768,6 +768,7 @@ export function AgentsPage() {
 }
 
 function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: string; agentName: string; onClose: () => void }) {
+  const { t } = useTranslation();
   const queryClient = useQueryClient();
   const [activeTab, setActiveTab] = useState<"versions" | "experiments">("versions");
   const [showCreateVersion, setShowCreateVersion] = useState(false);
@@ -860,7 +861,7 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
             <h3 className="text-lg font-black">{agentName}</h3>
             <p className="text-xs text-text-dim">Prompts & Experiments</p>
           </div>
-          <button onClick={onClose} className="p-2 rounded-xl hover:bg-main"><X className="w-4 h-4" /></button>
+          <button onClick={onClose} className="p-2 rounded-xl hover:bg-main" aria-label={t("common.close", { defaultValue: "Close" })}><X className="w-4 h-4" /></button>
         </div>
         
         <div className="px-6 py-3 border-b border-border-subtle flex gap-2 shrink-0">

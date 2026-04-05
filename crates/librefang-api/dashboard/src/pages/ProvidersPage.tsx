@@ -387,7 +387,7 @@ function DetailsModal({ provider, onClose, onTest, pendingId, t }: {
                 <p className="text-xs font-black uppercase tracking-widest text-text-dim/60">{provider.id}</p>
               </div>
             </div>
-            <button onClick={onClose} className="p-2 hover:bg-main/30 rounded-lg transition-colors">
+            <button onClick={onClose} className="p-2 hover:bg-main/30 rounded-lg transition-colors" aria-label={t("common.close", { defaultValue: "Close" })}>
               <X className="w-5 h-5 text-text-dim" />
             </button>
           </div>
@@ -789,7 +789,7 @@ export function ProvidersPage() {
             placeholder={t("common.search")}
             leftIcon={<Search className="w-4 h-4" />}
             rightIcon={search && (
-              <button onClick={() => setSearch("")} className="hover:text-text-main">
+              <button onClick={() => setSearch("")} className="hover:text-text-main" aria-label={t("common.clear_search", { defaultValue: "Clear search" })}>
                 <X className="w-3 h-3" />
               </button>
             )}
@@ -1022,7 +1022,7 @@ export function ProvidersPage() {
                 <Trash2 className="w-4 h-4 text-error" />
                 <h3 className="text-sm font-bold">{t("providers.delete_confirm_title")}</h3>
               </div>
-              <button onClick={() => setDeleteConfirmProvider(null)} className="p-1 rounded hover:bg-main"><X className="w-4 h-4" /></button>
+              <button onClick={() => setDeleteConfirmProvider(null)} className="p-1 rounded hover:bg-main" aria-label={t("common.close", { defaultValue: "Close" })}><X className="w-4 h-4" /></button>
             </div>
             <div className="p-5 space-y-4">
               <div className="flex items-center gap-3 p-3 rounded-xl bg-main">

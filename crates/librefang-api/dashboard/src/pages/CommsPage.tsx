@@ -218,7 +218,7 @@ export function CommsPage() {
         placeholder={t("common.search")}
         leftIcon={<Search className="w-4 h-4" />}
         rightIcon={search && (
-          <button onClick={() => setSearch("")} className="hover:text-text-main">
+          <button onClick={() => setSearch("")} className="hover:text-text-main" aria-label={t("common.clear_search", { defaultValue: "Clear search" })}>
             <X className="w-3 h-3" />
           </button>
         )}
