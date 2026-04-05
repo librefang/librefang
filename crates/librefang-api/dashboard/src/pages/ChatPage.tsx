@@ -148,15 +148,20 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
   const { ws, wsConnected, onDropRef } = useWebSocket(agentId);
   const addSkillOutput = useUIStore((s) => s.addSkillOutput);
 
-  // Save current messages to cache when switching away
+  // Save current messages to cache when switching away. The cleanup must
+  // read the LATEST messages at unmount/agent-swap time, so we keep a
+  // ref that tracks messages and only fire the save effect on agentId
+  // changes (previously had no deps, so cleanup+re-run every render).
   const prevAgentRef = useRef<string | null>(null);
+  const messagesRef = useRef<ChatMessage[]>(messages);
+  messagesRef.current = messages;
   useEffect(() => {
     return () => {
       if (prevAgentRef.current) {
-        sessionCache.set(prevAgentRef.current, messages);
+        sessionCache.set(prevAgentRef.current, messagesRef.current);
       }
     };
-  });
+  }, [agentId]);
   useEffect(() => { prevAgentRef.current = agentId; }, [agentId]);
 
   // Load history — use cache if available, otherwise fetch
@@ -536,7 +541,7 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
         {!isUser && message.tools && message.tools.length > 0 && (
           <div className="w-full mb-1">
             {message.tools.map((tool, i) => (
-              <ToolCallCard key={`${tool.name}-${i}`} tool={tool} />
+              <ToolCallCard key={tool._call_id ?? `${tool.name}-${i}`} tool={tool} />
             ))}
           </div>
         )}

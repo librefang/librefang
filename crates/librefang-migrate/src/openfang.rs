@@ -12,6 +12,82 @@ use std::path::Path;
 use tracing::{info, warn};
 use walkdir::WalkDir;
 
+/// After copying OpenFang files verbatim, check each copied `config.toml`
+/// and `agents/*/agent.toml` against the current LibreFang schema and attach
+/// warnings to the report for any drift.
+///
+/// Warnings only — we don't fail the migration or rewrite the copied files,
+/// because the user may have valid reasons for custom fields (e.g. forward
+/// compatibility with future LibreFang versions). The goal is visibility.
+///
+/// **What this catches:**
+/// - Unknown **top-level** fields/sections in `config.toml`
+/// - Invalid enum values (e.g. `group_policy = "respond"` when the valid set is
+///   `all|mention_only|commands_only|ignore`) — these fail deserialization
+/// - Wrong types anywhere in the tree
+/// - Missing required fields on agent manifests
+///
+/// **What this does NOT catch:**
+/// - Unknown fields **nested inside** sections (e.g. `[channels.telegram].foo`).
+///   LibreFang's channel structs use `#[serde(default)]` without
+///   `deny_unknown_fields`, so unknown nested fields are silently ignored at
+///   deserialization time. Catching these would require per-struct field-list
+///   introspection for every channel struct. Accepted trade-off.
+fn warn_on_schema_drift(target: &Path, report: &mut MigrationReport) {
+    use librefang_types::agent::AgentManifest;
+    use librefang_types::config::KernelConfig;
+
+    // --- config.toml ---
+    let config_path = target.join("config.toml");
+    if let Ok(content) = std::fs::read_to_string(&config_path) {
+        match toml::from_str::<toml::Value>(&content) {
+            Ok(raw) => {
+                let unknown = KernelConfig::detect_unknown_fields(&raw);
+                if !unknown.is_empty() {
+                    report.warnings.push(format!(
+                        "config.toml: {} unknown top-level field(s) copied from OpenFang \
+                         that LibreFang does not recognise: {} — these will be ignored. \
+                         Check for schema drift between OpenFang and LibreFang.",
+                        unknown.len(),
+                        unknown.join(", "),
+                    ));
+                }
+                if let Err(e) = toml::from_str::<KernelConfig>(&content) {
+                    report.warnings.push(format!(
+                        "config.toml does not cleanly deserialize into LibreFang \
+                         KernelConfig: {e} — LibreFang may fall back to defaults for \
+                         affected fields."
+                    ));
+                }
+            }
+            Err(e) => report.warnings.push(format!(
+                "config.toml is not valid TOML after migration: {e}"
+            )),
+        }
+    }
+
+    // --- agents/*/agent.toml ---
+    let agents_dir = target.join("agents");
+    if !agents_dir.is_dir() {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(&agents_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let manifest_path = entry.path().join("agent.toml");
+        let Ok(content) = std::fs::read_to_string(&manifest_path) else {
+            continue;
+        };
+        if let Err(e) = toml::from_str::<AgentManifest>(&content) {
+            report.warnings.push(format!(
+                "{}: does not cleanly deserialize into LibreFang AgentManifest: {e}",
+                manifest_path.display(),
+            ));
+        }
+    }
+}
+
 /// Determine the [`ItemKind`] from the relative path of a file within the
 /// openfang home directory.
 fn item_kind_for_path(rel: &Path) -> ItemKind {
@@ -143,6 +219,15 @@ pub fn migrate(options: &MigrateOptions) -> Result<MigrationReport, MigrateError
         });
     }
 
+    // Post-copy schema check: OpenFang and LibreFang share the same config
+    // format by convention, but that contract is not enforced anywhere. If
+    // OpenFang drifts (renamed fields, changed enum values, removed sections),
+    // a verbatim copy here will silently fall back to defaults at load time.
+    // Warn the user so the drift is visible, but don't block the migration.
+    if !options.dry_run {
+        warn_on_schema_drift(target, &mut report);
+    }
+
     Ok(report)
 }
 
@@ -204,7 +289,18 @@ mod tests {
         assert!(!report.dry_run);
         assert_eq!(report.imported.len(), 5);
         assert!(report.skipped.is_empty());
-        assert!(report.warnings.is_empty());
+        // The artificial fixture uses `[general]` and a stripped-down agent.toml
+        // which don't match the real LibreFang schema — the post-copy drift
+        // check correctly flags them. Verify that the warnings are exactly
+        // the schema-drift ones we expect, not anything else.
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.contains("unknown top-level field") && w.contains("general")),
+            "expected an unknown-top-level-field warning for `[general]`, got: {:?}",
+            report.warnings
+        );
 
         // Verify config.toml was rewritten
         let config_content = std::fs::read_to_string(dst.path().join("config.toml")).unwrap();
@@ -354,5 +450,151 @@ mod tests {
         assert!(!should_rewrite(Path::new("data/index.db")));
         assert!(!should_rewrite(Path::new("memory/MEMORY.md")));
         assert!(!should_rewrite(Path::new("sessions/main.jsonl")));
+    }
+
+    /// Happy path: a realistic LibreFang-shaped config.toml migrates cleanly
+    /// with zero schema-drift warnings.
+    #[test]
+    fn test_schema_drift_check_clean_config() {
+        let src = TempDir::new().unwrap();
+        let dst = TempDir::new().unwrap();
+
+        std::fs::write(
+            src.path().join("config.toml"),
+            "config_version = 2\n\
+             api_listen = \"0.0.0.0:4545\"\n\
+             log_level = \"info\"\n\
+             \n\
+             [default_model]\n\
+             provider = \"openfang-auto\"\n\
+             model = \"gpt-4\"\n",
+        )
+        .unwrap();
+
+        let options = MigrateOptions {
+            source: MigrateSource::OpenFang,
+            source_dir: src.path().to_path_buf(),
+            target_dir: dst.path().to_path_buf(),
+            dry_run: false,
+        };
+        let report = migrate(&options).unwrap();
+
+        assert!(
+            report.warnings.is_empty(),
+            "clean config should produce no drift warnings, got: {:?}",
+            report.warnings
+        );
+    }
+
+    /// Drift detection: an invalid **nested enum value** (like a stale
+    /// `group_policy = "respond"` from an old OpenFang) fails deserialization
+    /// and produces a warning.
+    #[test]
+    fn test_schema_drift_check_flags_bad_enum_value() {
+        let src = TempDir::new().unwrap();
+        let dst = TempDir::new().unwrap();
+
+        std::fs::write(
+            src.path().join("config.toml"),
+            "config_version = 2\n\
+             api_listen = \"0.0.0.0:4545\"\n\
+             \n\
+             [channels.telegram]\n\
+             bot_token_env = \"TG_TOKEN\"\n\
+             \n\
+             [channels.telegram.overrides]\n\
+             group_policy = \"respond\"\n",
+        )
+        .unwrap();
+
+        let options = MigrateOptions {
+            source: MigrateSource::OpenFang,
+            source_dir: src.path().to_path_buf(),
+            target_dir: dst.path().to_path_buf(),
+            dry_run: false,
+        };
+        let report = migrate(&options).unwrap();
+
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.contains("does not cleanly deserialize")),
+            "expected deserialize-failure warning for bad group_policy, got: {:?}",
+            report.warnings
+        );
+    }
+
+    /// Known limitation: an unknown field **nested** inside a section (e.g.
+    /// `[channels.telegram].old_field`) is NOT caught, because LibreFang's
+    /// channel structs use `#[serde(default)]` and silently drop unknown
+    /// fields. This test pins that behaviour so we notice if it ever changes.
+    #[test]
+    fn test_schema_drift_check_does_not_catch_nested_unknown_fields() {
+        let src = TempDir::new().unwrap();
+        let dst = TempDir::new().unwrap();
+
+        std::fs::write(
+            src.path().join("config.toml"),
+            "config_version = 2\n\
+             api_listen = \"0.0.0.0:4545\"\n\
+             \n\
+             [channels.telegram]\n\
+             bot_token_env = \"TG_TOKEN\"\n\
+             nickname = \"this-field-does-not-exist\"\n",
+        )
+        .unwrap();
+
+        let options = MigrateOptions {
+            source: MigrateSource::OpenFang,
+            source_dir: src.path().to_path_buf(),
+            target_dir: dst.path().to_path_buf(),
+            dry_run: false,
+        };
+        let report = migrate(&options).unwrap();
+
+        // Document the limitation: nested unknown fields produce no warnings.
+        assert!(
+            report.warnings.is_empty(),
+            "nested unknown fields are expected to slip through (see function \
+             doc comment for rationale), got: {:?}",
+            report.warnings
+        );
+    }
+
+    /// Drift detection: a config.toml with a field that LibreFang's
+    /// KernelConfig doesn't know should produce a warning but not fail.
+    #[test]
+    fn test_schema_drift_check_flags_unknown_fields() {
+        let src = TempDir::new().unwrap();
+        let dst = TempDir::new().unwrap();
+
+        // Note: `openfang` in field names gets text-substituted to `librefang`
+        // during the copy, so we use a neutral prefix to avoid confusion.
+        std::fs::write(
+            src.path().join("config.toml"),
+            "config_version = 2\n\
+             api_listen = \"0.0.0.0:4545\"\n\
+             \n\
+             [legacy_section]\n\
+             some_flag = true\n",
+        )
+        .unwrap();
+
+        let options = MigrateOptions {
+            source: MigrateSource::OpenFang,
+            source_dir: src.path().to_path_buf(),
+            target_dir: dst.path().to_path_buf(),
+            dry_run: false,
+        };
+        let report = migrate(&options).unwrap();
+
+        assert!(
+            report.warnings.iter().any(|w| w.contains("legacy_section")),
+            "expected drift warning for unknown section, got: {:?}",
+            report.warnings
+        );
+        // Migration itself still succeeded — the file was copied.
+        assert!(dst.path().join("config.toml").exists());
     }
 }

@@ -609,10 +609,15 @@ pub async fn add_custom_model(
         .into_json_tuple();
     }
 
-    // Persist to disk
+    // Persist to disk. If save fails, roll back the in-memory add so the
+    // catalog stays consistent with what's on disk — otherwise the caller
+    // sees "added" now but the model vanishes on the next daemon restart.
     let custom_path = state.kernel.home_dir().join("custom_models.json");
     if let Err(e) = catalog.save_custom_models(&custom_path) {
         tracing::warn!("Failed to persist custom models: {e}");
+        catalog.remove_custom_model(&id);
+        return ApiErrorResponse::internal(format!("Failed to persist custom model: {e}"))
+            .into_json_tuple();
     }
 
     (
@@ -637,6 +642,10 @@ pub async fn remove_custom_model(
         .write()
         .unwrap_or_else(|e| e.into_inner());
 
+    // Snapshot the entry before removing so we can restore it if the
+    // subsequent persist fails — keeps the in-memory catalog consistent
+    // with disk across failure paths.
+    let snapshot = catalog.find_model(&model_id).cloned();
     if !catalog.remove_custom_model(&model_id) {
         return ApiErrorResponse::not_found(format!("Custom model '{}' not found", model_id))
             .into_json_tuple();
@@ -645,6 +654,11 @@ pub async fn remove_custom_model(
     let custom_path = state.kernel.home_dir().join("custom_models.json");
     if let Err(e) = catalog.save_custom_models(&custom_path) {
         tracing::warn!("Failed to persist custom models: {e}");
+        if let Some(entry) = snapshot {
+            catalog.add_custom_model(entry);
+        }
+        return ApiErrorResponse::internal(format!("Failed to persist custom model: {e}"))
+            .into_json_tuple();
     }
 
     (
@@ -1011,10 +1025,18 @@ pub async fn test_provider(
 
     let start = std::time::Instant::now();
     let api_key_val = api_key.unwrap_or_default();
-    let client = librefang_runtime::http_client::proxied_client_builder()
+    let client = match librefang_runtime::http_client::proxied_client_builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
-        .expect("HTTP client build");
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return ApiErrorResponse::internal(format!(
+                "Failed to build HTTP client for provider test: {e}"
+            ))
+            .into_json_tuple();
+        }
+    };
 
     // ── Bedrock: AWS Signature auth — can't test with simple HTTP ──
     if name == "bedrock" || name == "aws-bedrock" {
