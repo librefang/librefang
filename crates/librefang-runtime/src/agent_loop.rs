@@ -1106,7 +1106,7 @@ pub async fn run_agent_loop(
                 if let Some(emb) = embedding_driver {
                     match emb.embed_one(&interaction_text).await {
                         Ok(vec) => {
-                            let _ = memory
+                            if let Err(e) = memory
                                 .remember_with_embedding_async(
                                     session.agent_id,
                                     &interaction_text,
@@ -1115,11 +1115,14 @@ pub async fn run_agent_loop(
                                     HashMap::new(),
                                     Some(&vec),
                                 )
-                                .await;
+                                .await
+                            {
+                                warn!("Failed to persist episodic memory (with embedding): {e}");
+                            }
                         }
                         Err(e) => {
                             warn!("Embedding for remember failed: {e}");
-                            let _ = memory
+                            if let Err(e2) = memory
                                 .remember(
                                     session.agent_id,
                                     &interaction_text,
@@ -1127,19 +1130,23 @@ pub async fn run_agent_loop(
                                     "episodic",
                                     HashMap::new(),
                                 )
-                                .await;
+                                .await
+                            {
+                                warn!("Failed to persist episodic memory (no embedding fallback): {e2}");
+                            }
                         }
                     }
-                } else {
-                    let _ = memory
-                        .remember(
-                            session.agent_id,
-                            &interaction_text,
-                            MemorySource::Conversation,
-                            "episodic",
-                            HashMap::new(),
-                        )
-                        .await;
+                } else if let Err(e) = memory
+                    .remember(
+                        session.agent_id,
+                        &interaction_text,
+                        MemorySource::Conversation,
+                        "episodic",
+                        HashMap::new(),
+                    )
+                    .await
+                {
+                    warn!("Failed to persist episodic memory: {e}");
                 }
 
                 // Context engine: after_turn hook
@@ -2492,7 +2499,12 @@ pub async fn run_agent_loop_streaming(
                          Any partial output was already sent to the user.]"
                     );
                     session.messages.push(Message::assistant(note));
-                    let _ = memory.save_session_async(session).await;
+                    if let Err(save_err) = memory.save_session_async(session).await {
+                        warn!(
+                            "Failed to persist timeout note to session: {save_err}. \
+                             The timeout marker will not appear on next session load."
+                        );
+                    }
                 }
                 return Err(e);
             }
@@ -2691,7 +2703,7 @@ pub async fn run_agent_loop_streaming(
                 if let Some(emb) = embedding_driver {
                     match emb.embed_one(&interaction_text).await {
                         Ok(vec) => {
-                            let _ = memory
+                            if let Err(e) = memory
                                 .remember_with_embedding_async(
                                     session.agent_id,
                                     &interaction_text,
@@ -2700,11 +2712,14 @@ pub async fn run_agent_loop_streaming(
                                     HashMap::new(),
                                     Some(&vec),
                                 )
-                                .await;
+                                .await
+                            {
+                                warn!("Failed to persist episodic memory (streaming, with embedding): {e}");
+                            }
                         }
                         Err(e) => {
                             warn!("Embedding for remember failed (streaming): {e}");
-                            let _ = memory
+                            if let Err(e2) = memory
                                 .remember(
                                     session.agent_id,
                                     &interaction_text,
@@ -2712,19 +2727,23 @@ pub async fn run_agent_loop_streaming(
                                     "episodic",
                                     HashMap::new(),
                                 )
-                                .await;
+                                .await
+                            {
+                                warn!("Failed to persist episodic memory (streaming, no embedding fallback): {e2}");
+                            }
                         }
                     }
-                } else {
-                    let _ = memory
-                        .remember(
-                            session.agent_id,
-                            &interaction_text,
-                            MemorySource::Conversation,
-                            "episodic",
-                            HashMap::new(),
-                        )
-                        .await;
+                } else if let Err(e) = memory
+                    .remember(
+                        session.agent_id,
+                        &interaction_text,
+                        MemorySource::Conversation,
+                        "episodic",
+                        HashMap::new(),
+                    )
+                    .await
+                {
+                    warn!("Failed to persist episodic memory (streaming): {e}");
                 }
 
                 // Context engine: after_turn hook
