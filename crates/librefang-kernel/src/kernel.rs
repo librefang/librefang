@@ -5559,6 +5559,82 @@ system_prompt = "You are a helpful assistant."
         Ok(())
     }
 
+    /// Reload an agent's manifest from its source agent.toml on disk.
+    ///
+    /// At boot the kernel reads agent.toml and syncs it into the in-memory
+    /// registry, but runtime edits to the file are otherwise invisible until
+    /// the next restart. This method re-reads the file, preserves
+    /// runtime-only fields that TOML doesn't carry (workspace path, tags,
+    /// current enabled state), replaces the in-memory manifest, persists it
+    /// to the DB, and invalidates the tool cache so the updated skill / MCP
+    /// allowlists take effect on the next message.
+    pub fn reload_agent_from_disk(&self, agent_id: AgentId) -> KernelResult<()> {
+        let entry = self.registry.get(agent_id).ok_or_else(|| {
+            KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
+        })?;
+
+        let toml_path = entry.source_toml_path.clone().unwrap_or_else(|| {
+            let safe_name = safe_path_component(&entry.name, "agent");
+            self.home_dir_boot
+                .join("agents")
+                .join(safe_name)
+                .join("agent.toml")
+        });
+
+        if !toml_path.exists() {
+            return Err(KernelError::LibreFang(LibreFangError::Internal(format!(
+                "agent.toml not found at {}",
+                toml_path.display()
+            ))));
+        }
+
+        let toml_str = std::fs::read_to_string(&toml_path).map_err(|e| {
+            KernelError::LibreFang(LibreFangError::Internal(format!(
+                "Failed to read {}: {e}",
+                toml_path.display()
+            )))
+        })?;
+
+        let mut disk_manifest: librefang_types::agent::AgentManifest = toml::from_str(&toml_str)
+            .map_err(|e| {
+                KernelError::LibreFang(LibreFangError::Internal(format!(
+                    "Invalid TOML in {}: {e}",
+                    toml_path.display()
+                )))
+            })?;
+
+        // Preserve runtime-only fields that don't live in the TOML file.
+        if disk_manifest.workspace.is_none() {
+            disk_manifest.workspace = entry.manifest.workspace.clone();
+        }
+        if disk_manifest.tags.is_empty() {
+            disk_manifest.tags = entry.manifest.tags.clone();
+        }
+
+        self.registry
+            .replace_manifest(agent_id, disk_manifest)
+            .map_err(KernelError::LibreFang)?;
+
+        if let Some(refreshed) = self.registry.get(agent_id) {
+            // Re-grant capabilities in case caps/profile changed in the TOML.
+            // Uses insert() so it replaces any existing grants for this agent.
+            // NOTE: we deliberately do NOT re-register with the scheduler,
+            // because that would wipe the agent's accumulated usage tracker.
+            // If resource quotas change, they take effect at next window reset.
+            let caps = manifest_to_capabilities(&refreshed.manifest);
+            self.capabilities.grant(agent_id, caps);
+            let _ = self.memory.save_agent(&refreshed);
+        }
+
+        // Invalidate the per-agent tool cache so the new skill/MCP allowlist
+        // takes effect on the next message. The skill-summary cache is keyed
+        // by allowlist content so it self-invalidates when the list changes.
+        self.prompt_metadata_cache.tools.remove(&agent_id);
+
+        info!(agent_id = %agent_id, path = %toml_path.display(), "Reloaded agent manifest from disk");
+        Ok(())
+    }
+
     /// Update an agent's skill allowlist. Empty = all skills (backward compat).
     pub fn set_agent_skills(&self, agent_id: AgentId, skills: Vec<String>) -> KernelResult<()> {
         // Validate skill names if allowlist is non-empty
