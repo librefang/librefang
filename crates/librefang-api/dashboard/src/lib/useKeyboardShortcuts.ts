@@ -46,11 +46,18 @@ interface KeyboardShortcutsOptions {
   onShowHelp: () => void;
 }
 
+/// Custom event dispatched when the user presses `n` — each page can
+/// listen for this and open its own "new X" modal. Dispatched at the
+/// window level so any component can subscribe.
+export const CREATE_EVENT = "librefang:create";
+
 /// Registers global keyboard shortcuts for the dashboard.
 ///
 /// - `g` + letter → navigate to page (vim-style, see G_NAV_SHORTCUTS)
 /// - `?` → open shortcut help modal
 /// - `/` → focus the first `[data-shortcut-search]` element on the page
+/// - `n` → dispatch CREATE_EVENT so the current page can open its
+///         "new X" modal (new agent / new workflow / new skill / ...)
 ///
 /// The `g` prefix state clears after 1500ms if no second key is pressed.
 export function useKeyboardShortcuts({ onShowHelp }: KeyboardShortcutsOptions) {
@@ -84,6 +91,16 @@ export function useKeyboardShortcuts({ onShowHelp }: KeyboardShortcutsOptions) {
           el.focus();
           return;
         }
+      }
+
+      // `n` dispatches a create event that each page listens for. Pages
+      // that have a primary create action (spawn agent, new workflow, ...)
+      // subscribe via window.addEventListener(CREATE_EVENT, handler) and
+      // open their modal in response.
+      if (e.key === "n") {
+        e.preventDefault();
+        window.dispatchEvent(new CustomEvent(CREATE_EVENT));
+        return;
       }
 
       const now = Date.now();

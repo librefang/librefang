@@ -13,6 +13,7 @@ import { PageHeader } from "../components/ui/PageHeader";
 import { ListSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
 import { useUIStore } from "../lib/store";
+import { useCreateShortcut } from "../lib/useCreateShortcut";
 import {
   Puzzle, Plus, Download, Trash2, Package, FolderOpen,
   GitBranch, X, Loader2, Check, AlertCircle, FileCode
@@ -28,6 +29,7 @@ export function PluginsPage() {
   const [showScaffold, setShowScaffold] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [installingName, setInstallingName] = useState<string | null>(null);
+  useCreateShortcut(() => setShowInstall(true));
 
   // Install form
   const [installSource, setInstallSource] = useState<"registry" | "local" | "git">("registry");

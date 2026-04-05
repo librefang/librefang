@@ -12,6 +12,7 @@ import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
 import { ConfirmDialog } from "../components/ui/ConfirmDialog";
+import { useCreateShortcut } from "../lib/useCreateShortcut";
 import { Card } from "../components/ui/Card";
 import { Input } from "../components/ui/Input";
 import { Button } from "../components/ui/Button";
@@ -50,6 +51,7 @@ export function AgentsPage() {
   const [stateFilter, setStateFilter] = useState<"all" | "running" | "suspended">("all");
   const [sortBy, setSortBy] = useState<"name" | "last_active" | "created_at">("name");
   const addToast = useUIStore((s) => s.addToast);
+  useCreateShortcut(() => setShowCreate(true));
   const queryClient = useQueryClient();
   const templatesQuery = useQuery({ queryKey: ["agent-templates"], queryFn: listAgentTemplates, enabled: showCreate && createMode === "template" });
   const spawnMutation = useMutation({

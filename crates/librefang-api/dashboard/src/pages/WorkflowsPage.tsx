@@ -22,6 +22,7 @@ import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
 import { PageHeader } from "../components/ui/PageHeader";
 import { useUIStore } from "../lib/store";
+import { useCreateShortcut } from "../lib/useCreateShortcut";
 import { ListSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
 import { ScheduleModal } from "../components/ui/ScheduleModal";
@@ -112,6 +113,7 @@ export function WorkflowsPage() {
     sessionStorage.removeItem("workflowTemplate");
     navigate({ to: "/canvas", search: { t: Date.now(), wf: undefined } });
   };
+  useCreateShortcut(handleNewWorkflow);
 
   const handleUseTemplate = async (tmpl: WorkflowTemplate) => {
     const steps: any[] = (tmpl as any).steps ?? [];
