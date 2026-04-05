@@ -1415,9 +1415,9 @@ fn migrate_channels_from_json(
             ];
             if allow_from_to_toml_array(sl.allow_from.as_ref()).is_some() {
                 report.warnings.push(
-                    "Slack: OpenClaw 'allow_from' could not be auto-mapped — \
-                     SlackConfig only has 'allowed_channels' (channel IDs), not per-user allowlists. \
-                     Please configure [channels.slack].allowed_channels manually."
+                    "Slack: OpenClaw 'allow_from' (per-user allowlist) could not be \
+                     auto-mapped — SlackConfig has no per-user allowlist, only \
+                     'allowed_channels' (channel IDs)."
                         .to_string(),
                 );
             }
