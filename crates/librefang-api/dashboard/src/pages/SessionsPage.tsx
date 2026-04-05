@@ -8,6 +8,7 @@ import { Badge } from "../components/ui/Badge";
 import { Input } from "../components/ui/Input";
 import { PageHeader } from "../components/ui/PageHeader";
 import { ListSkeleton } from "../components/ui/Skeleton";
+import { EmptyState } from "../components/ui/EmptyState";
 import { useUIStore } from "../lib/store";
 import { Clock, Search, MessageCircle, Trash2, Play, Users, Tag, Check, X } from "lucide-react";
 import { truncateId } from "../lib/string";
@@ -117,6 +118,7 @@ export function SessionsPage() {
           onChange={(e) => setSearch(e.target.value)}
           placeholder={t("sessions.search_placeholder")}
           leftIcon={<Search className="h-4 w-4" />}
+          data-shortcut-search
         />
       )}
 
@@ -124,16 +126,11 @@ export function SessionsPage() {
       {sessionsQuery.isLoading ? (
         <ListSkeleton rows={3} />
       ) : sessions.length === 0 ? (
-        <div className="flex flex-col items-center py-20">
-          <div className="relative mb-6">
-            <div className="w-20 h-20 rounded-3xl bg-brand/10 flex items-center justify-center">
-              <MessageCircle className="w-10 h-10 text-brand" />
-            </div>
-            <span className="absolute inset-0 rounded-3xl bg-brand/5 animate-pulse" style={{ animationDuration: "3s" }} />
-          </div>
-          <h3 className="text-xl font-black tracking-tight">{t("sessions.empty_title")}</h3>
-          <p className="text-sm text-text-dim mt-2 max-w-xs text-center">{t("sessions.empty_desc")}</p>
-        </div>
+        <EmptyState
+          icon={<MessageCircle className="w-7 h-7" />}
+          title={t("sessions.empty_title")}
+          description={t("sessions.empty_desc")}
+        />
       ) : (
         <div className="space-y-2 stagger-children">
           {sessions.map(s => {
