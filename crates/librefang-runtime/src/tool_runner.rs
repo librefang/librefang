@@ -772,11 +772,11 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "agent_kill".to_string(),
-            description: "Kill (terminate) another agent by its ID.".to_string(),
+            description: "Kill (terminate) another agent. Accepts UUID or agent name.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "agent_id": { "type": "string", "description": "The agent's UUID to kill" }
+                    "agent_id": { "type": "string", "description": "The target agent's UUID or name" }
                 },
                 "required": ["agent_id"]
             }),
