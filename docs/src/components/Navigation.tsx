@@ -354,7 +354,7 @@ const zhNavigation: Array<NavGroup> = [
 		],
 	},
 	{
-		title: "Agent",
+		title: "智能体",
 		links: [
 			{ title: "Agent 模板", href: withPrefix("/zh/agents") },
 			{ title: "自主 Hands", href: withPrefix("/zh/hands") },
