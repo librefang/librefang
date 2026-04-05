@@ -343,8 +343,8 @@ Call this whenever a plugin mysteriously does nothing — `runtime_available: fa
 - **Exit codes**: non-zero exits are logged with the script's stderr at `warn` level, and the default context engine result is used instead.
 - **Empty output**: if the script exits 0 but prints nothing, `EmptyOutput` is returned and the default result is used.
 - **Malformed JSON**: the runtime walks stdout lines from the bottom up, taking the first JSON-parseable one. If none are parseable, it wraps the last line of stdout as `{ "text": "..." }`.
-- **Path traversal**: `..` components in script paths are rejected at load time.
-- **Env scrubbing**: the spawned process inherits only PATH, HOME, LIBREFANG_* vars, the runtime's passthrough set, and anything explicitly listed in `allowed_env_vars`.
+- **Path traversal**: script paths may not contain `..` components — rejected at every invocation, not just load time.
+- **Env scrubbing**: every inherited env var is wiped (`env_clear`) before the subprocess spawns. LibreFang then sets `LIBREFANG_AGENT_ID`, `LIBREFANG_MESSAGE`, `LIBREFANG_RUNTIME`, forwards `PATH` and `HOME` from the parent process, adds the runtime's passthrough set (e.g. `PYTHONPATH`/`VIRTUAL_ENV` for Python, `GEM_HOME`/`GEM_PATH` for Ruby — see `runtime_passthrough_vars`), and finally forwards anything listed in the agent's `allowed_env_vars`. Your hook can read `LIBREFANG_AGENT_ID` / `LIBREFANG_MESSAGE` from the environment as an alternative to parsing stdin JSON.
 
 Hook stderr is captured and printed to LibreFang's own logs — use it liberally for debug logging from inside your hook.
 
