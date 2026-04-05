@@ -291,6 +291,7 @@ export function AgentsPage() {
         onChange={(e) => setSearch(e.target.value)}
         placeholder={t("common.search")}
         leftIcon={<Search className="h-4 w-4" />}
+        data-shortcut-search
       />
 
       <div className="flex items-center gap-2 -mt-2">

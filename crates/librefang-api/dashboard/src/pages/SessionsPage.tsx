@@ -118,6 +118,7 @@ export function SessionsPage() {
           onChange={(e) => setSearch(e.target.value)}
           placeholder={t("sessions.search_placeholder")}
           leftIcon={<Search className="h-4 w-4" />}
+          data-shortcut-search
         />
       )}
 

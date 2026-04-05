@@ -146,7 +146,7 @@
     "active_sessions": "Active Sessions",
     "agent_count": "Agent Count",
     "health_checks": "Health Checks",
-    "pro_tip_shortcut": "⌘K to search · ? for all shortcuts · g then letter to navigate",
+    "pro_tip_shortcut": "⌘K to search · / to focus search · ? for all shortcuts · g then letter to navigate",
     "setup_title": "Setup Required",
     "setup_description": "No configuration file detected. Click to auto-detect your LLM provider and generate a default config.",
     "setup_button": "Initialize",

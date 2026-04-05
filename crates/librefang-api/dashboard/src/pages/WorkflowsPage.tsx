@@ -267,7 +267,8 @@ export function WorkflowsPage() {
           {hasWorkflows && (
             <Input value={searchQuery} onChange={e => setSearchQuery(e.target.value)}
               placeholder={t("workflows.search_placeholder")}
-              leftIcon={<Search className="h-4 w-4" />} />
+              leftIcon={<Search className="h-4 w-4" />}
+              data-shortcut-search />
           )}
 
           {/* Loading Skeleton */}

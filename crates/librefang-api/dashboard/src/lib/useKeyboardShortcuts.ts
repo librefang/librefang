@@ -50,6 +50,7 @@ interface KeyboardShortcutsOptions {
 ///
 /// - `g` + letter → navigate to page (vim-style, see G_NAV_SHORTCUTS)
 /// - `?` → open shortcut help modal
+/// - `/` → focus the first `[data-shortcut-search]` element on the page
 ///
 /// The `g` prefix state clears after 1500ms if no second key is pressed.
 export function useKeyboardShortcuts({ onShowHelp }: KeyboardShortcutsOptions) {
@@ -73,6 +74,16 @@ export function useKeyboardShortcuts({ onShowHelp }: KeyboardShortcutsOptions) {
         e.preventDefault();
         onShowHelp();
         return;
+      }
+
+      // `/` focuses the first search input on the page (if any).
+      if (e.key === "/") {
+        const el = document.querySelector<HTMLElement>("[data-shortcut-search]");
+        if (el) {
+          e.preventDefault();
+          el.focus();
+          return;
+        }
       }
 
       const now = Date.now();

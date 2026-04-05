@@ -9,6 +9,7 @@ interface ShortcutsHelpProps {
 
 const GENERAL_SHORTCUTS: Array<{ keys: string[]; label: string }> = [
   { keys: ["⌘", "K"], label: "Open command palette" },
+  { keys: ["/"], label: "Focus search on current page" },
   { keys: ["?"], label: "Show this cheat sheet" },
   { keys: ["Esc"], label: "Close dialog / modal" },
 ];

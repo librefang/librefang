@@ -79,6 +79,7 @@ export function LogsPage() {
               placeholder={t("common.search")}
               leftIcon={<Search className="h-4 w-4" />}
               className="py-1.5!"
+              data-shortcut-search
             />
           </div>
           <select

@@ -210,7 +210,8 @@ export function ModelsPage() {
         <div className="flex-1 min-w-[160px] sm:min-w-[200px] max-w-sm">
           <Input value={search} onChange={e => setSearch(e.target.value)}
             placeholder={t("models.search_placeholder")}
-            leftIcon={<Search className="h-4 w-4" />} />
+            leftIcon={<Search className="h-4 w-4" />}
+            data-shortcut-search />
         </div>
 
         <select value={providerFilter} onChange={e => setProviderFilter(e.target.value)}
