@@ -96,8 +96,10 @@ pub fn validate_script_path(path: &str) -> Result<(), PythonError> {
 
 /// Find the Python interpreter on this system.
 pub fn find_python_interpreter() -> String {
-    // Try python3 first, then python
-    for cmd in &["python3", "python"] {
+    // Try python3, then python, then the Windows Python Launcher (`py`).
+    // Kept aligned with `plugin_runtime::check_runtime_status` so the
+    // doctor's availability report matches what hooks actually resolve to.
+    for cmd in &["python3", "python", "py"] {
         if std::process::Command::new(cmd)
             .arg("--version")
             .stdout(Stdio::null())

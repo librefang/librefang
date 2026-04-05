@@ -114,6 +114,17 @@ impl PluginRuntime {
         matches!(self, Self::Native)
     }
 
+    /// Arguments to pass when probing the launcher for its version.
+    /// Most runtimes use `--version`; a few have their own conventions
+    /// (Go uses `go version`, Lua uses `lua -v`).
+    pub fn version_args(&self) -> &'static [&'static str] {
+        match self {
+            Self::Go => &["version"],
+            Self::Lua => &["-v"],
+            _ => &["--version"],
+        }
+    }
+
     /// Canonical launcher binary to probe on PATH. `Native` has no launcher
     /// (the script *is* the binary), so it returns `None`.
     pub fn launcher_binary(&self) -> Option<&'static str> {
@@ -183,7 +194,8 @@ pub struct RuntimeStatus {
     pub available: bool,
     /// First non-empty line of the launcher's `--version` output, trimmed.
     pub version: Option<String>,
-    /// Human-facing install hint. Empty for `Native`.
+    /// Human-facing install hint. Populated for every runtime; consumers
+    /// should only surface it when `available` is false.
     pub install_hint: String,
 }
 
@@ -214,33 +226,16 @@ pub fn check_runtime_status(runtime: PluginRuntime) -> RuntimeStatus {
         _ => std::slice::from_ref(&primary),
     };
 
+    let version_args = runtime.version_args();
     for candidate in candidates {
-        match std::process::Command::new(candidate)
-            .arg("--version")
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .output()
-        {
-            Ok(output) if output.status.success() => {
-                // `--version` may write to stdout OR stderr (e.g. old python2).
-                let raw = if !output.stdout.is_empty() {
-                    output.stdout
-                } else {
-                    output.stderr
-                };
-                let version = String::from_utf8_lossy(&raw)
-                    .lines()
-                    .find(|l| !l.trim().is_empty())
-                    .map(|l| l.trim().to_string());
-                return RuntimeStatus {
-                    runtime: tag,
-                    launcher: Some((*candidate).to_string()),
-                    available: true,
-                    version,
-                    install_hint: hint,
-                };
-            }
-            _ => continue,
+        if let Some(version) = probe_launcher_version(candidate, version_args) {
+            return RuntimeStatus {
+                runtime: tag,
+                launcher: Some((*candidate).to_string()),
+                available: true,
+                version,
+                install_hint: hint,
+            };
         }
     }
 
@@ -251,6 +246,74 @@ pub fn check_runtime_status(runtime: PluginRuntime) -> RuntimeStatus {
         version: None,
         install_hint: hint,
     }
+}
+
+/// Run `{launcher} {version_args...}` with a 5-second wall-clock cap and
+/// return the first non-empty line of its output.
+///
+/// A bounded timeout protects the doctor endpoint from a hanging launcher
+/// (broken PATH shim, interactive prompt, stuck network in a wrapper script)
+/// locking the spawn_blocking thread indefinitely. stdin is redirected to
+/// null so launchers like `lua -v` don't drop into an interactive REPL
+/// when they inherit a TTY. Returns `None` if the launcher is missing,
+/// exits non-zero, produces no output, or exceeds the deadline.
+///
+/// Outer `Option` = success/failure. Inner `Option<String>` = the version
+/// string (if any output was captured).
+fn probe_launcher_version(launcher: &str, version_args: &[&str]) -> Option<Option<String>> {
+    const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+    const POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+    let mut child = std::process::Command::new(launcher)
+        .args(version_args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .ok()?;
+
+    let deadline = std::time::Instant::now() + PROBE_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::thread::sleep(POLL_INTERVAL);
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    };
+
+    if !status.success() {
+        return None;
+    }
+
+    // Read any buffered output. wait_with_output would re-wait (we already
+    // waited), so read the pipes directly.
+    use std::io::Read;
+    let mut stdout = Vec::new();
+    if let Some(mut s) = child.stdout.take() {
+        let _ = s.read_to_end(&mut stdout);
+    }
+    let mut stderr = Vec::new();
+    if let Some(mut s) = child.stderr.take() {
+        let _ = s.read_to_end(&mut stderr);
+    }
+    // `--version` may write to stdout OR stderr (old Python 2 wrote to stderr).
+    let raw = if !stdout.is_empty() { stdout } else { stderr };
+    let version = String::from_utf8_lossy(&raw)
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .map(|l| l.trim().to_string());
+    Some(version)
 }
 
 /// Error surfaced from a plugin hook run.
@@ -594,6 +657,53 @@ fn parse_output(lines: &[String]) -> Result<serde_json::Value, PluginRuntimeErro
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn version_args_are_runtime_specific() {
+        // Go and Lua have their own conventions.
+        assert_eq!(PluginRuntime::Go.version_args(), &["version"]);
+        assert_eq!(PluginRuntime::Lua.version_args(), &["-v"]);
+        // Everyone else uses --version.
+        assert_eq!(PluginRuntime::Python.version_args(), &["--version"]);
+        assert_eq!(PluginRuntime::Node.version_args(), &["--version"]);
+        assert_eq!(PluginRuntime::Ruby.version_args(), &["--version"]);
+    }
+
+    #[test]
+    fn doctor_reports_python_as_available() {
+        // Python is on every CI runner we target. A green doctor probe
+        // verifies the full path: Command::spawn -> try_wait -> read pipes.
+        let status = check_runtime_status(PluginRuntime::Python);
+        assert_eq!(status.runtime, "python");
+        assert!(
+            status.available,
+            "python probe failed: {status:?} (version_args mismatch?)"
+        );
+        assert!(status.launcher.is_some());
+        assert!(status.version.is_some());
+    }
+
+    #[test]
+    fn doctor_reports_native_without_probing() {
+        let status = check_runtime_status(PluginRuntime::Native);
+        assert_eq!(status.runtime, "native");
+        assert!(status.available, "native should always be available");
+        assert!(status.launcher.is_none());
+        assert!(status.version.is_none());
+    }
+
+    #[test]
+    fn doctor_flags_missing_launcher() {
+        let status = check_runtime_status(PluginRuntime::V); // v is rarely installed
+                                                             // We can't assert unavailable deterministically (V *might* be
+                                                             // installed), so just check the response shape stays consistent.
+        assert_eq!(status.runtime, "v");
+        if !status.available {
+            assert!(status.launcher.is_none());
+            assert!(status.version.is_none());
+            assert!(!status.install_hint.is_empty());
+        }
+    }
 
     #[test]
     fn from_tag_defaults_to_python() {
