@@ -25,8 +25,9 @@
 //!
 //! The protocol itself is language-agnostic — adding another runtime just
 //! means adding a variant to [`PluginRuntime`] and a match arm in
-//! [`spawn_hook`]. SDK helpers for each language live under
-//! `examples/plugin-sdks/`.
+//! [`build_command`]. Each runtime ships with a working ingest +
+//! after_turn scaffold template (see `plugin_manager::hook_templates`)
+//! that demonstrates the stdin/stdout contract.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
