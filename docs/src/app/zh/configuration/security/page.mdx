@@ -197,6 +197,7 @@ engine = "default"
 [context_engine.hooks]
 # ingest = "~/.librefang/scripts/my_recall.py"
 # after_turn = "~/.librefang/scripts/my_indexer.py"
+# runtime = "python"   # python（默认）| v | node | deno | go | native
 
 [[context_engine.plugin_registries]]
 name = "Official"
@@ -207,8 +208,9 @@ github_repo = "librefang/librefang-registry"
 |------|------|--------|------|
 | `engine` | string | `"default"` | 内置引擎名称。目前仅支持 `"default"`。 |
 | `plugin` | string 或 null | `null` | 插件名称。解析为 `~/.librefang/plugins/<name>/plugin.toml`。设置时优先于手动 `hooks`。 |
-| `hooks.ingest` | string 或 null | `null` | `ingest` 钩子的 Python 脚本路径（在收到新用户消息时调用）。 |
-| `hooks.after_turn` | string 或 null | `null` | `after_turn` 钩子的 Python 脚本路径（在每轮对话完成后调用）。 |
+| `hooks.ingest` | string 或 null | `null` | `ingest` 钩子的脚本路径（在收到新用户消息时调用）。 |
+| `hooks.after_turn` | string 或 null | `null` | `after_turn` 钩子的脚本路径（在每轮对话完成后调用）。 |
+| `hooks.runtime` | string 或 null | `"python"` | 运行钩子脚本的启动器。可选：`python`、`v`、`node`、`deno`、`go`、`native`（直接执行预编译二进制）。 |
 | `plugin_registries` | list of objects | 官方注册表 | 插件注册表（GitHub `owner/repo`），用于浏览可安装的插件。 |
 
 ---

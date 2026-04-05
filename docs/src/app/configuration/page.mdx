@@ -2577,6 +2577,7 @@ engine = "default"
 [context_engine.hooks]
 # ingest = "~/.librefang/scripts/my_recall.py"
 # after_turn = "~/.librefang/scripts/my_indexer.py"
+# runtime = "python"   # python (default) | v | node | deno | go | native
 
 [[context_engine.plugin_registries]]
 name = "Official"
@@ -2587,9 +2588,24 @@ github_repo = "librefang/librefang-registry"
 |-------|------|---------|-------------|
 | `engine` | string | `"default"` | Built-in engine name. Currently only `"default"` is supported. |
 | `plugin` | string or null | `null` | Plugin name. Resolves to `~/.librefang/plugins/<name>/plugin.toml`. Takes precedence over manual `hooks` if set. |
-| `hooks.ingest` | string or null | `null` | Python script path for the `ingest` hook (called on new user message). |
-| `hooks.after_turn` | string or null | `null` | Python script path for the `after_turn` hook (called after each completed turn). |
+| `hooks.ingest` | string or null | `null` | Script path for the `ingest` hook (called on new user message). |
+| `hooks.after_turn` | string or null | `null` | Script path for the `after_turn` hook (called after each completed turn). |
+| `hooks.runtime` | string or null | `"python"` | Which launcher runs the hook scripts. Supported: `python`, `v`, `node`, `deno`, `go`, `native` (exec a pre-compiled binary). Unknown values fall back to `python`. |
 | `plugin_registries` | list of objects | Official registry | Plugin registries (GitHub `owner/repo`) to browse for installable plugins. |
+
+Hooks speak a language-agnostic JSON-over-stdin/stdout protocol — pick the runtime that matches your script:
+
+```toml
+# Go plugin
+[context_engine.hooks]
+ingest = "~/.librefang/plugins/my-go-recall/hooks/ingest.go"
+runtime = "go"
+
+# V plugin compiled to a native binary
+[context_engine.hooks]
+ingest = "~/.librefang/plugins/fast-recall/hooks/ingest"
+runtime = "native"
+```
 
 ---
 
