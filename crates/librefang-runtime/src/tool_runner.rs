@@ -366,11 +366,11 @@ pub async fn execute_tool(
         "knowledge_query" => tool_knowledge_query(input, kernel).await,
 
         // Image analysis tool
-        "image_analyze" => tool_image_analyze(input).await,
+        "image_analyze" => tool_image_analyze(input, workspace_root).await,
 
         // Media understanding tools
-        "media_describe" => tool_media_describe(input, media_engine).await,
-        "media_transcribe" => tool_media_transcribe(input, media_engine).await,
+        "media_describe" => tool_media_describe(input, media_engine, workspace_root).await,
+        "media_transcribe" => tool_media_transcribe(input, media_engine, workspace_root).await,
 
         // Media generation tools (MediaDriver-based)
         "image_generate" => tool_image_generate(input, media_drivers, workspace_root).await,
@@ -1441,19 +1441,6 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
 // ---------------------------------------------------------------------------
 // Filesystem tools
 // ---------------------------------------------------------------------------
-
-/// SECURITY: Reject path traversal attempts. Forbids `..` components in file paths.
-fn validate_path(path: &str) -> Result<&str, String> {
-    for component in std::path::Path::new(path).components() {
-        if matches!(component, std::path::Component::ParentDir) {
-            return Err(format!(
-                "{}: '..' components are forbidden",
-                crate::workspace_sandbox::ERR_PATH_TRAVERSAL
-            ));
-        }
-    }
-    Ok(path)
-}
 
 /// Resolve a file path through the workspace sandbox.
 ///
@@ -2847,13 +2834,19 @@ async fn tool_a2a_send(
 // Image analysis tool
 // ---------------------------------------------------------------------------
 
-async fn tool_image_analyze(input: &serde_json::Value) -> Result<String, String> {
-    let path = input["path"].as_str().ok_or("Missing 'path' parameter")?;
+async fn tool_image_analyze(
+    input: &serde_json::Value,
+    workspace_root: Option<&Path>,
+) -> Result<String, String> {
+    let raw_path = input["path"].as_str().ok_or("Missing 'path' parameter")?;
     let prompt = input["prompt"].as_str().unwrap_or("");
+    // Route through the workspace sandbox so user-supplied paths cannot
+    // escape to arbitrary filesystem locations (e.g. /etc/passwd).
+    let resolved = resolve_file_path(raw_path, workspace_root)?;
 
-    let data = tokio::fs::read(path)
+    let data = tokio::fs::read(&resolved)
         .await
-        .map_err(|e| format!("Failed to read image '{path}': {e}"))?;
+        .map_err(|e| format!("Failed to read image '{raw_path}': {e}"))?;
 
     let file_size = data.len();
 
@@ -2880,7 +2873,7 @@ async fn tool_image_analyze(input: &serde_json::Value) -> Result<String, String>
     };
 
     let mut result = serde_json::json!({
-        "path": path,
+        "path": raw_path,
         "format": format,
         "file_size_bytes": file_size,
         "file_size_human": format_file_size(file_size),
@@ -3078,19 +3071,23 @@ fn tool_system_time() -> String {
 async fn tool_media_describe(
     input: &serde_json::Value,
     media_engine: Option<&crate::media_understanding::MediaEngine>,
+    workspace_root: Option<&Path>,
 ) -> Result<String, String> {
     use base64::Engine;
     let engine = media_engine.ok_or("Media engine not available. Check media configuration.")?;
-    let path = input["path"].as_str().ok_or("Missing 'path' parameter")?;
-    let _ = validate_path(path)?;
+    let raw_path = input["path"].as_str().ok_or("Missing 'path' parameter")?;
+    // Route through the workspace sandbox so all media reads stay inside
+    // the agent's dir — a plain `..` check would miss absolute paths like
+    // `/etc/passwd`.
+    let resolved = resolve_file_path(raw_path, workspace_root)?;
 
     // Read image file
-    let data = tokio::fs::read(path)
+    let data = tokio::fs::read(&resolved)
         .await
         .map_err(|e| format!("Failed to read image file: {e}"))?;
 
     // Detect MIME type from extension
-    let ext = std::path::Path::new(path)
+    let ext = resolved
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("")
@@ -3123,19 +3120,23 @@ async fn tool_media_describe(
 async fn tool_media_transcribe(
     input: &serde_json::Value,
     media_engine: Option<&crate::media_understanding::MediaEngine>,
+    workspace_root: Option<&Path>,
 ) -> Result<String, String> {
     use base64::Engine;
     let engine = media_engine.ok_or("Media engine not available. Check media configuration.")?;
-    let path = input["path"].as_str().ok_or("Missing 'path' parameter")?;
-    let _ = validate_path(path)?;
+    let raw_path = input["path"].as_str().ok_or("Missing 'path' parameter")?;
+    // Route through the workspace sandbox so all media reads stay inside
+    // the agent's dir — a plain `..` check would miss absolute paths like
+    // `/etc/passwd`.
+    let resolved = resolve_file_path(raw_path, workspace_root)?;
 
     // Read audio file
-    let data = tokio::fs::read(path)
+    let data = tokio::fs::read(&resolved)
         .await
         .map_err(|e| format!("Failed to read audio file: {e}"))?;
 
     // Detect MIME type from extension
-    let ext = std::path::Path::new(path)
+    let ext = resolved
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("")
