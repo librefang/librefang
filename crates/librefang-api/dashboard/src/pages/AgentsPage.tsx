@@ -296,9 +296,10 @@ export function AgentsPage() {
           icon={<Users className="h-4 w-4" />}
           helpText={t("agents.help")}
         />
-        <Button variant="primary" onClick={() => setShowCreate(true)} className="shrink-0">
+        <Button variant="primary" onClick={() => setShowCreate(true)} className="shrink-0" title={t("agents.create_agent") + " (n)"}>
           <Plus className="w-4 h-4" />
-          {t("agents.create_agent")}
+          <span>{t("agents.create_agent")}</span>
+          <kbd className="hidden sm:inline-flex h-5 min-w-[20px] items-center justify-center rounded border border-white/30 bg-white/10 px-1 text-[9px] font-mono font-semibold">n</kbd>
         </Button>
       </div>
 

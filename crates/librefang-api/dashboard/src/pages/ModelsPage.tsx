@@ -193,8 +193,10 @@ export function ModelsPage() {
         actions={
           <div className="flex items-center gap-2">
             {allModels.length > 0 && <Badge variant="brand">{totalAvailable} / {allModels.length} {t("models.available")}</Badge>}
-            <Button variant="primary" onClick={() => setShowAdd(true)}>
-              <Plus className="w-4 h-4" /> {t("models.add_model")}
+            <Button variant="primary" onClick={() => setShowAdd(true)} title={t("models.add_model") + " (n)"}>
+              <Plus className="w-4 h-4" />
+              <span>{t("models.add_model")}</span>
+              <kbd className="hidden sm:inline-flex h-5 min-w-[20px] items-center justify-center rounded border border-white/30 bg-white/10 px-1 text-[9px] font-mono font-semibold">n</kbd>
             </Button>
           </div>
         }

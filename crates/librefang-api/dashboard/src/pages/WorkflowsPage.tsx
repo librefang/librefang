@@ -196,9 +196,10 @@ export function WorkflowsPage() {
         icon={<Layers className="h-4 w-4" />}
         helpText={t("workflows.help")}
         actions={hasWorkflows ?
-          <Button variant="primary" onClick={handleNewWorkflow}>
+          <Button variant="primary" onClick={handleNewWorkflow} title={t("workflows.create_blank") + " (n)"}>
             <FilePlus className="h-4 w-4" />
-            {t("workflows.create_blank")}
+            <span>{t("workflows.create_blank")}</span>
+            <kbd className="hidden sm:inline-flex h-5 min-w-[20px] items-center justify-center rounded border border-white/30 bg-white/10 px-1 text-[9px] font-mono font-semibold">n</kbd>
           </Button> : undefined
         }
       />
