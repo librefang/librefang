@@ -613,10 +613,11 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     }
 
     async fn spawn_agent_by_name(&self, manifest_name: &str) -> Result<AgentId, String> {
-        // Look for manifest at ~/.librefang/agents/{name}/agent.toml
+        // Look for manifest at ~/.librefang/workspaces/agents/{name}/agent.toml
         let manifest_path = self
             .kernel
             .home_dir()
+            .join("workspaces")
             .join("agents")
             .join(manifest_name)
             .join("agent.toml");

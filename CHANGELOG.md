@@ -5,6 +5,59 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
+## [2026.4.6] - 2026-04-06
+
+### Added
+
+- Hot-reload skills dir and per-agent manifest (#2069) (@houko)
+- Unify full-section empty/error states (#2088) (@houko)
+- Focus trap + aria-modal + more n-shortcut coverage (#2092) (@houko)
+- Add send-audio endpoint for voice notes and audio files (#2099) (@f-liva)
+- Language-agnostic hook runtime (V / Go / Deno / Node / native) (#2100) (@houko)
+
+### Fixed
+
+- Allow tool retry on failure instead of early loop termination (#2065) (@neo-wanderer)
+- Sync openclaw/openfang with current KernelConfig schema (#2066) (@houko)
+- Stop stale messages_before index from breaking auto_memorize & append_canonical (#2068) (@houko)
+- Agent_send/kill fall through to name lookup for stale UUIDs (#2070) (@houko)
+- Reject missing required tool params instead of silent empty (#2071) (@houko)
+- Surface silent session-cleanup failures and panic on empty chunks (#2072) (@houko)
+- Return 404 for missing agents and reject malformed target_agent_id (#2073) (@houko)
+- Log when webhook/dingtalk bridge drops incoming messages (#2074) (@houko)
+- Surface agent tick panics instead of silent join drop (#2075) (@houko)
+- Emit skills/workspace/tool_blocklist during OpenClaw import (#2076) (@houko)
+- Providers.rs persistence failures + expect() panic (#2077) (@houko)
+- Surface silent DB errors and wrap merge updates in tx (#2078) (@houko)
+- Surface episodic memory persist failures in agent_loop (#2079) (@houko)
+- Sanitize user-controlled identity fields in prompt builder (#2080) (@houko)
+- Reload path must clamp bounds and clamp max_cron_jobs=0 (#2081) (@houko)
+- Close SSRF via redirect + URL-encoding bypass in taint (#2082) (@houko)
+- Route media tools through workspace sandbox (#2083) (@houko)
+- Guard sandbox ptr arithmetic with checked_add (#2084) (@houko)
+- ChatPage session-cache save effect + tool call keys (#2085) (@houko)
+- Cascade agent-scoped tables on remove_agent (#2086) (@houko)
+- Authorize cron_cancel + cap knowledge_query depth (#2087) (@houko)
+- Use PAT for release creation so dashboard-build fires (#2094) (@houko)
+- Suppress error messages in groups, show rate-limit in DMs only (#2095) (@f-liva)
+- Auto-close unclosed HTML tags, plain-text fallback, and reply-to photo support (#2096) (@f-liva)
+- Drop Ubuntu RUST_TEST_THREADS to 1 (#2117) (@houko)
+- Unify agent manifest path on workspaces/agents/ (#2118) (@houko)
+
+### Changed
+
+- Align URL hierarchy with sidebar nav groups (#2119) (@houko)
+
+### Maintenance
+
+- Fix test_image_analyze_missing_file after sandbox wiring (#2103) (@houko)
+- Ignore plugin scaffold templates (#2120) (@houko)
+
+### Reverted
+
+- V2026.4.6 stable release (was meant to be beta15) (#2126) (@houko)
+
+
 ## [2026.4.5] - 2026-04-05
 
 ### Added

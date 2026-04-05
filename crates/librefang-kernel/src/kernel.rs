@@ -565,6 +565,66 @@ fn ensure_workspaces_layout(home_dir: &Path) -> KernelResult<()> {
     Ok(())
 }
 
+/// One-shot migration from the legacy `<home>/agents/<name>/` layout to the
+/// canonical `<home>/workspaces/agents/<name>/` layout.
+///
+/// Prior releases (and the `migrate` subcommand's output) placed per-agent
+/// manifests under `<home>/agents/<name>/agent.toml`, while the runtime
+/// reads from `<home>/workspaces/agents/<name>/`. This function moves any
+/// stray directories on boot so existing installations keep working after
+/// unification. Destinations that already exist are left alone — the
+/// workspaces copy wins.
+fn migrate_legacy_agent_dirs(home_dir: &Path, workspaces_agents_dir: &Path) {
+    let legacy = home_dir.join("agents");
+    if !legacy.is_dir() {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(&legacy) else {
+        return;
+    };
+    let mut moved = 0usize;
+    for entry in entries.flatten() {
+        let src = entry.path();
+        if !src.is_dir() || !src.join("agent.toml").exists() {
+            continue;
+        }
+        let Some(name) = src.file_name() else {
+            continue;
+        };
+        let dest = workspaces_agents_dir.join(name);
+        if dest.exists() {
+            tracing::warn!(
+                src = %src.display(),
+                dest = %dest.display(),
+                "Legacy agent dir skipped — destination already exists"
+            );
+            continue;
+        }
+        if let Some(parent) = dest.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        match std::fs::rename(&src, &dest) {
+            Ok(()) => {
+                moved += 1;
+                tracing::info!(
+                    src = %src.display(),
+                    dest = %dest.display(),
+                    "Migrated legacy agent dir"
+                );
+            }
+            Err(e) => tracing::warn!(
+                src = %src.display(),
+                dest = %dest.display(),
+                "Failed to migrate legacy agent dir: {e}"
+            ),
+        }
+    }
+    if moved > 0 {
+        // Remove the legacy parent if it is now empty.
+        let _ = std::fs::remove_dir(&legacy);
+    }
+}
+
 /// Initialize a git repo in the home directory for config version control.
 fn init_git_if_missing(home_dir: &Path) {
     if home_dir.join(".git").exists() {
@@ -960,6 +1020,15 @@ impl LibreFangKernel {
     #[inline]
     pub fn home_dir(&self) -> &Path {
         &self.home_dir_boot
+    }
+
+    /// Relocate any legacy `<home>/agents/<name>/` directories into the
+    /// canonical `workspaces/agents/<name>/` layout. This is the same pass
+    /// that runs at boot and is exposed so runtime flows (e.g. the migrate
+    /// API route) can trigger it without requiring a daemon restart.
+    pub fn relocate_legacy_agent_dirs(&self) {
+        let workspaces_agents = self.config.load().effective_agent_workspaces_dir();
+        migrate_legacy_agent_dirs(&self.home_dir_boot, &workspaces_agents);
     }
 
     /// Data directory path (boot-time immutable).
@@ -1581,6 +1650,7 @@ impl LibreFangKernel {
 
         // Migrate old directory layout (hands/, workspaces/<agent>/) to unified layout
         ensure_workspaces_layout(&config.home_dir)?;
+        migrate_legacy_agent_dirs(&config.home_dir, &config.effective_agent_workspaces_dir());
 
         // Initialize memory substrate
         let db_path = config
@@ -2397,14 +2467,42 @@ impl LibreFangKernel {
 
                     // Check if TOML on disk is newer/different — if so, update from file
                     let mut entry = entry;
-                    let toml_path = entry.source_toml_path.clone().unwrap_or_else(|| {
+                    let fallback_toml_path = {
                         let safe_name = safe_path_component(&name, "agent");
-                        kernel
-                            .home_dir_boot
-                            .join("agents")
+                        cfg.effective_agent_workspaces_dir()
                             .join(safe_name)
                             .join("agent.toml")
-                    });
+                    };
+                    // Prefer stored source path when it still exists; otherwise
+                    // fall back to the canonical workspaces/agents/<name>/ location.
+                    // This self-heals entries whose source_toml_path was recorded
+                    // under the legacy `<home>/agents/<name>/` layout and later
+                    // relocated by `migrate_legacy_agent_dirs`.
+                    let (toml_path, source_path_changed) = match entry.source_toml_path.clone() {
+                        Some(p) if p.exists() => (p, false),
+                        Some(_) => {
+                            // Stored path no longer exists — repoint at the
+                            // canonical location if the fallback resolves.
+                            let repoint = fallback_toml_path.exists();
+                            (fallback_toml_path, repoint)
+                        }
+                        None => (fallback_toml_path, false),
+                    };
+                    if source_path_changed {
+                        entry.source_toml_path = Some(toml_path.clone());
+                        if let Err(e) = kernel.memory.save_agent(&entry) {
+                            warn!(
+                                agent = %name,
+                                "Failed to persist source_toml_path repoint: {e}"
+                            );
+                        } else {
+                            info!(
+                                agent = %name,
+                                path = %toml_path.display(),
+                                "Repointed stale source_toml_path to workspaces/agents/"
+                            );
+                        }
+                    }
                     if toml_path.exists() {
                         match std::fs::read_to_string(&toml_path) {
                             Ok(toml_str) => {
@@ -2473,17 +2571,21 @@ impl LibreFangKernel {
                     // Check enabled flag — also do a direct TOML read as fallback
                     let mut is_enabled = restored_entry.manifest.enabled;
                     if is_enabled {
-                        // Double-check: read directly from hands/agents TOML in case DB is stale.
-                        // Use proper TOML parsing instead of string matching to handle all valid
-                        // whitespace variants and avoid false positives from comments.
-                        for dir in &["agents", "hands"] {
-                            let check_path = kernel
-                                .home_dir_boot
-                                .join(dir)
+                        // Double-check: read directly from workspaces/{agents,hands}/
+                        // TOML in case DB is stale. Use proper TOML parsing instead
+                        // of string matching to handle all valid whitespace variants
+                        // and avoid false positives from comments.
+                        let candidates = [
+                            cfg.effective_agent_workspaces_dir()
                                 .join(&name)
-                                .join("agent.toml");
+                                .join("agent.toml"),
+                            cfg.effective_hands_workspaces_dir()
+                                .join(&name)
+                                .join("agent.toml"),
+                        ];
+                        for check_path in &candidates {
                             if check_path.exists() {
-                                if let Ok(content) = std::fs::read_to_string(&check_path) {
+                                if let Ok(content) = std::fs::read_to_string(check_path) {
                                     if toml_enabled_false(&content) {
                                         is_enabled = false;
                                         restored_entry.manifest.enabled = false;
@@ -5629,13 +5731,21 @@ system_prompt = "You are a helpful assistant."
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
         })?;
 
-        let toml_path = entry.source_toml_path.clone().unwrap_or_else(|| {
+        let fallback_toml_path = {
             let safe_name = safe_path_component(&entry.name, "agent");
-            self.home_dir_boot
-                .join("agents")
+            self.config
+                .load()
+                .effective_agent_workspaces_dir()
                 .join(safe_name)
                 .join("agent.toml")
-        });
+        };
+        // Prefer stored source path when it still exists; otherwise fall back
+        // to the canonical workspaces/agents/<name>/ location so entries with
+        // a stale legacy source_toml_path self-heal after boot migration.
+        let toml_path = match entry.source_toml_path.clone() {
+            Some(p) if p.exists() => p,
+            _ => fallback_toml_path,
+        };
 
         if !toml_path.exists() {
             return Err(KernelError::LibreFang(LibreFangError::Internal(format!(
@@ -5896,10 +6006,9 @@ system_prompt = "You are a helpful assistant."
     /// Write enabled flag to agent's TOML file.
     fn persist_agent_enabled(&self, _agent_id: AgentId, name: &str, enabled: bool) {
         let cfg = self.config.load();
-        // Check both agents/ and hands/ directories
-        let agents_path = self
-            .home_dir_boot
-            .join("agents")
+        // Check both workspaces/agents/ and workspaces/hands/ directories
+        let agents_path = cfg
+            .effective_agent_workspaces_dir()
             .join(name)
             .join("agent.toml");
         let hands_path = cfg

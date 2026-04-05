@@ -3589,9 +3589,9 @@ fn cmd_doctor(json: bool, repair: bool) {
             if answer.is_empty() || answer.starts_with('y') || answer.starts_with('Y') {
                 if std::fs::create_dir_all(&librefang_dir).is_ok() {
                     restrict_dir_permissions(&librefang_dir);
-                    for sub in ["data", "agents"] {
-                        let _ = std::fs::create_dir_all(librefang_dir.join(sub));
-                    }
+                    let _ = std::fs::create_dir_all(librefang_dir.join("data"));
+                    let _ =
+                        std::fs::create_dir_all(librefang_dir.join("workspaces").join("agents"));
                     if !json {
                         ui::check_ok("Created LibreFang directory");
                     }

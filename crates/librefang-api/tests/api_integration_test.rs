@@ -527,10 +527,13 @@ async fn test_run_migrate_uses_daemon_home_when_target_dir_is_empty() {
     assert_eq!(json["dry_run"], false);
 
     let config_path = harness.state.kernel.home_dir().join("config.toml");
+    // Migrate writes to <home>/agents/ but the daemon relocates the dirs to
+    // the canonical workspaces/agents/ layout immediately after migration.
     let agent_path = harness
         .state
         .kernel
         .home_dir()
+        .join("workspaces")
         .join("agents")
         .join("main")
         .join("agent.toml");
