@@ -61,7 +61,7 @@ impl TelegramAdapter {
     /// Create a new Telegram adapter.
     ///
     /// `token` is the raw bot token (read from env by the caller).
-    /// `allowed_users` is the list of Telegram user IDs allowed to interact (empty = allow all).
+    /// `allowed_users` is the list of Telegram user IDs or usernames allowed to interact (empty = allow all).
     /// `api_url` overrides the Telegram Bot API base URL (for proxies/mirrors).
     pub fn new(
         token: String,
@@ -179,6 +179,23 @@ impl TelegramAdapter {
             if !status.is_success() {
                 let body_text = resp.text().await.unwrap_or_default();
                 warn!("Telegram sendMessage failed ({status}): {body_text}");
+                // If HTML parsing failed, retry as plain text (no parse_mode)
+                if status == reqwest::StatusCode::BAD_REQUEST
+                    && body_text.contains("can't parse entities")
+                {
+                    let mut plain_body = serde_json::json!({
+                        "chat_id": chat_id,
+                        "text": chunk,
+                    });
+                    if let Some(tid) = thread_id {
+                        plain_body["message_thread_id"] = serde_json::json!(tid);
+                    }
+                    let retry = self.client.post(&url).json(&plain_body).send().await?;
+                    if !retry.status().is_success() {
+                        let retry_text = retry.text().await.unwrap_or_default();
+                        warn!("Telegram sendMessage plain fallback also failed: {retry_text}");
+                    }
+                }
             }
         }
         Ok(())
@@ -1209,6 +1226,31 @@ fn mime_type_from_telegram_path(url_or_path: &str) -> Option<String> {
     }
 }
 
+/// Check whether a Telegram user is allowed based on the `allowed_users` list.
+///
+/// Matching rules:
+/// 1. Empty list → allow everyone.
+/// 2. Exact match on `user_id` (compared as string).
+/// 3. If `username` is present, normalized case-insensitive match
+///    (both the entry and the username are stripped of a leading `@`).
+fn telegram_user_allowed(allowed_users: &[String], user_id: i64, username: Option<&str>) -> bool {
+    if allowed_users.is_empty() {
+        return true;
+    }
+    let user_id_str = user_id.to_string();
+    if allowed_users.iter().any(|u| u == &user_id_str) {
+        return true;
+    }
+    if let Some(uname) = username {
+        let normalized = uname.trim_start_matches('@').to_lowercase();
+        allowed_users
+            .iter()
+            .any(|u| u.trim_start_matches('@').to_lowercase() == normalized)
+    } else {
+        false
+    }
+}
+
 /// Parse a Telegram `callback_query` update into a `ChannelMessage`.
 ///
 /// Called when a user clicks an inline keyboard button. The callback data
@@ -1224,13 +1266,18 @@ fn parse_telegram_callback_query(
     let callback_query_id = callback["id"].as_str()?;
     let from = callback.get("from")?;
     let user_id = from["id"].as_i64()?;
-    let user_id_str = user_id.to_string();
+    let username = from["username"].as_str();
 
-    // Security: check allowed_users
-    if !allowed_users.is_empty() && !allowed_users.iter().any(|u| u == &user_id_str) {
-        debug!("Telegram callback_query filtered: user {user_id} not in allowed_users");
+    // Security: check allowed_users (supports user ID and username)
+    if !telegram_user_allowed(allowed_users, user_id, username) {
+        debug!(
+            "Telegram callback_query filtered: user {user_id} (username: {}) not in allowed_users",
+            username.unwrap_or("none")
+        );
         return None;
     }
+
+    let user_id_str = user_id.to_string();
 
     let first_name = from["first_name"].as_str().unwrap_or("Unknown");
     let last_name = from["last_name"].as_str().unwrap_or("");
@@ -1326,7 +1373,7 @@ async fn parse_telegram_update(
     };
 
     // Extract sender info: prefer `from` (user), fall back to `sender_chat` (channel/group)
-    let (user_id, display_name) = if let Some(from) = message.get("from") {
+    let (user_id, display_name, username) = if let Some(from) = message.get("from") {
         let uid = match from["id"].as_i64() {
             Some(id) => id,
             None => {
@@ -1342,7 +1389,8 @@ async fn parse_telegram_update(
         } else {
             format!("{first_name} {last_name}")
         };
-        (uid, name)
+        let username = from["username"].as_str().map(String::from);
+        (uid, name, username)
     } else if let Some(sender_chat) = message.get("sender_chat") {
         // Messages sent on behalf of a channel or group have `sender_chat` instead of `from`.
         let uid = match sender_chat["id"].as_i64() {
@@ -1354,18 +1402,18 @@ async fn parse_telegram_update(
             }
         };
         let title = sender_chat["title"].as_str().unwrap_or("Unknown Channel");
-        (uid, title.to_string())
+        (uid, title.to_string(), None)
     } else {
         return Err(DropReason::ParseError(format!(
             "update {update_id} has no from or sender_chat field"
         )));
     };
 
-    // Security: check allowed_users (compare as strings for consistency)
-    let user_id_str = user_id.to_string();
-    if !allowed_users.is_empty() && !allowed_users.iter().any(|u| u == &user_id_str) {
+    // Security: check allowed_users (supports user ID and username)
+    if !telegram_user_allowed(allowed_users, user_id, username.as_deref()) {
         return Err(DropReason::Filtered(format!(
-            "update {update_id}: user {user_id} not in allowed_users list"
+            "update {update_id}: user {user_id} (username: {}) not in allowed_users list",
+            username.as_deref().unwrap_or("none")
         )));
     }
 
@@ -1523,11 +1571,69 @@ async fn parse_telegram_update(
 
     // Extract reply-to-message context (Telegram `reply_to_message` field).
     // Prepend the quoted original text so the agent sees what the user is replying to.
+    // If the quoted message has a photo, include it so the agent can see it.
     let content = if let Some(reply) = message.get("reply_to_message") {
+        let reply_sender = reply["from"]["first_name"].as_str().unwrap_or("Someone");
         let reply_text = reply["text"].as_str().or_else(|| reply["caption"].as_str());
-        if let Some(quoted) = reply_text {
-            let reply_sender = reply["from"]["first_name"].as_str().unwrap_or("Someone");
-            // Truncate long quotes to avoid feeding the LLM too much irrelevant context
+
+        // Check if the quoted message has a photo
+        let reply_photo_url = if let Some(photos) = reply["photo"].as_array() {
+            let file_id = photos
+                .last()
+                .and_then(|p| p["file_id"].as_str())
+                .unwrap_or("");
+            if !file_id.is_empty() {
+                telegram_get_file_url(token, client, file_id, api_base_url).await
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Some(photo_url) = reply_photo_url {
+            // Quoted message has a photo.
+            // If the user's own message is already an image, keep it and add
+            // the quoted photo context as text (don't overwrite the user's photo).
+            let quote_context = reply_text
+                .map(|q| {
+                    let truncated = if q.len() > 200 {
+                        format!("{}...", &q[..q.floor_char_boundary(200)])
+                    } else {
+                        q.to_string()
+                    };
+                    format!("[Replying to {reply_sender}: \"{truncated}\"]\n")
+                })
+                .unwrap_or_else(|| format!("[Replying to {reply_sender}'s photo]\n"));
+
+            match content {
+                ChannelContent::Image {
+                    url,
+                    caption,
+                    mime_type,
+                } => {
+                    // User sent their own photo as reply — keep it, add quoted context to caption
+                    let cap = caption.unwrap_or_default();
+                    ChannelContent::Image {
+                        url,
+                        caption: Some(format!("{quote_context}{cap}")),
+                        mime_type,
+                    }
+                }
+                ChannelContent::Text(t) => {
+                    // User sent text reply to a photo — show the quoted photo
+                    let caption = format!("{quote_context}{t}");
+                    let mime_type = mime_type_from_telegram_path(&photo_url);
+                    ChannelContent::Image {
+                        url: photo_url,
+                        caption: Some(caption),
+                        mime_type,
+                    }
+                }
+                other => other,
+            }
+        } else if let Some(quoted) = reply_text {
+            // Quoted message has text only — prepend it
             let truncated = if quoted.len() > 200 {
                 format!("{}...", &quoted[..quoted.floor_char_boundary(200)])
             } else {
@@ -1536,7 +1642,7 @@ async fn parse_telegram_update(
             let prefix = format!("[Replying to {reply_sender}: \"{truncated}\"]\n");
             match content {
                 ChannelContent::Text(t) => ChannelContent::Text(format!("{prefix}{t}")),
-                other => other, // Leave Command/Image etc. unchanged
+                other => other,
             }
         } else {
             content
@@ -1663,6 +1769,7 @@ fn sanitize_telegram_html(text: &str) -> String {
 
     let mut result = String::with_capacity(text.len());
     let mut chars = text.char_indices().peekable();
+    let mut open_tags: Vec<String> = Vec::new();
 
     while let Some(&(i, ch)) = chars.peek() {
         if ch == '<' {
@@ -1670,6 +1777,7 @@ fn sanitize_telegram_html(text: &str) -> String {
             if let Some(end_offset) = text[i..].find('>') {
                 let tag_end = i + end_offset;
                 let tag_content = &text[i + 1..tag_end]; // content between < and >
+                let is_closing = tag_content.starts_with('/');
                 let tag_name = tag_content
                     .trim_start_matches('/')
                     .split(|c: char| c.is_whitespace() || c == '/' || c == '>')
@@ -1680,6 +1788,15 @@ fn sanitize_telegram_html(text: &str) -> String {
                 if !tag_name.is_empty() && ALLOWED.contains(&tag_name.as_str()) {
                     // Allowed tag — keep as-is
                     result.push_str(&text[i..tag_end + 1]);
+                    // Track open/close for balancing
+                    if is_closing {
+                        if let Some(pos) = open_tags.iter().rposition(|t| t == &tag_name) {
+                            open_tags.remove(pos);
+                        }
+                    } else if !tag_content.ends_with('/') {
+                        // Not self-closing
+                        open_tags.push(tag_name);
+                    }
                 } else {
                     // Unknown tag — escape both brackets
                     result.push_str("&lt;");
@@ -1702,6 +1819,13 @@ fn sanitize_telegram_html(text: &str) -> String {
             result.push(ch);
             chars.next();
         }
+    }
+
+    // Close any unclosed tags (prevents Telegram "can't parse entities" errors)
+    for tag in open_tags.into_iter().rev() {
+        result.push_str("</");
+        result.push_str(&tag);
+        result.push('>');
     }
 
     result
@@ -1833,6 +1957,97 @@ mod tests {
         )
         .await;
         assert!(msg.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_allowed_users_filter_username() {
+        let update = serde_json::json!({
+            "update_id": 123459,
+            "message": {
+                "message_id": 45,
+                "from": {
+                    "id": 999,
+                    "first_name": "Bob",
+                    "username": "bobuser"
+                },
+                "chat": {
+                    "id": 999,
+                    "type": "private"
+                },
+                "date": 1700000003,
+                "text": "hello"
+            }
+        });
+
+        let client = test_client();
+
+        // Username match (no @)
+        let allowed = vec!["bobuser".to_string()];
+        let msg = parse_telegram_update(
+            &update,
+            &allowed,
+            "fake:token",
+            &client,
+            DEFAULT_API_URL,
+            None,
+        )
+        .await;
+        assert!(msg.is_ok(), "username without @ should match");
+
+        // Username match (with @)
+        let allowed = vec!["@bobuser".to_string()];
+        let msg = parse_telegram_update(
+            &update,
+            &allowed,
+            "fake:token",
+            &client,
+            DEFAULT_API_URL,
+            None,
+        )
+        .await;
+        assert!(msg.is_ok(), "username with @ should match");
+
+        // Case-insensitive username match
+        let allowed = vec!["BoBuSeR".to_string()];
+        let msg = parse_telegram_update(
+            &update,
+            &allowed,
+            "fake:token",
+            &client,
+            DEFAULT_API_URL,
+            None,
+        )
+        .await;
+        assert!(msg.is_ok(), "username match should be case-insensitive");
+
+        // ID mismatch but username match
+        let allowed = vec!["111".to_string(), "bobuser".to_string()];
+        let msg = parse_telegram_update(
+            &update,
+            &allowed,
+            "fake:token",
+            &client,
+            DEFAULT_API_URL,
+            None,
+        )
+        .await;
+        assert!(
+            msg.is_ok(),
+            "should match by username when ID doesn't match"
+        );
+
+        // Wrong username, wrong ID → reject
+        let allowed = vec!["otheruser".to_string()];
+        let msg = parse_telegram_update(
+            &update,
+            &allowed,
+            "fake:token",
+            &client,
+            DEFAULT_API_URL,
+            None,
+        )
+        .await;
+        assert!(msg.is_err(), "wrong username should be rejected");
     }
 
     #[tokio::test]
@@ -2170,6 +2385,56 @@ mod tests {
         assert_eq!(msg.sender.platform_id, "-1001234567890");
         assert!(
             matches!(msg.content, ChannelContent::Text(ref t) if t == "Forwarded from channel")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sender_chat_allowed_users_id_only() {
+        // sender_chat path should only match by numeric ID, not by channel name/username.
+        let update = serde_json::json!({
+            "update_id": 501,
+            "message": {
+                "message_id": 81,
+                "sender_chat": {
+                    "id": -1001999888777_i64,
+                    "title": "My Channel",
+                    "type": "channel"
+                },
+                "chat": { "id": -1001234567890_i64, "type": "supergroup" },
+                "date": 1700000000,
+                "text": "Channel post"
+            }
+        });
+
+        let client = test_client();
+
+        // Allowed by sender_chat ID (as string)
+        let allowed = vec!["-1001999888777".to_string()];
+        let msg = parse_telegram_update(
+            &update,
+            &allowed,
+            "fake:token",
+            &client,
+            DEFAULT_API_URL,
+            None,
+        )
+        .await;
+        assert!(msg.is_ok(), "sender_chat should be allowed by numeric ID");
+
+        // NOT allowed by channel title alone — sender_chat has no username field
+        let allowed = vec!["My Channel".to_string()];
+        let msg = parse_telegram_update(
+            &update,
+            &allowed,
+            "fake:token",
+            &client,
+            DEFAULT_API_URL,
+            None,
+        )
+        .await;
+        assert!(
+            msg.is_err(),
+            "sender_chat should NOT match by channel title"
         );
     }
 
@@ -2653,6 +2918,78 @@ mod tests {
             &client,
         );
         assert!(msg.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_parse_telegram_callback_query_username_filter() {
+        let client = crate::http_client::new_client();
+        let callback = serde_json::json!({
+            "id": "cb_100",
+            "from": { "id": 42, "first_name": "Alice", "username": "alicebot" },
+            "data": "approve",
+            "message": {
+                "message_id": 2,
+                "chat": { "id": 100, "type": "private" },
+                "text": "Some prompt",
+                "date": 1700000000
+            }
+        });
+
+        // Username match (no @) — should allow
+        let msg = parse_telegram_callback_query(
+            &callback,
+            &["alicebot".to_string()],
+            "fake_token",
+            "https://api.telegram.org",
+            &client,
+        );
+        assert!(msg.is_some(), "callback: username without @ should match");
+
+        // Username match (with @) — should allow
+        let msg = parse_telegram_callback_query(
+            &callback,
+            &["@alicebot".to_string()],
+            "fake_token",
+            "https://api.telegram.org",
+            &client,
+        );
+        assert!(msg.is_some(), "callback: username with @ should match");
+
+        // Case-insensitive username — should allow
+        let msg = parse_telegram_callback_query(
+            &callback,
+            &["AlIcEbOt".to_string()],
+            "fake_token",
+            "https://api.telegram.org",
+            &client,
+        );
+        assert!(
+            msg.is_some(),
+            "callback: case-insensitive username should match"
+        );
+
+        // ID mismatch but username match — should allow
+        let msg = parse_telegram_callback_query(
+            &callback,
+            &["999".to_string(), "alicebot".to_string()],
+            "fake_token",
+            "https://api.telegram.org",
+            &client,
+        );
+        assert!(
+            msg.is_some(),
+            "callback: should match by username when ID doesn't match"
+        );
+
+        // Wrong username — should reject
+        let msg = parse_telegram_callback_query(
+            &callback,
+            &["wronguser".to_string()],
+            "fake_token",
+            "https://api.telegram.org",
+            &client,
+        );
+        assert!(msg.is_none(), "callback: wrong username should be rejected");
     }
 
     #[tokio::test]

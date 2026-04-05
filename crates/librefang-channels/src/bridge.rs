@@ -1273,6 +1273,43 @@ fn is_group_command(message: &ChannelMessage) -> bool {
         || matches!(&message.content, ChannelContent::Text(text) if text.starts_with('/'))
 }
 
+/// Check whether a built-in slash command is permitted on this channel.
+///
+/// Precedence: `disable_commands` > `allowed_commands` (whitelist) >
+/// `blocked_commands` (blacklist). When no overrides are configured,
+/// everything is allowed (current default behaviour).
+///
+/// Config entries may be written with or without a leading `/` (both
+/// `"agent"` and `"/agent"` match the dispatcher's bare `"agent"` token).
+fn is_command_allowed(cmd: &str, overrides: Option<&ChannelOverrides>) -> bool {
+    let Some(ov) = overrides else { return true };
+    if ov.disable_commands {
+        return false;
+    }
+    // Normalize config entries: strip a single optional leading slash so users
+    // can write either "agent" or "/agent" in TOML.
+    let matches = |entry: &String| -> bool {
+        let name = entry.strip_prefix('/').unwrap_or(entry);
+        name == cmd
+    };
+    if !ov.allowed_commands.is_empty() {
+        return ov.allowed_commands.iter().any(matches);
+    }
+    !ov.blocked_commands.iter().any(matches)
+}
+
+/// Reconstruct the raw slash-command text so that blocked commands can be
+/// forwarded to the agent as normal user input (e.g. `/agent admin` →
+/// `"/agent admin"`). Keeps the slash so the agent can see what the user
+/// originally typed.
+fn reconstruct_command_text(name: &str, args: &[String]) -> String {
+    if args.is_empty() {
+        format!("/{name}")
+    } else {
+        format!("/{} {}", name, args.join(" "))
+    }
+}
+
 fn should_process_group_message(
     ct_str: &str,
     overrides: &ChannelOverrides,
@@ -1720,19 +1757,28 @@ async fn dispatch_message(
         }
     }
 
-    // Handle commands first (early return)
+    // Handle commands first (early return) — unless the per-channel command
+    // policy blocks this command, in which case we fall through and treat it
+    // as normal text forwarded to the agent.
     if let ChannelContent::Command { ref name, ref args } = message.content {
-        let result = handle_command(
-            name,
-            args,
-            handle,
-            router,
-            &message.sender,
-            &message.channel,
-        )
-        .await;
-        send_response(adapter, &message.sender, result, thread_id, output_format).await;
-        return;
+        if is_command_allowed(name, overrides.as_ref()) {
+            let result = handle_command(
+                name,
+                args,
+                handle,
+                router,
+                &message.sender,
+                &message.channel,
+            )
+            .await;
+            send_response(adapter, &message.sender, result, thread_id, output_format).await;
+            return;
+        }
+        debug!(
+            command = name,
+            channel = ct_str,
+            "Command blocked by channel policy — forwarding to agent as text"
+        );
     }
 
     // For images: download, base64 encode, and send as multimodal content blocks
@@ -1767,7 +1813,7 @@ async fn dispatch_message(
 
     let text = match &message.content {
         ChannelContent::Text(t) => t.clone(),
-        ChannelContent::Command { .. } => unreachable!(), // handled above
+        ChannelContent::Command { name, args } => reconstruct_command_text(name, args),
         ChannelContent::Image {
             ref url,
             ref caption,
@@ -1821,11 +1867,16 @@ async fn dispatch_message(
             ref action,
             ref message_text,
         } => {
-            // A user clicked an interactive button — pass the callback action
-            // as the message text so the agent can handle it.
-            match message_text {
-                Some(mt) => format!("[Button clicked: {action}] (on message: {mt})"),
-                None => format!("[Button clicked: {action}]"),
+            // If action starts with '/', treat it as a slash command directly.
+            // This allows interactive buttons (e.g. Approve/Reject on approval
+            // notifications) to trigger commands like /approve or /reject.
+            if action.starts_with('/') {
+                action.clone()
+            } else {
+                match message_text {
+                    Some(mt) => format!("[Button clicked: {action}] (on message: {mt})"),
+                    None => format!("[Button clicked: {action}]"),
+                }
             }
         }
     };
@@ -1872,19 +1923,26 @@ async fn dispatch_message(
                 | "peers"
                 | "a2a"
         ) {
-            let result = handle_command(
-                cmd,
-                &args,
-                handle,
-                router,
-                &message.sender,
-                &message.channel,
-            )
-            .await;
-            send_response(adapter, &message.sender, result, thread_id, output_format).await;
-            return;
+            if is_command_allowed(cmd, overrides.as_ref()) {
+                let result = handle_command(
+                    cmd,
+                    &args,
+                    handle,
+                    router,
+                    &message.sender,
+                    &message.channel,
+                )
+                .await;
+                send_response(adapter, &message.sender, result, thread_id, output_format).await;
+                return;
+            }
+            debug!(
+                command = cmd,
+                channel = ct_str,
+                "Command blocked by channel policy — forwarding to agent as text"
+            );
         }
-        // Other slash commands pass through to the agent
+        // Other slash commands (and blocked ones) pass through to the agent
     }
 
     // Check broadcast routing first
@@ -2846,6 +2904,114 @@ mod tests {
     use super::*;
     use crate::types::ChannelType;
     use std::sync::Mutex;
+
+    #[test]
+    fn test_is_command_allowed_default_allows_everything() {
+        // No overrides configured — all commands allowed (current behaviour).
+        assert!(is_command_allowed("agent", None));
+        assert!(is_command_allowed("new", None));
+
+        // Explicit default overrides also allow everything.
+        let ov = ChannelOverrides::default();
+        assert!(is_command_allowed("agent", Some(&ov)));
+        assert!(is_command_allowed("reboot", Some(&ov)));
+    }
+
+    #[test]
+    fn test_is_command_allowed_disable_commands_blocks_all() {
+        let ov = ChannelOverrides {
+            disable_commands: true,
+            ..Default::default()
+        };
+        assert!(!is_command_allowed("start", Some(&ov)));
+        assert!(!is_command_allowed("help", Some(&ov)));
+        assert!(!is_command_allowed("agent", Some(&ov)));
+    }
+
+    #[test]
+    fn test_is_command_allowed_whitelist() {
+        let ov = ChannelOverrides {
+            allowed_commands: vec!["start".into(), "help".into()],
+            ..Default::default()
+        };
+        assert!(is_command_allowed("start", Some(&ov)));
+        assert!(is_command_allowed("help", Some(&ov)));
+        assert!(!is_command_allowed("agent", Some(&ov)));
+        assert!(!is_command_allowed("new", Some(&ov)));
+    }
+
+    #[test]
+    fn test_is_command_allowed_blacklist() {
+        let ov = ChannelOverrides {
+            blocked_commands: vec!["agent".into(), "new".into(), "reboot".into()],
+            ..Default::default()
+        };
+        assert!(!is_command_allowed("agent", Some(&ov)));
+        assert!(!is_command_allowed("new", Some(&ov)));
+        assert!(!is_command_allowed("reboot", Some(&ov)));
+        assert!(is_command_allowed("help", Some(&ov)));
+        assert!(is_command_allowed("start", Some(&ov)));
+    }
+
+    #[test]
+    fn test_is_command_allowed_precedence_disable_over_allow() {
+        // disable_commands trumps a whitelist.
+        let ov = ChannelOverrides {
+            disable_commands: true,
+            allowed_commands: vec!["start".into()],
+            ..Default::default()
+        };
+        assert!(!is_command_allowed("start", Some(&ov)));
+    }
+
+    #[test]
+    fn test_is_command_allowed_precedence_allow_over_block() {
+        // Whitelist takes precedence over blacklist when both set.
+        let ov = ChannelOverrides {
+            allowed_commands: vec!["agent".into()],
+            blocked_commands: vec!["agent".into(), "help".into()],
+            ..Default::default()
+        };
+        assert!(is_command_allowed("agent", Some(&ov)));
+        // `help` is not in the whitelist — blocked even though not via blocklist.
+        assert!(!is_command_allowed("help", Some(&ov)));
+    }
+
+    #[test]
+    fn test_is_command_allowed_tolerates_leading_slash_in_config() {
+        // Users may write either "agent" or "/agent" in TOML — both should work.
+        let ov = ChannelOverrides {
+            allowed_commands: vec!["/start".into(), "help".into()],
+            ..Default::default()
+        };
+        assert!(is_command_allowed("start", Some(&ov)));
+        assert!(is_command_allowed("help", Some(&ov)));
+        assert!(!is_command_allowed("agent", Some(&ov)));
+
+        let ov = ChannelOverrides {
+            blocked_commands: vec!["/agent".into(), "new".into()],
+            ..Default::default()
+        };
+        assert!(!is_command_allowed("agent", Some(&ov)));
+        assert!(!is_command_allowed("new", Some(&ov)));
+        assert!(is_command_allowed("help", Some(&ov)));
+    }
+
+    #[test]
+    fn test_reconstruct_command_text() {
+        assert_eq!(reconstruct_command_text("help", &[]), "/help");
+        assert_eq!(
+            reconstruct_command_text("agent", &["admin".into()]),
+            "/agent admin"
+        );
+        assert_eq!(
+            reconstruct_command_text(
+                "workflow",
+                &["run".into(), "pipeline-1".into(), "hello".into()]
+            ),
+            "/workflow run pipeline-1 hello"
+        );
+    }
 
     /// Mock kernel handle for testing.
     struct MockHandle {

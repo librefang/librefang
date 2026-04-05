@@ -69,15 +69,13 @@ function SettingRow({
 }
 
 export function SettingsPage() {
-  const { t, i18n } = useTranslation();
+  const { t } = useTranslation();
   const theme = useUIStore((s) => s.theme);
   const toggleTheme = useUIStore((s) => s.toggleTheme);
   const language = useUIStore((s) => s.language);
   const setLanguage = useUIStore((s) => s.setLanguage);
   const navLayout = useUIStore((s) => s.navLayout);
   const setNavLayout = useUIStore((s) => s.setNavLayout);
-  const isZh = i18n.language === "zh";
-
   return (
     <div className="flex flex-col gap-6 transition-colors duration-300">
       <PageHeader
@@ -99,7 +97,7 @@ export function SettingsPage() {
             icon={theme === "dark" ? Moon : Sun}
             iconColor="text-amber-500"
             label={t("settings.theme")}
-            description={isZh ? "切换界面明暗模式" : "Switch between light and dark mode"}
+            description={t("settings.theme_desc")}
           >
             <SegmentControl
               value={theme}
@@ -115,7 +113,7 @@ export function SettingsPage() {
             icon={Languages}
             iconColor="text-sky-500"
             label={t("settings.language")}
-            description={isZh ? "界面显示语言" : "Interface display language"}
+            description={t("settings.language_desc")}
           >
             <SegmentControl
               value={language}
@@ -131,7 +129,7 @@ export function SettingsPage() {
             icon={LayoutDashboard}
             iconColor="text-violet-500"
             label={t("settings.nav_layout")}
-            description={isZh ? "侧边栏导航折叠方式" : "Sidebar navigation style"}
+            description={t("settings.nav_layout_desc")}
           >
             <SegmentControl
               value={navLayout}

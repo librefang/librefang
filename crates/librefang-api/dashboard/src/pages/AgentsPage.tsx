@@ -6,16 +6,21 @@ import { useNavigate } from "@tanstack/react-router";
 import { listAgents, getAgentDetail, AgentDetail, spawnAgent, suspendAgent, resumeAgent, patchAgentConfig,
   listPromptVersions, listExperiments, activatePromptVersion, startExperiment, pauseExperiment, completeExperiment,
   createPromptVersion, createExperiment, deletePromptVersion, PromptVersion, PromptExperiment, ExperimentVariantMetrics, getExperimentMetrics,
-  listModels, listProviders, listAgentTemplates, deleteAgent, cloneAgent, stopAgent, clearAgentHistory, resetAgentSession } from "../api";
+  listModels, listProviders, listAgentTemplates, deleteAgent, cloneAgent, resetAgentSession } from "../api";
 import { isProviderAvailable } from "../lib/status";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
+import { ConfirmDialog } from "../components/ui/ConfirmDialog";
+import { Modal } from "../components/ui/Modal";
+import { useCreateShortcut } from "../lib/useCreateShortcut";
 import { Card } from "../components/ui/Card";
 import { Input } from "../components/ui/Input";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { Avatar } from "../components/ui/Avatar";
+import { useUIStore } from "../lib/store";
+import { filterVisible } from "../lib/hiddenModels";
 import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, GitBranch, Trash2, Check, BarChart3, Copy, RotateCcw } from "lucide-react";
 import { truncateId } from "../lib/string";
 import { getStatusVariant } from "../lib/status";
@@ -35,15 +40,40 @@ export function AgentsPage() {
   const [showPrompts, setShowPrompts] = useState(false);
   const [editingModel, setEditingModel] = useState(false);
   const [modelDraft, setModelDraft] = useState({ provider: "", model: "", max_tokens: "", temperature: "" });
+  // Destructive-action confirmation dialog. We set this instead of calling
+  // window.confirm() so the dialog matches the rest of the dashboard
+  // styling and can slide up as a bottom-sheet on mobile.
+  const [confirmDialog, setConfirmDialog] = useState<{
+    title: string;
+    message: string;
+    onConfirm: () => void;
+    tone?: "default" | "destructive";
+  } | null>(null);
+  const [stateFilter, setStateFilter] = useState<"all" | "running" | "suspended">("all");
+  const [sortBy, setSortBy] = useState<"name" | "last_active" | "created_at">("name");
+  const addToast = useUIStore((s) => s.addToast);
+  useCreateShortcut(() => setShowCreate(true));
   const queryClient = useQueryClient();
   const templatesQuery = useQuery({ queryKey: ["agent-templates"], queryFn: listAgentTemplates, enabled: showCreate && createMode === "template" });
   const spawnMutation = useMutation({
     mutationFn: spawnAgent,
-    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["agents"] }); setShowCreate(false); setTemplateName(""); setManifestToml(""); }
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["agents"] });
+      setShowCreate(false);
+      setTemplateName("");
+      setManifestToml("");
+      addToast(t("agents.spawn_success", { defaultValue: "Agent created" }), "success");
+    },
+    onError: (e: any) => addToast(e?.message || t("agents.spawn_failed", { defaultValue: "Failed to create agent" }), "error"),
   });
   const deleteMutation = useMutation({
     mutationFn: deleteAgent,
-    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["agents"] }); setDetailAgent(null); }
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["agents"] });
+      setDetailAgent(null);
+      addToast(t("agents.delete_success", { defaultValue: "Agent deleted" }), "success");
+    },
+    onError: (e: any) => addToast(e?.message || t("agents.delete_failed", { defaultValue: "Failed to delete agent" }), "error"),
   });
 
   const patchAgentConfigMutation = useMutation({
@@ -56,7 +86,9 @@ export function AgentsPage() {
       if (detailAgent?.id === agentId) {
         getAgentDetail(agentId).then(setDetailAgent).catch(() => {});
       }
+      addToast(t("agents.model_saved", { defaultValue: "Model updated" }), "success");
     },
+    onError: (e: any) => addToast(e?.message || t("agents.model_save_failed", { defaultValue: "Failed to update model" }), "error"),
   });
 
   function startModelEdit() {
@@ -134,16 +166,49 @@ export function AgentsPage() {
     [providersQuery.data],
   );
 
+  const hiddenModelKeys = useUIStore((s) => s.hiddenModelKeys);
+  const hiddenSet = useMemo(() => new Set(hiddenModelKeys), [hiddenModelKeys]);
+
+  const visibleModels = useMemo(
+    () => filterVisible(modelsQuery.data?.models ?? [], hiddenSet),
+    [modelsQuery.data?.models, hiddenSet],
+  );
+
   const agents = agentsQuery.data ?? [];
+  // Counts for the filter chips so operators can see "5 running / 2
+  // suspended" without running through the filter first.
+  const agentCounts = useMemo(() => {
+    const visible = agents.filter(a => !a.is_hand);
+    const running = visible.filter(a => (a.state || "").toLowerCase() === "running").length;
+    const suspended = visible.filter(a => (a.state || "").toLowerCase() === "suspended").length;
+    return { all: visible.length, running, suspended };
+  }, [agents]);
   const filteredAgents = useMemo(() => agents
     .filter(a => !a.is_hand)
+    .filter(a => {
+      if (stateFilter === "all") return true;
+      return (a.state || "").toLowerCase() === stateFilter;
+    })
     .filter(a => a.name.toLowerCase().includes(search.toLowerCase()) || a.id.toLowerCase().includes(search.toLowerCase()))
     .sort((a, b) => {
+      // Suspended always last regardless of primary sort — otherwise a
+      // "sort by recent" view would bury running agents behind stale
+      // suspended ones that happened to be touched recently.
       const aSusp = (a.state || "").toLowerCase() === "suspended" ? 1 : 0;
       const bSusp = (b.state || "").toLowerCase() === "suspended" ? 1 : 0;
       if (aSusp !== bSusp) return aSusp - bSusp;
+      if (sortBy === "last_active") {
+        const aT = a.last_active ? Date.parse(a.last_active) : 0;
+        const bT = b.last_active ? Date.parse(b.last_active) : 0;
+        return bT - aT; // most recent first
+      }
+      if (sortBy === "created_at") {
+        const aT = a.created_at ? Date.parse(a.created_at) : 0;
+        const bT = b.created_at ? Date.parse(b.created_at) : 0;
+        return bT - aT; // newest first
+      }
       return a.name.localeCompare(b.name);
-    }), [agents, search]);
+    }), [agents, search, stateFilter, sortBy]);
 
   const coreAgents = filteredAgents;
 
@@ -200,7 +265,19 @@ export function AgentsPage() {
           <Button variant="primary" size="sm" className="flex-1" onClick={(e) => { e.stopPropagation(); navigate({ to: "/chat", search: { agentId: agent.id } }); }}>
             <MessageCircle className="h-3.5 w-3.5 mr-1" /> {t("common.interact")}
           </Button>
-          <Button variant="secondary" size="sm" onClick={(e) => { e.stopPropagation(); if (confirm(t("agents.delete_confirm", { name: agent.name }))) deleteMutation.mutate(agent.id); }}>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={(e) => {
+              e.stopPropagation();
+              setConfirmDialog({
+                title: t("agents.delete_title", { defaultValue: "Delete agent?" }),
+                message: t("agents.delete_confirm", { name: agent.name }),
+                tone: "destructive",
+                onConfirm: () => deleteMutation.mutate(agent.id),
+              });
+            }}
+          >
             <Trash2 className="h-3.5 w-3.5" />
           </Button>
         </div>
@@ -220,9 +297,10 @@ export function AgentsPage() {
           icon={<Users className="h-4 w-4" />}
           helpText={t("agents.help")}
         />
-        <Button variant="primary" onClick={() => setShowCreate(true)} className="shrink-0">
+        <Button variant="primary" onClick={() => setShowCreate(true)} className="shrink-0" title={t("agents.create_agent") + " (n)"}>
           <Plus className="w-4 h-4" />
-          {t("agents.create_agent")}
+          <span>{t("agents.create_agent")}</span>
+          <kbd className="hidden sm:inline-flex h-5 min-w-[20px] items-center justify-center rounded border border-white/30 bg-white/10 px-1 text-[9px] font-mono font-semibold">n</kbd>
         </Button>
       </div>
 
@@ -231,17 +309,76 @@ export function AgentsPage() {
         onChange={(e) => setSearch(e.target.value)}
         placeholder={t("common.search")}
         leftIcon={<Search className="h-4 w-4" />}
+        data-shortcut-search
       />
+
+      <div className="flex items-center gap-2 -mt-2 flex-wrap">
+        {(["all", "running", "suspended"] as const).map((key) => {
+          const isActive = stateFilter === key;
+          const count = agentCounts[key];
+          const label = t(`agents.filter_${key}`, {
+            defaultValue: key === "all" ? "All" : key === "running" ? "Running" : "Suspended",
+          });
+          return (
+            <button
+              key={key}
+              onClick={() => setStateFilter(key)}
+              className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-[11px] font-bold transition-colors ${
+                isActive
+                  ? "border-brand/30 bg-brand/10 text-brand"
+                  : "border-border-subtle bg-surface text-text-dim hover:border-brand/20 hover:text-brand"
+              }`}
+            >
+              <span>{label}</span>
+              <span
+                className={`inline-flex items-center justify-center rounded-full px-1.5 min-w-[18px] h-[18px] text-[9px] font-mono ${
+                  isActive ? "bg-brand/20" : "bg-main"
+                }`}
+              >
+                {count}
+              </span>
+            </button>
+          );
+        })}
+        <div className="ml-auto flex items-center gap-1.5">
+          <span className="text-[10px] font-bold uppercase tracking-widest text-text-dim/60">
+            {t("common.sort_by", { defaultValue: "Sort" })}
+          </span>
+          <select
+            value={sortBy}
+            onChange={(e) => setSortBy(e.target.value as typeof sortBy)}
+            className="rounded-full border border-border-subtle bg-surface px-3 py-1 text-[11px] font-bold text-text-dim outline-none focus:border-brand hover:border-brand/20 cursor-pointer"
+          >
+            <option value="name">{t("common.sort_name", { defaultValue: "Name" })}</option>
+            <option value="last_active">{t("common.sort_last_active", { defaultValue: "Last active" })}</option>
+            <option value="created_at">{t("common.sort_created", { defaultValue: "Created" })}</option>
+          </select>
+        </div>
+      </div>
 
       {agentsQuery.isLoading ? (
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
           {[1, 2, 3, 4, 5, 6].map((i) => <CardSkeleton key={i} />)}
         </div>
       ) : filteredAgents.length === 0 ? (
-        search ? (
+        search || stateFilter !== "all" ? (
           <EmptyState
             title={t("agents.no_matching")}
             icon={<Search className="h-6 w-6" />}
+            action={
+              (search || stateFilter !== "all") && (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => {
+                    setSearch("");
+                    setStateFilter("all");
+                  }}
+                >
+                  {t("common.clear_filters", { defaultValue: "Clear filters" })}
+                </Button>
+              )
+            }
           />
         ) : (
           <EmptyState
@@ -280,7 +417,7 @@ export function AgentsPage() {
                     </div>
                   </div>
                 </div>
-                <button onClick={closeDetailModal} className="p-2 rounded-xl hover:bg-main transition-colors"><X className="w-4 h-4" /></button>
+                <button onClick={closeDetailModal} className="p-2 rounded-xl hover:bg-main transition-colors" aria-label={t("common.close", { defaultValue: "Close" })}><X className="w-4 h-4" /></button>
               </div>
             </div>
             <div className="p-6 space-y-5">
@@ -328,11 +465,11 @@ export function AgentsPage() {
                           >
                             {!modelDraft.provider.trim() && <option value="">Select provider first</option>}
                             {modelDraft.provider.trim() && modelsQuery.isLoading && <option value="">Loading...</option>}
-                            {modelDraft.provider.trim() && !modelsQuery.isLoading && modelsQuery.data?.models?.length === 0 && <option value="">No models</option>}
-                            {modelDraft.model && !modelsQuery.data?.models?.some(m => m.id === modelDraft.model) && (
+                            {modelDraft.provider.trim() && !modelsQuery.isLoading && visibleModels.length === 0 && <option value="">No models</option>}
+                            {modelDraft.model && !visibleModels.some(m => m.id === modelDraft.model) && (
                               <option value={modelDraft.model}>{modelDraft.model}</option>
                             )}
-                            {modelsQuery.data?.models?.map(m => (
+                            {visibleModels.map(m => (
                               <option key={m.id} value={m.id}>{m.display_name || m.id}</option>
                             ))}
                           </select>
@@ -458,8 +595,8 @@ export function AgentsPage() {
                   <div className="p-4 rounded-xl bg-main/50 border border-border-subtle/50 space-y-2.5 text-xs">
                     <div className="flex justify-between items-center">
                       <span className="text-text-dim">{t("agents.thinking_enabled")}</span>
-                      <Badge variant={detailAgent.thinking.budget_tokens > 0 ? "success" : "default"}>
-                        {detailAgent.thinking.budget_tokens > 0 ? t("common.yes") : t("common.no")}
+                      <Badge variant={(detailAgent.thinking.budget_tokens ?? 0) > 0 ? "success" : "default"}>
+                        {(detailAgent.thinking.budget_tokens ?? 0) > 0 ? t("common.yes") : t("common.no")}
                       </Badge>
                     </div>
                     <div className="flex justify-between items-center">
@@ -505,11 +642,38 @@ export function AgentsPage() {
                     <Copy className="w-4 h-4" />
                     <span className="text-[9px]">{t("agents.clone")}</span>
                   </Button>
-                  <Button variant="secondary" size="sm" className="flex-col gap-1 py-2.5 h-auto" onClick={async () => { if (confirm(t("agents.reset_confirm"))) { await resetAgentSession(detailAgent.id); const d = await getAgentDetail(detailAgent.id); setDetailAgent(d); } }}>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    className="flex-col gap-1 py-2.5 h-auto"
+                    onClick={() =>
+                      setConfirmDialog({
+                        title: t("agents.reset_title", { defaultValue: "Reset session?" }),
+                        message: t("agents.reset_confirm"),
+                        onConfirm: async () => {
+                          await resetAgentSession(detailAgent.id);
+                          const d = await getAgentDetail(detailAgent.id);
+                          setDetailAgent(d);
+                        },
+                      })
+                    }
+                  >
                     <RotateCcw className="w-4 h-4" />
                     <span className="text-[9px]">{t("agents.reset")}</span>
                   </Button>
-                  <Button variant="secondary" size="sm" className="flex-col gap-1 py-2.5 h-auto text-error/70 hover:text-error" onClick={() => { if (confirm(t("agents.delete_confirm", { name: detailAgent.name }))) { deleteMutation.mutate(detailAgent.id); } }}>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    className="flex-col gap-1 py-2.5 h-auto text-error/70 hover:text-error"
+                    onClick={() =>
+                      setConfirmDialog({
+                        title: t("agents.delete_title", { defaultValue: "Delete agent?" }),
+                        message: t("agents.delete_confirm", { name: detailAgent.name }),
+                        tone: "destructive",
+                        onConfirm: () => deleteMutation.mutate(detailAgent.id),
+                      })
+                    }
+                  >
                     <Trash2 className="w-4 h-4" />
                     <span className="text-[9px]">{t("common.delete")}</span>
                   </Button>
@@ -528,77 +692,77 @@ export function AgentsPage() {
       })()}
 
       {/* Create Agent Modal */}
-      {showCreate && (
-        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/30 backdrop-blur-sm" onClick={() => setShowCreate(false)}>
-          <div className="bg-surface rounded-t-2xl sm:rounded-2xl shadow-2xl border border-border-subtle w-full sm:w-[480px] sm:max-w-[90vw] animate-fade-in-scale" onClick={e => e.stopPropagation()}>
-            <div className="flex items-center justify-between px-5 py-3 border-b border-border-subtle">
-              <h3 className="text-sm font-bold">{t("agents.create_agent")}</h3>
-              <button onClick={() => setShowCreate(false)} className="p-1 rounded hover:bg-main"><X className="w-4 h-4" /></button>
+      <Modal isOpen={showCreate} onClose={() => setShowCreate(false)} title={t("agents.create_agent")} size="lg">
+        <div className="p-5 space-y-4">
+          {/* Mode tabs */}
+          <div className="flex gap-2">
+            <button onClick={() => setCreateMode("template")}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${createMode === "template" ? "bg-brand text-white" : "bg-main text-text-dim"}`}>
+              {t("agents.from_template")}
+            </button>
+            <button onClick={() => setCreateMode("toml")}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${createMode === "toml" ? "bg-brand text-white" : "bg-main text-text-dim"}`}>
+              {t("agents.from_toml")}
+            </button>
+          </div>
+
+          {createMode === "template" ? (
+            <div>
+              <label className="text-[10px] font-bold text-text-dim uppercase">{t("agents.template_name")}</label>
+              <select value={templateName} onChange={e => setTemplateName(e.target.value)}
+                className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-brand">
+                <option value="">{t("agents.template_placeholder")}</option>
+                {(templatesQuery.data ?? []).map(tmpl => (
+                  <option key={tmpl.name} value={tmpl.name}>{tmpl.name}</option>
+                ))}
+              </select>
             </div>
-            <div className="p-5 space-y-4">
-              {/* Mode tabs */}
-              <div className="flex gap-2">
-                <button onClick={() => setCreateMode("template")}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${createMode === "template" ? "bg-brand text-white" : "bg-main text-text-dim"}`}>
-                  {t("agents.from_template")}
-                </button>
-                <button onClick={() => setCreateMode("toml")}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${createMode === "toml" ? "bg-brand text-white" : "bg-main text-text-dim"}`}>
-                  {t("agents.from_toml")}
-                </button>
-              </div>
-
-              {createMode === "template" ? (
-                <div>
-                  <label className="text-[10px] font-bold text-text-dim uppercase">{t("agents.template_name")}</label>
-                  <select value={templateName} onChange={e => setTemplateName(e.target.value)}
-                    className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-brand">
-                    <option value="">{t("agents.template_placeholder")}</option>
-                    {(templatesQuery.data ?? []).map(tmpl => (
-                      <option key={tmpl.name} value={tmpl.name}>{tmpl.name}</option>
-                    ))}
-                  </select>
-                </div>
-              ) : (
-                <div>
-                  <label className="text-[10px] font-bold text-text-dim uppercase">{t("agents.manifest_toml")}</label>
-                  <textarea value={manifestToml} onChange={e => setManifestToml(e.target.value)}
-                    placeholder={'[agent]\nname = "my-agent"\n\n[model]\nprovider = "openai"\nmodel = "gpt-4o"\n\n[thinking]\nbudget_tokens = 10000\nstream_thinking = false'}
-                    rows={12}
-                    className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-xs font-mono outline-none focus:border-brand resize-none" />
-                  <p className="text-[9px] text-text-dim/50 mt-1 flex items-center gap-1">
-                    <Brain className="w-3 h-3" />
-                    {t("agents.thinking_toml_hint")}
-                  </p>
-                </div>
-              )}
-
-              {spawnMutation.error && (
-                <p className="text-xs text-error">{(spawnMutation.error as any)?.message || String(spawnMutation.error)}</p>
-              )}
-
-              <div className="flex gap-2 pt-2">
-                <Button variant="primary" className="flex-1"
-                  onClick={() => spawnMutation.mutate(createMode === "template" ? { template: templateName } : { manifest_toml: manifestToml })}
-                  disabled={spawnMutation.isPending || (createMode === "template" ? !templateName.trim() : !manifestToml.trim())}>
-                  {spawnMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Plus className="w-4 h-4 mr-1" />}
-                  {t("agents.create_agent")}
-                </Button>
-                <Button variant="secondary" onClick={() => setShowCreate(false)}>{t("common.cancel")}</Button>
-              </div>
+          ) : (
+            <div>
+              <label className="text-[10px] font-bold text-text-dim uppercase">{t("agents.manifest_toml")}</label>
+              <textarea value={manifestToml} onChange={e => setManifestToml(e.target.value)}
+                placeholder={'[agent]\nname = "my-agent"\n\n[model]\nprovider = "openai"\nmodel = "gpt-4o"\n\n[thinking]\nbudget_tokens = 10000\nstream_thinking = false'}
+                rows={12}
+                className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-xs font-mono outline-none focus:border-brand resize-none" />
+              <p className="text-[9px] text-text-dim/50 mt-1 flex items-center gap-1">
+                <Brain className="w-3 h-3" />
+                {t("agents.thinking_toml_hint")}
+              </p>
             </div>
+          )}
+
+          {spawnMutation.error && (
+            <p className="text-xs text-error">{(spawnMutation.error as any)?.message || String(spawnMutation.error)}</p>
+          )}
+
+          <div className="flex gap-2 pt-2">
+            <Button variant="primary" className="flex-1"
+              onClick={() => spawnMutation.mutate(createMode === "template" ? { template: templateName } : { manifest_toml: manifestToml })}
+              disabled={spawnMutation.isPending || (createMode === "template" ? !templateName.trim() : !manifestToml.trim())}>
+              {spawnMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Plus className="w-4 h-4 mr-1" />}
+              {t("agents.create_agent")}
+            </Button>
+            <Button variant="secondary" onClick={() => setShowCreate(false)}>{t("common.cancel")}</Button>
           </div>
         </div>
-      )}
+      </Modal>
 
       {/* Prompts & Experiments Modal */}
       {showPrompts && detailAgent && (
-        <PromptsExperimentsModal 
-          agentId={detailAgent.id} 
+        <PromptsExperimentsModal
+          agentId={detailAgent.id}
           agentName={t(`agents.builtin.${detailAgent.name}.name`, { defaultValue: detailAgent.name })}
-          onClose={() => setShowPrompts(false)} 
+          onClose={() => setShowPrompts(false)}
         />
       )}
+      <ConfirmDialog
+        isOpen={confirmDialog !== null}
+        title={confirmDialog?.title ?? ""}
+        message={confirmDialog?.message ?? ""}
+        tone={confirmDialog?.tone}
+        onConfirm={() => confirmDialog?.onConfirm()}
+        onClose={() => setConfirmDialog(null)}
+      />
     </div>
   );
 }
@@ -697,7 +861,7 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
             <h3 className="text-lg font-black">{agentName}</h3>
             <p className="text-xs text-text-dim">Prompts & Experiments</p>
           </div>
-          <button onClick={onClose} className="p-2 rounded-xl hover:bg-main"><X className="w-4 h-4" /></button>
+          <button onClick={onClose} className="p-2 rounded-xl hover:bg-main" aria-label={t("common.close", { defaultValue: "Close" })}><X className="w-4 h-4" /></button>
         </div>
         
         <div className="px-6 py-3 border-b border-border-subtle flex gap-2 shrink-0">
@@ -751,8 +915,8 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
               )}
 
               {showCreateVersion && (
-                <div className="fixed inset-0 z-60 flex items-center justify-center bg-black/50" onClick={() => setShowCreateVersion(false)}>
-                  <div className="bg-surface rounded-xl shadow-2xl border border-border-subtle p-6 w-full max-w-lg mx-4" onClick={e => e.stopPropagation()}>
+                <div className="fixed inset-0 z-60 flex items-end sm:items-center justify-center bg-black/50 p-0 sm:p-4" onClick={() => setShowCreateVersion(false)}>
+                  <div className="bg-surface rounded-t-2xl sm:rounded-xl shadow-2xl border border-border-subtle p-6 w-full max-w-lg" onClick={e => e.stopPropagation()}>
                     <h4 className="font-bold mb-4">Create Prompt Version</h4>
                     <div className="space-y-4">
                       <div>
@@ -852,8 +1016,8 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
               )}
 
               {showCreateExperiment && (
-                <div className="fixed inset-0 z-60 flex items-center justify-center bg-black/50" onClick={() => setShowCreateExperiment(false)}>
-                  <div className="bg-surface rounded-xl shadow-2xl border border-border-subtle p-6 w-full max-w-lg mx-4" onClick={e => e.stopPropagation()}>
+                <div className="fixed inset-0 z-60 flex items-end sm:items-center justify-center bg-black/50 p-0 sm:p-4" onClick={() => setShowCreateExperiment(false)}>
+                  <div className="bg-surface rounded-t-2xl sm:rounded-xl shadow-2xl border border-border-subtle p-6 w-full max-w-lg" onClick={e => e.stopPropagation()}>
                     <h4 className="font-bold mb-4">Create Experiment</h4>
                     <div className="space-y-4">
                       <div>

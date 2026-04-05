@@ -98,6 +98,17 @@ pub enum LibreFangError {
     /// Invalid user input.
     #[error("Invalid input: {0}")]
     InvalidInput(String),
+
+    /// The agent loop exited because tools failed in N consecutive iterations.
+    #[error(
+        "Repeated tool failures: {iterations} consecutive iterations with {error_count} errors"
+    )]
+    RepeatedToolFailures {
+        /// How many consecutive iterations had all tools fail.
+        iterations: u32,
+        /// The total count of tool errors in the final iteration.
+        error_count: u32,
+    },
 }
 
 /// Alias for Result with LibreFangError.

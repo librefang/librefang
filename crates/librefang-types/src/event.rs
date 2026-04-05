@@ -84,6 +84,8 @@ pub enum EventPayload {
     System(SystemEvent),
     /// An approval request was created and is waiting for human resolution.
     ApprovalRequested(ApprovalRequestedEvent),
+    /// An approval request was resolved (approved, denied, modified, etc.).
+    ApprovalResolved(ApprovalResolvedEvent),
     /// User-defined payload.
     Custom(Vec<u8>),
 }
@@ -101,6 +103,17 @@ pub struct ApprovalRequestedEvent {
     pub description: String,
     /// Risk classification.
     pub risk_level: String,
+}
+
+/// Payload for `EventPayload::ApprovalResolved`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApprovalResolvedEvent {
+    pub request_id: String,
+    pub agent_id: String,
+    pub tool_name: String,
+    /// The decision: "approved", "denied", "timed_out", "modify_and_retry", "skipped".
+    pub decision: String,
+    pub decided_by: Option<String>,
 }
 
 /// A message between agents or from user to agent.

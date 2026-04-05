@@ -26,6 +26,7 @@ interface UIState {
   collapsedNavGroups: Record<string, boolean>;
   toasts: Toast[];
   skillOutputs: SkillOutput[];
+  hiddenModelKeys: string[];
   toggleTheme: () => void;
   setLanguage: (lang: string) => void;
   setMobileMenuOpen: (open: boolean) => void;
@@ -37,6 +38,9 @@ interface UIState {
   addSkillOutput: (output: Omit<SkillOutput, "id" | "timestamp">) => void;
   dismissSkillOutput: (id: string) => void;
   clearSkillOutputs: () => void;
+  hideModel: (key: string) => void;
+  unhideModel: (key: string) => void;
+  pruneHiddenKeys: (validKeys: Set<string>) => void;
 }
 
 export const useUIStore = create<UIState>()(
@@ -50,6 +54,7 @@ export const useUIStore = create<UIState>()(
       collapsedNavGroups: {},
       toasts: [],
       skillOutputs: [],
+      hiddenModelKeys: [],
       toggleTheme: () =>
         set((state) => ({ theme: state.theme === "light" ? "dark" : "light" })),
       setLanguage: (lang) => {
@@ -80,10 +85,29 @@ export const useUIStore = create<UIState>()(
           skillOutputs: state.skillOutputs.filter((o) => o.id !== id),
         })),
       clearSkillOutputs: () => set({ skillOutputs: [] }),
+      hideModel: (key) =>
+        set((state) => ({
+          hiddenModelKeys: state.hiddenModelKeys.includes(key)
+            ? state.hiddenModelKeys
+            : [...state.hiddenModelKeys, key],
+        })),
+      unhideModel: (key) =>
+        set((state) => ({
+          hiddenModelKeys: state.hiddenModelKeys.filter((k) => k !== key),
+        })),
+      pruneHiddenKeys: (validKeys) =>
+        set((state) => ({
+          hiddenModelKeys: state.hiddenModelKeys.filter((k) => validKeys.has(k)),
+        })),
     }),
     {
       name: "librefang-ui-storage",
-      partialize: (state) => ({ theme: state.theme, language: state.language, navLayout: state.navLayout }),
+      partialize: (state) => ({
+        theme: state.theme,
+        language: state.language,
+        navLayout: state.navLayout,
+        hiddenModelKeys: state.hiddenModelKeys,
+      }),
     }
   )
 );

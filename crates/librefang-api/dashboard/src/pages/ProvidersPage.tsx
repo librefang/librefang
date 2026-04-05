@@ -12,7 +12,9 @@ import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { Input } from "../components/ui/Input";
+import { Modal } from "../components/ui/Modal";
 import { useUIStore } from "../lib/store";
+import { useCreateShortcut } from "../lib/useCreateShortcut";
 import {
   Server, Zap, Clock, Key, Globe, CheckCircle2, XCircle, Loader2, AlertCircle, Search,
   SortAsc, SortDesc, CheckSquare, Square, ChevronRight, X, Grid3X3, List, Filter,
@@ -385,7 +387,7 @@ function DetailsModal({ provider, onClose, onTest, pendingId, t }: {
                 <p className="text-xs font-black uppercase tracking-widest text-text-dim/60">{provider.id}</p>
               </div>
             </div>
-            <button onClick={onClose} className="p-2 hover:bg-main/30 rounded-lg transition-colors">
+            <button onClick={onClose} className="p-2 hover:bg-main/30 rounded-lg transition-colors" aria-label={t("common.close", { defaultValue: "Close" })}>
               <X className="w-5 h-5 text-text-dim" />
             </button>
           </div>
@@ -530,6 +532,7 @@ export function ProvidersPage() {
   const [detailsProvider, setDetailsProvider] = useState<Provider | null>(null);
   const [configProvider, setConfigProvider] = useState<Provider | null>(null);
   const [showCreateForm, setShowCreateForm] = useState(false);
+  useCreateShortcut(() => setShowCreateForm(true));
   const [keyInput, setKeyInput] = useState("");
   const [urlInput, setUrlInput] = useState("");
   const [keySaving, setKeySaving] = useState(false);
@@ -641,7 +644,7 @@ export function ProvidersPage() {
     try {
       const result = await testMutation.mutateAsync(id);
       if (result.status === "error") {
-        addToast(result.error_message || result.error || t("common.error"), "error");
+        addToast(String(result.error_message || result.error || t("common.error")), "error");
       } else {
         addToast(t("common.success"), "success");
       }
@@ -766,8 +769,9 @@ export function ProvidersPage() {
         helpText={t("providers.help")}
         actions={
           <div className="flex items-center gap-2">
-            <Button variant="primary" size="sm" onClick={() => setShowCreateForm(true)} leftIcon={<Plus className="w-3.5 h-3.5" />}>
-              {t("providers.add")}
+            <Button variant="primary" size="sm" onClick={() => setShowCreateForm(true)} leftIcon={<Plus className="w-3.5 h-3.5" />} title={t("providers.add") + " (n)"}>
+              <span>{t("providers.add")}</span>
+              <kbd className="hidden sm:inline-flex h-4 min-w-[16px] items-center justify-center rounded border border-white/30 bg-white/10 px-1 text-[8px] font-mono font-semibold ml-1.5">n</kbd>
             </Button>
             <div className="hidden rounded-full border border-border-subtle bg-surface px-3 py-1.5 text-[10px] font-bold uppercase text-text-dim sm:block">
               {t("providers.configured_count", { configured: configuredCount, total: providers.length })}
@@ -785,7 +789,7 @@ export function ProvidersPage() {
             placeholder={t("common.search")}
             leftIcon={<Search className="w-4 h-4" />}
             rightIcon={search && (
-              <button onClick={() => setSearch("")} className="hover:text-text-main">
+              <button onClick={() => setSearch("")} className="hover:text-text-main" aria-label={t("common.clear_search", { defaultValue: "Clear search" })}>
                 <X className="w-3 h-3" />
               </button>
             )}
@@ -945,17 +949,9 @@ export function ProvidersPage() {
       )}
 
       {/* API Key Config Modal */}
-      {configProvider && (
-        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/30 backdrop-blur-sm" onClick={() => setConfigProvider(null)}>
-          <div className="bg-surface rounded-2xl shadow-2xl border border-border-subtle w-[440px] max-w-[90vw] animate-fade-in-scale" onClick={e => e.stopPropagation()}>
-            <div className="flex items-center justify-between px-5 py-3 border-b border-border-subtle">
-              <div className="flex items-center gap-2">
-                <Key className="w-4 h-4 text-brand" />
-                <h3 className="text-sm font-bold">{t("providers.configure_provider")}</h3>
-              </div>
-              <button onClick={() => setConfigProvider(null)} className="p-1 rounded hover:bg-main"><X className="w-4 h-4" /></button>
-            </div>
-            <div className="p-5 space-y-4">
+      <Modal isOpen={!!configProvider} onClose={() => setConfigProvider(null)} title={t("providers.configure_provider")} size="md">
+        {configProvider && (
+          <div className="p-5 space-y-4">
               <div className="flex items-center gap-3 p-3 rounded-xl bg-main">
                 <div className="w-10 h-10 rounded-xl bg-brand/10 flex items-center justify-center">
                   {providerIcons[configProvider.id] || <Server className="w-5 h-5 text-brand" />}
@@ -1013,10 +1009,9 @@ export function ProvidersPage() {
                   </Button>
                 )}
               </div>
-            </div>
           </div>
-        </div>
-      )}
+        )}
+      </Modal>
 
       {/* Delete Confirmation Modal */}
       {deleteConfirmProvider && (
@@ -1027,7 +1022,7 @@ export function ProvidersPage() {
                 <Trash2 className="w-4 h-4 text-error" />
                 <h3 className="text-sm font-bold">{t("providers.delete_confirm_title")}</h3>
               </div>
-              <button onClick={() => setDeleteConfirmProvider(null)} className="p-1 rounded hover:bg-main"><X className="w-4 h-4" /></button>
+              <button onClick={() => setDeleteConfirmProvider(null)} className="p-1 rounded hover:bg-main" aria-label={t("common.close", { defaultValue: "Close" })}><X className="w-4 h-4" /></button>
             </div>
             <div className="p-5 space-y-4">
               <div className="flex items-center gap-3 p-3 rounded-xl bg-main">

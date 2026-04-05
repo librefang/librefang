@@ -110,7 +110,16 @@ pub trait ContextEngine: Send + Sync {
     /// Use this to index the message, recall relevant memories, or
     /// update internal state. Returns recalled memories that the
     /// agent loop injects into the system prompt.
-    async fn ingest(&self, agent_id: AgentId, user_message: &str) -> LibreFangResult<IngestResult>;
+    ///
+    /// `peer_id` is the sender's platform user ID when the message arrived
+    /// from a channel (Telegram, Discord, …) — implementors MUST scope
+    /// memory recall to this peer to prevent cross-user context leaks.
+    async fn ingest(
+        &self,
+        agent_id: AgentId,
+        user_message: &str,
+        peer_id: Option<&str>,
+    ) -> LibreFangResult<IngestResult>;
 
     /// Called before each LLM call to assemble the context window.
     ///
@@ -243,7 +252,12 @@ impl ContextEngine for DefaultContextEngine {
         Ok(())
     }
 
-    async fn ingest(&self, agent_id: AgentId, user_message: &str) -> LibreFangResult<IngestResult> {
+    async fn ingest(
+        &self,
+        agent_id: AgentId,
+        user_message: &str,
+        peer_id: Option<&str>,
+    ) -> LibreFangResult<IngestResult> {
         // In stable_prefix_mode, skip memory recall to keep system prompt stable for caching.
         if self.config.stable_prefix_mode {
             return Ok(IngestResult {
@@ -253,6 +267,7 @@ impl ContextEngine for DefaultContextEngine {
 
         let filter = Some(MemoryFilter {
             agent_id: Some(agent_id),
+            peer_id: peer_id.map(String::from),
             ..Default::default()
         });
         let limit = self.config.max_recall_results;
@@ -482,7 +497,12 @@ impl ContextEngine for ScriptableContextEngine {
         self.inner.bootstrap(config).await
     }
 
-    async fn ingest(&self, agent_id: AgentId, user_message: &str) -> LibreFangResult<IngestResult> {
+    async fn ingest(
+        &self,
+        agent_id: AgentId,
+        user_message: &str,
+        peer_id: Option<&str>,
+    ) -> LibreFangResult<IngestResult> {
         // In stable_prefix_mode, skip all recall (including hooks) to keep prompt stable
         if self.inner.config.stable_prefix_mode {
             return Ok(IngestResult {
@@ -492,17 +512,18 @@ impl ContextEngine for ScriptableContextEngine {
 
         // If no ingest script, delegate entirely to default engine
         let Some(ref script) = self.ingest_script else {
-            return self.inner.ingest(agent_id, user_message).await;
+            return self.inner.ingest(agent_id, user_message, peer_id).await;
         };
 
         // Run default recall first (for embedding-based memories)
-        let default_result = self.inner.ingest(agent_id, user_message).await?;
+        let default_result = self.inner.ingest(agent_id, user_message, peer_id).await?;
 
         // Run the Python hook for additional/custom recall
         let input = serde_json::json!({
             "type": "ingest",
             "agent_id": agent_id.0.to_string(),
             "message": user_message,
+            "peer_id": peer_id,
         });
 
         match Self::run_hook(script, input).await {
@@ -827,7 +848,7 @@ mod tests {
             ..Default::default()
         };
         let engine = DefaultContextEngine::new(config, make_memory(), None);
-        let result = engine.ingest(AgentId::new(), "hello").await.unwrap();
+        let result = engine.ingest(AgentId::new(), "hello", None).await.unwrap();
         assert!(result.recalled_memories.is_empty());
     }
 
@@ -860,7 +881,7 @@ mod tests {
 
         let config = ContextEngineConfig::default();
         let engine = DefaultContextEngine::new(config, memory, None);
-        let result = engine.ingest(agent_id, "Rust").await.unwrap();
+        let result = engine.ingest(agent_id, "Rust", None).await.unwrap();
         assert_eq!(result.recalled_memories.len(), 1);
         assert!(result.recalled_memories[0].content.contains("Rust"));
     }

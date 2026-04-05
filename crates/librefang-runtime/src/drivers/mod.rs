@@ -2,7 +2,8 @@
 //!
 //! Contains drivers for Anthropic Claude, Google Gemini, OpenAI-compatible APIs, and more.
 //! Supports: Anthropic, Gemini, OpenAI, Groq, OpenRouter, DeepSeek, DeepInfra,
-//! Together, Mistral, Fireworks, Ollama, vLLM, Chutes.ai, and any OpenAI-compatible endpoint.
+//! Together, Mistral, Fireworks, Ollama, vLLM, Chutes.ai, Alibaba Coding Plan, and any
+//! OpenAI-compatible endpoint.
 
 pub mod aider;
 pub mod anthropic;
@@ -556,6 +557,16 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
         hidden: true,
     },
     ProviderEntry {
+        name: "alibaba-coding-plan",
+        aliases: &[],
+        base_url: "https://coding-intl.dashscope.aliyuncs.com/v1",
+        api_key_env: "ALIBABA_CODING_PLAN_API_KEY",
+        key_required: true,
+        api_format: ApiFormat::OpenAI,
+        alt_api_key_env: None,
+        hidden: false,
+    },
+    ProviderEntry {
         name: "chutes",
         aliases: &[],
         base_url: "https://llm.chutes.ai/v1",
@@ -1013,6 +1024,7 @@ mod tests {
         assert!(providers.contains(&"kimi_coding"));
         assert!(providers.contains(&"qianfan"));
         assert!(providers.contains(&"volcengine"));
+        assert!(providers.contains(&"alibaba-coding-plan"));
         assert!(providers.contains(&"deepinfra"));
         assert!(providers.contains(&"chutes"));
         assert!(providers.contains(&"claude-code"));
@@ -1023,7 +1035,7 @@ mod tests {
         assert!(providers.contains(&"azure-openai"));
         assert!(providers.contains(&"vertex-ai"));
         assert!(providers.contains(&"nvidia-nim"));
-        assert_eq!(providers.len(), 42);
+        assert_eq!(providers.len(), 43);
     }
 
     #[test]
@@ -1039,6 +1051,14 @@ mod tests {
         let d = provider_defaults("xai").unwrap();
         assert_eq!(d.base_url, "https://api.x.ai/v1");
         assert_eq!(d.api_key_env, "XAI_API_KEY");
+        assert!(d.key_required);
+    }
+
+    #[test]
+    fn test_provider_defaults_alibaba_coding_plan() {
+        let d = provider_defaults("alibaba-coding-plan").unwrap();
+        assert_eq!(d.base_url, "https://coding-intl.dashscope.aliyuncs.com/v1");
+        assert_eq!(d.api_key_env, "ALIBABA_CODING_PLAN_API_KEY");
         assert!(d.key_required);
     }
 

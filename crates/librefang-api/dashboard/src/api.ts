@@ -74,16 +74,29 @@ export interface MediaVideoSubmitResult {
   provider: string;
 }
 
+export interface MediaVideoResult {
+  file_url: string;
+  width?: number;
+  height?: number;
+  duration_secs?: number;
+  provider: string;
+  model: string;
+}
+
 export interface MediaVideoStatus {
-  state: string;
+  status: string;
+  task_id?: string;
+  result?: MediaVideoResult;
   error?: string;
 }
 
 export interface MediaMusicResult {
+  url: string;
   format: string;
   provider: string;
   model: string;
   duration_ms?: number;
+  sample_rate?: number;
 }
 
 export interface ChannelField {
@@ -181,6 +194,7 @@ export interface AgentItem {
   ready?: boolean;
   profile?: string;
   identity?: AgentIdentity;
+  is_hand?: boolean;
 }
 
 export interface PaginatedResponse<T> {
@@ -274,10 +288,9 @@ export interface ScheduleItem {
   enabled?: boolean;
   created_at?: string;
   last_run?: string | null;
-  run_count?: number;
+  next_run?: string | null;
   agent_id?: string;
-  agent?: string;
-  schedule_input?: string;
+  workflow_id?: string;
 }
 
 export interface TriggerItem {
@@ -835,6 +848,25 @@ export async function listModels(params?: { provider?: string; tier?: string; av
   return get<{ models: ModelItem[]; total: number; available: number }>(`/api/models${qs ? `?${qs}` : ""}`);
 }
 
+export async function addCustomModel(model: {
+  id: string;
+  provider: string;
+  display_name?: string;
+  context_window?: number;
+  max_output_tokens?: number;
+  input_cost_per_m?: number;
+  output_cost_per_m?: number;
+  supports_tools?: boolean;
+  supports_vision?: boolean;
+  supports_streaming?: boolean;
+}): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>("/api/models/custom", model);
+}
+
+export async function removeCustomModel(modelId: string): Promise<ApiActionResponse> {
+  return del<ApiActionResponse>(`/api/models/custom/${encodeURIComponent(modelId)}`);
+}
+
 export async function setProviderKey(providerId: string, key: string): Promise<ApiActionResponse> {
   return post<ApiActionResponse>(`/api/providers/${encodeURIComponent(providerId)}/key`, { key });
 }
@@ -868,6 +900,7 @@ export interface SpeechResult {
   provider: string;
   model: string;
   duration_ms?: number;
+  sample_rate?: number;
 }
 
 export async function synthesizeSpeech(req: { text: string; provider?: string; model?: string; voice?: string; format?: string; language?: string; speed?: number }): Promise<SpeechResult> {
@@ -878,18 +911,12 @@ export async function submitVideo(req: { prompt: string; provider?: string; mode
   return post<MediaVideoSubmitResult>("/api/media/video", req);
 }
 
-export async function pollVideo(taskId: string): Promise<MediaVideoStatus> {
-  return get<MediaVideoStatus>(`/api/media/video/${encodeURIComponent(taskId)}`);
+export async function pollVideo(taskId: string, provider: string): Promise<MediaVideoStatus> {
+  return get<MediaVideoStatus>(`/api/media/video/${encodeURIComponent(taskId)}?provider=${encodeURIComponent(provider)}`);
 }
 
-export async function generateMusic(req: { prompt?: string; lyrics?: string; provider?: string; model?: string; instrumental?: boolean }): Promise<Blob> {
-  const resp = await fetch("/api/media/music", {
-    method: "POST",
-    headers: buildHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify(req),
-  });
-  if (!resp.ok) throw await parseError(resp);
-  return resp.blob();
+export async function generateMusic(req: { prompt?: string; lyrics?: string; provider?: string; model?: string; instrumental?: boolean }): Promise<MediaMusicResult> {
+  return post<MediaMusicResult>("/api/media/music", req);
 }
 
 export async function listChannels(): Promise<ChannelItem[]> {
@@ -1271,8 +1298,9 @@ export async function deleteTrigger(triggerId: string): Promise<ApiActionRespons
   return del<ApiActionResponse>(`/api/triggers/${encodeURIComponent(triggerId)}`);
 }
 
-export async function listCronJobs(): Promise<CronJobItem[]> {
-  const data = await get<{ jobs?: CronJobItem[]; total?: number }>("/api/cron/jobs");
+export async function listCronJobs(agentId?: string): Promise<CronJobItem[]> {
+  const url = agentId ? `/api/cron/jobs?agent_id=${encodeURIComponent(agentId)}` : "/api/cron/jobs";
+  const data = await get<{ jobs?: CronJobItem[]; total?: number }>(url);
   return data.jobs ?? [];
 }
 
@@ -1477,6 +1505,54 @@ export async function resolveApproval(id: string, approved: boolean): Promise<vo
   } else {
     await rejectApproval(id);
   }
+}
+
+export async function fetchApprovalCount(): Promise<number> {
+  const data = await get<{ pending: number }>("/api/approvals/count");
+  return data.pending ?? 0;
+}
+
+export async function batchResolveApprovals(
+  ids: string[],
+  decision: "approve" | "reject"
+): Promise<{ results: Array<{ id: string; status: string; message?: string }> }> {
+  return post("/api/approvals/batch", { ids, decision });
+}
+
+export async function modifyAndRetryApproval(
+  id: string,
+  feedback: string
+): Promise<{ id: string; status: string; decided_at: string }> {
+  return post(`/api/approvals/${encodeURIComponent(id)}/modify`, { feedback });
+}
+
+export interface ApprovalAuditEntry {
+  id: string;
+  request_id: string;
+  agent_id: string;
+  tool_name: string;
+  description: string;
+  action_summary: string;
+  risk_level: string;
+  decision: string;
+  decided_by?: string;
+  decided_at: string;
+  requested_at: string;
+  feedback?: string;
+}
+
+export async function queryApprovalAudit(params: {
+  limit?: number;
+  offset?: number;
+  agent_id?: string;
+  tool_name?: string;
+}): Promise<{ entries: ApprovalAuditEntry[]; total: number }> {
+  const query = new URLSearchParams();
+  if (params.limit != null) query.set("limit", String(params.limit));
+  if (params.offset != null) query.set("offset", String(params.offset));
+  if (params.agent_id) query.set("agent_id", params.agent_id);
+  if (params.tool_name) query.set("tool_name", params.tool_name);
+  return get(`/api/approvals/audit?${query.toString()}`);
 }
 
 export async function switchAgentSession(
@@ -1751,10 +1827,16 @@ export interface HandMessageResponse {
   cost_usd?: number;
 }
 
+export type SessionBlock =
+  | { type: "text"; text: string }
+  | { type: "tool_use"; id: string; name: string; input: unknown }
+  | { type: "tool_result"; tool_use_id: string; name: string; content: string; is_error: boolean };
+
 export interface HandSessionMessage {
   role: string;
   content: string;
   timestamp?: string;
+  blocks?: SessionBlock[];
 }
 
 export async function sendHandMessage(instanceId: string, message: string): Promise<HandMessageResponse> {
@@ -2085,7 +2167,7 @@ export interface PromptExperiment {
 }
 
 export interface ExperimentVariant {
-  id: string;
+  id?: string;
   name: string;
   prompt_version_id: string;
   description?: string;
@@ -2107,7 +2189,7 @@ export async function listPromptVersions(agentId: string): Promise<PromptVersion
   return get<PromptVersion[]>(`/api/agents/${encodeURIComponent(agentId)}/prompts/versions`);
 }
 
-export async function createPromptVersion(agentId: string, version: Omit<PromptVersion, "id" | "agent_id">): Promise<PromptVersion> {
+export async function createPromptVersion(agentId: string, version: Omit<PromptVersion, "id" | "agent_id" | "created_at" | "is_active">): Promise<PromptVersion> {
   return post<PromptVersion>(`/api/agents/${encodeURIComponent(agentId)}/prompts/versions`, version);
 }
 
@@ -2123,7 +2205,7 @@ export async function listExperiments(agentId: string): Promise<PromptExperiment
   return get<PromptExperiment[]>(`/api/agents/${encodeURIComponent(agentId)}/prompts/experiments`);
 }
 
-export async function createExperiment(agentId: string, experiment: Omit<PromptExperiment, "id" | "agent_id">): Promise<PromptExperiment> {
+export async function createExperiment(agentId: string, experiment: Omit<PromptExperiment, "id" | "agent_id" | "created_at">): Promise<PromptExperiment> {
   return post<PromptExperiment>(`/api/agents/${encodeURIComponent(agentId)}/prompts/experiments`, experiment);
 }
 

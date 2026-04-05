@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 16;
+const SCHEMA_VERSION: u32 = 17;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -73,6 +73,10 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
 
     if current_version < 16 {
         migrate_v16(conn)?;
+    }
+
+    if current_version < 17 {
+        migrate_v17(conn)?;
     }
 
     set_schema_version(conn, SCHEMA_VERSION)?;
@@ -569,6 +573,30 @@ fn migrate_v16(conn: &Connection) -> Result<(), rusqlite::Error> {
         [],
     )?;
     Ok(())
+}
+
+/// V17: Persistent approval audit log.
+fn migrate_v17(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS approval_audit (
+            id TEXT PRIMARY KEY,
+            request_id TEXT NOT NULL,
+            agent_id TEXT NOT NULL,
+            tool_name TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            action_summary TEXT NOT NULL DEFAULT '',
+            risk_level TEXT NOT NULL DEFAULT 'low',
+            decision TEXT NOT NULL,
+            decided_by TEXT,
+            decided_at TEXT NOT NULL,
+            requested_at TEXT NOT NULL,
+            feedback TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_approval_audit_agent ON approval_audit(agent_id);
+        CREATE INDEX IF NOT EXISTS idx_approval_audit_decided ON approval_audit(decided_at);
+        ",
+    )
 }
 
 #[cfg(test)]

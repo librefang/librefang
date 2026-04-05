@@ -3,10 +3,14 @@
 use chrono::Utc;
 use dashmap::DashMap;
 use librefang_types::approval::{
-    ApprovalDecision, ApprovalPolicy, ApprovalRequest, ApprovalResponse, RiskLevel,
+    ApprovalAuditEntry, ApprovalDecision, ApprovalPolicy, ApprovalRequest, ApprovalResponse,
+    RiskLevel, TimeoutFallback,
 };
 use librefang_types::capability::glob_matches;
+use rusqlite::Connection;
 use std::collections::VecDeque;
+use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -14,12 +18,18 @@ use uuid::Uuid;
 const MAX_PENDING_PER_AGENT: usize = 5;
 /// Max recent approval records to retain for history and UI visibility.
 const MAX_RECENT_APPROVALS: usize = 100;
+/// Max escalation rounds before falling back to TimedOut.
+const MAX_ESCALATIONS: u8 = 3;
 
 /// Manages approval requests with oneshot channels for blocking resolution.
 pub struct ApprovalManager {
     pending: DashMap<Uuid, PendingRequest>,
+    /// Requests that timed out but need escalation (re-notification + re-wait).
+    /// Stored separately to avoid dead oneshot channels in the pending map.
+    escalated: DashMap<Uuid, ApprovalRequest>,
     recent: std::sync::Mutex<VecDeque<ApprovalRecord>>,
     policy: std::sync::RwLock<ApprovalPolicy>,
+    audit_db: Option<Arc<StdMutex<Connection>>>,
 }
 
 struct PendingRequest {
@@ -39,8 +49,21 @@ impl ApprovalManager {
     pub fn new(policy: ApprovalPolicy) -> Self {
         Self {
             pending: DashMap::new(),
+            escalated: DashMap::new(),
             recent: std::sync::Mutex::new(VecDeque::new()),
             policy: std::sync::RwLock::new(policy),
+            audit_db: None,
+        }
+    }
+
+    /// Create an approval manager with persistent audit logging.
+    pub fn new_with_db(policy: ApprovalPolicy, conn: Arc<StdMutex<Connection>>) -> Self {
+        Self {
+            pending: DashMap::new(),
+            escalated: DashMap::new(),
+            recent: std::sync::Mutex::new(VecDeque::new()),
+            policy: std::sync::RwLock::new(policy),
+            audit_db: Some(conn),
         }
     }
 
@@ -133,7 +156,11 @@ impl ApprovalManager {
             .any(|pattern| glob_matches(pattern, tool_name))
     }
 
-    /// Submit an approval request. Returns a future that resolves when approved/denied/timed out.
+    /// Submit an approval request. Blocks until approved, denied, or timed out.
+    ///
+    /// When `timeout_fallback` is `Escalate` and `escalation_count < MAX_ESCALATIONS`,
+    /// a timeout re-inserts the request with bumped `escalation_count` so the caller
+    /// can re-notify and re-call this method.
     pub async fn request_approval(&self, req: ApprovalRequest) -> ApprovalDecision {
         // Check per-agent pending limit
         let agent_pending = self
@@ -146,9 +173,22 @@ impl ApprovalManager {
             return ApprovalDecision::Denied;
         }
 
-        let timeout = std::time::Duration::from_secs(req.timeout_secs);
         let id = req.id;
+        let escalation = req.escalation_count;
         let req_for_timeout = req.clone();
+
+        // Compute timeout: base + extra per escalation for Escalate fallback
+        let base_timeout = std::time::Duration::from_secs(req.timeout_secs);
+        let extra = {
+            let policy = self.policy.read().unwrap_or_else(|e| e.into_inner());
+            match &policy.timeout_fallback {
+                TimeoutFallback::Escalate { extra_timeout_secs } => {
+                    std::time::Duration::from_secs(*extra_timeout_secs) * escalation as u32
+                }
+                _ => std::time::Duration::ZERO,
+            }
+        };
+        let timeout = base_timeout + extra;
 
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.pending.insert(
@@ -159,7 +199,7 @@ impl ApprovalManager {
             },
         );
 
-        info!(request_id = %id, "Approval request submitted, waiting for resolution");
+        info!(request_id = %id, escalation, "Approval request submitted, waiting for resolution");
 
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(decision)) => {
@@ -167,16 +207,60 @@ impl ApprovalManager {
                 decision
             }
             _ => {
-                let request = self
-                    .pending
-                    .remove(&id)
-                    .map(|(_, pending)| pending.request)
-                    .unwrap_or(req_for_timeout);
-                self.push_recent(request, ApprovalDecision::TimedOut, None, Utc::now());
-                warn!(request_id = %id, "Approval request timed out");
-                ApprovalDecision::TimedOut
+                let policy = self.policy.read().unwrap_or_else(|e| e.into_inner());
+                let fallback = policy.timeout_fallback.clone();
+                drop(policy);
+
+                match fallback {
+                    TimeoutFallback::Escalate { .. } if escalation < MAX_ESCALATIONS => {
+                        // Remove from pending and store in escalated map for the caller
+                        // to pick up atomically. No dead oneshot channel.
+                        let mut escalated_req = self
+                            .pending
+                            .remove(&id)
+                            .map(|(_, p)| p.request)
+                            .unwrap_or(req_for_timeout);
+                        escalated_req.escalation_count += 1;
+                        warn!(
+                            request_id = %id,
+                            escalation = escalated_req.escalation_count,
+                            "Approval timed out — escalating"
+                        );
+                        self.escalated.insert(id, escalated_req);
+                        ApprovalDecision::TimedOut
+                    }
+                    TimeoutFallback::Skip => {
+                        let request = self
+                            .pending
+                            .remove(&id)
+                            .map(|(_, p)| p.request)
+                            .unwrap_or(req_for_timeout);
+                        self.push_recent(request, ApprovalDecision::Skipped, None, Utc::now());
+                        warn!(request_id = %id, "Approval timed out — skipped");
+                        ApprovalDecision::Skipped
+                    }
+                    _ => {
+                        let request = self
+                            .pending
+                            .remove(&id)
+                            .map(|(_, p)| p.request)
+                            .unwrap_or(req_for_timeout);
+                        self.push_recent(request, ApprovalDecision::TimedOut, None, Utc::now());
+                        warn!(request_id = %id, "Approval timed out — denied");
+                        ApprovalDecision::TimedOut
+                    }
+                }
             }
         }
+    }
+
+    /// Atomically take an escalated request (if any) for re-notification and re-wait.
+    /// Returns `Some((escalation_count, request))` if the request was escalated,
+    /// `None` if it was resolved by a human or not escalated.
+    pub fn take_escalated(&self, request_id: Uuid) -> Option<(u8, ApprovalRequest)> {
+        self.escalated
+            .remove(&request_id)
+            .map(|(_, req)| (req.escalation_count, req))
     }
 
     /// Resolve a pending request (called by API/UI).
@@ -190,23 +274,50 @@ impl ApprovalManager {
             Some((_, pending)) => {
                 let response = ApprovalResponse {
                     request_id,
-                    decision,
+                    decision: decision.clone(),
                     decided_at: Utc::now(),
                     decided_by,
                 };
                 self.push_recent(
                     pending.request.clone(),
-                    decision,
+                    response.decision.clone(),
                     response.decided_by.clone(),
                     response.decided_at,
                 );
                 // Send decision to waiting agent (ignore error if receiver dropped)
+                info!(request_id = %request_id, decision = ?response.decision, "Approval request resolved");
                 let _ = pending.sender.send(decision);
-                info!(request_id = %request_id, ?decision, "Approval request resolved");
                 Ok(response)
             }
-            None => Err(format!("No pending approval request with id {request_id}")),
+            None => {
+                // Check recent records for who already handled this
+                let recent = self.recent.lock().unwrap_or_else(|e| e.into_inner());
+                let handler_info = recent.iter().find(|r| r.request.id == request_id).map(|r| {
+                    let who = r.decided_by.as_deref().unwrap_or("unknown");
+                    let decision = r.decision.as_str();
+                    format!("Already {decision} by {who}")
+                });
+                drop(recent);
+                Err(handler_info.unwrap_or_else(|| {
+                    format!("Approval request {request_id} not found or expired")
+                }))
+            }
         }
+    }
+
+    /// Resolve multiple pending requests in batch.
+    pub fn resolve_batch(
+        &self,
+        ids: Vec<Uuid>,
+        decision: ApprovalDecision,
+        decided_by: Option<String>,
+    ) -> Vec<(Uuid, Result<ApprovalResponse, String>)> {
+        ids.into_iter()
+            .map(|id| {
+                let result = self.resolve(id, decision.clone(), decided_by.clone());
+                (id, result)
+            })
+            .collect()
     }
 
     /// List all pending requests (for API/dashboard display).
@@ -233,6 +344,94 @@ impl ApprovalManager {
         self.pending.len()
     }
 
+    /// Query the persistent audit log with pagination and optional filters.
+    pub fn query_audit(
+        &self,
+        limit: usize,
+        offset: usize,
+        agent_id: Option<&str>,
+        tool_name: Option<&str>,
+    ) -> Vec<ApprovalAuditEntry> {
+        let Some(db) = &self.audit_db else {
+            return Vec::new();
+        };
+        let Ok(conn) = db.lock() else {
+            return Vec::new();
+        };
+
+        let mut sql = String::from(
+            "SELECT id, request_id, agent_id, tool_name, description, action_summary, risk_level, decision, decided_by, decided_at, requested_at, feedback FROM approval_audit WHERE 1=1",
+        );
+        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+        if let Some(aid) = agent_id {
+            sql.push_str(" AND agent_id = ?");
+            params.push(Box::new(aid.to_string()));
+        }
+        if let Some(tn) = tool_name {
+            sql.push_str(" AND tool_name = ?");
+            params.push(Box::new(tn.to_string()));
+        }
+        sql.push_str(" ORDER BY decided_at DESC LIMIT ? OFFSET ?");
+        params.push(Box::new(limit as i64));
+        params.push(Box::new(offset as i64));
+
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params.iter().map(|p| p.as_ref()).collect();
+
+        let Ok(mut stmt) = conn.prepare(&sql) else {
+            return Vec::new();
+        };
+        let rows = stmt.query_map(param_refs.as_slice(), |row| {
+            Ok(ApprovalAuditEntry {
+                id: row.get(0)?,
+                request_id: row.get(1)?,
+                agent_id: row.get(2)?,
+                tool_name: row.get(3)?,
+                description: row.get(4)?,
+                action_summary: row.get(5)?,
+                risk_level: row.get(6)?,
+                decision: row.get(7)?,
+                decided_by: row.get(8)?,
+                decided_at: row.get(9)?,
+                requested_at: row.get(10)?,
+                feedback: row.get(11)?,
+            })
+        });
+        match rows {
+            Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// Count total audit entries (with optional filters).
+    pub fn audit_count(&self, agent_id: Option<&str>, tool_name: Option<&str>) -> usize {
+        let Some(db) = &self.audit_db else {
+            return 0;
+        };
+        let Ok(conn) = db.lock() else {
+            return 0;
+        };
+
+        let mut sql = String::from("SELECT COUNT(*) FROM approval_audit WHERE 1=1");
+        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+        if let Some(aid) = agent_id {
+            sql.push_str(" AND agent_id = ?");
+            params.push(Box::new(aid.to_string()));
+        }
+        if let Some(tn) = tool_name {
+            sql.push_str(" AND tool_name = ?");
+            params.push(Box::new(tn.to_string()));
+        }
+
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params.iter().map(|p| p.as_ref()).collect();
+
+        conn.query_row(&sql, param_refs.as_slice(), |row| row.get::<_, i64>(0))
+            .unwrap_or(0) as usize
+    }
+
     /// Update the approval policy (for hot-reload).
     pub fn update_policy(&self, policy: ApprovalPolicy) {
         *self.policy.write().unwrap_or_else(|e| e.into_inner()) = policy;
@@ -256,6 +455,32 @@ impl ApprovalManager {
         }
     }
 
+    /// Write an audit entry to the persistent database.
+    fn audit_log_write(&self, entry: &ApprovalAuditEntry) {
+        let Some(db) = &self.audit_db else { return };
+        let Ok(conn) = db.lock() else { return };
+        let result = conn.execute(
+            "INSERT OR IGNORE INTO approval_audit (id, request_id, agent_id, tool_name, description, action_summary, risk_level, decision, decided_by, decided_at, requested_at, feedback) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            rusqlite::params![
+                entry.id,
+                entry.request_id,
+                entry.agent_id,
+                entry.tool_name,
+                entry.description,
+                entry.action_summary,
+                entry.risk_level,
+                entry.decision,
+                entry.decided_by,
+                entry.decided_at,
+                entry.requested_at,
+                entry.feedback,
+            ],
+        );
+        if let Err(e) = result {
+            warn!("Failed to write approval audit entry: {e}");
+        }
+    }
+
     fn push_recent(
         &self,
         request: ApprovalRequest,
@@ -263,6 +488,29 @@ impl ApprovalManager {
         decided_by: Option<String>,
         decided_at: chrono::DateTime<Utc>,
     ) {
+        let feedback = match &decision {
+            ApprovalDecision::ModifyAndRetry { feedback } => Some(feedback.clone()),
+            _ => None,
+        };
+        let entry = ApprovalAuditEntry {
+            id: Uuid::new_v4().to_string(),
+            request_id: request.id.to_string(),
+            agent_id: request.agent_id.clone(),
+            tool_name: request.tool_name.clone(),
+            description: request.description.clone(),
+            action_summary: request.action_summary.clone(),
+            risk_level: serde_json::to_string(&request.risk_level)
+                .unwrap_or_default()
+                .trim_matches('"')
+                .to_string(),
+            decision: decision.as_str().to_string(),
+            decided_by: decided_by.clone(),
+            decided_at: decided_at.to_rfc3339(),
+            requested_at: request.requested_at.to_rfc3339(),
+            feedback,
+        };
+        self.audit_log_write(&entry);
+
         let mut recent = self.recent.lock().unwrap_or_else(|e| e.into_inner());
         recent.push_front(ApprovalRecord {
             request,
@@ -302,6 +550,8 @@ mod tests {
             timeout_secs,
             sender_id: None,
             channel: None,
+            route_to: Vec::new(),
+            escalation_count: 0,
         }
     }
 
@@ -321,10 +571,7 @@ mod tests {
         let policy = ApprovalPolicy {
             require_approval: vec!["file_write".to_string(), "file_delete".to_string()],
             timeout_secs: 30,
-            auto_approve_autonomous: false,
-            auto_approve: false,
-            trusted_senders: Vec::new(),
-            channel_rules: Vec::new(),
+            ..Default::default()
         };
         let mgr = ApprovalManager::new(policy);
         assert!(mgr.requires_approval("file_write"));
@@ -379,7 +626,7 @@ mod tests {
         let mgr = default_manager();
         let result = mgr.resolve(Uuid::new_v4(), ApprovalDecision::Approved, None);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("No pending approval request"));
+        assert!(result.unwrap_err().contains("not found or expired"));
     }
 
     // -----------------------------------------------------------------------
@@ -408,9 +655,7 @@ mod tests {
             require_approval: vec!["file_write".to_string()],
             timeout_secs: 120,
             auto_approve_autonomous: true,
-            auto_approve: false,
-            trusted_senders: Vec::new(),
-            channel_rules: Vec::new(),
+            ..Default::default()
         };
         mgr.update_policy(new_policy);
 

@@ -508,11 +508,11 @@ impl LlmDriver for AnthropicDriver {
                                     Err(e) => {
                                         tracing::warn!(
                                             tool = %name,
-                                            raw_args = %input_json,
+                                            raw_args_len = input_json.len(),
                                             error = %e,
-                                            "Malformed tool call arguments from Anthropic stream, using empty object"
+                                            "Malformed tool call arguments from Anthropic stream"
                                         );
-                                        ensure_object(serde_json::Value::Null)
+                                        super::openai::malformed_tool_input(&e, input_json.len())
                                     }
                                 };
                                 let _ = tx
@@ -565,20 +565,19 @@ impl LlmDriver for AnthropicDriver {
                         name,
                         input_json,
                     } => {
-                        let input: serde_json::Value = match serde_json::from_str::<serde_json::Value>(
-                            &input_json,
-                        ) {
-                            Ok(v) => ensure_object(v),
-                            Err(e) => {
-                                tracing::warn!(
-                                    tool = %name,
-                                    raw_args = %input_json,
-                                    error = %e,
-                                    "Malformed tool call arguments from Anthropic, using empty object"
-                                );
-                                ensure_object(serde_json::Value::Null)
-                            }
-                        };
+                        let input: serde_json::Value =
+                            match serde_json::from_str::<serde_json::Value>(&input_json) {
+                                Ok(v) => ensure_object(v),
+                                Err(e) => {
+                                    tracing::warn!(
+                                        tool = %name,
+                                        raw_args_len = input_json.len(),
+                                        error = %e,
+                                        "Malformed tool call arguments from Anthropic"
+                                    );
+                                    super::openai::malformed_tool_input(&e, input_json.len())
+                                }
+                            };
                         content.push(ContentBlock::ToolUse {
                             id: id.clone(),
                             name: name.clone(),

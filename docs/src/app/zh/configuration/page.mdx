@@ -1711,6 +1711,9 @@ threading = true
 output_format = "telegram_html"
 usage_footer = "tokens"
 typing_mode = "instant"
+disable_commands = false
+allowed_commands = []
+blocked_commands = []
 ```
 
 | 字段 | 类型 | 默认值 | 说明 |
@@ -1725,6 +1728,9 @@ typing_mode = "instant"
 | `output_format` | string 或 null | `null` | 覆盖输出格式。见下表。 |
 | `usage_footer` | string 或 null | `null` | 覆盖该通道的用量页脚模式。可选值：`off`、`tokens`、`cost`、`full`。 |
 | `typing_mode` | string 或 null | `null` | 输入状态指示器行为。见下表。默认为 `instant`。 |
+| `disable_commands` | bool | `false` | 关闭该通道所有内置斜杠命令。被拦截的命令作为普通文本转发给 Agent。 |
+| `allowed_commands` | list of strings | `[]` | 命令名白名单（不带 `/`）。非空时仅这些命令可用，其他命令转发给 Agent。 |
+| `blocked_commands` | list of strings | `[]` | 命令名黑名单（不带 `/`）。仅在 `allowed_commands` 为空时生效。 |
 
 **`dm_policy` 值说明：**
 

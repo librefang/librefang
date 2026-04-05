@@ -204,7 +204,7 @@ debounce_ms = 500
 # [channels.telegram]
 # bot_token_env = "TELEGRAM_BOT_TOKEN"
 # default_agent = "assistant"
-# allowed_users = []
+# allowed_users = []  # Telegram: accepts "123456789" (user ID), "alice" (username), or "@alice"
 # # Route forum threads to specific agents:
 # [channels.telegram.thread_routes]
 # "12345" = "research-agent"

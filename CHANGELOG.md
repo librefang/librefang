@@ -5,23 +5,58 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
+## [2026.4.5] - 2026-04-05
+
+### Added
+
+- Add inline tool use display to chat UI (#2031) (@neo-wanderer)
+- Support username and @username in allowed_users filter (#2036) (@leszek3737)
+- Add alibaba coding plan as provider (#2040) (@joshuachong)
+- Add hidden models — hide/unhide models from selectors (#2045) (@leszek3737)
+- HITL notification engine, batch ops, modify-and-retry, audit log (#2046) (@houko)
+- Add media generation page (#2051) (@houko)
+- Redesign Hands page with running strip and richer cards (#2052) (@houko)
+- Redesign Hands detail modal with hero, action bar, metrics strip (#2053) (@houko)
+- Polish Hands list — grid skeleton, empty states, degraded (#2054) (@houko)
+- Per-channel command policy for public-facing bots (#2063) (@houko)
+
+### Fixed
+
+- Stop embedding dashboard artifacts in release commits (#2039) (@houko)
+- Remove tracked static/react/ build artifacts from git (#2041) (@houko)
+- Trigger dashboard build on release publish (#2043) (@houko)
+- Strip provider prefix from agent fallback_models (#2047) (@houko)
+- Ensure static/react dir exists for include_dir! (#2048) (@houko)
+- Defer WebSocket close until connection is established (#2050) (@houko)
+- Hands detail modal tab bar height, underline, and schedules label (#2055) (@houko)
+- Remove count pills from Hands detail tabs to guarantee equal height (#2056) (@houko)
+- Auto-wire self handle in streaming path for inter-agent tools (#2061) (@houko)
+- Scope per-turn recall by peer_id to stop cross-user leaks (#2062) (@houko)
+
+### Documentation
+
+- Update dashboard build references after static/react removal (#2042) (@houko)
+- Clarify routing lives in agent manifest, not config.toml (#2060) (@houko)
+
+### Maintenance
+
+- Fix 20 pre-existing TypeScript errors (#2049) (@houko)
+
+
 ## [2026.4.4] - 2026-04-04
 
 ### Added
 
-- Editable temperature, provider and model dropdowns (#2010) (@leszek3737)
-- Add `librefang service install/uninstall/status` commands (#2014) (@houko)
-- Per-peer memory isolation for multi-user channels (#2015) (@houko)
-- Agent template dropdown + fix resolve path (#2017) (@houko)
-- Add agent actions — delete, clone, reset, suspend/resume (#2018) (@houko)
+- Interactive model switcher dropdown in connection bar (#1995) (@neo-wanderer)
+- Custom model management, workflow scheduling, and HandsPage fixes (#2028) (@houko)
+- Wire up channel test/reload and session labels (#2030) (@houko)
+- Serve dashboard from runtime directory with auto-sync (#2032) (@houko)
 
 ### Fixed
 
-- Fix Render build by adding root render.yaml with Dockerfile path (#2011) (@houko)
-- Route slash commands via WS command protocol (#2012) (@houko)
-- Suppress repeated unresponsive warnings and event bus overflow (#2013) (@houko)
-- Wait for port release before restarting daemon in dev mode (#2016) (@houko)
-- Add missing agents page i18n keys (#2019) (@houko)
+- Prevent duplicate TOML keys during config upgrade (#2025) (@houko)
+- Unify scheduling system, improve dashboard and hand UX (#2026) (@houko)
+- Sync Cargo.lock for flate2/tar dependencies (#2034) (@houko)
 
 
 ## [2026.4.3] - 2026-04-03

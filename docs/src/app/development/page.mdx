@@ -92,8 +92,8 @@ librefang start
 
 ### Dashboard Development
 
-The React dashboard build output is pre-committed in `crates/librefang-api/static/react/`.
-If you modify the dashboard source code, rebuild before compiling the Rust binary:
+The React dashboard is built locally into `crates/librefang-api/static/react/` (gitignored).
+CI builds and uploads it automatically; for local development, rebuild before compiling the Rust binary:
 
 ```bash
 # Rebuild dashboard assets
@@ -488,12 +488,8 @@ curl -s http://127.0.0.1:4545/ | head -5
 curl -sI http://127.0.0.1:4545/dashboard/assets/index-DVRukrPy.js
 # 200 = OK, 404 = assets not embedded
 
-# 4. If assets 404, verify the build output exists before compiling
-ls crates/librefang-api/static/react/index.html
-ls crates/librefang-api/static/react/assets/
-
-# 5. Rebuild: embed fresh assets into the binary
-cargo xtask build-web --dashboard
+# 4. If assets 404, rebuild the dashboard locally and recompile
+just dashboard-build
 cargo build -p librefang-cli --release
 ```
 

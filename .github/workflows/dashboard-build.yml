@@ -1,0 +1,77 @@
+name: Dashboard Build
+
+# `release: published` requires release-create.yml to use a PAT — releases
+# created by GITHUB_TOKEN do not fire downstream triggers.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/librefang-api/dashboard/src/**'
+      - 'crates/librefang-api/dashboard/package.json'
+      - 'crates/librefang-api/dashboard/vite.config.*'
+      - 'crates/librefang-api/dashboard/tsconfig.*'
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to upload dashboard asset to (e.g. v2026.4.5-beta14)'
+        required: true
+        type: string
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        working-directory: crates/librefang-api/dashboard
+        run: npm ci
+
+      - name: Build dashboard
+        working-directory: crates/librefang-api/dashboard
+        run: npm run build
+
+      - name: Package dashboard assets
+        run: |
+          cd crates/librefang-api/static/react
+          tar -czf /tmp/dashboard-dist.tar.gz .
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          case "${{ github.event_name }}" in
+            release)
+              TAG="${{ github.event.release.tag_name }}"
+              ;;
+            workflow_dispatch)
+              TAG="${{ github.event.inputs.tag }}"
+              ;;
+            *)
+              # push to main — upload to the most recent release
+              TAG=$(gh release list --limit 1 --json tagName --jq '.[0].tagName')
+              ;;
+          esac
+          if [ -z "$TAG" ]; then
+            echo "No release found, skipping upload"
+            exit 0
+          fi
+          echo "Uploading dashboard-dist.tar.gz to $TAG"
+          for attempt in $(seq 1 5); do
+            if gh release upload "$TAG" /tmp/dashboard-dist.tar.gz --clobber; then
+              echo "✓ Upload succeeded (attempt $attempt)"
+              exit 0
+            fi
+            echo "Upload failed (attempt $attempt/5), retrying in 10s..."
+            sleep 10
+          done
+          echo "::error::Upload failed after 5 attempts"
+          exit 1

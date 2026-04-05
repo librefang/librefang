@@ -8,6 +8,7 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
         .route("/skills/registry", axum::routing::get(list_skill_registry))
         .route("/skills/install", axum::routing::post(install_skill))
         .route("/skills/uninstall", axum::routing::post(uninstall_skill))
+        .route("/skills/reload", axum::routing::post(reload_skills))
         .route("/skills/create", axum::routing::post(create_skill))
         // Marketplace / ClawHub
         .route(
@@ -336,6 +337,32 @@ pub async fn uninstall_skill(
         }
         Err(e) => ApiErrorResponse::not_found(format!("{e}")).into_json_tuple(),
     }
+}
+
+/// POST /api/skills/reload — Rescan `~/.librefang/skills/` and refresh the
+/// in-memory registry. Use this after dropping a skill directory into the
+/// skills folder manually (install/uninstall via API already reload
+/// automatically). Returns the new installed skill count.
+#[utoipa::path(
+    post,
+    path = "/api/skills/reload",
+    tag = "skills",
+    responses(
+        (status = 200, description = "Rescan the skills directory from disk", body = serde_json::Value)
+    )
+)]
+pub async fn reload_skills(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    state.kernel.reload_skills();
+    let count = state
+        .kernel
+        .skill_registry_ref()
+        .read()
+        .map(|r| r.count())
+        .unwrap_or(0);
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({"status": "reloaded", "count": count})),
+    )
 }
 
 /// GET /api/skills/registry — List official skills from the local registry cache (~/.librefang/registry/skills).
@@ -2431,23 +2458,66 @@ pub async fn hand_get_session(
                 .messages
                 .iter()
                 .map(|m| {
-                    let content = match &m.content {
-                        librefang_types::message::MessageContent::Text(t) => t.clone(),
-                        librefang_types::message::MessageContent::Blocks(blocks) => blocks
-                            .iter()
-                            .filter_map(|b| match b {
-                                librefang_types::message::ContentBlock::Text { text, .. } => {
-                                    Some(text.clone())
-                                }
-                                _ => None,
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n"),
+                    let (content, blocks) = match &m.content {
+                        librefang_types::message::MessageContent::Text(t) => (t.clone(), None),
+                        librefang_types::message::MessageContent::Blocks(blocks) => {
+                            // Text-only content for backward compatibility
+                            let text = blocks
+                                .iter()
+                                .filter_map(|b| match b {
+                                    librefang_types::message::ContentBlock::Text {
+                                        text, ..
+                                    } => Some(text.clone()),
+                                    _ => None,
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            // Structured blocks for rich rendering
+                            let structured: Vec<serde_json::Value> = blocks
+                                .iter()
+                                .filter_map(|b| match b {
+                                    librefang_types::message::ContentBlock::Text {
+                                        text, ..
+                                    } => Some(serde_json::json!({
+                                        "type": "text", "text": text
+                                    })),
+                                    librefang_types::message::ContentBlock::ToolUse {
+                                        id,
+                                        name,
+                                        input,
+                                        ..
+                                    } => Some(serde_json::json!({
+                                        "type": "tool_use", "id": id, "name": name, "input": input
+                                    })),
+                                    librefang_types::message::ContentBlock::ToolResult {
+                                        tool_use_id,
+                                        tool_name,
+                                        content,
+                                        is_error,
+                                    } => Some(serde_json::json!({
+                                        "type": "tool_result",
+                                        "tool_use_id": tool_use_id,
+                                        "name": tool_name,
+                                        "content": content,
+                                        "is_error": is_error,
+                                    })),
+                                    _ => None,
+                                })
+                                .collect();
+                            let has_non_text = structured
+                                .iter()
+                                .any(|b| b["type"].as_str() != Some("text"));
+                            (text, if has_non_text { Some(structured) } else { None })
+                        }
                     };
-                    serde_json::json!({
+                    let mut msg = serde_json::json!({
                         "role": format!("{:?}", m.role).to_lowercase(),
                         "content": content,
-                    })
+                    });
+                    if let Some(blocks) = blocks {
+                        msg["blocks"] = serde_json::Value::Array(blocks);
+                    }
+                    msg
                 })
                 .collect();
             (

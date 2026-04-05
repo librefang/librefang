@@ -29,8 +29,7 @@ function parseCronType(cron: string): { type: ScheduleType; min?: number; hour?:
 }
 
 export function ScheduleModal({ title, subtitle, initialCron, onSave, onClose }: ScheduleModalProps) {
-  const { t, i18n } = useTranslation();
-  const isZh = i18n.language?.startsWith("zh");
+  const { t } = useTranslation();
 
   const parsed = parseCronType(initialCron || "0 9 * * *");
   const [scheduleType, setScheduleType] = useState<ScheduleType>(parsed.type);
@@ -62,16 +61,21 @@ export function ScheduleModal({ title, subtitle, initialCron, onSave, onClose }:
 
   const describeCron = (cron: string): string => {
     const parts = cron.trim().split(/\s+/);
-    if (parts.length !== 5) return isZh ? "无效表达式" : "Invalid expression";
+    if (parts.length !== 5) return t("scheduler.cron_invalid");
     const [m, h, dom, , dow] = parts;
     const pad = (n: string) => n.padStart(2, "0");
-    const wd = isZh ? ["日", "一", "二", "三", "四", "五", "六"] : ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-    if (m.startsWith("*/") && h === "*") return isZh ? `每 ${m.slice(2)} 分钟` : `Every ${m.slice(2)} min`;
-    if (m === "0" && h.startsWith("*/")) return isZh ? `每 ${h.slice(2)} 小时` : `Every ${h.slice(2)}h`;
-    if (m.match(/^\d+$/) && h.match(/^\d+$/) && dom.match(/^\d+$/) && dow === "*") return isZh ? `每月${dom}日 ${pad(h)}:${pad(m)}` : `${dom}th ${pad(h)}:${pad(m)}`;
-    if (m.match(/^\d+$/) && h.match(/^\d+$/) && dom === "*" && dow.match(/^\d$/)) return isZh ? `周${wd[+dow]} ${pad(h)}:${pad(m)}` : `${wd[+dow]} ${pad(h)}:${pad(m)}`;
-    if (m.match(/^\d+$/) && h.match(/^\d+$/) && dom === "*" && dow === "1-5") return isZh ? `工作日 ${pad(h)}:${pad(m)}` : `Weekdays ${pad(h)}:${pad(m)}`;
-    if (m.match(/^\d+$/) && h.match(/^\d+$/) && dom === "*" && dow === "*") return isZh ? `每天 ${pad(h)}:${pad(m)}` : `Daily ${pad(h)}:${pad(m)}`;
+    const weekdays = [
+      t("scheduler.weekday_sun"), t("scheduler.weekday_mon"), t("scheduler.weekday_tue"),
+      t("scheduler.weekday_wed"), t("scheduler.weekday_thu"), t("scheduler.weekday_fri"),
+      t("scheduler.weekday_sat"),
+    ];
+    const time = `${pad(h)}:${pad(m)}`;
+    if (m.startsWith("*/") && h === "*") return t("scheduler.cron_every_n_min", { n: m.slice(2) });
+    if (m === "0" && h.startsWith("*/")) return t("scheduler.cron_every_n_hour", { n: h.slice(2) });
+    if (m.match(/^\d+$/) && h.match(/^\d+$/) && dom.match(/^\d+$/) && dow === "*") return t("scheduler.cron_monthly", { dom, time });
+    if (m.match(/^\d+$/) && h.match(/^\d+$/) && dom === "*" && dow.match(/^\d$/)) return t("scheduler.cron_weekly", { day: weekdays[+dow], time });
+    if (m.match(/^\d+$/) && h.match(/^\d+$/) && dom === "*" && dow === "1-5") return t("scheduler.cron_weekdays", { time });
+    if (m.match(/^\d+$/) && h.match(/^\d+$/) && dom === "*" && dow === "*") return t("scheduler.cron_daily", { time });
     return cron;
   };
 
@@ -80,13 +84,13 @@ export function ScheduleModal({ title, subtitle, initialCron, onSave, onClose }:
   const cronValid = validateCron(previewCron);
 
   const types: { key: ScheduleType; label: string }[] = [
-    { key: "interval_min", label: isZh ? "分钟" : "Min" },
-    { key: "interval_hour", label: isZh ? "小时" : "Hour" },
-    { key: "daily", label: isZh ? "每天" : "Daily" },
-    { key: "weekday", label: isZh ? "工作日" : "Wkday" },
-    { key: "weekly", label: isZh ? "每周" : "Week" },
-    { key: "monthly", label: isZh ? "每月" : "Month" },
-    { key: "custom", label: "Cron" },
+    { key: "interval_min", label: t("scheduler.type_interval_min") },
+    { key: "interval_hour", label: t("scheduler.type_interval_hour") },
+    { key: "daily", label: t("scheduler.type_daily") },
+    { key: "weekday", label: t("scheduler.type_weekday") },
+    { key: "weekly", label: t("scheduler.type_weekly") },
+    { key: "monthly", label: t("scheduler.type_monthly") },
+    { key: "custom", label: t("scheduler.type_custom") },
   ];
 
   const sel = "h-9 rounded-lg border border-border-subtle bg-main px-2 text-sm outline-none focus:border-brand transition-colors";
@@ -104,7 +108,18 @@ export function ScheduleModal({ title, subtitle, initialCron, onSave, onClose }:
     </div>
   );
 
-  const wdShort = isZh ? ["一", "二", "三", "四", "五", "六", "日"] : ["M", "T", "W", "T", "F", "S", "S"];
+  const wdShort = [
+    t("scheduler.weekday_short_mon"), t("scheduler.weekday_short_tue"),
+    t("scheduler.weekday_short_wed"), t("scheduler.weekday_short_thu"),
+    t("scheduler.weekday_short_fri"), t("scheduler.weekday_short_sat"),
+    t("scheduler.weekday_short_sun"),
+  ];
+
+  const cronFieldHeaders = [
+    t("scheduler.field_min"), t("scheduler.field_hour"),
+    t("scheduler.field_day"), t("scheduler.field_month"),
+    t("scheduler.field_weekday"),
+  ];
 
   return (
     <div className="fixed inset-0 z-100 flex items-center justify-center bg-black/50 backdrop-blur-sm" onClick={onClose}>
@@ -135,23 +150,23 @@ export function ScheduleModal({ title, subtitle, initialCron, onSave, onClose }:
         <div className="px-5 h-[88px] flex items-center">
           {scheduleType === "interval_min" && (
             <div className="flex items-center gap-2 text-sm">
-              <span className="text-text-dim">{isZh ? "每" : "Every"}</span>
+              <span className="text-text-dim">{t("scheduler.every")}</span>
               <input type="number" min={1} max={59} value={intervalMin}
                 onChange={e => setIntervalMin(Math.max(1, Math.min(59, +e.target.value)))} className={num} />
-              <span className="text-text-dim">{isZh ? "分钟执行" : "minutes"}</span>
+              <span className="text-text-dim">{t("scheduler.minutes")}</span>
             </div>
           )}
           {scheduleType === "interval_hour" && (
             <div className="flex items-center gap-2 text-sm">
-              <span className="text-text-dim">{isZh ? "每" : "Every"}</span>
+              <span className="text-text-dim">{t("scheduler.every")}</span>
               <input type="number" min={1} max={23} value={intervalHour}
                 onChange={e => setIntervalHour(Math.max(1, Math.min(23, +e.target.value)))} className={num} />
-              <span className="text-text-dim">{isZh ? "小时执行" : "hours"}</span>
+              <span className="text-text-dim">{t("scheduler.hours")}</span>
             </div>
           )}
           {(scheduleType === "daily" || scheduleType === "weekday") && (
             <div className="flex items-center gap-2 text-sm">
-              <span className="text-text-dim">{scheduleType === "weekday" ? (isZh ? "工作日" : "Weekdays") : (isZh ? "每天" : "Daily")}</span>
+              <span className="text-text-dim">{scheduleType === "weekday" ? t("scheduler.weekdays_at") : t("scheduler.daily_at")}</span>
               {timeSelect}
             </div>
           )}
@@ -166,17 +181,17 @@ export function ScheduleModal({ title, subtitle, initialCron, onSave, onClose }:
                 ))}
               </div>
               <div className="flex items-center gap-2 text-sm">
-                <span className="text-text-dim">{isZh ? "时间" : "At"}</span>
+                <span className="text-text-dim">{t("scheduler.at")}</span>
                 {timeSelect}
               </div>
             </div>
           )}
           {scheduleType === "monthly" && (
             <div className="flex items-center gap-2 text-sm">
-              <span className="text-text-dim">{isZh ? "每月" : "Day"}</span>
+              <span className="text-text-dim">{t("scheduler.every_month_on")}</span>
               <input type="number" min={1} max={28} value={monthDay}
                 onChange={e => setMonthDay(Math.max(1, Math.min(28, +e.target.value)))} className={num} />
-              <span className="text-text-dim">{isZh ? "号" : "at"}</span>
+              <span className="text-text-dim">{t("scheduler.day_suffix")}</span>
               {timeSelect}
             </div>
           )}
@@ -187,7 +202,6 @@ export function ScheduleModal({ title, subtitle, initialCron, onSave, onClose }:
               const f = [...fields]; f[idx] = v;
               setCustomCron(f.slice(0, 5).join(" "));
             };
-            const hdr = isZh ? ["分", "时", "日", "月", "周"] : ["Min", "Hr", "Day", "Mon", "Wk"];
             const opts: string[][] = [
               ["*", "*/5", "*/10", "*/15", "*/30", ...Array.from({ length: 60 }, (_, i) => String(i))],
               ["*", "*/2", "*/4", "*/6", "*/12", ...Array.from({ length: 24 }, (_, i) => String(i))],
@@ -197,7 +211,7 @@ export function ScheduleModal({ title, subtitle, initialCron, onSave, onClose }:
             ];
             return (
               <div className="grid grid-cols-5 gap-2 w-full">
-                {hdr.map((h, i) => (
+                {cronFieldHeaders.map((h, i) => (
                   <div key={i}>
                     <p className="text-[9px] font-bold text-text-dim/50 text-center mb-1">{h}</p>
                     <select value={fields[i] || "*"} onChange={e => updateField(i, e.target.value)}

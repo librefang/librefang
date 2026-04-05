@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use tracing::warn;
 
 /// Result from a full-text session search.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -190,16 +191,23 @@ impl SessionStore {
         let session_id_str = session.id.0.to_string();
         let agent_id_str = session.agent_id.0.to_string();
 
-        // Delete existing FTS entry, then insert fresh content.
-        let _ = conn.execute(
+        // Delete existing FTS entry, then insert fresh content. Log on
+        // failure — silently dropping these keeps orphan/stale rows in
+        // sessions_fts whose JOINs to the real sessions table return
+        // NULL, poisoning full-text search results.
+        if let Err(e) = conn.execute(
             "DELETE FROM sessions_fts WHERE session_id = ?1",
             rusqlite::params![session_id_str],
-        );
+        ) {
+            warn!(session_id = %session_id_str, error = %e, "Failed to clear FTS entry for session");
+        }
         if !content.is_empty() {
-            let _ = conn.execute(
+            if let Err(e) = conn.execute(
                 "INSERT INTO sessions_fts (session_id, agent_id, content) VALUES (?1, ?2, ?3)",
                 rusqlite::params![session_id_str, agent_id_str, content],
-            );
+            ) {
+                warn!(session_id = %session_id_str, error = %e, "Failed to insert FTS entry for session");
+            }
         }
 
         Ok(())
@@ -227,10 +235,12 @@ impl SessionStore {
             rusqlite::params![id_str],
         )
         .map_err(|e| LibreFangError::Memory(e.to_string()))?;
-        let _ = conn.execute(
+        if let Err(e) = conn.execute(
             "DELETE FROM sessions_fts WHERE session_id = ?1",
             rusqlite::params![id_str],
-        );
+        ) {
+            warn!(session_id = %id_str, error = %e, "Failed to delete FTS entry; orphan row left in sessions_fts");
+        }
         Ok(())
     }
 
@@ -246,10 +256,12 @@ impl SessionStore {
             rusqlite::params![agent_id_str],
         )
         .map_err(|e| LibreFangError::Memory(e.to_string()))?;
-        let _ = conn.execute(
+        if let Err(e) = conn.execute(
             "DELETE FROM sessions_fts WHERE agent_id = ?1",
             rusqlite::params![agent_id_str],
-        );
+        ) {
+            warn!(agent_id = %agent_id_str, error = %e, "Failed to delete FTS entries for agent; orphans left in sessions_fts");
+        }
         Ok(())
     }
 

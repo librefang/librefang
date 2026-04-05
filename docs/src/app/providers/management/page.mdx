@@ -247,8 +247,10 @@ LibreFang can automatically select the cheapest model capable of handling each q
 
 ### Configuration
 
+Model routing is configured **per-agent in the agent manifest** — not as a top-level section in `~/.librefang/config.toml`. Putting `[routing]` at the top of `config.toml` will be ignored (the kernel logs `Unknown config field (ignored) field="routing"`).
+
 ```toml
-# In agent manifest or config.toml
+# In an agent manifest file
 [routing]
 simple_model = "claude-haiku-4-5-20251001"
 medium_model = "gemini-2.5-flash"

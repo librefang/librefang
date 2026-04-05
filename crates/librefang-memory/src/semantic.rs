@@ -16,7 +16,7 @@ use librefang_types::memory::{
 use rusqlite::Connection;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use tracing::debug;
+use tracing::{debug, warn};
 
 /// Semantic store backed by SQLite with optional vector search.
 ///
@@ -406,12 +406,17 @@ impl SemanticStore {
             );
         }
 
-        // Update access counts for returned memories
+        // Update access counts for returned memories. Logged on failure
+        // because the decay/consolidation engine keys TTL decisions off
+        // accessed_at — silently losing updates means "active" memories
+        // can be garbage-collected when they shouldn't be.
         for frag in &fragments {
-            let _ = conn.execute(
+            if let Err(e) = conn.execute(
                 "UPDATE memories SET access_count = access_count + 1, accessed_at = ?1 WHERE id = ?2",
                 rusqlite::params![Utc::now().to_rfc3339(), frag.id.0.to_string()],
-            );
+            ) {
+                warn!(memory_id = %frag.id.0, error = %e, "Failed to update access tracking");
+            }
         }
 
         Ok(fragments)
@@ -452,16 +457,19 @@ impl SemanticStore {
             }
         }
 
-        // Update access counts
+        // Update access counts — see note on the SQLite-path update above
+        // for why silent drops would corrupt decay logic.
         let conn = self
             .conn
             .lock()
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         for frag in &fragments {
-            let _ = conn.execute(
+            if let Err(e) = conn.execute(
                 "UPDATE memories SET access_count = access_count + 1, accessed_at = ?1 WHERE id = ?2",
                 rusqlite::params![Utc::now().to_rfc3339(), frag.id.0.to_string()],
-            );
+            ) {
+                warn!(memory_id = %frag.id.0, error = %e, "Failed to update access tracking");
+            }
         }
 
         Ok(fragments)
@@ -1160,6 +1168,62 @@ mod tests {
         let results = store.recall("Memory", 10, Some(filter)).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].content, "Memory A");
+    }
+
+    #[test]
+    fn test_recall_with_peer_filter_isolates_users() {
+        // Regression for per-peer memory isolation (#2058 follow-up).
+        // Two users A and B share an agent; recalling with peer_id=Some("A")
+        // must not return B's memories.
+        let store = setup();
+        let agent_id = AgentId::new();
+        let _ = store
+            .remember_with_embedding_and_peer(
+                agent_id,
+                "Alice likes dark roast coffee",
+                MemorySource::Conversation,
+                "episodic",
+                HashMap::new(),
+                None,
+                None,
+                None,
+                Default::default(),
+                Some("user-A"),
+            )
+            .unwrap();
+        let _ = store
+            .remember_with_embedding_and_peer(
+                agent_id,
+                "Bob likes dark roast coffee",
+                MemorySource::Conversation,
+                "episodic",
+                HashMap::new(),
+                None,
+                None,
+                None,
+                Default::default(),
+                Some("user-B"),
+            )
+            .unwrap();
+
+        // Query as user A — should only see Alice's memory.
+        let mut f = MemoryFilter::agent(agent_id);
+        f.peer_id = Some("user-A".into());
+        let results = store.recall("coffee", 10, Some(f)).unwrap();
+        assert_eq!(
+            results.len(),
+            1,
+            "user-A must not see user-B's memory, got: {:?}",
+            results.iter().map(|r| &r.content).collect::<Vec<_>>()
+        );
+        assert!(results[0].content.starts_with("Alice"));
+
+        // Query as user B — should only see Bob's memory.
+        let mut f = MemoryFilter::agent(agent_id);
+        f.peer_id = Some("user-B".into());
+        let results = store.recall("coffee", 10, Some(f)).unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].content.starts_with("Bob"));
     }
 
     #[test]

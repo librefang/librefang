@@ -2156,7 +2156,33 @@ impl LibreFangKernel {
         }
 
         // Initialize execution approval manager
-        let approval_manager = crate::approval::ApprovalManager::new(config.approval.clone());
+        let approval_manager = crate::approval::ApprovalManager::new_with_db(
+            config.approval.clone(),
+            memory.usage_conn(),
+        );
+
+        // Validate notification config — warn (not error) on unrecognized values
+        {
+            let known_events = [
+                "approval_requested",
+                "task_completed",
+                "task_failed",
+                "tool_failure",
+            ];
+            for (i, rule) in config.notification.agent_rules.iter().enumerate() {
+                for event in &rule.events {
+                    if !known_events.contains(&event.as_str()) {
+                        warn!(
+                            rule_index = i,
+                            agent_pattern = %rule.agent_pattern,
+                            event = %event,
+                            known = ?known_events,
+                            "Notification agent_rule references unknown event type"
+                        );
+                    }
+                }
+            }
+        }
 
         // Initialize binding/broadcast/auto-reply from config
         let initial_bindings = config.bindings.clone();
@@ -3227,6 +3253,21 @@ system_prompt = "You are a helpful assistant."
                     "ok",
                 );
 
+                // Push task_completed notification for autonomous (hand) agents
+                if let Some(entry) = self.registry.get(agent_id) {
+                    let is_autonomous = entry.tags.iter().any(|t| t.starts_with("hand:"))
+                        || entry.manifest.autonomous.is_some();
+                    if is_autonomous {
+                        let name = &entry.name;
+                        let msg = format!(
+                            "Agent \"{}\" completed task (in={}, out={} tokens)",
+                            name, result.total_usage.input_tokens, result.total_usage.output_tokens,
+                        );
+                        self.push_notification(&agent_id.to_string(), "task_completed", &msg)
+                            .await;
+                    }
+                }
+
                 Ok(result)
             }
             Err(e) => {
@@ -3241,6 +3282,38 @@ system_prompt = "You are a helpful assistant."
                 // Record the failure in supervisor for health reporting
                 self.supervisor.record_panic();
                 warn!(agent_id = %agent_id, error = %e, "Agent loop failed — recorded in supervisor");
+
+                // Push failure notification to alert_channels
+                let agent_name = self
+                    .registry
+                    .get(agent_id)
+                    .map(|a| a.name.clone())
+                    .unwrap_or_else(|| agent_id.to_string());
+                // Push notification — use "tool_failure" for the repeated-tool-failure
+                // exit path so operators with tool_failure agent_rules get alerted.
+                let (event_type, fail_msg) = match &e {
+                    KernelError::LibreFang(LibreFangError::RepeatedToolFailures {
+                        iterations,
+                        error_count,
+                    }) => (
+                        "tool_failure",
+                        format!(
+                            "Agent \"{}\" exited after {} consecutive tool failures ({} errors in final iteration)",
+                            agent_name, iterations, error_count
+                        ),
+                    ),
+                    other => (
+                        "task_failed",
+                        format!(
+                            "Agent \"{}\" loop failed: {}",
+                            agent_name,
+                            other.to_string().chars().take(200).collect::<String>()
+                        ),
+                    ),
+                };
+                self.push_notification(&agent_id.to_string(), event_type, &fail_msg)
+                    .await;
+
                 Err(e)
             }
         }
@@ -3308,6 +3381,18 @@ system_prompt = "You are a helpful assistant."
         tokio::sync::mpsc::Receiver<StreamEvent>,
         tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
     )> {
+        // Auto-wire the self kernel handle when the caller did not supply one.
+        // This mirrors the non-streaming `send_message()` path and is required
+        // for inter-agent tools (memory_store, memory_recall, agent_send, …) to
+        // work in streaming mode — channels like Telegram go through
+        // channel_bridge.rs which historically passes `None` here (#2058).
+        let kernel_handle = kernel_handle.or_else(|| {
+            self.self_handle
+                .get()
+                .and_then(|w| w.upgrade())
+                .map(|arc| arc as Arc<dyn KernelHandle>)
+        });
+
         // Try to acquire config reload barrier (non-blocking — this is a sync fn).
         // If a reload is in progress we proceed without the guard.
         let _config_guard = self.config_reload_lock.try_read();
@@ -3631,7 +3716,6 @@ system_prompt = "You are a helpful assistant."
                 }
             }
 
-            let messages_before = session.messages.len();
             let mut skill_snapshot = kernel_clone
                 .skill_registry
                 .read()
@@ -3721,9 +3805,13 @@ system_prompt = "You are a helpful assistant."
 
             match result {
                 Ok(result) => {
-                    // Append new messages to canonical session for cross-channel memory
-                    if session.messages.len() > messages_before {
-                        let new_messages = session.messages[messages_before..].to_vec();
+                    // Append new messages to canonical session for cross-channel memory.
+                    // Use run_agent_loop_streaming's own start index (post-trim) instead
+                    // of one captured here — the loop may trim session history and make
+                    // a locally-captured index stale (see #2067). Clamp defensively.
+                    let start = result.new_messages_start.min(session.messages.len());
+                    if start < session.messages.len() {
+                        let new_messages = session.messages[start..].to_vec();
                         if let Err(e) = memory.append_canonical(agent_id, &new_messages, None) {
                             warn!(agent_id = %agent_id, "Failed to update canonical session (streaming): {e}");
                         }
@@ -3930,6 +4018,8 @@ system_prompt = "You are a helpful assistant."
             provider_not_configured: false,
             experiment_context: None,
             latency_ms: 0,
+            // WASM agents don't mutate the session; N/A.
+            new_messages_start: 0,
         })
     }
 
@@ -3998,6 +4088,8 @@ system_prompt = "You are a helpful assistant."
             provider_not_configured: false,
             experiment_context: None,
             latency_ms: 0,
+            // Python agents don't mutate the session; N/A.
+            new_messages_start: 0,
         })
     }
 
@@ -4382,8 +4474,6 @@ system_prompt = "You are a helpful assistant."
                 label: None,
             });
 
-        let messages_before = session.messages.len();
-
         let tools = self.available_tools(agent_id);
         let tools = entry.mode.filter_tools((*tools).clone());
 
@@ -4751,9 +4841,13 @@ system_prompt = "You are a helpful assistant."
 
         let latency_ms = start_time.elapsed().as_millis() as u64;
 
-        // Append new messages to canonical session for cross-channel memory
-        if session.messages.len() > messages_before {
-            let new_messages = session.messages[messages_before..].to_vec();
+        // Append new messages to canonical session for cross-channel memory.
+        // Use run_agent_loop's own start index (post-trim) instead of one
+        // captured here — the loop may trim session history and make a
+        // locally-captured index stale (see #2067). Clamp defensively.
+        let start = result.new_messages_start.min(session.messages.len());
+        if start < session.messages.len() {
+            let new_messages = session.messages[start..].to_vec();
             if let Err(e) = self.memory.append_canonical(agent_id, &new_messages, None) {
                 warn!("Failed to update canonical session: {e}");
             }
@@ -5476,6 +5570,91 @@ system_prompt = "You are a helpful assistant."
         let _ = self.memory.delete_canonical_session(agent_id);
         debug!(agent_id = %agent_id, "Cleared canonical session after model switch");
 
+        Ok(())
+    }
+
+    /// Reload an agent's manifest from its source agent.toml on disk.
+    ///
+    /// At boot the kernel reads agent.toml and syncs it into the in-memory
+    /// registry, but runtime edits to the file are otherwise invisible until
+    /// the next restart. This method re-reads the file, preserves
+    /// runtime-only fields that TOML doesn't carry (workspace path, tags,
+    /// current enabled state), replaces the in-memory manifest, persists it
+    /// to the DB, and invalidates the tool cache so the updated skill / MCP
+    /// allowlists take effect on the next message.
+    pub fn reload_agent_from_disk(&self, agent_id: AgentId) -> KernelResult<()> {
+        let entry = self.registry.get(agent_id).ok_or_else(|| {
+            KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
+        })?;
+
+        let toml_path = entry.source_toml_path.clone().unwrap_or_else(|| {
+            let safe_name = safe_path_component(&entry.name, "agent");
+            self.home_dir_boot
+                .join("agents")
+                .join(safe_name)
+                .join("agent.toml")
+        });
+
+        if !toml_path.exists() {
+            return Err(KernelError::LibreFang(LibreFangError::Internal(format!(
+                "agent.toml not found at {}",
+                toml_path.display()
+            ))));
+        }
+
+        let toml_str = std::fs::read_to_string(&toml_path).map_err(|e| {
+            KernelError::LibreFang(LibreFangError::Internal(format!(
+                "Failed to read {}: {e}",
+                toml_path.display()
+            )))
+        })?;
+
+        let mut disk_manifest: librefang_types::agent::AgentManifest = toml::from_str(&toml_str)
+            .map_err(|e| {
+                KernelError::LibreFang(LibreFangError::Internal(format!(
+                    "Invalid TOML in {}: {e}",
+                    toml_path.display()
+                )))
+            })?;
+
+        // Preserve workspace if TOML leaves it unset — workspace is
+        // populated at spawn time with the real directory path.
+        if disk_manifest.workspace.is_none() {
+            disk_manifest.workspace = entry.manifest.workspace.clone();
+        }
+        // Always preserve the name. Renaming would also need to update
+        // `entry.name` and the registry's `name_index`, which reload does
+        // not touch — a renamed manifest without those updates would
+        // silently break `find_by_name` lookups. Use the rename API.
+        disk_manifest.name = entry.manifest.name.clone();
+        // Always preserve tags for the same reason: there is no runtime
+        // API to update `entry.tags` or the registry's `tag_index`, both
+        // of which are a snapshot taken at spawn time. Letting reload
+        // change `manifest.tags` would desync manifest tags from the
+        // tag index used by `find_by_tag()`.
+        disk_manifest.tags = entry.manifest.tags.clone();
+
+        self.registry
+            .replace_manifest(agent_id, disk_manifest)
+            .map_err(KernelError::LibreFang)?;
+
+        if let Some(refreshed) = self.registry.get(agent_id) {
+            // Re-grant capabilities in case caps/profile changed in the TOML.
+            // Uses insert() so it replaces any existing grants for this agent.
+            // NOTE: we deliberately do NOT re-register with the scheduler,
+            // because that would wipe the agent's accumulated usage tracker.
+            // If resource quotas change, they take effect at next window reset.
+            let caps = manifest_to_capabilities(&refreshed.manifest);
+            self.capabilities.grant(agent_id, caps);
+            let _ = self.memory.save_agent(&refreshed);
+        }
+
+        // Invalidate the per-agent tool cache so the new skill/MCP allowlist
+        // takes effect on the next message. The skill-summary cache is keyed
+        // by allowlist content so it self-invalidates when the list changes.
+        self.prompt_metadata_cache.tools.remove(&agent_id);
+
+        info!(agent_id = %agent_id, path = %toml_path.display(), "Reloaded agent manifest from disk");
         Ok(())
     }
 
@@ -6373,11 +6552,18 @@ system_prompt = "You are a helpful assistant."
 
         // Read and parse config file (using load_config to process $include directives)
         let config_path = self.home_dir_boot.join("config.toml");
-        let new_config = if config_path.exists() {
+        let mut new_config = if config_path.exists() {
             crate::config::load_config(Some(&config_path))
         } else {
             return Err("Config file not found".to_string());
         };
+
+        // Clamp bounds on the new config before validating or applying.
+        // Initial boot calls clamp_bounds() at kernel construction time,
+        // so without this call the reload path would apply out-of-range
+        // values (e.g. max_cron_jobs=0, timeouts=0) that the initial
+        // startup path normally corrects.
+        new_config.clamp_bounds();
 
         // Validate new config
         if let Err(errors) = validate_config_for_reload(&new_config) {
@@ -8053,7 +8239,7 @@ system_prompt = "You are a helpful assistant."
                     message_timeout_secs: cfg.default_model.message_timeout_secs,
                 };
                 match self.driver_cache.get_or_create(&config) {
-                    Ok(d) => chain.push((d, fb.model.clone())),
+                    Ok(d) => chain.push((d, strip_provider_prefix(&fb.model, &fb_provider))),
                     Err(e) => {
                         warn!("Fallback driver '{}' failed to init: {e}", fb_provider);
                     }
@@ -9394,6 +9580,146 @@ impl LibreFangKernel {
             );
         }
     }
+
+    /// Push a notification message to a single [`NotificationTarget`].
+    async fn push_to_target(
+        &self,
+        target: &librefang_types::approval::NotificationTarget,
+        message: &str,
+    ) {
+        if let Err(e) = self
+            .send_channel_message(
+                &target.channel_type,
+                &target.recipient,
+                message,
+                target.thread_id.as_deref(),
+            )
+            .await
+        {
+            warn!(
+                channel = %target.channel_type,
+                recipient = %target.recipient,
+                error = %e,
+                "Failed to push notification"
+            );
+        }
+    }
+
+    /// Push an interactive approval notification with Approve/Reject buttons.
+    async fn push_approval_interactive(
+        &self,
+        target: &librefang_types::approval::NotificationTarget,
+        message: &str,
+        request_id: &str,
+    ) {
+        let short_id = &request_id[..std::cmp::min(8, request_id.len())];
+        let interactive = librefang_channels::types::InteractiveMessage {
+            text: message.to_string(),
+            buttons: vec![vec![
+                librefang_channels::types::InteractiveButton {
+                    label: "Approve".to_string(),
+                    action: format!("/approve {short_id}"),
+                    style: Some("primary".to_string()),
+                    url: None,
+                },
+                librefang_channels::types::InteractiveButton {
+                    label: "Reject".to_string(),
+                    action: format!("/reject {short_id}"),
+                    style: Some("danger".to_string()),
+                    url: None,
+                },
+            ]],
+        };
+
+        if let Some(adapter) = self.channel_adapters.get(&target.channel_type) {
+            let user = librefang_channels::types::ChannelUser {
+                platform_id: target.recipient.clone(),
+                display_name: target.recipient.clone(),
+                librefang_user: None,
+            };
+            if let Err(e) = adapter.send_interactive(&user, &interactive).await {
+                warn!(
+                    channel = %target.channel_type,
+                    error = %e,
+                    "Failed to send interactive approval notification, falling back to text"
+                );
+                // Fallback to plain text
+                self.push_to_target(target, message).await;
+            }
+        } else {
+            // No adapter found — fall back to send_channel_message
+            self.push_to_target(target, message).await;
+        }
+    }
+
+    /// Push a notification to all configured targets, resolving routing rules.
+    /// Resolution: per-agent rules (matching event) > global channels for that event type.
+    async fn push_notification(&self, agent_id: &str, event_type: &str, message: &str) {
+        use librefang_types::capability::glob_matches;
+        let cfg = self.config.load_full();
+
+        // Check per-agent notification rules first
+        let agent_targets: Vec<librefang_types::approval::NotificationTarget> = cfg
+            .notification
+            .agent_rules
+            .iter()
+            .filter(|rule| {
+                glob_matches(&rule.agent_pattern, agent_id)
+                    && rule.events.iter().any(|e| e == event_type)
+            })
+            .flat_map(|rule| rule.channels.clone())
+            .collect();
+
+        let targets = if !agent_targets.is_empty() {
+            agent_targets
+        } else {
+            // Fallback to global channels based on event type
+            match event_type {
+                "approval_requested" => cfg.notification.approval_channels.clone(),
+                "task_completed" | "task_failed" | "tool_failure" => {
+                    cfg.notification.alert_channels.clone()
+                }
+                _ => Vec::new(),
+            }
+        };
+
+        for target in &targets {
+            self.push_to_target(target, message).await;
+        }
+    }
+
+    /// Resolve an agent identifier string (either a UUID or a human-readable
+    /// name) to a live `AgentId`. A valid-UUID-format string that doesn't
+    /// resolve to a live agent falls through to name lookup so stale or
+    /// hallucinated UUIDs from an LLM don't bypass the name path.
+    ///
+    /// On miss, the error lists every currently-registered agent so the
+    /// caller (typically an LLM) can recover without an extra agent_list
+    /// round trip.
+    fn resolve_agent_identifier(&self, agent_id: &str) -> Result<AgentId, String> {
+        if let Ok(uid) = agent_id.parse::<AgentId>() {
+            if self.registry.get(uid).is_some() {
+                return Ok(uid);
+            }
+        }
+        if let Some(entry) = self.registry.find_by_name(agent_id) {
+            return Ok(entry.id);
+        }
+        let available: Vec<String> = self
+            .registry
+            .list()
+            .iter()
+            .map(|a| format!("{} ({})", a.name, a.id))
+            .collect();
+        Err(if available.is_empty() {
+            format!("Agent not found: '{agent_id}'. No agents are currently registered.")
+        } else {
+            format!(
+                "Agent not found: '{agent_id}'. Call agent_list to see valid agents. Currently registered: [{}]",
+                available.join(", ")
+            )
+        })
+    }
 }
 
 #[async_trait]
@@ -9418,15 +9744,7 @@ impl KernelHandle for LibreFangKernel {
     }
 
     async fn send_to_agent(&self, agent_id: &str, message: &str) -> Result<String, String> {
-        // Try UUID first, then fall back to name lookup
-        let id: AgentId = match agent_id.parse() {
-            Ok(id) => id,
-            Err(_) => self
-                .registry
-                .find_by_name(agent_id)
-                .map(|e| e.id)
-                .ok_or_else(|| format!("Agent not found: {agent_id}"))?,
-        };
+        let id = self.resolve_agent_identifier(agent_id)?;
         let result = self
             .send_message(id, message)
             .await
@@ -9458,9 +9776,7 @@ impl KernelHandle for LibreFangKernel {
     }
 
     fn kill_agent(&self, agent_id: &str) -> Result<(), String> {
-        let id: AgentId = agent_id
-            .parse()
-            .map_err(|_| "Invalid agent ID".to_string())?;
+        let id = self.resolve_agent_identifier(agent_id)?;
         LibreFangKernel::kill_agent(self, id).map_err(|e| format!("Kill failed: {e}"))
     }
 
@@ -9862,7 +10178,7 @@ impl KernelHandle for LibreFangKernel {
         agent_id: &str,
         tool_name: &str,
         action_summary: &str,
-    ) -> Result<bool, String> {
+    ) -> Result<librefang_types::approval::ApprovalDecision, String> {
         use librefang_types::approval::{ApprovalDecision, ApprovalRequest as TypedRequest};
 
         // Hand agents are curated trusted packages — auto-approve tool execution.
@@ -9871,7 +10187,7 @@ impl KernelHandle for LibreFangKernel {
             if let Some(entry) = self.registry.get(aid) {
                 if entry.tags.iter().any(|t| t.starts_with("hand:")) {
                     info!(agent_id, tool_name, "Auto-approved for hand agent");
-                    return Ok(true);
+                    return Ok(ApprovalDecision::Approved);
                 }
             }
         }
@@ -9879,8 +10195,9 @@ impl KernelHandle for LibreFangKernel {
         let policy = self.approval_manager.policy();
         let risk_level = crate::approval::ApprovalManager::classify_risk(tool_name);
         let description = format!("Agent {} requests to execute {}", agent_id, tool_name);
+        let request_id = uuid::Uuid::new_v4();
         let req = TypedRequest {
-            id: uuid::Uuid::new_v4(),
+            id: request_id,
             agent_id: agent_id.to_string(),
             tool_name: tool_name.to_string(),
             description: description.clone(),
@@ -9890,6 +10207,8 @@ impl KernelHandle for LibreFangKernel {
             timeout_secs: policy.timeout_secs,
             sender_id: None,
             channel: None,
+            route_to: Vec::new(),
+            escalation_count: 0,
         };
 
         // Publish an ApprovalRequested event so channel adapters can notify users
@@ -9901,7 +10220,7 @@ impl KernelHandle for LibreFangKernel {
                 agent_id.parse().unwrap_or_default(),
                 EventTarget::System,
                 EventPayload::ApprovalRequested(ApprovalRequestedEvent {
-                    request_id: req.id.to_string(),
+                    request_id: request_id.to_string(),
                     agent_id: agent_id.to_string(),
                     tool_name: tool_name.to_string(),
                     description: description.clone(),
@@ -9911,8 +10230,128 @@ impl KernelHandle for LibreFangKernel {
             self.event_bus.publish(event).await;
         }
 
-        let decision = self.approval_manager.request_approval(req).await;
-        Ok(decision == ApprovalDecision::Approved)
+        // Push approval notification to configured channels.
+        // Resolution order: per-request route_to > policy routing rules > per-agent rules > global defaults.
+        {
+            use librefang_types::capability::glob_matches;
+
+            let cfg = self.config.load_full();
+            let policy = self.approval_manager.policy();
+            let targets: Vec<librefang_types::approval::NotificationTarget> =
+                if !req.route_to.is_empty() {
+                    // Highest priority: explicitly routed targets on the request itself
+                    req.route_to.clone()
+                } else {
+                    // Check policy routing rules (match tool_pattern)
+                    let routed: Vec<librefang_types::approval::NotificationTarget> = policy
+                        .routing
+                        .iter()
+                        .filter(|r| glob_matches(&r.tool_pattern, tool_name))
+                        .flat_map(|r| r.route_to.clone())
+                        .collect();
+                    if !routed.is_empty() {
+                        routed
+                    } else {
+                        // Check per-agent notification rules
+                        let agent_routed: Vec<librefang_types::approval::NotificationTarget> = cfg
+                            .notification
+                            .agent_rules
+                            .iter()
+                            .filter(|rule| {
+                                glob_matches(&rule.agent_pattern, agent_id)
+                                    && rule.events.iter().any(|e| e == "approval_requested")
+                            })
+                            .flat_map(|rule| rule.channels.clone())
+                            .collect();
+                        if !agent_routed.is_empty() {
+                            agent_routed
+                        } else {
+                            // Fallback: global approval_channels
+                            cfg.notification.approval_channels.clone()
+                        }
+                    }
+                };
+
+            let msg = format!(
+                "{} Approval needed: agent \"{}\" wants to run `{}` — {}",
+                risk_level.emoji(),
+                agent_id,
+                tool_name,
+                description,
+            );
+            let req_id_str = request_id.to_string();
+            for target in &targets {
+                self.push_approval_interactive(target, &msg, &req_id_str)
+                    .await;
+            }
+        }
+
+        let mut decision = self.approval_manager.request_approval(req).await;
+
+        // Handle Escalate: atomically take escalated request, re-notify, re-wait.
+        // No TOCTOU: single `take_escalated()` call is the only decision point.
+        while decision == ApprovalDecision::TimedOut {
+            match self.approval_manager.take_escalated(request_id) {
+                Some((count, escalated_req)) => {
+                    let esc_msg = format!(
+                        "{} ESCALATION #{}: Approval still needed for \"{}\" — `{}` — {}",
+                        risk_level.emoji(),
+                        count,
+                        agent_id,
+                        tool_name,
+                        description,
+                    );
+                    // Use interactive buttons for escalation too (same as initial notification)
+                    {
+                        use librefang_types::capability::glob_matches;
+                        let cfg = self.config.load_full();
+                        let esc_targets: Vec<_> = {
+                            let agent_routed: Vec<_> = cfg
+                                .notification
+                                .agent_rules
+                                .iter()
+                                .filter(|rule| {
+                                    glob_matches(&rule.agent_pattern, agent_id)
+                                        && rule.events.iter().any(|e| e == "approval_requested")
+                                })
+                                .flat_map(|rule| rule.channels.clone())
+                                .collect();
+                            if !agent_routed.is_empty() {
+                                agent_routed
+                            } else {
+                                cfg.notification.approval_channels.clone()
+                            }
+                        };
+                        let req_id_str = request_id.to_string();
+                        for target in &esc_targets {
+                            self.push_approval_interactive(target, &esc_msg, &req_id_str)
+                                .await;
+                        }
+                    }
+                    decision = self.approval_manager.request_approval(escalated_req).await;
+                }
+                None => break, // Normal timeout, not an escalation
+            }
+        }
+
+        // Publish resolved event so channel adapters can notify outcome
+        {
+            use librefang_types::event::{ApprovalResolvedEvent, Event, EventPayload, EventTarget};
+            let event = Event::new(
+                agent_id.parse().unwrap_or_default(),
+                EventTarget::System,
+                EventPayload::ApprovalResolved(ApprovalResolvedEvent {
+                    request_id: request_id.to_string(),
+                    agent_id: agent_id.to_string(),
+                    tool_name: tool_name.to_string(),
+                    decision: decision.as_str().to_string(),
+                    decided_by: None,
+                }),
+            );
+            self.event_bus.publish(event).await;
+        }
+
+        Ok(decision)
     }
 
     fn list_a2a_agents(&self) -> Vec<(String, String)> {

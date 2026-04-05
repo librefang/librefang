@@ -1,6 +1,7 @@
 import { type ReactNode, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { RefreshCw, HelpCircle, X } from "lucide-react";
+import { RefreshCw, HelpCircle } from "lucide-react";
+import { Modal } from "./Modal";
 
 interface PageHeaderProps {
   icon: ReactNode;
@@ -34,6 +35,7 @@ export function PageHeader({ icon, title, subtitle, actions, isFetching, onRefre
               onClick={() => setShowHelp(true)}
               className="flex h-8 w-8 items-center justify-center rounded-xl border border-border-subtle bg-surface text-text-dim hover:text-brand hover:border-brand/30 transition-colors duration-200"
               title={t("common.help", { defaultValue: "Help" })}
+              aria-label={t("common.help", { defaultValue: "Help" })}
             >
               <HelpCircle className="h-4 w-4" />
             </button>
@@ -42,6 +44,8 @@ export function PageHeader({ icon, title, subtitle, actions, isFetching, onRefre
             <button
               className="flex h-8 items-center gap-1.5 rounded-xl border border-border-subtle bg-surface px-3 text-xs font-bold text-text-dim hover:text-brand hover:border-brand/30 hover:shadow-sm transition-colors duration-200"
               onClick={onRefresh}
+              aria-label={t("common.refresh")}
+              aria-busy={isFetching}
             >
               <RefreshCw className={`h-3.5 w-3.5 ${isFetching ? "animate-spin" : ""}`} />
               <span className="hidden sm:inline">{t("common.refresh")}</span>
@@ -51,33 +55,11 @@ export function PageHeader({ icon, title, subtitle, actions, isFetching, onRefre
       </header>
 
       {/* Help Modal */}
-      {showHelp && helpText && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm"
-          onClick={() => setShowHelp(false)}
-        >
-          <div
-            className="bg-surface border border-border-subtle rounded-2xl w-full max-w-md shadow-2xl animate-fade-in-scale"
-            onClick={e => e.stopPropagation()}
-          >
-            <div className="flex items-center justify-between p-4 border-b border-border-subtle">
-              <div className="flex items-center gap-2">
-                <HelpCircle className="h-4 w-4 text-brand" />
-                <span className="font-bold text-sm">{title}</span>
-              </div>
-              <button
-                onClick={() => setShowHelp(false)}
-                className="p-1.5 hover:bg-main/30 rounded-lg transition-colors text-text-dim hover:text-text-main"
-              >
-                <X className="h-4 w-4" />
-              </button>
-            </div>
-            <div className="p-5">
-              <p className="text-sm text-text-dim leading-relaxed whitespace-pre-line">{helpText}</p>
-            </div>
-          </div>
+      <Modal isOpen={showHelp && !!helpText} onClose={() => setShowHelp(false)} title={title} size="md">
+        <div className="p-5">
+          <p className="text-sm text-text-dim leading-relaxed whitespace-pre-line">{helpText}</p>
         </div>
-      )}
+      </Modal>
     </>
   );
 }

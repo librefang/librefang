@@ -7,7 +7,7 @@ import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { PageHeader } from "../components/ui/PageHeader";
 import { EmptyState } from "../components/ui/EmptyState";
-import { BarChart3, DollarSign, Shield, Save, Loader2, Cpu, Users, Zap, TrendingUp, Activity, Clock, Gauge, Target } from "lucide-react";
+import { BarChart3, DollarSign, Shield, Save, Loader2, Cpu, Users, Zap, TrendingUp, Activity, Clock, Gauge, Target, Download } from "lucide-react";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend } from "recharts";
 
@@ -39,6 +39,52 @@ export function AnalyticsPage() {
 
   const isLoading = usageQuery.isLoading;
 
+  // Download combined per-agent + per-model usage as a CSV so operators
+  // can hand it to their finance/FinOps pipeline without screenshotting.
+  const handleExportCsv = () => {
+    const escape = (v: unknown) => {
+      if (v == null) return "";
+      const s = String(v);
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const lines: string[] = [];
+    lines.push("scope,name,identifier,total_cost_usd,total_tokens,calls");
+    for (const a of usageByAgent as any[]) {
+      lines.push(
+        [
+          "agent",
+          escape(a.name ?? ""),
+          escape(a.agent_id ?? ""),
+          (a.cost ?? a.total_cost_usd ?? 0).toString(),
+          (a.total_tokens ?? 0).toString(),
+          (a.call_count ?? a.calls ?? 0).toString(),
+        ].join(","),
+      );
+    }
+    for (const m of usageByModel as any[]) {
+      lines.push(
+        [
+          "model",
+          escape(m.model ?? ""),
+          escape(m.provider ?? ""),
+          (m.total_cost_usd ?? 0).toString(),
+          (m.total_tokens ?? 0).toString(),
+          (m.call_count ?? 0).toString(),
+        ].join(","),
+      );
+    }
+    const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const date = new Date().toISOString().slice(0, 10);
+    a.href = url;
+    a.download = `librefang-usage-${date}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <div className="flex flex-col gap-4 sm:gap-6 transition-colors duration-300">
       {/* Header */}
@@ -50,6 +96,18 @@ export function AnalyticsPage() {
         isFetching={usageQuery.isFetching}
         onRefresh={() => { usageQuery.refetch(); usageByAgentQuery.refetch(); usageByModelQuery.refetch(); dailyQuery.refetch(); modelPerformanceQuery.refetch(); }}
         helpText={t("analytics.help")}
+        actions={
+          (usageByAgent.length > 0 || (usageByModel as any[]).length > 0) ? (
+            <button
+              onClick={handleExportCsv}
+              title={t("analytics.export_csv", { defaultValue: "Export CSV" })}
+              className="flex h-8 items-center gap-1.5 rounded-xl border border-border-subtle bg-surface px-3 text-xs font-bold text-text-dim hover:text-brand hover:border-brand/30 hover:shadow-sm transition-colors duration-200"
+            >
+              <Download className="h-3.5 w-3.5" />
+              <span className="hidden sm:inline">CSV</span>
+            </button>
+          ) : undefined
+        }
       />
 
       {isLoading ? (
@@ -184,7 +242,7 @@ export function AnalyticsPage() {
                       <CartesianGrid strokeDasharray="3 3" opacity={0.2} horizontal={false} />
                       <XAxis type="number" tick={{ fontSize: 10 }} tickFormatter={v => `${v}ms`} axisLine={false} tickLine={false} />
                       <YAxis type="category" dataKey="name" tick={{ fontSize: 10 }} width={120} axisLine={false} tickLine={false} />
-                      <Tooltip contentStyle={{ borderRadius: 12, fontSize: 12 }} formatter={(v: any, name: string) => [`${v}ms`, name]} />
+                      <Tooltip contentStyle={{ borderRadius: 12, fontSize: 12 }} formatter={(v: any, name: any) => [`${v}ms`, name]} />
                       <Legend />
                       <Bar dataKey="avg" name="Avg" radius={[0, 4, 4, 0]} fill="#3b82f6" />
                       <Bar dataKey="min" name="Min" radius={[0, 4, 4, 0]} fill="#22c55e" />

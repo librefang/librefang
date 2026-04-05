@@ -11,7 +11,9 @@ import { Badge } from "../components/ui/Badge";
 import { Input } from "../components/ui/Input";
 import { Button } from "../components/ui/Button";
 import { MarkdownContent } from "../components/ui/MarkdownContent";
+import { Modal } from "../components/ui/Modal";
 import { useUIStore } from "../lib/store";
+import { useCreateShortcut } from "../lib/useCreateShortcut";
 import { Database, Search, Trash2, Plus, X, Sparkles, Zap, Clock, Edit2, Loader2, Settings } from "lucide-react";
 
 const REFRESH_MS = 30000;
@@ -33,15 +35,8 @@ function AddMemoryDialog({ onClose }: { onClose: () => void }) {
   });
 
   return (
-    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-black/50 backdrop-blur-sm" onClick={onClose}>
-      <div className="bg-surface rounded-2xl border border-border-subtle w-full sm:max-w-md p-4 sm:p-6 rounded-t-2xl sm:rounded-2xl shadow-2xl animate-fade-in-scale" onClick={e => e.stopPropagation()}>
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="text-lg font-black">{t("memory.add_memory")}</h3>
-          <button onClick={onClose} className="p-1 hover:bg-main/30 rounded-lg">
-            <X className="w-5 h-5 text-text-dim" />
-          </button>
-        </div>
-
+    <Modal isOpen={true} onClose={onClose} title={t("memory.add_memory")} size="md">
+      <div className="p-4 sm:p-6">
         <div className="space-y-4">
           <div>
             <label className="text-xs font-bold text-text-dim mb-1 block">{t("memory.content")}</label>
@@ -88,7 +83,7 @@ function AddMemoryDialog({ onClose }: { onClose: () => void }) {
           </Button>
         </div>
       </div>
-    </div>
+    </Modal>
   );
 }
 
@@ -107,15 +102,8 @@ function EditMemoryDialog({ memory, onClose }: { memory: { id: string; content?:
   });
 
   return (
-    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-black/50 backdrop-blur-sm" onClick={onClose}>
-      <div className="bg-surface rounded-2xl border border-border-subtle w-full sm:max-w-md p-4 sm:p-6 rounded-t-2xl sm:rounded-2xl shadow-2xl animate-fade-in-scale" onClick={e => e.stopPropagation()}>
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="text-lg font-black">{t("memory.edit_memory")}</h3>
-          <button onClick={onClose} className="p-1 hover:bg-main/30 rounded-lg">
-            <X className="w-5 h-5 text-text-dim" />
-          </button>
-        </div>
-
+    <Modal isOpen={true} onClose={onClose} title={t("memory.edit_memory")} size="md">
+      <div className="p-4 sm:p-6">
         <div>
           <label className="text-xs font-bold text-text-dim mb-1 block">{t("memory.content")}</label>
           <textarea
@@ -133,7 +121,7 @@ function EditMemoryDialog({ memory, onClose }: { memory: { id: string; content?:
           </Button>
         </div>
       </div>
-    </div>
+    </Modal>
   );
 }
 
@@ -225,8 +213,8 @@ function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
   const labelCls = "text-[10px] font-bold uppercase tracking-widest text-text-dim mb-1 block";
 
   return (
-    <div className="fixed inset-0 z-100 flex items-center justify-center bg-black/50 backdrop-blur-sm" onClick={onClose}>
-      <div className="w-full max-w-lg mx-4 rounded-2xl bg-surface border border-border-subtle shadow-2xl animate-fade-in-scale overflow-hidden" onClick={e => e.stopPropagation()}>
+    <div className="fixed inset-0 z-100 flex items-end sm:items-center justify-center bg-black/50 backdrop-blur-sm p-0 sm:p-4" onClick={onClose}>
+      <div className="w-full max-w-lg rounded-t-2xl sm:rounded-2xl bg-surface border border-border-subtle shadow-2xl animate-fade-in-scale overflow-hidden" onClick={e => e.stopPropagation()}>
         <div className="p-6 pb-4">
           <h3 className="text-lg font-black">{t("memory.config_title", { defaultValue: "Memory Configuration" })}</h3>
           <p className="text-xs text-text-dim mt-0.5">{t("memory.config_desc", { defaultValue: "Changes are written to config.toml. Restart required for full effect." })}</p>
@@ -323,6 +311,7 @@ export function MemoryPage() {
   const [levelFilter, setLevelFilter] = useState<string>("all");
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [showConfigDialog, setShowConfigDialog] = useState(false);
+  useCreateShortcut(() => setShowAddDialog(true));
   const [editingMemory, setEditingMemory] = useState<{ id: string; content?: string } | null>(null);
 
 
@@ -443,7 +432,7 @@ export function MemoryPage() {
             placeholder={t("common.search")}
             leftIcon={<Search className="w-4 h-4" />}
             rightIcon={search && (
-              <button onClick={() => setSearch("")} className="hover:text-text-main">
+              <button onClick={() => setSearch("")} className="hover:text-text-main" aria-label={t("common.clear_search", { defaultValue: "Clear search" })}>
                 <X className="w-3 h-3" />
               </button>
             )}

@@ -21,7 +21,10 @@ import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
 import { PageHeader } from "../components/ui/PageHeader";
+import { useUIStore } from "../lib/store";
+import { useCreateShortcut } from "../lib/useCreateShortcut";
 import { ListSkeleton } from "../components/ui/Skeleton";
+import { EmptyState } from "../components/ui/EmptyState";
 import { ScheduleModal } from "../components/ui/ScheduleModal";
 import {
   Layers, Trash2, FilePlus, Play, Search,
@@ -55,13 +58,23 @@ export function WorkflowsPage() {
     queryFn: () => getWorkflowRun(selectedRunId!),
     enabled: Boolean(selectedRunId),
   });
-  const runMutation = useMutation({ mutationFn: ({ workflowId, input }: any) => runWorkflow(workflowId, input) });
+  const addToast = useUIStore((s) => s.addToast);
+  const runMutation = useMutation({
+    mutationFn: ({ workflowId, input }: any) => runWorkflow(workflowId, input),
+    onSuccess: () => addToast(t("workflows.run_started", { defaultValue: "Workflow run started" }), "success"),
+    onError: (e: any) => addToast(e?.message || t("workflows.run_failed", { defaultValue: "Failed to start workflow" }), "error"),
+  });
   const dryRunMutation = useMutation({
     mutationFn: ({ workflowId, input }: { workflowId: string; input: string }) =>
       dryRunWorkflow(workflowId, input),
     onSuccess: (data) => setDryRunResult(data),
+    onError: (e: any) => addToast(e?.message || t("workflows.dry_run_failed", { defaultValue: "Dry run failed" }), "error"),
   });
-  const deleteMutation = useMutation({ mutationFn: deleteWorkflow });
+  const deleteMutation = useMutation({
+    mutationFn: deleteWorkflow,
+    onSuccess: () => addToast(t("workflows.deleted", { defaultValue: "Workflow deleted" }), "success"),
+    onError: (e: any) => addToast(e?.message || t("workflows.delete_failed", { defaultValue: "Failed to delete workflow" }), "error"),
+  });
 
   const workflows = useMemo(() =>
     [...(workflowsQuery.data ?? [])]
@@ -100,6 +113,7 @@ export function WorkflowsPage() {
     sessionStorage.removeItem("workflowTemplate");
     navigate({ to: "/canvas", search: { t: Date.now(), wf: undefined } });
   };
+  useCreateShortcut(handleNewWorkflow);
 
   const handleUseTemplate = async (tmpl: WorkflowTemplate) => {
     const steps: any[] = (tmpl as any).steps ?? [];
@@ -182,9 +196,10 @@ export function WorkflowsPage() {
         icon={<Layers className="h-4 w-4" />}
         helpText={t("workflows.help")}
         actions={hasWorkflows ?
-          <Button variant="primary" onClick={handleNewWorkflow}>
+          <Button variant="primary" onClick={handleNewWorkflow} title={t("workflows.create_blank") + " (n)"}>
             <FilePlus className="h-4 w-4" />
-            {t("workflows.create_blank")}
+            <span>{t("workflows.create_blank")}</span>
+            <kbd className="hidden sm:inline-flex h-5 min-w-[20px] items-center justify-center rounded border border-white/30 bg-white/10 px-1 text-[9px] font-mono font-semibold">n</kbd>
           </Button> : undefined
         }
       />
@@ -255,7 +270,8 @@ export function WorkflowsPage() {
           {hasWorkflows && (
             <Input value={searchQuery} onChange={e => setSearchQuery(e.target.value)}
               placeholder={t("workflows.search_placeholder")}
-              leftIcon={<Search className="h-4 w-4" />} />
+              leftIcon={<Search className="h-4 w-4" />}
+              data-shortcut-search />
           )}
 
           {/* Loading Skeleton */}
@@ -325,7 +341,8 @@ export function WorkflowsPage() {
                     </div>
                   ) : (
                     <button onClick={() => handleDelete(wf.id)}
-                      className="p-2 rounded-lg text-text-dim/30 hover:text-error hover:bg-error/10 transition-colors">
+                      className="p-2 rounded-lg text-text-dim/30 hover:text-error hover:bg-error/10 transition-colors"
+                      aria-label={t("common.delete")}>
                       <Trash2 className="w-3.5 h-3.5" />
                     </button>
                   )}
@@ -566,25 +583,25 @@ export function WorkflowsPage() {
       ) : (
         /* Empty State */
         !workflowsQuery.isLoading && (
-          <div className="text-center py-12">
-            <div className="w-16 h-16 rounded-2xl bg-brand/10 flex items-center justify-center mx-auto mb-4">
-              <Layers className="w-8 h-8 text-brand" />
-            </div>
-            <h3 className="text-lg font-bold">{t("workflows.empty_title")}</h3>
-            <p className="text-sm text-text-dim mt-1 mb-6">{t("workflows.empty_desc")}</p>
-            <div className="flex items-center justify-center gap-3">
-              <Button variant="primary" onClick={() => handleNewWorkflow()}>
-                <FilePlus className="w-4 h-4" />
-                {t("workflows.create_blank")}
-              </Button>
-              {apiTemplates.length > 0 && (
-                <Button variant="secondary" onClick={() => setActiveTab("templates")}>
-                  <Layers className="w-4 h-4" />
-                  {t("workflows.template_library")}
+          <EmptyState
+            icon={<Layers className="w-7 h-7" />}
+            title={t("workflows.empty_title")}
+            description={t("workflows.empty_desc")}
+            action={
+              <div className="flex items-center justify-center gap-3">
+                <Button variant="primary" onClick={() => handleNewWorkflow()}>
+                  <FilePlus className="w-4 h-4" />
+                  {t("workflows.create_blank")}
                 </Button>
-              )}
-            </div>
-          </div>
+                {apiTemplates.length > 0 && (
+                  <Button variant="secondary" onClick={() => setActiveTab("templates")}>
+                    <Layers className="w-4 h-4" />
+                    {t("workflows.template_library")}
+                  </Button>
+                )}
+              </div>
+            }
+          />
         )
       )}
         </>

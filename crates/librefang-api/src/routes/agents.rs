@@ -119,6 +119,10 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             axum::routing::post(clone_agent),
         )
         .route(
+            "/agents/{id}/reload",
+            axum::routing::post(reload_agent_manifest),
+        )
+        .route(
             "/agents/{id}/files",
             axum::routing::get(list_agent_files),
         )
@@ -2305,6 +2309,15 @@ pub async fn set_model(
         }
     };
     let explicit_provider = body["provider"].as_str();
+    // Check agent exists — kernel returns a generic error for missing
+    // agents that the match arm below would wrap as 500. Validate up
+    // front so the caller gets a 404 for the common case.
+    if state.kernel.agent_registry().get(agent_id).is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+        );
+    }
     match state
         .kernel
         .set_agent_model(agent_id, model, explicit_provider)
@@ -2482,6 +2495,16 @@ pub async fn set_agent_tools(
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": t.t("api-error-agent-missing-tools")})),
+        );
+    }
+
+    // Check agent exists — kernel returns a generic error for missing
+    // agents that the match arm below would wrap as 500. Validate up
+    // front so the caller gets a 404 for the common case.
+    if state.kernel.agent_registry().get(agent_id).is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
         );
     }
 
@@ -3476,6 +3499,49 @@ pub async fn clone_agent(
             "name": req.new_name,
         })),
     )
+}
+
+/// POST /api/agents/{id}/reload — Re-read the agent's agent.toml from disk.
+///
+/// Picks up manual edits to fields like `skills`, `mcp_servers`, `tools`,
+/// or `system_prompt` without restarting the daemon. Runtime-only fields
+/// (workspace path, tags) are preserved.
+#[utoipa::path(
+    post,
+    path = "/api/agents/{id}/reload",
+    tag = "agents",
+    params(("id" = String, Path, description = "Agent ID")),
+    responses(
+        (status = 200, description = "Agent manifest reloaded from agent.toml", body = serde_json::Value)
+    )
+)]
+pub async fn reload_agent_manifest(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    let agent_id: AgentId = match id.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
+            );
+        }
+    };
+    match state.kernel.reload_agent_from_disk(agent_id) {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"status": "reloaded", "agent_id": id})),
+        ),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(
+                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
+            ),
+        ),
+    }
 }
 
 // ---------------------------------------------------------------------------

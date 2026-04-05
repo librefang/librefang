@@ -68,9 +68,15 @@ jobs:
           # Write to file for multiline output
           echo "$CHANGES" > /tmp/changelog.md
 
+      # Use HOMEBREW_TAP_TOKEN (PAT) instead of GITHUB_TOKEN so that the
+      # `release: published` event fires downstream workflows. Releases
+      # created by GITHUB_TOKEN do NOT trigger any subsequent workflow runs,
+      # which is why dashboard-build.yml's `release: published` trigger
+      # never fired for past releases — leaving beta14 without its
+      # `dashboard-dist.tar.gz` asset for ~9 hours after publish (#2091).
       - name: Create GitHub Release
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
 

@@ -7,7 +7,7 @@
       "name": "Apache-2.0",
       "url": "https://www.apache.org/licenses/LICENSE-2.0"
     },
-    "version": "2026.4.3-beta11"
+    "version": "2026.4.4-beta13"
   },
   "paths": {
     "/.well-known/agent.json": {
@@ -6010,7 +6010,7 @@
         "tags": [
           "workflows"
         ],
-        "summary": "GET /api/schedules — List all cron-based scheduled jobs.",
+        "summary": "GET /api/schedules — List all scheduled jobs.",
         "operationId": "list_schedules",
         "responses": {
           "200": {
@@ -6030,7 +6030,7 @@
         "tags": [
           "workflows"
         ],
-        "summary": "POST /api/schedules — Create a new cron-based scheduled job.",
+        "summary": "POST /api/schedules — Create a new scheduled job (backed by CronScheduler).",
         "operationId": "create_schedule",
         "requestBody": {
           "content": {
@@ -6149,7 +6149,7 @@
         "tags": [
           "workflows"
         ],
-        "summary": "POST /api/schedules/:id/run — Manually run a scheduled job now.",
+        "summary": "POST /api/schedules/:id/run — Manually trigger a scheduled job now.",
         "operationId": "run_schedule",
         "parameters": [
           {

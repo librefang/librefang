@@ -103,6 +103,25 @@ pub struct ChannelOverrides {
     /// (show the done reaction for backward compatibility).
     #[serde(default)]
     pub clear_done_reaction: bool,
+    /// When `true`, all built-in slash commands (`/agent`, `/new`, `/help`, …)
+    /// are disabled on this channel and any leading-slash text is forwarded
+    /// to the agent as normal message content. Use this for public-facing
+    /// bots where end users must not be able to switch agents or reset
+    /// sessions. Takes precedence over `allowed_commands` / `blocked_commands`.
+    #[serde(default)]
+    pub disable_commands: bool,
+    /// Whitelist of built-in command names (without the leading `/`) that
+    /// are allowed on this channel. When non-empty, any command outside this
+    /// list is treated as normal text and forwarded to the agent. Leave
+    /// empty to fall back to `blocked_commands`.
+    #[serde(default)]
+    pub allowed_commands: Vec<String>,
+    /// Blacklist of built-in command names (without the leading `/`) that
+    /// are blocked on this channel. Applied only when `allowed_commands` is
+    /// empty. Blocked commands are treated as normal text and forwarded to
+    /// the agent.
+    #[serde(default)]
+    pub blocked_commands: Vec<String>,
 }
 
 impl Default for ChannelOverrides {
@@ -123,6 +142,9 @@ impl Default for ChannelOverrides {
             message_debounce_max_ms: 30000,
             message_debounce_max_buffer: 64,
             clear_done_reaction: false,
+            disable_commands: false,
+            allowed_commands: Vec::new(),
+            blocked_commands: Vec::new(),
         }
     }
 }
@@ -1775,6 +1797,9 @@ pub struct KernelConfig {
     /// Execution approval policy.
     #[serde(default, alias = "approval_policy")]
     pub approval: crate::approval::ApprovalPolicy,
+    /// Notification engine configuration for approval alerts and task state notifications.
+    #[serde(default)]
+    pub notification: crate::approval::NotificationConfig,
     /// Cron scheduler max total jobs across all agents. Default: 500.
     #[serde(default = "default_max_cron_jobs")]
     pub max_cron_jobs: usize,
@@ -2835,6 +2860,7 @@ impl Default for KernelConfig {
             webhook_triggers: None,
             triggers: TriggersConfig::default(),
             approval: crate::approval::ApprovalPolicy::default(),
+            notification: crate::approval::NotificationConfig::default(),
             max_cron_jobs: default_max_cron_jobs(),
             include: Vec::new(),
             exec_policy: ExecPolicy::default(),

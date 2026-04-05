@@ -823,6 +823,9 @@ threading = true
 output_format = "telegram_html"
 usage_footer = "tokens"
 typing_mode = "instant"
+disable_commands = false
+allowed_commands = []
+blocked_commands = []
 ```
 
 | 字段 | 类型 | 默认值 | 说明 |
@@ -837,6 +840,9 @@ typing_mode = "instant"
 | `output_format` | string 或 null | `null` | 覆盖输出格式。见下表。 |
 | `usage_footer` | string 或 null | `null` | 覆盖该通道的用量页脚模式。可选值：`off`、`tokens`、`cost`、`full`。 |
 | `typing_mode` | string 或 null | `null` | 输入状态指示器行为。见下表。默认为 `instant`。 |
+| `disable_commands` | bool | `false` | 关闭该通道所有内置斜杠命令。参见[命令策略](#命令策略)。 |
+| `allowed_commands` | list of strings | `[]` | 命令名白名单（不带 `/`）。非空时仅这些命令可用。 |
+| `blocked_commands` | list of strings | `[]` | 命令名黑名单（不带 `/`）。仅在 `allowed_commands` 为空时生效。 |
 
 **`dm_policy` 值说明：**
 
@@ -872,6 +878,41 @@ typing_mode = "instant"
 | `message` | 仅在 LLM 返回第一个文本增量时发送输入状态指示。 |
 | `thinking` | 仅在 LLM 推理/思考阶段发送输入状态指示。 |
 | `never` | 从不发送输入状态指示。 |
+
+#### 命令策略
+
+每个通道都自带一组内置斜杠命令（`/agent`、`/new`、`/reboot`、`/model`、`/usage` 等），可用于切换 Agent、重置会话、查看用量、触发工作流。在**面向公众的 bot**（客服、社区助手）上暴露这些命令是安全隐患——任何人都可以打 `/agent admin` 切到内部 Agent，`/new` 清空会话，或者 `/model` 换模型。
+
+下面三个字段按通道对内置命令做访问控制。**优先级：** `disable_commands` > `allowed_commands`（白名单） > `blocked_commands`（黑名单）。
+
+**被拦截的命令会作为普通文本转发给 Agent**——不会返回错误。所以一个设置了 `disable_commands = true` 的公共 bot，当用户打 `/agent admin` 时，会由 Agent 自然语言回复，用户永远不会发现命令系统的存在。
+
+**配方：完全锁定的公共 bot（禁用所有命令）**
+
+```toml
+[channels.telegram.overrides]
+disable_commands = true
+```
+
+**配方：保留平台 UX 必需命令的公共 bot**
+
+Telegram 的 UX 约定要求 `/start` 展示欢迎语，只保留安全的几个：
+
+```toml
+[channels.telegram.overrides]
+allowed_commands = ["start", "help"]
+```
+
+**配方：只屏蔽危险命令的管理员 bot**
+
+对于面向运维人员的 bot（用 `allowed_users` 限制访问），你可能仍想屏蔽会改变昂贵状态的命令：
+
+```toml
+[channels.telegram.overrides]
+blocked_commands = ["agent", "new", "reboot", "model", "stop"]
+```
+
+命令名是内部使用的裸 token —— TOML 里写 `"agent"` 或 `"/agent"` 都行，匹配时会自动去掉前导斜杠。完整命令列表见 `/help`。
 
 ---
 

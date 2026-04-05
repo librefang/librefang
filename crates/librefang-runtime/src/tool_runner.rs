@@ -13,7 +13,7 @@ use librefang_types::tool_compat::normalize_tool_name;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 /// Maximum inter-agent call depth to prevent infinite recursion (A->B->C->...).
 #[allow(dead_code)]
@@ -52,24 +52,44 @@ fn check_taint_shell_exec(command: &str) -> Option<String> {
 ///
 /// Blocks URLs that appear to contain API keys, tokens, or other secrets
 /// in query parameters (potential data exfiltration). Implements TaintSink::net_fetch().
+///
+/// Both the raw URL and its percent-decoded query parameter names are
+/// checked — an attacker can otherwise bypass the filter with encoding
+/// tricks such as `api%5Fkey=secret` (the server decodes `%5F` to `_`
+/// and receives the real `api_key=secret`).
 fn check_taint_net_fetch(url: &str) -> Option<String> {
-    let exfil_patterns = [
-        "api_key=",
-        "apikey=",
-        "token=",
-        "secret=",
-        "password=",
-        "Authorization:",
-    ];
-    for pattern in &exfil_patterns {
-        if url.to_lowercase().contains(&pattern.to_lowercase()) {
-            let mut labels = HashSet::new();
-            labels.insert(TaintLabel::Secret);
-            let tainted = TaintedValue::new(url, labels, "llm_tool_call");
-            if let Err(violation) = tainted.check_sink(&TaintSink::net_fetch()) {
-                warn!(url = crate::str_utils::safe_truncate_str(url, 80), %violation, "Net fetch taint check failed");
-                return Some(violation.to_string());
+    const SECRET_KEYS: &[&str] = &["api_key", "apikey", "token", "secret", "password"];
+
+    // Scan 1: raw URL literal for `<key>=` and the Authorization header prefix.
+    let url_lower = url.to_lowercase();
+    let mut hit = url_lower.contains("authorization:");
+    if !hit {
+        hit = SECRET_KEYS
+            .iter()
+            .any(|k| url_lower.contains(&format!("{k}=")));
+    }
+
+    // Scan 2: percent-decoded query parameter names. Parsing via
+    // `url::Url` decodes each name so `api%5Fkey` becomes `api_key`.
+    if !hit {
+        if let Ok(parsed) = url::Url::parse(url) {
+            for (name, _value) in parsed.query_pairs() {
+                let name_lower = name.to_lowercase();
+                if SECRET_KEYS.iter().any(|k| name_lower == *k) {
+                    hit = true;
+                    break;
+                }
             }
+        }
+    }
+
+    if hit {
+        let mut labels = HashSet::new();
+        labels.insert(TaintLabel::Secret);
+        let tainted = TaintedValue::new(url, labels, "llm_tool_call");
+        if let Err(violation) = tainted.check_sink(&TaintSink::net_fetch()) {
+            warn!(url = crate::str_utils::safe_truncate_str(url, 80), %violation, "Net fetch taint check failed");
+            return Some(violation.to_string());
         }
     }
     None
@@ -169,10 +189,32 @@ pub async fn execute_tool(
                 librefang_types::truncate_str(&input_str, 200)
             );
             match kh.request_approval(agent_id_str, tool_name, &summary).await {
-                Ok(true) => {
+                Ok(librefang_types::approval::ApprovalDecision::Approved) => {
                     debug!(tool_name, "Approval granted — proceeding with execution");
                 }
-                Ok(false) => {
+                Ok(librefang_types::approval::ApprovalDecision::ModifyAndRetry { feedback }) => {
+                    warn!(tool_name, "Approval: human requested modification");
+                    return ToolResult {
+                        tool_use_id: tool_use_id.to_string(),
+                        content: format!(
+                            "[MODIFY_AND_RETRY] Human feedback for '{}': {}",
+                            tool_name, feedback
+                        ),
+                        is_error: true,
+                    };
+                }
+                Ok(librefang_types::approval::ApprovalDecision::Skipped) => {
+                    info!(tool_name, "Approval timed out — tool skipped by policy");
+                    return ToolResult {
+                        tool_use_id: tool_use_id.to_string(),
+                        content: format!(
+                            "Tool '{}' skipped: approval timed out and policy is set to skip. Continue without this tool.",
+                            tool_name
+                        ),
+                        is_error: false,
+                    };
+                }
+                Ok(_) => {
                     warn!(tool_name, "Approval denied — blocking tool execution");
                     return ToolResult {
                         tool_use_id: tool_use_id.to_string(),
@@ -195,6 +237,25 @@ pub async fn execute_tool(
         }
     }
 
+    // Check for truncated tool call arguments from the LLM driver (#2027).
+    // When the LLM's response is cut off mid-JSON (max_tokens exceeded), the
+    // driver marks the input with __args_truncated. Return a helpful error
+    // so the LLM can retry with smaller content.
+    if input
+        .get(crate::drivers::openai::TRUNCATED_ARGS_KEY)
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        let error_msg = input["__error"].as_str().unwrap_or(
+            "Tool call arguments were truncated. Try smaller content or split into multiple calls.",
+        );
+        return ToolResult {
+            tool_use_id: tool_use_id.to_string(),
+            content: error_msg.to_string(),
+            is_error: true,
+        };
+    }
+
     debug!(tool_name, "Executing tool");
     let result = match tool_name {
         // Filesystem tools
@@ -204,40 +265,50 @@ pub async fn execute_tool(
         "apply_patch" => tool_apply_patch(input, workspace_root).await,
 
         // Web tools (upgraded: multi-provider search, SSRF-protected fetch)
-        "web_fetch" => {
-            // Taint check: block URLs containing secrets/PII from being exfiltrated
-            let url = input["url"].as_str().unwrap_or("");
-            if let Some(violation) = check_taint_net_fetch(url) {
-                return ToolResult {
-                    tool_use_id: tool_use_id.to_string(),
-                    content: format!("Taint violation: {violation}"),
-                    is_error: true,
-                };
+        "web_fetch" => match input["url"].as_str() {
+            None => Err("Missing 'url' parameter".to_string()),
+            Some(url) => {
+                // Taint check: block URLs containing secrets/PII from being exfiltrated
+                if let Some(violation) = check_taint_net_fetch(url) {
+                    return ToolResult {
+                        tool_use_id: tool_use_id.to_string(),
+                        content: format!("Taint violation: {violation}"),
+                        is_error: true,
+                    };
+                }
+                let method = input["method"].as_str().unwrap_or("GET");
+                let headers = input.get("headers").and_then(|v| v.as_object());
+                let body = input["body"].as_str();
+                if let Some(ctx) = web_ctx {
+                    ctx.fetch
+                        .fetch_with_options(url, method, headers, body)
+                        .await
+                } else {
+                    tool_web_fetch_legacy(input).await
+                }
             }
-            let method = input["method"].as_str().unwrap_or("GET");
-            let headers = input.get("headers").and_then(|v| v.as_object());
-            let body = input["body"].as_str();
-            if let Some(ctx) = web_ctx {
-                ctx.fetch
-                    .fetch_with_options(url, method, headers, body)
-                    .await
-            } else {
-                tool_web_fetch_legacy(input).await
-            }
-        }
-        "web_search" => {
-            if let Some(ctx) = web_ctx {
-                let query = input["query"].as_str().unwrap_or("");
+        },
+        "web_search" => match input["query"].as_str() {
+            None => Err("Missing 'query' parameter".to_string()),
+            Some(query) => {
                 let max_results = input["max_results"].as_u64().unwrap_or(5) as usize;
-                ctx.search.search(query, max_results).await
-            } else {
-                tool_web_search_legacy(input).await
+                if let Some(ctx) = web_ctx {
+                    ctx.search.search(query, max_results).await
+                } else {
+                    tool_web_search_legacy(input).await
+                }
             }
-        }
+        },
 
         // Shell tool — exec policy + metacharacter check + taint check
         "shell_exec" => {
-            let command = input["command"].as_str().unwrap_or("");
+            let Some(command) = input["command"].as_str() else {
+                return ToolResult {
+                    tool_use_id: tool_use_id.to_string(),
+                    content: "Missing 'command' parameter".to_string(),
+                    is_error: true,
+                };
+            };
 
             let is_full_exec = exec_policy
                 .is_some_and(|p| p.mode == librefang_types::config::ExecSecurityMode::Full);
@@ -314,9 +385,9 @@ pub async fn execute_tool(
         "task_list" => tool_task_list(input, kernel).await,
         "event_publish" => tool_event_publish(input, kernel).await,
 
-        // Scheduling tools
-        "schedule_create" => tool_schedule_create(input, kernel).await,
-        "schedule_list" => tool_schedule_list(kernel).await,
+        // Scheduling tools (delegate to CronScheduler via kernel handle)
+        "schedule_create" => tool_schedule_create(input, kernel, caller_agent_id).await,
+        "schedule_list" => tool_schedule_list(kernel, caller_agent_id).await,
         "schedule_delete" => tool_schedule_delete(input, kernel).await,
 
         // Knowledge graph tools
@@ -325,11 +396,11 @@ pub async fn execute_tool(
         "knowledge_query" => tool_knowledge_query(input, kernel).await,
 
         // Image analysis tool
-        "image_analyze" => tool_image_analyze(input).await,
+        "image_analyze" => tool_image_analyze(input, workspace_root).await,
 
         // Media understanding tools
-        "media_describe" => tool_media_describe(input, media_engine).await,
-        "media_transcribe" => tool_media_transcribe(input, media_engine).await,
+        "media_describe" => tool_media_describe(input, media_engine, workspace_root).await,
+        "media_transcribe" => tool_media_transcribe(input, media_engine, workspace_root).await,
 
         // Media generation tools (MediaDriver-based)
         "image_generate" => tool_image_generate(input, media_drivers, workspace_root).await,
@@ -357,7 +428,7 @@ pub async fn execute_tool(
         // Cron scheduling tools
         "cron_create" => tool_cron_create(input, kernel, caller_agent_id).await,
         "cron_list" => tool_cron_list(kernel, caller_agent_id).await,
-        "cron_cancel" => tool_cron_cancel(input, kernel).await,
+        "cron_cancel" => tool_cron_cancel(input, kernel, caller_agent_id).await,
 
         // Channel send tool (proactive outbound messaging)
         "channel_send" => tool_channel_send(input, kernel, workspace_root).await,
@@ -384,7 +455,13 @@ pub async fn execute_tool(
 
         // Browser automation tools
         "browser_navigate" => {
-            let url = input["url"].as_str().unwrap_or("");
+            let Some(url) = input["url"].as_str() else {
+                return ToolResult {
+                    tool_use_id: tool_use_id.to_string(),
+                    content: "Missing 'url' parameter".to_string(),
+                    is_error: true,
+                };
+            };
             if let Some(violation) = check_taint_net_fetch(url) {
                 return ToolResult {
                     tool_use_id: tool_use_id.to_string(),
@@ -731,11 +808,11 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "agent_kill".to_string(),
-            description: "Kill (terminate) another agent by its ID.".to_string(),
+            description: "Kill (terminate) another agent. Accepts UUID or agent name.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "agent_id": { "type": "string", "description": "The agent's UUID to kill" }
+                    "agent_id": { "type": "string", "description": "The target agent's UUID or name" }
                 },
                 "required": ["agent_id"]
             }),
@@ -1401,19 +1478,6 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
 // Filesystem tools
 // ---------------------------------------------------------------------------
 
-/// SECURITY: Reject path traversal attempts. Forbids `..` components in file paths.
-fn validate_path(path: &str) -> Result<&str, String> {
-    for component in std::path::Path::new(path).components() {
-        if matches!(component, std::path::Component::ParentDir) {
-            return Err(format!(
-                "{}: '..' components are forbidden",
-                crate::workspace_sandbox::ERR_PATH_TRAVERSAL
-            ));
-        }
-    }
-    Ok(path)
-}
-
 /// Resolve a file path through the workspace sandbox.
 ///
 /// SECURITY: Returns an error when `workspace_root` is `None` to prevent
@@ -2035,7 +2099,7 @@ async fn tool_task_claim(
     caller_agent_id: Option<&str>,
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
-    let agent_id = caller_agent_id.unwrap_or("");
+    let agent_id = caller_agent_id.ok_or("task_claim requires a calling agent context")?;
     match kh.task_claim(agent_id).await? {
         Some(task) => {
             serde_json::to_string_pretty(&task).map_err(|e| format!("Serialize error: {e}"))
@@ -2229,7 +2293,14 @@ async fn tool_knowledge_query(
     let source = input["source"].as_str().map(|s| s.to_string());
     let target = input["target"].as_str().map(|s| s.to_string());
     let relation = input["relation"].as_str().map(parse_relation_type);
-    let max_depth = input["max_depth"].as_u64().unwrap_or(1) as u32;
+    // Cap depth to prevent LLM-triggered DoS via exponential graph
+    // traversal. Knowledge graphs rarely benefit from depth > 5 and
+    // the backend traversal is O(branching_factor^depth).
+    const MAX_KNOWLEDGE_DEPTH: u64 = 10;
+    let max_depth = input["max_depth"]
+        .as_u64()
+        .unwrap_or(1)
+        .min(MAX_KNOWLEDGE_DEPTH) as u32;
 
     let pattern = librefang_types::memory::GraphPattern {
         source,
@@ -2383,71 +2454,80 @@ fn parse_time_to_hour(s: &str) -> Result<u32, String> {
     Ok(hour)
 }
 
-const SCHEDULES_KEY: &str = "__librefang_schedules";
+// schedule_* tools — high-level wrappers around the CronScheduler engine.
+// These accept natural language schedules ("daily at 9am") and delegate to
+// kh.cron_create/list/cancel which use the real kernel tick loop (#2024).
 
 async fn tool_schedule_create(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
+    let agent_id = caller_agent_id.ok_or("Agent ID required for schedule_create")?;
     let description = input["description"]
         .as_str()
         .ok_or("Missing 'description' parameter")?;
     let schedule_str = input["schedule"]
         .as_str()
         .ok_or("Missing 'schedule' parameter")?;
-    let agent = input["agent"].as_str().unwrap_or("");
+    let message = input["message"].as_str().unwrap_or(description);
 
     let cron_expr = parse_schedule_to_cron(schedule_str)?;
-    let schedule_id = uuid::Uuid::new_v4().to_string();
 
-    let entry = serde_json::json!({
-        "id": schedule_id,
-        "description": description,
-        "schedule_input": schedule_str,
-        "cron": cron_expr,
-        "agent": agent,
-        "created_at": chrono::Utc::now().to_rfc3339(),
-        "enabled": true,
-    });
-
-    // Load existing schedules from shared memory
-    let mut schedules: Vec<serde_json::Value> = match kh.memory_recall(SCHEDULES_KEY, None)? {
-        Some(serde_json::Value::Array(arr)) => arr,
-        _ => Vec::new(),
+    // CronJob name only allows alphanumeric + space/hyphen/underscore (max 128 chars).
+    // Sanitize the user-provided description to fit these constraints.
+    let name: String = description
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == ' ' || *c == '-' || *c == '_')
+        .take(128)
+        .collect();
+    let name = if name.is_empty() {
+        "scheduled-task".to_string()
+    } else {
+        name
     };
 
-    schedules.push(entry);
-    kh.memory_store(SCHEDULES_KEY, serde_json::Value::Array(schedules), None)?;
+    // Build CronJob JSON compatible with kh.cron_create()
+    let job_json = serde_json::json!({
+        "name": name,
+        "schedule": { "kind": "cron", "expr": cron_expr },
+        "action": { "kind": "agent_turn", "message": message },
+        "delivery": { "kind": "none" },
+    });
 
+    let result = kh.cron_create(agent_id, job_json).await?;
     Ok(format!(
-        "Schedule created:\n  ID: {schedule_id}\n  Description: {description}\n  Cron: {cron_expr}\n  Original: {schedule_str}"
+        "Schedule created and will execute automatically.\n  Cron: {cron_expr}\n  Original: {schedule_str}\n  {result}"
     ))
 }
 
-async fn tool_schedule_list(kernel: Option<&Arc<dyn KernelHandle>>) -> Result<String, String> {
+async fn tool_schedule_list(
+    kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
+) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
+    let agent_id = caller_agent_id.ok_or("Agent ID required for schedule_list")?;
+    let jobs = kh.cron_list(agent_id).await?;
 
-    let schedules: Vec<serde_json::Value> = match kh.memory_recall(SCHEDULES_KEY, None)? {
-        Some(serde_json::Value::Array(arr)) => arr,
-        _ => Vec::new(),
-    };
-
-    if schedules.is_empty() {
+    if jobs.is_empty() {
         return Ok("No scheduled tasks.".to_string());
     }
 
-    let mut output = format!("Scheduled tasks ({}):\n\n", schedules.len());
-    for s in &schedules {
-        let enabled = s["enabled"].as_bool().unwrap_or(true);
+    let mut output = format!("Scheduled tasks ({}):\n\n", jobs.len());
+    for j in &jobs {
+        let enabled = j["enabled"].as_bool().unwrap_or(true);
         let status = if enabled { "active" } else { "paused" };
+        let schedule_display = j["schedule"]["expr"]
+            .as_str()
+            .or_else(|| j["schedule"]["every_secs"].as_u64().map(|_| "interval"))
+            .unwrap_or("?");
         output.push_str(&format!(
-            "  [{status}] {} — {}\n    Cron: {} | Agent: {}\n    Created: {}\n\n",
-            s["id"].as_str().unwrap_or("?"),
-            s["description"].as_str().unwrap_or("?"),
-            s["cron"].as_str().unwrap_or("?"),
-            s["agent"].as_str().unwrap_or("(self)"),
-            s["created_at"].as_str().unwrap_or("?"),
+            "  [{status}] {} — {}\n    Schedule: {}\n    Next run: {}\n\n",
+            j["id"].as_str().unwrap_or("?"),
+            j["name"].as_str().unwrap_or("?"),
+            schedule_display,
+            j["next_run"].as_str().unwrap_or("pending"),
         ));
     }
 
@@ -2459,21 +2539,12 @@ async fn tool_schedule_delete(
     kernel: Option<&Arc<dyn KernelHandle>>,
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
-    let id = input["id"].as_str().ok_or("Missing 'id' parameter")?;
-
-    let mut schedules: Vec<serde_json::Value> = match kh.memory_recall(SCHEDULES_KEY, None)? {
-        Some(serde_json::Value::Array(arr)) => arr,
-        _ => Vec::new(),
-    };
-
-    let before = schedules.len();
-    schedules.retain(|s| s["id"].as_str() != Some(id));
-
-    if schedules.len() == before {
-        return Err(format!("Schedule '{id}' not found."));
-    }
-
-    kh.memory_store(SCHEDULES_KEY, serde_json::Value::Array(schedules), None)?;
+    // Accept either "id" or "job_id" for backward compatibility
+    let id = input["id"]
+        .as_str()
+        .or_else(|| input["job_id"].as_str())
+        .ok_or("Missing 'id' parameter")?;
+    kh.cron_cancel(id).await?;
     Ok(format!("Schedule '{id}' deleted."))
 }
 
@@ -2504,11 +2575,28 @@ async fn tool_cron_list(
 async fn tool_cron_cancel(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
     let job_id = input["job_id"]
         .as_str()
         .ok_or("Missing 'job_id' parameter")?;
+    let agent_id = caller_agent_id.ok_or("Agent ID required for cron_cancel")?;
+    // Authorize: the caller may only cancel jobs that belong to them.
+    // Otherwise an agent with the cron_cancel tool could delete any other
+    // agent's jobs as long as it learns their UUID (via side-channel or
+    // social engineering).
+    let owned = kh.cron_list(agent_id).await?;
+    let owns_job = owned.iter().any(|job| {
+        job.get("id")
+            .and_then(|v| v.as_str())
+            .is_some_and(|id| id == job_id)
+    });
+    if !owns_job {
+        return Err(format!(
+            "Cron job '{job_id}' not found or not owned by this agent"
+        ));
+    }
     kh.cron_cancel(job_id).await?;
     Ok(format!("Cron job '{job_id}' cancelled."))
 }
@@ -2806,13 +2894,19 @@ async fn tool_a2a_send(
 // Image analysis tool
 // ---------------------------------------------------------------------------
 
-async fn tool_image_analyze(input: &serde_json::Value) -> Result<String, String> {
-    let path = input["path"].as_str().ok_or("Missing 'path' parameter")?;
+async fn tool_image_analyze(
+    input: &serde_json::Value,
+    workspace_root: Option<&Path>,
+) -> Result<String, String> {
+    let raw_path = input["path"].as_str().ok_or("Missing 'path' parameter")?;
     let prompt = input["prompt"].as_str().unwrap_or("");
+    // Route through the workspace sandbox so user-supplied paths cannot
+    // escape to arbitrary filesystem locations (e.g. /etc/passwd).
+    let resolved = resolve_file_path(raw_path, workspace_root)?;
 
-    let data = tokio::fs::read(path)
+    let data = tokio::fs::read(&resolved)
         .await
-        .map_err(|e| format!("Failed to read image '{path}': {e}"))?;
+        .map_err(|e| format!("Failed to read image '{raw_path}': {e}"))?;
 
     let file_size = data.len();
 
@@ -2839,7 +2933,7 @@ async fn tool_image_analyze(input: &serde_json::Value) -> Result<String, String>
     };
 
     let mut result = serde_json::json!({
-        "path": path,
+        "path": raw_path,
         "format": format,
         "file_size_bytes": file_size,
         "file_size_human": format_file_size(file_size),
@@ -3037,19 +3131,23 @@ fn tool_system_time() -> String {
 async fn tool_media_describe(
     input: &serde_json::Value,
     media_engine: Option<&crate::media_understanding::MediaEngine>,
+    workspace_root: Option<&Path>,
 ) -> Result<String, String> {
     use base64::Engine;
     let engine = media_engine.ok_or("Media engine not available. Check media configuration.")?;
-    let path = input["path"].as_str().ok_or("Missing 'path' parameter")?;
-    let _ = validate_path(path)?;
+    let raw_path = input["path"].as_str().ok_or("Missing 'path' parameter")?;
+    // Route through the workspace sandbox so all media reads stay inside
+    // the agent's dir — a plain `..` check would miss absolute paths like
+    // `/etc/passwd`.
+    let resolved = resolve_file_path(raw_path, workspace_root)?;
 
     // Read image file
-    let data = tokio::fs::read(path)
+    let data = tokio::fs::read(&resolved)
         .await
         .map_err(|e| format!("Failed to read image file: {e}"))?;
 
     // Detect MIME type from extension
-    let ext = std::path::Path::new(path)
+    let ext = resolved
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("")
@@ -3082,19 +3180,23 @@ async fn tool_media_describe(
 async fn tool_media_transcribe(
     input: &serde_json::Value,
     media_engine: Option<&crate::media_understanding::MediaEngine>,
+    workspace_root: Option<&Path>,
 ) -> Result<String, String> {
     use base64::Engine;
     let engine = media_engine.ok_or("Media engine not available. Check media configuration.")?;
-    let path = input["path"].as_str().ok_or("Missing 'path' parameter")?;
-    let _ = validate_path(path)?;
+    let raw_path = input["path"].as_str().ok_or("Missing 'path' parameter")?;
+    // Route through the workspace sandbox so all media reads stay inside
+    // the agent's dir — a plain `..` check would miss absolute paths like
+    // `/etc/passwd`.
+    let resolved = resolve_file_path(raw_path, workspace_root)?;
 
     // Read audio file
-    let data = tokio::fs::read(path)
+    let data = tokio::fs::read(&resolved)
         .await
         .map_err(|e| format!("Failed to read audio file: {e}"))?;
 
     // Detect MIME type from extension
-    let ext = std::path::Path::new(path)
+    let ext = resolved
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("")
@@ -4074,9 +4176,9 @@ mod tests {
             _agent_id: &str,
             _tool_name: &str,
             _action_summary: &str,
-        ) -> Result<bool, String> {
+        ) -> Result<librefang_types::approval::ApprovalDecision, String> {
             self.approval_requests.fetch_add(1, Ordering::SeqCst);
-            Ok(false)
+            Ok(librefang_types::approval::ApprovalDecision::Denied)
         }
     }
 
@@ -4775,10 +4877,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_image_analyze_missing_file() {
+        let workspace = tempfile::tempdir().expect("tempdir");
         let result = execute_tool(
             "test-id",
             "image_analyze",
-            &serde_json::json!({"path": "/nonexistent/image.png"}),
+            &serde_json::json!({"path": "nonexistent_image.png"}),
             None,
             None,
             None,
@@ -4787,7 +4890,7 @@ mod tests {
             None,
             None,
             None,
-            None,
+            Some(workspace.path()),
             None, // media_engine
             None, // media_drivers
             None, // exec_policy
@@ -4799,7 +4902,11 @@ mod tests {
         )
         .await;
         assert!(result.is_error);
-        assert!(result.content.contains("Failed to read"));
+        assert!(
+            result.content.contains("Failed to read"),
+            "unexpected error content: {}",
+            result.content
+        );
     }
 
     #[test]

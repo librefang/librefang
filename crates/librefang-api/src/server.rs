@@ -796,6 +796,14 @@ pub async fn run_daemon(
 
     let (app, state) = build_router(kernel.clone(), addr).await;
 
+    // Sync dashboard assets in background (downloads from release if outdated)
+    {
+        let home = kernel.home_dir().to_path_buf();
+        bg_tasks.push(tokio::spawn(async move {
+            crate::webchat::sync_dashboard(&home).await;
+        }));
+    }
+
     // Background provider key validation — runs shortly after boot so the
     // dashboard shows ValidatedKey / InvalidKey instead of just Configured.
     kernel.clone().spawn_key_validation();

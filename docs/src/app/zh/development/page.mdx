@@ -92,8 +92,8 @@ librefang start
 
 ### Dashboard 开发
 
-React Dashboard 的构建产物已预提交在 `crates/librefang-api/static/react/` 目录中。
-如果你修改了 Dashboard 源码，需要在编译 Rust 二进制之前重新构建：
+React Dashboard 构建产物输出到 `crates/librefang-api/static/react/`（已 gitignore）。
+CI 会自动构建并上传；本地开发时，需要在编译 Rust 二进制之前手动构建：
 
 ```bash
 # 重新构建 Dashboard 资源
@@ -488,12 +488,8 @@ curl -s http://127.0.0.1:4545/ | head -5
 curl -sI http://127.0.0.1:4545/dashboard/assets/index-DVRukrPy.js
 # 200 = 正常, 404 = 资源未嵌入
 
-# 4. 如果资源 404，验证编译前构建产物是否存在
-ls crates/librefang-api/static/react/index.html
-ls crates/librefang-api/static/react/assets/
-
-# 5. 重新构建：将新资源嵌入二进制
-cargo xtask build-web --dashboard
+# 4. 如果资源 404，本地重新构建 dashboard 并重新编译
+just dashboard-build
 cargo build -p librefang-cli --release
 ```
 

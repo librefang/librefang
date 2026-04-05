@@ -5,19 +5,25 @@ import rehypeKatex from "rehype-katex";
 import remarkMath from "remark-math";
 import { useTranslation } from "react-i18next";
 import { useNavigate, useSearch } from "@tanstack/react-router";
-import { buildAuthenticatedWebSocketUrl, listAgents, sendAgentMessage, loadAgentSession, listPendingApprovals, resolveApproval, getFullConfig, listAgentSessions, createAgentSession, switchAgentSession, deleteSession, listMediaProviders } from "../api";
-import type { ApprovalItem, SessionListItem } from "../api";
+import { buildAuthenticatedWebSocketUrl, listAgents, sendAgentMessage, loadAgentSession, listPendingApprovals, resolveApproval, getFullConfig, listAgentSessions, createAgentSession, switchAgentSession, deleteSession, listModels, patchAgentConfig, listMediaProviders } from "../api";
+import type { ApprovalItem, SessionListItem, ModelItem, AgentTool } from "../api";
 import { normalizeToolOutput } from "../lib/chat";
 import { useTtsManager } from "../lib/tts";
-import { MessageCircle, Send, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, Zap, ShieldAlert, CheckCircle, XCircle, Clock, Plus, Trash2, ChevronDown, Copy, Volume2, Pause, Loader2 } from "lucide-react";
+import { MessageCircle, Send, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, Zap, ShieldAlert, CheckCircle, XCircle, Clock, Plus, Trash2, ChevronDown, Loader2, Copy, Volume2, Pause, Download } from "lucide-react";
 import { Badge } from "../components/ui/Badge";
 import { MarkdownContent } from "../components/ui/MarkdownContent";
 import { useUIStore } from "../lib/store";
+import { ToolCallCard } from "../components/ui/ToolCallCard";
+import { filterVisible } from "../lib/hiddenModels";
 import { Typewriter_v2 } from "../components/Typewriter_v2";
 import "katex/dist/katex.min.css";
 
 const isAuthUnavailable = (status?: string) =>
   !!status && status !== "configured" && status !== "validated_key" && status !== "configured_cli" && status !== "not_required";
+
+interface ChatToolCall extends AgentTool {
+  _call_id?: string;
+}
 
 interface ChatMessage {
   id: string;
@@ -30,6 +36,7 @@ interface ChatMessage {
   cost_usd?: number;
   memories_saved?: string[];
   memories_used?: string[];
+  tools?: ChatToolCall[];
 }
 
 // Slash commands
@@ -112,9 +119,16 @@ function useWebSocket(agentId: string | null) {
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
       retriesRef.current = 0;
       onDropRef.current = null;
-      if (wsRef.current) {
-        wsRef.current.onclose = null; // prevent reconnect on intentional close
-        wsRef.current.close();
+      const ws = wsRef.current;
+      if (ws) {
+        ws.onclose = null; // prevent reconnect on intentional close
+        if (ws.readyState === WebSocket.CONNECTING) {
+          // Closing a CONNECTING socket triggers a noisy browser warning;
+          // defer the close until it actually opens.
+          ws.onopen = () => ws.close();
+        } else if (ws.readyState === WebSocket.OPEN) {
+          ws.close();
+        }
         wsRef.current = null;
       }
     };
@@ -134,15 +148,20 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
   const { ws, wsConnected, onDropRef } = useWebSocket(agentId);
   const addSkillOutput = useUIStore((s) => s.addSkillOutput);
 
-  // Save current messages to cache when switching away
+  // Save current messages to cache when switching away. The cleanup must
+  // read the LATEST messages at unmount/agent-swap time, so we keep a
+  // ref that tracks messages and only fire the save effect on agentId
+  // changes (previously had no deps, so cleanup+re-run every render).
   const prevAgentRef = useRef<string | null>(null);
+  const messagesRef = useRef<ChatMessage[]>(messages);
+  messagesRef.current = messages;
   useEffect(() => {
     return () => {
       if (prevAgentRef.current) {
-        sessionCache.set(prevAgentRef.current, messages);
+        sessionCache.set(prevAgentRef.current, messagesRef.current);
       }
     };
-  });
+  }, [agentId]);
   useEffect(() => { prevAgentRef.current = agentId; }, [agentId]);
 
   // Load history — use cache if available, otherwise fetch
@@ -172,7 +191,8 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
                 ? ""
                 : JSON.stringify(msg.content);
 
-            if (!content.trim()) return [];
+            const hasTools = msg.tools && msg.tools.length > 0;
+            if (!content.trim() && !hasTools) return [];
 
             return [{
               id: `hist-${idx}`,
@@ -183,6 +203,7 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
                   : "assistant",
               content,
               timestamp: new Date(),
+              tools: msg.tools,
             }];
           });
           setMessages(historical);
@@ -351,7 +372,47 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
                   m.id === botMsg.id ? { ...m, isStreaming: false } : m
                 ));
               }
+            } else if (data.type === "tool_start") {
+              // Agent started a tool call — add a running tool entry
+              const toolName = typeof data.tool === "string" ? data.tool : "unknown";
+              const toolId = data.id || `tool-${Date.now()}`;
+              setMessages(prev => prev.map(m =>
+                m.id === botMsg.id
+                  ? { ...m, tools: [...(m.tools || []), { name: toolName, running: true, expanded: false, is_error: false, input: undefined, result: undefined, _call_id: toolId }] }
+                  : m
+              ));
+            } else if (data.type === "tool_end") {
+              // LLM finished specifying the tool call — attach input but keep running
+              // (tool_end means the LLM output is complete, NOT that the tool finished executing;
+              // the tool stays "running" until tool_result arrives)
+              const toolId = data.id;
+              let parsedInput: unknown;
+              try { parsedInput = typeof data.input === "string" ? JSON.parse(data.input) : data.input; } catch { parsedInput = data.input; }
+              setMessages(prev => prev.map(m => {
+                if (m.id !== botMsg.id) return m;
+                const tools = (m.tools || []).map(t =>
+                  t._call_id === toolId ? { ...t, input: parsedInput } : t
+                );
+                return { ...m, tools };
+              }));
             } else if (data.type === "tool_result") {
+              // Attach result to the most recent tool matching by name
+              const toolName = typeof data.tool === "string" ? data.tool : "";
+              const isError = Boolean(data.is_error);
+              const result = typeof data.result === "string" ? data.result : data.result != null ? JSON.stringify(data.result) : "";
+              setMessages(prev => prev.map(m => {
+                if (m.id !== botMsg.id) return m;
+                const tools = [...(m.tools || [])];
+                // Find last tool with this name that has no result yet
+                for (let i = tools.length - 1; i >= 0; i--) {
+                  if (tools[i].name === toolName && tools[i].result === undefined) {
+                    tools[i] = { ...tools[i], result, is_error: isError, running: false };
+                    break;
+                  }
+                }
+                return { ...m, tools };
+              }));
+              // Also keep the skill output panel behavior
               const entry = normalizeToolOutput(data);
               if (entry) {
                 addSkillOutput({ skillName: entry.tool, agentId: agentId || undefined, content: entry.content });
@@ -452,6 +513,15 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
     );
   }
 
+  // Strip <tool_call>...</tool_call> XML blocks and orphaned closing tags from LLM output
+  const displayContent = useMemo(() => {
+    if (isUser) return message.content;
+    return message.content
+      .replace(/<tool_call>[\s\S]*?<\/tool_call>/g, "")
+      .replace(/<\/?tool_calls?>/g, "")
+      .trim();
+  }, [message.content, isUser]);
+
   return (
     <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
       <div className={`flex flex-col max-w-[90%] sm:max-w-[75%] ${isUser ? "items-end" : "items-start"}`}>
@@ -467,7 +537,17 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
           </span>
         </div>
 
+        {/* Tool calls — rendered above text for assistant messages */}
+        {!isUser && message.tools && message.tools.length > 0 && (
+          <div className="w-full mb-1">
+            {message.tools.map((tool, i) => (
+              <ToolCallCard key={tool._call_id ?? `${tool.name}-${i}`} tool={tool} />
+            ))}
+          </div>
+        )}
+
         {/* Message content */}
+        {(displayContent || isUser || message.isStreaming || message.error) && (
         <div className={`relative px-4 py-3 rounded-2xl text-sm leading-relaxed shadow-sm transition-colors ${
           isUser
             ? "bg-gradient-to-br from-brand to-brand/90 text-white rounded-tr-md"
@@ -476,8 +556,8 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
               : "bg-surface border border-border-subtle rounded-tl-md"
         }`}>
           {message.isStreaming ? (
-            message.content ? (
-              <Typewriter_v2 text={message.content} speed={10} />
+            displayContent ? (
+              <Typewriter_v2 text={displayContent} speed={10} />
             ) : (
               <div className="flex items-center gap-1">
                 <span className="w-1.5 h-1.5 bg-brand/60 rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
@@ -491,16 +571,17 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
               <span>{message.error}</span>
             </div>
           ) : isUser ? (
-            <p className="whitespace-pre-line break-words">{message.content}</p>
+            <p className="whitespace-pre-line break-words">{displayContent}</p>
           ) : (
             <MarkdownContent
               remarkPlugins={[remarkMath]}
               rehypePlugins={[rehypeKatex]}
             >
-              {message.content}
+              {displayContent}
             </MarkdownContent>
           )}
         </div>
+        )}
 
         {/* Meta info + action buttons */}
         <div className={`flex items-center justify-between w-full mt-1.5 ${isUser ? "flex-row-reverse" : ""}`}>
@@ -661,16 +742,38 @@ function ChatInput({ onSend, disabled, placeholder, authMissing, providerName }:
 }
 
 // Connection status bar with session dropdown
-function ConnectionBar({ agentName, isLoading, messageCount, onClear, wsConnected, modelName, sessions, activeSessionId, onSwitchSession, onNewSession, onDeleteSession }: {
-  agentName: string; isLoading: boolean; messageCount: number; onClear: () => void; wsConnected?: boolean; modelName?: string;
+function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, wsConnected, modelName, sessions, activeSessionId, onSwitchSession, onNewSession, onDeleteSession, agentId, onModelChange }: {
+  agentName: string; isLoading: boolean; messageCount: number; onClear: () => void; onExport: () => void; wsConnected?: boolean; modelName?: string;
   sessions?: SessionListItem[]; activeSessionId?: string;
   onSwitchSession?: (sessionId: string) => void; onNewSession?: () => void; onDeleteSession?: (sessionId: string) => void;
+  agentId: string; onModelChange: () => void;
 }) {
   const { t } = useTranslation();
   const [sessionOpen, setSessionOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
-  // Close dropdown on outside click
+  // Model popover state
+  const [modelOpen, setModelOpen] = useState(false);
+  const modelRef = useRef<HTMLDivElement>(null);
+  const [models, setModels] = useState<ModelItem[]>([]);
+  const [modelSearch, setModelSearch] = useState("");
+  const [modelLoading, setModelLoading] = useState(false);
+  const [modelFetchError, setModelFetchError] = useState<string | null>(null);
+  const [patchError, setPatchError] = useState<string | null>(null);
+  const [patchPending, setPatchPending] = useState(false);
+  const [optimisticModel, setOptimisticModel] = useState<string | null>(null);
+
+  const hiddenModelKeys = useUIStore((s) => s.hiddenModelKeys);
+  const hiddenSet = useMemo(() => new Set(hiddenModelKeys), [hiddenModelKeys]);
+
+  // Clear optimistic model once the real modelName catches up
+  useEffect(() => {
+    if (optimisticModel && modelName === optimisticModel) {
+      setOptimisticModel(null);
+    }
+  }, [modelName, optimisticModel]);
+
+  // Close session dropdown on outside click
   useEffect(() => {
     if (!sessionOpen) return;
     const handler = (e: MouseEvent) => {
@@ -681,6 +784,51 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, wsConnecte
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
   }, [sessionOpen]);
+
+  // Close model popover on outside click
+  useEffect(() => {
+    if (!modelOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (modelRef.current && !modelRef.current.contains(e.target as Node)) {
+        setModelOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [modelOpen]);
+
+  // Fetch available models lazily when popover first opens
+  useEffect(() => {
+    if (!modelOpen || models.length > 0 || modelLoading) return;
+    setModelLoading(true);
+    setModelFetchError(null);
+    listModels({ available: true })
+      .then(res => setModels(res.models))
+      .catch(() => setModelFetchError(t("chat.unable_to_load_models")))
+      .finally(() => setModelLoading(false));
+  }, [modelOpen, models.length, modelLoading]);
+
+  const visibleModels = useMemo(() => filterVisible(models, hiddenSet), [models, hiddenSet]);
+  const filteredModels = visibleModels.filter(m =>
+    (m.provider + " " + (m.id || "")).toLowerCase().includes(modelSearch.toLowerCase())
+  );
+
+  async function handleSelectModel(model: ModelItem) {
+    const prev = optimisticModel ?? modelName ?? null;
+    setOptimisticModel(model.id);
+    setPatchPending(true);
+    setPatchError(null);
+    try {
+      await patchAgentConfig(agentId, { model: model.id, provider: model.provider });
+      setModelOpen(false);
+      onModelChange(); // invalidates queries; useEffect clears optimisticModel when modelName catches up
+    } catch {
+      setOptimisticModel(prev);
+      setPatchError(t("chat.model_update_failed"));
+    } finally {
+      setPatchPending(false);
+    }
+  }
 
   return (
     <div className="px-2 sm:px-4 py-2 sm:py-2.5 border-b border-border-subtle/50 bg-gradient-to-r from-surface to-transparent flex items-center justify-between">
@@ -705,9 +853,90 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, wsConnecte
         )}
       </div>
       <div className="flex items-center gap-2">
-        {modelName && (
-          <span className="hidden sm:inline text-[10px] text-text-dim/50 font-mono truncate max-w-[200px]">{modelName}</span>
-        )}
+        {/* Model switcher */}
+        <div className="relative hidden sm:block" ref={modelRef}>
+          <button
+            onClick={() => setModelOpen(v => !v)}
+            className="flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] font-mono text-text-dim/50 hover:text-text hover:bg-surface-hover transition-colors truncate max-w-[200px]"
+            title="Switch model"
+          >
+            <span className="truncate">{optimisticModel ?? modelName ?? t("chat.no_model")}</span>
+            <ChevronDown className={`h-2.5 w-2.5 shrink-0 transition-transform ${modelOpen ? "rotate-180" : ""}`} />
+          </button>
+          {modelOpen && (
+            <div className="absolute right-0 top-full mt-1 w-80 bg-surface border border-border-subtle rounded-xl shadow-xl z-50 overflow-hidden">
+              <div className="p-2 border-b border-border-subtle/50">
+                <span className="text-[10px] font-semibold text-text-dim/50 uppercase tracking-wider px-2">{t("chat.switch_model")}</span>
+              </div>
+              <div className="p-2 border-b border-border-subtle/50">
+                <input
+                  autoFocus
+                  type="text"
+                  value={modelSearch}
+                  onChange={e => setModelSearch(e.target.value)}
+                  placeholder={t("chat.search_models")}
+                  className="w-full px-2.5 py-1.5 text-xs rounded-lg bg-main border border-border-subtle focus:outline-none focus:border-brand"
+                />
+                {patchError && (
+                  <p className="text-error text-[10px] mt-1.5 px-1">{patchError}</p>
+                )}
+              </div>
+              <div className={`max-h-64 overflow-y-auto scrollbar-thin p-1.5 space-y-0.5 ${patchPending ? "pointer-events-none opacity-60" : ""}`}>
+                {modelLoading && (
+                  <div className="flex items-center gap-2 px-2.5 py-2 text-xs text-text-dim">
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                    {t("chat.loading_models")}
+                  </div>
+                )}
+                {modelFetchError && (
+                  <div className="px-2.5 py-2 space-y-1.5">
+                    <p className="text-xs text-error">{modelFetchError}</p>
+                    <button
+                      onClick={() => { setModels([]); setModelFetchError(null); }}
+                      className="text-[10px] text-brand hover:underline"
+                    >
+                      {t("chat.retry")}
+                    </button>
+                  </div>
+                )}
+                {!modelLoading && !modelFetchError && filteredModels.length === 0 && (
+                  <p className="px-2.5 py-2 text-xs text-text-dim">{t("chat.no_models_found")}</p>
+                )}
+                {!modelLoading && !modelFetchError && modelName && !filteredModels.some(m => m.id === modelName) && (
+                  <div
+                    key={`fallback/${modelName}`}
+                    onClick={() => {}}
+                    className="flex items-center gap-2 px-2.5 py-2 rounded-lg cursor-pointer transition-colors bg-brand/10 text-brand"
+                  >
+                    {patchPending
+                      ? <Loader2 className="h-3 w-3 animate-spin shrink-0" />
+                      : <span className="w-1.5 h-1.5 rounded-full bg-success shrink-0" />
+                    }
+                    <span className="text-xs font-medium truncate">{modelName}</span>
+                  </div>
+                )}
+                {!modelLoading && !modelFetchError && filteredModels.map(model => {
+                  const isActive = model.id === (optimisticModel ?? modelName);
+                  return (
+                    <div
+                      key={`${model.provider}/${model.id}`}
+                      onClick={() => { if (!isActive) handleSelectModel(model); }}
+                      className={`flex items-center gap-2 px-2.5 py-2 rounded-lg cursor-pointer transition-colors ${isActive ? "bg-brand/10 text-brand" : "hover:bg-surface-hover text-text-dim"}`}
+                    >
+                      {isActive && patchPending
+                        ? <Loader2 className="h-3 w-3 animate-spin shrink-0" />
+                        : isActive && <span className="w-1.5 h-1.5 rounded-full bg-success shrink-0" />
+                      }
+                      <span className="text-[10px] text-text-dim/60 shrink-0">{model.provider}</span>
+                      <span className="text-[10px]">·</span>
+                      <span className="text-xs font-medium truncate">{model.id}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
         {/* Session dropdown */}
         {sessions && sessions.length > 0 && (
           <div className="relative" ref={dropdownRef}>
@@ -786,10 +1015,20 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, wsConnecte
           </div>
         )}
         {messageCount > 0 && (
-          <button onClick={onClear} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-text-dim/60 hover:text-error hover:bg-error/5 transition-colors">
-            <X className="h-3 w-3" />
-            {t("chat.clear_chat")}
-          </button>
+          <>
+            <button
+              onClick={onExport}
+              title={t("chat.export_markdown", { defaultValue: "Export as Markdown" })}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-text-dim/60 hover:text-brand hover:bg-brand/5 transition-colors"
+            >
+              <Download className="h-3 w-3" />
+              <span className="hidden sm:inline">{t("chat.export", { defaultValue: "Export" })}</span>
+            </button>
+            <button onClick={onClear} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-text-dim/60 hover:text-error hover:bg-error/5 transition-colors">
+              <X className="h-3 w-3" />
+              {t("chat.clear_chat")}
+            </button>
+          </>
         )}
       </div>
     </div>
@@ -1003,6 +1242,47 @@ export function ChatPage() {
   // Session state — bump version to force message reload after switch
   const [sessionVersion, setSessionVersion] = useState(0);
   const { messages, isLoading, sendMessage, clearHistory, wsConnected } = useChatMessages(selectedAgentId || null, agents, sessionVersion);
+
+  // Export current conversation as a markdown file. Keeps the local
+  // timestamp, role, content, and (when present) tool call summaries
+  // so operators can archive or share transcripts.
+  const handleExport = useCallback(() => {
+    if (messages.length === 0) return;
+    const agentName = agents.find(a => a.id === selectedAgentId)?.name ?? selectedAgentId;
+    const lines: string[] = [
+      `# Conversation with ${agentName}`,
+      "",
+      `_Exported: ${new Date().toISOString()}_`,
+      `_${messages.length} messages_`,
+      "",
+      "---",
+      "",
+    ];
+    for (const m of messages) {
+      const ts = m.timestamp instanceof Date ? m.timestamp.toISOString() : new Date(m.timestamp as any).toISOString();
+      const role = m.role === "assistant" ? agentName : m.role;
+      lines.push(`### ${role} · ${ts}`);
+      lines.push("");
+      if (m.content) {
+        lines.push(m.content);
+        lines.push("");
+      }
+      if (m.tools && m.tools.length > 0) {
+        lines.push(`_Tools: ${m.tools.map(t => t.name).join(", ")}_`);
+        lines.push("");
+      }
+    }
+    const blob = new Blob([lines.join("\n")], { type: "text/markdown;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    const date = new Date().toISOString().slice(0, 10);
+    a.download = `chat-${agentName.replace(/[^a-zA-Z0-9-_]/g, "_")}-${date}.md`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }, [messages, agents, selectedAgentId]);
   const { pendingApprovals, removeApproval } = useApprovalPoller(selectedAgentId || null);
   const selectedAgent = agents.find(a => a.id === selectedAgentId);
 
@@ -1163,6 +1443,7 @@ export function ChatPage() {
               isLoading={isLoading}
               messageCount={messages.length}
               onClear={clearHistory}
+              onExport={handleExport}
               wsConnected={wsConnected}
               modelName={selectedAgent?.model_name}
               sessions={sessionsQuery.data}
@@ -1170,6 +1451,8 @@ export function ChatPage() {
               onSwitchSession={handleSwitchSession}
               onNewSession={handleNewSession}
               onDeleteSession={handleDeleteSession}
+              agentId={selectedAgentId}
+              onModelChange={() => queryClient.invalidateQueries({ queryKey: ["agents", "list"] })}
             />
           )}
 

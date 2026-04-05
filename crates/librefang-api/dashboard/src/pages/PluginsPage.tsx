@@ -11,9 +11,13 @@ import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { PageHeader } from "../components/ui/PageHeader";
 import { ListSkeleton } from "../components/ui/Skeleton";
+import { EmptyState } from "../components/ui/EmptyState";
+import { Modal } from "../components/ui/Modal";
+import { useUIStore } from "../lib/store";
+import { useCreateShortcut } from "../lib/useCreateShortcut";
 import {
   Puzzle, Plus, Download, Trash2, Package, FolderOpen,
-  GitBranch, X, Loader2, Check, AlertCircle, FileCode
+  GitBranch, Loader2, Check, AlertCircle, FileCode
 } from "lucide-react";
 
 const REFRESH_MS = 30000;
@@ -26,6 +30,7 @@ export function PluginsPage() {
   const [showScaffold, setShowScaffold] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [installingName, setInstallingName] = useState<string | null>(null);
+  useCreateShortcut(() => setShowInstall(true));
 
   // Install form
   const [installSource, setInstallSource] = useState<"registry" | "local" | "git">("registry");
@@ -42,20 +47,43 @@ export function PluginsPage() {
   const pluginsQuery = useQuery({ queryKey: ["plugins"], queryFn: listPlugins, refetchInterval: REFRESH_MS });
   const registriesQuery = useQuery({ queryKey: ["plugins", "registries"], queryFn: listPluginRegistries, enabled: tab === "registry" });
 
+  const addToast = useUIStore((s) => s.addToast);
   const installMutation = useMutation({
     mutationFn: installPlugin,
-    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["plugins"] }); setShowInstall(false); resetInstallForm(); },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["plugins"] });
+      setShowInstall(false);
+      resetInstallForm();
+      addToast(t("plugins.install_success", { defaultValue: "Plugin installed" }), "success");
+    },
+    onError: (e: any) => addToast(e?.message || t("plugins.install_failed", { defaultValue: "Install failed" }), "error"),
     onSettled: () => { setInstallingName(null); },
   });
   const uninstallMutation = useMutation({
     mutationFn: uninstallPlugin,
-    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["plugins"] }); setConfirmDelete(null); }
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["plugins"] });
+      setConfirmDelete(null);
+      addToast(t("plugins.uninstall_success", { defaultValue: "Plugin removed" }), "success");
+    },
+    onError: (e: any) => addToast(e?.message || t("plugins.uninstall_failed", { defaultValue: "Uninstall failed" }), "error"),
   });
   const scaffoldMutation = useMutation({
     mutationFn: ({ name, desc }: { name: string; desc: string }) => scaffoldPlugin(name, desc),
-    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["plugins"] }); setShowScaffold(false); setScaffoldName(""); setScaffoldDesc(""); }
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["plugins"] });
+      setShowScaffold(false);
+      setScaffoldName("");
+      setScaffoldDesc("");
+      addToast(t("plugins.scaffold_success", { defaultValue: "Plugin created" }), "success");
+    },
+    onError: (e: any) => addToast(e?.message || t("plugins.scaffold_failed", { defaultValue: "Create failed" }), "error"),
   });
-  const depsMutation = useMutation({ mutationFn: installPluginDeps });
+  const depsMutation = useMutation({
+    mutationFn: installPluginDeps,
+    onSuccess: () => addToast(t("plugins.deps_installed", { defaultValue: "Dependencies installed" }), "success"),
+    onError: (e: any) => addToast(e?.message || t("plugins.deps_failed", { defaultValue: "Dependency install failed" }), "error"),
+  });
 
   const plugins = pluginsQuery.data?.plugins ?? [];
   const registries = registriesQuery.data?.registries ?? [];
@@ -130,13 +158,11 @@ export function PluginsPage() {
           {pluginsQuery.isLoading ? (
             <ListSkeleton rows={3} />
           ) : plugins.length === 0 ? (
-            <div className="text-center py-16">
-              <div className="w-14 h-14 rounded-2xl bg-brand/10 flex items-center justify-center mx-auto mb-4">
-                <Puzzle className="w-7 h-7 text-brand" />
-              </div>
-              <h3 className="text-lg font-bold">{t("plugins.no_plugins")}</h3>
-              <p className="text-sm text-text-dim mt-1">{t("plugins.no_plugins_desc")}</p>
-            </div>
+            <EmptyState
+              icon={<Puzzle className="w-7 h-7" />}
+              title={t("plugins.no_plugins")}
+              description={t("plugins.no_plugins_desc")}
+            />
           ) : (
             <div className="space-y-2 stagger-children">
               {plugins.map(p => (
@@ -171,7 +197,7 @@ export function PluginsPage() {
                         <button onClick={() => setConfirmDelete(null)} className="px-2 py-1 rounded-lg bg-main text-text-dim text-[10px] font-bold">{t("common.cancel")}</button>
                       </div>
                     ) : (
-                      <button onClick={() => handleDelete(p.name)} className="p-2 rounded-lg text-text-dim/30 hover:text-error hover:bg-error/10 transition-colors">
+                      <button onClick={() => handleDelete(p.name)} className="p-2 rounded-lg text-text-dim/30 hover:text-error hover:bg-error/10 transition-colors" aria-label={t("common.delete")}>
                         <Trash2 className="w-3.5 h-3.5" />
                       </button>
                     )}
@@ -191,9 +217,10 @@ export function PluginsPage() {
               <Loader2 className="w-4 h-4 animate-spin" /> {t("plugins.loading_registries")}
             </div>
           ) : registries.length === 0 ? (
-            <div className="text-center py-16">
-              <p className="text-sm text-text-dim">{t("plugins.no_registries")}</p>
-            </div>
+            <EmptyState
+              icon={<Puzzle className="w-7 h-7" />}
+              title={t("plugins.no_registries")}
+            />
           ) : (
             <div className="space-y-8">
               {registries.map(reg => (
@@ -237,14 +264,8 @@ export function PluginsPage() {
       )}
 
       {/* Install Modal */}
-      {showInstall && (
-        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/30 backdrop-blur-sm" onClick={() => setShowInstall(false)}>
-          <div className="bg-surface rounded-2xl shadow-2xl border border-border-subtle w-full sm:w-[440px] sm:max-w-[90vw] animate-fade-in-scale" onClick={e => e.stopPropagation()}>
-            <div className="flex items-center justify-between px-5 py-3 border-b border-border-subtle">
-              <h3 className="text-sm font-bold">{t("plugins.install_title")}</h3>
-              <button onClick={() => setShowInstall(false)} className="p-1 rounded hover:bg-main"><X className="w-4 h-4" /></button>
-            </div>
-            <div className="p-5 space-y-4">
+      <Modal isOpen={showInstall} onClose={() => setShowInstall(false)} title={t("plugins.install_title")} size="md">
+        <div className="p-5 space-y-4">
               {/* Source Tabs */}
               <div>
                 <label className="text-[10px] font-bold text-text-dim uppercase">{t("plugins.source")}</label>
@@ -306,41 +327,31 @@ export function PluginsPage() {
                 </Button>
                 <Button variant="secondary" onClick={() => setShowInstall(false)}>{t("common.cancel")}</Button>
               </div>
-            </div>
-          </div>
         </div>
-      )}
+      </Modal>
 
       {/* Scaffold Modal */}
-      {showScaffold && (
-        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/30 backdrop-blur-sm" onClick={() => setShowScaffold(false)}>
-          <div className="bg-surface rounded-2xl shadow-2xl border border-border-subtle w-full sm:w-[400px] sm:max-w-[90vw] animate-fade-in-scale" onClick={e => e.stopPropagation()}>
-            <div className="flex items-center justify-between px-5 py-3 border-b border-border-subtle">
-              <h3 className="text-sm font-bold">{t("plugins.scaffold_title")}</h3>
-              <button onClick={() => setShowScaffold(false)} className="p-1 rounded hover:bg-main"><X className="w-4 h-4" /></button>
-            </div>
-            <div className="p-5 space-y-4">
-              <div>
-                <label className="text-[10px] font-bold text-text-dim uppercase">{t("plugins.plugin_name")}</label>
-                <input value={scaffoldName} onChange={e => setScaffoldName(e.target.value)} className={inputClass} placeholder="my-plugin" />
-              </div>
-              <div>
-                <label className="text-[10px] font-bold text-text-dim uppercase">{t("plugins.description")}</label>
-                <input value={scaffoldDesc} onChange={e => setScaffoldDesc(e.target.value)} className={inputClass} placeholder={t("plugins.scaffold_desc")} />
-              </div>
-              <div className="flex gap-2 pt-2">
-                <Button variant="primary" className="flex-1"
-                  onClick={() => scaffoldMutation.mutate({ name: scaffoldName, desc: scaffoldDesc })}
-                  disabled={!scaffoldName.trim() || scaffoldMutation.isPending}>
-                  {scaffoldMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Plus className="w-4 h-4 mr-1" />}
-                  {t("plugins.create")}
-                </Button>
-                <Button variant="secondary" onClick={() => setShowScaffold(false)}>{t("common.cancel")}</Button>
-              </div>
-            </div>
+      <Modal isOpen={showScaffold} onClose={() => setShowScaffold(false)} title={t("plugins.scaffold_title")} size="sm">
+        <div className="p-5 space-y-4">
+          <div>
+            <label className="text-[10px] font-bold text-text-dim uppercase">{t("plugins.plugin_name")}</label>
+            <input value={scaffoldName} onChange={e => setScaffoldName(e.target.value)} className={inputClass} placeholder="my-plugin" />
+          </div>
+          <div>
+            <label className="text-[10px] font-bold text-text-dim uppercase">{t("plugins.description")}</label>
+            <input value={scaffoldDesc} onChange={e => setScaffoldDesc(e.target.value)} className={inputClass} placeholder={t("plugins.scaffold_desc")} />
+          </div>
+          <div className="flex gap-2 pt-2">
+            <Button variant="primary" className="flex-1"
+              onClick={() => scaffoldMutation.mutate({ name: scaffoldName, desc: scaffoldDesc })}
+              disabled={!scaffoldName.trim() || scaffoldMutation.isPending}>
+              {scaffoldMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Plus className="w-4 h-4 mr-1" />}
+              {t("plugins.create")}
+            </Button>
+            <Button variant="secondary" onClick={() => setShowScaffold(false)}>{t("common.cancel")}</Button>
           </div>
         </div>
-      )}
+      </Modal>
     </div>
   );
 }

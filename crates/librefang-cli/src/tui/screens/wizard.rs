@@ -152,6 +152,12 @@ const PROVIDERS: &[ProviderInfo] = &[
         default_model: "local-model",
         needs_key: false,
     },
+    ProviderInfo {
+        name: "alibaba-coding-plan",
+        env_var: "ALIBABA_CODING_PLAN_API_KEY",
+        default_model: "alibaba-coding-plan/qwen3.5-plus",
+        needs_key: true,
+    },
 ];
 
 /// Check if first-run setup is needed.

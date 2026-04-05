@@ -90,6 +90,25 @@ jobs:
           fi
           echo "Affected crates: $(cat "$GITHUB_OUTPUT" | grep crates)"
 
+  # ── Reject dashboard build artifacts in PRs ─────────────────────────────────────────
+  no-build-artifacts:
+    name: No Build Artifacts
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Reject static/react/ in PR
+        run: |
+          # Only flag added or modified files (not deletions — cleanup PRs are OK)
+          ADDED=$(git diff --diff-filter=AM --name-only origin/${{ github.base_ref }}...HEAD -- 'crates/librefang-api/static/react/' || true)
+          if [ -n "$ADDED" ]; then
+            echo "::error::PR adds/modifies dashboard build artifacts (static/react/). These are auto-built by CI — remove them from your commits."
+            echo "Fix: git rm --cached crates/librefang-api/static/react/ && git commit --amend"
+            exit 1
+          fi
+
   # ── Code quality checks (fast, run in parallel) ─────────────────────────────────────
   quality:
     name: Quality

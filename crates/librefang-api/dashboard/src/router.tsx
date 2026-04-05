@@ -26,6 +26,7 @@ const WizardPage = lazy(() => import("./pages/WizardPage").then(m => ({ default:
 const WorkflowsPage = lazy(() => import("./pages/WorkflowsPage").then(m => ({ default: m.WorkflowsPage })));
 const PluginsPage = lazy(() => import("./pages/PluginsPage").then(m => ({ default: m.PluginsPage })));
 const ModelsPage = lazy(() => import("./pages/ModelsPage").then(m => ({ default: m.ModelsPage })));
+const MediaPage = lazy(() => import("./pages/MediaPage").then(m => ({ default: m.MediaPage })));
 const NetworkPage = lazy(() => import("./pages/NetworkPage").then(m => ({ default: m.NetworkPage })));
 const A2APage = lazy(() => import("./pages/A2APage").then(m => ({ default: m.A2APage })));
 const TelemetryPage = lazy(() => import("./pages/TelemetryPage").then(m => ({ default: m.TelemetryPage })));
@@ -184,6 +185,12 @@ const modelsRoute = createRoute({
   component: () => <L><ModelsPage /></L>
 });
 
+const mediaRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/media",
+  component: () => <L><MediaPage /></L>
+});
+
 const networkRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/network",
@@ -226,6 +233,7 @@ const routeTree = rootRoute.addChildren([
   handsRoute,
   pluginsRoute,
   modelsRoute,
+  mediaRoute,
   networkRoute,
   a2aRoute,
   telemetryRoute,
