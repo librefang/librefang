@@ -912,7 +912,7 @@ For an operator-facing bot (with an `allowed_users` gate), you may still want to
 blocked_commands = ["agent", "new", "reboot", "model", "stop"]
 ```
 
-Command names are the bare tokens used internally (no leading `/`). The full list of built-in commands is in `/help`.
+Command names are the bare tokens used internally — either `"agent"` or `"/agent"` in TOML works, the leading slash is stripped on match. The full list of built-in commands is in `/help`.
 
 ---
 

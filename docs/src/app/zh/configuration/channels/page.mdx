@@ -912,7 +912,7 @@ allowed_commands = ["start", "help"]
 blocked_commands = ["agent", "new", "reboot", "model", "stop"]
 ```
 
-命令名是内部使用的裸 token（不带 `/`）。完整命令列表见 `/help`。
+命令名是内部使用的裸 token —— TOML 里写 `"agent"` 或 `"/agent"` 都行，匹配时会自动去掉前导斜杠。完整命令列表见 `/help`。
 
 ---
 

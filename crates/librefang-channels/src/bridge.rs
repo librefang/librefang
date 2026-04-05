@@ -1278,15 +1278,24 @@ fn is_group_command(message: &ChannelMessage) -> bool {
 /// Precedence: `disable_commands` > `allowed_commands` (whitelist) >
 /// `blocked_commands` (blacklist). When no overrides are configured,
 /// everything is allowed (current default behaviour).
+///
+/// Config entries may be written with or without a leading `/` (both
+/// `"agent"` and `"/agent"` match the dispatcher's bare `"agent"` token).
 fn is_command_allowed(cmd: &str, overrides: Option<&ChannelOverrides>) -> bool {
     let Some(ov) = overrides else { return true };
     if ov.disable_commands {
         return false;
     }
+    // Normalize config entries: strip a single optional leading slash so users
+    // can write either "agent" or "/agent" in TOML.
+    let matches = |entry: &String| -> bool {
+        let name = entry.strip_prefix('/').unwrap_or(entry);
+        name == cmd
+    };
     if !ov.allowed_commands.is_empty() {
-        return ov.allowed_commands.iter().any(|c| c.as_str() == cmd);
+        return ov.allowed_commands.iter().any(matches);
     }
-    !ov.blocked_commands.iter().any(|c| c.as_str() == cmd)
+    !ov.blocked_commands.iter().any(matches)
 }
 
 /// Reconstruct the raw slash-command text so that blocked commands can be
@@ -2966,6 +2975,26 @@ mod tests {
         assert!(is_command_allowed("agent", Some(&ov)));
         // `help` is not in the whitelist — blocked even though not via blocklist.
         assert!(!is_command_allowed("help", Some(&ov)));
+    }
+
+    #[test]
+    fn test_is_command_allowed_tolerates_leading_slash_in_config() {
+        // Users may write either "agent" or "/agent" in TOML — both should work.
+        let ov = ChannelOverrides {
+            allowed_commands: vec!["/start".into(), "help".into()],
+            ..Default::default()
+        };
+        assert!(is_command_allowed("start", Some(&ov)));
+        assert!(is_command_allowed("help", Some(&ov)));
+        assert!(!is_command_allowed("agent", Some(&ov)));
+
+        let ov = ChannelOverrides {
+            blocked_commands: vec!["/agent".into(), "new".into()],
+            ..Default::default()
+        };
+        assert!(!is_command_allowed("agent", Some(&ov)));
+        assert!(!is_command_allowed("new", Some(&ov)));
+        assert!(is_command_allowed("help", Some(&ov)));
     }
 
     #[test]
