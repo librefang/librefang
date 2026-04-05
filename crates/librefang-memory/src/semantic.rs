@@ -1163,6 +1163,62 @@ mod tests {
     }
 
     #[test]
+    fn test_recall_with_peer_filter_isolates_users() {
+        // Regression for per-peer memory isolation (#2058 follow-up).
+        // Two users A and B share an agent; recalling with peer_id=Some("A")
+        // must not return B's memories.
+        let store = setup();
+        let agent_id = AgentId::new();
+        let _ = store
+            .remember_with_embedding_and_peer(
+                agent_id,
+                "Alice likes dark roast coffee",
+                MemorySource::Conversation,
+                "episodic",
+                HashMap::new(),
+                None,
+                None,
+                None,
+                Default::default(),
+                Some("user-A"),
+            )
+            .unwrap();
+        let _ = store
+            .remember_with_embedding_and_peer(
+                agent_id,
+                "Bob likes dark roast coffee",
+                MemorySource::Conversation,
+                "episodic",
+                HashMap::new(),
+                None,
+                None,
+                None,
+                Default::default(),
+                Some("user-B"),
+            )
+            .unwrap();
+
+        // Query as user A — should only see Alice's memory.
+        let mut f = MemoryFilter::agent(agent_id);
+        f.peer_id = Some("user-A".into());
+        let results = store.recall("coffee", 10, Some(f)).unwrap();
+        assert_eq!(
+            results.len(),
+            1,
+            "user-A must not see user-B's memory, got: {:?}",
+            results.iter().map(|r| &r.content).collect::<Vec<_>>()
+        );
+        assert!(results[0].content.starts_with("Alice"));
+
+        // Query as user B — should only see Bob's memory.
+        let mut f = MemoryFilter::agent(agent_id);
+        f.peer_id = Some("user-B".into());
+        let results = store.recall("coffee", 10, Some(f)).unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].content.starts_with("Bob"));
+    }
+
+    #[test]
     fn test_forget() {
         let store = setup();
         let agent_id = AgentId::new();

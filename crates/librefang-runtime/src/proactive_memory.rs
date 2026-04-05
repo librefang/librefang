@@ -1,19 +1,16 @@
 //! Proactive Memory integration for the runtime.
 //!
-//! This module provides:
-//! - `init_proactive_memory`: Create a ProactiveMemoryStore for the kernel
-//! - `build_prompt_context_with_memory`: Format retrieved memories for prompt injection
-//!
-//! The actual auto_retrieve and auto_memorize calls happen directly in `agent_loop.rs`
-//! rather than through fire-and-forget hooks, ensuring results are properly consumed.
+//! Provides `init_proactive_memory` to create a `ProactiveMemoryStore` for the
+//! kernel. The actual `auto_retrieve` and `auto_memorize` calls happen directly
+//! in `agent_loop.rs` rather than through fire-and-forget hooks, ensuring
+//! results are properly consumed and peer-scoped.
 
-use librefang_memory::{ProactiveMemoryConfig, ProactiveMemoryHooks, ProactiveMemoryStore};
+use librefang_memory::{ProactiveMemoryConfig, ProactiveMemoryStore};
 use librefang_types::error::LibreFangError;
 use librefang_types::memory::{
     ExtractionResult, MemoryAction, MemoryExtractor, MemoryFragment, MemoryItem, MemoryLevel,
 };
 use std::sync::Arc;
-use tracing::warn;
 
 // ---------------------------------------------------------------------------
 // EmbeddingDriver → EmbeddingFn bridge
@@ -30,28 +27,6 @@ impl librefang_memory::proactive::EmbeddingFn for EmbeddingBridge {
             .embed_one(text)
             .await
             .map_err(|e| LibreFangError::Internal(format!("Embedding failed: {e}")))
-    }
-}
-
-/// Build a context string with proactive memory for prompt injection.
-///
-/// Includes both semantic memory matches and relevant knowledge graph relations.
-pub async fn build_prompt_context_with_memory(
-    memory: &ProactiveMemoryStore,
-    user_id: &str,
-    user_message: &str,
-) -> Option<String> {
-    let result: Result<Vec<librefang_memory::MemoryItem>, LibreFangError> =
-        memory.auto_retrieve(user_id, user_message, None).await;
-    match result {
-        Ok(memories) if !memories.is_empty() => {
-            Some(memory.format_context_with_query(&memories, user_message))
-        }
-        Ok(_) => None,
-        Err(e) => {
-            warn!("Failed to retrieve proactive memories: {}", e);
-            None
-        }
     }
 }
 

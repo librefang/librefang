@@ -539,9 +539,10 @@ pub async fn run_agent_loop(
 
     // Recall relevant memories — use context engine if available, else fallback to inline logic.
     // In stable_prefix_mode, skip memory recall to keep the system prompt prefix stable for caching.
+    // Scope recall to the current peer so multi-user channels don't leak context across users.
     let mut memories = if let Some(engine) = context_engine {
         engine
-            .ingest(session.agent_id, user_message)
+            .ingest(session.agent_id, user_message, sender_user_id.as_deref())
             .await
             .map(|r| r.recalled_memories)
             .unwrap_or_default()
@@ -557,6 +558,7 @@ pub async fn run_agent_loop(
                         5,
                         Some(MemoryFilter {
                             agent_id: Some(session.agent_id),
+                            peer_id: sender_user_id.clone(),
                             ..Default::default()
                         }),
                         Some(&query_vec),
@@ -572,6 +574,7 @@ pub async fn run_agent_loop(
                         5,
                         Some(MemoryFilter {
                             agent_id: Some(session.agent_id),
+                            peer_id: sender_user_id.clone(),
                             ..Default::default()
                         }),
                     )
@@ -586,6 +589,7 @@ pub async fn run_agent_loop(
                 5,
                 Some(MemoryFilter {
                     agent_id: Some(session.agent_id),
+                    peer_id: sender_user_id.clone(),
                     ..Default::default()
                 }),
             )
@@ -2075,9 +2079,10 @@ pub async fn run_agent_loop_streaming(
 
     // Recall relevant memories — use context engine if available, else fallback to inline logic.
     // In stable_prefix_mode, skip memory recall to keep the system prompt prefix stable for caching.
+    // Scope recall to the current peer so multi-user channels don't leak context across users.
     let mut memories = if let Some(engine) = context_engine {
         engine
-            .ingest(session.agent_id, user_message)
+            .ingest(session.agent_id, user_message, sender_user_id.as_deref())
             .await
             .map(|r| r.recalled_memories)
             .unwrap_or_default()
@@ -2093,6 +2098,7 @@ pub async fn run_agent_loop_streaming(
                         5,
                         Some(MemoryFilter {
                             agent_id: Some(session.agent_id),
+                            peer_id: sender_user_id.clone(),
                             ..Default::default()
                         }),
                         Some(&query_vec),
@@ -2108,6 +2114,7 @@ pub async fn run_agent_loop_streaming(
                         5,
                         Some(MemoryFilter {
                             agent_id: Some(session.agent_id),
+                            peer_id: sender_user_id.clone(),
                             ..Default::default()
                         }),
                     )
@@ -2122,6 +2129,7 @@ pub async fn run_agent_loop_streaming(
                 5,
                 Some(MemoryFilter {
                     agent_id: Some(session.agent_id),
+                    peer_id: sender_user_id.clone(),
                     ..Default::default()
                 }),
             )
