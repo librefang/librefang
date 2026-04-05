@@ -10,6 +10,7 @@ Common issues, diagnostics, and answers to frequently asked questions about Libr
 - [LLM Provider Issues](#llm-provider-issues)
 - [Channel Issues](#channel-issues)
 - [Agent Issues](#agent-issues)
+- [Plugin Issues](#plugin-issues)
 - [API Issues](#api-issues)
 - [Desktop App Issues](#desktop-app-issues)
 - [Performance](#performance)
@@ -336,6 +337,63 @@ tools = ["file_read", "web_fetch", "shell_exec"]  # Must list each tool
 1. TOML manifest is valid: `librefang agent spawn --dry-run manifest.toml`
 2. LLM provider is configured and has a valid key
 3. Model specified in manifest exists in the catalog
+
+---
+
+## Plugin Issues
+
+### Context engine plugin silently does nothing
+
+**Cause**: usually the plugin's declared runtime isn't installed on this host. The hook fails with `LauncherNotFound`, LibreFang logs a warning, and falls back to the default context engine — so nothing crashes, nothing visible changes, and memories just never come back.
+
+**Diagnose**: call the doctor endpoint.
+
+```bash
+curl http://127.0.0.1:4545/api/plugins/doctor
+```
+
+Look for:
+- `runtimes[].available: false` → the runtime's launcher (e.g. `go`, `deno`, `ruby`) isn't on PATH. Install it per the `install_hint` field.
+- `plugins[].runtime_available: false` → the plugin's declared runtime is missing.
+- `plugins[].hooks_valid: false` → a hook script declared in `plugin.toml` doesn't exist on disk.
+
+In Docker, most runtimes aren't pre-installed — extend the image. See [Configuration → Plugins](./configuration#context_engine) for copy-paste `RUN` snippets.
+
+### Hook script hangs / times out
+
+**Cause**: hooks have a 30-second wall-clock timeout. Common culprits: blocking network calls, unclosed stdin reads, accidentally waiting on `input()` or `readline` with no data.
+
+**Check**:
+1. Test the hook manually: `echo '{"type":"ingest","agent_id":"t","message":"hi","peer_id":null}' | python3 hooks/ingest.py` — it should print one line and exit.
+2. If it hangs, the script is reading more than just stdin.
+3. Look at LibreFang logs for `Timeout` entries naming your hook.
+
+### Hook runs but memories don't show up
+
+**Cause**: output isn't valid JSON, or the last line of stdout isn't the JSON response.
+
+LibreFang scans stdout from bottom to top and uses the first JSON-parseable line. Debug logs printed *before* the JSON are fine; logs printed *after* are fine; but if the last line is something like `done.` or a traceback, the response is lost.
+
+**Check**: pipe stdout through `tail -n1` locally and confirm it's a valid `{"type": "ingest_result", ...}` object.
+
+### Plugin installed but not loaded
+
+**Cause**: `plugin` or `hooks` field not set in `config.toml`.
+
+```toml
+[context_engine]
+plugin = "your-plugin-name"   # resolves to ~/.librefang/plugins/your-plugin-name/
+```
+
+Or configure hooks manually without a plugin dir:
+
+```toml
+[context_engine.hooks]
+ingest = "~/.librefang/scripts/my_ingest.py"
+runtime = "python"
+```
+
+Restart LibreFang after editing config.
 
 ---
 

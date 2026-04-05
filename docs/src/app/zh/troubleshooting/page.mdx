@@ -10,6 +10,7 @@ LibreFang 常见问题、诊断方法及常见问题解答。
 - [LLM 提供商问题](#llm-提供商问题)
 - [通道问题](#通道问题)
 - [Agent 问题](#agent-问题)
+- [插件问题](#插件问题)
 - [API 问题](#api-问题)
 - [桌面应用问题](#桌面应用问题)
 - [性能](#性能)
@@ -336,6 +337,63 @@ tools = ["file_read", "web_fetch", "shell_exec"]  # Must list each tool
 1. TOML 清单文件是否有效：`librefang agent spawn --dry-run manifest.toml`
 2. LLM 提供商是否已配置且密钥有效
 3. 清单中指定的模型是否存在于模型目录中
+
+---
+
+## 插件问题
+
+### Context engine 插件静默失效
+
+**原因**：通常是插件声明的 runtime 在这台机器上没装。hook 会以 `LauncherNotFound` 失败，LibreFang 打一条 warning 日志，回退到默认 context engine —— 所以不会崩、表面上没变化、但召回的 memories 永远不回来。
+
+**诊断**：调 doctor 端点。
+
+```bash
+curl http://127.0.0.1:4545/api/plugins/doctor
+```
+
+重点看：
+- `runtimes[].available: false` → 对应 runtime 的 launcher（比如 `go`、`deno`、`ruby`）不在 PATH 上。按 `install_hint` 字段的提示装。
+- `plugins[].runtime_available: false` → 插件声明的 runtime 缺失。
+- `plugins[].hooks_valid: false` → `plugin.toml` 里声明的 hook 脚本在磁盘上不存在。
+
+Docker 环境里大部分 runtime 没预装 —— 参考 [Configuration → Plugins](./configuration#context_engine) 里的 `RUN` snippet 自己 extend 镜像。
+
+### Hook 脚本卡住 / 超时
+
+**原因**：hook 有 30 秒墙钟超时。常见坑：阻塞网络调用、stdin 没关闭、误读 `input()` / `readline` 但没数据。
+
+**检查**：
+1. 手动测 hook：`echo '{"type":"ingest","agent_id":"t","message":"hi","peer_id":null}' | python3 hooks/ingest.py` —— 应该打一行然后退出。
+2. 如果 hang 住，脚本在读 stdin 以外的东西。
+3. 看 LibreFang 日志里提到你 hook 的 `Timeout` 条目。
+
+### Hook 跑了但 memories 没出来
+
+**原因**：输出不是合法 JSON，或者 stdout 最后一行不是 JSON 响应。
+
+LibreFang 从 stdout 最后一行往前扫，取第一个能 parse 的 JSON 行。在 JSON **前面**打的 debug log 不影响；**后面**打的也不影响；但如果最后一行是 `done.` 或者 traceback 之类的东西，响应就丢了。
+
+**检查**：本地把 stdout 通过 `tail -n1` 过一遍，确认最后一行是合法的 `{"type": "ingest_result", ...}` 对象。
+
+### 插件装了但没加载
+
+**原因**：`config.toml` 里没配 `plugin` 或 `hooks` 字段。
+
+```toml
+[context_engine]
+plugin = "your-plugin-name"   # 解析到 ~/.librefang/plugins/your-plugin-name/
+```
+
+或者手动配 hook 不装插件目录：
+
+```toml
+[context_engine.hooks]
+ingest = "~/.librefang/scripts/my_ingest.py"
+runtime = "python"
+```
+
+改完配置重启 LibreFang。
 
 ---
 
