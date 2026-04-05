@@ -1,0 +1,80 @@
+# Backward-compat redirects for the 2026-04 docs URL restructure.
+# All pages moved from flat URLs to hierarchical group-based URLs.
+# Wildcard rules (:splat) must come after their exact-match counterparts.
+
+# --- Getting Started group ---
+/librefang            /getting-started              301
+/roadmap              /getting-started/roadmap      301
+/examples             /getting-started/examples     301
+/glossary             /getting-started/glossary     301
+/comparison           /getting-started/comparison   301
+
+# --- Configuration group (providers nests under) ---
+/providers            /configuration/providers         301
+/providers/*          /configuration/providers/:splat  301
+
+# --- Architecture group ---
+/security             /architecture/security  301
+
+# --- Agent group ---
+/agents               /agent/templates   301
+/hands                /agent/hands       301
+/memory               /agent/memory      301
+/skills               /agent/skills      301
+/plugins              /agent/plugins     301
+/workflows            /agent/workflows   301
+
+# --- Integrations group ---
+/channels             /integrations/channels         301
+/channels/*           /integrations/channels/:splat  301
+/api                  /integrations/api              301
+/api/*                /integrations/api/:splat       301
+/sdk                  /integrations/sdk              301
+/cli                  /integrations/cli              301
+/cli/*                /integrations/cli/:splat       301
+/android-termux       /integrations/android-termux   301
+/mcp-a2a              /integrations/mcp-a2a          301
+/migration            /integrations/migration        301
+/desktop              /integrations/desktop          301
+/development          /integrations/development      301
+
+# --- Operations group ---
+/troubleshooting      /operations/troubleshooting  301
+/production           /operations/production       301
+/faq                  /operations/faq              301
+
+# --- zh locale: same structure ---
+/zh/librefang         /zh/getting-started              301
+/zh/roadmap           /zh/getting-started/roadmap      301
+/zh/examples          /zh/getting-started/examples     301
+/zh/glossary          /zh/getting-started/glossary     301
+/zh/comparison        /zh/getting-started/comparison   301
+
+/zh/providers         /zh/configuration/providers         301
+/zh/providers/*       /zh/configuration/providers/:splat  301
+
+/zh/security          /zh/architecture/security  301
+
+/zh/agents            /zh/agent/templates   301
+/zh/hands             /zh/agent/hands       301
+/zh/memory            /zh/agent/memory      301
+/zh/skills            /zh/agent/skills      301
+/zh/plugins           /zh/agent/plugins     301
+/zh/workflows         /zh/agent/workflows   301
+
+/zh/channels          /zh/integrations/channels         301
+/zh/channels/*        /zh/integrations/channels/:splat  301
+/zh/api               /zh/integrations/api              301
+/zh/api/*             /zh/integrations/api/:splat       301
+/zh/sdk               /zh/integrations/sdk              301
+/zh/cli               /zh/integrations/cli              301
+/zh/cli/*             /zh/integrations/cli/:splat       301
+/zh/android-termux    /zh/integrations/android-termux   301
+/zh/mcp-a2a           /zh/integrations/mcp-a2a          301
+/zh/migration         /zh/integrations/migration        301
+/zh/desktop           /zh/integrations/desktop          301
+/zh/development       /zh/integrations/development      301
+
+/zh/troubleshooting   /zh/operations/troubleshooting  301
+/zh/production        /zh/operations/production       301
+/zh/faq               /zh/operations/faq              301
