@@ -52,24 +52,44 @@ fn check_taint_shell_exec(command: &str) -> Option<String> {
 ///
 /// Blocks URLs that appear to contain API keys, tokens, or other secrets
 /// in query parameters (potential data exfiltration). Implements TaintSink::net_fetch().
+///
+/// Both the raw URL and its percent-decoded query parameter names are
+/// checked — an attacker can otherwise bypass the filter with encoding
+/// tricks such as `api%5Fkey=secret` (the server decodes `%5F` to `_`
+/// and receives the real `api_key=secret`).
 fn check_taint_net_fetch(url: &str) -> Option<String> {
-    let exfil_patterns = [
-        "api_key=",
-        "apikey=",
-        "token=",
-        "secret=",
-        "password=",
-        "Authorization:",
-    ];
-    for pattern in &exfil_patterns {
-        if url.to_lowercase().contains(&pattern.to_lowercase()) {
-            let mut labels = HashSet::new();
-            labels.insert(TaintLabel::Secret);
-            let tainted = TaintedValue::new(url, labels, "llm_tool_call");
-            if let Err(violation) = tainted.check_sink(&TaintSink::net_fetch()) {
-                warn!(url = crate::str_utils::safe_truncate_str(url, 80), %violation, "Net fetch taint check failed");
-                return Some(violation.to_string());
+    const SECRET_KEYS: &[&str] = &["api_key", "apikey", "token", "secret", "password"];
+
+    // Scan 1: raw URL literal for `<key>=` and the Authorization header prefix.
+    let url_lower = url.to_lowercase();
+    let mut hit = url_lower.contains("authorization:");
+    if !hit {
+        hit = SECRET_KEYS
+            .iter()
+            .any(|k| url_lower.contains(&format!("{k}=")));
+    }
+
+    // Scan 2: percent-decoded query parameter names. Parsing via
+    // `url::Url` decodes each name so `api%5Fkey` becomes `api_key`.
+    if !hit {
+        if let Ok(parsed) = url::Url::parse(url) {
+            for (name, _value) in parsed.query_pairs() {
+                let name_lower = name.to_lowercase();
+                if SECRET_KEYS.iter().any(|k| name_lower == *k) {
+                    hit = true;
+                    break;
+                }
             }
+        }
+    }
+
+    if hit {
+        let mut labels = HashSet::new();
+        labels.insert(TaintLabel::Secret);
+        let tainted = TaintedValue::new(url, labels, "llm_tool_call");
+        if let Err(violation) = tainted.check_sink(&TaintSink::net_fetch()) {
+            warn!(url = crate::str_utils::safe_truncate_str(url, 80), %violation, "Net fetch taint check failed");
+            return Some(violation.to_string());
         }
     }
     None

@@ -28,9 +28,31 @@ impl WebFetchEngine {
     ///
     /// Uses the resolved addresses from [`check_ssrf`] to configure DNS
     /// pinning on the builder, preventing DNS-rebinding TOCTOU attacks.
+    ///
+    /// Installs a custom redirect policy so every 3xx target is re-validated
+    /// through `check_ssrf`. Without this, an attacker-controlled public
+    /// host could respond with `302 Location: http://169.254.169.254/...`
+    /// and reqwest's default policy would silently follow — the DNS pin
+    /// only protects the original hostname, not redirect targets.
     fn pinned_client(&self, resolution: SsrfResolution) -> reqwest::Client {
+        let allowed_hosts = self.config.ssrf_allowed_hosts.clone();
+        let redirect_policy = reqwest::redirect::Policy::custom(move |attempt| {
+            if attempt.previous().len() >= 10 {
+                return attempt.error("too many redirects");
+            }
+            // Clone target to String so we can still move `attempt` into
+            // attempt.error() on the SSRF-denied branch below.
+            let target = attempt.url().as_str().to_owned();
+            match check_ssrf(&target, &allowed_hosts) {
+                Ok(_) => attempt.follow(),
+                Err(reason) => {
+                    attempt.error(format!("SSRF blocked redirect to {target}: {reason}"))
+                }
+            }
+        });
         let builder = crate::http_client::proxied_client_builder()
             .timeout(std::time::Duration::from_secs(self.config.timeout_secs))
+            .redirect(redirect_policy)
             .gzip(true)
             .deflate(true)
             .brotli(true);
