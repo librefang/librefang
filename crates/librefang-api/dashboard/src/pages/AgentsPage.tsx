@@ -48,6 +48,7 @@ export function AgentsPage() {
     tone?: "default" | "destructive";
   } | null>(null);
   const [stateFilter, setStateFilter] = useState<"all" | "running" | "suspended">("all");
+  const [sortBy, setSortBy] = useState<"name" | "last_active" | "created_at">("name");
   const addToast = useUIStore((s) => s.addToast);
   const queryClient = useQueryClient();
   const templatesQuery = useQuery({ queryKey: ["agent-templates"], queryFn: listAgentTemplates, enabled: showCreate && createMode === "template" });
@@ -187,11 +188,24 @@ export function AgentsPage() {
     })
     .filter(a => a.name.toLowerCase().includes(search.toLowerCase()) || a.id.toLowerCase().includes(search.toLowerCase()))
     .sort((a, b) => {
+      // Suspended always last regardless of primary sort — otherwise a
+      // "sort by recent" view would bury running agents behind stale
+      // suspended ones that happened to be touched recently.
       const aSusp = (a.state || "").toLowerCase() === "suspended" ? 1 : 0;
       const bSusp = (b.state || "").toLowerCase() === "suspended" ? 1 : 0;
       if (aSusp !== bSusp) return aSusp - bSusp;
+      if (sortBy === "last_active") {
+        const aT = a.last_active ? Date.parse(a.last_active) : 0;
+        const bT = b.last_active ? Date.parse(b.last_active) : 0;
+        return bT - aT; // most recent first
+      }
+      if (sortBy === "created_at") {
+        const aT = a.created_at ? Date.parse(a.created_at) : 0;
+        const bT = b.created_at ? Date.parse(b.created_at) : 0;
+        return bT - aT; // newest first
+      }
       return a.name.localeCompare(b.name);
-    }), [agents, search, stateFilter]);
+    }), [agents, search, stateFilter, sortBy]);
 
   const coreAgents = filteredAgents;
 
@@ -294,7 +308,7 @@ export function AgentsPage() {
         data-shortcut-search
       />
 
-      <div className="flex items-center gap-2 -mt-2">
+      <div className="flex items-center gap-2 -mt-2 flex-wrap">
         {(["all", "running", "suspended"] as const).map((key) => {
           const isActive = stateFilter === key;
           const count = agentCounts[key];
@@ -322,6 +336,20 @@ export function AgentsPage() {
             </button>
           );
         })}
+        <div className="ml-auto flex items-center gap-1.5">
+          <span className="text-[10px] font-bold uppercase tracking-widest text-text-dim/60">
+            {t("common.sort_by", { defaultValue: "Sort" })}
+          </span>
+          <select
+            value={sortBy}
+            onChange={(e) => setSortBy(e.target.value as typeof sortBy)}
+            className="rounded-full border border-border-subtle bg-surface px-3 py-1 text-[11px] font-bold text-text-dim outline-none focus:border-brand hover:border-brand/20 cursor-pointer"
+          >
+            <option value="name">{t("common.sort_name", { defaultValue: "Name" })}</option>
+            <option value="last_active">{t("common.sort_last_active", { defaultValue: "Last active" })}</option>
+            <option value="created_at">{t("common.sort_created", { defaultValue: "Created" })}</option>
+          </select>
+        </div>
       </div>
 
       {agentsQuery.isLoading ? (
