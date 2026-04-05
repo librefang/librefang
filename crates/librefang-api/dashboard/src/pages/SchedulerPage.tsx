@@ -9,6 +9,7 @@ import { useUIStore } from "../lib/store";
 import { Clock, Plus, Play, Trash2, Calendar, Zap, X, Loader2, AlertCircle, ChevronRight } from "lucide-react";
 import { ScheduleModal } from "../components/ui/ScheduleModal";
 import { ListSkeleton } from "../components/ui/Skeleton";
+import { EmptyState } from "../components/ui/EmptyState";
 import { truncateId } from "../lib/string";
 
 const REFRESH_MS = 30000;
@@ -136,10 +137,10 @@ export function SchedulerPage() {
         {schedulesQuery.isLoading ? (
           <ListSkeleton rows={2} />
         ) : schedules.length === 0 ? (
-          <div className="text-center py-12 rounded-2xl border border-dashed border-border-subtle">
-            <Calendar className="w-8 h-8 text-text-dim/30 mx-auto mb-2" />
-            <p className="text-sm text-text-dim">{t("scheduler.no_schedules")}</p>
-          </div>
+          <EmptyState
+            icon={<Calendar className="w-7 h-7" />}
+            title={t("scheduler.no_schedules")}
+          />
         ) : (
           <div className="space-y-2 stagger-children">
             {schedules.map(s => {
@@ -192,12 +193,10 @@ export function SchedulerPage() {
       <div>
         <h2 className="text-xs font-bold uppercase tracking-widest text-text-dim/50 mb-3">{t("scheduler.event_triggers")}</h2>
         {triggers.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-10 rounded-2xl border border-dashed border-border-subtle bg-gradient-to-b from-surface/50 to-transparent">
-            <div className="w-12 h-12 rounded-xl bg-warning/10 flex items-center justify-center mb-3">
-              <Zap className="w-6 h-6 text-warning/50" />
-            </div>
-            <p className="text-xs text-text-dim font-medium">{t("common.no_data")}</p>
-          </div>
+          <EmptyState
+            icon={<Zap className="w-7 h-7" />}
+            title={t("common.no_data")}
+          />
         ) : (
           <div className="space-y-2 stagger-children">
             {triggers.map((tr: any) => {

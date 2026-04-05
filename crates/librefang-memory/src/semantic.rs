@@ -16,7 +16,7 @@ use librefang_types::memory::{
 use rusqlite::Connection;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use tracing::debug;
+use tracing::{debug, warn};
 
 /// Semantic store backed by SQLite with optional vector search.
 ///
@@ -406,12 +406,17 @@ impl SemanticStore {
             );
         }
 
-        // Update access counts for returned memories
+        // Update access counts for returned memories. Logged on failure
+        // because the decay/consolidation engine keys TTL decisions off
+        // accessed_at — silently losing updates means "active" memories
+        // can be garbage-collected when they shouldn't be.
         for frag in &fragments {
-            let _ = conn.execute(
+            if let Err(e) = conn.execute(
                 "UPDATE memories SET access_count = access_count + 1, accessed_at = ?1 WHERE id = ?2",
                 rusqlite::params![Utc::now().to_rfc3339(), frag.id.0.to_string()],
-            );
+            ) {
+                warn!(memory_id = %frag.id.0, error = %e, "Failed to update access tracking");
+            }
         }
 
         Ok(fragments)
@@ -452,16 +457,19 @@ impl SemanticStore {
             }
         }
 
-        // Update access counts
+        // Update access counts — see note on the SQLite-path update above
+        // for why silent drops would corrupt decay logic.
         let conn = self
             .conn
             .lock()
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         for frag in &fragments {
-            let _ = conn.execute(
+            if let Err(e) = conn.execute(
                 "UPDATE memories SET access_count = access_count + 1, accessed_at = ?1 WHERE id = ?2",
                 rusqlite::params![Utc::now().to_rfc3339(), frag.id.0.to_string()],
-            );
+            ) {
+                warn!(memory_id = %frag.id.0, error = %e, "Failed to update access tracking");
+            }
         }
 
         Ok(fragments)
