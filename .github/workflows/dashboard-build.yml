@@ -1,18 +1,7 @@
 name: Dashboard Build
 
-# The dashboard is shipped as a `dashboard-dist.tar.gz` asset on each GitHub
-# Release. The `librefang` daemon downloads this tarball from the latest
-# release on first boot and extracts it into `~/.librefang/dashboard/`. If
-# the asset is missing, new installs see a plain-text "React dashboard build
-# missing" error on `/` because the binary no longer embeds the dashboard.
-#
-# Triggering:
-#   * release: published — fires when release-create.yml publishes a new
-#     release. This requires release-create.yml to use a PAT (not
-#     GITHUB_TOKEN), otherwise GitHub suppresses the downstream trigger.
-#   * push to main touching dashboard sources — refreshes the asset on the
-#     most recent release between binary releases.
-#   * workflow_dispatch — manual backfill for older releases.
+# `release: published` requires release-create.yml to use a PAT — releases
+# created by GITHUB_TOKEN do not fire downstream triggers.
 on:
   push:
     branches: [main]
@@ -76,4 +65,13 @@ jobs:
             exit 0
           fi
           echo "Uploading dashboard-dist.tar.gz to $TAG"
-          gh release upload "$TAG" /tmp/dashboard-dist.tar.gz --clobber
+          for attempt in $(seq 1 5); do
+            if gh release upload "$TAG" /tmp/dashboard-dist.tar.gz --clobber; then
+              echo "✓ Upload succeeded (attempt $attempt)"
+              exit 0
+            fi
+            echo "Upload failed (attempt $attempt/5), retrying in 10s..."
+            sleep 10
+          done
+          echo "::error::Upload failed after 5 attempts"
+          exit 1
