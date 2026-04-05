@@ -43,6 +43,7 @@ export function PluginsPage() {
   // Scaffold form
   const [scaffoldName, setScaffoldName] = useState("");
   const [scaffoldDesc, setScaffoldDesc] = useState("");
+  const [scaffoldRuntime, setScaffoldRuntime] = useState("python");
 
   const pluginsQuery = useQuery({ queryKey: ["plugins"], queryFn: listPlugins, refetchInterval: REFRESH_MS });
   const registriesQuery = useQuery({ queryKey: ["plugins", "registries"], queryFn: listPluginRegistries, enabled: tab === "registry" });
@@ -69,12 +70,14 @@ export function PluginsPage() {
     onError: (e: any) => addToast(e?.message || t("plugins.uninstall_failed", { defaultValue: "Uninstall failed" }), "error"),
   });
   const scaffoldMutation = useMutation({
-    mutationFn: ({ name, desc }: { name: string; desc: string }) => scaffoldPlugin(name, desc),
+    mutationFn: ({ name, desc, runtime }: { name: string; desc: string; runtime: string }) =>
+      scaffoldPlugin(name, desc, runtime),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["plugins"] });
       setShowScaffold(false);
       setScaffoldName("");
       setScaffoldDesc("");
+      setScaffoldRuntime("python");
       addToast(t("plugins.scaffold_success", { defaultValue: "Plugin created" }), "success");
     },
     onError: (e: any) => addToast(e?.message || t("plugins.scaffold_failed", { defaultValue: "Create failed" }), "error"),
@@ -341,9 +344,25 @@ export function PluginsPage() {
             <label className="text-[10px] font-bold text-text-dim uppercase">{t("plugins.description")}</label>
             <input value={scaffoldDesc} onChange={e => setScaffoldDesc(e.target.value)} className={inputClass} placeholder={t("plugins.scaffold_desc")} />
           </div>
+          <div>
+            <label className="text-[10px] font-bold text-text-dim uppercase">{t("plugins.runtime", { defaultValue: "Runtime" })}</label>
+            <select value={scaffoldRuntime} onChange={e => setScaffoldRuntime(e.target.value)} className={inputClass}>
+              <option value="python">Python</option>
+              <option value="node">Node.js</option>
+              <option value="deno">Deno (TypeScript)</option>
+              <option value="bun">Bun (TypeScript)</option>
+              <option value="go">Go</option>
+              <option value="v">V (vlang)</option>
+              <option value="ruby">Ruby</option>
+              <option value="php">PHP</option>
+              <option value="lua">Lua</option>
+              <option value="bash">Bash</option>
+              <option value="native">Native binary</option>
+            </select>
+          </div>
           <div className="flex gap-2 pt-2">
             <Button variant="primary" className="flex-1"
-              onClick={() => scaffoldMutation.mutate({ name: scaffoldName, desc: scaffoldDesc })}
+              onClick={() => scaffoldMutation.mutate({ name: scaffoldName, desc: scaffoldDesc, runtime: scaffoldRuntime })}
               disabled={!scaffoldName.trim() || scaffoldMutation.isPending}>
               {scaffoldMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Plus className="w-4 h-4 mr-1" />}
               {t("plugins.create")}
