@@ -716,9 +716,6 @@ pub async fn run_agent_loop(
         None
     };
 
-    // Track message count before this turn so auto_memorize only processes new messages.
-    let messages_before = session.messages.len();
-
     // Mutable collector for memories saved during this turn (populated by auto_memorize).
     let mut memories_saved: Vec<String> = Vec::new();
     // Mutable collector for memory conflicts detected during this turn.
@@ -812,6 +809,13 @@ pub async fn run_agent_loop(
         &manifest.name,
         user_message,
     );
+
+    // Index of the user message just pushed, captured AFTER trim so the slice
+    // `session.messages[messages_before..]` stays in-bounds even when
+    // safe_trim_messages drained more than (len - MAX_HISTORY_MESSAGES) to
+    // land on a safe tool-pair boundary. The trim drains from the front and
+    // find_safe_trim_point keeps len >= 1, so the user msg sits at len-1.
+    let messages_before = session.messages.len().saturating_sub(1);
 
     // Proactively strip base64 image data from previous turns.  Images that
     // survived from earlier sessions (e.g. after a crash or daemon restart)
@@ -2239,9 +2243,6 @@ pub async fn run_agent_loop_streaming(
         None
     };
 
-    // Track message count before this turn so auto_memorize only processes new messages.
-    let messages_before = session.messages.len();
-
     // Mutable collector for memories saved during this turn (populated by auto_memorize).
     let mut memories_saved: Vec<String> = Vec::new();
     // Mutable collector for memory conflicts detected during this turn.
@@ -2331,6 +2332,13 @@ pub async fn run_agent_loop_streaming(
         &manifest.name,
         user_message,
     );
+
+    // Index of the user message just pushed, captured AFTER trim so the slice
+    // `session.messages[messages_before..]` stays in-bounds even when
+    // safe_trim_messages drained more than (len - MAX_HISTORY_MESSAGES) to
+    // land on a safe tool-pair boundary. The trim drains from the front and
+    // find_safe_trim_point keeps len >= 1, so the user msg sits at len-1.
+    let messages_before = session.messages.len().saturating_sub(1);
 
     // Proactively strip stale image data from previous turns (streaming path).
     strip_prior_image_data(&mut messages);
@@ -4076,6 +4084,99 @@ mod tests {
     #[test]
     fn test_max_history_messages() {
         assert_eq!(MAX_HISTORY_MESSAGES, 40);
+    }
+
+    /// Regression for issue #2067: auto_memorize sliced `session.messages`
+    /// with an index captured **before** `safe_trim_messages` ran, so when
+    /// `find_safe_trim_point` scanned forward and trimmed deeper than
+    /// `len - MAX_HISTORY_MESSAGES`, the slice went out of range and the
+    /// agent_loop task panicked ("range start index 42 out of range for
+    /// slice of length 36").
+    ///
+    /// After the fix, `messages_before` is captured POST-trim as
+    /// `len.saturating_sub(1)`, pointing at the user message that was just
+    /// pushed — which must always be the last message in the session because
+    /// safe_trim_messages only drains from the front. This test pins both
+    /// halves: it shows the OLD index would have been out of bounds for the
+    /// trimmed session, AND that the NEW index yields a valid slice
+    /// containing exactly the just-pushed user message.
+    #[test]
+    fn test_safe_trim_leaves_user_message_sliceable_after_deep_trim() {
+        // Build 42 messages where the tail forms tool-pair chains that
+        // force find_safe_trim_point to scan past the minimum trim depth.
+        // Pattern: user question -> assistant(tool_use) -> user(tool_result)
+        // repeated. A safe boundary is a User msg that is NOT a tool-result.
+        let mut session_messages: Vec<Message> = Vec::new();
+        for i in 0..13 {
+            // Plain turn: user question + assistant reply.
+            session_messages.push(Message::user(format!("q{i}")));
+            session_messages.push(Message::assistant(format!("a{i}")));
+        }
+        // Push a run of tool-pair messages so indices near min_trim are NOT
+        // safe boundaries, forcing the forward scan to skip ahead.
+        for i in 0..7 {
+            let tool_use_id = format!("tu-{i}");
+            session_messages.push(Message {
+                role: Role::Assistant,
+                content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+                    id: tool_use_id.clone(),
+                    name: "noop".to_string(),
+                    input: serde_json::json!({}),
+                    provider_metadata: None,
+                }]),
+                pinned: false,
+            });
+            session_messages.push(Message {
+                role: Role::User,
+                content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                    tool_use_id,
+                    tool_name: "noop".to_string(),
+                    content: format!("r{i}"),
+                    is_error: false,
+                }]),
+                pinned: false,
+            });
+        }
+        // Capture the OLD (buggy) index: len BEFORE pushing the current
+        // turn's user message, which is what the old code used.
+        let old_messages_before = session_messages.len();
+
+        // Push the current turn's user message. At this point
+        // len = 26 + 14 + 1 = 41, which is > MAX_HISTORY_MESSAGES=40 and
+        // will trigger safe_trim_messages.
+        session_messages.push(Message::user("current turn"));
+        assert!(session_messages.len() > MAX_HISTORY_MESSAGES);
+
+        let mut llm_messages = session_messages.clone();
+        safe_trim_messages(
+            &mut llm_messages,
+            &mut session_messages,
+            "test-agent",
+            "current turn",
+        );
+
+        // The forward scan in find_safe_trim_point skipped past the tool-pair
+        // run, so the trim drained deeper than (old_len+1) - MAX_HISTORY.
+        // This is the exact shape that produced the issue #2067 panic.
+        assert!(
+            session_messages.len() < old_messages_before,
+            "expected deep trim to put old_messages_before out of bounds \
+             (old_before={old_messages_before}, post_trim_len={})",
+            session_messages.len()
+        );
+
+        // Post-trim invariants used by the fix at the auto_memorize call
+        // site: session is non-empty, the just-pushed user msg is the last
+        // element, and slicing at len-1 yields exactly that one message.
+        assert!(!session_messages.is_empty());
+        let messages_before = session_messages.len().saturating_sub(1);
+        let tail = &session_messages[messages_before..];
+        assert_eq!(tail.len(), 1);
+        assert_eq!(tail[0].role, Role::User);
+        match &tail[0].content {
+            MessageContent::Text(t) => assert_eq!(t, "current turn"),
+            other => panic!("expected text user msg, got {other:?}"),
+        }
     }
 
     #[test]
