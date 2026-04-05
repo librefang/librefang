@@ -21,8 +21,9 @@
 /hands                /agent/hands       301
 /memory               /agent/memory      301
 /skills               /agent/skills      301
-/plugins              /agent/plugins     301
-/workflows            /agent/workflows   301
+/plugins              /agent/plugins              301
+/prompt-intelligence  /agent/prompt-intelligence  301
+/workflows            /agent/workflows            301
 
 # --- Integrations group ---
 /channels             /integrations/channels         301
@@ -59,8 +60,9 @@
 /zh/hands             /zh/agent/hands       301
 /zh/memory            /zh/agent/memory      301
 /zh/skills            /zh/agent/skills      301
-/zh/plugins           /zh/agent/plugins     301
-/zh/workflows         /zh/agent/workflows   301
+/zh/plugins              /zh/agent/plugins              301
+/zh/prompt-intelligence  /zh/agent/prompt-intelligence  301
+/zh/workflows            /zh/agent/workflows            301
 
 /zh/channels          /zh/integrations/channels         301
 /zh/channels/*        /zh/integrations/channels/:splat  301
