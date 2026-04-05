@@ -12,6 +12,7 @@ import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { Input } from "../components/ui/Input";
+import { Modal } from "../components/ui/Modal";
 import { useUIStore } from "../lib/store";
 import { useCreateShortcut } from "../lib/useCreateShortcut";
 import {
@@ -948,17 +949,9 @@ export function ProvidersPage() {
       )}
 
       {/* API Key Config Modal */}
-      {configProvider && (
-        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/30 backdrop-blur-sm" onClick={() => setConfigProvider(null)}>
-          <div className="bg-surface rounded-2xl shadow-2xl border border-border-subtle w-[440px] max-w-[90vw] animate-fade-in-scale" onClick={e => e.stopPropagation()}>
-            <div className="flex items-center justify-between px-5 py-3 border-b border-border-subtle">
-              <div className="flex items-center gap-2">
-                <Key className="w-4 h-4 text-brand" />
-                <h3 className="text-sm font-bold">{t("providers.configure_provider")}</h3>
-              </div>
-              <button onClick={() => setConfigProvider(null)} className="p-1 rounded hover:bg-main"><X className="w-4 h-4" /></button>
-            </div>
-            <div className="p-5 space-y-4">
+      <Modal isOpen={!!configProvider} onClose={() => setConfigProvider(null)} title={t("providers.configure_provider")} size="md">
+        {configProvider && (
+          <div className="p-5 space-y-4">
               <div className="flex items-center gap-3 p-3 rounded-xl bg-main">
                 <div className="w-10 h-10 rounded-xl bg-brand/10 flex items-center justify-center">
                   {providerIcons[configProvider.id] || <Server className="w-5 h-5 text-brand" />}
@@ -1016,10 +1009,9 @@ export function ProvidersPage() {
                   </Button>
                 )}
               </div>
-            </div>
           </div>
-        </div>
-      )}
+        )}
+      </Modal>
 
       {/* Delete Confirmation Modal */}
       {deleteConfirmProvider && (
