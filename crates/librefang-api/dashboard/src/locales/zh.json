@@ -146,7 +146,7 @@
     "active_sessions": "活跃会话",
     "agent_count": "Agent 数量",
     "health_checks": "健康检查",
-    "pro_tip_shortcut": "使用 ⌘K 快速搜索 · 按 ← 折叠侧边栏",
+    "pro_tip_shortcut": "⌘K 搜索 · ? 查看全部快捷键 · g + 字母跳页",
     "setup_title": "需要初始化",
     "setup_description": "未检测到配置文件，点击自动检测 LLM 供应商并生成默认配置。",
     "setup_button": "初始化",

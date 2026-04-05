@@ -11,6 +11,7 @@ import { isProviderAvailable } from "../lib/status";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
+import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { Card } from "../components/ui/Card";
 import { Input } from "../components/ui/Input";
 import { Button } from "../components/ui/Button";
@@ -37,6 +38,15 @@ export function AgentsPage() {
   const [showPrompts, setShowPrompts] = useState(false);
   const [editingModel, setEditingModel] = useState(false);
   const [modelDraft, setModelDraft] = useState({ provider: "", model: "", max_tokens: "", temperature: "" });
+  // Destructive-action confirmation dialog. We set this instead of calling
+  // window.confirm() so the dialog matches the rest of the dashboard
+  // styling and can slide up as a bottom-sheet on mobile.
+  const [confirmDialog, setConfirmDialog] = useState<{
+    title: string;
+    message: string;
+    onConfirm: () => void;
+    tone?: "default" | "destructive";
+  } | null>(null);
   const queryClient = useQueryClient();
   const templatesQuery = useQuery({ queryKey: ["agent-templates"], queryFn: listAgentTemplates, enabled: showCreate && createMode === "template" });
   const spawnMutation = useMutation({
@@ -210,7 +220,19 @@ export function AgentsPage() {
           <Button variant="primary" size="sm" className="flex-1" onClick={(e) => { e.stopPropagation(); navigate({ to: "/chat", search: { agentId: agent.id } }); }}>
             <MessageCircle className="h-3.5 w-3.5 mr-1" /> {t("common.interact")}
           </Button>
-          <Button variant="secondary" size="sm" onClick={(e) => { e.stopPropagation(); if (confirm(t("agents.delete_confirm", { name: agent.name }))) deleteMutation.mutate(agent.id); }}>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={(e) => {
+              e.stopPropagation();
+              setConfirmDialog({
+                title: t("agents.delete_title", { defaultValue: "Delete agent?" }),
+                message: t("agents.delete_confirm", { name: agent.name }),
+                tone: "destructive",
+                onConfirm: () => deleteMutation.mutate(agent.id),
+              });
+            }}
+          >
             <Trash2 className="h-3.5 w-3.5" />
           </Button>
         </div>
@@ -515,11 +537,38 @@ export function AgentsPage() {
                     <Copy className="w-4 h-4" />
                     <span className="text-[9px]">{t("agents.clone")}</span>
                   </Button>
-                  <Button variant="secondary" size="sm" className="flex-col gap-1 py-2.5 h-auto" onClick={async () => { if (confirm(t("agents.reset_confirm"))) { await resetAgentSession(detailAgent.id); const d = await getAgentDetail(detailAgent.id); setDetailAgent(d); } }}>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    className="flex-col gap-1 py-2.5 h-auto"
+                    onClick={() =>
+                      setConfirmDialog({
+                        title: t("agents.reset_title", { defaultValue: "Reset session?" }),
+                        message: t("agents.reset_confirm"),
+                        onConfirm: async () => {
+                          await resetAgentSession(detailAgent.id);
+                          const d = await getAgentDetail(detailAgent.id);
+                          setDetailAgent(d);
+                        },
+                      })
+                    }
+                  >
                     <RotateCcw className="w-4 h-4" />
                     <span className="text-[9px]">{t("agents.reset")}</span>
                   </Button>
-                  <Button variant="secondary" size="sm" className="flex-col gap-1 py-2.5 h-auto text-error/70 hover:text-error" onClick={() => { if (confirm(t("agents.delete_confirm", { name: detailAgent.name }))) { deleteMutation.mutate(detailAgent.id); } }}>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    className="flex-col gap-1 py-2.5 h-auto text-error/70 hover:text-error"
+                    onClick={() =>
+                      setConfirmDialog({
+                        title: t("agents.delete_title", { defaultValue: "Delete agent?" }),
+                        message: t("agents.delete_confirm", { name: detailAgent.name }),
+                        tone: "destructive",
+                        onConfirm: () => deleteMutation.mutate(detailAgent.id),
+                      })
+                    }
+                  >
                     <Trash2 className="w-4 h-4" />
                     <span className="text-[9px]">{t("common.delete")}</span>
                   </Button>
@@ -603,12 +652,20 @@ export function AgentsPage() {
 
       {/* Prompts & Experiments Modal */}
       {showPrompts && detailAgent && (
-        <PromptsExperimentsModal 
-          agentId={detailAgent.id} 
+        <PromptsExperimentsModal
+          agentId={detailAgent.id}
           agentName={t(`agents.builtin.${detailAgent.name}.name`, { defaultValue: detailAgent.name })}
-          onClose={() => setShowPrompts(false)} 
+          onClose={() => setShowPrompts(false)}
         />
       )}
+      <ConfirmDialog
+        isOpen={confirmDialog !== null}
+        title={confirmDialog?.title ?? ""}
+        message={confirmDialog?.message ?? ""}
+        tone={confirmDialog?.tone}
+        onConfirm={() => confirmDialog?.onConfirm()}
+        onClose={() => setConfirmDialog(null)}
+      />
     </div>
   );
 }
