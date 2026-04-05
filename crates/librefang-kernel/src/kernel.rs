@@ -3289,12 +3289,29 @@ system_prompt = "You are a helpful assistant."
                     .get(agent_id)
                     .map(|a| a.name.clone())
                     .unwrap_or_else(|| agent_id.to_string());
-                let fail_msg = format!(
-                    "Agent \"{}\" loop failed: {}",
-                    agent_name,
-                    e.to_string().chars().take(200).collect::<String>()
-                );
-                self.push_notification(&agent_id.to_string(), "task_failed", &fail_msg)
+                // Push notification — use "tool_failure" for the repeated-tool-failure
+                // exit path so operators with tool_failure agent_rules get alerted.
+                let (event_type, fail_msg) = match &e {
+                    KernelError::LibreFang(LibreFangError::RepeatedToolFailures {
+                        iterations,
+                        error_count,
+                    }) => (
+                        "tool_failure",
+                        format!(
+                            "Agent \"{}\" exited after {} consecutive tool failures ({} errors in final iteration)",
+                            agent_name, iterations, error_count
+                        ),
+                    ),
+                    other => (
+                        "task_failed",
+                        format!(
+                            "Agent \"{}\" loop failed: {}",
+                            agent_name,
+                            other.to_string().chars().take(200).collect::<String>()
+                        ),
+                    ),
+                };
+                self.push_notification(&agent_id.to_string(), event_type, &fail_msg)
                     .await;
 
                 Err(e)
