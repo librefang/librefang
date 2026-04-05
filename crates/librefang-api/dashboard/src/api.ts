@@ -2118,8 +2118,12 @@ export async function uninstallPlugin(name: string): Promise<ApiActionResponse> 
   return post<ApiActionResponse>("/api/plugins/uninstall", { name });
 }
 
-export async function scaffoldPlugin(name: string, description: string): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>("/api/plugins/scaffold", { name, description });
+export async function scaffoldPlugin(
+  name: string,
+  description: string,
+  runtime?: string,
+): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>("/api/plugins/scaffold", { name, description, runtime });
 }
 
 export async function installPluginDeps(name: string): Promise<ApiActionResponse> {

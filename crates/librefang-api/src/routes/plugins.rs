@@ -20,6 +20,7 @@ pub fn router() -> axum::Router<Arc<AppState>> {
         .route("/plugins/install", axum::routing::post(install_plugin))
         .route("/plugins/uninstall", axum::routing::post(uninstall_plugin))
         .route("/plugins/scaffold", axum::routing::post(scaffold_plugin))
+        .route("/plugins/doctor", axum::routing::get(plugin_doctor))
         .route("/plugins/{name}", axum::routing::get(get_plugin))
         .route(
             "/plugins/{name}/install-deps",
@@ -224,7 +225,14 @@ pub async fn uninstall_plugin(Json(body): Json<serde_json::Value>) -> impl IntoR
 
 /// POST /api/plugins/scaffold — Create a new plugin from template.
 ///
-/// Request body: `{"name": "my-plugin", "description": "My custom plugin"}`
+/// Request body:
+/// ```json
+/// {
+///   "name": "my-plugin",
+///   "description": "My custom plugin",
+///   "runtime": "python"  // optional: python (default) | v | node | deno | go | native
+/// }
+/// ```
 #[utoipa::path(
     post,
     path = "/api/plugins/scaffold",
@@ -244,8 +252,10 @@ pub async fn scaffold_plugin(Json(body): Json<serde_json::Value>) -> impl IntoRe
         .get("description")
         .and_then(|d| d.as_str())
         .unwrap_or("");
+    // Optional runtime tag — defaults to "python" when omitted for BC.
+    let runtime = body.get("runtime").and_then(|r| r.as_str());
 
-    match librefang_runtime::plugin_manager::scaffold_plugin(name, description) {
+    match librefang_runtime::plugin_manager::scaffold_plugin(name, description, runtime) {
         Ok(path) => (
             StatusCode::CREATED,
             Json(serde_json::json!({
@@ -263,6 +273,33 @@ pub async fn scaffold_plugin(Json(body): Json<serde_json::Value>) -> impl IntoRe
             (status, Json(serde_json::json!({"error": e})))
         }
     }
+}
+
+/// GET /api/plugins/doctor — Diagnose runtime availability + per-plugin readiness.
+///
+/// Probes every supported runtime (`python`, `node`, `go`, ...) for its
+/// launcher on PATH, then cross-references with every installed plugin to
+/// flag which ones will fail at hook time because their runtime is missing.
+#[utoipa::path(
+    get,
+    path = "/api/plugins/doctor",
+    tag = "plugins",
+    responses(
+        (status = 200, description = "Runtime availability + per-plugin diagnostics", body = serde_json::Value)
+    )
+)]
+pub async fn plugin_doctor() -> impl IntoResponse {
+    // `run_doctor` spawns subprocesses — keep it off the async runtime.
+    let report = tokio::task::spawn_blocking(librefang_runtime::plugin_manager::run_doctor)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::error!(error = %e, "plugin doctor task panicked");
+            librefang_runtime::plugin_manager::DoctorReport {
+                runtimes: Vec::new(),
+                plugins: Vec::new(),
+            }
+        });
+    Json(report)
 }
 
 /// POST /api/plugins/:name/install-deps — Install Python dependencies for a plugin.
