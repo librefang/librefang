@@ -103,6 +103,25 @@ pub struct ChannelOverrides {
     /// (show the done reaction for backward compatibility).
     #[serde(default)]
     pub clear_done_reaction: bool,
+    /// When `true`, all built-in slash commands (`/agent`, `/new`, `/help`, …)
+    /// are disabled on this channel and any leading-slash text is forwarded
+    /// to the agent as normal message content. Use this for public-facing
+    /// bots where end users must not be able to switch agents or reset
+    /// sessions. Takes precedence over `allowed_commands` / `blocked_commands`.
+    #[serde(default)]
+    pub disable_commands: bool,
+    /// Whitelist of built-in command names (without the leading `/`) that
+    /// are allowed on this channel. When non-empty, any command outside this
+    /// list is treated as normal text and forwarded to the agent. Leave
+    /// empty to fall back to `blocked_commands`.
+    #[serde(default)]
+    pub allowed_commands: Vec<String>,
+    /// Blacklist of built-in command names (without the leading `/`) that
+    /// are blocked on this channel. Applied only when `allowed_commands` is
+    /// empty. Blocked commands are treated as normal text and forwarded to
+    /// the agent.
+    #[serde(default)]
+    pub blocked_commands: Vec<String>,
 }
 
 impl Default for ChannelOverrides {
@@ -123,6 +142,9 @@ impl Default for ChannelOverrides {
             message_debounce_max_ms: 30000,
             message_debounce_max_buffer: 64,
             clear_done_reaction: false,
+            disable_commands: false,
+            allowed_commands: Vec::new(),
+            blocked_commands: Vec::new(),
         }
     }
 }
