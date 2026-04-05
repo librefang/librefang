@@ -17,6 +17,7 @@ import { isProviderAvailable } from "../lib/status";
 import { Card } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
+import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import {
   Activity, Cpu, HardDrive, Zap, Timer, Layers, CheckCircle2, GitCommit,
   Calendar, Server, Monitor, Settings, HeartPulse, Box, Globe, FolderOpen,
@@ -662,35 +663,15 @@ export function RuntimePage() {
       )}
 
       {/* Shutdown Confirm Dialog */}
-      {showShutdownConfirm && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm" onClick={() => setShowShutdownConfirm(false)}>
-          <div className="bg-surface border border-border-subtle rounded-2xl p-6 max-w-sm w-full mx-4 shadow-2xl" onClick={e => e.stopPropagation()}>
-            <div className="flex items-center gap-3 mb-4">
-              <div className="w-10 h-10 rounded-xl bg-error/10 flex items-center justify-center">
-                <Power className="w-5 h-5 text-error" />
-              </div>
-              <div>
-                <h3 className="text-sm font-black">{t("runtime.shutdown_confirm_title")}</h3>
-                <p className="text-xs text-text-dim">{t("runtime.shutdown_confirm_desc")}</p>
-              </div>
-            </div>
-            <div className="flex justify-end gap-2 mt-6">
-              <Button variant="ghost" size="sm" onClick={() => setShowShutdownConfirm(false)}>
-                {t("common.cancel")}
-              </Button>
-              <Button
-                variant="danger"
-                size="sm"
-                leftIcon={shutdownMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Power className="w-3.5 h-3.5" />}
-                disabled={shutdownMutation.isPending}
-                onClick={() => shutdownMutation.mutate()}
-              >
-                {t("runtime.shutdown_confirm")}
-              </Button>
-            </div>
-          </div>
-        </div>
-      )}
+      <ConfirmDialog
+        isOpen={showShutdownConfirm}
+        title={t("runtime.shutdown_confirm_title")}
+        message={t("runtime.shutdown_confirm_desc")}
+        confirmLabel={t("runtime.shutdown_confirm")}
+        tone="destructive"
+        onConfirm={() => shutdownMutation.mutate()}
+        onClose={() => setShowShutdownConfirm(false)}
+      />
     </div>
   );
 }

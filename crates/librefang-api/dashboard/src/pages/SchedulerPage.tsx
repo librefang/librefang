@@ -7,10 +7,11 @@ import { Badge } from "../components/ui/Badge";
 import { PageHeader } from "../components/ui/PageHeader";
 import { useUIStore } from "../lib/store";
 import { useCreateShortcut } from "../lib/useCreateShortcut";
-import { Clock, Plus, Play, Trash2, Calendar, Zap, X, Loader2, AlertCircle, ChevronRight } from "lucide-react";
+import { Clock, Plus, Play, Trash2, Calendar, Zap, Loader2, AlertCircle, ChevronRight } from "lucide-react";
 import { ScheduleModal } from "../components/ui/ScheduleModal";
 import { ListSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
+import { Modal } from "../components/ui/Modal";
 import { truncateId } from "../lib/string";
 
 const REFRESH_MS = 30000;
@@ -250,14 +251,8 @@ export function SchedulerPage() {
       </div>
 
       {/* Create Modal */}
-      {showCreate && (
-        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/30 backdrop-blur-sm" onClick={() => setShowCreate(false)}>
-          <div className="bg-surface rounded-t-2xl sm:rounded-2xl shadow-2xl border border-border-subtle w-full sm:w-[440px] sm:max-w-[90vw] animate-fade-in-scale" onClick={e => e.stopPropagation()}>
-            <div className="flex items-center justify-between px-5 py-3 border-b border-border-subtle">
-              <h3 className="text-sm font-bold">{t("scheduler.create_job")}</h3>
-              <button onClick={() => setShowCreate(false)} className="p-1 rounded hover:bg-main"><X className="w-4 h-4" /></button>
-            </div>
-            <form onSubmit={handleCreate} className="p-5 space-y-4">
+      <Modal isOpen={showCreate} onClose={() => setShowCreate(false)} title={t("scheduler.create_job")} size="md">
+        <form onSubmit={handleCreate} className="p-5 space-y-4">
               <div>
                 <label className="text-[10px] font-bold text-text-dim uppercase">{t("scheduler.job_name")}</label>
                 <input value={name} onChange={e => setName(e.target.value)} placeholder={t("scheduler.job_name_placeholder")} className={inputClass} />
@@ -323,10 +318,8 @@ export function SchedulerPage() {
                 </Button>
                 <Button type="button" variant="secondary" onClick={() => setShowCreate(false)}>{t("common.cancel")}</Button>
               </div>
-            </form>
-          </div>
-        </div>
-      )}
+        </form>
+      </Modal>
     </div>
   );
 }
