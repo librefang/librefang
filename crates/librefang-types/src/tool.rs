@@ -150,9 +150,12 @@ pub enum AgentLoopSignal {
         content: String,
     },
     ApprovalResolved {
+        tool_use_id: String,
         tool_name: String,
         decision: String,
-        result_preview: String,
+        result_content: String,
+        result_is_error: bool,
+        result_status: ToolExecutionStatus,
     },
 }
 

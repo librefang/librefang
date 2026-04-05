@@ -1387,29 +1387,23 @@ pub async fn approve_request(
         }
     };
 
-    let kernel = Arc::clone(&state.kernel);
-    match tokio::spawn(async move {
-        kernel
-            .resolve_tool_approval(
-                uuid,
-                librefang_types::approval::ApprovalDecision::Approved,
-                Some("api".to_string()),
-            )
-            .await
-    })
-    .await
+    match state
+        .kernel
+        .resolve_tool_approval(
+            uuid,
+            librefang_types::approval::ApprovalDecision::Approved,
+            Some("api".to_string()),
+        )
+        .await
     {
-        Ok(Ok((resp, _deferred))) => (
+        Ok((resp, _deferred)) => (
             StatusCode::OK,
             Json(
                 serde_json::json!({"id": id, "status": "approved", "decided_at": resp.decided_at.to_rfc3339()}),
             ),
         )
             .into_response(),
-        Ok(Err(e)) => ApiErrorResponse::not_found(e).into_json_tuple().into_response(),
-        Err(e) => ApiErrorResponse::internal(format!("approval resolution task failed: {e}"))
-            .into_json_tuple()
-            .into_response(),
+        Err(e) => ApiErrorResponse::not_found(e).into_json_tuple().into_response(),
     }
 }
 
@@ -1430,29 +1424,23 @@ pub async fn reject_request(
         }
     };
 
-    let kernel = Arc::clone(&state.kernel);
-    match tokio::spawn(async move {
-        kernel
-            .resolve_tool_approval(
-                uuid,
-                librefang_types::approval::ApprovalDecision::Denied,
-                Some("api".to_string()),
-            )
-            .await
-    })
-    .await
+    match state
+        .kernel
+        .resolve_tool_approval(
+            uuid,
+            librefang_types::approval::ApprovalDecision::Denied,
+            Some("api".to_string()),
+        )
+        .await
     {
-        Ok(Ok((resp, _deferred))) => (
+        Ok((resp, _deferred)) => (
             StatusCode::OK,
             Json(
                 serde_json::json!({"id": id, "status": "rejected", "decided_at": resp.decided_at.to_rfc3339()}),
             ),
         )
             .into_response(),
-        Ok(Err(e)) => ApiErrorResponse::not_found(e).into_json_tuple().into_response(),
-        Err(e) => ApiErrorResponse::internal(format!("approval resolution task failed: {e}"))
-            .into_json_tuple()
-            .into_response(),
+        Err(e) => ApiErrorResponse::not_found(e).into_json_tuple().into_response(),
     }
 }
 
@@ -1474,9 +1462,12 @@ pub async fn modify_request(
     Json(body): Json<ModifyRequestBody>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> axum::response::Response {
-    const MAX_FEEDBACK_LEN: usize = 4096;
     // Truncate feedback to prevent database bloat
-    let feedback: String = body.feedback.chars().take(MAX_FEEDBACK_LEN).collect();
+    let feedback: String = body
+        .feedback
+        .chars()
+        .take(librefang_types::approval::MAX_APPROVAL_FEEDBACK_LEN)
+        .collect();
     let uuid = match uuid::Uuid::parse_str(&id) {
         Ok(u) => u,
         Err(_) => {
@@ -1487,29 +1478,23 @@ pub async fn modify_request(
         }
     };
 
-    let kernel = Arc::clone(&state.kernel);
-    match tokio::spawn(async move {
-        kernel
-            .resolve_tool_approval(
-                uuid,
-                librefang_types::approval::ApprovalDecision::ModifyAndRetry { feedback },
-                Some("api".to_string()),
-            )
-            .await
-    })
-    .await
+    match state
+        .kernel
+        .resolve_tool_approval(
+            uuid,
+            librefang_types::approval::ApprovalDecision::ModifyAndRetry { feedback },
+            Some("api".to_string()),
+        )
+        .await
     {
-        Ok(Ok((resp, _deferred))) => (
+        Ok((resp, _deferred)) => (
             StatusCode::OK,
             Json(
                 serde_json::json!({"id": id, "status": "modified", "decided_at": resp.decided_at.to_rfc3339()}),
             ),
         )
             .into_response(),
-        Ok(Err(e)) => ApiErrorResponse::not_found(e).into_json_tuple().into_response(),
-        Err(e) => ApiErrorResponse::internal(format!("approval resolution task failed: {e}"))
-            .into_json_tuple()
-            .into_response(),
+        Err(e) => ApiErrorResponse::not_found(e).into_json_tuple().into_response(),
     }
 }
 
@@ -1570,7 +1555,12 @@ pub async fn batch_resolve(
             .resolve_tool_approval(uuid, decision.clone(), Some("api".to_string()))
             .await
         {
-            Ok(_) => result_json.push(serde_json::json!({"id": id, "status": "ok"})),
+            Ok((resp, _)) => result_json.push(serde_json::json!({
+                "id": id,
+                "status": "ok",
+                "decision": resp.decision.as_str(),
+                "decided_at": resp.decided_at.to_rfc3339(),
+            })),
             Err(e) => {
                 result_json.push(serde_json::json!({"id": id, "status": "error", "message": e}))
             }

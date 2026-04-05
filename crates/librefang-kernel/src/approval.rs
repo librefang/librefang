@@ -40,6 +40,12 @@ struct PendingRequest {
 }
 
 #[derive(Debug, Clone)]
+pub struct EscalatedApproval {
+    pub request_id: Uuid,
+    pub request: ApprovalRequest,
+}
+
+#[derive(Debug, Clone)]
 pub struct ApprovalRecord {
     pub request: ApprovalRequest,
     pub decision: ApprovalDecision,
@@ -48,6 +54,13 @@ pub struct ApprovalRecord {
 }
 
 impl ApprovalManager {
+    fn pending_count_for_agent(&self, agent_id: &str) -> usize {
+        self.pending
+            .iter()
+            .filter(|r| r.value().request.agent_id == agent_id)
+            .count()
+    }
+
     pub fn new(policy: ApprovalPolicy) -> Self {
         Self {
             pending: DashMap::new(),
@@ -171,11 +184,7 @@ impl ApprovalManager {
         let mut current_req = req;
 
         loop {
-            let agent_pending = self
-                .pending
-                .iter()
-                .filter(|r| r.value().request.agent_id == current_req.agent_id)
-                .count();
+            let agent_pending = self.pending_count_for_agent(&current_req.agent_id);
             if agent_pending >= MAX_PENDING_PER_AGENT {
                 warn!(agent_id = %current_req.agent_id, "Approval request rejected: too many pending");
                 return ApprovalDecision::Denied;
@@ -242,12 +251,12 @@ impl ApprovalManager {
         req: ApprovalRequest,
         deferred: DeferredToolExecution,
     ) -> Result<uuid::Uuid, String> {
-        // Anti-duplicate guard: check if identical request already pending
+        // Anti-duplicate guard: reject duplicate tool_use IDs so a single tool
+        // call cannot be submitted twice, but allow identical inputs from
+        // distinct tool calls in the same assistant response.
         let has_duplicate = self.pending.iter().any(|r| {
             if let Some(ref d) = r.value().deferred {
-                d.agent_id == deferred.agent_id
-                    && d.tool_name == deferred.tool_name
-                    && d.input == deferred.input
+                d.tool_use_id == deferred.tool_use_id
             } else {
                 false
             }
@@ -257,17 +266,7 @@ impl ApprovalManager {
         }
 
         // Per-agent pending limit
-        let agent_pending_count = self
-            .pending
-            .iter()
-            .filter(|r| {
-                r.value()
-                    .deferred
-                    .as_ref()
-                    .map(|d| d.agent_id == deferred.agent_id)
-                    .unwrap_or(false)
-            })
-            .count();
+        let agent_pending_count = self.pending_count_for_agent(&req.agent_id);
         if agent_pending_count >= MAX_PENDING_PER_AGENT {
             return Err("Too many pending approval requests for this agent".to_string());
         }
@@ -289,8 +288,12 @@ impl ApprovalManager {
     /// Returns terminal decisions for deferred requests. Escalating requests stay pending.
     pub fn expire_pending_requests(
         &self,
-    ) -> Vec<(uuid::Uuid, ApprovalDecision, DeferredToolExecution)> {
+    ) -> (
+        Vec<EscalatedApproval>,
+        Vec<(uuid::Uuid, ApprovalDecision, DeferredToolExecution)>,
+    ) {
         let now = chrono::Utc::now();
+        let mut escalated = Vec::new();
         let mut expired = Vec::new();
         let fallback = {
             let policy = self.policy.read().unwrap_or_else(|e| e.into_inner());
@@ -323,12 +326,16 @@ impl ApprovalManager {
                         self.pending.insert(
                             id,
                             PendingRequest {
-                                request,
+                                request: request.clone(),
                                 sender: pending.sender,
                                 deferred: pending.deferred,
                                 submitted_at: now,
                             },
                         );
+                        escalated.push(EscalatedApproval {
+                            request_id: id,
+                            request,
+                        });
                     }
                     ExpiryOutcome::Resolve(decision) => {
                         self.push_recent(pending.request.clone(), decision.clone(), None, now);
@@ -343,7 +350,7 @@ impl ApprovalManager {
             }
         }
 
-        expired
+        (escalated, expired)
     }
 
     /// Resolve a pending request (called by API/UI).
@@ -1249,7 +1256,8 @@ mod tests {
         mgr.submit_request(req, deferred).unwrap();
         mgr.pending.get_mut(&id).unwrap().submitted_at = Utc::now() - chrono::Duration::seconds(5);
 
-        let expired = mgr.expire_pending_requests();
+        let (escalated, expired) = mgr.expire_pending_requests();
+        assert!(escalated.is_empty());
         assert_eq!(expired.len(), 1);
         assert_eq!(expired[0].1, ApprovalDecision::Skipped);
         assert_eq!(mgr.pending_count(), 0);
@@ -1281,14 +1289,17 @@ mod tests {
         for expected in 1..=MAX_ESCALATIONS {
             mgr.pending.get_mut(&id).unwrap().submitted_at =
                 Utc::now() - chrono::Duration::seconds(60);
-            let expired = mgr.expire_pending_requests();
+            let (escalated, expired) = mgr.expire_pending_requests();
+            assert_eq!(escalated.len(), 1);
+            assert_eq!(escalated[0].request_id, id);
             assert!(expired.is_empty());
             let pending = mgr.get_pending(id).unwrap();
             assert_eq!(pending.escalation_count, expected);
         }
 
         mgr.pending.get_mut(&id).unwrap().submitted_at = Utc::now() - chrono::Duration::seconds(60);
-        let expired = mgr.expire_pending_requests();
+        let (escalated, expired) = mgr.expire_pending_requests();
+        assert!(escalated.is_empty());
         assert_eq!(expired.len(), 1);
         assert_eq!(expired[0].1, ApprovalDecision::TimedOut);
         assert_eq!(mgr.pending_count(), 0);
@@ -1311,7 +1322,7 @@ mod tests {
 
         let id1 = mgr.submit_request(req1, deferred1).unwrap();
 
-        // Try to submit identical request
+        // Try to submit duplicate tool_use_id
         let req2 = make_request("agent-1", "shell_exec", 300);
         let deferred2 = DeferredToolExecution {
             agent_id: "agent-1".to_string(),
@@ -1330,6 +1341,40 @@ mod tests {
 
         // Cleanup
         let _ = mgr.resolve(id1, ApprovalDecision::Denied, None);
+    }
+
+    #[tokio::test]
+    async fn test_submit_request_allows_identical_input_with_distinct_tool_use_ids() {
+        let mgr = Arc::new(default_manager());
+        let req1 = make_request("agent-1", "shell_exec", 300);
+        let deferred1 = DeferredToolExecution {
+            agent_id: "agent-1".to_string(),
+            tool_use_id: "tool-1".to_string(),
+            tool_name: "shell_exec".to_string(),
+            input: serde_json::json!({"cmd": "ls"}),
+            allowed_tools: None,
+            sender_id: None,
+            channel: None,
+            workspace_root: None,
+        };
+        let id1 = mgr.submit_request(req1, deferred1).unwrap();
+
+        let req2 = make_request("agent-1", "shell_exec", 300);
+        let deferred2 = DeferredToolExecution {
+            agent_id: "agent-1".to_string(),
+            tool_use_id: "tool-2".to_string(),
+            tool_name: "shell_exec".to_string(),
+            input: serde_json::json!({"cmd": "ls"}),
+            allowed_tools: None,
+            sender_id: None,
+            channel: None,
+            workspace_root: None,
+        };
+
+        let id2 = mgr.submit_request(req2, deferred2).unwrap();
+
+        let _ = mgr.resolve(id1, ApprovalDecision::Denied, None);
+        let _ = mgr.resolve(id2, ApprovalDecision::Denied, None);
     }
 
     #[tokio::test]
@@ -1416,8 +1461,9 @@ mod tests {
             },
         );
 
-        let expired = mgr.expire_pending_requests();
+        let (escalated, expired) = mgr.expire_pending_requests();
 
+        assert!(escalated.is_empty());
         assert_eq!(expired.len(), 1);
         assert_eq!(expired[0].0, request_id);
         assert_eq!(expired[0].1, ApprovalDecision::TimedOut);
@@ -1454,8 +1500,10 @@ mod tests {
             },
         );
 
-        let expired = mgr.expire_pending_requests();
+        let (escalated, expired) = mgr.expire_pending_requests();
 
+        assert_eq!(escalated.len(), 1);
+        assert_eq!(escalated[0].request_id, request_id);
         assert!(expired.is_empty());
         let pending = mgr
             .get_pending(request_id)

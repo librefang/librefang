@@ -177,6 +177,72 @@ fn strip_processed_image_data(messages: &mut [Message]) {
     }
 }
 
+fn apply_approval_resolution_signal(
+    session: &mut Session,
+    messages: &mut [Message],
+    tool_use_id: &str,
+    result_content: &str,
+    result_is_error: bool,
+    result_status: librefang_types::tool::ToolExecutionStatus,
+) {
+    fn patch_message_blocks(
+        msg: &mut Message,
+        tool_use_id: &str,
+        result_content: &str,
+        result_is_error: bool,
+        result_status: librefang_types::tool::ToolExecutionStatus,
+    ) -> bool {
+        let MessageContent::Blocks(blocks) = &mut msg.content else {
+            return false;
+        };
+        for block in blocks.iter_mut() {
+            if let ContentBlock::ToolResult {
+                tool_use_id: id,
+                content,
+                is_error,
+                status,
+                approval_request_id,
+                ..
+            } = block
+            {
+                if id == tool_use_id
+                    && *status == librefang_types::tool::ToolExecutionStatus::WaitingApproval
+                {
+                    *content = result_content.to_string();
+                    *is_error = result_is_error;
+                    *status = result_status;
+                    *approval_request_id = None;
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    for msg in session.messages.iter_mut().rev() {
+        if patch_message_blocks(
+            msg,
+            tool_use_id,
+            result_content,
+            result_is_error,
+            result_status,
+        ) {
+            break;
+        }
+    }
+    for msg in messages.iter_mut().rev() {
+        if patch_message_blocks(
+            msg,
+            tool_use_id,
+            result_content,
+            result_is_error,
+            result_status,
+        ) {
+            break;
+        }
+    }
+}
+
 /// Strip images from all messages except the last user message.
 ///
 /// Called *before* the LLM call to proactively clean stale images from
@@ -1534,13 +1600,28 @@ pub async fn run_agent_loop(
                                 let injected_text = match signal {
                                     AgentLoopSignal::Message { content } => content,
                                     AgentLoopSignal::ApprovalResolved {
+                                        tool_use_id,
                                         tool_name,
                                         decision,
-                                        result_preview,
-                                    } => format!(
-                                        "[System] Tool '{}' approval resolved ({}). Result: {}",
-                                        tool_name, decision, result_preview
-                                    ),
+                                        result_content,
+                                        result_is_error,
+                                        result_status,
+                                    } => {
+                                        apply_approval_resolution_signal(
+                                            session,
+                                            messages.as_mut_slice(),
+                                            &tool_use_id,
+                                            &result_content,
+                                            result_is_error,
+                                            result_status,
+                                        );
+                                        let result_preview =
+                                            librefang_types::truncate_str(&result_content, 300);
+                                        format!(
+                                            "[System] Tool '{}' approval resolved ({}). Result: {}",
+                                            tool_name, decision, result_preview
+                                        )
+                                    }
                                 };
                                 let inject_msg = Message::user(&injected_text);
                                 session.messages.push(inject_msg.clone());
@@ -3150,13 +3231,28 @@ pub async fn run_agent_loop_streaming(
                                 let injected_text = match signal {
                                     AgentLoopSignal::Message { content } => content,
                                     AgentLoopSignal::ApprovalResolved {
+                                        tool_use_id,
                                         tool_name,
                                         decision,
-                                        result_preview,
-                                    } => format!(
-                                        "[System] Tool '{}' approval resolved ({}). Result: {}",
-                                        tool_name, decision, result_preview
-                                    ),
+                                        result_content,
+                                        result_is_error,
+                                        result_status,
+                                    } => {
+                                        apply_approval_resolution_signal(
+                                            session,
+                                            messages.as_mut_slice(),
+                                            &tool_use_id,
+                                            &result_content,
+                                            result_is_error,
+                                            result_status,
+                                        );
+                                        let result_preview =
+                                            librefang_types::truncate_str(&result_content, 300);
+                                        format!(
+                                            "[System] Tool '{}' approval resolved ({}). Result: {}",
+                                            tool_name, decision, result_preview
+                                        )
+                                    }
                                 };
                                 let inject_msg = Message::user(&injected_text);
                                 session.messages.push(inject_msg.clone());

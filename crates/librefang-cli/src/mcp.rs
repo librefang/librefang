@@ -165,9 +165,8 @@ fn create_backend(config: Option<std::path::PathBuf>) -> McpBackend {
     let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
 
     // Spawn approval expiry sweep task on the runtime
-    let kernel_clone = kernel.clone();
-    rt.spawn(async move {
-        kernel_clone.spawn_approval_sweep_task();
+    rt.block_on(async {
+        kernel.clone().spawn_approval_sweep_task();
     });
 
     McpBackend::InProcess { kernel, rt }

@@ -1085,6 +1085,7 @@ impl LibreFangKernel {
     /// This periodically checks for expired pending approval requests and
     /// handles their resolution (e.g., timing out deferred tool executions).
     pub fn spawn_approval_sweep_task(self: Arc<Self>) {
+        let handle = tokio::runtime::Handle::current();
         if self.approval_sweep_started.swap(true, Ordering::AcqRel) {
             debug!("Approval expiry sweep task already running");
             return;
@@ -1093,12 +1094,17 @@ impl LibreFangKernel {
         let kernel = Arc::clone(&self);
         let mut shutdown_rx = self.shutdown_tx.subscribe();
 
-        tokio::spawn(async move {
+        handle.spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
-                        let expired = kernel.approval_manager.expire_pending_requests();
+                        let (escalated, expired) = kernel.approval_manager.expire_pending_requests();
+                        for escalated_req in escalated {
+                            kernel
+                                .notify_escalated_approval(&escalated_req.request, escalated_req.request_id)
+                                .await;
+                        }
                         for (request_id, decision, deferred) in expired {
                             kernel.handle_approval_resolution(
                                 request_id, decision, deferred
@@ -10223,7 +10229,10 @@ impl KernelHandle for LibreFangKernel {
             agent_id: agent_id.to_string(),
             tool_name: tool_name.to_string(),
             description: description.clone(),
-            action_summary: action_summary.chars().take(512).collect(),
+            action_summary: action_summary
+                .chars()
+                .take(librefang_types::approval::MAX_ACTION_SUMMARY_LEN)
+                .collect(),
             risk_level,
             requested_at: chrono::Utc::now(),
             timeout_secs: policy.timeout_secs,
@@ -10361,7 +10370,10 @@ impl KernelHandle for LibreFangKernel {
             agent_id: agent_id.to_string(),
             tool_name: tool_name.to_string(),
             description: description.clone(),
-            action_summary: action_summary.chars().take(512).collect(),
+            action_summary: action_summary
+                .chars()
+                .take(librefang_types::approval::MAX_ACTION_SUMMARY_LEN)
+                .collect(),
             risk_level,
             requested_at: chrono::Utc::now(),
             timeout_secs: policy.timeout_secs,
@@ -10370,6 +10382,10 @@ impl KernelHandle for LibreFangKernel {
             route_to: Vec::new(),
             escalation_count: 0,
         };
+
+        self.approval_manager
+            .submit_request(req.clone(), deferred)
+            .map_err(|e| e.to_string())?;
 
         // Publish event + push notification (same as blocking path)
         {
@@ -10433,9 +10449,7 @@ impl KernelHandle for LibreFangKernel {
             }
         }
 
-        self.approval_manager
-            .submit_request(req, deferred)
-            .map(|request_id| ToolApprovalSubmission::Pending { request_id })
+        Ok(ToolApprovalSubmission::Pending { request_id })
     }
 
     async fn resolve_tool_approval(
@@ -10454,12 +10468,23 @@ impl KernelHandle for LibreFangKernel {
             .approval_manager
             .resolve(request_id, decision, decided_by)?;
 
-        // 5.1: If we got a deferred execution payload, handle the resolution
-        // (execute approved tool / build terminal result, update session, notify agent).
+        // Deferred approval execution resumes in the background so API callers do
+        // not block on slow tools.
         if let Some(ref def) = deferred {
             let decision_clone = response.decision.clone();
-            self.handle_approval_resolution(request_id, decision_clone, def.clone())
-                .await;
+            let kernel = Arc::clone(
+                self.self_handle
+                    .get()
+                    .and_then(|w| w.upgrade())
+                    .as_ref()
+                    .ok_or_else(|| "Kernel self-handle unavailable".to_string())?,
+            );
+            let deferred_clone = def.clone();
+            tokio::spawn(async move {
+                kernel
+                    .handle_approval_resolution(request_id, decision_clone, deferred_clone)
+                    .await;
+            });
         }
 
         Ok((response, deferred))
@@ -11050,6 +11075,61 @@ impl KernelHandle for LibreFangKernel {
 // ---------------------------------------------------------------------------
 
 impl LibreFangKernel {
+    async fn notify_escalated_approval(
+        &self,
+        req: &librefang_types::approval::ApprovalRequest,
+        request_id: uuid::Uuid,
+    ) {
+        use librefang_types::capability::glob_matches;
+
+        let policy = self.approval_manager.policy();
+        let cfg = self.config.load_full();
+        let targets: Vec<librefang_types::approval::NotificationTarget> =
+            if !req.route_to.is_empty() {
+                req.route_to.clone()
+            } else {
+                let routed: Vec<_> = policy
+                    .routing
+                    .iter()
+                    .filter(|r| glob_matches(&r.tool_pattern, &req.tool_name))
+                    .flat_map(|r| r.route_to.clone())
+                    .collect();
+                if !routed.is_empty() {
+                    routed
+                } else {
+                    let agent_routed: Vec<_> = cfg
+                        .notification
+                        .agent_rules
+                        .iter()
+                        .filter(|rule| {
+                            glob_matches(&rule.agent_pattern, &req.agent_id)
+                                && rule.events.iter().any(|e| e == "approval_requested")
+                        })
+                        .flat_map(|rule| rule.channels.clone())
+                        .collect();
+                    if !agent_routed.is_empty() {
+                        agent_routed
+                    } else {
+                        cfg.notification.approval_channels.clone()
+                    }
+                }
+            };
+
+        let msg = format!(
+            "{} ESCALATION #{}: Approval still needed: agent \"{}\" wants to run `{}` - {}",
+            req.risk_level.emoji(),
+            req.escalation_count,
+            req.agent_id,
+            req.tool_name,
+            req.description,
+        );
+        let req_id_str = request_id.to_string();
+        for target in &targets {
+            self.push_approval_interactive(target, &msg, &req_id_str)
+                .await;
+        }
+    }
+
     /// Handle the aftermath of an approval decision: execute tool (if approved),
     /// build terminal result (if denied/expired/skipped), update session, notify agent.
     pub(crate) async fn handle_approval_resolution(
@@ -11108,12 +11188,13 @@ impl LibreFangKernel {
             ),
         };
 
-        // 5.2: Replace WaitingApproval result in session with the final result.
-        self.replace_tool_result_in_session(&agent_id, &deferred.tool_use_id, &result)
-            .await;
-
-        // 5.3: Notify the running agent loop via injection channel.
-        self.notify_agent_of_resolution(&agent_id, &deferred, &decision, &result);
+        // Let the live agent loop own patching and persistence when it can accept
+        // the resolution signal. Fall back to direct session mutation only when the
+        // agent is not currently reachable.
+        if !self.notify_agent_of_resolution(&agent_id, &deferred, &decision, &result) {
+            self.replace_tool_result_in_session(&agent_id, &deferred.tool_use_id, &result)
+                .await;
+        }
     }
 
     fn build_deferred_tool_exec_context<'a>(
@@ -11179,17 +11260,18 @@ impl LibreFangKernel {
         Ok(result)
     }
 
-    /// Replace a `WaitingApproval` `ToolResult` in the agent's session with the
-    /// final resolved result. Uses `tool_use_id` to locate the placeholder block.
+    /// Replace or reconcile a resolved approval result in the persisted session.
+    ///
+    /// This fallback may run concurrently with an in-flight agent-loop save, so it
+    /// always reloads the latest persisted session just before writing and only
+    /// patches against that snapshot. If another writer already persisted the same
+    /// terminal result, this becomes a no-op instead of appending a duplicate.
     async fn replace_tool_result_in_session(
         &self,
         agent_id: &AgentId,
         tool_use_id: &str,
         result: &librefang_types::tool::ToolResult,
     ) {
-        use librefang_types::message::{ContentBlock, MessageContent};
-        use librefang_types::tool::ToolExecutionStatus;
-
         // Resolve the agent's session_id from the registry.
         let session_id = match self.registry.get(*agent_id) {
             Some(entry) => entry.session_id,
@@ -11221,71 +11303,111 @@ impl LibreFangKernel {
             }
         };
 
-        let mut replaced = false;
-        let mut already_final = false;
-        'outer: for msg in &mut session.messages {
-            let blocks = match &mut msg.content {
-                MessageContent::Blocks(blocks) => blocks,
-                _ => continue,
-            };
-            for block in blocks.iter_mut() {
-                if let ContentBlock::ToolResult {
-                    tool_use_id: ref id,
-                    content,
-                    is_error,
-                    status,
-                    approval_request_id,
-                    ..
-                } = block
-                {
-                    if id == tool_use_id {
-                        if *status == ToolExecutionStatus::WaitingApproval {
-                            *content = result.content.clone();
-                            *is_error = result.is_error;
-                            *status = result.status;
-                            *approval_request_id = None;
-                            replaced = true;
-                            break 'outer;
-                        }
+        fn reconcile_tool_result(
+            session: &mut librefang_memory::session::Session,
+            tool_use_id: &str,
+            result: &librefang_types::tool::ToolResult,
+        ) -> bool {
+            use librefang_types::message::{ContentBlock, MessageContent};
+            use librefang_types::tool::ToolExecutionStatus;
 
-                        if *status == result.status && *content == result.content {
-                            already_final = true;
-                            break 'outer;
-                        }
-                    }
-                }
-            }
-        }
-
-        if !replaced && !already_final {
-            if let Some(last_message) = session.messages.last_mut() {
-                let block = ContentBlock::ToolResult {
-                    tool_use_id: result.tool_use_id.clone(),
-                    tool_name: result.tool_name.clone().unwrap_or_default(),
-                    content: result.content.clone(),
-                    is_error: result.is_error,
-                    status: result.status,
-                    approval_request_id: None,
+            let mut replaced = false;
+            let mut already_final = false;
+            'outer: for msg in &mut session.messages {
+                let blocks = match &mut msg.content {
+                    MessageContent::Blocks(blocks) => blocks,
+                    _ => continue,
                 };
+                for block in blocks.iter_mut() {
+                    if let ContentBlock::ToolResult {
+                        tool_use_id: ref id,
+                        content,
+                        is_error,
+                        status,
+                        approval_request_id,
+                        ..
+                    } = block
+                    {
+                        if id == tool_use_id {
+                            if *status == ToolExecutionStatus::WaitingApproval {
+                                *content = result.content.clone();
+                                *is_error = result.is_error;
+                                *status = result.status;
+                                *approval_request_id = None;
+                                replaced = true;
+                                break 'outer;
+                            }
 
-                match &mut last_message.content {
-                    MessageContent::Blocks(blocks) => blocks.push(block),
-                    MessageContent::Text(text) => {
-                        let prior = std::mem::take(text);
-                        last_message.content = MessageContent::Blocks(vec![
-                            ContentBlock::Text {
-                                text: prior,
-                                provider_metadata: None,
-                            },
-                            block,
-                        ]);
+                            if *status == result.status && *content == result.content {
+                                already_final = true;
+                                break 'outer;
+                            }
+                        }
                     }
                 }
-                replaced = true;
             }
+
+            if !replaced && !already_final {
+                if let Some(last_message) = session.messages.last_mut() {
+                    let block = ContentBlock::ToolResult {
+                        tool_use_id: result.tool_use_id.clone(),
+                        tool_name: result.tool_name.clone().unwrap_or_default(),
+                        content: result.content.clone(),
+                        is_error: result.is_error,
+                        status: result.status,
+                        approval_request_id: None,
+                    };
+
+                    match &mut last_message.content {
+                        MessageContent::Blocks(blocks) => blocks.push(block),
+                        MessageContent::Text(text) => {
+                            let prior = std::mem::take(text);
+                            last_message.content = MessageContent::Blocks(vec![
+                                ContentBlock::Text {
+                                    text: prior,
+                                    provider_metadata: None,
+                                },
+                                block,
+                            ]);
+                        }
+                    }
+                    replaced = true;
+                }
+            }
+
+            replaced || already_final
         }
 
-        if replaced {
+        if !reconcile_tool_result(&mut session, tool_use_id, result) {
+            debug!(
+                agent_id = %agent_id,
+                tool_use_id,
+                "replace_tool_result_in_session: terminal result already present or no writable message found"
+            );
+            return;
+        }
+
+        let persisted_session = match self.memory.get_session(session_id) {
+            Ok(Some(s)) => s,
+            Ok(None) => {
+                warn!(
+                    agent_id = %agent_id,
+                    "replace_tool_result_in_session: session disappeared before reconcile-save"
+                );
+                return;
+            }
+            Err(e) => {
+                warn!(
+                    agent_id = %agent_id,
+                    error = %e,
+                    "replace_tool_result_in_session: failed to reload latest session"
+                );
+                return;
+            }
+        };
+
+        session = persisted_session;
+        if reconcile_tool_result(&mut session, tool_use_id, result) {
             if let Err(e) = self.memory.save_session(&session) {
                 warn!(
                     agent_id = %agent_id,
@@ -11310,27 +11432,33 @@ impl LibreFangKernel {
         deferred: &librefang_types::tool::DeferredToolExecution,
         decision: &librefang_types::approval::ApprovalDecision,
         result: &librefang_types::tool::ToolResult,
-    ) {
+    ) -> bool {
         if let Some(tx) = self.injection_senders.get(agent_id) {
             match tx.try_send(AgentLoopSignal::ApprovalResolved {
+                tool_use_id: deferred.tool_use_id.clone(),
                 tool_name: deferred.tool_name.clone(),
                 decision: decision.as_str().to_string(),
-                result_preview: librefang_types::truncate_str(&result.content, 300).to_string(),
+                result_content: result.content.clone(),
+                result_is_error: result.is_error,
+                result_status: result.status,
             }) {
                 Ok(()) => {
                     debug!(agent_id = %agent_id, "Approval resolution injected into agent loop");
+                    true
                 }
                 Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                     warn!(
                         agent_id = %agent_id,
-                        "Approval resolution injection channel full — notification dropped"
+                        "Approval resolution injection channel full — falling back to session patch"
                     );
+                    false
                 }
                 Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                     debug!(
                         agent_id = %agent_id,
                         "Approval resolution: agent loop is not running (injection channel closed)"
                     );
+                    false
                 }
             }
         } else {
@@ -11338,6 +11466,7 @@ impl LibreFangKernel {
                 agent_id = %agent_id,
                 "Approval resolution: no active agent loop to notify"
             );
+            false
         }
     }
 }
@@ -11419,8 +11548,68 @@ impl librefang_wire::peer::PeerHandle for LibreFangKernel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::stream;
+    use librefang_channels::types::{ChannelAdapter, ChannelContent, ChannelType, ChannelUser};
+    use librefang_types::approval::{
+        AgentNotificationRule, ApprovalRequest, NotificationConfig, NotificationTarget, RiskLevel,
+    };
     use librefang_types::config::DefaultModelConfig;
     use std::collections::HashMap;
+    use std::pin::Pin;
+
+    struct RecordingChannelAdapter {
+        name: String,
+        channel_type: ChannelType,
+        sent: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl RecordingChannelAdapter {
+        fn new(channel_type: &str) -> Self {
+            Self {
+                name: channel_type.to_string(),
+                channel_type: ChannelType::Custom(channel_type.to_string()),
+                sent: Arc::new(std::sync::Mutex::new(Vec::new())),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ChannelAdapter for RecordingChannelAdapter {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        fn channel_type(&self) -> ChannelType {
+            self.channel_type.clone()
+        }
+
+        async fn start(
+            &self,
+        ) -> Result<
+            Pin<Box<dyn futures::Stream<Item = librefang_channels::types::ChannelMessage> + Send>>,
+            Box<dyn std::error::Error + Send + Sync>,
+        > {
+            Ok(Box::pin(stream::empty()))
+        }
+
+        async fn send(
+            &self,
+            user: &ChannelUser,
+            content: ChannelContent,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            if let ChannelContent::Text(text) = content {
+                self.sent
+                    .lock()
+                    .unwrap()
+                    .push(format!("{}:{text}", user.platform_id));
+            }
+            Ok(())
+        }
+
+        async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            Ok(())
+        }
+    }
 
     struct EnvVarGuard {
         key: &'static str,
@@ -11506,6 +11695,90 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_notify_escalated_approval_prefers_request_route_to() {
+        let dir = tempfile::tempdir().unwrap();
+        let home_dir = dir.path().to_path_buf();
+        std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+        let explicit_target = NotificationTarget {
+            channel_type: "test".to_string(),
+            recipient: "explicit-recipient".to_string(),
+            thread_id: None,
+        };
+
+        let mut config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            ..KernelConfig::default()
+        };
+        config.approval.routing = vec![librefang_types::approval::ApprovalRoutingRule {
+            tool_pattern: "shell_*".to_string(),
+            route_to: vec![NotificationTarget {
+                channel_type: "test".to_string(),
+                recipient: "policy-recipient".to_string(),
+                thread_id: None,
+            }],
+        }];
+        config.notification = NotificationConfig {
+            approval_channels: vec![NotificationTarget {
+                channel_type: "test".to_string(),
+                recipient: "global-recipient".to_string(),
+                thread_id: None,
+            }],
+            alert_channels: Vec::new(),
+            agent_rules: vec![AgentNotificationRule {
+                agent_pattern: "*".to_string(),
+                channels: vec![NotificationTarget {
+                    channel_type: "test".to_string(),
+                    recipient: "agent-rule-recipient".to_string(),
+                    thread_id: None,
+                }],
+                events: vec!["approval_requested".to_string()],
+            }],
+        };
+
+        let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+        let adapter = Arc::new(RecordingChannelAdapter::new("test"));
+        let sent = adapter.sent.clone();
+        kernel.channel_adapters.insert("test".to_string(), adapter);
+
+        let req = ApprovalRequest {
+            id: uuid::Uuid::new_v4(),
+            agent_id: "agent-123".to_string(),
+            tool_name: "shell_exec".to_string(),
+            description: "run shell command".to_string(),
+            action_summary: "run shell command".to_string(),
+            risk_level: RiskLevel::High,
+            requested_at: chrono::Utc::now(),
+            timeout_secs: 60,
+            sender_id: None,
+            channel: None,
+            route_to: vec![explicit_target],
+            escalation_count: 1,
+        };
+
+        kernel.notify_escalated_approval(&req, req.id).await;
+
+        let sent = sent.lock().unwrap().clone();
+        assert_eq!(
+            sent.len(),
+            1,
+            "only the explicit request target should be used"
+        );
+        assert!(
+            sent[0].starts_with("explicit-recipient:"),
+            "escalation should use the per-request route_to target"
+        );
+        assert!(
+            !sent[0].contains("policy-recipient")
+                && !sent[0].contains("agent-rule-recipient")
+                && !sent[0].contains("global-recipient")
+        );
+
+        kernel.shutdown();
     }
 
     #[test]
