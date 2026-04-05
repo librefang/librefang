@@ -38,7 +38,8 @@
     "logout": "Logout",
     "expand_sidebar": "Expand sidebar",
     "collapse_sidebar": "Collapse sidebar",
-    "open_menu": "Open navigation menu"
+    "open_menu": "Open navigation menu",
+    "skip_to_content": "Skip to content"
   },
   "common": {
     "refresh": "Refresh",

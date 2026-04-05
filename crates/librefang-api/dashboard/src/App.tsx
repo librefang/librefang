@@ -449,6 +449,14 @@ export function App() {
 
   return (
     <div className="flex h-screen flex-col bg-main text-slate-900 dark:text-slate-100 lg:flex-row transition-colors duration-300 overflow-hidden">
+      {/* Skip to content — visible only when focused (keyboard users) */}
+      <a
+        href="#main-content"
+        className="sr-only focus:not-sr-only focus:fixed focus:top-4 focus:left-4 focus:z-[200] focus:rounded-lg focus:bg-brand focus:px-4 focus:py-2 focus:text-sm focus:font-bold focus:text-white focus:shadow-lg focus:outline-none"
+      >
+        {t("nav.skip_to_content", { defaultValue: "Skip to content" })}
+      </a>
+
       {/* Sidebar Overlay (Mobile) */}
       {isMobileMenuOpen && (
         <div 
@@ -665,7 +673,7 @@ export function App() {
         </header>
 
         {/* Main Content */}
-        <main className="flex-1 overflow-y-auto overflow-x-hidden bg-main">
+        <main id="main-content" className="flex-1 overflow-y-auto overflow-x-hidden bg-main" tabIndex={-1}>
           <div className="mx-auto max-w-7xl p-3 sm:p-4 lg:p-8">
             <Outlet />
           </div>
