@@ -35,7 +35,10 @@
     "a2a": "A2A",
     "telemetry": "遥测",
     "user_center": "用户中心",
-    "logout": "退出登录"
+    "logout": "退出登录",
+    "expand_sidebar": "展开侧边栏",
+    "collapse_sidebar": "折叠侧边栏",
+    "open_menu": "打开导航菜单"
   },
   "common": {
     "refresh": "刷新",

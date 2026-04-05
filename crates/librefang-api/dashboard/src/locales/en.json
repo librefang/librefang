@@ -35,7 +35,10 @@
     "a2a": "A2A",
     "telemetry": "Telemetry",
     "user_center": "User Center",
-    "logout": "Logout"
+    "logout": "Logout",
+    "expand_sidebar": "Expand sidebar",
+    "collapse_sidebar": "Collapse sidebar",
+    "open_menu": "Open navigation menu"
   },
   "common": {
     "refresh": "Refresh",
