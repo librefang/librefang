@@ -11,6 +11,7 @@ import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { PageHeader } from "../components/ui/PageHeader";
 import { ListSkeleton } from "../components/ui/Skeleton";
+import { EmptyState } from "../components/ui/EmptyState";
 import {
   Puzzle, Plus, Download, Trash2, Package, FolderOpen,
   GitBranch, X, Loader2, Check, AlertCircle, FileCode
@@ -130,13 +131,11 @@ export function PluginsPage() {
           {pluginsQuery.isLoading ? (
             <ListSkeleton rows={3} />
           ) : plugins.length === 0 ? (
-            <div className="text-center py-16">
-              <div className="w-14 h-14 rounded-2xl bg-brand/10 flex items-center justify-center mx-auto mb-4">
-                <Puzzle className="w-7 h-7 text-brand" />
-              </div>
-              <h3 className="text-lg font-bold">{t("plugins.no_plugins")}</h3>
-              <p className="text-sm text-text-dim mt-1">{t("plugins.no_plugins_desc")}</p>
-            </div>
+            <EmptyState
+              icon={<Puzzle className="w-7 h-7" />}
+              title={t("plugins.no_plugins")}
+              description={t("plugins.no_plugins_desc")}
+            />
           ) : (
             <div className="space-y-2 stagger-children">
               {plugins.map(p => (
@@ -191,9 +190,10 @@ export function PluginsPage() {
               <Loader2 className="w-4 h-4 animate-spin" /> {t("plugins.loading_registries")}
             </div>
           ) : registries.length === 0 ? (
-            <div className="text-center py-16">
-              <p className="text-sm text-text-dim">{t("plugins.no_registries")}</p>
-            </div>
+            <EmptyState
+              icon={<Puzzle className="w-7 h-7" />}
+              title={t("plugins.no_registries")}
+            />
           ) : (
             <div className="space-y-8">
               {registries.map(reg => (

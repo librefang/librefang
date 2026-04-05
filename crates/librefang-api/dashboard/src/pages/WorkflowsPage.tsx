@@ -22,6 +22,7 @@ import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
 import { PageHeader } from "../components/ui/PageHeader";
 import { ListSkeleton } from "../components/ui/Skeleton";
+import { EmptyState } from "../components/ui/EmptyState";
 import { ScheduleModal } from "../components/ui/ScheduleModal";
 import {
   Layers, Trash2, FilePlus, Play, Search,
@@ -566,25 +567,25 @@ export function WorkflowsPage() {
       ) : (
         /* Empty State */
         !workflowsQuery.isLoading && (
-          <div className="text-center py-12">
-            <div className="w-16 h-16 rounded-2xl bg-brand/10 flex items-center justify-center mx-auto mb-4">
-              <Layers className="w-8 h-8 text-brand" />
-            </div>
-            <h3 className="text-lg font-bold">{t("workflows.empty_title")}</h3>
-            <p className="text-sm text-text-dim mt-1 mb-6">{t("workflows.empty_desc")}</p>
-            <div className="flex items-center justify-center gap-3">
-              <Button variant="primary" onClick={() => handleNewWorkflow()}>
-                <FilePlus className="w-4 h-4" />
-                {t("workflows.create_blank")}
-              </Button>
-              {apiTemplates.length > 0 && (
-                <Button variant="secondary" onClick={() => setActiveTab("templates")}>
-                  <Layers className="w-4 h-4" />
-                  {t("workflows.template_library")}
+          <EmptyState
+            icon={<Layers className="w-7 h-7" />}
+            title={t("workflows.empty_title")}
+            description={t("workflows.empty_desc")}
+            action={
+              <div className="flex items-center justify-center gap-3">
+                <Button variant="primary" onClick={() => handleNewWorkflow()}>
+                  <FilePlus className="w-4 h-4" />
+                  {t("workflows.create_blank")}
                 </Button>
-              )}
-            </div>
-          </div>
+                {apiTemplates.length > 0 && (
+                  <Button variant="secondary" onClick={() => setActiveTab("templates")}>
+                    <Layers className="w-4 h-4" />
+                    {t("workflows.template_library")}
+                  </Button>
+                )}
+              </div>
+            }
+          />
         )
       )}
         </>

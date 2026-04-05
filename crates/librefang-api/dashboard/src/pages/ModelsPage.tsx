@@ -8,6 +8,7 @@ import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
 import { PageHeader } from "../components/ui/PageHeader";
 import { ListSkeleton } from "../components/ui/Skeleton";
+import { EmptyState } from "../components/ui/EmptyState";
 import { useUIStore } from "../lib/store";
 import {
   Cpu, Search, Check, X, Eye, EyeOff, Wrench, Zap, AlertCircle, Lock, Plus, Trash2, Loader2, Sparkles
@@ -254,10 +255,10 @@ export function ModelsPage() {
       {modelsQuery.isLoading ? (
         <ListSkeleton rows={5} />
       ) : filtered.length === 0 ? (
-        <div className="text-center py-16">
-          <Cpu className="w-10 h-10 text-text-dim/20 mx-auto mb-3" />
-          <p className="text-sm text-text-dim">{allModels.length === 0 ? t("models.no_models") : t("models.no_results")}</p>
-        </div>
+        <EmptyState
+          icon={<Cpu className="w-7 h-7" />}
+          title={allModels.length === 0 ? t("models.no_models") : t("models.no_results")}
+        />
       ) : (
         <div className="rounded-2xl border border-border-subtle overflow-hidden overflow-x-auto">
           <div className="grid grid-cols-[minmax(160px,1fr)_100px_80px_80px_80px_50px_50px_50px_80px] min-w-[780px] gap-3 px-5 py-3 bg-main text-[11px] font-bold text-text-dim/60 uppercase">
