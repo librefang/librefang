@@ -1712,6 +1712,9 @@ threading = true
 output_format = "telegram_html"
 usage_footer = "tokens"
 typing_mode = "instant"
+disable_commands = false
+allowed_commands = []
+blocked_commands = []
 ```
 
 | Field | Type | Default | Description |
@@ -1726,6 +1729,9 @@ typing_mode = "instant"
 | `output_format` | string or null | `null` | Override output formatting. See below. |
 | `usage_footer` | string or null | `null` | Override usage footer mode for this channel. Values: `off`, `tokens`, `cost`, `full`. |
 | `typing_mode` | string or null | `null` | Typing indicator behavior. See below. Defaults to `instant`. |
+| `disable_commands` | bool | `false` | Disable all built-in slash commands on this channel. Blocked commands are forwarded to the agent as plain text. |
+| `allowed_commands` | list of strings | `[]` | Whitelist of command names (no leading `/`). When non-empty, only these are allowed; others are forwarded to the agent. |
+| `blocked_commands` | list of strings | `[]` | Blacklist of command names (no leading `/`). Applied when `allowed_commands` is empty. |
 
 **`dm_policy` values:**
 

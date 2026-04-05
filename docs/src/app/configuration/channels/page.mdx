@@ -823,6 +823,9 @@ threading = true
 output_format = "telegram_html"
 usage_footer = "tokens"
 typing_mode = "instant"
+disable_commands = false
+allowed_commands = []
+blocked_commands = []
 ```
 
 | Field | Type | Default | Description |
@@ -837,6 +840,9 @@ typing_mode = "instant"
 | `output_format` | string or null | `null` | Override output formatting. See below. |
 | `usage_footer` | string or null | `null` | Override usage footer mode for this channel. Values: `off`, `tokens`, `cost`, `full`. |
 | `typing_mode` | string or null | `null` | Typing indicator behavior. See below. Defaults to `instant`. |
+| `disable_commands` | bool | `false` | Disable all built-in slash commands. See [Command Policy](#command-policy). |
+| `allowed_commands` | list of strings | `[]` | Whitelist of command names (no leading `/`). When non-empty, only these commands work. |
+| `blocked_commands` | list of strings | `[]` | Blacklist of command names (no leading `/`). Applied when `allowed_commands` is empty. |
 
 **`dm_policy` values:**
 
@@ -872,6 +878,41 @@ typing_mode = "instant"
 | `message` | Send typing indicator only when the first text delta arrives from the LLM. |
 | `thinking` | Send typing indicator only during LLM reasoning/thinking phase. |
 | `never` | Never send typing indicators. |
+
+#### Command Policy
+
+Every channel ships with a set of built-in slash commands (`/agent`, `/new`, `/reboot`, `/model`, `/usage`, etc.) that let users switch agents, reset sessions, inspect usage, and trigger workflows. On **public-facing bots** (customer support, community assistants), exposing these to arbitrary users is a security hole — anyone can type `/agent admin` to switch to an internal agent, `/new` to wipe the session, or `/model` to change the model.
+
+The three command-policy fields gate the built-in commands per channel. **Precedence:** `disable_commands` > `allowed_commands` (whitelist) > `blocked_commands` (blacklist).
+
+**Blocked commands are forwarded to the agent as plain text** — they are *not* rejected with an error. So a public bot with `disable_commands = true` will respond conversationally when a user types `/agent admin`, and the user never learns that any command system exists.
+
+**Recipe: locked-down public bot (no commands at all)**
+
+```toml
+[channels.telegram.overrides]
+disable_commands = true
+```
+
+**Recipe: public bot that keeps platform UX commands**
+
+Telegram's UX expects `/start` to display a welcome message. Keep only the safe ones:
+
+```toml
+[channels.telegram.overrides]
+allowed_commands = ["start", "help"]
+```
+
+**Recipe: admin bot that just blocks the dangerous ones**
+
+For an operator-facing bot (with an `allowed_users` gate), you may still want to block commands that change costly state:
+
+```toml
+[channels.telegram.overrides]
+blocked_commands = ["agent", "new", "reboot", "model", "stop"]
+```
+
+Command names are the bare tokens used internally (no leading `/`). The full list of built-in commands is in `/help`.
 
 ---
 
