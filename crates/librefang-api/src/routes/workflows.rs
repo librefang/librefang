@@ -1116,12 +1116,14 @@ fn parse_cron_job_id(
 
 /// Helper: serialize a CronJob to the JSON shape the dashboard expects.
 fn cron_job_to_schedule_json(job: &librefang_types::scheduler::CronJob) -> serde_json::Value {
-    let cron_expr = match &job.schedule {
-        librefang_types::scheduler::CronSchedule::Cron { expr, .. } => expr.clone(),
+    let (cron_expr, tz) = match &job.schedule {
+        librefang_types::scheduler::CronSchedule::Cron { expr, tz } => (expr.clone(), tz.clone()),
         librefang_types::scheduler::CronSchedule::Every { every_secs } => {
-            format!("every {every_secs}s")
+            (format!("every {every_secs}s"), None)
         }
-        librefang_types::scheduler::CronSchedule::At { at } => format!("at {}", at.to_rfc3339()),
+        librefang_types::scheduler::CronSchedule::At { at } => {
+            (format!("at {}", at.to_rfc3339()), None)
+        }
     };
     let message = match &job.action {
         librefang_types::scheduler::CronAction::AgentTurn { message, .. } => message.clone(),
@@ -1140,6 +1142,7 @@ fn cron_job_to_schedule_json(job: &librefang_types::scheduler::CronJob) -> serde
         "id": job.id.to_string(),
         "name": job.name,
         "cron": cron_expr,
+        "tz": tz,
         "agent_id": job.agent_id.to_string(),
         "workflow_id": workflow_id,
         "message": message,
@@ -1279,6 +1282,10 @@ pub async fn create_schedule(
     }
 
     let message = req["message"].as_str().unwrap_or("").to_string();
+    let tz = req["tz"]
+        .as_str()
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty());
 
     // Build the CronJob action
     let action = if !workflow_id_str.is_empty() {
@@ -1309,10 +1316,7 @@ pub async fn create_schedule(
         agent_id: resolved_agent_id,
         name,
         enabled: req.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true),
-        schedule: librefang_types::scheduler::CronSchedule::Cron {
-            expr: cron,
-            tz: None,
-        },
+        schedule: librefang_types::scheduler::CronSchedule::Cron { expr: cron, tz },
         action,
         delivery: librefang_types::scheduler::CronDelivery::None,
         created_at: chrono::Utc::now(),
@@ -1360,9 +1364,14 @@ pub async fn update_schedule(
         if cron_parts.len() != 5 {
             return ApiErrorResponse::bad_request("Invalid cron expression").into_json_tuple();
         }
+        let tz = req
+            .get("tz")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
         updates.insert(
             "schedule".to_string(),
-            serde_json::json!({"kind": "cron", "expr": cron}),
+            serde_json::json!({"kind": "cron", "expr": cron, "tz": tz}),
         );
     }
     if let Some(agent_id) = req.get("agent_id") {

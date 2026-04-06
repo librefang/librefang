@@ -1253,6 +1253,7 @@ export async function listSchedules(): Promise<ScheduleItem[]> {
 export async function createSchedule(payload: {
   name: string;
   cron: string;
+  tz?: string;
   agent_id?: string;
   workflow_id?: string;
   message?: string;
