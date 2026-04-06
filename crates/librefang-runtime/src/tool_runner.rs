@@ -370,7 +370,7 @@ pub async fn execute_tool_raw(
         "goal_update" => tool_goal_update(input, *kernel),
 
         // Workflow execution tool
-        "workflow_run" => tool_workflow_run(input, kernel).await,
+        "workflow_run" => tool_workflow_run(input, *kernel).await,
 
         // Browser automation tools
         "browser_navigate" => {
