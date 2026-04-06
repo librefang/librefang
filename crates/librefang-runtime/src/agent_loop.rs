@@ -177,6 +177,543 @@ fn strip_processed_image_data(messages: &mut [Message]) {
     }
 }
 
+fn completion_timeout_override(
+    manifest: &AgentManifest,
+    available_tools: &[ToolDefinition],
+) -> Option<u64> {
+    manifest
+        .metadata
+        .get("timeout_secs")
+        .and_then(|v| v.as_u64())
+        .or_else(|| {
+            if available_tools
+                .iter()
+                .any(|t| t.name.starts_with("browser_") || t.name.starts_with("playwright_"))
+            {
+                Some(600)
+            } else {
+                None
+            }
+        })
+}
+
+fn build_completion_request(
+    manifest: &AgentManifest,
+    system_prompt: &str,
+    messages: &[Message],
+    available_tools: &[ToolDefinition],
+) -> CompletionRequest {
+    CompletionRequest {
+        model: strip_provider_prefix(&manifest.model.model, &manifest.model.provider),
+        messages: messages.to_vec(),
+        tools: available_tools.to_vec(),
+        max_tokens: manifest.model.max_tokens,
+        temperature: manifest.model.temperature,
+        system: Some(system_prompt.to_string()),
+        thinking: manifest.thinking.clone(),
+        prompt_caching: manifest
+            .metadata
+            .get("prompt_caching")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true),
+        response_format: manifest.response_format.clone(),
+        timeout_secs: completion_timeout_override(manifest, available_tools),
+    }
+}
+
+fn accumulate_token_usage(total_usage: &mut TokenUsage, usage: &TokenUsage) {
+    total_usage.input_tokens += usage.input_tokens;
+    total_usage.output_tokens += usage.output_tokens;
+    total_usage.cache_creation_input_tokens += usage.cache_creation_input_tokens;
+    total_usage.cache_read_input_tokens += usage.cache_read_input_tokens;
+}
+
+fn tool_use_blocks_from_calls(tool_calls: &[ToolCall]) -> Vec<ContentBlock> {
+    tool_calls
+        .iter()
+        .map(|tc| ContentBlock::ToolUse {
+            id: tc.id.clone(),
+            name: tc.name.clone(),
+            input: tc.input.clone(),
+            provider_metadata: None,
+        })
+        .collect()
+}
+
+fn append_tool_result_guidance_blocks(tool_result_blocks: &mut Vec<ContentBlock>) {
+    let denial_count = tool_result_blocks
+        .iter()
+        .filter(|b| {
+            matches!(b, ContentBlock::ToolResult { status, .. }
+            if *status == librefang_types::tool::ToolExecutionStatus::Denied)
+        })
+        .count();
+    if denial_count > 0 {
+        tool_result_blocks.push(ContentBlock::Text {
+            text: format!(
+                "[System: {} tool call(s) were denied by approval policy. \
+                 Do NOT retry denied tools. Explain to the user what you \
+                 wanted to do and that it requires their approval.]",
+                denial_count
+            ),
+            provider_metadata: None,
+        });
+    }
+
+    let modify_count = tool_result_blocks
+        .iter()
+        .filter(|b| {
+            matches!(b, ContentBlock::ToolResult { status, .. }
+            if *status == librefang_types::tool::ToolExecutionStatus::ModifyAndRetry)
+        })
+        .count();
+    if modify_count > 0 {
+        tool_result_blocks.push(ContentBlock::Text {
+            text: format!(
+                "[System: {} tool call(s) received human feedback requesting modification. \
+                 Read the feedback carefully, revise your approach, and retry with a \
+                 different strategy. Do NOT repeat the exact same tool call.]",
+                modify_count
+            ),
+            provider_metadata: None,
+        });
+    }
+
+    let error_count = tool_result_blocks
+        .iter()
+        .filter(|b| matches!(b, ContentBlock::ToolResult { is_error: true, .. }))
+        .count();
+    let non_denial_errors = error_count.saturating_sub(denial_count);
+    if non_denial_errors > 0 {
+        tool_result_blocks.push(ContentBlock::Text {
+            text: format!(
+                "[System: {} tool(s) returned errors. Report the error honestly \
+                 to the user. Do NOT fabricate results or pretend the tool succeeded. \
+                 If a search or fetch failed, tell the user it failed and suggest \
+                 alternatives instead of making up data.]",
+                non_denial_errors
+            ),
+            provider_metadata: None,
+        });
+    }
+}
+
+fn count_tool_result_outcomes(tool_result_blocks: &[ContentBlock]) -> (u32, u32) {
+    let hard_error_count = tool_result_blocks
+        .iter()
+        .filter(|b| match b {
+            ContentBlock::ToolResult {
+                status,
+                content,
+                is_error: true,
+                ..
+            } => !status.is_soft_error() && !is_soft_error_content(content),
+            _ => false,
+        })
+        .count() as u32;
+    let success_count = tool_result_blocks
+        .iter()
+        .filter(|b| {
+            matches!(
+                b,
+                ContentBlock::ToolResult {
+                    is_error: false,
+                    ..
+                }
+            )
+        })
+        .count() as u32;
+
+    (hard_error_count, success_count)
+}
+
+fn update_consecutive_hard_failures(
+    consecutive_all_failed: &mut u32,
+    tool_result_blocks: &[ContentBlock],
+) -> u32 {
+    let (hard_error_count, success_count) = count_tool_result_outcomes(tool_result_blocks);
+
+    if success_count == 0 && hard_error_count > 0 {
+        *consecutive_all_failed += 1;
+    } else {
+        *consecutive_all_failed = 0;
+    }
+
+    hard_error_count
+}
+
+struct ToolUseSetup {
+    rationale_text: Option<String>,
+    allowed_tool_names: Vec<String>,
+    caller_id_str: String,
+}
+
+fn begin_tool_use_turn(
+    response: &crate::llm_driver::CompletionResponse,
+    session: &mut Session,
+    messages: &mut Vec<Message>,
+    available_tools: &[ToolDefinition],
+) -> ToolUseSetup {
+    let rationale_text = {
+        let text = response.text();
+        if text.trim().is_empty() {
+            None
+        } else {
+            Some(text)
+        }
+    };
+
+    let assistant_blocks = response.content.clone();
+
+    session.messages.push(Message {
+        role: Role::Assistant,
+        content: MessageContent::Blocks(assistant_blocks.clone()),
+        pinned: false,
+    });
+    messages.push(Message {
+        role: Role::Assistant,
+        content: MessageContent::Blocks(assistant_blocks),
+        pinned: false,
+    });
+
+    ToolUseSetup {
+        rationale_text,
+        allowed_tool_names: available_tools.iter().map(|t| t.name.clone()).collect(),
+        caller_id_str: session.agent_id.to_string(),
+    }
+}
+
+struct ExecutedToolCall {
+    result: librefang_types::tool::ToolResult,
+    final_content: String,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_single_tool_call(
+    manifest: &AgentManifest,
+    tool_call: &ToolCall,
+    loop_guard: &mut LoopGuard,
+    memory: &MemorySubstrate,
+    session: &mut Session,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+    available_tool_names: &[String],
+    caller_id_str: &str,
+    skill_registry: Option<&SkillRegistry>,
+    mcp_connections: Option<&tokio::sync::Mutex<Vec<McpConnection>>>,
+    web_ctx: Option<&WebToolsContext>,
+    browser_ctx: Option<&crate::browser::BrowserManager>,
+    hand_allowed_env: &[String],
+    workspace_root: Option<&Path>,
+    media_engine: Option<&crate::media_understanding::MediaEngine>,
+    media_drivers: Option<&crate::media::MediaDriverCache>,
+    tts_engine: Option<&crate::tts::TtsEngine>,
+    docker_config: Option<&librefang_types::config::DockerSandboxConfig>,
+    hooks: Option<&crate::hooks::HookRegistry>,
+    process_manager: Option<&crate::process_manager::ProcessManager>,
+    sender_user_id: Option<&str>,
+    sender_channel: Option<&str>,
+    context_budget: &ContextBudget,
+    context_engine: Option<&dyn ContextEngine>,
+    context_window_tokens: usize,
+    on_phase: Option<&PhaseCallback>,
+    decision_traces: &mut Vec<DecisionTrace>,
+    rationale_text: &Option<String>,
+    tools_recovered_from_text: bool,
+    iteration: u32,
+    streaming: bool,
+    agent_id_str: &str,
+) -> Result<ExecutedToolCall, LibreFangError> {
+    let verdict = loop_guard.check(&tool_call.name, &tool_call.input);
+    match &verdict {
+        LoopGuardVerdict::CircuitBreak(msg) => {
+            if streaming {
+                warn!(tool = %tool_call.name, "Circuit breaker triggered (streaming)");
+            } else {
+                warn!(tool = %tool_call.name, "Circuit breaker triggered");
+            }
+            if let Err(e) = memory.save_session_async(session).await {
+                warn!("Failed to save session on circuit break: {e}");
+            }
+            let ctx = crate::hooks::HookContext {
+                agent_name: &manifest.name,
+                agent_id: agent_id_str,
+                event: librefang_types::agent::HookEvent::AgentLoopEnd,
+                data: serde_json::json!({
+                    "reason": "circuit_break",
+                    "error": msg.as_str(),
+                }),
+            };
+            fire_hook_best_effort(hooks, &ctx);
+            return Err(LibreFangError::Internal(msg.clone()));
+        }
+        LoopGuardVerdict::Block(msg) => {
+            if streaming {
+                warn!(tool = %tool_call.name, "Tool call blocked by loop guard (streaming)");
+            } else {
+                warn!(tool = %tool_call.name, "Tool call blocked by loop guard");
+            }
+            return Ok(ExecutedToolCall {
+                result: librefang_types::tool::ToolResult {
+                    tool_use_id: tool_call.id.clone(),
+                    content: msg.clone(),
+                    is_error: true,
+                    status: librefang_types::tool::ToolExecutionStatus::Error,
+                    ..Default::default()
+                },
+                final_content: msg.clone(),
+            });
+        }
+        _ => {}
+    }
+
+    if streaming {
+        debug!(tool = %tool_call.name, id = %tool_call.id, "Executing tool (streaming)");
+    } else {
+        debug!(tool = %tool_call.name, id = %tool_call.id, "Executing tool");
+    }
+
+    if let Some(cb) = on_phase {
+        let sanitized: String = tool_call
+            .name
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(64)
+            .collect();
+        cb(LoopPhase::ToolUse {
+            tool_name: sanitized,
+        });
+    }
+
+    if let Some(hook_reg) = hooks {
+        let ctx = crate::hooks::HookContext {
+            agent_name: &manifest.name,
+            agent_id: caller_id_str,
+            event: librefang_types::agent::HookEvent::BeforeToolCall,
+            data: serde_json::json!({
+                "tool_name": &tool_call.name,
+                "input": &tool_call.input,
+            }),
+        };
+        if let Err(reason) = hook_reg.fire(&ctx) {
+            let content = format!("Hook blocked tool '{}': {}", tool_call.name, reason);
+            return Ok(ExecutedToolCall {
+                result: librefang_types::tool::ToolResult {
+                    tool_use_id: tool_call.id.clone(),
+                    content: content.clone(),
+                    is_error: true,
+                    status: librefang_types::tool::ToolExecutionStatus::Error,
+                    ..Default::default()
+                },
+                final_content: content,
+            });
+        }
+    }
+
+    let effective_exec_policy = manifest.exec_policy.as_ref();
+    let tool_timeout = kernel
+        .as_ref()
+        .map_or(TOOL_TIMEOUT_SECS, |k| k.tool_timeout_secs());
+    let trace_start = Instant::now();
+    let trace_timestamp = chrono::Utc::now();
+    let result = match tokio::time::timeout(
+        Duration::from_secs(tool_timeout),
+        tool_runner::execute_tool(
+            &tool_call.id,
+            &tool_call.name,
+            &tool_call.input,
+            kernel,
+            Some(available_tool_names),
+            Some(caller_id_str),
+            skill_registry,
+            mcp_connections,
+            web_ctx,
+            browser_ctx,
+            if hand_allowed_env.is_empty() {
+                None
+            } else {
+                Some(hand_allowed_env)
+            },
+            workspace_root,
+            media_engine,
+            media_drivers,
+            effective_exec_policy,
+            tts_engine,
+            docker_config,
+            process_manager,
+            sender_user_id,
+            sender_channel,
+        ),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => {
+            if streaming {
+                warn!(tool = %tool_call.name, "Tool execution timed out after {}s (streaming)", tool_timeout);
+            } else {
+                warn!(tool = %tool_call.name, "Tool execution timed out after {}s", tool_timeout);
+            }
+            librefang_types::tool::ToolResult {
+                tool_use_id: tool_call.id.clone(),
+                content: format!(
+                    "Tool '{}' timed out after {}s.",
+                    tool_call.name, tool_timeout
+                ),
+                is_error: true,
+                status: librefang_types::tool::ToolExecutionStatus::Expired,
+                ..Default::default()
+            }
+        }
+    };
+    let execution_ms = trace_start.elapsed().as_millis() as u64;
+
+    let output_summary = librefang_types::truncate_str(&result.content, 200).to_string();
+    decision_traces.push(DecisionTrace {
+        tool_use_id: tool_call.id.clone(),
+        tool_name: tool_call.name.clone(),
+        input: tool_call.input.clone(),
+        rationale: rationale_text.clone(),
+        recovered_from_text: tools_recovered_from_text,
+        execution_ms,
+        is_error: result.is_error,
+        output_summary,
+        iteration,
+        timestamp: trace_timestamp,
+    });
+
+    let ctx = crate::hooks::HookContext {
+        agent_name: &manifest.name,
+        agent_id: caller_id_str,
+        event: librefang_types::agent::HookEvent::AfterToolCall,
+        data: serde_json::json!({
+            "tool_name": &tool_call.name,
+            "result": &result.content,
+            "is_error": result.is_error,
+        }),
+    };
+    fire_hook_best_effort(hooks, &ctx);
+
+    let content = sanitize_tool_result_content(
+        &result.content,
+        context_budget,
+        context_engine,
+        context_window_tokens,
+    );
+    let final_content = if let LoopGuardVerdict::Warn(ref warn_msg) = verdict {
+        format!("{content}\n\n[LOOP GUARD] {warn_msg}")
+    } else {
+        content
+    };
+
+    Ok(ExecutedToolCall {
+        result,
+        final_content,
+    })
+}
+
+fn append_tool_result_block(
+    tool_result_blocks: &mut Vec<ContentBlock>,
+    tool_call: &ToolCall,
+    result: &librefang_types::tool::ToolResult,
+    final_content: String,
+) {
+    tool_result_blocks.push(ContentBlock::ToolResult {
+        tool_use_id: result.tool_use_id.clone(),
+        tool_name: tool_call.name.clone(),
+        content: final_content,
+        is_error: result.is_error,
+        status: result.status,
+        approval_request_id: result.approval_request_id.clone(),
+    });
+}
+
+fn handle_mid_turn_signal(
+    pending_messages: Option<&tokio::sync::Mutex<mpsc::Receiver<AgentLoopSignal>>>,
+    manifest_name: &str,
+    session: &mut Session,
+    messages: &mut Vec<Message>,
+    tool_result_blocks: &mut Vec<ContentBlock>,
+) -> bool {
+    let Some(pending_rx) = pending_messages else {
+        return false;
+    };
+    let Ok(mut rx) = pending_rx.try_lock() else {
+        return false;
+    };
+    let Ok(signal) = rx.try_recv() else {
+        return false;
+    };
+
+    info!(
+        agent = %manifest_name,
+        "Mid-turn signal injected — interrupting tool execution"
+    );
+    if !tool_result_blocks.is_empty() {
+        let partial_results = Message {
+            role: Role::User,
+            content: MessageContent::Blocks(tool_result_blocks.clone()),
+            pinned: false,
+        };
+        session.messages.push(partial_results.clone());
+        messages.push(partial_results);
+    }
+    let injected_text = match signal {
+        AgentLoopSignal::Message { content } => content,
+        AgentLoopSignal::ApprovalResolved {
+            tool_use_id,
+            tool_name,
+            decision,
+            result_content,
+            result_is_error,
+            result_status,
+        } => {
+            apply_approval_resolution_signal(
+                session,
+                messages.as_mut_slice(),
+                &tool_use_id,
+                &result_content,
+                result_is_error,
+                result_status,
+            );
+            let result_preview = librefang_types::truncate_str(&result_content, 300);
+            format!(
+                "[System] Tool '{}' approval resolved ({}). Result: {}",
+                tool_name, decision, result_preview
+            )
+        }
+    };
+    let inject_msg = Message::user(&injected_text);
+    session.messages.push(inject_msg.clone());
+    messages.push(inject_msg);
+    tool_result_blocks.clear();
+    true
+}
+
+fn finalize_tool_use_results(
+    session: &mut Session,
+    messages: &mut Vec<Message>,
+    tool_result_blocks: &mut Vec<ContentBlock>,
+) {
+    append_tool_result_guidance_blocks(tool_result_blocks);
+
+    let tool_results_msg = Message {
+        role: Role::User,
+        content: MessageContent::Blocks(tool_result_blocks.clone()),
+        pinned: false,
+    };
+    session.messages.push(tool_results_msg.clone());
+    messages.push(tool_results_msg);
+}
+
+fn max_tokens_response_text(response: &crate::llm_driver::CompletionResponse) -> String {
+    let text = response.text();
+    if text.trim().is_empty() {
+        "[Partial response — token limit reached with no text output.]".to_string()
+    } else {
+        text
+    }
+}
+
 fn apply_approval_resolution_signal(
     session: &mut Session,
     messages: &mut [Message],
@@ -479,13 +1016,158 @@ fn sanitize_tool_result_content(
     }
 }
 
+fn fire_hook_best_effort(
+    hook_reg: Option<&crate::hooks::HookRegistry>,
+    ctx: &crate::hooks::HookContext<'_>,
+) {
+    if let Some(hook_reg) = hook_reg {
+        if let Err(err) = hook_reg.fire(ctx) {
+            warn!(
+                event = ?ctx.event,
+                agent = ctx.agent_name,
+                error = %err,
+                "Hook failed in best-effort path"
+            );
+        }
+    }
+}
+
+fn recall_or_default<T, E>(result: Result<T, E>, warning: &str) -> T
+where
+    T: Default,
+    E: std::fmt::Display,
+{
+    match result {
+        Ok(value) => value,
+        Err(err) => {
+            warn!(error = %err, "{warning}");
+            T::default()
+        }
+    }
+}
+
+fn push_filtered_user_message(
+    session: &mut Session,
+    user_message: &str,
+    user_content_blocks: Option<Vec<ContentBlock>>,
+    pii_filter: &crate::pii_filter::PiiFilter,
+    privacy_config: &librefang_types::config::PrivacyConfig,
+) {
+    if let Some(blocks) = user_content_blocks {
+        let filtered_blocks = if privacy_config.mode != librefang_types::config::PrivacyMode::Off {
+            blocks
+                .into_iter()
+                .map(|block| match block {
+                    ContentBlock::Text {
+                        text,
+                        provider_metadata,
+                    } => ContentBlock::Text {
+                        text: pii_filter.filter_message(&text, &privacy_config.mode),
+                        provider_metadata,
+                    },
+                    other => other,
+                })
+                .collect()
+        } else {
+            blocks
+        };
+        session
+            .messages
+            .push(Message::user_with_blocks(filtered_blocks));
+    } else {
+        let filtered_message = pii_filter.filter_message(user_message, &privacy_config.mode);
+        session.messages.push(Message::user(&filtered_message));
+    }
+}
+
+async fn remember_interaction_best_effort(
+    memory: &MemorySubstrate,
+    embedding_driver: Option<&(dyn EmbeddingDriver + Send + Sync)>,
+    agent_id: librefang_types::agent::AgentId,
+    interaction_text: &str,
+    remember_context: &str,
+) {
+    if let Some(emb) = embedding_driver {
+        match emb.embed_one(interaction_text).await {
+            Ok(vec) => {
+                if let Err(e) = memory
+                    .remember_with_embedding_async(
+                        agent_id,
+                        interaction_text,
+                        MemorySource::Conversation,
+                        "episodic",
+                        HashMap::new(),
+                        Some(&vec),
+                    )
+                    .await
+                {
+                    warn!(
+                        error = %e,
+                        remember_context,
+                        "Failed to persist episodic memory with embedding"
+                    );
+                }
+            }
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    remember_context,
+                    "Embedding for remember failed; falling back to plain memory"
+                );
+                if let Err(e2) = memory
+                    .remember(
+                        agent_id,
+                        interaction_text,
+                        MemorySource::Conversation,
+                        "episodic",
+                        HashMap::new(),
+                    )
+                    .await
+                {
+                    warn!(
+                        error = %e2,
+                        remember_context,
+                        "Failed to persist episodic memory after embedding fallback"
+                    );
+                }
+            }
+        }
+    } else if let Err(e) = memory
+        .remember(
+            agent_id,
+            interaction_text,
+            MemorySource::Conversation,
+            "episodic",
+            HashMap::new(),
+        )
+        .await
+    {
+        warn!(
+            error = %e,
+            remember_context,
+            "Failed to persist episodic memory"
+        );
+    }
+}
+
 /// Convert a proactive `MemoryItem` into the `MemoryFragment` format used by the agent loop.
 fn proactive_item_to_fragment(
     item: librefang_types::memory::MemoryItem,
     agent_id: librefang_types::agent::AgentId,
 ) -> MemoryFragment {
+    let memory_id = MemoryId(uuid::Uuid::parse_str(&item.id).unwrap_or_else(|err| {
+        let fallback = uuid::Uuid::new_v4();
+        warn!(
+            invalid_memory_id = %item.id,
+            fallback_id = %fallback,
+            error = %err,
+            "Invalid proactive memory id; using generated UUID"
+        );
+        fallback
+    }));
+
     MemoryFragment {
-        id: MemoryId(uuid::Uuid::parse_str(&item.id).unwrap_or_else(|_| uuid::Uuid::new_v4())),
+        id: memory_id,
         agent_id,
         content: item.content,
         embedding: None,
@@ -499,6 +1181,348 @@ fn proactive_item_to_fragment(
         image_url: None,
         image_embedding: None,
         modality: Default::default(),
+    }
+}
+
+struct PromptExperimentSelection {
+    experiment_context: Option<ExperimentContext>,
+    running_experiment: Option<librefang_types::agent::PromptExperiment>,
+}
+
+struct RecallSetup {
+    memories: Vec<MemoryFragment>,
+    memories_used: Vec<String>,
+}
+
+struct PromptSetup {
+    system_prompt: String,
+    memory_context_msg: Option<String>,
+}
+
+struct PreparedMessages {
+    messages: Vec<Message>,
+    new_messages_start: usize,
+}
+
+fn reply_directives_from_parsed(
+    parsed_directives: crate::reply_directives::DirectiveSet,
+) -> librefang_types::message::ReplyDirectives {
+    librefang_types::message::ReplyDirectives {
+        reply_to: parsed_directives.reply_to,
+        current_thread: parsed_directives.current_thread,
+        silent: parsed_directives.silent,
+    }
+}
+
+fn select_running_experiment(
+    manifest: &AgentManifest,
+    session: &Session,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+    streaming: bool,
+) -> PromptExperimentSelection {
+    let mut experiment_context: Option<ExperimentContext> = None;
+    let mut running_experiment: Option<librefang_types::agent::PromptExperiment> = None;
+    if let Some(kernel) = kernel {
+        let agent_id = session.agent_id.to_string();
+        if let Ok(Some(exp)) = kernel.get_running_experiment(&agent_id) {
+            running_experiment = Some(exp.clone());
+            if !exp.variants.is_empty() {
+                let hash_val = (session.id.0.as_u128() % 100) as u8;
+                let mut cumulative = 0u8;
+                let mut variant_index = 0;
+                for (i, &weight) in exp.traffic_split.iter().enumerate() {
+                    cumulative = cumulative.saturating_add(weight);
+                    if hash_val < cumulative {
+                        variant_index = i;
+                        break;
+                    }
+                }
+                variant_index = variant_index.min(exp.variants.len() - 1);
+                let variant = &exp.variants[variant_index];
+                info!(
+                    agent = %manifest.name,
+                    experiment = %exp.name,
+                    variant = %variant.name,
+                    index = variant_index,
+                    "A/B experiment active - using variant{}",
+                    if streaming { " (streaming)" } else { "" }
+                );
+                experiment_context = Some(ExperimentContext {
+                    experiment_id: exp.id,
+                    variant_id: variant.id,
+                    variant_name: variant.name.clone(),
+                    request_start: std::time::Instant::now(),
+                });
+            }
+        }
+    }
+
+    PromptExperimentSelection {
+        experiment_context,
+        running_experiment,
+    }
+}
+
+async fn setup_recalled_memories(
+    session: &Session,
+    user_message: &str,
+    memory: &MemorySubstrate,
+    embedding_driver: Option<&(dyn EmbeddingDriver + Send + Sync)>,
+    proactive_memory: Option<&Arc<librefang_memory::ProactiveMemoryStore>>,
+    context_engine: Option<&dyn ContextEngine>,
+    stable_prefix_mode: bool,
+    sender_user_id: Option<&str>,
+    streaming: bool,
+) -> RecallSetup {
+    let mut memories = if let Some(engine) = context_engine {
+        recall_or_default(
+            engine
+                .ingest(session.agent_id, user_message, sender_user_id)
+                .await
+                .map(|r| r.recalled_memories),
+            if streaming {
+                "Context engine ingest failed (streaming); continuing without recalled memories"
+            } else {
+                "Context engine ingest failed; continuing without recalled memories"
+            },
+        )
+    } else if stable_prefix_mode {
+        Vec::new()
+    } else if let Some(emb) = embedding_driver {
+        match emb.embed_one(user_message).await {
+            Ok(query_vec) => {
+                if streaming {
+                    debug!("Using vector recall (streaming, dims={})", query_vec.len());
+                } else {
+                    debug!("Using vector recall (dims={})", query_vec.len());
+                }
+                recall_or_default(
+                    memory
+                        .recall_with_embedding_async(
+                            user_message,
+                            5,
+                            Some(MemoryFilter {
+                                agent_id: Some(session.agent_id),
+                                peer_id: sender_user_id.map(str::to_owned),
+                                ..Default::default()
+                            }),
+                            Some(&query_vec),
+                        )
+                        .await,
+                    if streaming {
+                        "Vector memory recall failed (streaming); continuing without recalled memories"
+                    } else {
+                        "Vector memory recall failed; continuing without recalled memories"
+                    },
+                )
+            }
+            Err(e) => {
+                if streaming {
+                    warn!("Embedding recall failed (streaming), falling back to text search: {e}");
+                } else {
+                    warn!("Embedding recall failed, falling back to text search: {e}");
+                }
+                recall_or_default(
+                    memory
+                        .recall(
+                            user_message,
+                            5,
+                            Some(MemoryFilter {
+                                agent_id: Some(session.agent_id),
+                                peer_id: sender_user_id.map(str::to_owned),
+                                ..Default::default()
+                            }),
+                        )
+                        .await,
+                    if streaming {
+                        "Text memory recall failed after embedding fallback (streaming); continuing without recalled memories"
+                    } else {
+                        "Text memory recall failed after embedding fallback; continuing without recalled memories"
+                    },
+                )
+            }
+        }
+    } else {
+        recall_or_default(
+            memory
+                .recall(
+                    user_message,
+                    5,
+                    Some(MemoryFilter {
+                        agent_id: Some(session.agent_id),
+                        peer_id: sender_user_id.map(str::to_owned),
+                        ..Default::default()
+                    }),
+                )
+                .await,
+            if streaming {
+                "Text memory recall failed (streaming); continuing without recalled memories"
+            } else {
+                "Text memory recall failed; continuing without recalled memories"
+            },
+        )
+    };
+
+    if !stable_prefix_mode {
+        if let Some(pm_store_arc) = proactive_memory {
+            let user_id = session.agent_id.0.to_string();
+            match pm_store_arc
+                .auto_retrieve(&user_id, user_message, sender_user_id)
+                .await
+            {
+                Ok(pm_memories) if !pm_memories.is_empty() => {
+                    if streaming {
+                        debug!(
+                            "Proactive memory (streaming) retrieved {} items",
+                            pm_memories.len()
+                        );
+                    } else {
+                        debug!("Proactive memory retrieved {} items", pm_memories.len());
+                    }
+                    let pm_fragments: Vec<_> = pm_memories
+                        .into_iter()
+                        .map(|item| proactive_item_to_fragment(item, session.agent_id))
+                        .filter(|frag| !memories.iter().any(|m| m.content == frag.content))
+                        .collect();
+                    memories.extend(pm_fragments);
+                }
+                Ok(_) => {
+                    if streaming {
+                        debug!("No proactive memories retrieved (streaming)");
+                    } else {
+                        debug!("No proactive memories retrieved");
+                    }
+                }
+                Err(e) => {
+                    if streaming {
+                        warn!("Proactive memory auto_retrieve failed (streaming): {e}");
+                    } else {
+                        warn!("Proactive memory auto_retrieve failed: {e}");
+                    }
+                }
+            }
+        }
+    }
+
+    let memories_used = memories.iter().map(|m| m.content.clone()).collect();
+    RecallSetup {
+        memories,
+        memories_used,
+    }
+}
+
+fn build_prompt_setup(
+    manifest: &AgentManifest,
+    session: &Session,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+    experiment_context: Option<&ExperimentContext>,
+    running_experiment: Option<&librefang_types::agent::PromptExperiment>,
+    memories: &[MemoryFragment],
+    stable_prefix_mode: bool,
+    streaming: bool,
+) -> PromptSetup {
+    let mut system_prompt = manifest.model.system_prompt.clone();
+
+    if let Some(kernel) = kernel {
+        let _ = kernel.auto_track_prompt_version(session.agent_id, &system_prompt);
+    }
+
+    if let Some(ctx) = experiment_context {
+        if let Some(exp) = running_experiment {
+            if let Some(kernel) = kernel {
+                if let Some(variant) = exp.variants.iter().find(|v| v.id == ctx.variant_id) {
+                    if let Ok(Some(prompt_version)) =
+                        kernel.get_prompt_version(&variant.prompt_version_id.to_string())
+                    {
+                        debug!(
+                            agent = %manifest.name,
+                            experiment = %exp.name,
+                            variant = %variant.name,
+                            version = prompt_version.version,
+                            "Using experiment variant prompt version{}",
+                            if streaming { " (streaming)" } else { "" }
+                        );
+                        system_prompt = prompt_version.system_prompt.clone();
+                    }
+                }
+            }
+        }
+    }
+
+    let memory_context_msg = if !memories.is_empty() {
+        let mem_pairs: Vec<(String, String)> = memories
+            .iter()
+            .map(|m| (String::new(), m.content.clone()))
+            .collect();
+        if stable_prefix_mode {
+            let personal_ctx =
+                crate::prompt_builder::format_memory_items_as_personal_context(&mem_pairs);
+            Some(personal_ctx)
+        } else {
+            let section = crate::prompt_builder::build_memory_section(&mem_pairs);
+            system_prompt.push_str("\n\n");
+            system_prompt.push_str(&section);
+            None
+        }
+    } else {
+        None
+    };
+
+    PromptSetup {
+        system_prompt,
+        memory_context_msg,
+    }
+}
+
+fn prepare_llm_messages(
+    manifest: &AgentManifest,
+    session: &mut Session,
+    user_message: &str,
+    memory_context_msg: Option<String>,
+) -> PreparedMessages {
+    let llm_messages: Vec<Message> = session
+        .messages
+        .iter()
+        .filter(|m| m.role != Role::System)
+        .cloned()
+        .collect();
+
+    let mut messages = crate::session_repair::validate_and_repair(&llm_messages);
+
+    if let Some(cc_msg) = manifest
+        .metadata
+        .get("canonical_context_msg")
+        .and_then(|v| v.as_str())
+    {
+        if !cc_msg.is_empty() {
+            messages.insert(0, Message::user(cc_msg));
+        }
+    }
+
+    if let Some(mem_msg) = memory_context_msg {
+        messages.insert(
+            0,
+            Message::user(format!(
+                "[System context — what you know about this person]\n{mem_msg}"
+            )),
+        );
+    }
+
+    safe_trim_messages(
+        &mut messages,
+        &mut session.messages,
+        &manifest.name,
+        user_message,
+    );
+    let user_message_index = session.messages.len().saturating_sub(1);
+    let trimmed_prefix = messages.len().saturating_sub(session.messages.len());
+    let new_messages_start = user_message_index.saturating_sub(trimmed_prefix);
+    strip_prior_image_data(&mut messages);
+    strip_prior_image_data(&mut session.messages);
+
+    PreparedMessages {
+        messages,
+        new_messages_start,
     }
 }
 
@@ -521,6 +1545,238 @@ fn serialize_session_messages(
             })
         })
         .collect()
+}
+
+fn build_silent_agent_loop_result(
+    total_usage: TokenUsage,
+    iterations: u32,
+    parsed_directives: crate::reply_directives::DirectiveSet,
+    decision_traces: Vec<DecisionTrace>,
+    memories_used: Vec<String>,
+    experiment_context: Option<ExperimentContext>,
+    new_messages_start: usize,
+) -> AgentLoopResult {
+    AgentLoopResult {
+        response: String::new(),
+        total_usage,
+        iterations,
+        cost_usd: None,
+        silent: true,
+        directives: reply_directives_from_parsed(parsed_directives),
+        decision_traces,
+        memories_saved: Vec::new(),
+        memories_used,
+        memory_conflicts: Vec::new(),
+        provider_not_configured: false,
+        experiment_context,
+        latency_ms: 0,
+        new_messages_start,
+    }
+}
+
+enum EndTurnRetry {
+    EmptyResponse { is_silent_failure: bool },
+    HallucinatedAction,
+    ActionIntent,
+}
+
+fn classify_end_turn_retry(
+    text: &str,
+    response: &crate::llm_driver::CompletionResponse,
+    iteration: u32,
+    available_tools: &[ToolDefinition],
+    any_tools_executed: bool,
+    hallucination_retried: bool,
+    action_nudge_retried: bool,
+    user_message: &str,
+) -> Option<EndTurnRetry> {
+    if text.trim().is_empty() && response.tool_calls.is_empty() {
+        let is_silent_failure =
+            response.usage.input_tokens == 0 && response.usage.output_tokens == 0;
+        if iteration == 0 || is_silent_failure {
+            return Some(EndTurnRetry::EmptyResponse { is_silent_failure });
+        }
+    }
+
+    if !text.trim().is_empty()
+        && response.tool_calls.is_empty()
+        && !available_tools.is_empty()
+        && !any_tools_executed
+        && !hallucination_retried
+        && looks_like_hallucinated_action(text)
+    {
+        return Some(EndTurnRetry::HallucinatedAction);
+    }
+
+    if !text.trim().is_empty()
+        && response.tool_calls.is_empty()
+        && !available_tools.is_empty()
+        && !any_tools_executed
+        && !action_nudge_retried
+        && !hallucination_retried
+        && user_message_has_action_intent(user_message)
+    {
+        return Some(EndTurnRetry::ActionIntent);
+    }
+
+    None
+}
+
+fn finalize_end_turn_text(
+    text: String,
+    any_tools_executed: bool,
+    manifest_name: &str,
+    iteration: u32,
+    total_usage: &TokenUsage,
+    messages_count: usize,
+    empty_response_log_message: &str,
+) -> String {
+    if text.trim().is_empty() {
+        warn!(
+            agent = %manifest_name,
+            iteration,
+            input_tokens = total_usage.input_tokens,
+            output_tokens = total_usage.output_tokens,
+            messages_count,
+            "{empty_response_log_message}"
+        );
+        if any_tools_executed {
+            "[Task completed — the agent executed tools but did not produce a text summary.]"
+                .to_string()
+        } else {
+            "[The model returned an empty response. This usually means the model is overloaded, the context is too large, or the API key lacks credits. Try again or check /status.]".to_string()
+        }
+    } else {
+        text
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn finalize_successful_end_turn(
+    manifest: &AgentManifest,
+    session: &mut Session,
+    memory: &MemorySubstrate,
+    embedding_driver: Option<&(dyn EmbeddingDriver + Send + Sync)>,
+    context_engine: Option<&dyn ContextEngine>,
+    on_phase: Option<&PhaseCallback>,
+    proactive_memory: Option<&Arc<librefang_memory::ProactiveMemoryStore>>,
+    hooks: Option<&crate::hooks::HookRegistry>,
+    agent_id_str: &str,
+    user_message: &str,
+    final_response: String,
+    messages: &[Message],
+    iteration: u32,
+    total_usage: TokenUsage,
+    decision_traces: Vec<DecisionTrace>,
+    mut memories_saved: Vec<String>,
+    memories_used: Vec<String>,
+    mut memory_conflicts: Vec<librefang_types::memory::MemoryConflict>,
+    experiment_context: Option<ExperimentContext>,
+    directives: librefang_types::message::ReplyDirectives,
+    new_messages_start: usize,
+    sender_user_id: Option<&str>,
+    completion_log_message: &str,
+    remember_context: &str,
+    proactive_memory_debug_message: &str,
+    proactive_memory_warn_message: &str,
+) -> LibreFangResult<AgentLoopResult> {
+    session
+        .messages
+        .push(Message::assistant(final_response.clone()));
+
+    let keep_recent = manifest
+        .autonomous
+        .as_ref()
+        .and_then(|a| a.heartbeat_keep_recent)
+        .unwrap_or(10);
+    crate::session_repair::prune_heartbeat_turns(&mut session.messages, keep_recent);
+
+    memory
+        .save_session_async(session)
+        .await
+        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+
+    let interaction_text = format!(
+        "User asked: {}\nI responded: {}",
+        user_message, final_response
+    );
+    remember_interaction_best_effort(
+        memory,
+        embedding_driver,
+        session.agent_id,
+        &interaction_text,
+        remember_context,
+    )
+    .await;
+
+    if let Some(engine) = context_engine {
+        if let Err(e) = engine.after_turn(session.agent_id, messages).await {
+            warn!("Context engine after_turn failed: {e}");
+        }
+    }
+
+    if let Some(cb) = on_phase {
+        cb(LoopPhase::Done);
+    }
+
+    info!(
+        agent = %manifest.name,
+        iterations = iteration + 1,
+        tokens = total_usage.total(),
+        "{completion_log_message}"
+    );
+
+    if let Some(pm_store) = proactive_memory {
+        let user_id = session.agent_id.0.to_string();
+        let new_messages = &session.messages[new_messages_start..];
+        let messages_json = serialize_session_messages(new_messages);
+        match pm_store
+            .auto_memorize(&user_id, &messages_json, sender_user_id)
+            .await
+        {
+            Ok(result) if result.has_content => {
+                debug!(
+                    memories = result.memories.len(),
+                    relations = result.relations.len(),
+                    "{proactive_memory_debug_message}"
+                );
+                memories_saved.extend(result.memories.iter().map(|m| m.content.clone()));
+                memory_conflicts.extend(result.conflicts);
+            }
+            Ok(_) => {}
+            Err(e) => {
+                warn!("{proactive_memory_warn_message}: {e}");
+            }
+        }
+    }
+
+    let ctx = crate::hooks::HookContext {
+        agent_name: &manifest.name,
+        agent_id: agent_id_str,
+        event: librefang_types::agent::HookEvent::AgentLoopEnd,
+        data: serde_json::json!({
+            "iterations": iteration + 1,
+            "response_length": final_response.len(),
+        }),
+    };
+    fire_hook_best_effort(hooks, &ctx);
+
+    Ok(AgentLoopResult {
+        response: final_response,
+        total_usage,
+        iterations: iteration + 1,
+        cost_usd: None,
+        silent: false,
+        directives,
+        decision_traces,
+        memories_saved,
+        memories_used,
+        memory_conflicts,
+        provider_not_configured: false,
+        experiment_context,
+        latency_ms: 0,
+        new_messages_start,
+    })
 }
 
 /// Run the agent execution loop for a single user message.
@@ -576,44 +1832,10 @@ pub async fn run_agent_loop(
         });
     }
 
-    // Check for running A/B experiment and select variant
-    let mut experiment_context: Option<ExperimentContext> = None;
-    let mut running_experiment: Option<librefang_types::agent::PromptExperiment> = None;
-    if let Some(kernel) = kernel.as_ref() {
-        let agent_id = session.agent_id.to_string();
-        if let Ok(Some(exp)) = kernel.get_running_experiment(&agent_id) {
-            running_experiment = Some(exp.clone());
-            if !exp.variants.is_empty() {
-                // Use traffic_split for weighted variant selection, consistent per session
-                let hash_val = (session.id.0.as_u128() % 100) as u8;
-                let mut cumulative = 0u8;
-                let mut variant_index = 0;
-                for (i, &weight) in exp.traffic_split.iter().enumerate() {
-                    cumulative = cumulative.saturating_add(weight);
-                    if hash_val < cumulative {
-                        variant_index = i;
-                        break;
-                    }
-                }
-                // Clamp to valid range
-                variant_index = variant_index.min(exp.variants.len() - 1);
-                let variant = &exp.variants[variant_index];
-                info!(
-                    agent = %manifest.name,
-                    experiment = %exp.name,
-                    variant = %variant.name,
-                    index = variant_index,
-                    "A/B experiment active - using variant"
-                );
-                experiment_context = Some(ExperimentContext {
-                    experiment_id: exp.id,
-                    variant_id: variant.id,
-                    variant_name: variant.name.clone(),
-                    request_start: std::time::Instant::now(),
-                });
-            }
-        }
-    }
+    let PromptExperimentSelection {
+        experiment_context,
+        running_experiment,
+    } = select_running_experiment(manifest, session, kernel.as_ref(), false);
 
     // Extract hand-allowed env vars from manifest metadata (set by kernel for hand settings)
     let hand_allowed_env: Vec<String> = manifest
@@ -637,172 +1859,53 @@ pub async fn run_agent_loop(
 
     let stable_prefix_mode = stable_prefix_mode_enabled(manifest);
 
-    // Recall relevant memories — use context engine if available, else fallback to inline logic.
-    // In stable_prefix_mode, skip memory recall to keep the system prompt prefix stable for caching.
-    // Scope recall to the current peer so multi-user channels don't leak context across users.
-    let mut memories = if let Some(engine) = context_engine {
-        engine
-            .ingest(session.agent_id, user_message, sender_user_id.as_deref())
-            .await
-            .map(|r| r.recalled_memories)
-            .unwrap_or_default()
-    } else if stable_prefix_mode {
-        Vec::new()
-    } else if let Some(emb) = embedding_driver {
-        match emb.embed_one(user_message).await {
-            Ok(query_vec) => {
-                debug!("Using vector recall (dims={})", query_vec.len());
-                memory
-                    .recall_with_embedding_async(
-                        user_message,
-                        5,
-                        Some(MemoryFilter {
-                            agent_id: Some(session.agent_id),
-                            peer_id: sender_user_id.clone(),
-                            ..Default::default()
-                        }),
-                        Some(&query_vec),
-                    )
-                    .await
-                    .unwrap_or_default()
-            }
-            Err(e) => {
-                warn!("Embedding recall failed, falling back to text search: {e}");
-                memory
-                    .recall(
-                        user_message,
-                        5,
-                        Some(MemoryFilter {
-                            agent_id: Some(session.agent_id),
-                            peer_id: sender_user_id.clone(),
-                            ..Default::default()
-                        }),
-                    )
-                    .await
-                    .unwrap_or_default()
-            }
-        }
-    } else {
-        memory
-            .recall(
-                user_message,
-                5,
-                Some(MemoryFilter {
-                    agent_id: Some(session.agent_id),
-                    peer_id: sender_user_id.clone(),
-                    ..Default::default()
-                }),
-            )
-            .await
-            .unwrap_or_default()
-    };
-
-    // Proactive memory: auto-retrieve (cleanup runs inside auto_retrieve)
-    // In stable_prefix_mode, skip proactive recall too to keep the prompt prefix stable for caching.
-    if !stable_prefix_mode {
-        if let Some(ref pm_store_arc) = proactive_memory {
-            let user_id = session.agent_id.0.to_string();
-
-            match pm_store_arc
-                .auto_retrieve(&user_id, user_message, sender_user_id.as_deref())
-                .await
-            {
-                Ok(pm_memories) if !pm_memories.is_empty() => {
-                    debug!("Proactive memory retrieved {} items", pm_memories.len());
-                    let pm_fragments: Vec<_> = pm_memories
-                        .into_iter()
-                        .map(|item| proactive_item_to_fragment(item, session.agent_id))
-                        .filter(|frag| !memories.iter().any(|m| m.content == frag.content))
-                        .collect();
-                    memories.extend(pm_fragments);
-                }
-                Ok(_) => {
-                    debug!("No proactive memories retrieved");
-                }
-                Err(e) => {
-                    warn!("Proactive memory auto_retrieve failed: {e}");
-                }
-            }
-        }
-    }
+    let RecallSetup {
+        memories,
+        memories_used,
+    } = setup_recalled_memories(
+        session,
+        user_message,
+        memory,
+        embedding_driver,
+        proactive_memory.as_ref(),
+        context_engine,
+        stable_prefix_mode,
+        sender_user_id.as_deref(),
+        false,
+    )
+    .await;
 
     // Fire BeforePromptBuild hook
     let agent_id_str = session.agent_id.0.to_string();
-    if let Some(hook_reg) = hooks {
-        let ctx = crate::hooks::HookContext {
-            agent_name: &manifest.name,
-            agent_id: agent_id_str.as_str(),
-            event: librefang_types::agent::HookEvent::BeforePromptBuild,
-            data: serde_json::json!({
-                "system_prompt": &manifest.model.system_prompt,
-                "user_message": user_message,
-            }),
-        };
-        let _ = hook_reg.fire(&ctx);
-    }
-
-    // Capture summaries of recalled memories for user-visible feedback.
-    let memories_used: Vec<String> = memories.iter().map(|m| m.content.clone()).collect();
-
-    // Build the system prompt — base prompt comes from kernel (prompt_builder),
-    // we append recalled memories here since they are resolved at loop time.
-    // In stable_prefix_mode, memories are injected as a context message instead
-    // (see below) to keep the system prompt prefix stable for caching.
-    let mut system_prompt = manifest.model.system_prompt.clone();
-
-    // Auto-track the agent's BASE prompt version (before experiment replacement)
-    if let Some(kernel) = kernel.as_ref() {
-        let _ = kernel.auto_track_prompt_version(session.agent_id, &system_prompt);
-    }
-
-    // If running an A/B experiment, use the variant's system prompt instead
-    if let Some(ref ctx) = experiment_context {
-        if let Some(ref exp) = running_experiment {
-            if let Some(kernel) = kernel.as_ref() {
-                if let Some(variant) = exp.variants.iter().find(|v| v.id == ctx.variant_id) {
-                    if let Ok(Some(prompt_version)) =
-                        kernel.get_prompt_version(&variant.prompt_version_id.to_string())
-                    {
-                        debug!(
-                            agent = %manifest.name,
-                            experiment = %exp.name,
-                            variant = %variant.name,
-                            version = prompt_version.version,
-                            "Using experiment variant prompt version"
-                        );
-                        system_prompt = prompt_version.system_prompt.clone();
-                    }
-                }
-            }
-        }
-    }
-
-    let memory_context_msg = if !memories.is_empty() {
-        let mem_pairs: Vec<(String, String)> = memories
-            .iter()
-            .map(|m| (String::new(), m.content.clone()))
-            .collect();
-        if stable_prefix_mode {
-            // In stable_prefix_mode, inject personal context only (no tool
-            // instructions) as a standalone context message to keep the system
-            // prompt prefix stable for caching.
-            let personal_ctx =
-                crate::prompt_builder::format_memory_items_as_personal_context(&mem_pairs);
-            Some(personal_ctx)
-        } else {
-            let section = crate::prompt_builder::build_memory_section(&mem_pairs);
-            system_prompt.push_str("\n\n");
-            system_prompt.push_str(&section);
-            None
-        }
-    } else {
-        None
+    let ctx = crate::hooks::HookContext {
+        agent_name: &manifest.name,
+        agent_id: agent_id_str.as_str(),
+        event: librefang_types::agent::HookEvent::BeforePromptBuild,
+        data: serde_json::json!({
+            "system_prompt": &manifest.model.system_prompt,
+            "user_message": user_message,
+        }),
     };
+    fire_hook_best_effort(hooks, &ctx);
+
+    let PromptSetup {
+        system_prompt,
+        memory_context_msg,
+    } = build_prompt_setup(
+        manifest,
+        session,
+        kernel.as_ref(),
+        experiment_context.as_ref(),
+        running_experiment.as_ref(),
+        &memories,
+        stable_prefix_mode,
+        false,
+    );
 
     // Mutable collector for memories saved during this turn (populated by auto_memorize).
-    let mut memories_saved: Vec<String> = Vec::new();
+    let memories_saved: Vec<String> = Vec::new();
     // Mutable collector for memory conflicts detected during this turn.
-    let mut memory_conflicts: Vec<librefang_types::memory::MemoryConflict> = Vec::new();
+    let memory_conflicts: Vec<librefang_types::memory::MemoryConflict> = Vec::new();
 
     // PII privacy filtering: extract config from manifest metadata.
     let privacy_config: librefang_types::config::PrivacyConfig = manifest
@@ -816,95 +1919,23 @@ pub async fn run_agent_loop(
     // When content blocks are provided (e.g. text + image from a channel),
     // use multimodal message format so the LLM receives the image for vision.
     // PII filter is applied to text content before adding to session.
-    if let Some(blocks) = user_content_blocks {
-        let filtered_blocks = if privacy_config.mode != librefang_types::config::PrivacyMode::Off {
-            blocks
-                .into_iter()
-                .map(|block| match block {
-                    ContentBlock::Text {
-                        text,
-                        provider_metadata,
-                    } => ContentBlock::Text {
-                        text: pii_filter.filter_message(&text, &privacy_config.mode),
-                        provider_metadata,
-                    },
-                    other => other,
-                })
-                .collect()
-        } else {
-            blocks
-        };
-        session
-            .messages
-            .push(Message::user_with_blocks(filtered_blocks));
-    } else {
-        let filtered_message = pii_filter.filter_message(user_message, &privacy_config.mode);
-        session.messages.push(Message::user(&filtered_message));
-    }
+    push_filtered_user_message(
+        session,
+        user_message,
+        user_content_blocks,
+        &pii_filter,
+        &privacy_config,
+    );
 
-    // Build the messages for the LLM, filtering system messages
-    // System prompt goes into the separate `system` field
-    let llm_messages: Vec<Message> = session
-        .messages
-        .iter()
-        .filter(|m| m.role != Role::System)
-        .cloned()
-        .collect();
-
-    // Validate and repair session history (drop orphans, merge consecutive)
-    let mut messages = crate::session_repair::validate_and_repair(&llm_messages);
-
-    // Inject canonical context as the first user message (not in system prompt)
-    // to keep the system prompt stable across turns for provider prompt caching.
-    if let Some(cc_msg) = manifest
-        .metadata
-        .get("canonical_context_msg")
-        .and_then(|v| v.as_str())
-    {
-        if !cc_msg.is_empty() {
-            messages.insert(0, Message::user(cc_msg));
-        }
-    }
-
-    // In stable_prefix_mode, inject recalled memories as a context message
-    // (after canonical context, before conversation) to avoid polluting the
-    // system prompt prefix that benefits from provider prompt caching.
-    // Framed as system context so the LLM treats it as background knowledge.
-    if let Some(mem_msg) = memory_context_msg {
-        messages.insert(
-            0,
-            Message::user(format!(
-                "[System context — what you know about this person]\n{mem_msg}"
-            )),
-        );
-    }
+    let PreparedMessages {
+        mut messages,
+        new_messages_start: prepared_new_messages_start,
+    } = prepare_llm_messages(manifest, session, user_message, memory_context_msg);
 
     let mut total_usage = TokenUsage::default();
     let final_response;
 
-    // Safety valve: trim excessively long message histories to prevent context
-    // overflow. Cuts at conversation-turn boundaries so ToolUse/ToolResult
-    // pairs are never split (fixes "EOF while parsing" from empty API responses).
-    // Also trims the persistent session so the truncated version is saved to DB.
-    safe_trim_messages(
-        &mut messages,
-        &mut session.messages,
-        &manifest.name,
-        user_message,
-    );
-
-    // Update new_messages_start now that trim has run and the user message
-    // has been pushed. The trim drains only from the front and
-    // find_safe_trim_point keeps len >= 1, so the user msg sits at len-1.
-    new_messages_start = session.messages.len().saturating_sub(1);
-
-    // Proactively strip base64 image data from previous turns.  Images that
-    // survived from earlier sessions (e.g. after a crash or daemon restart)
-    // would otherwise waste ~56K tokens per image on every subsequent LLM
-    // call.  The current turn's image (last user message) is preserved so the
-    // LLM can still process it.
-    strip_prior_image_data(&mut messages);
-    strip_prior_image_data(&mut session.messages);
+    new_messages_start = prepared_new_messages_start;
 
     // Use autonomous config max_iterations if set, else default
     let max_iterations = manifest
@@ -957,42 +1988,8 @@ pub async fn run_agent_loop(
             apply_context_guard(&mut messages, &context_budget, available_tools);
         }
 
-        // Strip provider prefix: "openrouter/google/gemini-2.5-flash" → "google/gemini-2.5-flash"
-        let api_model = strip_provider_prefix(&manifest.model.model, &manifest.model.provider);
-
-        let prompt_caching = manifest
-            .metadata
-            .get("prompt_caching")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
-
-        let timeout_override = manifest
-            .metadata
-            .get("timeout_secs")
-            .and_then(|v| v.as_u64())
-            .or_else(|| {
-                if available_tools
-                    .iter()
-                    .any(|t| t.name.starts_with("browser_") || t.name.starts_with("playwright_"))
-                {
-                    Some(600)
-                } else {
-                    None
-                }
-            });
-
-        let request = CompletionRequest {
-            model: api_model,
-            messages: messages.clone(),
-            tools: available_tools.to_vec(),
-            max_tokens: manifest.model.max_tokens,
-            temperature: manifest.model.temperature,
-            system: Some(system_prompt.clone()),
-            thinking: manifest.thinking.clone(),
-            prompt_caching,
-            response_format: manifest.response_format.clone(),
-            timeout_secs: timeout_override,
-        };
+        let request =
+            build_completion_request(manifest, &system_prompt, &messages, available_tools);
 
         // Notify phase: Thinking
         if let Some(cb) = on_phase {
@@ -1009,10 +2006,7 @@ pub async fn run_agent_loop(
         let provider_name = manifest.model.provider.as_str();
         let mut response = call_with_retry(&*driver, request, Some(provider_name), None).await?;
 
-        total_usage.input_tokens += response.usage.input_tokens;
-        total_usage.output_tokens += response.usage.output_tokens;
-        total_usage.cache_creation_input_tokens += response.usage.cache_creation_input_tokens;
-        total_usage.cache_read_input_tokens += response.usage.cache_read_input_tokens;
+        accumulate_token_usage(&mut total_usage, &response.usage);
 
         // Strip image base64 from earlier messages (LLM already processed them)
         strip_processed_image_data(&mut messages);
@@ -1035,17 +2029,7 @@ pub async fn run_agent_loop(
                 response.tool_calls = recovered;
                 response.stop_reason = StopReason::ToolUse;
                 tools_recovered_from_text = true;
-                // Build ToolUse content blocks from recovered calls
-                let mut new_blocks: Vec<ContentBlock> = Vec::new();
-                for tc in &response.tool_calls {
-                    new_blocks.push(ContentBlock::ToolUse {
-                        id: tc.id.clone(),
-                        name: tc.name.clone(),
-                        input: tc.input.clone(),
-                        provider_metadata: None,
-                    });
-                }
-                response.content = new_blocks;
+                response.content = tool_use_blocks_from_calls(&response.tool_calls);
             }
         }
 
@@ -1069,35 +2053,28 @@ pub async fn run_agent_loop(
                         .save_session_async(session)
                         .await
                         .map_err(|e| LibreFangError::Memory(e.to_string()))?;
-                    return Ok(AgentLoopResult {
-                        response: String::new(),
+                    return Ok(build_silent_agent_loop_result(
                         total_usage,
-                        iterations: iteration + 1,
-                        cost_usd: None,
-                        silent: true,
-                        directives: librefang_types::message::ReplyDirectives {
-                            reply_to: parsed_directives.reply_to,
-                            current_thread: parsed_directives.current_thread,
-                            silent: true,
-                        },
+                        iteration + 1,
+                        parsed_directives,
                         decision_traces,
-                        memories_saved: Vec::new(),
-                        memories_used: memories_used.clone(),
-                        memory_conflicts: Vec::new(),
-                        provider_not_configured: false,
-                        experiment_context: experiment_context.clone(),
-                        latency_ms: 0,
+                        memories_used.clone(),
+                        experiment_context.clone(),
                         new_messages_start,
-                    });
+                    ));
                 }
 
-                // One-shot retry: if the LLM returns empty text with no tool use,
-                // try once more before accepting the empty result.
-                // Triggers on first call OR when input_tokens=0 (silently failed request).
-                if text.trim().is_empty() && response.tool_calls.is_empty() {
-                    let is_silent_failure =
-                        response.usage.input_tokens == 0 && response.usage.output_tokens == 0;
-                    if iteration == 0 || is_silent_failure {
+                match classify_end_turn_retry(
+                    &text,
+                    &response,
+                    iteration,
+                    available_tools,
+                    any_tools_executed,
+                    hallucination_retried,
+                    action_nudge_retried,
+                    user_message,
+                ) {
+                    Some(EndTurnRetry::EmptyResponse { is_silent_failure }) => {
                         warn!(
                             agent = %manifest.name,
                             iteration,
@@ -1106,8 +2083,6 @@ pub async fn run_agent_loop(
                             silent_failure = is_silent_failure,
                             "Empty response, retrying once"
                         );
-                        // Re-validate messages before retry — the history may have
-                        // broken tool_use/tool_result pairs that caused the failure.
                         if is_silent_failure {
                             messages = crate::session_repair::validate_and_repair(&messages);
                         }
@@ -1115,460 +2090,137 @@ pub async fn run_agent_loop(
                         messages.push(Message::user("Please provide your response.".to_string()));
                         continue;
                     }
-                }
-
-                // Detect hallucinated actions: LLM claims completion without using tools.
-                // Only trigger when no tools have been executed in ANY iteration —
-                // if tools ran in earlier iterations, the text is a legitimate summary.
-                if !text.trim().is_empty()
-                    && response.tool_calls.is_empty()
-                    && !available_tools.is_empty()
-                    && !any_tools_executed
-                    && !hallucination_retried
-                    && looks_like_hallucinated_action(&text)
-                {
-                    hallucination_retried = true;
-                    warn!(
-                        agent = %manifest.name,
-                        iteration,
-                        "Detected hallucinated action — agent claimed action without tool calls, retrying"
-                    );
-                    messages.push(Message::assistant(&text));
-                    messages.push(Message::user(
-                        "[System: You described performing an action but did not actually call any tools. \
-                         Please use the provided tools to carry out the action rather than just describing it.]"
-                    ));
-                    continue;
-                }
-
-                // Detect missing tool execution for explicit user action requests.
-                // If the user asked for an action (e.g. "send to Telegram", "execute X")
-                // but the LLM responded with only text and no tool calls, nudge it to
-                // actually use the available tools.  Only retry once to avoid loops.
-                if !text.trim().is_empty()
-                    && response.tool_calls.is_empty()
-                    && !available_tools.is_empty()
-                    && !any_tools_executed
-                    && !action_nudge_retried
-                    && !hallucination_retried
-                    && user_message_has_action_intent(user_message)
-                {
-                    action_nudge_retried = true;
-                    warn!(
-                        agent = %manifest.name,
-                        iteration,
-                        "User requested action but LLM responded without tool calls — nudging retry"
-                    );
-                    messages.push(Message::assistant(&text));
-                    messages.push(Message::user(
-                        "[System: You described actions but didn't execute them. \
-                         Please use the available tools to complete the requested actions.]",
-                    ));
-                    continue;
-                }
-
-                // Guard against empty response — covers both iteration 0 and post-tool cycles
-                let text = if text.trim().is_empty() {
-                    warn!(
-                        agent = %manifest.name,
-                        iteration,
-                        input_tokens = total_usage.input_tokens,
-                        output_tokens = total_usage.output_tokens,
-                        messages_count = messages.len(),
-                        "Empty response from LLM — guard activated"
-                    );
-                    if any_tools_executed {
-                        "[Task completed — the agent executed tools but did not produce a text summary.]".to_string()
-                    } else {
-                        "[The model returned an empty response. This usually means the model is overloaded, the context is too large, or the API key lacks credits. Try again or check /status.]".to_string()
+                    Some(EndTurnRetry::HallucinatedAction) => {
+                        hallucination_retried = true;
+                        warn!(
+                            agent = %manifest.name,
+                            iteration,
+                            "Detected hallucinated action — agent claimed action without tool calls, retrying"
+                        );
+                        messages.push(Message::assistant(&text));
+                        messages.push(Message::user(
+                            "[System: You described performing an action but did not actually call any tools. \
+                             Please use the provided tools to carry out the action rather than just describing it.]"
+                        ));
+                        continue;
                     }
-                } else {
-                    text
-                };
+                    Some(EndTurnRetry::ActionIntent) => {
+                        action_nudge_retried = true;
+                        warn!(
+                            agent = %manifest.name,
+                            iteration,
+                            "User requested action but LLM responded without tool calls — nudging retry"
+                        );
+                        messages.push(Message::assistant(&text));
+                        messages.push(Message::user(
+                            "[System: You described actions but didn't execute them. \
+                             Please use the available tools to complete the requested actions.]",
+                        ));
+                        continue;
+                    }
+                    None => {}
+                }
+
+                let text = finalize_end_turn_text(
+                    text,
+                    any_tools_executed,
+                    &manifest.name,
+                    iteration,
+                    &total_usage,
+                    messages.len(),
+                    "Empty response from LLM — guard activated",
+                );
                 final_response = text.clone();
-                session.messages.push(Message::assistant(text));
 
-                // Prune NO_REPLY heartbeat turns to save context budget
-                let keep_recent = manifest
-                    .autonomous
-                    .as_ref()
-                    .and_then(|a| a.heartbeat_keep_recent)
-                    .unwrap_or(10);
-                crate::session_repair::prune_heartbeat_turns(&mut session.messages, keep_recent);
-
-                // Save session
-                memory
-                    .save_session_async(session)
-                    .await
-                    .map_err(|e| LibreFangError::Memory(e.to_string()))?;
-
-                // Remember this interaction (with embedding if available)
-                let interaction_text = format!(
-                    "User asked: {}\nI responded: {}",
-                    user_message, final_response
-                );
-                if let Some(emb) = embedding_driver {
-                    match emb.embed_one(&interaction_text).await {
-                        Ok(vec) => {
-                            if let Err(e) = memory
-                                .remember_with_embedding_async(
-                                    session.agent_id,
-                                    &interaction_text,
-                                    MemorySource::Conversation,
-                                    "episodic",
-                                    HashMap::new(),
-                                    Some(&vec),
-                                )
-                                .await
-                            {
-                                warn!("Failed to persist episodic memory (with embedding): {e}");
-                            }
-                        }
-                        Err(e) => {
-                            warn!("Embedding for remember failed: {e}");
-                            if let Err(e2) = memory
-                                .remember(
-                                    session.agent_id,
-                                    &interaction_text,
-                                    MemorySource::Conversation,
-                                    "episodic",
-                                    HashMap::new(),
-                                )
-                                .await
-                            {
-                                warn!("Failed to persist episodic memory (no embedding fallback): {e2}");
-                            }
-                        }
-                    }
-                } else if let Err(e) = memory
-                    .remember(
-                        session.agent_id,
-                        &interaction_text,
-                        MemorySource::Conversation,
-                        "episodic",
-                        HashMap::new(),
-                    )
-                    .await
-                {
-                    warn!("Failed to persist episodic memory: {e}");
-                }
-
-                // Context engine: after_turn hook
-                if let Some(engine) = context_engine {
-                    if let Err(e) = engine.after_turn(session.agent_id, &messages).await {
-                        warn!("Context engine after_turn failed: {e}");
-                    }
-                }
-
-                // Notify phase: Done
-                if let Some(cb) = on_phase {
-                    cb(LoopPhase::Done);
-                }
-
-                info!(
-                    agent = %manifest.name,
-                    iterations = iteration + 1,
-                    tokens = total_usage.total(),
-                    "Agent loop completed"
-                );
-
-                // Run auto_memorize directly (not via hook) for proper result handling.
-                // Relations are stored inside auto_memorize via store_relations().
-                // Only send new messages from this turn, not the full session history.
-                if let Some(ref pm_store) = proactive_memory {
-                    let user_id = session.agent_id.0.to_string();
-                    let new_messages = &session.messages[new_messages_start..];
-                    let messages_json = serialize_session_messages(new_messages);
-                    match pm_store
-                        .auto_memorize(&user_id, &messages_json, sender_user_id.as_deref())
-                        .await
-                    {
-                        Ok(result) if result.has_content => {
-                            debug!(
-                                "Proactive memory: stored {} memories, {} relations",
-                                result.memories.len(),
-                                result.relations.len(),
-                            );
-                            memories_saved
-                                .extend(result.memories.iter().map(|m| m.content.clone()));
-                            memory_conflicts.extend(result.conflicts);
-                        }
-                        Ok(_) => {}
-                        Err(e) => {
-                            warn!("Proactive memory auto_memorize failed: {e}");
-                        }
-                    }
-                }
-
-                // Fire AgentLoopEnd hook
-                if let Some(hook_reg) = hooks {
-                    let ctx = crate::hooks::HookContext {
-                        agent_name: &manifest.name,
-                        agent_id: agent_id_str.as_str(),
-                        event: librefang_types::agent::HookEvent::AgentLoopEnd,
-                        data: serde_json::json!({
-                            "iterations": iteration + 1,
-                            "response_length": final_response.len(),
-                        }),
-                    };
-                    let _ = hook_reg.fire(&ctx);
-                }
-
-                return Ok(AgentLoopResult {
-                    response: final_response,
+                return finalize_successful_end_turn(
+                    manifest,
+                    session,
+                    memory,
+                    embedding_driver,
+                    context_engine,
+                    on_phase,
+                    proactive_memory.as_ref(),
+                    hooks,
+                    agent_id_str.as_str(),
+                    user_message,
+                    final_response,
+                    &messages,
+                    iteration,
                     total_usage,
-                    iterations: iteration + 1,
-                    cost_usd: None,
-                    silent: false,
-                    directives: Default::default(),
                     decision_traces,
                     memories_saved,
                     memories_used,
                     memory_conflicts,
-                    provider_not_configured: false,
-                    experiment_context: experiment_context.clone(),
-                    latency_ms: 0,
+                    experiment_context.clone(),
+                    reply_directives_from_parsed(parsed_directives),
                     new_messages_start,
-                });
+                    sender_user_id.as_deref(),
+                    "Agent loop completed",
+                    "non_streaming",
+                    "Proactive memory: stored {} memories, {} relations",
+                    "Proactive memory auto_memorize failed",
+                )
+                .await;
             }
             StopReason::ToolUse => {
                 // Reset MaxTokens continuation counter on tool use
                 consecutive_max_tokens = 0;
                 any_tools_executed = true;
-
-                // Extract the assistant's reasoning text that accompanied the tool calls.
-                // This is the rationale for why the LLM selected these tools.
-                let rationale_text = {
-                    let text = response.text();
-                    if text.trim().is_empty() {
-                        None
-                    } else {
-                        Some(text)
-                    }
-                };
-
-                // Execute tool calls
-                let assistant_blocks = response.content.clone();
-
-                // Add assistant message with tool use blocks
-                session.messages.push(Message {
-                    role: Role::Assistant,
-                    content: MessageContent::Blocks(assistant_blocks.clone()),
-                    pinned: false,
-                });
-                messages.push(Message {
-                    role: Role::Assistant,
-                    content: MessageContent::Blocks(assistant_blocks),
-                    pinned: false,
-                });
-
-                // Build allowed tool names list for capability enforcement
-                let allowed_tool_names: Vec<String> =
-                    available_tools.iter().map(|t| t.name.clone()).collect();
-                let caller_id_str = session.agent_id.to_string();
+                let tool_use_setup =
+                    begin_tool_use_turn(&response, session, &mut messages, available_tools);
 
                 // Execute each tool call with loop guard, timeout, and truncation
                 let mut tool_result_blocks = Vec::new();
                 for tool_call in &response.tool_calls {
-                    // Loop guard check
-                    let verdict = loop_guard.check(&tool_call.name, &tool_call.input);
-                    match &verdict {
-                        LoopGuardVerdict::CircuitBreak(msg) => {
-                            warn!(tool = %tool_call.name, "Circuit breaker triggered");
-                            // Save session before bailing
-                            if let Err(e) = memory.save_session_async(session).await {
-                                warn!("Failed to save session on circuit break: {e}");
-                            }
-                            // Fire AgentLoopEnd hook on circuit break
-                            if let Some(hook_reg) = hooks {
-                                let ctx = crate::hooks::HookContext {
-                                    agent_name: &manifest.name,
-                                    agent_id: agent_id_str.as_str(),
-                                    event: librefang_types::agent::HookEvent::AgentLoopEnd,
-                                    data: serde_json::json!({
-                                        "reason": "circuit_break",
-                                        "error": msg.as_str(),
-                                    }),
-                                };
-                                let _ = hook_reg.fire(&ctx);
-                            }
-                            return Err(LibreFangError::Internal(msg.clone()));
-                        }
-                        LoopGuardVerdict::Block(msg) => {
-                            warn!(tool = %tool_call.name, "Tool call blocked by loop guard");
-                            tool_result_blocks.push(ContentBlock::ToolResult {
-                                tool_use_id: tool_call.id.clone(),
-                                tool_name: tool_call.name.clone(),
-                                content: msg.clone(),
-                                is_error: true,
-                                status: librefang_types::tool::ToolExecutionStatus::Error,
-                                approval_request_id: None,
-                            });
-                            continue;
-                        }
-                        _ => {} // Allow or Warn — proceed with execution
-                    }
-
-                    debug!(tool = %tool_call.name, id = %tool_call.id, "Executing tool");
-
-                    // Notify phase: ToolUse
-                    if let Some(cb) = on_phase {
-                        let sanitized: String = tool_call
-                            .name
-                            .chars()
-                            .filter(|c| !c.is_control())
-                            .take(64)
-                            .collect();
-                        cb(LoopPhase::ToolUse {
-                            tool_name: sanitized,
-                        });
-                    }
-
-                    // Fire BeforeToolCall hook (can block execution)
-                    if let Some(hook_reg) = hooks {
-                        let ctx = crate::hooks::HookContext {
-                            agent_name: &manifest.name,
-                            agent_id: &caller_id_str,
-                            event: librefang_types::agent::HookEvent::BeforeToolCall,
-                            data: serde_json::json!({
-                                "tool_name": &tool_call.name,
-                                "input": &tool_call.input,
-                            }),
-                        };
-                        if let Err(reason) = hook_reg.fire(&ctx) {
-                            tool_result_blocks.push(ContentBlock::ToolResult {
-                                tool_use_id: tool_call.id.clone(),
-                                tool_name: tool_call.name.clone(),
-                                content: format!(
-                                    "Hook blocked tool '{}': {}",
-                                    tool_call.name, reason
-                                ),
-                                is_error: true,
-                                status: librefang_types::tool::ToolExecutionStatus::Error,
-                                approval_request_id: None,
-                            });
-                            continue;
-                        }
-                    }
-
-                    // Resolve effective exec policy (per-agent override or global)
-                    let effective_exec_policy = manifest.exec_policy.as_ref();
-
-                    // Timeout-wrapped execution with timing for decision trace
-                    let tool_timeout = kernel
-                        .as_ref()
-                        .map_or(TOOL_TIMEOUT_SECS, |k| k.tool_timeout_secs());
-                    let trace_start = Instant::now();
-                    let trace_timestamp = chrono::Utc::now();
-                    let result = match tokio::time::timeout(
-                        Duration::from_secs(tool_timeout),
-                        tool_runner::execute_tool(
-                            &tool_call.id,
-                            &tool_call.name,
-                            &tool_call.input,
-                            kernel.as_ref(),
-                            Some(&allowed_tool_names),
-                            Some(&caller_id_str),
-                            skill_registry,
-                            mcp_connections,
-                            web_ctx,
-                            browser_ctx,
-                            if hand_allowed_env.is_empty() {
-                                None
-                            } else {
-                                Some(&hand_allowed_env)
-                            },
-                            workspace_root,
-                            media_engine,
-                            media_drivers,
-                            effective_exec_policy,
-                            tts_engine,
-                            docker_config,
-                            process_manager,
-                            sender_user_id.as_deref(),
-                            sender_channel.as_deref(),
-                        ),
-                    )
-                    .await
-                    {
-                        Ok(result) => result,
-                        Err(_) => {
-                            warn!(tool = %tool_call.name, "Tool execution timed out after {}s", tool_timeout);
-                            librefang_types::tool::ToolResult {
-                                tool_use_id: tool_call.id.clone(),
-                                content: format!(
-                                    "Tool '{}' timed out after {}s.",
-                                    tool_call.name, tool_timeout
-                                ),
-                                is_error: true,
-                                status: librefang_types::tool::ToolExecutionStatus::Expired,
-                                ..Default::default()
-                            }
-                        }
-                    };
-                    let execution_ms = trace_start.elapsed().as_millis() as u64;
-
-                    // Record decision trace for this tool call
-                    let output_summary =
-                        librefang_types::truncate_str(&result.content, 200).to_string();
-                    decision_traces.push(DecisionTrace {
-                        tool_use_id: tool_call.id.clone(),
-                        tool_name: tool_call.name.clone(),
-                        input: tool_call.input.clone(),
-                        rationale: rationale_text.clone(),
-                        recovered_from_text: tools_recovered_from_text,
-                        execution_ms,
-                        is_error: result.is_error,
-                        output_summary,
-                        iteration,
-                        timestamp: trace_timestamp,
-                    });
-
-                    // Fire AfterToolCall hook
-                    if let Some(hook_reg) = hooks {
-                        let ctx = crate::hooks::HookContext {
-                            agent_name: &manifest.name,
-                            agent_id: caller_id_str.as_str(),
-                            event: librefang_types::agent::HookEvent::AfterToolCall,
-                            data: serde_json::json!({
-                                "tool_name": &tool_call.name,
-                                "result": &result.content,
-                                "is_error": result.is_error,
-                            }),
-                        };
-                        let _ = hook_reg.fire(&ctx);
-                    }
-
-                    // Dynamic truncation based on context budget (replaces flat MAX_TOOL_RESULT_CHARS)
-                    let content = sanitize_tool_result_content(
-                        &result.content,
+                    let executed = execute_single_tool_call(
+                        manifest,
+                        tool_call,
+                        &mut loop_guard,
+                        memory,
+                        session,
+                        kernel.as_ref(),
+                        &tool_use_setup.allowed_tool_names,
+                        &tool_use_setup.caller_id_str,
+                        skill_registry,
+                        mcp_connections,
+                        web_ctx,
+                        browser_ctx,
+                        &hand_allowed_env,
+                        workspace_root,
+                        media_engine,
+                        media_drivers,
+                        tts_engine,
+                        docker_config,
+                        hooks,
+                        process_manager,
+                        sender_user_id.as_deref(),
+                        sender_channel.as_deref(),
                         &context_budget,
                         context_engine,
                         ctx_window,
+                        on_phase,
+                        &mut decision_traces,
+                        &tool_use_setup.rationale_text,
+                        tools_recovered_from_text,
+                        iteration,
+                        false,
+                        agent_id_str.as_str(),
+                    )
+                    .await?;
+
+                    append_tool_result_block(
+                        &mut tool_result_blocks,
+                        tool_call,
+                        &executed.result,
+                        executed.final_content,
                     );
-
-                    // Append warning if verdict was Warn
-                    let final_content = if let LoopGuardVerdict::Warn(ref warn_msg) = verdict {
-                        format!("{content}\n\n[LOOP GUARD] {warn_msg}")
-                    } else {
-                        content
-                    };
-
-                    tool_result_blocks.push(ContentBlock::ToolResult {
-                        tool_use_id: result.tool_use_id,
-                        tool_name: tool_call.name.clone(),
-                        content: final_content,
-                        is_error: result.is_error,
-                        status: result.status,
-                        approval_request_id: result.approval_request_id.clone(),
-                    });
 
                     // Stop executing remaining tool calls on failure (#948)
                     // but not for approval denials or sandbox security rejections —
                     // those should let the LLM recover and retry with a valid path (#1861)
-                    let is_soft_error =
-                        result.status.is_soft_error() || is_soft_error_content(&result.content);
-                    if result.is_error && !is_soft_error {
+                    let is_soft_error = executed.result.status.is_soft_error()
+                        || is_soft_error_content(&executed.result.content);
+                    if executed.result.is_error && !is_soft_error {
                         warn!(
                             tool = %tool_call.name,
                             "Tool execution failed — skipping remaining tool calls"
@@ -1580,127 +2232,18 @@ pub async fn run_agent_loop(
                     // messages between tool calls. If one is available, flush
                     // completed tool results so far and inject the user message
                     // so the LLM can process the interrupt on the next iteration.
-                    if let Some(pending_rx) = pending_messages {
-                        if let Ok(mut rx) = pending_rx.try_lock() {
-                            if let Ok(signal) = rx.try_recv() {
-                                info!(
-                                    agent = %manifest.name,
-                                    "Mid-turn signal injected — interrupting tool execution"
-                                );
-                                // Flush completed tool results collected so far
-                                if !tool_result_blocks.is_empty() {
-                                    let partial_results = Message {
-                                        role: Role::User,
-                                        content: MessageContent::Blocks(tool_result_blocks.clone()),
-                                        pinned: false,
-                                    };
-                                    session.messages.push(partial_results.clone());
-                                    messages.push(partial_results);
-                                }
-                                let injected_text = match signal {
-                                    AgentLoopSignal::Message { content } => content,
-                                    AgentLoopSignal::ApprovalResolved {
-                                        tool_use_id,
-                                        tool_name,
-                                        decision,
-                                        result_content,
-                                        result_is_error,
-                                        result_status,
-                                    } => {
-                                        apply_approval_resolution_signal(
-                                            session,
-                                            messages.as_mut_slice(),
-                                            &tool_use_id,
-                                            &result_content,
-                                            result_is_error,
-                                            result_status,
-                                        );
-                                        let result_preview =
-                                            librefang_types::truncate_str(&result_content, 300);
-                                        format!(
-                                            "[System] Tool '{}' approval resolved ({}). Result: {}",
-                                            tool_name, decision, result_preview
-                                        )
-                                    }
-                                };
-                                let inject_msg = Message::user(&injected_text);
-                                session.messages.push(inject_msg.clone());
-                                messages.push(inject_msg);
-                                // Clear tool_result_blocks — they've been flushed
-                                tool_result_blocks.clear();
-                                break;
-                            }
-                        }
+                    if handle_mid_turn_signal(
+                        pending_messages,
+                        &manifest.name,
+                        session,
+                        &mut messages,
+                        &mut tool_result_blocks,
+                    ) {
+                        break;
                     }
                 }
 
-                // Detect approval denials and inject guidance to prevent infinite retry loops
-                let denial_count = tool_result_blocks
-                    .iter()
-                    .filter(|b| {
-                        matches!(b, ContentBlock::ToolResult { status, .. }
-                        if *status == librefang_types::tool::ToolExecutionStatus::Denied)
-                    })
-                    .count();
-                if denial_count > 0 {
-                    tool_result_blocks.push(ContentBlock::Text {
-                        text: format!(
-                            "[System: {} tool call(s) were denied by approval policy. \
-                             Do NOT retry denied tools. Explain to the user what you \
-                             wanted to do and that it requires their approval.]",
-                            denial_count
-                        ),
-                        provider_metadata: None,
-                    });
-                }
-
-                // Detect modify-and-retry requests and inject guidance
-                let modify_count = tool_result_blocks
-                    .iter()
-                    .filter(|b| {
-                        matches!(b, ContentBlock::ToolResult { status, .. }
-                        if *status == librefang_types::tool::ToolExecutionStatus::ModifyAndRetry)
-                    })
-                    .count();
-                if modify_count > 0 {
-                    tool_result_blocks.push(ContentBlock::Text {
-                        text: format!(
-                            "[System: {} tool call(s) received human feedback requesting modification. \
-                             Read the feedback carefully, revise your approach, and retry with a \
-                             different strategy. Do NOT repeat the exact same tool call.]",
-                            modify_count
-                        ),
-                        provider_metadata: None,
-                    });
-                }
-
-                // Detect tool errors and inject guidance to prevent fabrication
-                let error_count = tool_result_blocks
-                    .iter()
-                    .filter(|b| matches!(b, ContentBlock::ToolResult { is_error: true, .. }))
-                    .count();
-                let non_denial_errors = error_count.saturating_sub(denial_count);
-                if non_denial_errors > 0 {
-                    tool_result_blocks.push(ContentBlock::Text {
-                        text: format!(
-                            "[System: {} tool(s) returned errors. Report the error honestly \
-                             to the user. Do NOT fabricate results or pretend the tool succeeded. \
-                             If a search or fetch failed, tell the user it failed and suggest \
-                             alternatives instead of making up data.]",
-                            non_denial_errors
-                        ),
-                        provider_metadata: None,
-                    });
-                }
-
-                // Add tool results as a user message (Anthropic API requirement)
-                let tool_results_msg = Message {
-                    role: Role::User,
-                    content: MessageContent::Blocks(tool_result_blocks.clone()),
-                    pinned: false,
-                };
-                session.messages.push(tool_results_msg.clone());
-                messages.push(tool_results_msg);
+                finalize_tool_use_results(session, &mut messages, &mut tool_result_blocks);
 
                 // Interim save after tool execution to prevent data loss on crash
                 if let Err(e) = memory.save_session_async(session).await {
@@ -1710,33 +2253,11 @@ pub async fn run_agent_loop(
                 // (soft errors — approval denials, sandbox rejections, truncation —
                 //  do NOT count; the LLM is expected to recover from those cheaply.)
                 // NOTE: keep in sync with run_agent_loop_streaming.
-                let hard_error_count = tool_result_blocks
-                    .iter()
-                    .filter(|b| match b {
-                        ContentBlock::ToolResult {
-                            status,
-                            content,
-                            is_error: true,
-                            ..
-                        } => !status.is_soft_error() && !is_soft_error_content(content),
-                        _ => false,
-                    })
-                    .count() as u32;
-                let success_count = tool_result_blocks
-                    .iter()
-                    .filter(|b| {
-                        matches!(
-                            b,
-                            ContentBlock::ToolResult {
-                                is_error: false,
-                                ..
-                            }
-                        )
-                    })
-                    .count() as u32;
-
-                if success_count == 0 && hard_error_count > 0 {
-                    consecutive_all_failed += 1;
+                let hard_error_count = update_consecutive_hard_failures(
+                    &mut consecutive_all_failed,
+                    &tool_result_blocks,
+                );
+                if consecutive_all_failed > 0 && hard_error_count > 0 {
                     if consecutive_all_failed >= MAX_CONSECUTIVE_ALL_FAILED {
                         warn!(
                             agent = %manifest.name,
@@ -1744,39 +2265,33 @@ pub async fn run_agent_loop(
                             hard_error_count,
                             "Tool failures in {MAX_CONSECUTIVE_ALL_FAILED} consecutive iterations — exiting loop"
                         );
-                        if let Some(hook_reg) = hooks {
-                            let ctx = crate::hooks::HookContext {
-                                agent_name: &manifest.name,
-                                agent_id: agent_id_str.as_str(),
-                                event: librefang_types::agent::HookEvent::AgentLoopEnd,
-                                data: serde_json::json!({
-                                    "iterations": iteration + 1,
-                                    "reason": "tool_failure",
-                                    "error_count": hard_error_count,
-                                    "consecutive_all_failed": consecutive_all_failed,
-                                }),
-                            };
-                            let _ = hook_reg.fire(&ctx);
-                        }
+                        let ctx = crate::hooks::HookContext {
+                            agent_name: &manifest.name,
+                            agent_id: agent_id_str.as_str(),
+                            event: librefang_types::agent::HookEvent::AgentLoopEnd,
+                            data: serde_json::json!({
+                                "iterations": iteration + 1,
+                                "reason": "tool_failure",
+                                "error_count": hard_error_count,
+                                "consecutive_all_failed": consecutive_all_failed,
+                            }),
+                        };
+                        fire_hook_best_effort(hooks, &ctx);
                         return Err(LibreFangError::RepeatedToolFailures {
                             iterations: consecutive_all_failed,
                             error_count: hard_error_count,
                         });
                     }
-                } else {
-                    consecutive_all_failed = 0;
                 }
             }
             StopReason::MaxTokens => {
                 consecutive_max_tokens += 1;
                 if consecutive_max_tokens >= MAX_CONTINUATIONS {
                     // Return partial response instead of continuing forever
-                    let text = response.text();
-                    let text = if text.trim().is_empty() {
-                        "[Partial response — token limit reached with no text output.]".to_string()
-                    } else {
-                        text
-                    };
+                    let text = max_tokens_response_text(&response);
+                    let (cleaned_text, parsed_directives) =
+                        crate::reply_directives::parse_directives(&text);
+                    let text = cleaned_text;
                     session.messages.push(Message::assistant(&text));
                     if let Err(e) = memory.save_session_async(session).await {
                         warn!("Failed to save session on max continuations: {e}");
@@ -1787,25 +2302,23 @@ pub async fn run_agent_loop(
                         "Max continuations reached, returning partial response"
                     );
                     // Fire AgentLoopEnd hook
-                    if let Some(hook_reg) = hooks {
-                        let ctx = crate::hooks::HookContext {
-                            agent_name: &manifest.name,
-                            agent_id: agent_id_str.as_str(),
-                            event: librefang_types::agent::HookEvent::AgentLoopEnd,
-                            data: serde_json::json!({
-                                "iterations": iteration + 1,
-                                "reason": "max_continuations",
-                            }),
-                        };
-                        let _ = hook_reg.fire(&ctx);
-                    }
+                    let ctx = crate::hooks::HookContext {
+                        agent_name: &manifest.name,
+                        agent_id: agent_id_str.as_str(),
+                        event: librefang_types::agent::HookEvent::AgentLoopEnd,
+                        data: serde_json::json!({
+                            "iterations": iteration + 1,
+                            "reason": "max_continuations",
+                        }),
+                    };
+                    fire_hook_best_effort(hooks, &ctx);
                     return Ok(AgentLoopResult {
                         response: text,
                         total_usage,
                         iterations: iteration + 1,
                         cost_usd: None,
                         silent: false,
-                        directives: Default::default(),
+                        directives: reply_directives_from_parsed(parsed_directives),
                         decision_traces,
                         memories_saved,
                         memories_used,
@@ -1833,18 +2346,16 @@ pub async fn run_agent_loop(
     }
 
     // Fire AgentLoopEnd hook on max iterations exceeded
-    if let Some(hook_reg) = hooks {
-        let ctx = crate::hooks::HookContext {
-            agent_name: &manifest.name,
-            agent_id: agent_id_str.as_str(),
-            event: librefang_types::agent::HookEvent::AgentLoopEnd,
-            data: serde_json::json!({
-                "reason": "max_iterations_exceeded",
-                "iterations": max_iterations,
-            }),
-        };
-        let _ = hook_reg.fire(&ctx);
-    }
+    let ctx = crate::hooks::HookContext {
+        agent_name: &manifest.name,
+        agent_id: agent_id_str.as_str(),
+        event: librefang_types::agent::HookEvent::AgentLoopEnd,
+        data: serde_json::json!({
+            "reason": "max_iterations_exceeded",
+            "iterations": max_iterations,
+        }),
+    };
+    fire_hook_best_effort(hooks, &ctx);
 
     Err(LibreFangError::MaxIterationsExceeded(max_iterations))
 }
@@ -1853,13 +2364,11 @@ pub async fn run_agent_loop(
 ///
 /// Uses the `llm_errors` classifier for smart error handling and the
 /// `ProviderCooldown` circuit breaker to prevent request storms.
-async fn call_with_retry(
-    driver: &dyn LlmDriver,
-    request: CompletionRequest,
+fn check_retry_cooldown(
     provider: Option<&str>,
     cooldown: Option<&ProviderCooldown>,
-) -> LibreFangResult<crate::llm_driver::CompletionResponse> {
-    // Check circuit breaker before calling
+    allow_probe_log_message: &str,
+) -> LibreFangResult<()> {
     if let (Some(provider), Some(cooldown)) = (provider, cooldown) {
         match cooldown.check(provider) {
             CooldownVerdict::Reject {
@@ -1871,88 +2380,130 @@ async fn call_with_retry(
                 )));
             }
             CooldownVerdict::AllowProbe => {
-                debug!(provider, "Allowing probe request through circuit breaker");
+                debug!(provider, "{allow_probe_log_message}");
             }
             CooldownVerdict::Allow => {}
         }
     }
+
+    Ok(())
+}
+
+fn record_retry_success(provider: Option<&str>, cooldown: Option<&ProviderCooldown>) {
+    if let (Some(provider), Some(cooldown)) = (provider, cooldown) {
+        cooldown.record_success(provider);
+    }
+}
+
+fn record_retry_failure(
+    provider: Option<&str>,
+    cooldown: Option<&ProviderCooldown>,
+    is_billing: bool,
+) {
+    if let (Some(provider), Some(cooldown)) = (provider, cooldown) {
+        cooldown.record_failure(provider, is_billing);
+    }
+}
+
+async fn handle_retryable_llm_error(
+    attempt: u32,
+    retry_after_ms: u64,
+    exhausted_message: String,
+    retry_log_message: &str,
+    last_error_label: &'static str,
+    provider: Option<&str>,
+    cooldown: Option<&ProviderCooldown>,
+) -> Result<String, LibreFangError> {
+    if attempt == MAX_RETRIES {
+        record_retry_failure(provider, cooldown, false);
+        return Err(LibreFangError::LlmDriver(exhausted_message));
+    }
+
+    let delay = std::cmp::max(retry_after_ms, BASE_RETRY_DELAY_MS * 2u64.pow(attempt));
+    warn!(attempt, delay_ms = delay, "{retry_log_message}");
+    tokio::time::sleep(Duration::from_millis(delay)).await;
+    Ok(last_error_label.to_string())
+}
+
+fn build_user_facing_llm_error(
+    error: &LlmError,
+    classification_log_message: &str,
+) -> (bool, LibreFangError) {
+    let raw_error = error.to_string();
+    let status = match error {
+        LlmError::Api { status, .. } => Some(*status),
+        _ => None,
+    };
+    let classified = llm_errors::classify_error(&raw_error, status);
+    warn!(
+        category = ?classified.category,
+        retryable = classified.is_retryable,
+        raw = %raw_error,
+        "{classification_log_message}: {}",
+        classified.sanitized_message
+    );
+
+    let user_msg = if classified.category == llm_errors::LlmErrorCategory::Format {
+        format!("{} — raw: {}", classified.sanitized_message, raw_error)
+    } else {
+        classified.sanitized_message
+    };
+
+    (classified.is_billing, LibreFangError::LlmDriver(user_msg))
+}
+
+async fn call_with_retry(
+    driver: &dyn LlmDriver,
+    request: CompletionRequest,
+    provider: Option<&str>,
+    cooldown: Option<&ProviderCooldown>,
+) -> LibreFangResult<crate::llm_driver::CompletionResponse> {
+    check_retry_cooldown(
+        provider,
+        cooldown,
+        "Allowing probe request through circuit breaker",
+    )?;
 
     let mut last_error = None;
 
     for attempt in 0..=MAX_RETRIES {
         match driver.complete(request.clone()).await {
             Ok(response) => {
-                // Record success with circuit breaker
-                if let (Some(provider), Some(cooldown)) = (provider, cooldown) {
-                    cooldown.record_success(provider);
-                }
+                record_retry_success(provider, cooldown);
                 return Ok(response);
             }
             Err(LlmError::RateLimited { retry_after_ms }) => {
-                if attempt == MAX_RETRIES {
-                    if let (Some(provider), Some(cooldown)) = (provider, cooldown) {
-                        cooldown.record_failure(provider, false);
-                    }
-                    return Err(LibreFangError::LlmDriver(format!(
-                        "Rate limited after {} retries",
-                        MAX_RETRIES
-                    )));
-                }
-                let delay = std::cmp::max(retry_after_ms, BASE_RETRY_DELAY_MS * 2u64.pow(attempt));
-                warn!(
-                    attempt,
-                    delay_ms = delay,
-                    "Rate limited, retrying after delay"
+                last_error = Some(
+                    handle_retryable_llm_error(
+                        attempt,
+                        retry_after_ms,
+                        format!("Rate limited after {} retries", MAX_RETRIES),
+                        "Rate limited, retrying after delay",
+                        "Rate limited",
+                        provider,
+                        cooldown,
+                    )
+                    .await?,
                 );
-                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
-                last_error = Some("Rate limited".to_string());
             }
             Err(LlmError::Overloaded { retry_after_ms }) => {
-                if attempt == MAX_RETRIES {
-                    if let (Some(provider), Some(cooldown)) = (provider, cooldown) {
-                        cooldown.record_failure(provider, false);
-                    }
-                    return Err(LibreFangError::LlmDriver(format!(
-                        "Model overloaded after {} retries",
-                        MAX_RETRIES
-                    )));
-                }
-                let delay = std::cmp::max(retry_after_ms, BASE_RETRY_DELAY_MS * 2u64.pow(attempt));
-                warn!(
-                    attempt,
-                    delay_ms = delay,
-                    "Model overloaded, retrying after delay"
+                last_error = Some(
+                    handle_retryable_llm_error(
+                        attempt,
+                        retry_after_ms,
+                        format!("Model overloaded after {} retries", MAX_RETRIES),
+                        "Model overloaded, retrying after delay",
+                        "Overloaded",
+                        provider,
+                        cooldown,
+                    )
+                    .await?,
                 );
-                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
-                last_error = Some("Overloaded".to_string());
             }
             Err(e) => {
-                // Use classifier for smarter error handling
-                let raw_error = e.to_string();
-                let status = match &e {
-                    LlmError::Api { status, .. } => Some(*status),
-                    _ => None,
-                };
-                let classified = llm_errors::classify_error(&raw_error, status);
-                warn!(
-                    category = ?classified.category,
-                    retryable = classified.is_retryable,
-                    raw = %raw_error,
-                    "LLM error classified: {}",
-                    classified.sanitized_message
-                );
-
-                if let (Some(provider), Some(cooldown)) = (provider, cooldown) {
-                    cooldown.record_failure(provider, classified.is_billing);
-                }
-
-                // Include raw error detail so dashboard users can debug
-                let user_msg = if classified.category == llm_errors::LlmErrorCategory::Format {
-                    format!("{} — raw: {}", classified.sanitized_message, raw_error)
-                } else {
-                    classified.sanitized_message
-                };
-                return Err(LibreFangError::LlmDriver(user_msg));
+                let (is_billing, err) = build_user_facing_llm_error(&e, "LLM error classified");
+                record_retry_failure(provider, cooldown, is_billing);
+                return Err(err);
             }
         }
     }
@@ -1972,74 +2523,47 @@ async fn stream_with_retry(
     provider: Option<&str>,
     cooldown: Option<&ProviderCooldown>,
 ) -> LibreFangResult<crate::llm_driver::CompletionResponse> {
-    // Check circuit breaker before calling
-    if let (Some(provider), Some(cooldown)) = (provider, cooldown) {
-        match cooldown.check(provider) {
-            CooldownVerdict::Reject {
-                reason,
-                retry_after_secs,
-            } => {
-                return Err(LibreFangError::LlmDriver(format!(
-                    "Provider '{provider}' is in cooldown ({reason}). Retry in {retry_after_secs}s."
-                )));
-            }
-            CooldownVerdict::AllowProbe => {
-                debug!(
-                    provider,
-                    "Allowing probe request through circuit breaker (stream)"
-                );
-            }
-            CooldownVerdict::Allow => {}
-        }
-    }
+    check_retry_cooldown(
+        provider,
+        cooldown,
+        "Allowing probe request through circuit breaker (stream)",
+    )?;
 
     let mut last_error = None;
 
     for attempt in 0..=MAX_RETRIES {
         match driver.stream(request.clone(), tx.clone()).await {
             Ok(response) => {
-                if let (Some(provider), Some(cooldown)) = (provider, cooldown) {
-                    cooldown.record_success(provider);
-                }
+                record_retry_success(provider, cooldown);
                 return Ok(response);
             }
             Err(LlmError::RateLimited { retry_after_ms }) => {
-                if attempt == MAX_RETRIES {
-                    if let (Some(provider), Some(cooldown)) = (provider, cooldown) {
-                        cooldown.record_failure(provider, false);
-                    }
-                    return Err(LibreFangError::LlmDriver(format!(
-                        "Rate limited after {} retries",
-                        MAX_RETRIES
-                    )));
-                }
-                let delay = std::cmp::max(retry_after_ms, BASE_RETRY_DELAY_MS * 2u64.pow(attempt));
-                warn!(
-                    attempt,
-                    delay_ms = delay,
-                    "Rate limited (stream), retrying after delay"
+                last_error = Some(
+                    handle_retryable_llm_error(
+                        attempt,
+                        retry_after_ms,
+                        format!("Rate limited after {} retries", MAX_RETRIES),
+                        "Rate limited (stream), retrying after delay",
+                        "Rate limited",
+                        provider,
+                        cooldown,
+                    )
+                    .await?,
                 );
-                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
-                last_error = Some("Rate limited".to_string());
             }
             Err(LlmError::Overloaded { retry_after_ms }) => {
-                if attempt == MAX_RETRIES {
-                    if let (Some(provider), Some(cooldown)) = (provider, cooldown) {
-                        cooldown.record_failure(provider, false);
-                    }
-                    return Err(LibreFangError::LlmDriver(format!(
-                        "Model overloaded after {} retries",
-                        MAX_RETRIES
-                    )));
-                }
-                let delay = std::cmp::max(retry_after_ms, BASE_RETRY_DELAY_MS * 2u64.pow(attempt));
-                warn!(
-                    attempt,
-                    delay_ms = delay,
-                    "Model overloaded (stream), retrying after delay"
+                last_error = Some(
+                    handle_retryable_llm_error(
+                        attempt,
+                        retry_after_ms,
+                        format!("Model overloaded after {} retries", MAX_RETRIES),
+                        "Model overloaded (stream), retrying after delay",
+                        "Overloaded",
+                        provider,
+                        cooldown,
+                    )
+                    .await?,
                 );
-                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
-                last_error = Some("Overloaded".to_string());
             }
             Err(LlmError::TimedOut {
                 inactivity_secs,
@@ -2062,30 +2586,10 @@ async fn stream_with_retry(
                 )));
             }
             Err(e) => {
-                let raw_error = e.to_string();
-                let status = match &e {
-                    LlmError::Api { status, .. } => Some(*status),
-                    _ => None,
-                };
-                let classified = llm_errors::classify_error(&raw_error, status);
-                warn!(
-                    category = ?classified.category,
-                    retryable = classified.is_retryable,
-                    raw = %raw_error,
-                    "LLM stream error classified: {}",
-                    classified.sanitized_message
-                );
-
-                if let (Some(provider), Some(cooldown)) = (provider, cooldown) {
-                    cooldown.record_failure(provider, classified.is_billing);
-                }
-
-                let user_msg = if classified.category == llm_errors::LlmErrorCategory::Format {
-                    format!("{} — raw: {}", classified.sanitized_message, raw_error)
-                } else {
-                    classified.sanitized_message
-                };
-                return Err(LibreFangError::LlmDriver(user_msg));
+                let (is_billing, err) =
+                    build_user_facing_llm_error(&e, "LLM stream error classified");
+                record_retry_failure(provider, cooldown, is_billing);
+                return Err(err);
             }
         }
     }
@@ -2149,44 +2653,10 @@ pub async fn run_agent_loop_streaming(
         });
     }
 
-    // Check for running A/B experiment and select variant
-    let mut experiment_context: Option<ExperimentContext> = None;
-    let mut running_experiment: Option<librefang_types::agent::PromptExperiment> = None;
-    if let Some(kernel) = kernel.as_ref() {
-        let agent_id = session.agent_id.to_string();
-        if let Ok(Some(exp)) = kernel.get_running_experiment(&agent_id) {
-            running_experiment = Some(exp.clone());
-            if !exp.variants.is_empty() {
-                // Use traffic_split for weighted variant selection, consistent per session
-                let hash_val = (session.id.0.as_u128() % 100) as u8;
-                let mut cumulative = 0u8;
-                let mut variant_index = 0;
-                for (i, &weight) in exp.traffic_split.iter().enumerate() {
-                    cumulative = cumulative.saturating_add(weight);
-                    if hash_val < cumulative {
-                        variant_index = i;
-                        break;
-                    }
-                }
-                // Clamp to valid range
-                variant_index = variant_index.min(exp.variants.len() - 1);
-                let variant = &exp.variants[variant_index];
-                info!(
-                    agent = %manifest.name,
-                    experiment = %exp.name,
-                    variant = %variant.name,
-                    index = variant_index,
-                    "A/B experiment active - using variant (streaming)"
-                );
-                experiment_context = Some(ExperimentContext {
-                    experiment_id: exp.id,
-                    variant_id: variant.id,
-                    variant_name: variant.name.clone(),
-                    request_start: std::time::Instant::now(),
-                });
-            }
-        }
-    }
+    let PromptExperimentSelection {
+        experiment_context,
+        running_experiment,
+    } = select_running_experiment(manifest, session, kernel.as_ref(), true);
 
     // Extract hand-allowed env vars from manifest metadata (set by kernel for hand settings)
     let hand_allowed_env: Vec<String> = manifest
@@ -2210,175 +2680,53 @@ pub async fn run_agent_loop_streaming(
 
     let stable_prefix_mode = stable_prefix_mode_enabled(manifest);
 
-    // Recall relevant memories — use context engine if available, else fallback to inline logic.
-    // In stable_prefix_mode, skip memory recall to keep the system prompt prefix stable for caching.
-    // Scope recall to the current peer so multi-user channels don't leak context across users.
-    let mut memories = if let Some(engine) = context_engine {
-        engine
-            .ingest(session.agent_id, user_message, sender_user_id.as_deref())
-            .await
-            .map(|r| r.recalled_memories)
-            .unwrap_or_default()
-    } else if stable_prefix_mode {
-        Vec::new()
-    } else if let Some(emb) = embedding_driver {
-        match emb.embed_one(user_message).await {
-            Ok(query_vec) => {
-                debug!("Using vector recall (streaming, dims={})", query_vec.len());
-                memory
-                    .recall_with_embedding_async(
-                        user_message,
-                        5,
-                        Some(MemoryFilter {
-                            agent_id: Some(session.agent_id),
-                            peer_id: sender_user_id.clone(),
-                            ..Default::default()
-                        }),
-                        Some(&query_vec),
-                    )
-                    .await
-                    .unwrap_or_default()
-            }
-            Err(e) => {
-                warn!("Embedding recall failed (streaming), falling back to text search: {e}");
-                memory
-                    .recall(
-                        user_message,
-                        5,
-                        Some(MemoryFilter {
-                            agent_id: Some(session.agent_id),
-                            peer_id: sender_user_id.clone(),
-                            ..Default::default()
-                        }),
-                    )
-                    .await
-                    .unwrap_or_default()
-            }
-        }
-    } else {
-        memory
-            .recall(
-                user_message,
-                5,
-                Some(MemoryFilter {
-                    agent_id: Some(session.agent_id),
-                    peer_id: sender_user_id.clone(),
-                    ..Default::default()
-                }),
-            )
-            .await
-            .unwrap_or_default()
-    };
-
-    // Proactive memory: auto-retrieve (cleanup runs inside auto_retrieve)
-    // In stable_prefix_mode, skip proactive recall too to keep the prompt prefix stable for caching.
-    if !stable_prefix_mode {
-        if let Some(ref pm_store_arc) = proactive_memory {
-            let user_id = session.agent_id.0.to_string();
-
-            match pm_store_arc
-                .auto_retrieve(&user_id, user_message, sender_user_id.as_deref())
-                .await
-            {
-                Ok(pm_memories) if !pm_memories.is_empty() => {
-                    debug!(
-                        "Proactive memory (streaming) retrieved {} items",
-                        pm_memories.len()
-                    );
-                    let pm_fragments: Vec<_> = pm_memories
-                        .into_iter()
-                        .map(|item| proactive_item_to_fragment(item, session.agent_id))
-                        .filter(|frag| !memories.iter().any(|m| m.content == frag.content))
-                        .collect();
-                    memories.extend(pm_fragments);
-                }
-                Ok(_) => {
-                    debug!("No proactive memories retrieved (streaming)");
-                }
-                Err(e) => {
-                    warn!("Proactive memory auto_retrieve failed (streaming): {e}");
-                }
-            }
-        }
-    }
+    let RecallSetup {
+        memories,
+        memories_used,
+    } = setup_recalled_memories(
+        session,
+        user_message,
+        memory,
+        embedding_driver,
+        proactive_memory.as_ref(),
+        context_engine,
+        stable_prefix_mode,
+        sender_user_id.as_deref(),
+        true,
+    )
+    .await;
 
     // Fire BeforePromptBuild hook
     let agent_id_str = session.agent_id.0.to_string();
-    if let Some(hook_reg) = hooks {
-        let ctx = crate::hooks::HookContext {
-            agent_name: &manifest.name,
-            agent_id: agent_id_str.as_str(),
-            event: librefang_types::agent::HookEvent::BeforePromptBuild,
-            data: serde_json::json!({
-                "system_prompt": &manifest.model.system_prompt,
-                "user_message": user_message,
-            }),
-        };
-        let _ = hook_reg.fire(&ctx);
-    }
-
-    // Capture summaries of recalled memories for user-visible feedback (streaming).
-    let memories_used: Vec<String> = memories.iter().map(|m| m.content.clone()).collect();
-
-    // Build the system prompt — base prompt comes from kernel (prompt_builder),
-    // we append recalled memories here since they are resolved at loop time.
-    // In stable_prefix_mode, memories are injected as a context message instead
-    // (see below) to keep the system prompt prefix stable for caching.
-    let mut system_prompt = manifest.model.system_prompt.clone();
-
-    // Auto-track the agent's BASE prompt version (before experiment replacement)
-    if let Some(kernel) = kernel.as_ref() {
-        let _ = kernel.auto_track_prompt_version(session.agent_id, &system_prompt);
-    }
-
-    // If running an A/B experiment, use the variant's system prompt instead
-    if let Some(ref ctx) = experiment_context {
-        if let Some(ref exp) = running_experiment {
-            if let Some(kernel) = kernel.as_ref() {
-                if let Some(variant) = exp.variants.iter().find(|v| v.id == ctx.variant_id) {
-                    if let Ok(Some(prompt_version)) =
-                        kernel.get_prompt_version(&variant.prompt_version_id.to_string())
-                    {
-                        debug!(
-                            agent = %manifest.name,
-                            experiment = %exp.name,
-                            variant = %variant.name,
-                            version = prompt_version.version,
-                            "Using experiment variant prompt version (streaming)"
-                        );
-                        system_prompt = prompt_version.system_prompt.clone();
-                    }
-                }
-            }
-        }
-    }
-
-    let memory_context_msg = if !memories.is_empty() {
-        let mem_pairs: Vec<(String, String)> = memories
-            .iter()
-            .map(|m| (String::new(), m.content.clone()))
-            .collect();
-        if stable_prefix_mode {
-            // In stable_prefix_mode, inject personal context only (no tool
-            // instructions) as a standalone context message to keep the system
-            // prompt prefix stable for caching.
-            let personal_ctx =
-                crate::prompt_builder::format_memory_items_as_personal_context(&mem_pairs);
-            Some(personal_ctx)
-        } else {
-            let section = crate::prompt_builder::build_memory_section(&mem_pairs);
-            system_prompt.push_str("\n\n");
-            system_prompt.push_str(&section);
-            None
-        }
-    } else {
-        None
+    let ctx = crate::hooks::HookContext {
+        agent_name: &manifest.name,
+        agent_id: agent_id_str.as_str(),
+        event: librefang_types::agent::HookEvent::BeforePromptBuild,
+        data: serde_json::json!({
+            "system_prompt": &manifest.model.system_prompt,
+            "user_message": user_message,
+        }),
     };
+    fire_hook_best_effort(hooks, &ctx);
+
+    let PromptSetup {
+        system_prompt,
+        memory_context_msg,
+    } = build_prompt_setup(
+        manifest,
+        session,
+        kernel.as_ref(),
+        experiment_context.as_ref(),
+        running_experiment.as_ref(),
+        &memories,
+        stable_prefix_mode,
+        true,
+    );
 
     // Mutable collector for memories saved during this turn (populated by auto_memorize).
-    let mut memories_saved: Vec<String> = Vec::new();
+    let memories_saved: Vec<String> = Vec::new();
     // Mutable collector for memory conflicts detected during this turn.
-    let mut memory_conflicts: Vec<librefang_types::memory::MemoryConflict> = Vec::new();
+    let memory_conflicts: Vec<librefang_types::memory::MemoryConflict> = Vec::new();
 
     // PII privacy filtering: extract config from manifest metadata.
     let privacy_config: librefang_types::config::PrivacyConfig = manifest
@@ -2392,86 +2740,23 @@ pub async fn run_agent_loop_streaming(
     // When content blocks are provided (e.g. text + image from a channel),
     // use multimodal message format so the LLM receives the image for vision.
     // PII filter is applied to text content before adding to session.
-    if let Some(blocks) = user_content_blocks {
-        let filtered_blocks = if privacy_config.mode != librefang_types::config::PrivacyMode::Off {
-            blocks
-                .into_iter()
-                .map(|block| match block {
-                    ContentBlock::Text {
-                        text,
-                        provider_metadata,
-                    } => ContentBlock::Text {
-                        text: pii_filter.filter_message(&text, &privacy_config.mode),
-                        provider_metadata,
-                    },
-                    other => other,
-                })
-                .collect()
-        } else {
-            blocks
-        };
-        session
-            .messages
-            .push(Message::user_with_blocks(filtered_blocks));
-    } else {
-        let filtered_message = pii_filter.filter_message(user_message, &privacy_config.mode);
-        session.messages.push(Message::user(&filtered_message));
-    }
+    push_filtered_user_message(
+        session,
+        user_message,
+        user_content_blocks,
+        &pii_filter,
+        &privacy_config,
+    );
 
-    let llm_messages: Vec<Message> = session
-        .messages
-        .iter()
-        .filter(|m| m.role != Role::System)
-        .cloned()
-        .collect();
-
-    // Validate and repair session history (drop orphans, merge consecutive)
-    let mut messages = crate::session_repair::validate_and_repair(&llm_messages);
-
-    // Inject canonical context as the first user message (not in system prompt)
-    // to keep the system prompt stable across turns for provider prompt caching.
-    if let Some(cc_msg) = manifest
-        .metadata
-        .get("canonical_context_msg")
-        .and_then(|v| v.as_str())
-    {
-        if !cc_msg.is_empty() {
-            messages.insert(0, Message::user(cc_msg));
-        }
-    }
-
-    // In stable_prefix_mode, inject recalled memories as a context message
-    // (after canonical context, before conversation) to avoid polluting the
-    // system prompt prefix that benefits from provider prompt caching.
-    // Framed as system context so the LLM treats it as background knowledge.
-    if let Some(mem_msg) = memory_context_msg {
-        messages.insert(
-            0,
-            Message::user(format!(
-                "[System context — what you know about this person]\n{mem_msg}"
-            )),
-        );
-    }
+    let PreparedMessages {
+        mut messages,
+        new_messages_start: prepared_new_messages_start,
+    } = prepare_llm_messages(manifest, session, user_message, memory_context_msg);
 
     let mut total_usage = TokenUsage::default();
     let final_response;
 
-    // Safety valve: trim at conversation-turn boundaries (streaming path).
-    // Also trims the persistent session so the truncated version is saved to DB.
-    safe_trim_messages(
-        &mut messages,
-        &mut session.messages,
-        &manifest.name,
-        user_message,
-    );
-
-    // Update new_messages_start now that trim has run and the user message
-    // has been pushed. See iterative-path comment for details.
-    new_messages_start = session.messages.len().saturating_sub(1);
-
-    // Proactively strip stale image data from previous turns (streaming path).
-    strip_prior_image_data(&mut messages);
-    strip_prior_image_data(&mut session.messages);
+    new_messages_start = prepared_new_messages_start;
 
     // Use autonomous config max_iterations if set, else default
     let max_iterations = manifest
@@ -2538,45 +2823,8 @@ pub async fn run_agent_loop_streaming(
             }
         }
 
-        // Strip provider prefix: "openrouter/google/gemini-2.5-flash" → "google/gemini-2.5-flash"
-        let api_model = strip_provider_prefix(&manifest.model.model, &manifest.model.provider);
-
-        let prompt_caching = manifest
-            .metadata
-            .get("prompt_caching")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
-
-        // Per-request timeout: manifest metadata takes priority, then browser
-        // heuristic, then driver default (None = use driver's configured value).
-        let timeout_override = manifest
-            .metadata
-            .get("timeout_secs")
-            .and_then(|v| v.as_u64())
-            .or_else(|| {
-                // Auto-extend for agents with browser tools
-                if available_tools
-                    .iter()
-                    .any(|t| t.name.starts_with("browser_") || t.name.starts_with("playwright_"))
-                {
-                    Some(600) // 10 minutes for browser tasks
-                } else {
-                    None
-                }
-            });
-
-        let request = CompletionRequest {
-            model: api_model,
-            messages: messages.clone(),
-            tools: available_tools.to_vec(),
-            max_tokens: manifest.model.max_tokens,
-            temperature: manifest.model.temperature,
-            system: Some(system_prompt.clone()),
-            thinking: manifest.thinking.clone(),
-            prompt_caching,
-            response_format: manifest.response_format.clone(),
-            timeout_secs: timeout_override,
-        };
+        let request =
+            build_completion_request(manifest, &system_prompt, &messages, available_tools);
 
         // Notify phase: on first iteration emit Streaming; on subsequent
         // iterations (after tool execution) emit Thinking so the UI shows
@@ -2638,10 +2886,7 @@ pub async fn run_agent_loop_streaming(
             }
         };
 
-        total_usage.input_tokens += response.usage.input_tokens;
-        total_usage.output_tokens += response.usage.output_tokens;
-        total_usage.cache_creation_input_tokens += response.usage.cache_creation_input_tokens;
-        total_usage.cache_read_input_tokens += response.usage.cache_read_input_tokens;
+        accumulate_token_usage(&mut total_usage, &response.usage);
 
         // Strip image base64 from earlier messages (LLM already processed them)
         strip_processed_image_data(&mut messages);
@@ -2663,16 +2908,7 @@ pub async fn run_agent_loop_streaming(
                 response.tool_calls = recovered;
                 response.stop_reason = StopReason::ToolUse;
                 tools_recovered_from_text = true;
-                let mut new_blocks: Vec<ContentBlock> = Vec::new();
-                for tc in &response.tool_calls {
-                    new_blocks.push(ContentBlock::ToolUse {
-                        id: tc.id.clone(),
-                        name: tc.name.clone(),
-                        input: tc.input.clone(),
-                        provider_metadata: None,
-                    });
-                }
-                response.content = new_blocks;
+                response.content = tool_use_blocks_from_calls(&response.tool_calls);
             }
         }
 
@@ -2695,35 +2931,28 @@ pub async fn run_agent_loop_streaming(
                         .save_session_async(session)
                         .await
                         .map_err(|e| LibreFangError::Memory(e.to_string()))?;
-                    return Ok(AgentLoopResult {
-                        response: String::new(),
+                    return Ok(build_silent_agent_loop_result(
                         total_usage,
-                        iterations: iteration + 1,
-                        cost_usd: None,
-                        silent: true,
-                        directives: librefang_types::message::ReplyDirectives {
-                            reply_to: parsed_directives_s.reply_to,
-                            current_thread: parsed_directives_s.current_thread,
-                            silent: true,
-                        },
+                        iteration + 1,
+                        parsed_directives_s,
                         decision_traces,
-                        memories_saved: Vec::new(),
-                        memories_used: memories_used.clone(),
-                        memory_conflicts: Vec::new(),
-                        provider_not_configured: false,
-                        experiment_context: experiment_context.clone(),
-                        latency_ms: 0,
+                        memories_used.clone(),
+                        experiment_context.clone(),
                         new_messages_start,
-                    });
+                    ));
                 }
 
-                // One-shot retry: if the LLM returns empty text with no tool use,
-                // try once more before accepting the empty result.
-                // Triggers on first call OR when input_tokens=0 (silently failed request).
-                if text.trim().is_empty() && response.tool_calls.is_empty() {
-                    let is_silent_failure =
-                        response.usage.input_tokens == 0 && response.usage.output_tokens == 0;
-                    if iteration == 0 || is_silent_failure {
+                match classify_end_turn_retry(
+                    &text,
+                    &response,
+                    iteration,
+                    available_tools,
+                    any_tools_executed,
+                    hallucination_retried,
+                    action_nudge_retried,
+                    user_message,
+                ) {
+                    Some(EndTurnRetry::EmptyResponse { is_silent_failure }) => {
                         warn!(
                             agent = %manifest.name,
                             iteration,
@@ -2732,8 +2961,6 @@ pub async fn run_agent_loop_streaming(
                             silent_failure = is_silent_failure,
                             "Empty response (streaming), retrying once"
                         );
-                        // Re-validate messages before retry — the history may have
-                        // broken tool_use/tool_result pairs that caused the failure.
                         if is_silent_failure {
                             messages = crate::session_repair::validate_and_repair(&messages);
                         }
@@ -2741,446 +2968,131 @@ pub async fn run_agent_loop_streaming(
                         messages.push(Message::user("Please provide your response.".to_string()));
                         continue;
                     }
-                }
-
-                // Detect hallucinated actions: LLM claims completion without using tools.
-                // Only trigger when no tools have been executed in ANY iteration —
-                // if tools ran in earlier iterations, the text is a legitimate summary.
-                if !text.trim().is_empty()
-                    && response.tool_calls.is_empty()
-                    && !available_tools.is_empty()
-                    && !any_tools_executed
-                    && !hallucination_retried
-                    && looks_like_hallucinated_action(&text)
-                {
-                    hallucination_retried = true;
-                    warn!(
-                        agent = %manifest.name,
-                        iteration,
-                        "Detected hallucinated action (streaming) — agent claimed action without tool calls, retrying"
-                    );
-                    messages.push(Message::assistant(&text));
-                    messages.push(Message::user(
-                        "[System: You described performing an action but did not actually call any tools. \
-                         Please use the provided tools to carry out the action rather than just describing it.]"
-                    ));
-                    continue;
-                }
-
-                // Detect missing tool execution for explicit user action requests (streaming).
-                if !text.trim().is_empty()
-                    && response.tool_calls.is_empty()
-                    && !available_tools.is_empty()
-                    && !any_tools_executed
-                    && !action_nudge_retried
-                    && !hallucination_retried
-                    && user_message_has_action_intent(user_message)
-                {
-                    action_nudge_retried = true;
-                    warn!(
-                        agent = %manifest.name,
-                        iteration,
-                        "User requested action but LLM responded without tool calls (streaming) — nudging retry"
-                    );
-                    messages.push(Message::assistant(&text));
-                    messages.push(Message::user(
-                        "[System: You described actions but didn't execute them. \
-                         Please use the available tools to complete the requested actions.]",
-                    ));
-                    continue;
-                }
-
-                // Guard against empty response — covers both iteration 0 and post-tool cycles
-                let text = if text.trim().is_empty() {
-                    warn!(
-                        agent = %manifest.name,
-                        iteration,
-                        input_tokens = total_usage.input_tokens,
-                        output_tokens = total_usage.output_tokens,
-                        messages_count = messages.len(),
-                        "Empty response from LLM (streaming) — guard activated"
-                    );
-                    if any_tools_executed {
-                        "[Task completed — the agent executed tools but did not produce a text summary.]".to_string()
-                    } else {
-                        "[The model returned an empty response. This usually means the model is overloaded, the context is too large, or the API key lacks credits. Try again or check /status.]".to_string()
+                    Some(EndTurnRetry::HallucinatedAction) => {
+                        hallucination_retried = true;
+                        warn!(
+                            agent = %manifest.name,
+                            iteration,
+                            "Detected hallucinated action (streaming) — agent claimed action without tool calls, retrying"
+                        );
+                        messages.push(Message::assistant(&text));
+                        messages.push(Message::user(
+                            "[System: You described performing an action but did not actually call any tools. \
+                             Please use the provided tools to carry out the action rather than just describing it.]"
+                        ));
+                        continue;
                     }
-                } else {
-                    text
-                };
+                    Some(EndTurnRetry::ActionIntent) => {
+                        action_nudge_retried = true;
+                        warn!(
+                            agent = %manifest.name,
+                            iteration,
+                            "User requested action but LLM responded without tool calls (streaming) — nudging retry"
+                        );
+                        messages.push(Message::assistant(&text));
+                        messages.push(Message::user(
+                            "[System: You described actions but didn't execute them. \
+                             Please use the available tools to complete the requested actions.]",
+                        ));
+                        continue;
+                    }
+                    None => {}
+                }
+
+                let text = finalize_end_turn_text(
+                    text,
+                    any_tools_executed,
+                    &manifest.name,
+                    iteration,
+                    &total_usage,
+                    messages.len(),
+                    "Empty response from LLM (streaming) — guard activated",
+                );
                 final_response = text.clone();
-                session.messages.push(Message::assistant(text));
 
-                // Prune NO_REPLY heartbeat turns to save context budget
-                let keep_recent = manifest
-                    .autonomous
-                    .as_ref()
-                    .and_then(|a| a.heartbeat_keep_recent)
-                    .unwrap_or(10);
-                crate::session_repair::prune_heartbeat_turns(&mut session.messages, keep_recent);
-
-                memory
-                    .save_session_async(session)
-                    .await
-                    .map_err(|e| LibreFangError::Memory(e.to_string()))?;
-
-                // Remember this interaction (with embedding if available)
-                let interaction_text = format!(
-                    "User asked: {}\nI responded: {}",
-                    user_message, final_response
-                );
-                if let Some(emb) = embedding_driver {
-                    match emb.embed_one(&interaction_text).await {
-                        Ok(vec) => {
-                            if let Err(e) = memory
-                                .remember_with_embedding_async(
-                                    session.agent_id,
-                                    &interaction_text,
-                                    MemorySource::Conversation,
-                                    "episodic",
-                                    HashMap::new(),
-                                    Some(&vec),
-                                )
-                                .await
-                            {
-                                warn!("Failed to persist episodic memory (streaming, with embedding): {e}");
-                            }
-                        }
-                        Err(e) => {
-                            warn!("Embedding for remember failed (streaming): {e}");
-                            if let Err(e2) = memory
-                                .remember(
-                                    session.agent_id,
-                                    &interaction_text,
-                                    MemorySource::Conversation,
-                                    "episodic",
-                                    HashMap::new(),
-                                )
-                                .await
-                            {
-                                warn!("Failed to persist episodic memory (streaming, no embedding fallback): {e2}");
-                            }
-                        }
-                    }
-                } else if let Err(e) = memory
-                    .remember(
-                        session.agent_id,
-                        &interaction_text,
-                        MemorySource::Conversation,
-                        "episodic",
-                        HashMap::new(),
-                    )
-                    .await
-                {
-                    warn!("Failed to persist episodic memory (streaming): {e}");
-                }
-
-                // Context engine: after_turn hook
-                if let Some(engine) = context_engine {
-                    if let Err(e) = engine.after_turn(session.agent_id, &messages).await {
-                        warn!("Context engine after_turn failed: {e}");
-                    }
-                }
-
-                // Notify phase: Done
-                if let Some(cb) = on_phase {
-                    cb(LoopPhase::Done);
-                }
-
-                info!(
-                    agent = %manifest.name,
-                    iterations = iteration + 1,
-                    tokens = total_usage.total(),
-                    "Streaming agent loop completed"
-                );
-
-                // Run auto_memorize directly for streaming path.
-                // Relations are stored inside auto_memorize via store_relations().
-                // Only send new messages from this turn, not the full session history.
-                if let Some(ref pm_store) = proactive_memory {
-                    let user_id = session.agent_id.0.to_string();
-                    let new_messages = &session.messages[new_messages_start..];
-                    let messages_json = serialize_session_messages(new_messages);
-                    match pm_store
-                        .auto_memorize(&user_id, &messages_json, sender_user_id.as_deref())
-                        .await
-                    {
-                        Ok(result) if result.has_content => {
-                            debug!(
-                                "Proactive memory (streaming): stored {} memories, {} relations",
-                                result.memories.len(),
-                                result.relations.len(),
-                            );
-                            memories_saved
-                                .extend(result.memories.iter().map(|m| m.content.clone()));
-                            memory_conflicts.extend(result.conflicts);
-                        }
-                        Ok(_) => {}
-                        Err(e) => {
-                            warn!("Proactive memory auto_memorize failed (streaming): {e}");
-                        }
-                    }
-                }
-
-                // Experiment metrics are recorded by the kernel after cost calculation
-                // (agent_loop doesn't have access to pricing information)
-
-                // Fire AgentLoopEnd hook
-                if let Some(hook_reg) = hooks {
-                    let ctx = crate::hooks::HookContext {
-                        agent_name: &manifest.name,
-                        agent_id: agent_id_str.as_str(),
-                        event: librefang_types::agent::HookEvent::AgentLoopEnd,
-                        data: serde_json::json!({
-                            "iterations": iteration + 1,
-                            "response_length": final_response.len(),
-                        }),
-                    };
-                    let _ = hook_reg.fire(&ctx);
-                }
-
-                return Ok(AgentLoopResult {
-                    response: final_response,
+                return finalize_successful_end_turn(
+                    manifest,
+                    session,
+                    memory,
+                    embedding_driver,
+                    context_engine,
+                    on_phase,
+                    proactive_memory.as_ref(),
+                    hooks,
+                    agent_id_str.as_str(),
+                    user_message,
+                    final_response,
+                    &messages,
+                    iteration,
                     total_usage,
-                    iterations: iteration + 1,
-                    cost_usd: None,
-                    silent: false,
-                    directives: Default::default(),
                     decision_traces,
                     memories_saved,
                     memories_used,
                     memory_conflicts,
-                    provider_not_configured: false,
                     experiment_context,
-                    latency_ms: 0,
+                    reply_directives_from_parsed(parsed_directives_s),
                     new_messages_start,
-                });
+                    sender_user_id.as_deref(),
+                    "Streaming agent loop completed",
+                    "streaming",
+                    "Proactive memory (streaming): stored {} memories, {} relations",
+                    "Proactive memory auto_memorize failed (streaming)",
+                )
+                .await;
             }
             StopReason::ToolUse => {
                 // Reset MaxTokens continuation counter on tool use
                 consecutive_max_tokens = 0;
                 any_tools_executed = true;
-
-                // Extract the assistant's reasoning text that accompanied the tool calls.
-                let rationale_text = {
-                    let text = response.text();
-                    if text.trim().is_empty() {
-                        None
-                    } else {
-                        Some(text)
-                    }
-                };
-
-                let assistant_blocks = response.content.clone();
-
-                session.messages.push(Message {
-                    role: Role::Assistant,
-                    content: MessageContent::Blocks(assistant_blocks.clone()),
-                    pinned: false,
-                });
-                messages.push(Message {
-                    role: Role::Assistant,
-                    content: MessageContent::Blocks(assistant_blocks),
-                    pinned: false,
-                });
-
-                let allowed_tool_names: Vec<String> =
-                    available_tools.iter().map(|t| t.name.clone()).collect();
-                let caller_id_str = session.agent_id.to_string();
+                let tool_use_setup =
+                    begin_tool_use_turn(&response, session, &mut messages, available_tools);
 
                 // Execute each tool call with loop guard, timeout, and truncation
                 let mut tool_result_blocks = Vec::new();
                 for tool_call in &response.tool_calls {
-                    // Loop guard check
-                    let verdict = loop_guard.check(&tool_call.name, &tool_call.input);
-                    match &verdict {
-                        LoopGuardVerdict::CircuitBreak(msg) => {
-                            warn!(tool = %tool_call.name, "Circuit breaker triggered (streaming)");
-                            if let Err(e) = memory.save_session_async(session).await {
-                                warn!("Failed to save session on circuit break: {e}");
-                            }
-                            // Fire AgentLoopEnd hook on circuit break
-                            if let Some(hook_reg) = hooks {
-                                let ctx = crate::hooks::HookContext {
-                                    agent_name: &manifest.name,
-                                    agent_id: agent_id_str.as_str(),
-                                    event: librefang_types::agent::HookEvent::AgentLoopEnd,
-                                    data: serde_json::json!({
-                                        "reason": "circuit_break",
-                                        "error": msg.as_str(),
-                                    }),
-                                };
-                                let _ = hook_reg.fire(&ctx);
-                            }
-                            return Err(LibreFangError::Internal(msg.clone()));
-                        }
-                        LoopGuardVerdict::Block(msg) => {
-                            warn!(tool = %tool_call.name, "Tool call blocked by loop guard (streaming)");
-                            tool_result_blocks.push(ContentBlock::ToolResult {
-                                tool_use_id: tool_call.id.clone(),
-                                tool_name: tool_call.name.clone(),
-                                content: msg.clone(),
-                                is_error: true,
-                                status: librefang_types::tool::ToolExecutionStatus::Error,
-                                approval_request_id: None,
-                            });
-                            continue;
-                        }
-                        _ => {} // Allow or Warn — proceed with execution
-                    }
-
-                    debug!(tool = %tool_call.name, id = %tool_call.id, "Executing tool (streaming)");
-
-                    // Notify phase: ToolUse
-                    if let Some(cb) = on_phase {
-                        let sanitized: String = tool_call
-                            .name
-                            .chars()
-                            .filter(|c| !c.is_control())
-                            .take(64)
-                            .collect();
-                        cb(LoopPhase::ToolUse {
-                            tool_name: sanitized,
-                        });
-                    }
-
-                    // Fire BeforeToolCall hook (can block execution)
-                    if let Some(hook_reg) = hooks {
-                        let ctx = crate::hooks::HookContext {
-                            agent_name: &manifest.name,
-                            agent_id: &caller_id_str,
-                            event: librefang_types::agent::HookEvent::BeforeToolCall,
-                            data: serde_json::json!({
-                                "tool_name": &tool_call.name,
-                                "input": &tool_call.input,
-                            }),
-                        };
-                        if let Err(reason) = hook_reg.fire(&ctx) {
-                            tool_result_blocks.push(ContentBlock::ToolResult {
-                                tool_use_id: tool_call.id.clone(),
-                                tool_name: tool_call.name.clone(),
-                                content: format!(
-                                    "Hook blocked tool '{}': {}",
-                                    tool_call.name, reason
-                                ),
-                                is_error: true,
-                                status: librefang_types::tool::ToolExecutionStatus::Error,
-                                approval_request_id: None,
-                            });
-                            continue;
-                        }
-                    }
-
-                    // Resolve effective exec policy (per-agent override or global)
-                    let effective_exec_policy = manifest.exec_policy.as_ref();
-
-                    // Timeout-wrapped execution with timing for decision trace
-                    let tool_timeout = kernel
-                        .as_ref()
-                        .map_or(TOOL_TIMEOUT_SECS, |k| k.tool_timeout_secs());
-                    let trace_start = Instant::now();
-                    let trace_timestamp = chrono::Utc::now();
-                    let result = match tokio::time::timeout(
-                        Duration::from_secs(tool_timeout),
-                        tool_runner::execute_tool(
-                            &tool_call.id,
-                            &tool_call.name,
-                            &tool_call.input,
-                            kernel.as_ref(),
-                            Some(&allowed_tool_names),
-                            Some(&caller_id_str),
-                            skill_registry,
-                            mcp_connections,
-                            web_ctx,
-                            browser_ctx,
-                            if hand_allowed_env.is_empty() {
-                                None
-                            } else {
-                                Some(&hand_allowed_env)
-                            },
-                            workspace_root,
-                            media_engine,
-                            media_drivers,
-                            effective_exec_policy,
-                            tts_engine,
-                            docker_config,
-                            process_manager,
-                            sender_user_id.as_deref(),
-                            sender_channel.as_deref(),
-                        ),
-                    )
-                    .await
-                    {
-                        Ok(result) => result,
-                        Err(_) => {
-                            warn!(tool = %tool_call.name, "Tool execution timed out after {}s (streaming)", tool_timeout);
-                            librefang_types::tool::ToolResult {
-                                tool_use_id: tool_call.id.clone(),
-                                content: format!(
-                                    "Tool '{}' timed out after {}s.",
-                                    tool_call.name, tool_timeout
-                                ),
-                                is_error: true,
-                                status: librefang_types::tool::ToolExecutionStatus::Expired,
-                                ..Default::default()
-                            }
-                        }
-                    };
-                    let execution_ms = trace_start.elapsed().as_millis() as u64;
-
-                    // Record decision trace for this tool call
-                    let output_summary =
-                        librefang_types::truncate_str(&result.content, 200).to_string();
-                    decision_traces.push(DecisionTrace {
-                        tool_use_id: tool_call.id.clone(),
-                        tool_name: tool_call.name.clone(),
-                        input: tool_call.input.clone(),
-                        rationale: rationale_text.clone(),
-                        recovered_from_text: tools_recovered_from_text,
-                        execution_ms,
-                        is_error: result.is_error,
-                        output_summary,
-                        iteration,
-                        timestamp: trace_timestamp,
-                    });
-
-                    // Fire AfterToolCall hook
-                    if let Some(hook_reg) = hooks {
-                        let ctx = crate::hooks::HookContext {
-                            agent_name: &manifest.name,
-                            agent_id: caller_id_str.as_str(),
-                            event: librefang_types::agent::HookEvent::AfterToolCall,
-                            data: serde_json::json!({
-                                "tool_name": &tool_call.name,
-                                "result": &result.content,
-                                "is_error": result.is_error,
-                            }),
-                        };
-                        let _ = hook_reg.fire(&ctx);
-                    }
-
-                    // Dynamic truncation based on context budget (replaces flat MAX_TOOL_RESULT_CHARS)
-                    let content = sanitize_tool_result_content(
-                        &result.content,
+                    let executed = execute_single_tool_call(
+                        manifest,
+                        tool_call,
+                        &mut loop_guard,
+                        memory,
+                        session,
+                        kernel.as_ref(),
+                        &tool_use_setup.allowed_tool_names,
+                        &tool_use_setup.caller_id_str,
+                        skill_registry,
+                        mcp_connections,
+                        web_ctx,
+                        browser_ctx,
+                        &hand_allowed_env,
+                        workspace_root,
+                        media_engine,
+                        media_drivers,
+                        tts_engine,
+                        docker_config,
+                        hooks,
+                        process_manager,
+                        sender_user_id.as_deref(),
+                        sender_channel.as_deref(),
                         &context_budget,
                         context_engine,
                         ctx_window,
-                    );
-
-                    // Append warning if verdict was Warn
-                    let final_content = if let LoopGuardVerdict::Warn(ref warn_msg) = verdict {
-                        format!("{content}\n\n[LOOP GUARD] {warn_msg}")
-                    } else {
-                        content
-                    };
+                        on_phase,
+                        &mut decision_traces,
+                        &tool_use_setup.rationale_text,
+                        tools_recovered_from_text,
+                        iteration,
+                        true,
+                        agent_id_str.as_str(),
+                    )
+                    .await?;
 
                     // Notify client of tool execution result (detect dead consumer)
-                    let preview: String = final_content.chars().take(300).collect();
+                    let preview: String = executed.final_content.chars().take(300).collect();
                     if stream_tx
                         .send(StreamEvent::ToolExecutionResult {
                             name: tool_call.name.clone(),
                             result_preview: preview,
-                            is_error: result.is_error,
+                            is_error: executed.result.is_error,
                         })
                         .await
                         .is_err()
@@ -3188,21 +3100,19 @@ pub async fn run_agent_loop_streaming(
                         warn!(agent = %manifest.name, "Stream consumer disconnected — continuing tool loop but will not stream further");
                     }
 
-                    tool_result_blocks.push(ContentBlock::ToolResult {
-                        tool_use_id: result.tool_use_id,
-                        tool_name: tool_call.name.clone(),
-                        content: final_content,
-                        is_error: result.is_error,
-                        status: result.status,
-                        approval_request_id: result.approval_request_id.clone(),
-                    });
+                    append_tool_result_block(
+                        &mut tool_result_blocks,
+                        tool_call,
+                        &executed.result,
+                        executed.final_content,
+                    );
 
                     // Stop executing remaining tool calls on failure (#948)
                     // but not for approval denials or sandbox security rejections —
                     // those should let the LLM recover and retry with a valid path (#1861)
-                    let is_soft_error =
-                        result.status.is_soft_error() || is_soft_error_content(&result.content);
-                    if result.is_error && !is_soft_error {
+                    let is_soft_error = executed.result.status.is_soft_error()
+                        || is_soft_error_content(&executed.result.content);
+                    if executed.result.is_error && !is_soft_error {
                         warn!(
                             tool = %tool_call.name,
                             "Tool execution failed — skipping remaining tool calls (streaming)"
@@ -3212,125 +3122,18 @@ pub async fn run_agent_loop_streaming(
 
                     // Mid-turn message injection (#956): check for pending user
                     // messages between tool calls (streaming variant).
-                    if let Some(pending_rx) = pending_messages {
-                        if let Ok(mut rx) = pending_rx.try_lock() {
-                            if let Ok(signal) = rx.try_recv() {
-                                info!(
-                                    agent = %manifest.name,
-                                    "Mid-turn signal injected — interrupting tool execution (streaming)"
-                                );
-                                if !tool_result_blocks.is_empty() {
-                                    let partial_results = Message {
-                                        role: Role::User,
-                                        content: MessageContent::Blocks(tool_result_blocks.clone()),
-                                        pinned: false,
-                                    };
-                                    session.messages.push(partial_results.clone());
-                                    messages.push(partial_results);
-                                }
-                                let injected_text = match signal {
-                                    AgentLoopSignal::Message { content } => content,
-                                    AgentLoopSignal::ApprovalResolved {
-                                        tool_use_id,
-                                        tool_name,
-                                        decision,
-                                        result_content,
-                                        result_is_error,
-                                        result_status,
-                                    } => {
-                                        apply_approval_resolution_signal(
-                                            session,
-                                            messages.as_mut_slice(),
-                                            &tool_use_id,
-                                            &result_content,
-                                            result_is_error,
-                                            result_status,
-                                        );
-                                        let result_preview =
-                                            librefang_types::truncate_str(&result_content, 300);
-                                        format!(
-                                            "[System] Tool '{}' approval resolved ({}). Result: {}",
-                                            tool_name, decision, result_preview
-                                        )
-                                    }
-                                };
-                                let inject_msg = Message::user(&injected_text);
-                                session.messages.push(inject_msg.clone());
-                                messages.push(inject_msg);
-                                tool_result_blocks.clear();
-                                break;
-                            }
-                        }
+                    if handle_mid_turn_signal(
+                        pending_messages,
+                        &manifest.name,
+                        session,
+                        &mut messages,
+                        &mut tool_result_blocks,
+                    ) {
+                        break;
                     }
                 }
 
-                // Detect approval denials and inject guidance to prevent infinite retry loops
-                let denial_count = tool_result_blocks
-                    .iter()
-                    .filter(|b| {
-                        matches!(b, ContentBlock::ToolResult { status, .. }
-                        if *status == librefang_types::tool::ToolExecutionStatus::Denied)
-                    })
-                    .count();
-                if denial_count > 0 {
-                    tool_result_blocks.push(ContentBlock::Text {
-                        text: format!(
-                            "[System: {} tool call(s) were denied by approval policy. \
-                             Do NOT retry denied tools. Explain to the user what you \
-                             wanted to do and that it requires their approval.]",
-                            denial_count
-                        ),
-                        provider_metadata: None,
-                    });
-                }
-
-                // Detect modify-and-retry requests and inject guidance
-                let modify_count = tool_result_blocks
-                    .iter()
-                    .filter(|b| {
-                        matches!(b, ContentBlock::ToolResult { status, .. }
-                        if *status == librefang_types::tool::ToolExecutionStatus::ModifyAndRetry)
-                    })
-                    .count();
-                if modify_count > 0 {
-                    tool_result_blocks.push(ContentBlock::Text {
-                        text: format!(
-                            "[System: {} tool call(s) received human feedback requesting modification. \
-                             Read the feedback carefully, revise your approach, and retry with a \
-                             different strategy. Do NOT repeat the exact same tool call.]",
-                            modify_count
-                        ),
-                        provider_metadata: None,
-                    });
-                }
-
-                // Detect tool errors and inject guidance to prevent fabrication
-                let error_count = tool_result_blocks
-                    .iter()
-                    .filter(|b| matches!(b, ContentBlock::ToolResult { is_error: true, .. }))
-                    .count();
-                let non_denial_errors = error_count.saturating_sub(denial_count);
-                if non_denial_errors > 0 {
-                    tool_result_blocks.push(ContentBlock::Text {
-                        text: format!(
-                            "[System: {} tool(s) returned errors. Report the error honestly \
-                             to the user. Do NOT fabricate results or pretend the tool succeeded. \
-                             If a search or fetch failed, tell the user it failed and suggest \
-                             alternatives instead of making up data.]",
-                            non_denial_errors
-                        ),
-                        provider_metadata: None,
-                    });
-                }
-
-                // Save tool results to session (removed early return that blocked retries)
-                let tool_results_msg = Message {
-                    role: Role::User,
-                    content: MessageContent::Blocks(tool_result_blocks.clone()),
-                    pinned: false,
-                };
-                session.messages.push(tool_results_msg.clone());
-                messages.push(tool_results_msg);
+                finalize_tool_use_results(session, &mut messages, &mut tool_result_blocks);
 
                 if let Err(e) = memory.save_session_async(session).await {
                     warn!("Failed to interim-save session: {e}");
@@ -3339,33 +3142,11 @@ pub async fn run_agent_loop_streaming(
                 // (soft errors — approval denials, sandbox rejections, truncation —
                 //  do NOT count; the LLM is expected to recover from those cheaply.)
                 // NOTE: keep in sync with run_agent_loop (non-streaming).
-                let hard_error_count = tool_result_blocks
-                    .iter()
-                    .filter(|b| match b {
-                        ContentBlock::ToolResult {
-                            status,
-                            content,
-                            is_error: true,
-                            ..
-                        } => !status.is_soft_error() && !is_soft_error_content(content),
-                        _ => false,
-                    })
-                    .count() as u32;
-                let success_count = tool_result_blocks
-                    .iter()
-                    .filter(|b| {
-                        matches!(
-                            b,
-                            ContentBlock::ToolResult {
-                                is_error: false,
-                                ..
-                            }
-                        )
-                    })
-                    .count() as u32;
-
-                if success_count == 0 && hard_error_count > 0 {
-                    consecutive_all_failed += 1;
+                let hard_error_count = update_consecutive_hard_failures(
+                    &mut consecutive_all_failed,
+                    &tool_result_blocks,
+                );
+                if consecutive_all_failed > 0 && hard_error_count > 0 {
                     if consecutive_all_failed >= MAX_CONSECUTIVE_ALL_FAILED {
                         warn!(
                             agent = %manifest.name,
@@ -3373,38 +3154,32 @@ pub async fn run_agent_loop_streaming(
                             hard_error_count,
                             "Tool failures in {MAX_CONSECUTIVE_ALL_FAILED} consecutive iterations — exiting streaming loop"
                         );
-                        if let Some(hook_reg) = hooks {
-                            let ctx = crate::hooks::HookContext {
-                                agent_name: &manifest.name,
-                                agent_id: agent_id_str.as_str(),
-                                event: librefang_types::agent::HookEvent::AgentLoopEnd,
-                                data: serde_json::json!({
-                                    "iterations": iteration + 1,
-                                    "reason": "tool_failure",
-                                    "error_count": hard_error_count,
-                                    "consecutive_all_failed": consecutive_all_failed,
-                                }),
-                            };
-                            let _ = hook_reg.fire(&ctx);
-                        }
+                        let ctx = crate::hooks::HookContext {
+                            agent_name: &manifest.name,
+                            agent_id: agent_id_str.as_str(),
+                            event: librefang_types::agent::HookEvent::AgentLoopEnd,
+                            data: serde_json::json!({
+                                "iterations": iteration + 1,
+                                "reason": "tool_failure",
+                                "error_count": hard_error_count,
+                                "consecutive_all_failed": consecutive_all_failed,
+                            }),
+                        };
+                        fire_hook_best_effort(hooks, &ctx);
                         return Err(LibreFangError::RepeatedToolFailures {
                             iterations: consecutive_all_failed,
                             error_count: hard_error_count,
                         });
                     }
-                } else {
-                    consecutive_all_failed = 0;
                 }
             }
             StopReason::MaxTokens => {
                 consecutive_max_tokens += 1;
                 if consecutive_max_tokens >= MAX_CONTINUATIONS {
-                    let text = response.text();
-                    let text = if text.trim().is_empty() {
-                        "[Partial response — token limit reached with no text output.]".to_string()
-                    } else {
-                        text
-                    };
+                    let text = max_tokens_response_text(&response);
+                    let (cleaned_text, parsed_directives) =
+                        crate::reply_directives::parse_directives(&text);
+                    let text = cleaned_text;
                     session.messages.push(Message::assistant(&text));
                     if let Err(e) = memory.save_session_async(session).await {
                         warn!("Failed to save session on max continuations: {e}");
@@ -3415,25 +3190,23 @@ pub async fn run_agent_loop_streaming(
                         "Max continuations reached (streaming), returning partial response"
                     );
                     // Fire AgentLoopEnd hook
-                    if let Some(hook_reg) = hooks {
-                        let ctx = crate::hooks::HookContext {
-                            agent_name: &manifest.name,
-                            agent_id: agent_id_str.as_str(),
-                            event: librefang_types::agent::HookEvent::AgentLoopEnd,
-                            data: serde_json::json!({
-                                "iterations": iteration + 1,
-                                "reason": "max_continuations",
-                            }),
-                        };
-                        let _ = hook_reg.fire(&ctx);
-                    }
+                    let ctx = crate::hooks::HookContext {
+                        agent_name: &manifest.name,
+                        agent_id: agent_id_str.as_str(),
+                        event: librefang_types::agent::HookEvent::AgentLoopEnd,
+                        data: serde_json::json!({
+                            "iterations": iteration + 1,
+                            "reason": "max_continuations",
+                        }),
+                    };
+                    fire_hook_best_effort(hooks, &ctx);
                     return Ok(AgentLoopResult {
                         response: text,
                         total_usage,
                         iterations: iteration + 1,
                         cost_usd: None,
                         silent: false,
-                        directives: Default::default(),
+                        directives: reply_directives_from_parsed(parsed_directives),
                         decision_traces,
                         memories_saved,
                         memories_used,
@@ -3459,18 +3232,16 @@ pub async fn run_agent_loop_streaming(
     }
 
     // Fire AgentLoopEnd hook on max iterations exceeded
-    if let Some(hook_reg) = hooks {
-        let ctx = crate::hooks::HookContext {
-            agent_name: &manifest.name,
-            agent_id: agent_id_str.as_str(),
-            event: librefang_types::agent::HookEvent::AgentLoopEnd,
-            data: serde_json::json!({
-                "reason": "max_iterations_exceeded",
-                "iterations": max_iterations,
-            }),
-        };
-        let _ = hook_reg.fire(&ctx);
-    }
+    let ctx = crate::hooks::HookContext {
+        agent_name: &manifest.name,
+        agent_id: agent_id_str.as_str(),
+        event: librefang_types::agent::HookEvent::AgentLoopEnd,
+        data: serde_json::json!({
+            "reason": "max_iterations_exceeded",
+            "iterations": max_iterations,
+        }),
+    };
+    fire_hook_best_effort(hooks, &ctx);
 
     Err(LibreFangError::MaxIterationsExceeded(max_iterations))
 }
@@ -4364,6 +4135,62 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_prepare_llm_messages_new_messages_start_keeps_full_turn_after_trim() {
+        let manifest = test_manifest();
+        let agent_id = librefang_types::agent::AgentId::new();
+        let mut session = librefang_memory::session::Session {
+            id: librefang_types::agent::SessionId::new(),
+            agent_id,
+            messages: Vec::new(),
+            context_window_tokens: 0,
+            label: None,
+        };
+
+        for i in 0..13 {
+            session.messages.push(Message::user(format!("q{i}")));
+            session.messages.push(Message::assistant(format!("a{i}")));
+        }
+        for i in 0..7 {
+            let tool_use_id = format!("tu-{i}");
+            session.messages.push(Message {
+                role: Role::Assistant,
+                content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+                    id: tool_use_id.clone(),
+                    name: "noop".to_string(),
+                    input: serde_json::json!({}),
+                    provider_metadata: None,
+                }]),
+                pinned: false,
+            });
+            session.messages.push(Message {
+                role: Role::User,
+                content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                    tool_use_id,
+                    tool_name: "noop".to_string(),
+                    content: format!("r{i}"),
+                    is_error: false,
+                    status: librefang_types::tool::ToolExecutionStatus::default(),
+                    approval_request_id: None,
+                }]),
+                pinned: false,
+            });
+        }
+
+        let prior_len = session.messages.len();
+        session.messages.push(Message::user("current turn"));
+        let PreparedMessages {
+            new_messages_start, ..
+        } = prepare_llm_messages(&manifest, &mut session, "current turn", None);
+
+        assert!(prior_len > new_messages_start);
+        let tail = &session.messages[new_messages_start..];
+        assert_eq!(tail.len(), 1);
+        assert_eq!(tail[0].role, Role::User);
+        assert_eq!(tail[0].content.text_content(), "current turn");
+        assert_eq!(new_messages_start, session.messages.len().saturating_sub(1));
+    }
+
     /// Verifies that AgentLoopResult exposes a usable `new_messages_start`
     /// by default so kernel-side callers can always rely on the field
     /// existing without worrying about uninitialized state.
@@ -4613,6 +4440,33 @@ mod tests {
         }
     }
 
+    struct DirectiveDriver {
+        text: &'static str,
+        stop_reason: StopReason,
+    }
+
+    #[async_trait]
+    impl LlmDriver for DirectiveDriver {
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            Ok(CompletionResponse {
+                content: vec![ContentBlock::Text {
+                    text: self.text.to_string(),
+                    provider_metadata: None,
+                }],
+                stop_reason: self.stop_reason,
+                tool_calls: vec![],
+                usage: TokenUsage {
+                    input_tokens: 10,
+                    output_tokens: 8,
+                    ..Default::default()
+                },
+            })
+        }
+    }
+
     #[tokio::test]
     async fn test_empty_response_after_tool_use_returns_fallback() {
         let memory = librefang_memory::MemorySubstrate::open_in_memory(0.01).unwrap();
@@ -4774,6 +4628,225 @@ mod tests {
 
         // Normal response should pass through unchanged
         assert_eq!(result.response, "Hello from the agent!");
+    }
+
+    #[tokio::test]
+    async fn test_success_response_preserves_reply_directives() {
+        let memory = librefang_memory::MemorySubstrate::open_in_memory(0.01).unwrap();
+        let agent_id = librefang_types::agent::AgentId::new();
+        let mut session = librefang_memory::session::Session {
+            id: librefang_types::agent::SessionId::new(),
+            agent_id,
+            messages: Vec::new(),
+            context_window_tokens: 0,
+            label: None,
+        };
+        let manifest = test_manifest();
+        let driver: Arc<dyn LlmDriver> = Arc::new(DirectiveDriver {
+            text: "[[reply:msg_123]] [[@current]] Visible reply",
+            stop_reason: StopReason::EndTurn,
+        });
+
+        let result = run_agent_loop(
+            &manifest,
+            "Reply to this",
+            &mut session,
+            &memory,
+            driver,
+            &[],
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("Loop should complete without error");
+
+        assert_eq!(result.response, "Visible reply");
+        assert_eq!(result.directives.reply_to.as_deref(), Some("msg_123"));
+        assert!(result.directives.current_thread);
+        assert!(!result.directives.silent);
+    }
+
+    #[tokio::test]
+    async fn test_max_tokens_partial_response_preserves_reply_directives() {
+        let memory = librefang_memory::MemorySubstrate::open_in_memory(0.01).unwrap();
+        let agent_id = librefang_types::agent::AgentId::new();
+        let mut session = librefang_memory::session::Session {
+            id: librefang_types::agent::SessionId::new(),
+            agent_id,
+            messages: Vec::new(),
+            context_window_tokens: 0,
+            label: None,
+        };
+        let manifest = test_manifest();
+        let driver: Arc<dyn LlmDriver> = Arc::new(DirectiveDriver {
+            text: "[[reply:msg_999]] [[@current]] Partial answer",
+            stop_reason: StopReason::MaxTokens,
+        });
+
+        let result = run_agent_loop(
+            &manifest,
+            "Tell me more",
+            &mut session,
+            &memory,
+            driver,
+            &[],
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("Loop should complete without error");
+
+        assert_eq!(result.response, "Partial answer");
+        assert_eq!(result.iterations, MAX_CONTINUATIONS);
+        assert_eq!(result.directives.reply_to.as_deref(), Some("msg_999"));
+        assert!(result.directives.current_thread);
+        assert!(!result.directives.silent);
+    }
+
+    #[tokio::test]
+    async fn test_streaming_max_continuations_return_preserves_reply_directives() {
+        let memory = librefang_memory::MemorySubstrate::open_in_memory(0.01).unwrap();
+        let agent_id = librefang_types::agent::AgentId::new();
+        let mut session = librefang_memory::session::Session {
+            id: librefang_types::agent::SessionId::new(),
+            agent_id,
+            messages: Vec::new(),
+            context_window_tokens: 0,
+            label: None,
+        };
+        let manifest = test_manifest();
+        let driver: Arc<dyn LlmDriver> = Arc::new(EmptyMaxTokensDriver);
+        let (tx, _rx) = mpsc::channel(64);
+
+        let result = run_agent_loop_streaming(
+            &manifest,
+            "Tell me more",
+            &mut session,
+            &memory,
+            driver,
+            &[],
+            None,
+            tx,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("Streaming loop should complete without error");
+
+        assert_eq!(
+            result.response,
+            "[Partial response — token limit reached with no text output.]"
+        );
+        assert_eq!(result.iterations, MAX_CONTINUATIONS);
+        assert!(result.directives.reply_to.is_none());
+        assert!(!result.directives.current_thread);
+        assert!(!result.directives.silent);
+    }
+
+    #[tokio::test]
+    async fn test_streaming_max_continuations_with_directives_preserves_reply_directives() {
+        let memory = librefang_memory::MemorySubstrate::open_in_memory(0.01).unwrap();
+        let agent_id = librefang_types::agent::AgentId::new();
+        let mut session = librefang_memory::session::Session {
+            id: librefang_types::agent::SessionId::new(),
+            agent_id,
+            messages: Vec::new(),
+            context_window_tokens: 0,
+            label: None,
+        };
+        let manifest = test_manifest();
+        let driver: Arc<dyn LlmDriver> = Arc::new(DirectiveDriver {
+            text: "[[reply:msg_999]] [[@current]] Partial answer",
+            stop_reason: StopReason::MaxTokens,
+        });
+        let (tx, _rx) = mpsc::channel(64);
+
+        let result = run_agent_loop_streaming(
+            &manifest,
+            "Tell me more",
+            &mut session,
+            &memory,
+            driver,
+            &[],
+            None,
+            tx,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("Streaming loop should complete without error");
+
+        assert_eq!(result.response, "Partial answer");
+        assert_eq!(result.iterations, MAX_CONTINUATIONS);
+        assert_eq!(result.directives.reply_to.as_deref(), Some("msg_999"));
+        assert!(result.directives.current_thread);
+        assert!(!result.directives.silent);
     }
 
     #[tokio::test]
