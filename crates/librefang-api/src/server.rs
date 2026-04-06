@@ -808,6 +808,10 @@ pub async fn run_daemon(
     // dashboard shows ValidatedKey / InvalidKey instead of just Configured.
     kernel.clone().spawn_key_validation();
 
+    // Approval expiry sweep — checks for expired pending approval requests
+    // every 10 seconds and handles their resolution.
+    kernel.clone().spawn_approval_sweep_task();
+
     // Config file hot-reload watcher (polls every 30 seconds).
     // Spawned after `build_router` so it can access `AppState` for bridge reload.
     {

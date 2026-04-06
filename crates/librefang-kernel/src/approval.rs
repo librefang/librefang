@@ -21,12 +21,12 @@ const MAX_RECENT_APPROVALS: usize = 100;
 /// Max escalation rounds before falling back to TimedOut.
 const MAX_ESCALATIONS: u8 = 3;
 
-/// Manages approval requests with oneshot channels for blocking resolution.
+/// Re-export from librefang-types so approval.rs consumers don't need two imports.
+pub use librefang_types::tool::DeferredToolExecution;
+
+/// Manages approval requests for both blocking and deferred execution paths.
 pub struct ApprovalManager {
     pending: DashMap<Uuid, PendingRequest>,
-    /// Requests that timed out but need escalation (re-notification + re-wait).
-    /// Stored separately to avoid dead oneshot channels in the pending map.
-    escalated: DashMap<Uuid, ApprovalRequest>,
     recent: std::sync::Mutex<VecDeque<ApprovalRecord>>,
     policy: std::sync::RwLock<ApprovalPolicy>,
     audit_db: Option<Arc<StdMutex<Connection>>>,
@@ -34,7 +34,15 @@ pub struct ApprovalManager {
 
 struct PendingRequest {
     request: ApprovalRequest,
-    sender: tokio::sync::oneshot::Sender<ApprovalDecision>,
+    sender: Option<tokio::sync::oneshot::Sender<ApprovalDecision>>,
+    deferred: Option<DeferredToolExecution>,
+    submitted_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct EscalatedApproval {
+    pub request_id: Uuid,
+    pub request: ApprovalRequest,
 }
 
 #[derive(Debug, Clone)]
@@ -46,10 +54,16 @@ pub struct ApprovalRecord {
 }
 
 impl ApprovalManager {
+    fn pending_count_for_agent(&self, agent_id: &str) -> usize {
+        self.pending
+            .iter()
+            .filter(|r| r.value().request.agent_id == agent_id)
+            .count()
+    }
+
     pub fn new(policy: ApprovalPolicy) -> Self {
         Self {
             pending: DashMap::new(),
-            escalated: DashMap::new(),
             recent: std::sync::Mutex::new(VecDeque::new()),
             policy: std::sync::RwLock::new(policy),
             audit_db: None,
@@ -60,7 +74,6 @@ impl ApprovalManager {
     pub fn new_with_db(policy: ApprovalPolicy, conn: Arc<StdMutex<Connection>>) -> Self {
         Self {
             pending: DashMap::new(),
-            escalated: DashMap::new(),
             recent: std::sync::Mutex::new(VecDeque::new()),
             policy: std::sync::RwLock::new(policy),
             audit_db: Some(conn),
@@ -162,59 +175,47 @@ impl ApprovalManager {
     /// a timeout re-inserts the request with bumped `escalation_count` so the caller
     /// can re-notify and re-call this method.
     pub async fn request_approval(&self, req: ApprovalRequest) -> ApprovalDecision {
-        // Check per-agent pending limit
-        let agent_pending = self
-            .pending
-            .iter()
-            .filter(|r| r.value().request.agent_id == req.agent_id)
-            .count();
-        if agent_pending >= MAX_PENDING_PER_AGENT {
-            warn!(agent_id = %req.agent_id, "Approval request rejected: too many pending");
-            return ApprovalDecision::Denied;
-        }
+        let fallback = self
+            .policy
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .timeout_fallback
+            .clone();
+        let mut current_req = req;
 
-        let id = req.id;
-        let escalation = req.escalation_count;
-        let req_for_timeout = req.clone();
+        loop {
+            let agent_pending = self.pending_count_for_agent(&current_req.agent_id);
+            if agent_pending >= MAX_PENDING_PER_AGENT {
+                warn!(agent_id = %current_req.agent_id, "Approval request rejected: too many pending");
+                return ApprovalDecision::Denied;
+            }
 
-        // Compute timeout: base + extra per escalation for Escalate fallback
-        let base_timeout = std::time::Duration::from_secs(req.timeout_secs);
-        let extra = {
-            let policy = self.policy.read().unwrap_or_else(|e| e.into_inner());
-            match &policy.timeout_fallback {
-                TimeoutFallback::Escalate { extra_timeout_secs } => {
-                    std::time::Duration::from_secs(*extra_timeout_secs) * escalation as u32
+            let id = current_req.id;
+            let escalation = current_req.escalation_count;
+            let timeout =
+                std::time::Duration::from_secs(effective_timeout_secs(&current_req, &fallback));
+            let req_for_timeout = current_req.clone();
+
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            self.pending.insert(
+                id,
+                PendingRequest {
+                    request: current_req,
+                    sender: Some(tx),
+                    deferred: None,
+                    submitted_at: chrono::Utc::now(),
+                },
+            );
+
+            info!(request_id = %id, escalation, "Approval request submitted, waiting for resolution");
+
+            match tokio::time::timeout(timeout, rx).await {
+                Ok(Ok(decision)) => {
+                    debug!(request_id = %id, ?decision, "Approval resolved");
+                    return decision;
                 }
-                _ => std::time::Duration::ZERO,
-            }
-        };
-        let timeout = base_timeout + extra;
-
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        self.pending.insert(
-            id,
-            PendingRequest {
-                request: req,
-                sender: tx,
-            },
-        );
-
-        info!(request_id = %id, escalation, "Approval request submitted, waiting for resolution");
-
-        match tokio::time::timeout(timeout, rx).await {
-            Ok(Ok(decision)) => {
-                debug!(request_id = %id, ?decision, "Approval resolved");
-                decision
-            }
-            _ => {
-                let policy = self.policy.read().unwrap_or_else(|e| e.into_inner());
-                let fallback = policy.timeout_fallback.clone();
-                drop(policy);
-
-                match fallback {
-                    TimeoutFallback::Escalate { .. } if escalation < MAX_ESCALATIONS => {
-                        // Remove from pending and store in escalated map for the caller
-                        // to pick up atomically. No dead oneshot channel.
+                _ => match timeout_decision(&req_for_timeout, &fallback) {
+                    ExpiryOutcome::Escalate => {
                         let mut escalated_req = self
                             .pending
                             .remove(&id)
@@ -226,50 +227,142 @@ impl ApprovalManager {
                             escalation = escalated_req.escalation_count,
                             "Approval timed out — escalating"
                         );
-                        self.escalated.insert(id, escalated_req);
-                        ApprovalDecision::TimedOut
+                        current_req = escalated_req;
                     }
-                    TimeoutFallback::Skip => {
+                    ExpiryOutcome::Resolve(decision) => {
                         let request = self
                             .pending
                             .remove(&id)
                             .map(|(_, p)| p.request)
                             .unwrap_or(req_for_timeout);
-                        self.push_recent(request, ApprovalDecision::Skipped, None, Utc::now());
-                        warn!(request_id = %id, "Approval timed out — skipped");
-                        ApprovalDecision::Skipped
+                        self.push_recent(request, decision.clone(), None, Utc::now());
+                        warn!(request_id = %id, decision = %decision.as_str(), "Approval timed out");
+                        return decision;
                     }
-                    _ => {
-                        let request = self
-                            .pending
-                            .remove(&id)
-                            .map(|(_, p)| p.request)
-                            .unwrap_or(req_for_timeout);
-                        self.push_recent(request, ApprovalDecision::TimedOut, None, Utc::now());
-                        warn!(request_id = %id, "Approval timed out — denied");
-                        ApprovalDecision::TimedOut
-                    }
-                }
+                },
             }
         }
     }
 
-    /// Atomically take an escalated request (if any) for re-notification and re-wait.
-    /// Returns `Some((escalation_count, request))` if the request was escalated,
-    /// `None` if it was resolved by a human or not escalated.
-    pub fn take_escalated(&self, request_id: Uuid) -> Option<(u8, ApprovalRequest)> {
-        self.escalated
-            .remove(&request_id)
-            .map(|(_, req)| (req.escalation_count, req))
+    /// Submit a tool for approval without blocking. Returns request UUID immediately.
+    /// The DeferredToolExecution is stored and returned atomically on resolve().
+    pub fn submit_request(
+        &self,
+        req: ApprovalRequest,
+        deferred: DeferredToolExecution,
+    ) -> Result<uuid::Uuid, String> {
+        // Anti-duplicate guard: reject duplicate tool_use IDs so a single tool
+        // call cannot be submitted twice, but allow identical inputs from
+        // distinct tool calls in the same assistant response.
+        let has_duplicate = self.pending.iter().any(|r| {
+            if let Some(ref d) = r.value().deferred {
+                d.tool_use_id == deferred.tool_use_id
+            } else {
+                false
+            }
+        });
+        if has_duplicate {
+            return Err("Duplicate approval request already pending".to_string());
+        }
+
+        // Per-agent pending limit
+        let agent_pending_count = self.pending_count_for_agent(&req.agent_id);
+        if agent_pending_count >= MAX_PENDING_PER_AGENT {
+            return Err("Too many pending approval requests for this agent".to_string());
+        }
+
+        let id = req.id;
+        self.pending.insert(
+            id,
+            PendingRequest {
+                request: req,
+                sender: None,
+                deferred: Some(deferred),
+                submitted_at: chrono::Utc::now(),
+            },
+        );
+        Ok(id)
+    }
+
+    /// Sweep expired requests. Called periodically by kernel.
+    /// Returns terminal decisions for deferred requests. Escalating requests stay pending.
+    pub fn expire_pending_requests(
+        &self,
+    ) -> (
+        Vec<EscalatedApproval>,
+        Vec<(uuid::Uuid, ApprovalDecision, DeferredToolExecution)>,
+    ) {
+        let now = chrono::Utc::now();
+        let mut escalated = Vec::new();
+        let mut expired = Vec::new();
+        let fallback = {
+            let policy = self.policy.read().unwrap_or_else(|e| e.into_inner());
+            policy.timeout_fallback.clone()
+        };
+
+        // Collect expired request IDs first to avoid holding iter while mutating
+        let expired_ids: Vec<uuid::Uuid> = self
+            .pending
+            .iter()
+            .filter(|entry| {
+                let timeout_secs = effective_timeout_secs(&entry.value().request, &fallback);
+                let elapsed = now.signed_duration_since(entry.value().submitted_at);
+                elapsed > chrono::Duration::seconds(timeout_secs as i64)
+            })
+            .map(|entry| *entry.key())
+            .collect();
+
+        for id in expired_ids {
+            if let Some((_, pending)) = self.pending.remove(&id) {
+                match timeout_decision(&pending.request, &fallback) {
+                    ExpiryOutcome::Escalate => {
+                        let mut request = pending.request;
+                        request.escalation_count += 1;
+                        warn!(
+                            request_id = %id,
+                            escalation = request.escalation_count,
+                            "Approval timed out, escalating deferred request"
+                        );
+                        self.pending.insert(
+                            id,
+                            PendingRequest {
+                                request: request.clone(),
+                                sender: pending.sender,
+                                deferred: pending.deferred,
+                                submitted_at: now,
+                            },
+                        );
+                        escalated.push(EscalatedApproval {
+                            request_id: id,
+                            request,
+                        });
+                    }
+                    ExpiryOutcome::Resolve(decision) => {
+                        self.push_recent(pending.request.clone(), decision.clone(), None, now);
+                        if let Some(sender) = pending.sender {
+                            let _ = sender.send(decision.clone());
+                        }
+                        if let Some(deferred) = pending.deferred {
+                            expired.push((id, decision, deferred));
+                        }
+                    }
+                }
+            }
+        }
+
+        (escalated, expired)
     }
 
     /// Resolve a pending request (called by API/UI).
+    ///
+    /// Returns `(ApprovalResponse, Option<DeferredToolExecution>)` — the deferred payload
+    /// is `Some` when the request was submitted via `submit_request()` (non-blocking path).
     pub fn resolve(
         &self,
         request_id: Uuid,
         decision: ApprovalDecision,
         decided_by: Option<String>,
-    ) -> Result<ApprovalResponse, String> {
+    ) -> Result<(ApprovalResponse, Option<DeferredToolExecution>), String> {
         match self.pending.remove(&request_id) {
             Some((_, pending)) => {
                 let response = ApprovalResponse {
@@ -284,10 +377,12 @@ impl ApprovalManager {
                     response.decided_by.clone(),
                     response.decided_at,
                 );
-                // Send decision to waiting agent (ignore error if receiver dropped)
+                // Send decision to waiting agent via oneshot if present (blocking path)
                 info!(request_id = %request_id, decision = ?response.decision, "Approval request resolved");
-                let _ = pending.sender.send(decision);
-                Ok(response)
+                if let Some(sender) = pending.sender {
+                    let _ = sender.send(decision);
+                }
+                Ok((response, pending.deferred))
             }
             None => {
                 // Check recent records for who already handled this
@@ -314,7 +409,9 @@ impl ApprovalManager {
     ) -> Vec<(Uuid, Result<ApprovalResponse, String>)> {
         ids.into_iter()
             .map(|id| {
-                let result = self.resolve(id, decision.clone(), decided_by.clone());
+                let result = self
+                    .resolve(id, decision.clone(), decided_by.clone())
+                    .map(|(resp, _deferred)| resp);
                 (id, result)
             })
             .collect()
@@ -524,6 +621,31 @@ impl ApprovalManager {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ExpiryOutcome {
+    Escalate,
+    Resolve(ApprovalDecision),
+}
+
+fn effective_timeout_secs(request: &ApprovalRequest, fallback: &TimeoutFallback) -> u64 {
+    match fallback {
+        TimeoutFallback::Escalate { extra_timeout_secs } => {
+            request.timeout_secs + (*extra_timeout_secs * request.escalation_count as u64)
+        }
+        _ => request.timeout_secs,
+    }
+}
+
+fn timeout_decision(request: &ApprovalRequest, fallback: &TimeoutFallback) -> ExpiryOutcome {
+    match fallback {
+        TimeoutFallback::Escalate { .. } if request.escalation_count < MAX_ESCALATIONS => {
+            ExpiryOutcome::Escalate
+        }
+        TimeoutFallback::Skip => ExpiryOutcome::Resolve(ApprovalDecision::Skipped),
+        _ => ExpiryOutcome::Resolve(ApprovalDecision::TimedOut),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -715,7 +837,7 @@ mod tests {
                 Some("admin".to_string()),
             );
             assert!(result.is_ok());
-            let resp = result.unwrap();
+            let (resp, _deferred) = result.unwrap();
             assert_eq!(resp.decision, ApprovalDecision::Approved);
             assert_eq!(resp.decided_by, Some("admin".to_string()));
         });
@@ -1026,5 +1148,366 @@ mod tests {
         assert!(mgr.requires_approval("file_read"));
         assert!(mgr.requires_approval("file_write"));
         assert!(!mgr.requires_approval("web_fetch"));
+    }
+
+    // -----------------------------------------------------------------------
+    // submit_request (non-blocking approval)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_submit_request_returns_uuid_immediately() {
+        let mgr = Arc::new(default_manager());
+        let req = make_request("agent-1", "shell_exec", 300);
+        let deferred = DeferredToolExecution {
+            agent_id: "agent-1".to_string(),
+            tool_use_id: "tool-1".to_string(),
+            tool_name: "shell_exec".to_string(),
+            input: serde_json::json!({"cmd": "ls"}),
+            allowed_tools: None,
+            sender_id: None,
+            channel: None,
+            workspace_root: None,
+        };
+
+        let result = mgr.submit_request(req, deferred);
+        assert!(result.is_ok());
+        let id = result.unwrap();
+        assert!(!id.is_nil());
+
+        // Cleanup
+        let _ = mgr.resolve(id, ApprovalDecision::Denied, None);
+    }
+
+    #[tokio::test]
+    async fn test_submit_request_stores_deferred_payload() {
+        let mgr = Arc::new(default_manager());
+        let req = make_request("agent-1", "shell_exec", 300);
+        let deferred = DeferredToolExecution {
+            agent_id: "agent-1".to_string(),
+            tool_use_id: "tool-1".to_string(),
+            tool_name: "shell_exec".to_string(),
+            input: serde_json::json!({"cmd": "ls"}),
+            allowed_tools: Some(vec!["shell_exec".to_string()]),
+            sender_id: Some("user-123".to_string()),
+            channel: Some("telegram".to_string()),
+            workspace_root: Some(std::path::PathBuf::from("/tmp")),
+        };
+
+        let id = mgr.submit_request(req, deferred.clone()).unwrap();
+
+        // Verify deferred is stored by resolving and checking the returned deferred
+        let (response, returned_deferred) =
+            mgr.resolve(id, ApprovalDecision::Denied, None).unwrap();
+        assert_eq!(response.decision, ApprovalDecision::Denied);
+        assert!(returned_deferred.is_some());
+        let stored = returned_deferred.unwrap();
+        assert_eq!(stored.agent_id, "agent-1");
+        assert_eq!(stored.tool_use_id, "tool-1");
+        assert_eq!(stored.tool_name, "shell_exec");
+        assert_eq!(stored.sender_id, Some("user-123".to_string()));
+        assert_eq!(stored.channel, Some("telegram".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_returns_deferred_atomically() {
+        let mgr = Arc::new(default_manager());
+        let req = make_request("agent-1", "shell_exec", 300);
+        let deferred = DeferredToolExecution {
+            agent_id: "agent-1".to_string(),
+            tool_use_id: "tool-1".to_string(),
+            tool_name: "shell_exec".to_string(),
+            input: serde_json::json!({"cmd": "ls"}),
+            allowed_tools: None,
+            sender_id: None,
+            channel: None,
+            workspace_root: None,
+        };
+
+        let id = mgr.submit_request(req, deferred.clone()).unwrap();
+
+        // Resolve and verify atomic return
+        let (response, returned_deferred) = mgr
+            .resolve(id, ApprovalDecision::Approved, Some("admin".to_string()))
+            .unwrap();
+        assert_eq!(response.decision, ApprovalDecision::Approved);
+        assert!(returned_deferred.is_some());
+        assert_eq!(returned_deferred.unwrap().agent_id, "agent-1");
+    }
+
+    #[test]
+    fn test_expire_pending_requests_skip_fallback() {
+        let policy = ApprovalPolicy {
+            timeout_fallback: TimeoutFallback::Skip,
+            ..ApprovalPolicy::default()
+        };
+        let mgr = ApprovalManager::new(policy);
+        let req = make_request("agent-1", "shell_exec", 1);
+        let id = req.id;
+        let deferred = DeferredToolExecution {
+            agent_id: "agent-1".to_string(),
+            tool_use_id: "tool-1".to_string(),
+            tool_name: "shell_exec".to_string(),
+            input: serde_json::json!({"cmd": "ls"}),
+            allowed_tools: None,
+            sender_id: None,
+            channel: None,
+            workspace_root: None,
+        };
+        mgr.submit_request(req, deferred).unwrap();
+        mgr.pending.get_mut(&id).unwrap().submitted_at = Utc::now() - chrono::Duration::seconds(5);
+
+        let (escalated, expired) = mgr.expire_pending_requests();
+        assert!(escalated.is_empty());
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired[0].1, ApprovalDecision::Skipped);
+        assert_eq!(mgr.pending_count(), 0);
+    }
+
+    #[test]
+    fn test_expire_pending_requests_escalates_then_times_out() {
+        let policy = ApprovalPolicy {
+            timeout_fallback: TimeoutFallback::Escalate {
+                extra_timeout_secs: 5,
+            },
+            ..ApprovalPolicy::default()
+        };
+        let mgr = ApprovalManager::new(policy);
+        let req = make_request("agent-1", "shell_exec", 1);
+        let id = req.id;
+        let deferred = DeferredToolExecution {
+            agent_id: "agent-1".to_string(),
+            tool_use_id: "tool-1".to_string(),
+            tool_name: "shell_exec".to_string(),
+            input: serde_json::json!({"cmd": "ls"}),
+            allowed_tools: None,
+            sender_id: None,
+            channel: None,
+            workspace_root: None,
+        };
+        mgr.submit_request(req, deferred).unwrap();
+
+        for expected in 1..=MAX_ESCALATIONS {
+            mgr.pending.get_mut(&id).unwrap().submitted_at =
+                Utc::now() - chrono::Duration::seconds(60);
+            let (escalated, expired) = mgr.expire_pending_requests();
+            assert_eq!(escalated.len(), 1);
+            assert_eq!(escalated[0].request_id, id);
+            assert!(expired.is_empty());
+            let pending = mgr.get_pending(id).unwrap();
+            assert_eq!(pending.escalation_count, expected);
+        }
+
+        mgr.pending.get_mut(&id).unwrap().submitted_at = Utc::now() - chrono::Duration::seconds(60);
+        let (escalated, expired) = mgr.expire_pending_requests();
+        assert!(escalated.is_empty());
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired[0].1, ApprovalDecision::TimedOut);
+        assert_eq!(mgr.pending_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_submit_request_duplicate_guard() {
+        let mgr = Arc::new(default_manager());
+        let req1 = make_request("agent-1", "shell_exec", 300);
+        let deferred1 = DeferredToolExecution {
+            agent_id: "agent-1".to_string(),
+            tool_use_id: "tool-1".to_string(),
+            tool_name: "shell_exec".to_string(),
+            input: serde_json::json!({"cmd": "ls"}),
+            allowed_tools: None,
+            sender_id: None,
+            channel: None,
+            workspace_root: None,
+        };
+
+        let id1 = mgr.submit_request(req1, deferred1).unwrap();
+
+        // Try to submit duplicate tool_use_id
+        let req2 = make_request("agent-1", "shell_exec", 300);
+        let deferred2 = DeferredToolExecution {
+            agent_id: "agent-1".to_string(),
+            tool_use_id: "tool-1".to_string(),
+            tool_name: "shell_exec".to_string(),
+            input: serde_json::json!({"cmd": "ls"}),
+            allowed_tools: None,
+            sender_id: None,
+            channel: None,
+            workspace_root: None,
+        };
+
+        let result = mgr.submit_request(req2, deferred2);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Duplicate"));
+
+        // Cleanup
+        let _ = mgr.resolve(id1, ApprovalDecision::Denied, None);
+    }
+
+    #[tokio::test]
+    async fn test_submit_request_allows_identical_input_with_distinct_tool_use_ids() {
+        let mgr = Arc::new(default_manager());
+        let req1 = make_request("agent-1", "shell_exec", 300);
+        let deferred1 = DeferredToolExecution {
+            agent_id: "agent-1".to_string(),
+            tool_use_id: "tool-1".to_string(),
+            tool_name: "shell_exec".to_string(),
+            input: serde_json::json!({"cmd": "ls"}),
+            allowed_tools: None,
+            sender_id: None,
+            channel: None,
+            workspace_root: None,
+        };
+        let id1 = mgr.submit_request(req1, deferred1).unwrap();
+
+        let req2 = make_request("agent-1", "shell_exec", 300);
+        let deferred2 = DeferredToolExecution {
+            agent_id: "agent-1".to_string(),
+            tool_use_id: "tool-2".to_string(),
+            tool_name: "shell_exec".to_string(),
+            input: serde_json::json!({"cmd": "ls"}),
+            allowed_tools: None,
+            sender_id: None,
+            channel: None,
+            workspace_root: None,
+        };
+
+        let id2 = mgr.submit_request(req2, deferred2).unwrap();
+
+        let _ = mgr.resolve(id1, ApprovalDecision::Denied, None);
+        let _ = mgr.resolve(id2, ApprovalDecision::Denied, None);
+    }
+
+    #[tokio::test]
+    async fn test_per_agent_limit_enforced() {
+        let mgr = Arc::new(default_manager());
+
+        // Submit MAX_PENDING_PER_AGENT requests for agent-1
+        let mut ids = Vec::new();
+        for i in 0..MAX_PENDING_PER_AGENT {
+            let req = make_request("agent-1", "shell_exec", 300);
+            let deferred = DeferredToolExecution {
+                agent_id: "agent-1".to_string(),
+                tool_use_id: format!("tool-{i}"),
+                tool_name: "shell_exec".to_string(),
+                input: serde_json::json!({"cmd": format!("ls {i}")}),
+                allowed_tools: None,
+                sender_id: None,
+                channel: None,
+                workspace_root: None,
+            };
+            let id = mgr.submit_request(req, deferred).unwrap();
+            ids.push(id);
+        }
+
+        // Try to submit one more for same agent
+        let req = make_request("agent-1", "shell_exec", 300);
+        let deferred = DeferredToolExecution {
+            agent_id: "agent-1".to_string(),
+            tool_use_id: "tool-extra".to_string(),
+            tool_name: "shell_exec".to_string(),
+            input: serde_json::json!({"cmd": "ls extra"}),
+            allowed_tools: None,
+            sender_id: None,
+            channel: None,
+            workspace_root: None,
+        };
+        let result = mgr.submit_request(req, deferred);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Too many pending"));
+
+        // Different agent should still be able to submit
+        let req = make_request("agent-2", "shell_exec", 300);
+        let deferred = DeferredToolExecution {
+            agent_id: "agent-2".to_string(),
+            tool_use_id: "tool-other".to_string(),
+            tool_name: "shell_exec".to_string(),
+            input: serde_json::json!({"cmd": "ls other"}),
+            allowed_tools: None,
+            sender_id: None,
+            channel: None,
+            workspace_root: None,
+        };
+        let result = mgr.submit_request(req, deferred);
+        assert!(result.is_ok());
+
+        // Cleanup
+        for id in ids {
+            let _ = mgr.resolve(id, ApprovalDecision::Denied, None);
+        }
+        let _ = mgr.resolve(result.unwrap(), ApprovalDecision::Denied, None);
+    }
+
+    #[test]
+    fn test_expire_pending_requests_respects_deny_fallback() {
+        let mgr = ApprovalManager::new(ApprovalPolicy::default());
+        let req = make_request("agent-1", "shell_exec", 60);
+        let request_id = req.id;
+        mgr.pending.insert(
+            request_id,
+            PendingRequest {
+                request: req,
+                sender: None,
+                deferred: Some(DeferredToolExecution {
+                    agent_id: "agent-1".to_string(),
+                    tool_use_id: "tool-1".to_string(),
+                    tool_name: "shell_exec".to_string(),
+                    input: serde_json::json!({"cmd": "ls"}),
+                    allowed_tools: None,
+                    sender_id: None,
+                    channel: None,
+                    workspace_root: None,
+                }),
+                submitted_at: Utc::now() - chrono::Duration::seconds(120),
+            },
+        );
+
+        let (escalated, expired) = mgr.expire_pending_requests();
+
+        assert!(escalated.is_empty());
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired[0].0, request_id);
+        assert_eq!(expired[0].1, ApprovalDecision::TimedOut);
+        assert!(mgr.get_pending(request_id).is_none());
+    }
+
+    #[test]
+    fn test_expire_pending_requests_escalates_only_under_escalate_fallback() {
+        let policy = ApprovalPolicy {
+            timeout_fallback: TimeoutFallback::Escalate {
+                extra_timeout_secs: 30,
+            },
+            ..ApprovalPolicy::default()
+        };
+        let mgr = ApprovalManager::new(policy);
+        let req = make_request("agent-1", "shell_exec", 60);
+        let request_id = req.id;
+        mgr.pending.insert(
+            request_id,
+            PendingRequest {
+                request: req,
+                sender: None,
+                deferred: Some(DeferredToolExecution {
+                    agent_id: "agent-1".to_string(),
+                    tool_use_id: "tool-1".to_string(),
+                    tool_name: "shell_exec".to_string(),
+                    input: serde_json::json!({"cmd": "ls"}),
+                    allowed_tools: None,
+                    sender_id: None,
+                    channel: None,
+                    workspace_root: None,
+                }),
+                submitted_at: Utc::now() - chrono::Duration::seconds(120),
+            },
+        );
+
+        let (escalated, expired) = mgr.expire_pending_requests();
+
+        assert_eq!(escalated.len(), 1);
+        assert_eq!(escalated[0].request_id, request_id);
+        assert!(expired.is_empty());
+        let pending = mgr
+            .get_pending(request_id)
+            .expect("request should remain pending");
+        assert_eq!(pending.escalation_count, 1);
     }
 }

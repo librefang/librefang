@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::tool::ToolExecutionStatus;
+
 /// A message in an LLM conversation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
@@ -90,6 +92,12 @@ pub enum ContentBlock {
         content: String,
         /// Whether the tool execution errored.
         is_error: bool,
+        /// Detailed execution status.
+        #[serde(default)]
+        status: ToolExecutionStatus,
+        /// Approval request ID, set when status is WaitingApproval.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        approval_request_id: Option<String>,
     },
     /// Extended thinking content block (model's reasoning trace).
     #[serde(rename = "thinking")]
@@ -513,5 +521,88 @@ mod tests {
         assert!(text.contains("[Image (image/png) previously processed]"));
         assert!(text.contains("[Image (image/jpeg) previously processed]"));
         assert!(text.contains("between"));
+    }
+
+    // -----------------------------------------------------------------------
+    // ContentBlock::ToolResult tests (Step 1 from plan)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_content_block_tool_result_serde() {
+        let block = ContentBlock::ToolResult {
+            tool_use_id: "toolu_abc".to_string(),
+            tool_name: "shell_exec".to_string(),
+            content: "Command output".to_string(),
+            is_error: false,
+            status: crate::tool::ToolExecutionStatus::Completed,
+            approval_request_id: None,
+        };
+        let json = serde_json::to_string(&block).unwrap();
+        let deserialized: ContentBlock = serde_json::from_str(&json).unwrap();
+        match deserialized {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                status,
+                approval_request_id,
+                ..
+            } => {
+                assert_eq!(tool_use_id, "toolu_abc");
+                assert_eq!(status, crate::tool::ToolExecutionStatus::Completed);
+                assert!(approval_request_id.is_none());
+            }
+            _ => panic!("Expected ToolResult block"),
+        }
+    }
+
+    #[test]
+    fn test_content_block_tool_result_deserialization_old_format() {
+        // Old format without status and approval_request_id fields
+        let json = r#"{
+            "type": "tool_result",
+            "tool_use_id": "toolu_old",
+            "tool_name": "file_read",
+            "content": "File contents",
+            "is_error": false
+        }"#;
+        let block: ContentBlock = serde_json::from_str(json).unwrap();
+        match block {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                status,
+                approval_request_id,
+                ..
+            } => {
+                assert_eq!(tool_use_id, "toolu_old");
+                assert_eq!(status, crate::tool::ToolExecutionStatus::Completed); // Default
+                assert!(approval_request_id.is_none()); // Default
+            }
+            _ => panic!("Expected ToolResult block"),
+        }
+    }
+
+    #[test]
+    fn test_content_block_tool_result_with_approval_request_id() {
+        let block = ContentBlock::ToolResult {
+            tool_use_id: "toolu_abc".to_string(),
+            tool_name: "shell_exec".to_string(),
+            content: "Waiting for approval".to_string(),
+            is_error: false,
+            status: crate::tool::ToolExecutionStatus::WaitingApproval,
+            approval_request_id: Some("req-123".to_string()),
+        };
+        let json = serde_json::to_string(&block).unwrap();
+        assert!(json.contains("waiting_approval"));
+        assert!(json.contains("req-123"));
+
+        let deserialized: ContentBlock = serde_json::from_str(&json).unwrap();
+        match deserialized {
+            ContentBlock::ToolResult {
+                approval_request_id,
+                ..
+            } => {
+                assert_eq!(approval_request_id, Some("req-123".to_string()));
+            }
+            _ => panic!("Expected ToolResult block"),
+        }
     }
 }

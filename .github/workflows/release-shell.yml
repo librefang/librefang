@@ -24,10 +24,32 @@ jobs:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/wait-for-release
 
+  # ── Build React dashboard (shared by all binary jobs) ───────────────────
+  build_dashboard:
+    name: Build Dashboard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install dependencies
+        working-directory: crates/librefang-api/dashboard
+        run: npm ci
+      - name: Build dashboard
+        working-directory: crates/librefang-api/dashboard
+        run: npm run build
+      - name: Upload dashboard artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dashboard-dist
+          path: crates/librefang-api/static/react/
+          retention-days: 1
+
   # ── CLI Binary (macOS) ────────────────────────────────────────────────────
   cli_mac:
     name: CLI / ${{ matrix.target }}
-    needs: [wait_for_release]
+    needs: [wait_for_release, build_dashboard]
     runs-on: macos-latest
     strategy:
       fail-fast: false
@@ -38,6 +60,10 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v4
+        with:
+          name: dashboard-dist
+          path: crates/librefang-api/static/react/
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -75,7 +101,7 @@ jobs:
   # ── CLI Binary (Linux) ──────────────────────────────────────────────────
   cli_linux:
     name: CLI / ${{ matrix.target }}
-    needs: [wait_for_release]
+    needs: [wait_for_release, build_dashboard]
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
@@ -88,6 +114,10 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v4
+        with:
+          name: dashboard-dist
+          path: crates/librefang-api/static/react/
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -131,11 +161,15 @@ jobs:
   # ── CLI Binary (Android / Termux) ───────────────────────────────────────
   cli_android:
     name: CLI / aarch64-linux-android
-    needs: [wait_for_release]
+    needs: [wait_for_release, build_dashboard]
     runs-on: ubuntu-22.04
 
     steps:
       - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v4
+        with:
+          name: dashboard-dist
+          path: crates/librefang-api/static/react/
       - uses: dtolnay/rust-toolchain@stable
       - name: Install cross
         run: cargo install cross --locked
@@ -169,7 +203,7 @@ jobs:
   # ── CLI Binary (Linux) - Mini (12 channels) ───────────────────────────────
   cli_linux_mini:
     name: CLI / ${{ matrix.target }} (mini)
-    needs: [wait_for_release]
+    needs: [wait_for_release, build_dashboard]
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
@@ -179,6 +213,10 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v4
+        with:
+          name: dashboard-dist
+          path: crates/librefang-api/static/react/
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -214,7 +252,7 @@ jobs:
   # ── CLI Binary (Linux, musl — fully static) ─────────────────────────────
   cli_musl:
     name: CLI / ${{ matrix.target }} (static)
-    needs: [wait_for_release]
+    needs: [wait_for_release, build_dashboard]
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
@@ -225,6 +263,10 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v4
+        with:
+          name: dashboard-dist
+          path: crates/librefang-api/static/react/
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -268,7 +310,7 @@ jobs:
   # ── CLI Binary (Windows) ────────────────────────────────────────────────
   cli_windows:
     name: CLI / ${{ matrix.target }}
-    needs: [wait_for_release]
+    needs: [wait_for_release, build_dashboard]
     runs-on: windows-latest
     strategy:
       fail-fast: false
@@ -279,6 +321,10 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v4
+        with:
+          name: dashboard-dist
+          path: crates/librefang-api/static/react/
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -313,7 +359,7 @@ jobs:
   # ── CLI Binary (macOS) - Mini ─────────────────────────────────────────────
   cli_mac_mini:
     name: CLI / ${{ matrix.target }} (mini)
-    needs: [wait_for_release]
+    needs: [wait_for_release, build_dashboard]
     runs-on: macos-latest
     strategy:
       fail-fast: false
@@ -323,6 +369,10 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v4
+        with:
+          name: dashboard-dist
+          path: crates/librefang-api/static/react/
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -360,7 +410,7 @@ jobs:
   # ── CLI Binary (Windows) - Mini ───────────────────────────────────────────
   cli_windows_mini:
     name: CLI / ${{ matrix.target }} (mini)
-    needs: [wait_for_release]
+    needs: [wait_for_release, build_dashboard]
     runs-on: windows-latest
     strategy:
       fail-fast: false
@@ -370,6 +420,10 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v4
+        with:
+          name: dashboard-dist
+          path: crates/librefang-api/static/react/
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}

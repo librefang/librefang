@@ -26,7 +26,7 @@ use librefang_types::memory::{MemoryFragment, MemoryId};
 use librefang_types::message::{
     ContentBlock, Message, MessageContent, Role, StopReason, TokenUsage,
 };
-use librefang_types::tool::{DecisionTrace, ToolCall, ToolDefinition};
+use librefang_types::tool::{AgentLoopSignal, DecisionTrace, ToolCall, ToolDefinition};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -78,10 +78,12 @@ fn is_no_reply(text: &str) -> bool {
 /// expected to recover from cheaply on the next iteration (approval denials,
 /// sandbox rejections, modify-and-retry hints, argument-truncation nudges).
 /// Hard errors (unrecognized tool, network failure, etc.) are caller's problem.
+///
+/// Prefer `ToolExecutionStatus::is_soft_error()` where the status is available.
+/// This content-based fallback covers legacy paths and sandbox string errors that
+/// don't yet carry a typed status.
 fn is_soft_error_content(content: &str) -> bool {
-    content.contains("requires human approval and was denied")
-        || content.contains("[MODIFY_AND_RETRY]")
-        || content.contains(ERR_PATH_TRAVERSAL)
+    content.contains(ERR_PATH_TRAVERSAL)
         || content.contains(ERR_SANDBOX_ESCAPE)
         || content.contains("arguments were truncated")
 }
@@ -172,6 +174,72 @@ fn safe_trim_messages(
 fn strip_processed_image_data(messages: &mut [Message]) {
     for msg in messages.iter_mut() {
         msg.content.strip_images();
+    }
+}
+
+fn apply_approval_resolution_signal(
+    session: &mut Session,
+    messages: &mut [Message],
+    tool_use_id: &str,
+    result_content: &str,
+    result_is_error: bool,
+    result_status: librefang_types::tool::ToolExecutionStatus,
+) {
+    fn patch_message_blocks(
+        msg: &mut Message,
+        tool_use_id: &str,
+        result_content: &str,
+        result_is_error: bool,
+        result_status: librefang_types::tool::ToolExecutionStatus,
+    ) -> bool {
+        let MessageContent::Blocks(blocks) = &mut msg.content else {
+            return false;
+        };
+        for block in blocks.iter_mut() {
+            if let ContentBlock::ToolResult {
+                tool_use_id: id,
+                content,
+                is_error,
+                status,
+                approval_request_id,
+                ..
+            } = block
+            {
+                if id == tool_use_id
+                    && *status == librefang_types::tool::ToolExecutionStatus::WaitingApproval
+                {
+                    *content = result_content.to_string();
+                    *is_error = result_is_error;
+                    *status = result_status;
+                    *approval_request_id = None;
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    for msg in session.messages.iter_mut().rev() {
+        if patch_message_blocks(
+            msg,
+            tool_use_id,
+            result_content,
+            result_is_error,
+            result_status,
+        ) {
+            break;
+        }
+    }
+    for msg in messages.iter_mut().rev() {
+        if patch_message_blocks(
+            msg,
+            tool_use_id,
+            result_content,
+            result_is_error,
+            result_status,
+        ) {
+            break;
+        }
     }
 }
 
@@ -486,7 +554,7 @@ pub async fn run_agent_loop(
     user_content_blocks: Option<Vec<ContentBlock>>,
     proactive_memory: Option<Arc<librefang_memory::ProactiveMemoryStore>>,
     context_engine: Option<&dyn ContextEngine>,
-    pending_messages: Option<&tokio::sync::Mutex<mpsc::Receiver<String>>>,
+    pending_messages: Option<&tokio::sync::Mutex<mpsc::Receiver<AgentLoopSignal>>>,
 ) -> LibreFangResult<AgentLoopResult> {
     info!(agent = %manifest.name, "Starting agent loop");
 
@@ -1333,6 +1401,8 @@ pub async fn run_agent_loop(
                                 tool_name: tool_call.name.clone(),
                                 content: msg.clone(),
                                 is_error: true,
+                                status: librefang_types::tool::ToolExecutionStatus::Error,
+                                approval_request_id: None,
                             });
                             continue;
                         }
@@ -1374,6 +1444,8 @@ pub async fn run_agent_loop(
                                     tool_call.name, reason
                                 ),
                                 is_error: true,
+                                status: librefang_types::tool::ToolExecutionStatus::Error,
+                                approval_request_id: None,
                             });
                             continue;
                         }
@@ -1429,6 +1501,8 @@ pub async fn run_agent_loop(
                                     tool_call.name, tool_timeout
                                 ),
                                 is_error: true,
+                                status: librefang_types::tool::ToolExecutionStatus::Expired,
+                                ..Default::default()
                             }
                         }
                     };
@@ -1485,12 +1559,15 @@ pub async fn run_agent_loop(
                         tool_name: tool_call.name.clone(),
                         content: final_content,
                         is_error: result.is_error,
+                        status: result.status,
+                        approval_request_id: result.approval_request_id.clone(),
                     });
 
                     // Stop executing remaining tool calls on failure (#948)
                     // but not for approval denials or sandbox security rejections —
                     // those should let the LLM recover and retry with a valid path (#1861)
-                    let is_soft_error = result.is_error && is_soft_error_content(&result.content);
+                    let is_soft_error =
+                        result.status.is_soft_error() || is_soft_error_content(&result.content);
                     if result.is_error && !is_soft_error {
                         warn!(
                             tool = %tool_call.name,
@@ -1505,10 +1582,10 @@ pub async fn run_agent_loop(
                     // so the LLM can process the interrupt on the next iteration.
                     if let Some(pending_rx) = pending_messages {
                         if let Ok(mut rx) = pending_rx.try_lock() {
-                            if let Ok(injected_msg) = rx.try_recv() {
+                            if let Ok(signal) = rx.try_recv() {
                                 info!(
                                     agent = %manifest.name,
-                                    "Mid-turn message injected — interrupting tool execution"
+                                    "Mid-turn signal injected — interrupting tool execution"
                                 );
                                 // Flush completed tool results collected so far
                                 if !tool_result_blocks.is_empty() {
@@ -1520,8 +1597,33 @@ pub async fn run_agent_loop(
                                     session.messages.push(partial_results.clone());
                                     messages.push(partial_results);
                                 }
-                                // Inject the user interrupt message
-                                let inject_msg = Message::user(&injected_msg);
+                                let injected_text = match signal {
+                                    AgentLoopSignal::Message { content } => content,
+                                    AgentLoopSignal::ApprovalResolved {
+                                        tool_use_id,
+                                        tool_name,
+                                        decision,
+                                        result_content,
+                                        result_is_error,
+                                        result_status,
+                                    } => {
+                                        apply_approval_resolution_signal(
+                                            session,
+                                            messages.as_mut_slice(),
+                                            &tool_use_id,
+                                            &result_content,
+                                            result_is_error,
+                                            result_status,
+                                        );
+                                        let result_preview =
+                                            librefang_types::truncate_str(&result_content, 300);
+                                        format!(
+                                            "[System] Tool '{}' approval resolved ({}). Result: {}",
+                                            tool_name, decision, result_preview
+                                        )
+                                    }
+                                };
+                                let inject_msg = Message::user(&injected_text);
                                 session.messages.push(inject_msg.clone());
                                 messages.push(inject_msg);
                                 // Clear tool_result_blocks — they've been flushed
@@ -1536,8 +1638,8 @@ pub async fn run_agent_loop(
                 let denial_count = tool_result_blocks
                     .iter()
                     .filter(|b| {
-                        matches!(b, ContentBlock::ToolResult { content, is_error: true, .. }
-                        if content.contains("requires human approval and was denied"))
+                        matches!(b, ContentBlock::ToolResult { status, .. }
+                        if *status == librefang_types::tool::ToolExecutionStatus::Denied)
                     })
                     .count();
                 if denial_count > 0 {
@@ -1556,8 +1658,8 @@ pub async fn run_agent_loop(
                 let modify_count = tool_result_blocks
                     .iter()
                     .filter(|b| {
-                        matches!(b, ContentBlock::ToolResult { content, is_error: true, .. }
-                        if content.contains("[MODIFY_AND_RETRY]"))
+                        matches!(b, ContentBlock::ToolResult { status, .. }
+                        if *status == librefang_types::tool::ToolExecutionStatus::ModifyAndRetry)
                     })
                     .count();
                 if modify_count > 0 {
@@ -1612,10 +1714,11 @@ pub async fn run_agent_loop(
                     .iter()
                     .filter(|b| match b {
                         ContentBlock::ToolResult {
+                            status,
                             content,
                             is_error: true,
                             ..
-                        } => !is_soft_error_content(content),
+                        } => !status.is_soft_error() && !is_soft_error_content(content),
                         _ => false,
                     })
                     .count() as u32;
@@ -2025,7 +2128,7 @@ pub async fn run_agent_loop_streaming(
     user_content_blocks: Option<Vec<ContentBlock>>,
     proactive_memory: Option<Arc<librefang_memory::ProactiveMemoryStore>>,
     context_engine: Option<&dyn ContextEngine>,
-    pending_messages: Option<&tokio::sync::Mutex<mpsc::Receiver<String>>>,
+    pending_messages: Option<&tokio::sync::Mutex<mpsc::Receiver<AgentLoopSignal>>>,
 ) -> LibreFangResult<AgentLoopResult> {
     info!(agent = %manifest.name, "Starting streaming agent loop");
 
@@ -2918,6 +3021,8 @@ pub async fn run_agent_loop_streaming(
                                 tool_name: tool_call.name.clone(),
                                 content: msg.clone(),
                                 is_error: true,
+                                status: librefang_types::tool::ToolExecutionStatus::Error,
+                                approval_request_id: None,
                             });
                             continue;
                         }
@@ -2959,6 +3064,8 @@ pub async fn run_agent_loop_streaming(
                                     tool_call.name, reason
                                 ),
                                 is_error: true,
+                                status: librefang_types::tool::ToolExecutionStatus::Error,
+                                approval_request_id: None,
                             });
                             continue;
                         }
@@ -3014,6 +3121,8 @@ pub async fn run_agent_loop_streaming(
                                     tool_call.name, tool_timeout
                                 ),
                                 is_error: true,
+                                status: librefang_types::tool::ToolExecutionStatus::Expired,
+                                ..Default::default()
                             }
                         }
                     };
@@ -3084,12 +3193,15 @@ pub async fn run_agent_loop_streaming(
                         tool_name: tool_call.name.clone(),
                         content: final_content,
                         is_error: result.is_error,
+                        status: result.status,
+                        approval_request_id: result.approval_request_id.clone(),
                     });
 
                     // Stop executing remaining tool calls on failure (#948)
                     // but not for approval denials or sandbox security rejections —
                     // those should let the LLM recover and retry with a valid path (#1861)
-                    let is_soft_error = result.is_error && is_soft_error_content(&result.content);
+                    let is_soft_error =
+                        result.status.is_soft_error() || is_soft_error_content(&result.content);
                     if result.is_error && !is_soft_error {
                         warn!(
                             tool = %tool_call.name,
@@ -3102,10 +3214,10 @@ pub async fn run_agent_loop_streaming(
                     // messages between tool calls (streaming variant).
                     if let Some(pending_rx) = pending_messages {
                         if let Ok(mut rx) = pending_rx.try_lock() {
-                            if let Ok(injected_msg) = rx.try_recv() {
+                            if let Ok(signal) = rx.try_recv() {
                                 info!(
                                     agent = %manifest.name,
-                                    "Mid-turn message injected — interrupting tool execution (streaming)"
+                                    "Mid-turn signal injected — interrupting tool execution (streaming)"
                                 );
                                 if !tool_result_blocks.is_empty() {
                                     let partial_results = Message {
@@ -3116,7 +3228,33 @@ pub async fn run_agent_loop_streaming(
                                     session.messages.push(partial_results.clone());
                                     messages.push(partial_results);
                                 }
-                                let inject_msg = Message::user(&injected_msg);
+                                let injected_text = match signal {
+                                    AgentLoopSignal::Message { content } => content,
+                                    AgentLoopSignal::ApprovalResolved {
+                                        tool_use_id,
+                                        tool_name,
+                                        decision,
+                                        result_content,
+                                        result_is_error,
+                                        result_status,
+                                    } => {
+                                        apply_approval_resolution_signal(
+                                            session,
+                                            messages.as_mut_slice(),
+                                            &tool_use_id,
+                                            &result_content,
+                                            result_is_error,
+                                            result_status,
+                                        );
+                                        let result_preview =
+                                            librefang_types::truncate_str(&result_content, 300);
+                                        format!(
+                                            "[System] Tool '{}' approval resolved ({}). Result: {}",
+                                            tool_name, decision, result_preview
+                                        )
+                                    }
+                                };
+                                let inject_msg = Message::user(&injected_text);
                                 session.messages.push(inject_msg.clone());
                                 messages.push(inject_msg);
                                 tool_result_blocks.clear();
@@ -3130,8 +3268,8 @@ pub async fn run_agent_loop_streaming(
                 let denial_count = tool_result_blocks
                     .iter()
                     .filter(|b| {
-                        matches!(b, ContentBlock::ToolResult { content, is_error: true, .. }
-                        if content.contains("requires human approval and was denied"))
+                        matches!(b, ContentBlock::ToolResult { status, .. }
+                        if *status == librefang_types::tool::ToolExecutionStatus::Denied)
                     })
                     .count();
                 if denial_count > 0 {
@@ -3150,8 +3288,8 @@ pub async fn run_agent_loop_streaming(
                 let modify_count = tool_result_blocks
                     .iter()
                     .filter(|b| {
-                        matches!(b, ContentBlock::ToolResult { content, is_error: true, .. }
-                        if content.contains("[MODIFY_AND_RETRY]"))
+                        matches!(b, ContentBlock::ToolResult { status, .. }
+                        if *status == librefang_types::tool::ToolExecutionStatus::ModifyAndRetry)
                     })
                     .count();
                 if modify_count > 0 {
@@ -3205,10 +3343,11 @@ pub async fn run_agent_loop_streaming(
                     .iter()
                     .filter(|b| match b {
                         ContentBlock::ToolResult {
+                            status,
                             content,
                             is_error: true,
                             ..
-                        } => !is_soft_error_content(content),
+                        } => !status.is_soft_error() && !is_soft_error_content(content),
                         _ => false,
                     })
                     .count() as u32;
@@ -4177,6 +4316,8 @@ mod tests {
                     tool_name: "noop".to_string(),
                     content: format!("r{i}"),
                     is_error: false,
+                    status: librefang_types::tool::ToolExecutionStatus::default(),
+                    approval_request_id: None,
                 }]),
                 pinned: false,
             });

@@ -85,16 +85,25 @@ jobs:
           echo "Docker:  $DOCKER_STATUS"
           echo "SDK:     $SDK_STATUS"
 
-          # Check if all workflows have completed
+          # Check if all workflows have completed (cancelled = abort, skip notification)
+          HAS_CANCELLED=false
           for status in "$SHELL_STATUS" "$DESKTOP_STATUS" "$DOCKER_STATUS" "$SDK_STATUS"; do
             if [ "$status" = "running" ] || [ "$status" = "pending" ] || [ "$status" = "not_found" ]; then
               ALL_DONE=false
               break
             fi
+            if [ "$status" = "cancelled" ]; then
+              HAS_CANCELLED=true
+            fi
           done
 
           if [ "$ALL_DONE" = "false" ]; then
             echo "Not all workflows completed yet, waiting for next trigger"
+            exit 0
+          fi
+
+          if [ "$HAS_CANCELLED" = "true" ]; then
+            echo "Some workflows were cancelled, skipping notification"
             exit 0
           fi
 

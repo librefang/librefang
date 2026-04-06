@@ -20,7 +20,10 @@ const MAX_TOOL_NAME_LEN: usize = 64;
 const MAX_DESCRIPTION_LEN: usize = 1024;
 
 /// Maximum length of an action summary (chars).
-const MAX_ACTION_SUMMARY_LEN: usize = 512;
+pub const MAX_ACTION_SUMMARY_LEN: usize = 512;
+
+/// Maximum length of modify-and-retry feedback (chars).
+pub const MAX_APPROVAL_FEEDBACK_LEN: usize = 4096;
 
 /// Minimum approval timeout in seconds.
 const MIN_TIMEOUT_SECS: u64 = 10;

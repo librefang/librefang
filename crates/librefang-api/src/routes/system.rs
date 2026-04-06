@@ -65,15 +65,34 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
         .route("/approvals/{id}", axum::routing::get(get_approval))
         .route(
             "/approvals/{id}/approve",
-            axum::routing::post(approve_request),
+            axum::routing::post(
+                |state: State<Arc<AppState>>,
+                 id: Path<String>,
+                 lang: Option<axum::Extension<RequestLanguage>>| async move {
+                    approve_request(state, id, lang).await
+                },
+            ),
         )
         .route(
             "/approvals/{id}/reject",
-            axum::routing::post(reject_request),
+            axum::routing::post(
+                |state: State<Arc<AppState>>,
+                 id: Path<String>,
+                 lang: Option<axum::Extension<RequestLanguage>>| async move {
+                    reject_request(state, id, lang).await
+                },
+            ),
         )
         .route(
             "/approvals/{id}/modify",
-            axum::routing::post(modify_request),
+            axum::routing::post(
+                |state: State<Arc<AppState>>,
+                 id: Path<String>,
+                 lang: Option<axum::Extension<RequestLanguage>>,
+                 body: Json<ModifyRequestBody>| async move {
+                    modify_request(state, id, body, lang).await
+                },
+            ),
         )
         // Webhook triggers (external event injection)
         .route("/hooks/wake", axum::routing::post(webhook_wake))
@@ -1357,28 +1376,34 @@ pub async fn approve_request(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
-) -> impl IntoResponse {
-    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+) -> axum::response::Response {
     let uuid = match uuid::Uuid::parse_str(&id) {
         Ok(u) => u,
         Err(_) => {
+            let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
             return ApiErrorResponse::bad_request(t.t("api-error-approval-invalid-id"))
-                .into_json_tuple();
+                .into_json_tuple()
+                .into_response();
         }
     };
 
-    match state.kernel.approvals().resolve(
-        uuid,
-        librefang_types::approval::ApprovalDecision::Approved,
-        Some("api".to_string()),
-    ) {
-        Ok(resp) => (
+    match state
+        .kernel
+        .resolve_tool_approval(
+            uuid,
+            librefang_types::approval::ApprovalDecision::Approved,
+            Some("api".to_string()),
+        )
+        .await
+    {
+        Ok((resp, _deferred)) => (
             StatusCode::OK,
             Json(
                 serde_json::json!({"id": id, "status": "approved", "decided_at": resp.decided_at.to_rfc3339()}),
             ),
-        ),
-        Err(e) => ApiErrorResponse::not_found(e).into_json_tuple(),
+        )
+            .into_response(),
+        Err(e) => ApiErrorResponse::not_found(e).into_json_tuple().into_response(),
     }
 }
 
@@ -1388,28 +1413,34 @@ pub async fn reject_request(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
-) -> impl IntoResponse {
-    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+) -> axum::response::Response {
     let uuid = match uuid::Uuid::parse_str(&id) {
         Ok(u) => u,
         Err(_) => {
+            let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
             return ApiErrorResponse::bad_request(t.t("api-error-approval-invalid-id"))
-                .into_json_tuple();
+                .into_json_tuple()
+                .into_response();
         }
     };
 
-    match state.kernel.approvals().resolve(
-        uuid,
-        librefang_types::approval::ApprovalDecision::Denied,
-        Some("api".to_string()),
-    ) {
-        Ok(resp) => (
+    match state
+        .kernel
+        .resolve_tool_approval(
+            uuid,
+            librefang_types::approval::ApprovalDecision::Denied,
+            Some("api".to_string()),
+        )
+        .await
+    {
+        Ok((resp, _deferred)) => (
             StatusCode::OK,
             Json(
                 serde_json::json!({"id": id, "status": "rejected", "decided_at": resp.decided_at.to_rfc3339()}),
             ),
-        ),
-        Err(e) => ApiErrorResponse::not_found(e).into_json_tuple(),
+        )
+            .into_response(),
+        Err(e) => ApiErrorResponse::not_found(e).into_json_tuple().into_response(),
     }
 }
 
@@ -1428,33 +1459,42 @@ pub struct ModifyRequestBody {
 pub async fn modify_request(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-    lang: Option<axum::Extension<RequestLanguage>>,
     Json(body): Json<ModifyRequestBody>,
-) -> impl IntoResponse {
-    const MAX_FEEDBACK_LEN: usize = 4096;
-    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    lang: Option<axum::Extension<RequestLanguage>>,
+) -> axum::response::Response {
     // Truncate feedback to prevent database bloat
-    let feedback: String = body.feedback.chars().take(MAX_FEEDBACK_LEN).collect();
+    let feedback: String = body
+        .feedback
+        .chars()
+        .take(librefang_types::approval::MAX_APPROVAL_FEEDBACK_LEN)
+        .collect();
     let uuid = match uuid::Uuid::parse_str(&id) {
         Ok(u) => u,
         Err(_) => {
+            let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
             return ApiErrorResponse::bad_request(t.t("api-error-approval-invalid-id"))
-                .into_json_tuple();
+                .into_json_tuple()
+                .into_response();
         }
     };
 
-    match state.kernel.approvals().resolve(
-        uuid,
-        librefang_types::approval::ApprovalDecision::ModifyAndRetry { feedback },
-        Some("api".to_string()),
-    ) {
-        Ok(resp) => (
+    match state
+        .kernel
+        .resolve_tool_approval(
+            uuid,
+            librefang_types::approval::ApprovalDecision::ModifyAndRetry { feedback },
+            Some("api".to_string()),
+        )
+        .await
+    {
+        Ok((resp, _deferred)) => (
             StatusCode::OK,
             Json(
                 serde_json::json!({"id": id, "status": "modified", "decided_at": resp.decided_at.to_rfc3339()}),
             ),
-        ),
-        Err(e) => ApiErrorResponse::not_found(e).into_json_tuple(),
+        )
+            .into_response(),
+        Err(e) => ApiErrorResponse::not_found(e).into_json_tuple().into_response(),
     }
 }
 
@@ -1508,16 +1548,24 @@ pub async fn batch_resolve(
         }
     }
 
-    let results =
-        state
+    for uuid in valid_uuids {
+        let id = uuid.to_string();
+        match state
             .kernel
-            .approvals()
-            .resolve_batch(valid_uuids, decision, Some("api".to_string()));
-
-    result_json.extend(results.into_iter().map(|(id, res)| match res {
-        Ok(_) => serde_json::json!({"id": id.to_string(), "status": "ok"}),
-        Err(e) => serde_json::json!({"id": id.to_string(), "status": "error", "message": e}),
-    }));
+            .resolve_tool_approval(uuid, decision.clone(), Some("api".to_string()))
+            .await
+        {
+            Ok((resp, _)) => result_json.push(serde_json::json!({
+                "id": id,
+                "status": "ok",
+                "decision": resp.decision.as_str(),
+                "decided_at": resp.decided_at.to_rfc3339(),
+            })),
+            Err(e) => {
+                result_json.push(serde_json::json!({"id": id, "status": "error", "message": e}))
+            }
+        }
+    }
 
     (
         StatusCode::OK,
