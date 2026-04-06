@@ -1,0 +1,39 @@
+[package]
+name = "ruvector-domain-expansion"
+version = "2.0.4"
+edition = "2021"
+rust-version = "1.77"
+license = "MIT"
+authors = ["Ruvector Team"]
+repository = "https://github.com/ruvnet/ruvector"
+description = "Cross-domain transfer learning engine: Rust synthesis, structured planning, tool orchestration"
+keywords = ["transfer-learning", "domain-expansion", "generalization", "rust-synthesis", "planning"]
+categories = ["algorithms", "science"]
+
+[features]
+default = []
+rvf = ["dep:rvf-types", "dep:rvf-wire", "dep:rvf-crypto"]
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+rand = "0.8"
+
+# RVF integration (optional, behind "rvf" feature)
+# Paths removed — rvf crates not ported to librefang workspace.
+# Enable only if rvf-types/rvf-wire/rvf-crypto are published to crates.io.
+rvf-types = { version = "0.2.0", optional = true }
+rvf-wire = { version = "0.1.0", optional = true }
+rvf-crypto = { version = "0.2.0", optional = true }
+
+[dev-dependencies]
+proptest = "1.5"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "domain_expansion_bench"
+harness = false
+
+[lib]
+crate-type = ["rlib"]
