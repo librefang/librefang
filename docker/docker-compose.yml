@@ -1,0 +1,33 @@
+# Librefang Supabase + RuVector PostgreSQL
+# Minimal compose for local development and testing
+#
+# Build image first:
+#   docker build -f docker/Dockerfile.supabase-ruvector -t supabase-ruvector:latest .
+#
+# Start:
+#   docker compose -f docker/docker-compose.yml up -d
+#
+# Connect:
+#   psql -h localhost -p 54322 -U postgres -d postgres
+
+services:
+  db:
+    image: supabase-ruvector:latest
+    container_name: librefang-ruvector-db
+    ports:
+      - "54322:5432"
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    volumes:
+      - ruvector-pgdata:/var/lib/postgresql/data
+      - ./sql/ruvector_setup.sql:/docker-entrypoint-initdb.d/zzz-ruvector-app-setup.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  ruvector-pgdata:

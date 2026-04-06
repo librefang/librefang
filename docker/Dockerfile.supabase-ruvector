@@ -1,0 +1,224 @@
+# Librefang Supabase + RuVector PostgreSQL Extension
+# Multi-stage build: compile ruvector pgrx extension, layer onto Supabase PG image
+#
+# Build context: librefang repo root (workspace with crates/ruvector-*)
+#
+# Usage:
+#   docker build -f docker/Dockerfile.supabase-ruvector -t supabase-ruvector:latest .
+
+ARG PG_VERSION=17
+ARG RUST_VERSION=1.88
+
+# ============================================================================
+# Stage 1: Base builder with Rust + PostgreSQL dev tools
+# ============================================================================
+FROM rust:${RUST_VERSION}-bookworm AS base-builder
+
+ARG PG_VERSION
+
+# Add PostgreSQL APT repository
+RUN sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" > /etc/apt/sources.list.d/pgdg.list' && \
+    wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | apt-key add -
+
+# Install PostgreSQL development dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    postgresql-${PG_VERSION} \
+    postgresql-server-dev-${PG_VERSION} \
+    libclang-dev \
+    clang \
+    pkg-config \
+    libssl-dev \
+    cmake \
+    wget \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install pgrx (exact version from ruvector crate)
+RUN cargo install cargo-pgrx --version 0.12.6 --locked
+
+# Initialize pgrx
+RUN cargo pgrx init --pg${PG_VERSION} /usr/lib/postgresql/${PG_VERSION}/bin/pg_config
+
+# Set PGRX environment
+ENV PGRX_PG_CONFIG_PATH=/usr/lib/postgresql/${PG_VERSION}/bin/pg_config
+ENV PGRX_HOME=/root/.pgrx
+ENV PG_VERSION=${PG_VERSION}
+
+# ============================================================================
+# Stage 2: Extension builder with full workspace
+# ============================================================================
+FROM base-builder AS extension-builder
+
+ARG PG_VERSION
+
+WORKDIR /build
+
+# Copy source from build context (librefang workspace root)
+COPY --chown=root:root . /build/
+
+# Rebuild Cargo.toml with only ruvector workspace members (strip librefang crates)
+RUN cat > /build/Cargo.toml << 'WORKSPACE_EOF'
+[workspace]
+members = [
+    "crates/ruvector-postgres",
+    "crates/ruvector-solver",
+    "crates/ruvector-math",
+    "crates/ruvector-attention",
+    "crates/ruvector-sona",
+    "crates/ruvector-domain-expansion",
+    "crates/ruvector-mincut-gated-transformer",
+]
+resolver = "2"
+
+[workspace.package]
+version = "2.0.4"
+edition = "2021"
+rust-version = "1.77"
+license = "MIT"
+authors = ["Ruvector Team"]
+repository = "https://github.com/ruvnet/ruvector"
+
+[workspace.dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+rand = "0.8"
+rand_distr = "0.4"
+tracing = "0.1"
+rayon = "1.10"
+crossbeam = "0.8"
+dashmap = "6.1"
+parking_lot = "0.12"
+once_cell = "1.20"
+criterion = { version = "0.5", features = ["html_reports"] }
+proptest = "1.5"
+nalgebra = { version = "0.33", default-features = false, features = ["std"] }
+ndarray = "0.16"
+chrono = "0.4"
+anyhow = "1.0"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "unwind"
+WORKSPACE_EOF
+
+WORKDIR /build/crates/ruvector-postgres
+
+# Stage libgcc_s.so.1 to a fixed path so the runtime COPY doesn't need arch triplet
+RUN cp $(gcc -print-libgcc-file-name | xargs dirname)/libgcc_s.so.1 /tmp/libgcc_s.so.1 || \
+    cp $(find /lib /usr/lib -name 'libgcc_s.so.1' -type f 2>/dev/null | head -1) /tmp/libgcc_s.so.1
+
+# Build the extension with ALL features
+RUN cargo pgrx package \
+    --pg-config /usr/lib/postgresql/${PG_VERSION}/bin/pg_config \
+    --features pg${PG_VERSION},index-all,quant-all,all-features-v3
+
+# Copy SQL schemas
+RUN for f in sql/ruvector--*.sql; do \
+        cp "$f" /build/target/release/ruvector-pg${PG_VERSION}/usr/share/postgresql/${PG_VERSION}/extension/ 2>/dev/null || true; \
+    done
+
+# ============================================================================
+# Stage 3: Runtime — Supabase PostgreSQL with RuVector extension
+# ============================================================================
+FROM supabase/postgres:17.6.1.095
+
+ARG PG_VERSION=17
+
+LABEL maintainer="librefang" description="Supabase PostgreSQL with RuVector extension (all features)"
+
+# Copy built extension to staging area
+COPY --from=extension-builder /build/target/release/ruvector-pg${PG_VERSION}/usr/share/postgresql/${PG_VERSION}/extension/* \
+    /tmp/ruvector-ext/
+
+COPY --from=extension-builder /build/target/release/ruvector-pg${PG_VERSION}/usr/lib/postgresql/${PG_VERSION}/lib/* \
+    /tmp/ruvector-lib/
+
+COPY --from=extension-builder /tmp/libgcc_s.so.1 /usr/lib/libgcc_s.so.1
+
+# Install extension into Nix PostgreSQL paths dynamically
+# Uses symlinks for standard paths to avoid duplicating the ~31 MB .so
+RUN set -eux; \
+    PG_PKGLIB=$(pg_config --pkglibdir); \
+    PG_SHAREDIR=$(pg_config --sharedir); \
+    \
+    cp /tmp/ruvector-lib/ruvector.so "$PG_PKGLIB/ruvector.so"; \
+    chmod 755 "$PG_PKGLIB/ruvector.so"; \
+    \
+    mkdir -p "$PG_SHAREDIR/extension"; \
+    cp /tmp/ruvector-ext/ruvector--*.sql "$PG_SHAREDIR/extension/"; \
+    \
+    printf "comment = 'RuVector v0.3: SIMD-optimized vector similarity search'\n" > "$PG_SHAREDIR/extension/ruvector.control"; \
+    printf "default_version = '0.3.0'\n" >> "$PG_SHAREDIR/extension/ruvector.control"; \
+    printf "module_pathname = '%s/ruvector'\n" "$PG_PKGLIB" >> "$PG_SHAREDIR/extension/ruvector.control"; \
+    printf "relocatable = false\n" >> "$PG_SHAREDIR/extension/ruvector.control"; \
+    printf "superuser = false\n" >> "$PG_SHAREDIR/extension/ruvector.control"; \
+    printf "trusted = true\n" >> "$PG_SHAREDIR/extension/ruvector.control"; \
+    \
+    mkdir -p /usr/lib/postgresql/${PG_VERSION}/lib /usr/share/postgresql/${PG_VERSION}/extension; \
+    ln -sf "$PG_PKGLIB/ruvector.so" /usr/lib/postgresql/${PG_VERSION}/lib/ruvector.so; \
+    for f in "$PG_SHAREDIR"/extension/ruvector--*.sql "$PG_SHAREDIR/extension/ruvector.control"; do \
+        ln -sf "$f" "/usr/share/postgresql/${PG_VERSION}/extension/$(basename $f)"; \
+    done; \
+    \
+    echo "=== Extension files installed ==="; \
+    ls -lh "$PG_PKGLIB/ruvector.so"; \
+    ls -lh "$PG_SHAREDIR/extension/ruvector"*; \
+    \
+    rm -rf /tmp/ruvector-ext /tmp/ruvector-lib
+
+# Setup script: ensure libgcc_s is findable at runtime
+RUN mkdir -p /docker-entrypoint-initdb.d && \
+    cat > /docker-entrypoint-initdb.d/00-ruvector-setup.sh << 'SETUP_EOF'
+#!/bin/bash
+set -e
+echo "=== RuVector Extension Setup ==="
+LIBGCC=$(find /nix/store -name 'libgcc_s.so.1' -path '*/gcc-*-libgcc/*' -type f 2>/dev/null | head -1)
+if [ -n "$LIBGCC" ]; then
+    export LD_LIBRARY_PATH="$(dirname $LIBGCC):${LD_LIBRARY_PATH:-}"
+fi
+echo "=== RuVector Setup Complete ==="
+SETUP_EOF
+
+# Init SQL: clean orphans, install extension, verify, tune
+RUN cat > /docker-entrypoint-initdb.d/zz-ruvector-init.sql << 'SQL_EOF'
+-- Clean up orphaned ruvector_* functions from previous installs
+DO $$
+DECLARE
+  fn_sig TEXT;
+BEGIN
+  FOR fn_sig IN
+    SELECT p.oid::regprocedure::text
+    FROM pg_proc p
+    JOIN pg_namespace n ON p.pronamespace = n.oid
+    WHERE n.nspname = 'public'
+      AND p.proname LIKE 'ruvector_%'
+      AND NOT EXISTS (
+        SELECT 1 FROM pg_depend d
+        WHERE d.objid = p.oid AND d.deptype = 'e'
+      )
+  LOOP
+    BEGIN
+      EXECUTE 'DROP FUNCTION IF EXISTS ' || fn_sig;
+      RAISE NOTICE 'Dropped orphan ruvector function: %', fn_sig;
+    EXCEPTION WHEN dependent_objects_still_exist THEN
+      RAISE WARNING 'Cannot drop orphan % (has dependents) - skipping', fn_sig;
+    END;
+  END LOOP;
+END $$;
+
+CREATE EXTENSION IF NOT EXISTS ruvector;
+
+SELECT extname, extversion FROM pg_extension WHERE extname = 'ruvector';
+SELECT ruvector_version();
+
+ALTER SYSTEM SET ruvector.ef_search = 100;
+SELECT pg_reload_conf();
+SQL_EOF
+
+RUN chmod +x /docker-entrypoint-initdb.d/00-ruvector-setup.sh
+
+EXPOSE 5432
