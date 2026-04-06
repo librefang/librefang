@@ -50,8 +50,8 @@ dashboard-build:
 dash:
     cd crates/librefang-api/dashboard && pnpm install && pnpm dev
 
-# Build desktop app (Tauri)
-desktop-build:
+# Build desktop app (Tauri) — builds dashboard assets first
+desktop-build: dashboard-build
     cargo tauri build -c crates/librefang-desktop/tauri.conf.json
 
 # Start desktop app in dev mode
