@@ -1,8 +1,8 @@
 # Context Engine 插件
 
-Context engine 插件用来自定义 agent 上下文窗口里放什么：在处理新用户消息时召回相关记忆，以及在每一轮对话结束后做后续处理。插件走一个极简的 JSON-over-stdin/stdout 协议，几乎任何能读 stdin、写 stdout 的语言都能写。
+Context engine 插件用来完全自定义 agent 的上下文管理：从记忆召回、context window 组装，到 context 压缩和子 agent 生命周期。插件走一个极简的 JSON-over-stdin/stdout 协议，几乎任何能读 stdin、写 stdout 的语言都能写。
 
-本页讲协议、manifest 格式、所有支持的 runtime，以及一个从零到跑通的完整例子。
+本页讲协议、manifest 格式、所有支持的 runtime，以及从零到跑通的完整例子。
 
 ## 目录
 
@@ -29,7 +29,9 @@ my-recall-plugin/
 ├── plugin.toml          # manifest
 └── hooks/
     ├── ingest.py        # （或 .js / .go / .rb / ...）
-    └── after_turn.py
+    ├── after_turn.py
+    ├── assemble.py      # 可选：控制 LLM 看到什么
+    └── compact.py       # 可选：自定义压缩策略
 ```
 
 LibreFang 加载 manifest，把声明的 hook 脚本挂到 context engine 上，在预定义的生命周期点作为子进程执行。每次调用都是一个全新的子进程：stdin 进一个 JSON 对象，stdout 出一个 JSON 对象。
@@ -40,16 +42,22 @@ LibreFang 加载 manifest，把声明的 hook 脚本挂到 context engine 上，
 
 ## Hook 生命周期
 
-目前支持两个 hook：
+支持全部 7 个 hook，覆盖 context engine 完整生命周期：
 
-| Hook | 触发时机 | 用途 | 阻塞当前轮？ |
-|------|----------|------|-------------|
-| `ingest` | 新用户消息进入会话，LLM 调用之前 | 召回记忆 / 注入自定义上下文 | 是 |
-| `after_turn` | LLM 完成一轮（响应发出后） | 索引、持久化、触发后台任务 | 否（fire-and-forget） |
+| Hook | 触发时机 | 用途 | 阻塞当前轮？ | 失败时 |
+|------|----------|------|-------------|--------|
+| `bootstrap` | 引擎初始化，仅一次 | 连接向量库、预热缓存 | 是（启动时） | 警告，继续 |
+| `ingest` | 新用户消息进入，LLM 调用前 | 召回记忆 / 注入自定义上下文 | 是 | fallback 到默认召回 |
+| `assemble` | **每次 LLM 调用前** | **完全控制 context window 内容** | 是 | fallback 到默认裁剪 |
+| `compact` | context 压力时 | 自定义压缩策略 | 是 | fallback 到 LLM 压缩 |
+| `after_turn` | LLM 完成一轮（响应发出后） | 索引、持久化、触发后台任务 | 否（fire-and-forget） | 警告，忽略 |
+| `prepare_subagent` | 子 agent 启动前 | 隔离 memory scope | 是 | 警告，继续 |
+| `merge_subagent` | 子 agent 完成后 | 合并 context | 是 | 警告，继续 |
 
 **关键特性：**
 
-- `ingest` 是**叠加**在内置召回之上的 —— 它返回的 memories 会和默认召回的结果合并，不是替代。
+- `assemble` 是最强的 hook —— 它完全替代默认的 context window 组装，你的脚本决定 LLM 看到的每一条消息。
+- `ingest` 是**叠加**在内置召回之上的 —— 返回的 memories 会和默认召回结果合并，不是替代。
 - `after_turn` 是尽力而为：失败只记日志，不会反馈给用户。
 - 如果 context engine 配置开了 `stable_prefix_mode`，`ingest` hook 会被跳过。
 - 每个 hook 跑在全新子进程里 —— 调用之间**没有任何内存状态**。需要持久状态请用外部存储（SQLite、向量库、HTTP 服务）。
@@ -104,13 +112,13 @@ LibreFang 加载 manifest，把声明的 hook 脚本挂到 context engine 上，
   "type": "after_turn",
   "agent_id": "0f3b…-uuid",
   "messages": [
-    { "role": "user", "content": "我上次问的 Kafka 那件事是什么？" },
-    { "role": "assistant", "content": "你问过 consumer groups…" }
+    { "role": "user", "content": "我上次问的 Kafka 那件事是什么？", "pinned": false },
+    { "role": "assistant", "content": "你问过 consumer groups…", "pinned": false }
   ]
 }
 ```
 
-每条消息的 `content` 被截断到前 500 字符以保证 hook 跑得快。需要完整消息的话从 tool call 或独立 webhook 里自己拿。
+每条消息的 `content` 被截断到前 500 字符以保证 hook 跑得快。
 
 **响应：**
 
@@ -119,6 +127,129 @@ LibreFang 加载 manifest，把声明的 hook 脚本挂到 context engine 上，
 ```
 
 返回值被忽略 —— 只是表示完成。吐任何合法 JSON、退出码 0 即可。
+
+---
+
+### `bootstrap` hook
+
+引擎初始化时调用一次，适合做连接检查、预热缓存等初始化工作。
+
+**请求：**
+
+```json
+{
+  "type": "bootstrap",
+  "context_window_tokens": 200000,
+  "stable_prefix_mode": false,
+  "max_recall_results": 5
+}
+```
+
+**响应：**
+
+```json
+{ "type": "ok" }
+```
+
+失败只记 `warn` 日志，不阻止引擎启动。
+
+---
+
+### `assemble` hook ⭐ 最强 hook
+
+每次 LLM 调用前触发，**完全控制 LLM 看到的消息列表**。
+
+**请求：**
+
+```json
+{
+  "type": "assemble",
+  "system_prompt": "你是一个有帮助的助手。",
+  "messages": [
+    { "role": "user", "content": "帮我查一下 Kafka 的配置", "pinned": false },
+    {
+      "role": "assistant",
+      "content": [
+        { "type": "tool_use", "id": "tu_01", "name": "file_read", "input": { "path": "/etc/kafka.conf" } }
+      ],
+      "pinned": false
+    },
+    {
+      "role": "user",
+      "content": [
+        { "type": "tool_result", "tool_use_id": "tu_01", "content": "broker=localhost:9092\n...", "is_error": false }
+      ],
+      "pinned": false
+    }
+  ],
+  "context_window_tokens": 200000
+}
+```
+
+消息包含**完整结构**，包括 tool_use / tool_result / image / thinking 块。`pinned: true` 的消息不应被裁剪。
+
+**响应：**
+
+```json
+{
+  "type": "assemble_result",
+  "messages": [...]
+}
+```
+
+返回裁剪 / 重排后的消息列表。返回空列表或失败时，自动 fallback 到默认裁剪策略。
+
+---
+
+### `compact` hook
+
+context 窗口压力过大时触发，用自定义策略压缩历史消息。
+
+**请求：**
+
+```json
+{
+  "type": "compact",
+  "agent_id": "0f3b…-uuid",
+  "messages": [...],
+  "model": "llama-3.3-70b-versatile",
+  "context_window_tokens": 200000
+}
+```
+
+消息格式同 `assemble`。
+
+**响应：**
+
+```json
+{
+  "type": "compact_result",
+  "messages": [...]
+}
+```
+
+返回压缩后的消息列表。返回空列表或失败时，fallback 到内置 LLM 压缩。
+
+---
+
+### `prepare_subagent` / `merge_subagent` hook
+
+子 agent 生命周期钩子，适合需要隔离或合并 memory scope 的场景。
+
+**请求：**
+
+```json
+{ "type": "prepare_subagent", "parent_id": "...", "child_id": "..." }
+{ "type": "merge_subagent",   "parent_id": "...", "child_id": "..." }
+```
+
+**响应：**
+
+```json
+{ "type": "ok" }
+```
+
+---
 
 ### 错误
 
@@ -137,9 +268,17 @@ description = "从 Qdrant 向量库召回"
 author = "Evan"
 
 [hooks]
+# 基础 hook（最常用）
 ingest = "hooks/ingest.py"
 after_turn = "hooks/after_turn.py"
 runtime = "python"
+
+# 可选 hook（按需开启）
+# bootstrap        = "hooks/bootstrap.py"
+# assemble         = "hooks/assemble.py"
+# compact          = "hooks/compact.py"
+# prepare_subagent = "hooks/prepare_subagent.py"
+# merge_subagent   = "hooks/merge_subagent.py"
 
 requirements = "requirements.txt"
 ```
@@ -150,10 +289,15 @@ requirements = "requirements.txt"
 | `version` | string | 是 | Semver。 |
 | `description` | string | 否 | Dashboard 插件列表显示用。 |
 | `author` | string | 否 | 自由文本。 |
-| `hooks.ingest` | string | 否 | 相对插件目录的路径。只用 `after_turn` 的话可以省略。 |
-| `hooks.after_turn` | string | 否 | 相对插件目录的路径。 |
-| `hooks.runtime` | string | 否 | 取值：`python`、`native`、`v`、`node`、`deno`、`go`、`ruby`、`bash`、`bun`、`php`、`lua`。默认 `python`。未知值回退到 `python` 并打 warning。 |
-| `requirements` | string | 否 | 只有 `python` runtime 会读；指向 `requirements.txt`，通过 `pip3 install --user -r …` 安装。其他 runtime 各自管各自的依赖（`go.mod`、`package.json`、`Gemfile` 等）。 |
+| `hooks.ingest` | string | 否 | 新消息进来时召回记忆。 |
+| `hooks.after_turn` | string | 否 | turn 完成后持久化 / 更新索引。 |
+| `hooks.bootstrap` | string | 否 | 引擎初始化时运行一次。 |
+| `hooks.assemble` | string | 否 | **完全控制 LLM 看到的消息**，最强 hook。 |
+| `hooks.compact` | string | 否 | context 压力时自定义压缩策略。 |
+| `hooks.prepare_subagent` | string | 否 | 子 agent 启动前隔离 memory scope。 |
+| `hooks.merge_subagent` | string | 否 | 子 agent 完成后合并 context。 |
+| `hooks.runtime` | string | 否 | 取值：`python`、`native`、`v`、`node`、`deno`、`go`、`ruby`、`bash`、`bun`、`php`、`lua`。默认 `python`。 |
+| `requirements` | string | 否 | 只有 `python` runtime 会读；指向 `requirements.txt`。 |
 
 ---
 

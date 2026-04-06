@@ -543,31 +543,44 @@ pub fn scaffold_plugin(
     // manifest + files stay in sync.
     let (ingest_file, ingest_body, after_file, after_body) = hook_templates(runtime_kind);
 
-    // Write plugin.toml — use toml serialization to avoid injection
-    let manifest = PluginManifest {
-        name: name.to_string(),
-        version: "0.1.0".to_string(),
-        description: Some(description.to_string()),
-        author: None,
-        hooks: librefang_types::config::ContextEngineHooks {
-            ingest: Some(format!("hooks/{ingest_file}")),
-            after_turn: Some(format!("hooks/{after_file}")),
-            // Only persist the runtime tag when it's non-default — Python
-            // plugins keep their old one-line `[hooks]` section.
-            runtime: if matches!(runtime_kind, crate::plugin_runtime::PluginRuntime::Python) {
-                None
-            } else {
-                Some(runtime_tag.to_string())
-            },
-        },
-        requirements: if matches!(runtime_kind, crate::plugin_runtime::PluginRuntime::Python) {
-            Some("requirements.txt".to_string())
-        } else {
-            None
-        },
+    // Write plugin.toml as a hand-crafted string so we can include comments
+    // that guide users toward the new hook slots.
+    let runtime_line = if matches!(runtime_kind, crate::plugin_runtime::PluginRuntime::Python) {
+        String::new()
+    } else {
+        format!("runtime = \"{runtime_tag}\"\n")
     };
-    let manifest_toml =
-        toml::to_string_pretty(&manifest).map_err(|e| format!("Failed to serialize TOML: {e}"))?;
+    let requirements_line =
+        if matches!(runtime_kind, crate::plugin_runtime::PluginRuntime::Python) {
+            "requirements = \"requirements.txt\"\n".to_string()
+        } else {
+            String::new()
+        };
+    let manifest_toml = format!(
+        r#"name = "{name}"
+version = "0.1.0"
+description = "{description}"
+
+[hooks]
+# --- Always-on hooks (uncomment to activate) ---
+ingest = "hooks/{ingest_file}"
+after_turn = "hooks/{after_file}"
+{runtime_line}
+# --- Optional lifecycle hooks ---
+# bootstrap      = "hooks/bootstrap.{ext}"   # called once on engine init
+# assemble       = "hooks/assemble.{ext}"    # control what the LLM sees (most powerful)
+# compact        = "hooks/compact.{ext}"     # custom context compression
+# prepare_subagent = "hooks/prepare_subagent.{ext}"
+# merge_subagent   = "hooks/merge_subagent.{ext}"
+{requirements_line}"#,
+        name = name,
+        description = description,
+        ingest_file = ingest_file,
+        after_file = after_file,
+        runtime_line = runtime_line,
+        requirements_line = requirements_line,
+        ext = runtime_kind.script_extension(),
+    );
     std::fs::write(plugin_dir.join("plugin.toml"), manifest_toml)
         .map_err(|e| format!("Failed to write plugin.toml: {e}"))?;
 
@@ -652,10 +665,17 @@ const PY_INGEST: &str = r#"#!/usr/bin/env python3
 """Context engine ingest hook.
 
 Receives via stdin:
-    {"type": "ingest", "agent_id": "...", "message": "user message text"}
+    {
+      "type": "ingest",
+      "agent_id": "...",
+      "message": "user message text",
+      "peer_id": "platform-user-id-or-null"
+    }
 
 Should print to stdout:
     {"type": "ingest_result", "memories": [{"content": "recalled fact"}]}
+
+Tip: scope your recall to peer_id when present to prevent cross-user leaks.
 """
 import json
 import sys
@@ -664,13 +684,13 @@ def main():
     request = json.loads(sys.stdin.read())
     agent_id = request["agent_id"]
     message = request["message"]
+    peer_id = request.get("peer_id")  # None when called directly via API
 
     # TODO: Implement your custom recall logic here.
     # Example: query a vector database, search a knowledge base, etc.
     memories = []
 
-    result = {"type": "ingest_result", "memories": memories}
-    print(json.dumps(result))
+    print(json.dumps({"type": "ingest_result", "memories": memories}))
 
 if __name__ == "__main__":
     main()
@@ -680,7 +700,13 @@ const PY_AFTER_TURN: &str = r#"#!/usr/bin/env python3
 """Context engine after_turn hook.
 
 Receives via stdin:
-    {"type": "after_turn", "agent_id": "...", "messages": [...]}
+    {
+      "type": "after_turn",
+      "agent_id": "...",
+      "messages": [{"role": "user"|"assistant", "content": "...", "pinned": false}, ...]
+    }
+
+Note: message content is truncated to 500 chars per message for performance.
 
 Should print to stdout:
     {"type": "ok"}
@@ -697,6 +723,133 @@ def main():
     # Example: update indexes, persist state, log analytics, etc.
 
     print(json.dumps({"type": "ok"}))
+
+if __name__ == "__main__":
+    main()
+"#;
+
+const PY_ASSEMBLE: &str = r#"#!/usr/bin/env python3
+"""Context engine assemble hook — controls what the LLM sees.
+
+This is the most powerful hook. Called before every LLM request.
+
+Receives via stdin:
+    {
+      "type": "assemble",
+      "system_prompt": "...",
+      "messages": [
+        {"role": "user"|"assistant"|"tool", "content": <text or blocks>, "pinned": false},
+        ...
+      ],
+      "context_window_tokens": 200000
+    }
+
+Messages use the full LibreFang message format — content can be a plain string
+or a list of blocks (text, tool_use, tool_result, image, thinking).
+
+Should print to stdout:
+    {"type": "assemble_result", "messages": [...]}
+
+Return a trimmed/reordered subset of messages that fits the token budget.
+If you return an empty list or fail, LibreFang falls back to its default
+overflow recovery (trim oldest, then compact).
+"""
+import json
+import sys
+
+def estimate_tokens(text: str) -> int:
+    """Rough token estimate: ~4 chars per token."""
+    return max(1, len(text) // 4)
+
+def message_text(msg: dict) -> str:
+    content = msg.get("content", "")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(
+            b.get("text", b.get("content", ""))
+            for b in content
+            if isinstance(b, dict)
+        )
+    return ""
+
+def main():
+    request = json.loads(sys.stdin.read())
+    messages = request["messages"]
+    context_window_tokens = request["context_window_tokens"]
+
+    # Reserve tokens for system prompt and response headroom
+    budget = context_window_tokens - 4000
+
+    # Keep messages newest-first until we exceed the budget, then stop
+    kept = []
+    used = 0
+    for msg in reversed(messages):
+        tokens = estimate_tokens(message_text(msg))
+        if used + tokens > budget:
+            break
+        kept.append(msg)
+        used += tokens
+
+    kept.reverse()
+    print(json.dumps({"type": "assemble_result", "messages": kept}))
+
+if __name__ == "__main__":
+    main()
+"#;
+
+const PY_COMPACT: &str = r#"#!/usr/bin/env python3
+"""Context engine compact hook — custom context compression.
+
+Called when the context window is under pressure.
+
+Receives via stdin:
+    {
+      "type": "compact",
+      "agent_id": "...",
+      "messages": [...],   # full message list (same format as assemble)
+      "model": "llama-3.3-70b-versatile",
+      "context_window_tokens": 200000
+    }
+
+Should print to stdout:
+    {"type": "compact_result", "messages": [...]}
+
+Return a compacted version of the message list. If you fail or return
+an empty list, LibreFang falls back to its built-in LLM-based compaction.
+"""
+import json
+import sys
+
+def message_text(msg: dict) -> str:
+    content = msg.get("content", "")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(
+            b.get("text", b.get("content", ""))
+            for b in content
+            if isinstance(b, dict)
+        )
+    return ""
+
+def main():
+    request = json.loads(sys.stdin.read())
+    messages = request["messages"]
+
+    # Simple strategy: keep the first (system/context) message and the last 10
+    pinned = [m for m in messages if m.get("pinned")]
+    rest = [m for m in messages if not m.get("pinned")]
+
+    summary_text = "... (older messages summarized) ..."
+    summary_msg = {"role": "assistant", "content": summary_text, "pinned": False}
+
+    if len(rest) > 10:
+        compacted = pinned + [summary_msg] + rest[-10:]
+    else:
+        compacted = pinned + rest
+
+    print(json.dumps({"type": "compact_result", "messages": compacted}))
 
 if __name__ == "__main__":
     main()

@@ -114,6 +114,24 @@ impl PluginRuntime {
         matches!(self, Self::Native)
     }
 
+    /// Canonical file extension for hook scripts of this runtime.
+    /// Used when generating scaffold comments in `plugin.toml`.
+    pub fn script_extension(&self) -> &'static str {
+        match self {
+            Self::Python => "py",
+            Self::Native => "bin",
+            Self::V => "v",
+            Self::Node => "js",
+            Self::Deno => "ts",
+            Self::Go => "go",
+            Self::Ruby => "rb",
+            Self::Bash => "sh",
+            Self::Bun => "ts",
+            Self::Php => "php",
+            Self::Lua => "lua",
+        }
+    }
+
     /// Arguments to pass when probing the launcher for its version.
     /// Most runtimes use `--version`; a few have their own conventions
     /// (Go uses `go version`, Lua uses `lua -v`).

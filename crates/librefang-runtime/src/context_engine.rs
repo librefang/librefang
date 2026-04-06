@@ -605,15 +605,10 @@ impl ContextEngine for ScriptableContextEngine {
                 .await;
         };
 
-        // Serialize messages for the script
+        // Serialize full message structure — tool_use/tool_result blocks preserved
         let msg_values: Vec<serde_json::Value> = messages
             .iter()
-            .map(|m| {
-                serde_json::json!({
-                    "role": serde_json::to_value(m.role).unwrap_or_default(),
-                    "content": m.content.text_content(),
-                })
-            })
+            .map(|m| serde_json::to_value(m).unwrap_or_default())
             .collect();
 
         let input = serde_json::json!({
@@ -628,20 +623,7 @@ impl ContextEngine for ScriptableContextEngine {
                 if let Some(new_msgs) = output.get("messages").and_then(|v| v.as_array()) {
                     let assembled: Vec<Message> = new_msgs
                         .iter()
-                        .filter_map(|v| {
-                            let role_str = v.get("role")?.as_str()?;
-                            let content =
-                                v.get("content")?.as_str().unwrap_or("").to_string();
-                            let role = serde_json::from_value(serde_json::Value::String(
-                                role_str.to_string(),
-                            ))
-                            .ok()?;
-                            Some(Message {
-                                role,
-                                content: librefang_types::message::MessageContent::text(content),
-                                pinned: false,
-                            })
-                        })
+                        .filter_map(|v| serde_json::from_value(v.clone()).ok())
                         .collect();
 
                     if !assembled.is_empty() {
@@ -684,14 +666,10 @@ impl ContextEngine for ScriptableContextEngine {
                 .await;
         };
 
+        // Serialize full message structure — tool_use/tool_result blocks preserved
         let msg_values: Vec<serde_json::Value> = messages
             .iter()
-            .map(|m| {
-                serde_json::json!({
-                    "role": serde_json::to_value(m.role).unwrap_or_default(),
-                    "content": m.content.text_content(),
-                })
-            })
+            .map(|m| serde_json::to_value(m).unwrap_or_default())
             .collect();
 
         let input = serde_json::json!({
@@ -707,20 +685,7 @@ impl ContextEngine for ScriptableContextEngine {
                 if let Some(new_msgs) = output.get("messages").and_then(|v| v.as_array()) {
                     let compacted: Vec<Message> = new_msgs
                         .iter()
-                        .filter_map(|v| {
-                            let role_str = v.get("role")?.as_str()?;
-                            let content =
-                                v.get("content")?.as_str().unwrap_or("").to_string();
-                            let role = serde_json::from_value(serde_json::Value::String(
-                                role_str.to_string(),
-                            ))
-                            .ok()?;
-                            Some(Message {
-                                role,
-                                content: librefang_types::message::MessageContent::text(content),
-                                pinned: false,
-                            })
-                        })
+                        .filter_map(|v| serde_json::from_value(v.clone()).ok())
                         .collect();
 
                     if !compacted.is_empty() {
