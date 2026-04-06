@@ -17,6 +17,14 @@ members = [
     "crates/librefang-telemetry",
     "xtask",
     "crates/librefang-testing",
+    # RuVector PG extension crates (uncomment to build docker image):
+    # "crates/ruvector-postgres",
+    # "crates/ruvector-solver",
+    # "crates/ruvector-math",
+    # "crates/ruvector-attention",
+    # "crates/ruvector-sona",
+    # "crates/ruvector-domain-expansion",
+    # "crates/ruvector-mincut-gated-transformer",
 ]
 
 [workspace.package]
