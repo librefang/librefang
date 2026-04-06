@@ -2216,6 +2216,28 @@ pub struct ContextEngineHooks {
     /// Receives: `{"type": "after_turn", "agent_id": "...", "messages": [...]}`
     /// Returns: `{"type": "ok"}` (acknowledgement)
     pub after_turn: Option<String>,
+    /// Script for the `bootstrap` hook (called once on engine init).
+    /// Receives: `{"type": "bootstrap", "context_window_tokens": N, "stable_prefix_mode": bool, "max_recall_results": N}`
+    /// Returns: `{"type": "ok"}`
+    pub bootstrap: Option<String>,
+    /// Script for the `assemble` hook (called before each LLM call).
+    /// Receives: `{"type": "assemble", "agent_id": "...", "messages": [...], "system_prompt": "...", "context_window_tokens": N}`
+    /// Returns: `{"type": "assemble_result", "messages": [...]}` — script controls what the model sees.
+    /// Falls back to default engine if script fails or returns no messages.
+    pub assemble: Option<String>,
+    /// Script for the `compact` hook (called under context pressure).
+    /// Receives: `{"type": "compact", "agent_id": "...", "messages": [...], "model": "...", "context_window_tokens": N}`
+    /// Returns: `{"type": "compact_result", "messages": [...]}` — compacted message list.
+    /// Falls back to default LLM-based compaction if script fails.
+    pub compact: Option<String>,
+    /// Script for the `prepare_subagent` hook (called before sub-agent spawn).
+    /// Receives: `{"type": "prepare_subagent", "parent_id": "...", "child_id": "..."}`
+    /// Returns: `{"type": "ok"}`
+    pub prepare_subagent: Option<String>,
+    /// Script for the `merge_subagent` hook (called after sub-agent completes).
+    /// Receives: `{"type": "merge_subagent", "parent_id": "...", "child_id": "..."}`
+    /// Returns: `{"type": "ok"}`
+    pub merge_subagent: Option<String>,
     /// Which runtime launches the hook scripts.
     ///
     /// Supported: `"python"` (default, runs `.py` via `python3`), `"native"`

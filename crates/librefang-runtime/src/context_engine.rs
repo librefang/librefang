@@ -421,6 +421,11 @@ pub struct ScriptableContextEngine {
     inner: DefaultContextEngine,
     ingest_script: Option<String>,
     after_turn_script: Option<String>,
+    bootstrap_script: Option<String>,
+    assemble_script: Option<String>,
+    compact_script: Option<String>,
+    prepare_subagent_script: Option<String>,
+    merge_subagent_script: Option<String>,
     runtime: crate::plugin_runtime::PluginRuntime,
 }
 
@@ -434,6 +439,11 @@ impl ScriptableContextEngine {
             inner,
             ingest_script: hooks.ingest.clone(),
             after_turn_script: hooks.after_turn.clone(),
+            bootstrap_script: hooks.bootstrap.clone(),
+            assemble_script: hooks.assemble.clone(),
+            compact_script: hooks.compact.clone(),
+            prepare_subagent_script: hooks.prepare_subagent.clone(),
+            merge_subagent_script: hooks.merge_subagent.clone(),
             runtime: crate::plugin_runtime::PluginRuntime::from_tag(hooks.runtime.as_deref()),
         }
     }
@@ -476,24 +486,43 @@ impl ScriptableContextEngine {
 #[async_trait]
 impl ContextEngine for ScriptableContextEngine {
     async fn bootstrap(&self, config: &ContextEngineConfig) -> LibreFangResult<()> {
-        // Validate hook scripts exist at startup
-        if let Some(ref path) = self.ingest_script {
-            let resolved = Self::resolve_script_path(path);
-            if !std::path::Path::new(&resolved).exists() {
-                warn!("Ingest hook script not found: {resolved}");
-            } else {
-                debug!("Ingest hook configured: {resolved}");
+        // Validate all declared hook scripts exist at startup
+        for (name, opt_path) in [
+            ("ingest", &self.ingest_script),
+            ("after_turn", &self.after_turn_script),
+            ("bootstrap", &self.bootstrap_script),
+            ("assemble", &self.assemble_script),
+            ("compact", &self.compact_script),
+            ("prepare_subagent", &self.prepare_subagent_script),
+            ("merge_subagent", &self.merge_subagent_script),
+        ] {
+            if let Some(ref path) = opt_path {
+                let resolved = Self::resolve_script_path(path);
+                if !std::path::Path::new(&resolved).exists() {
+                    warn!("{name} hook script not found: {resolved}");
+                } else {
+                    debug!("{name} hook configured: {resolved}");
+                }
             }
         }
-        if let Some(ref path) = self.after_turn_script {
-            let resolved = Self::resolve_script_path(path);
-            if !std::path::Path::new(&resolved).exists() {
-                warn!("After-turn hook script not found: {resolved}");
-            } else {
-                debug!("After-turn hook configured: {resolved}");
+
+        self.inner.bootstrap(config).await?;
+
+        // Run bootstrap script if configured
+        if let Some(ref script) = self.bootstrap_script {
+            let input = serde_json::json!({
+                "type": "bootstrap",
+                "context_window_tokens": config.context_window_tokens,
+                "stable_prefix_mode": config.stable_prefix_mode,
+                "max_recall_results": config.max_recall_results,
+            });
+            match Self::run_hook(script, self.runtime, input).await {
+                Ok(_) => debug!("Bootstrap hook completed"),
+                Err(e) => warn!("Bootstrap hook failed (non-fatal): {e}"),
             }
         }
-        self.inner.bootstrap(config).await
+
+        Ok(())
     }
 
     async fn ingest(
@@ -569,10 +598,75 @@ impl ContextEngine for ScriptableContextEngine {
         tools: &[ToolDefinition],
         context_window_tokens: usize,
     ) -> LibreFangResult<AssembleResult> {
-        // Always delegate to Rust — too performance-critical for Python
-        self.inner
-            .assemble(messages, system_prompt, tools, context_window_tokens)
-            .await
+        let Some(ref script) = self.assemble_script else {
+            return self
+                .inner
+                .assemble(messages, system_prompt, tools, context_window_tokens)
+                .await;
+        };
+
+        // Serialize messages for the script
+        let msg_values: Vec<serde_json::Value> = messages
+            .iter()
+            .map(|m| {
+                serde_json::json!({
+                    "role": serde_json::to_value(m.role).unwrap_or_default(),
+                    "content": m.content.text_content(),
+                })
+            })
+            .collect();
+
+        let input = serde_json::json!({
+            "type": "assemble",
+            "system_prompt": system_prompt,
+            "messages": msg_values,
+            "context_window_tokens": context_window_tokens,
+        });
+
+        match Self::run_hook(script, self.runtime, input).await {
+            Ok(output) => {
+                if let Some(new_msgs) = output.get("messages").and_then(|v| v.as_array()) {
+                    let assembled: Vec<Message> = new_msgs
+                        .iter()
+                        .filter_map(|v| {
+                            let role_str = v.get("role")?.as_str()?;
+                            let content =
+                                v.get("content")?.as_str().unwrap_or("").to_string();
+                            let role = serde_json::from_value(serde_json::Value::String(
+                                role_str.to_string(),
+                            ))
+                            .ok()?;
+                            Some(Message {
+                                role,
+                                content: librefang_types::message::MessageContent::text(content),
+                                pinned: false,
+                            })
+                        })
+                        .collect();
+
+                    if !assembled.is_empty() {
+                        *messages = assembled;
+                        return Ok(AssembleResult {
+                            recovery: crate::context_overflow::RecoveryStage::None,
+                        });
+                    }
+                    warn!("Assemble hook returned empty messages, falling back to default");
+                } else {
+                    warn!(
+                        "Assemble hook returned no 'messages' field, falling back to default"
+                    );
+                }
+                self.inner
+                    .assemble(messages, system_prompt, tools, context_window_tokens)
+                    .await
+            }
+            Err(e) => {
+                warn!("Assemble hook failed, falling back to default: {e}");
+                self.inner
+                    .assemble(messages, system_prompt, tools, context_window_tokens)
+                    .await
+            }
+        }
     }
 
     async fn compact(
@@ -583,10 +677,78 @@ impl ContextEngine for ScriptableContextEngine {
         model: &str,
         context_window_tokens: usize,
     ) -> LibreFangResult<CompactionResult> {
-        // Always delegate to Rust — requires LLM driver access
-        self.inner
-            .compact(agent_id, messages, driver, model, context_window_tokens)
-            .await
+        let Some(ref script) = self.compact_script else {
+            return self
+                .inner
+                .compact(agent_id, messages, driver, model, context_window_tokens)
+                .await;
+        };
+
+        let msg_values: Vec<serde_json::Value> = messages
+            .iter()
+            .map(|m| {
+                serde_json::json!({
+                    "role": serde_json::to_value(m.role).unwrap_or_default(),
+                    "content": m.content.text_content(),
+                })
+            })
+            .collect();
+
+        let input = serde_json::json!({
+            "type": "compact",
+            "agent_id": agent_id.0.to_string(),
+            "messages": msg_values,
+            "model": model,
+            "context_window_tokens": context_window_tokens,
+        });
+
+        match Self::run_hook(script, self.runtime, input).await {
+            Ok(output) => {
+                if let Some(new_msgs) = output.get("messages").and_then(|v| v.as_array()) {
+                    let compacted: Vec<Message> = new_msgs
+                        .iter()
+                        .filter_map(|v| {
+                            let role_str = v.get("role")?.as_str()?;
+                            let content =
+                                v.get("content")?.as_str().unwrap_or("").to_string();
+                            let role = serde_json::from_value(serde_json::Value::String(
+                                role_str.to_string(),
+                            ))
+                            .ok()?;
+                            Some(Message {
+                                role,
+                                content: librefang_types::message::MessageContent::text(content),
+                                pinned: false,
+                            })
+                        })
+                        .collect();
+
+                    if !compacted.is_empty() {
+                        return Ok(CompactionResult {
+                            summary: String::from("script"),
+                            kept_messages: compacted,
+                            compacted_count: messages.len(),
+                            chunks_used: 1,
+                            used_fallback: false,
+                        });
+                    }
+                    warn!("Compact hook returned empty messages, falling back to default");
+                } else {
+                    warn!(
+                        "Compact hook returned no 'messages' field, falling back to default"
+                    );
+                }
+                self.inner
+                    .compact(agent_id, messages, driver, model, context_window_tokens)
+                    .await
+            }
+            Err(e) => {
+                warn!("Compact hook failed, falling back to default: {e}");
+                self.inner
+                    .compact(agent_id, messages, driver, model, context_window_tokens)
+                    .await
+            }
+        }
     }
 
     async fn after_turn(&self, agent_id: AgentId, messages: &[Message]) -> LibreFangResult<()> {
@@ -630,6 +792,54 @@ impl ContextEngine for ScriptableContextEngine {
                 warn!("After-turn hook task panicked: {e}");
             }
         });
+
+        Ok(())
+    }
+
+    async fn prepare_subagent_context(
+        &self,
+        parent_id: AgentId,
+        child_id: AgentId,
+    ) -> LibreFangResult<()> {
+        self.inner
+            .prepare_subagent_context(parent_id, child_id)
+            .await?;
+
+        if let Some(ref script) = self.prepare_subagent_script {
+            let input = serde_json::json!({
+                "type": "prepare_subagent",
+                "parent_id": parent_id.0.to_string(),
+                "child_id": child_id.0.to_string(),
+            });
+            match Self::run_hook(script, self.runtime, input).await {
+                Ok(_) => debug!("Prepare-subagent hook completed"),
+                Err(e) => warn!("Prepare-subagent hook failed (non-fatal): {e}"),
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn merge_subagent_context(
+        &self,
+        parent_id: AgentId,
+        child_id: AgentId,
+    ) -> LibreFangResult<()> {
+        self.inner
+            .merge_subagent_context(parent_id, child_id)
+            .await?;
+
+        if let Some(ref script) = self.merge_subagent_script {
+            let input = serde_json::json!({
+                "type": "merge_subagent",
+                "parent_id": parent_id.0.to_string(),
+                "child_id": child_id.0.to_string(),
+            });
+            match Self::run_hook(script, self.runtime, input).await {
+                Ok(_) => debug!("Merge-subagent hook completed"),
+                Err(e) => warn!("Merge-subagent hook failed (non-fatal): {e}"),
+            }
+        }
 
         Ok(())
     }
@@ -735,6 +945,36 @@ pub fn load_plugin(
             .as_ref()
             .map(|p| resolve_and_sandbox(p))
             .transpose()?,
+        bootstrap: manifest
+            .hooks
+            .bootstrap
+            .as_ref()
+            .map(|p| resolve_and_sandbox(p))
+            .transpose()?,
+        assemble: manifest
+            .hooks
+            .assemble
+            .as_ref()
+            .map(|p| resolve_and_sandbox(p))
+            .transpose()?,
+        compact: manifest
+            .hooks
+            .compact
+            .as_ref()
+            .map(|p| resolve_and_sandbox(p))
+            .transpose()?,
+        prepare_subagent: manifest
+            .hooks
+            .prepare_subagent
+            .as_ref()
+            .map(|p| resolve_and_sandbox(p))
+            .transpose()?,
+        merge_subagent: manifest
+            .hooks
+            .merge_subagent
+            .as_ref()
+            .map(|p| resolve_and_sandbox(p))
+            .transpose()?,
         // Propagate the runtime tag from the plugin manifest. `None` means
         // "use the default" which resolves to Python in PluginRuntime::from_tag.
         runtime: manifest.hooks.runtime.clone(),
@@ -745,6 +985,11 @@ pub fn load_plugin(
         dir = %plugin_dir.display(),
         ingest = ?resolved_hooks.ingest,
         after_turn = ?resolved_hooks.after_turn,
+        bootstrap = ?resolved_hooks.bootstrap,
+        assemble = ?resolved_hooks.assemble,
+        compact = ?resolved_hooks.compact,
+        prepare_subagent = ?resolved_hooks.prepare_subagent,
+        merge_subagent = ?resolved_hooks.merge_subagent,
         "Loaded plugin manifest"
     );
 
