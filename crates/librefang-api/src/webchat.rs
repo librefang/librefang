@@ -16,6 +16,29 @@ use std::sync::Arc;
 /// Compile-time ETag based on the crate version.
 const ETAG: &str = concat!("\"librefang-", env!("CARGO_PKG_VERSION"), "\"");
 
+/// Loading page shown while dashboard assets are being downloaded.
+const LOADING_HTML: &str = r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<meta http-equiv="refresh" content="3">
+<title>LibreFang</title>
+<style>
+  body{font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#f8f9fa;color:#333}
+  .c{text-align:center}
+  .spinner{width:32px;height:32px;border:3px solid #e0e0e0;border-top-color:#666;border-radius:50%;animation:spin .8s linear infinite;margin:0 auto 16px}
+  @keyframes spin{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<div class="c">
+  <div class="spinner"></div>
+  <p>Downloading dashboard assets…</p>
+</div>
+</body>
+</html>"#;
+
 /// Compile-time embedded dashboard (fallback).
 static REACT_DIST: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/static/react");
 
@@ -116,8 +139,11 @@ pub async fn webchat_page(State(state): State<Arc<crate::routes::AppState>>) -> 
         )
             .into_response(),
         None => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "React dashboard build missing (expected static/react/index.html)",
+            [
+                (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+                (header::CACHE_CONTROL, "no-cache"),
+            ],
+            LOADING_HTML,
         )
             .into_response(),
     }
