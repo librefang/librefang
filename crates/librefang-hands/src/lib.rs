@@ -429,6 +429,17 @@ pub(crate) fn parse_multi_agent_entry(
         .map(|s| s.to_string());
 
     let manifest = if let Some(ref template_name) = base_ref {
+        // Validate template name: must be a simple directory name without path
+        // separators or parent-directory references to prevent path traversal.
+        if template_name.contains("..")
+            || template_name.contains('/')
+            || template_name.contains('\\')
+        {
+            return Err(format!(
+                "[agents.{role}]: invalid base template name '{template_name}': \
+                 must be a simple name without path separators"
+            ));
+        }
         // Load the base agent template and merge hand overrides on top.
         let agents_dir = agents_dir.ok_or_else(|| {
             format!(

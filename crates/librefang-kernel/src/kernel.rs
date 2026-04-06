@@ -6574,7 +6574,13 @@ system_prompt = "You are a helpful assistant."
                         }
                     }
                     // Deactivate the hand instance
-                    let _ = self.hand_registry.deactivate(instance.instance_id);
+                    if let Err(e) = self.hand_registry.deactivate(instance.instance_id) {
+                        warn!(
+                            instance_id = %instance.instance_id,
+                            error = %e,
+                            "Failed to deactivate hand instance during rollback"
+                        );
+                    }
                     return Err(e);
                 }
             };
