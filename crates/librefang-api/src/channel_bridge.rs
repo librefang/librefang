@@ -7,15 +7,7 @@ use librefang_channels::bridge::{BridgeManager, ChannelBridgeHandle};
 use librefang_channels::router::AgentRouter;
 use librefang_channels::sidecar::SidecarAdapter;
 use librefang_channels::types::{ChannelAdapter, SenderContext};
-
-/// Strict format check for recovery codes: exactly `DDDD-DDDD`.
-fn is_recovery_code_format(code: &str) -> bool {
-    let trimmed = code.trim();
-    trimmed.len() == 9
-        && trimmed.as_bytes()[4] == b'-'
-        && trimmed[..4].chars().all(|c| c.is_ascii_digit())
-        && trimmed[5..].chars().all(|c| c.is_ascii_digit())
-}
+use librefang_kernel::approval::ApprovalManager;
 
 /// Sanitize LLM/driver errors into user-friendly messages for channel delivery.
 ///
@@ -1204,7 +1196,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                         return "Too many failed TOTP attempts. Try again later.".into();
                     }
                     match totp_code {
-                        Some(code) if is_recovery_code_format(code) => {
+                        Some(code) if ApprovalManager::is_recovery_code_format(code) => {
                             // Recovery code
                             match self.kernel.vault_get("totp_recovery_codes") {
                                 Some(stored) => {

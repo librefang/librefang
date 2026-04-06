@@ -689,6 +689,15 @@ impl ApprovalManager {
             .collect()
     }
 
+    /// Check if a string matches the recovery code format: exactly `DDDD-DDDD`.
+    pub fn is_recovery_code_format(code: &str) -> bool {
+        let trimmed = code.trim();
+        trimmed.len() == 9
+            && trimmed.as_bytes()[4] == b'-'
+            && trimmed[..4].chars().all(|c| c.is_ascii_digit())
+            && trimmed[5..].chars().all(|c| c.is_ascii_digit())
+    }
+
     /// Verify a recovery code against the stored list, consuming it on success.
     ///
     /// Returns `Ok(true)` if the code matched and was consumed, `Ok(false)` if
