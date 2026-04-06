@@ -115,7 +115,15 @@ async fn run_embedded_server(
     listen_addr: SocketAddr,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
-    let (app, state) = build_router(kernel, listen_addr).await;
+    let (app, state) = build_router(kernel.clone(), listen_addr).await;
+
+    // Sync dashboard assets in background (downloads from release if outdated)
+    {
+        let home = kernel.home_dir().to_path_buf();
+        tokio::spawn(async move {
+            librefang_api::webchat::sync_dashboard(&home).await;
+        });
+    }
 
     // Convert std TcpListener → tokio TcpListener
     std_listener
