@@ -378,6 +378,42 @@ fn default_version() -> String {
     "0.0.0".to_string()
 }
 
+/// Normalize a flat-format agent TOML into nested format.
+///
+/// Legacy agent.toml may have `provider = "x"`, `model = "y"`, `system_prompt`,
+/// `max_tokens`, `temperature`, `api_key_env`, `base_url` as top-level scalars.
+/// This moves them into a `[model]` sub-table so that deep_merge with a nested
+/// overlay works correctly.
+fn normalize_flat_to_nested(value: &mut toml::Value) {
+    let table = match value.as_table_mut() {
+        Some(t) => t,
+        None => return,
+    };
+    // If `model` is already a table, the template is in nested format — nothing to do.
+    if table.get("model").map(|v| v.is_table()).unwrap_or(false) {
+        return;
+    }
+    // Collect flat model fields into a sub-table.
+    let model_keys = [
+        "provider",
+        "model",
+        "system_prompt",
+        "max_tokens",
+        "temperature",
+        "api_key_env",
+        "base_url",
+    ];
+    let mut model_table = toml::map::Map::new();
+    for key in &model_keys {
+        if let Some(val) = table.remove(*key) {
+            model_table.insert((*key).to_string(), val);
+        }
+    }
+    if !model_table.is_empty() {
+        table.insert("model".to_string(), toml::Value::Table(model_table));
+    }
+}
+
 /// Deep-merge two TOML values. `overlay` fields win over `base` fields.
 /// Tables are merged recursively; scalars and arrays in overlay replace base.
 fn deep_merge_toml(base: &mut toml::Value, overlay: &toml::Value) {
@@ -459,6 +495,12 @@ pub(crate) fn parse_multi_agent_entry(
                 template_path.display()
             )
         })?;
+
+        // Normalize flat-format base templates to nested format before merging.
+        // Legacy agent.toml files may have `provider`, `model`, `system_prompt`
+        // etc. as top-level strings. If we merge a nested `[model]` overlay onto
+        // a flat base, the flat fields get orphaned and lost after deserialization.
+        normalize_flat_to_nested(&mut base_value);
 
         // Deep-merge: hand agent fields override base template fields.
         // Remove hand-only fields before merge (they're not part of AgentManifest).
@@ -710,6 +752,13 @@ impl<'de> Deserialize<'de> for HandDefinition {
             agents_map
         } else if let Some(agent_value) = raw.agent {
             // Single-agent format: [agent] → convert to {"main": ...}
+            // `base` template references are only supported in [agents.*] format.
+            if agent_value.as_table().and_then(|t| t.get("base")).is_some() {
+                return Err(serde::de::Error::custom(
+                    "[agent] does not support `base` template references. \
+                     Use [agents.main] with `base = \"...\"` instead.",
+                ));
+            }
             let manifest =
                 parse_single_agent_section(&agent_value).map_err(serde::de::Error::custom)?;
             let mut map = BTreeMap::new();
@@ -777,6 +826,11 @@ pub(crate) fn parse_hand_definition(
         }
         agents_map
     } else if let Some(agent_value) = raw.agent {
+        if agent_value.as_table().and_then(|t| t.get("base")).is_some() {
+            return Err("[agent] does not support `base` template references. \
+                 Use [agents.main] with `base = \"...\"` instead."
+                .to_string());
+        }
         let manifest = parse_single_agent_section(&agent_value)?;
         let mut map = BTreeMap::new();
         map.insert(
