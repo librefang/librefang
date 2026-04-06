@@ -1205,7 +1205,10 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                                             let _ = self.kernel.vault_set("totp_recovery_codes", &updated);
                                             true
                                         }
-                                        Ok((false, _)) => return "Invalid recovery code.".into(),
+                                        Ok((false, _)) => {
+                                            self.kernel.approvals().record_totp_failure(sender_id);
+                                            return "Invalid recovery code.".into();
+                                        }
                                         Err(e) => return format!("Recovery code error: {e}"),
                                     }
                                 }

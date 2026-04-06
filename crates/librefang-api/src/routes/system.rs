@@ -1438,6 +1438,7 @@ pub async fn approve_request(
                                     true
                                 }
                                 Ok((false, _)) => {
+                                    state.kernel.approvals().record_totp_failure("api_admin");
                                     return ApiErrorResponse::bad_request("Invalid recovery code")
                                         .into_json_tuple()
                                         .into_response();
@@ -1766,6 +1767,12 @@ pub async fn totp_setup(
     let already_confirmed = state.kernel.vault_get("totp_confirmed").as_deref() == Some("true");
 
     if already_confirmed {
+        if state.kernel.approvals().is_totp_locked_out("api_admin") {
+            return ApiErrorResponse::bad_request(
+                "Too many failed TOTP attempts. Try again later.",
+            )
+            .into_json_tuple();
+        }
         match body.current_code.as_deref() {
             None => {
                 return ApiErrorResponse::bad_request(
@@ -1803,6 +1810,7 @@ pub async fn totp_setup(
                     }
                 };
                 if !verified {
+                    state.kernel.approvals().record_totp_failure("api_admin");
                     return ApiErrorResponse::bad_request(
                         "Invalid current_code. Provide a valid TOTP or recovery code to reset.",
                     )
@@ -1866,6 +1874,11 @@ pub async fn totp_confirm(
     State(state): State<Arc<AppState>>,
     Json(body): Json<TotpConfirmBody>,
 ) -> impl IntoResponse {
+    if state.kernel.approvals().is_totp_locked_out("api_admin") {
+        return ApiErrorResponse::bad_request("Too many failed TOTP attempts. Try again later.")
+            .into_json_tuple();
+    }
+
     let secret = match state.kernel.vault_get("totp_secret") {
         Some(s) => s,
         None => {
@@ -1888,10 +1901,13 @@ pub async fn totp_confirm(
                 ),
             )
         }
-        Ok(false) => ApiErrorResponse::bad_request(
-            "Invalid TOTP code. Check your authenticator app and try again.",
-        )
-        .into_json_tuple(),
+        Ok(false) => {
+            state.kernel.approvals().record_totp_failure("api_admin");
+            ApiErrorResponse::bad_request(
+                "Invalid TOTP code. Check your authenticator app and try again.",
+            )
+            .into_json_tuple()
+        }
         Err(e) => ApiErrorResponse::internal(e).into_json_tuple(),
     }
 }
@@ -1933,6 +1949,11 @@ pub async fn totp_revoke(
     State(state): State<Arc<AppState>>,
     Json(body): Json<TotpRevokeBody>,
 ) -> impl IntoResponse {
+    if state.kernel.approvals().is_totp_locked_out("api_admin") {
+        return ApiErrorResponse::bad_request("Too many failed TOTP attempts. Try again later.")
+            .into_json_tuple();
+    }
+
     let confirmed = state.kernel.vault_get("totp_confirmed").as_deref() == Some("true");
 
     if !confirmed {
@@ -1966,6 +1987,7 @@ pub async fn totp_revoke(
     };
 
     if !verified {
+        state.kernel.approvals().record_totp_failure("api_admin");
         return ApiErrorResponse::bad_request(
             "Invalid code. Provide a valid TOTP or recovery code.",
         )
