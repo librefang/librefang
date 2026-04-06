@@ -3096,6 +3096,10 @@ pub struct DefaultModelConfig {
     /// many seconds of silence on stdout, not wall-clock time.
     #[serde(default = "default_message_timeout_secs")]
     pub message_timeout_secs: u64,
+    /// Provider-specific extension parameters that are flattened directly
+    /// into the API request body.
+    #[serde(default, flatten)]
+    pub extra_params: HashMap<String, serde_json::Value>,
 }
 
 fn default_message_timeout_secs() -> u64 {
@@ -3110,6 +3114,7 @@ impl Default for DefaultModelConfig {
             api_key_env: String::new(),
             base_url: None,
             message_timeout_secs: default_message_timeout_secs(),
+            extra_params: HashMap::new(),
         }
     }
 }

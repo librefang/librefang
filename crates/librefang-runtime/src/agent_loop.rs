@@ -992,6 +992,11 @@ pub async fn run_agent_loop(
             prompt_caching,
             response_format: manifest.response_format.clone(),
             timeout_secs: timeout_override,
+            extra_body: if manifest.model.extra_params.is_empty() {
+                None
+            } else {
+                Some(manifest.model.extra_params.clone())
+            },
         };
 
         // Notify phase: Thinking
@@ -2576,6 +2581,11 @@ pub async fn run_agent_loop_streaming(
             prompt_caching,
             response_format: manifest.response_format.clone(),
             timeout_secs: timeout_override,
+            extra_body: if manifest.model.extra_params.is_empty() {
+                None
+            } else {
+                Some(manifest.model.extra_params.clone())
+            },
         };
 
         // Notify phase: on first iteration emit Streaming; on subsequent

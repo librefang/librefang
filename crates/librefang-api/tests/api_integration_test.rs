@@ -81,6 +81,7 @@ async fn start_test_server_with_provider(
             api_key_env: api_key_env.to_string(),
             base_url: None,
             message_timeout_secs: 300,
+            extra_params: std::collections::HashMap::new(),
         },
         ..KernelConfig::default()
     };
@@ -212,6 +213,7 @@ async fn start_full_router(api_key: &str) -> FullRouterHarness {
             api_key_env: "OLLAMA_API_KEY".to_string(),
             base_url: None,
             message_timeout_secs: 300,
+            extra_params: std::collections::HashMap::new(),
         },
         ..KernelConfig::default()
     };
@@ -1328,6 +1330,7 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
             api_key_env: "OLLAMA_API_KEY".to_string(),
             base_url: None,
             message_timeout_secs: 300,
+            extra_params: std::collections::HashMap::new(),
         },
         ..KernelConfig::default()
     };

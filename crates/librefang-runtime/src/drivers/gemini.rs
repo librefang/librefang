@@ -1268,6 +1268,7 @@ mod tests {
             prompt_caching: false,
             response_format: None,
             timeout_secs: None,
+            extra_body: None,
         };
 
         let tools = convert_tools(&request);
@@ -1289,6 +1290,7 @@ mod tests {
             prompt_caching: false,
             response_format: None,
             timeout_secs: None,
+            extra_body: None,
         };
 
         let tools = convert_tools(&request);

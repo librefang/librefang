@@ -10,6 +10,7 @@ use librefang_types::config::ResponseFormat;
 use librefang_types::message::{ContentBlock, MessageContent, Role, StopReason, TokenUsage};
 use librefang_types::tool::ToolCall;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use tracing::{debug, warn};
 use zeroize::Zeroizing;
 
@@ -115,6 +116,9 @@ struct OaiRequest {
     /// Structured output: `response_format` field (json_object or json_schema).
     #[serde(skip_serializing_if = "Option::is_none")]
     response_format: Option<serde_json::Value>,
+    /// Provider-specific extension parameters, flattened to the request top-level.
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    extra_body: Option<HashMap<String, serde_json::Value>>,
 }
 
 /// Convert a [`ResponseFormat`] into the OpenAI `response_format` JSON value.
@@ -515,6 +519,7 @@ impl OpenAIDriver {
                 .response_format
                 .as_ref()
                 .and_then(oai_response_format),
+            extra_body: request.extra_body.clone(),
         })
     }
 }
@@ -1960,5 +1965,72 @@ mod tests {
             ensure_object(input),
             serde_json::json!({"raw_input": "[1, 2, 3]"})
         );
+    }
+
+    #[test]
+    fn test_oai_request_extra_body_flattening() {
+        let mut extra = HashMap::new();
+        extra.insert("enable_memory".to_string(), serde_json::json!(true));
+
+        let req = OaiRequest {
+            model: "qwen3.6".to_string(),
+            messages: vec![OaiMessage {
+                role: "user".to_string(),
+                content: Some(OaiMessageContent::Text("hello".to_string())),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            }],
+            max_tokens: Some(4096),
+            max_completion_tokens: None,
+            temperature: Some(0.7),
+            tools: vec![],
+            tool_choice: None,
+            stream: false,
+            stream_options: None,
+            thinking: None,
+            response_format: None,
+            extra_body: Some(extra),
+        };
+
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        // extra_body keys should be at top level (flattened)
+        assert_eq!(
+            parsed.get("enable_memory").unwrap(),
+            &serde_json::json!(true)
+        );
+        assert_eq!(parsed.get("model").unwrap(), "qwen3.6");
+        // There should be no nested "extra_body" key
+        assert!(parsed.get("extra_body").is_none());
+    }
+
+    #[test]
+    fn test_oai_request_extra_body_none_skipped() {
+        let req = OaiRequest {
+            model: "test-model".to_string(),
+            messages: vec![OaiMessage {
+                role: "user".to_string(),
+                content: Some(OaiMessageContent::Text("hi".to_string())),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            }],
+            max_tokens: Some(100),
+            max_completion_tokens: None,
+            temperature: Some(0.5),
+            tools: vec![],
+            tool_choice: None,
+            stream: false,
+            stream_options: None,
+            thinking: None,
+            response_format: None,
+            extra_body: None,
+        };
+
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(parsed.get("extra_body").is_none());
     }
 }

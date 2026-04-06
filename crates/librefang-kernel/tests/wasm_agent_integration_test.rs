@@ -116,6 +116,7 @@ fn test_config(tmp: &tempfile::TempDir) -> KernelConfig {
             api_key_env: "OLLAMA_API_KEY".to_string(),
             base_url: None,
             message_timeout_secs: 300,
+            extra_params: std::collections::HashMap::new(),
         },
         ..KernelConfig::default()
     }

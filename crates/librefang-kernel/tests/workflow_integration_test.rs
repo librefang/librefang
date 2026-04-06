@@ -25,6 +25,7 @@ fn test_config(provider: &str, model: &str, api_key_env: &str) -> KernelConfig {
             api_key_env: api_key_env.to_string(),
             base_url: None,
             message_timeout_secs: 300,
+            extra_params: std::collections::HashMap::new(),
         },
         ..KernelConfig::default()
     }
