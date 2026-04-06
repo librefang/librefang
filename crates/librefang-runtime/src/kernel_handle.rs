@@ -196,6 +196,8 @@ pub trait KernelHandle: Send + Sync {
         request_id: uuid::Uuid,
         decision: librefang_types::approval::ApprovalDecision,
         decided_by: Option<String>,
+        totp_verified: bool,
+        user_id: Option<&str>,
     ) -> Result<
         (
             librefang_types::approval::ApprovalResponse,
@@ -203,7 +205,7 @@ pub trait KernelHandle: Send + Sync {
         ),
         String,
     > {
-        let _ = (request_id, decision, decided_by);
+        let _ = (request_id, decision, decided_by, totp_verified, user_id);
         Err("Approval system not available".to_string())
     }
 

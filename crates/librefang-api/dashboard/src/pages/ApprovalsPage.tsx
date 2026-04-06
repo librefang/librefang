@@ -8,6 +8,7 @@ import {
   batchResolveApprovals,
   modifyAndRetryApproval,
   queryApprovalAudit,
+  totpStatus,
   type ApprovalAuditEntry,
 } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
@@ -255,12 +256,18 @@ export function ApprovalsPage() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [modifyingId, setModifyingId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<Tab>("pending");
+  const [totpPromptId, setTotpPromptId] = useState<string | null>(null);
+  const [totpInput, setTotpInput] = useState("");
   const addToast = useUIStore((s) => s.addToast);
 
   const approvalsQuery = useQuery({ queryKey: ["approvals", "list"], queryFn: listApprovals, refetchInterval: REFRESH_MS });
+  const totpQuery = useQuery({ queryKey: ["totp", "status"], queryFn: totpStatus, staleTime: 60_000 });
+
+  const totpEnforced = totpQuery.data?.enforced ?? false;
 
   const approveMutation = useMutation({
-    mutationFn: (id: string) => approveApproval(id),
+    mutationFn: ({ id, totpCode }: { id: string; totpCode?: string }) =>
+      approveApproval(id, totpCode),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["approvals"] }),
   });
   const rejectMutation = useMutation({
@@ -272,16 +279,32 @@ export function ApprovalsPage() {
   const pendingApprovals = approvals.filter((a) => !a.status || a.status === "pending");
 
   async function handleDecision(id: string, decision: "approve" | "reject") {
+    // If TOTP is enforced and user is approving, prompt for code
+    if (decision === "approve" && totpEnforced) {
+      setTotpPromptId(id);
+      setTotpInput("");
+      return;
+    }
+    await executeDecision(id, decision);
+  }
+
+  async function handleTotpSubmit() {
+    if (!totpPromptId || totpInput.length !== 6) return;
+    await executeDecision(totpPromptId, "approve", totpInput);
+    setTotpPromptId(null);
+    setTotpInput("");
+  }
+
+  async function executeDecision(id: string, decision: "approve" | "reject", totpCode?: string) {
     setPendingId(id);
     try {
       if (decision === "approve") {
-        await approveMutation.mutateAsync(id);
+        await approveMutation.mutateAsync({ id, totpCode });
         addToast(t("approvals.approvedToast"), "success");
       } else {
         await rejectMutation.mutateAsync(id);
         addToast(t("approvals.rejectedToast"), "success");
       }
-      // Remove from selection after resolution
       setSelected((prev) => {
         const next = new Set(prev);
         next.delete(id);
@@ -386,8 +409,9 @@ export function ApprovalsPage() {
                     variant="success"
                     size="sm"
                     onClick={() => handleBatchAction("approve")}
-                    disabled={pendingId === "batch"}
+                    disabled={pendingId === "batch" || totpEnforced}
                     isLoading={pendingId === "batch"}
+                    title={totpEnforced ? "Batch approve disabled when TOTP is enforced" : undefined}
                   >
                     {t("approvals.approveSelected")}
                   </Button>
@@ -466,6 +490,40 @@ export function ApprovalsPage() {
                         </div>
                       )}
                     </div>
+                    {/* TOTP prompt */}
+                    {totpPromptId === a.id && isPending && (
+                      <div className="mt-3 flex items-center gap-2">
+                        <input
+                          type="text"
+                          inputMode="numeric"
+                          maxLength={6}
+                          pattern="[0-9]*"
+                          value={totpInput}
+                          onChange={(e) => setTotpInput(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                          placeholder="000000"
+                          className="w-28 rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono tracking-widest text-center focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none transition-colors"
+                          autoFocus
+                          onKeyDown={(e) => e.key === "Enter" && handleTotpSubmit()}
+                        />
+                        <Button
+                          variant="success"
+                          size="sm"
+                          onClick={handleTotpSubmit}
+                          disabled={totpInput.length !== 6 || pendingId === a.id}
+                          isLoading={pendingId === a.id}
+                        >
+                          {t("approvals.approve")}
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => { setTotpPromptId(null); setTotpInput(""); }}
+                        >
+                          {t("common.cancel", "Cancel")}
+                        </Button>
+                        <span className="text-xs text-text-dim">TOTP</span>
+                      </div>
+                    )}
                     {/* Modify form */}
                     {modifyingId === a.id && isPending && (
                       <ModifyForm id={a.id} onDone={() => setModifyingId(null)} />

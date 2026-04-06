@@ -1159,11 +1159,20 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                 msg.push_str(&format!("    {}\n", req.action_summary));
             }
         }
-        msg.push_str("\nUse /approve <id> or /reject <id>");
+        if self.kernel.approvals().requires_totp() {
+            msg.push_str("\nUse /approve <id> <totp-code> or /reject <id>");
+        } else {
+            msg.push_str("\nUse /approve <id> or /reject <id>");
+        }
         msg
     }
 
-    async fn resolve_approval_text(&self, id_prefix: &str, approve: bool) -> String {
+    async fn resolve_approval_text(
+        &self,
+        id_prefix: &str,
+        approve: bool,
+        totp_code: Option<&str>,
+    ) -> String {
         let pending = self.kernel.approvals().list_pending();
         let matched: Vec<_> = pending
             .iter()
@@ -1178,11 +1187,59 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                 } else {
                     librefang_types::approval::ApprovalDecision::Denied
                 };
-                match self
-                    .kernel
-                    .approvals()
-                    .resolve(req.id, decision, Some("channel".to_string()))
-                {
+
+                // Pre-verify TOTP or recovery code if required
+                let totp_verified = if approve && self.kernel.approvals().requires_totp() {
+                    if self.kernel.approvals().is_totp_locked_out("channel_user") {
+                        return "Too many failed TOTP attempts. Try again later.".into();
+                    }
+                    match totp_code {
+                        Some(code) if code.contains('-') => {
+                            // Recovery code
+                            match self.kernel.vault_get("totp_recovery_codes") {
+                                Some(stored) => {
+                                    match librefang_kernel::approval::ApprovalManager::verify_recovery_code(&stored, code) {
+                                        Ok((true, updated)) => {
+                                            let _ = self.kernel.vault_set("totp_recovery_codes", &updated);
+                                            true
+                                        }
+                                        Ok((false, _)) => return "Invalid recovery code.".into(),
+                                        Err(e) => return format!("Recovery code error: {e}"),
+                                    }
+                                }
+                                None => return "No recovery codes configured.".into(),
+                            }
+                        }
+                        Some(code) => {
+                            // TOTP code
+                            let secret = match self.kernel.vault_get("totp_secret") {
+                                Some(s) => s,
+                                None => return "TOTP not configured. Set up TOTP first.".into(),
+                            };
+                            match librefang_kernel::approval::ApprovalManager::verify_totp_code(
+                                &secret, code,
+                            ) {
+                                Ok(true) => true,
+                                Ok(false) => {
+                                    self.kernel.approvals().record_totp_failure("channel_user");
+                                    return "Invalid TOTP code.".into();
+                                }
+                                Err(e) => return format!("TOTP error: {e}"),
+                            }
+                        }
+                        None => false, // Let resolve() check grace period
+                    }
+                } else {
+                    false
+                };
+
+                match self.kernel.approvals().resolve(
+                    req.id,
+                    decision,
+                    Some("channel".to_string()),
+                    totp_verified,
+                    Some("channel_user"),
+                ) {
                     Ok(_) => {
                         let verb = if approve { "Approved" } else { "Rejected" };
                         let id_str = req.id.to_string();
@@ -1194,7 +1251,13 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                             req.agent_id
                         )
                     }
-                    Err(e) => e, // e.g. "Already approved by channel"
+                    Err(e) if e.contains("TOTP") => {
+                        format!(
+                            "TOTP code required. Use: /approve {} <6-digit-code>",
+                            id_prefix
+                        )
+                    }
+                    Err(e) => e,
                 }
             }
             n => format!("{n} approvals match '{id_prefix}'. Be more specific."),

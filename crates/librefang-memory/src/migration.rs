@@ -591,12 +591,19 @@ fn migrate_v17(conn: &Connection) -> Result<(), rusqlite::Error> {
             decided_by TEXT,
             decided_at TEXT NOT NULL,
             requested_at TEXT NOT NULL,
-            feedback TEXT
+            feedback TEXT,
+            second_factor_used INTEGER NOT NULL DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS idx_approval_audit_agent ON approval_audit(agent_id);
         CREATE INDEX IF NOT EXISTS idx_approval_audit_decided ON approval_audit(decided_at);
         ",
-    )
+    )?;
+    // Migration: add second_factor_used column (ignore error if already exists)
+    let _ = conn.execute(
+        "ALTER TABLE approval_audit ADD COLUMN second_factor_used INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    Ok(())
 }
 
 #[cfg(test)]
