@@ -656,9 +656,7 @@ fn handle_mid_turn_signal(
     messages: &mut Vec<Message>,
     tool_result_blocks: &mut Vec<ContentBlock>,
 ) -> Option<ToolResultOutcomeSummary> {
-    let Some(pending_rx) = pending_messages else {
-        return None;
-    };
+    let pending_rx = pending_messages?;
     let Ok(mut rx) = pending_rx.try_lock() else {
         return None;
     };
@@ -1216,14 +1214,48 @@ struct RecallSetup {
     memories_used: Vec<String>,
 }
 
+struct RecallSetupContext<'a> {
+    session: &'a Session,
+    user_message: &'a str,
+    memory: &'a MemorySubstrate,
+    embedding_driver: Option<&'a (dyn EmbeddingDriver + Send + Sync)>,
+    proactive_memory: Option<&'a Arc<librefang_memory::ProactiveMemoryStore>>,
+    context_engine: Option<&'a dyn ContextEngine>,
+    sender_user_id: Option<&'a str>,
+    stable_prefix_mode: bool,
+    streaming: bool,
+}
+
 struct PromptSetup {
     system_prompt: String,
     memory_context_msg: Option<String>,
 }
 
+struct PromptSetupContext<'a> {
+    manifest: &'a AgentManifest,
+    session: &'a Session,
+    kernel: Option<&'a Arc<dyn KernelHandle>>,
+    experiment_context: Option<&'a ExperimentContext>,
+    running_experiment: Option<&'a librefang_types::agent::PromptExperiment>,
+    memories: &'a [MemoryFragment],
+    stable_prefix_mode: bool,
+    streaming: bool,
+}
+
 struct PreparedMessages {
     messages: Vec<Message>,
     new_messages_start: usize,
+}
+
+struct EndTurnRetryContext<'a> {
+    text: &'a str,
+    response: &'a crate::llm_driver::CompletionResponse,
+    iteration: u32,
+    available_tools: &'a [ToolDefinition],
+    any_tools_executed: bool,
+    hallucination_retried: bool,
+    action_nudge_retried: bool,
+    user_message: &'a str,
 }
 
 fn reply_directives_from_parsed(
@@ -1285,53 +1317,43 @@ fn select_running_experiment(
     }
 }
 
-async fn setup_recalled_memories(
-    session: &Session,
-    user_message: &str,
-    memory: &MemorySubstrate,
-    embedding_driver: Option<&(dyn EmbeddingDriver + Send + Sync)>,
-    proactive_memory: Option<&Arc<librefang_memory::ProactiveMemoryStore>>,
-    context_engine: Option<&dyn ContextEngine>,
-    stable_prefix_mode: bool,
-    sender_user_id: Option<&str>,
-    streaming: bool,
-) -> RecallSetup {
-    let mut memories = if let Some(engine) = context_engine {
+async fn setup_recalled_memories(ctx: RecallSetupContext<'_>) -> RecallSetup {
+    let mut memories = if let Some(engine) = ctx.context_engine {
         recall_or_default(
             engine
-                .ingest(session.agent_id, user_message, sender_user_id)
+                .ingest(ctx.session.agent_id, ctx.user_message, ctx.sender_user_id)
                 .await
                 .map(|r| r.recalled_memories),
-            if streaming {
+            if ctx.streaming {
                 "Context engine ingest failed (streaming); continuing without recalled memories"
             } else {
                 "Context engine ingest failed; continuing without recalled memories"
             },
         )
-    } else if stable_prefix_mode {
+    } else if ctx.stable_prefix_mode {
         Vec::new()
-    } else if let Some(emb) = embedding_driver {
-        match emb.embed_one(user_message).await {
+    } else if let Some(emb) = ctx.embedding_driver {
+        match emb.embed_one(ctx.user_message).await {
             Ok(query_vec) => {
-                if streaming {
+                if ctx.streaming {
                     debug!("Using vector recall (streaming, dims={})", query_vec.len());
                 } else {
                     debug!("Using vector recall (dims={})", query_vec.len());
                 }
                 recall_or_default(
-                    memory
+                    ctx.memory
                         .recall_with_embedding_async(
-                            user_message,
+                            ctx.user_message,
                             5,
                             Some(MemoryFilter {
-                                agent_id: Some(session.agent_id),
-                                peer_id: sender_user_id.map(str::to_owned),
+                                agent_id: Some(ctx.session.agent_id),
+                                peer_id: ctx.sender_user_id.map(str::to_owned),
                                 ..Default::default()
                             }),
                             Some(&query_vec),
                         )
                         .await,
-                    if streaming {
+                    if ctx.streaming {
                         "Vector memory recall failed (streaming); continuing without recalled memories"
                     } else {
                         "Vector memory recall failed; continuing without recalled memories"
@@ -1339,24 +1361,24 @@ async fn setup_recalled_memories(
                 )
             }
             Err(e) => {
-                if streaming {
+                if ctx.streaming {
                     warn!("Embedding recall failed (streaming), falling back to text search: {e}");
                 } else {
                     warn!("Embedding recall failed, falling back to text search: {e}");
                 }
                 recall_or_default(
-                    memory
+                    ctx.memory
                         .recall(
-                            user_message,
+                            ctx.user_message,
                             5,
                             Some(MemoryFilter {
-                                agent_id: Some(session.agent_id),
-                                peer_id: sender_user_id.map(str::to_owned),
+                                agent_id: Some(ctx.session.agent_id),
+                                peer_id: ctx.sender_user_id.map(str::to_owned),
                                 ..Default::default()
                             }),
                         )
                         .await,
-                    if streaming {
+                    if ctx.streaming {
                         "Text memory recall failed after embedding fallback (streaming); continuing without recalled memories"
                     } else {
                         "Text memory recall failed after embedding fallback; continuing without recalled memories"
@@ -1366,18 +1388,18 @@ async fn setup_recalled_memories(
         }
     } else {
         recall_or_default(
-            memory
+            ctx.memory
                 .recall(
-                    user_message,
+                    ctx.user_message,
                     5,
                     Some(MemoryFilter {
-                        agent_id: Some(session.agent_id),
-                        peer_id: sender_user_id.map(str::to_owned),
+                        agent_id: Some(ctx.session.agent_id),
+                        peer_id: ctx.sender_user_id.map(str::to_owned),
                         ..Default::default()
                     }),
                 )
                 .await,
-            if streaming {
+            if ctx.streaming {
                 "Text memory recall failed (streaming); continuing without recalled memories"
             } else {
                 "Text memory recall failed; continuing without recalled memories"
@@ -1385,15 +1407,15 @@ async fn setup_recalled_memories(
         )
     };
 
-    if !stable_prefix_mode {
-        if let Some(pm_store_arc) = proactive_memory {
-            let user_id = session.agent_id.0.to_string();
+    if !ctx.stable_prefix_mode {
+        if let Some(pm_store_arc) = ctx.proactive_memory {
+            let user_id = ctx.session.agent_id.0.to_string();
             match pm_store_arc
-                .auto_retrieve(&user_id, user_message, sender_user_id)
+                .auto_retrieve(&user_id, ctx.user_message, ctx.sender_user_id)
                 .await
             {
                 Ok(pm_memories) if !pm_memories.is_empty() => {
-                    if streaming {
+                    if ctx.streaming {
                         debug!(
                             "Proactive memory (streaming) retrieved {} items",
                             pm_memories.len()
@@ -1403,20 +1425,20 @@ async fn setup_recalled_memories(
                     }
                     let pm_fragments: Vec<_> = pm_memories
                         .into_iter()
-                        .map(|item| proactive_item_to_fragment(item, session.agent_id))
+                        .map(|item| proactive_item_to_fragment(item, ctx.session.agent_id))
                         .filter(|frag| !memories.iter().any(|m| m.content == frag.content))
                         .collect();
                     memories.extend(pm_fragments);
                 }
                 Ok(_) => {
-                    if streaming {
+                    if ctx.streaming {
                         debug!("No proactive memories retrieved (streaming)");
                     } else {
                         debug!("No proactive memories retrieved");
                     }
                 }
                 Err(e) => {
-                    if streaming {
+                    if ctx.streaming {
                         warn!("Proactive memory auto_retrieve failed (streaming): {e}");
                     } else {
                         warn!("Proactive memory auto_retrieve failed: {e}");
@@ -1433,36 +1455,31 @@ async fn setup_recalled_memories(
     }
 }
 
-fn build_prompt_setup(
-    manifest: &AgentManifest,
-    session: &Session,
-    kernel: Option<&Arc<dyn KernelHandle>>,
-    experiment_context: Option<&ExperimentContext>,
-    running_experiment: Option<&librefang_types::agent::PromptExperiment>,
-    memories: &[MemoryFragment],
-    stable_prefix_mode: bool,
-    streaming: bool,
-) -> PromptSetup {
-    let mut system_prompt = manifest.model.system_prompt.clone();
+fn build_prompt_setup(ctx: PromptSetupContext<'_>) -> PromptSetup {
+    let mut system_prompt = ctx.manifest.model.system_prompt.clone();
 
-    if let Some(kernel) = kernel {
-        let _ = kernel.auto_track_prompt_version(session.agent_id, &system_prompt);
+    if let Some(kernel) = ctx.kernel {
+        let _ = kernel.auto_track_prompt_version(ctx.session.agent_id, &system_prompt);
     }
 
-    if let Some(ctx) = experiment_context {
-        if let Some(exp) = running_experiment {
-            if let Some(kernel) = kernel {
-                if let Some(variant) = exp.variants.iter().find(|v| v.id == ctx.variant_id) {
+    if let Some(experiment_context) = ctx.experiment_context {
+        if let Some(exp) = ctx.running_experiment {
+            if let Some(kernel) = ctx.kernel {
+                if let Some(variant) = exp
+                    .variants
+                    .iter()
+                    .find(|v| v.id == experiment_context.variant_id)
+                {
                     if let Ok(Some(prompt_version)) =
                         kernel.get_prompt_version(&variant.prompt_version_id.to_string())
                     {
                         debug!(
-                            agent = %manifest.name,
+                            agent = %ctx.manifest.name,
                             experiment = %exp.name,
                             variant = %variant.name,
                             version = prompt_version.version,
                             "Using experiment variant prompt version{}",
-                            if streaming { " (streaming)" } else { "" }
+                            if ctx.streaming { " (streaming)" } else { "" }
                         );
                         system_prompt = prompt_version.system_prompt.clone();
                     }
@@ -1471,12 +1488,13 @@ fn build_prompt_setup(
         }
     }
 
-    let memory_context_msg = if !memories.is_empty() {
-        let mem_pairs: Vec<(String, String)> = memories
+    let memory_context_msg = if !ctx.memories.is_empty() {
+        let mem_pairs: Vec<(String, String)> = ctx
+            .memories
             .iter()
             .map(|m| (String::new(), m.content.clone()))
             .collect();
-        if stable_prefix_mode {
+        if ctx.stable_prefix_mode {
             let personal_ctx =
                 crate::prompt_builder::format_memory_items_as_personal_context(&mem_pairs);
             Some(personal_ctx)
@@ -1600,41 +1618,32 @@ enum EndTurnRetry {
     ActionIntent,
 }
 
-fn classify_end_turn_retry(
-    text: &str,
-    response: &crate::llm_driver::CompletionResponse,
-    iteration: u32,
-    available_tools: &[ToolDefinition],
-    any_tools_executed: bool,
-    hallucination_retried: bool,
-    action_nudge_retried: bool,
-    user_message: &str,
-) -> Option<EndTurnRetry> {
-    if text.trim().is_empty() && response.tool_calls.is_empty() {
+fn classify_end_turn_retry(ctx: EndTurnRetryContext<'_>) -> Option<EndTurnRetry> {
+    if ctx.text.trim().is_empty() && ctx.response.tool_calls.is_empty() {
         let is_silent_failure =
-            response.usage.input_tokens == 0 && response.usage.output_tokens == 0;
-        if iteration == 0 || is_silent_failure {
+            ctx.response.usage.input_tokens == 0 && ctx.response.usage.output_tokens == 0;
+        if ctx.iteration == 0 || is_silent_failure {
             return Some(EndTurnRetry::EmptyResponse { is_silent_failure });
         }
     }
 
-    if !text.trim().is_empty()
-        && response.tool_calls.is_empty()
-        && !available_tools.is_empty()
-        && !any_tools_executed
-        && !hallucination_retried
-        && looks_like_hallucinated_action(text)
+    if !ctx.text.trim().is_empty()
+        && ctx.response.tool_calls.is_empty()
+        && !ctx.available_tools.is_empty()
+        && !ctx.any_tools_executed
+        && !ctx.hallucination_retried
+        && looks_like_hallucinated_action(ctx.text)
     {
         return Some(EndTurnRetry::HallucinatedAction);
     }
 
-    if !text.trim().is_empty()
-        && response.tool_calls.is_empty()
-        && !available_tools.is_empty()
-        && !any_tools_executed
-        && !action_nudge_retried
-        && !hallucination_retried
-        && user_message_has_action_intent(user_message)
+    if !ctx.text.trim().is_empty()
+        && ctx.response.tool_calls.is_empty()
+        && !ctx.available_tools.is_empty()
+        && !ctx.any_tools_executed
+        && !ctx.action_nudge_retried
+        && !ctx.hallucination_retried
+        && user_message_has_action_intent(ctx.user_message)
     {
         return Some(EndTurnRetry::ActionIntent);
     }
@@ -1882,17 +1891,17 @@ pub async fn run_agent_loop(
     let RecallSetup {
         memories,
         memories_used,
-    } = setup_recalled_memories(
+    } = setup_recalled_memories(RecallSetupContext {
         session,
         user_message,
         memory,
         embedding_driver,
-        proactive_memory.as_ref(),
+        proactive_memory: proactive_memory.as_ref(),
         context_engine,
+        sender_user_id: sender_user_id.as_deref(),
         stable_prefix_mode,
-        sender_user_id.as_deref(),
-        false,
-    )
+        streaming: false,
+    })
     .await;
 
     // Fire BeforePromptBuild hook
@@ -1911,16 +1920,16 @@ pub async fn run_agent_loop(
     let PromptSetup {
         system_prompt,
         memory_context_msg,
-    } = build_prompt_setup(
+    } = build_prompt_setup(PromptSetupContext {
         manifest,
         session,
-        kernel.as_ref(),
-        experiment_context.as_ref(),
-        running_experiment.as_ref(),
-        &memories,
+        kernel: kernel.as_ref(),
+        experiment_context: experiment_context.as_ref(),
+        running_experiment: running_experiment.as_ref(),
+        memories: &memories,
         stable_prefix_mode,
-        false,
-    );
+        streaming: false,
+    });
 
     // Mutable collector for memories saved during this turn (populated by auto_memorize).
     let memories_saved: Vec<String> = Vec::new();
@@ -2084,16 +2093,16 @@ pub async fn run_agent_loop(
                     ));
                 }
 
-                match classify_end_turn_retry(
-                    &text,
-                    &response,
+                match classify_end_turn_retry(EndTurnRetryContext {
+                    text: &text,
+                    response: &response,
                     iteration,
                     available_tools,
                     any_tools_executed,
                     hallucination_retried,
                     action_nudge_retried,
                     user_message,
-                ) {
+                }) {
                     Some(EndTurnRetry::EmptyResponse { is_silent_failure }) => {
                         warn!(
                             agent = %manifest.name,
@@ -2283,31 +2292,32 @@ pub async fn run_agent_loop(
                     &mut consecutive_all_failed,
                     iteration_outcomes,
                 );
-                if consecutive_all_failed > 0 && hard_error_count > 0 {
-                    if consecutive_all_failed >= MAX_CONSECUTIVE_ALL_FAILED {
-                        warn!(
-                            agent = %manifest.name,
-                            consecutive_all_failed,
-                            hard_error_count,
-                            "Tool failures in {MAX_CONSECUTIVE_ALL_FAILED} consecutive iterations — exiting loop"
-                        );
-                        let ctx = crate::hooks::HookContext {
-                            agent_name: &manifest.name,
-                            agent_id: agent_id_str.as_str(),
-                            event: librefang_types::agent::HookEvent::AgentLoopEnd,
-                            data: serde_json::json!({
-                                "iterations": iteration + 1,
-                                "reason": "tool_failure",
-                                "error_count": hard_error_count,
-                                "consecutive_all_failed": consecutive_all_failed,
-                            }),
-                        };
-                        fire_hook_best_effort(hooks, &ctx);
-                        return Err(LibreFangError::RepeatedToolFailures {
-                            iterations: consecutive_all_failed,
-                            error_count: hard_error_count,
-                        });
-                    }
+                if consecutive_all_failed > 0
+                    && hard_error_count > 0
+                    && consecutive_all_failed >= MAX_CONSECUTIVE_ALL_FAILED
+                {
+                    warn!(
+                        agent = %manifest.name,
+                        consecutive_all_failed,
+                        hard_error_count,
+                        "Tool failures in {MAX_CONSECUTIVE_ALL_FAILED} consecutive iterations — exiting loop"
+                    );
+                    let ctx = crate::hooks::HookContext {
+                        agent_name: &manifest.name,
+                        agent_id: agent_id_str.as_str(),
+                        event: librefang_types::agent::HookEvent::AgentLoopEnd,
+                        data: serde_json::json!({
+                            "iterations": iteration + 1,
+                            "reason": "tool_failure",
+                            "error_count": hard_error_count,
+                            "consecutive_all_failed": consecutive_all_failed,
+                        }),
+                    };
+                    fire_hook_best_effort(hooks, &ctx);
+                    return Err(LibreFangError::RepeatedToolFailures {
+                        iterations: consecutive_all_failed,
+                        error_count: hard_error_count,
+                    });
                 }
             }
             StopReason::MaxTokens => {
@@ -2709,17 +2719,17 @@ pub async fn run_agent_loop_streaming(
     let RecallSetup {
         memories,
         memories_used,
-    } = setup_recalled_memories(
+    } = setup_recalled_memories(RecallSetupContext {
         session,
         user_message,
         memory,
         embedding_driver,
-        proactive_memory.as_ref(),
+        proactive_memory: proactive_memory.as_ref(),
         context_engine,
+        sender_user_id: sender_user_id.as_deref(),
         stable_prefix_mode,
-        sender_user_id.as_deref(),
-        true,
-    )
+        streaming: true,
+    })
     .await;
 
     // Fire BeforePromptBuild hook
@@ -2738,16 +2748,16 @@ pub async fn run_agent_loop_streaming(
     let PromptSetup {
         system_prompt,
         memory_context_msg,
-    } = build_prompt_setup(
+    } = build_prompt_setup(PromptSetupContext {
         manifest,
         session,
-        kernel.as_ref(),
-        experiment_context.as_ref(),
-        running_experiment.as_ref(),
-        &memories,
+        kernel: kernel.as_ref(),
+        experiment_context: experiment_context.as_ref(),
+        running_experiment: running_experiment.as_ref(),
+        memories: &memories,
         stable_prefix_mode,
-        true,
-    );
+        streaming: true,
+    });
 
     // Mutable collector for memories saved during this turn (populated by auto_memorize).
     let memories_saved: Vec<String> = Vec::new();
@@ -2968,16 +2978,16 @@ pub async fn run_agent_loop_streaming(
                     ));
                 }
 
-                match classify_end_turn_retry(
-                    &text,
-                    &response,
+                match classify_end_turn_retry(EndTurnRetryContext {
+                    text: &text,
+                    response: &response,
                     iteration,
                     available_tools,
                     any_tools_executed,
                     hallucination_retried,
                     action_nudge_retried,
                     user_message,
-                ) {
+                }) {
                     Some(EndTurnRetry::EmptyResponse { is_silent_failure }) => {
                         warn!(
                             agent = %manifest.name,
@@ -3178,31 +3188,32 @@ pub async fn run_agent_loop_streaming(
                     &mut consecutive_all_failed,
                     iteration_outcomes,
                 );
-                if consecutive_all_failed > 0 && hard_error_count > 0 {
-                    if consecutive_all_failed >= MAX_CONSECUTIVE_ALL_FAILED {
-                        warn!(
-                            agent = %manifest.name,
-                            consecutive_all_failed,
-                            hard_error_count,
-                            "Tool failures in {MAX_CONSECUTIVE_ALL_FAILED} consecutive iterations — exiting streaming loop"
-                        );
-                        let ctx = crate::hooks::HookContext {
-                            agent_name: &manifest.name,
-                            agent_id: agent_id_str.as_str(),
-                            event: librefang_types::agent::HookEvent::AgentLoopEnd,
-                            data: serde_json::json!({
-                                "iterations": iteration + 1,
-                                "reason": "tool_failure",
-                                "error_count": hard_error_count,
-                                "consecutive_all_failed": consecutive_all_failed,
-                            }),
-                        };
-                        fire_hook_best_effort(hooks, &ctx);
-                        return Err(LibreFangError::RepeatedToolFailures {
-                            iterations: consecutive_all_failed,
-                            error_count: hard_error_count,
-                        });
-                    }
+                if consecutive_all_failed > 0
+                    && hard_error_count > 0
+                    && consecutive_all_failed >= MAX_CONSECUTIVE_ALL_FAILED
+                {
+                    warn!(
+                        agent = %manifest.name,
+                        consecutive_all_failed,
+                        hard_error_count,
+                        "Tool failures in {MAX_CONSECUTIVE_ALL_FAILED} consecutive iterations — exiting streaming loop"
+                    );
+                    let ctx = crate::hooks::HookContext {
+                        agent_name: &manifest.name,
+                        agent_id: agent_id_str.as_str(),
+                        event: librefang_types::agent::HookEvent::AgentLoopEnd,
+                        data: serde_json::json!({
+                            "iterations": iteration + 1,
+                            "reason": "tool_failure",
+                            "error_count": hard_error_count,
+                            "consecutive_all_failed": consecutive_all_failed,
+                        }),
+                    };
+                    fire_hook_best_effort(hooks, &ctx);
+                    return Err(LibreFangError::RepeatedToolFailures {
+                        iterations: consecutive_all_failed,
+                        error_count: hard_error_count,
+                    });
                 }
             }
             StopReason::MaxTokens => {
@@ -4680,7 +4691,7 @@ mod tests {
         assert_eq!(messages.len(), 2);
         match &session.messages[0].content {
             MessageContent::Blocks(blocks) => {
-                assert!(blocks.len() >= 1);
+                assert!(!blocks.is_empty());
                 match &blocks[0] {
                     ContentBlock::ToolResult {
                         tool_use_id,
