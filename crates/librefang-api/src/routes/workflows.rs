@@ -1359,20 +1359,47 @@ pub async fn update_schedule(
     if let Some(name) = req.get("name") {
         updates.insert("name".to_string(), name.clone());
     }
+    // Read tz from the request (if provided).  When the caller sends
+    // a new `cron` expression we must carry over the timezone — otherwise
+    // replacing the entire schedule object would reset tz to null.
+    let req_tz = req
+        .get("tz")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+
     if let Some(cron) = req.get("cron").and_then(|v| v.as_str()) {
         let cron_parts: Vec<&str> = cron.split_whitespace().collect();
         if cron_parts.len() != 5 {
             return ApiErrorResponse::bad_request("Invalid cron expression").into_json_tuple();
         }
-        let tz = req
-            .get("tz")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string());
+        // If tz not in this request, preserve the existing tz from the job.
+        let tz = req_tz.clone().or_else(|| {
+            state.kernel.cron().get_meta(job_id).and_then(|meta| {
+                if let librefang_types::scheduler::CronSchedule::Cron { tz, .. } =
+                    &meta.job.schedule
+                {
+                    tz.clone()
+                } else {
+                    None
+                }
+            })
+        });
         updates.insert(
             "schedule".to_string(),
             serde_json::json!({"kind": "cron", "expr": cron, "tz": tz}),
         );
+    } else if req_tz.is_some() {
+        // Caller wants to change only the timezone — read current cron expr.
+        if let Some(meta) = state.kernel.cron().get_meta(job_id) {
+            if let librefang_types::scheduler::CronSchedule::Cron { expr, .. } = &meta.job.schedule
+            {
+                updates.insert(
+                    "schedule".to_string(),
+                    serde_json::json!({"kind": "cron", "expr": expr, "tz": req_tz}),
+                );
+            }
+        }
     }
     if let Some(agent_id) = req.get("agent_id") {
         updates.insert("agent_id".to_string(), agent_id.clone());
