@@ -1249,6 +1249,10 @@ mod tests {
             }],
             timeout_fallback: TimeoutFallback::default(),
             routing: Vec::new(),
+            second_factor: SecondFactor::default(),
+            totp_issuer: "LibreFang".into(),
+            totp_grace_period_secs: 300,
+            totp_tools: Vec::new(),
         };
         let json = serde_json::to_string(&policy).unwrap();
         let back: ApprovalPolicy = serde_json::from_str(&json).unwrap();
@@ -1586,6 +1590,7 @@ mod tests {
             decided_at: "2024-01-01T00:00:00Z".into(),
             requested_at: "2024-01-01T00:00:00Z".into(),
             feedback: None,
+            second_factor_used: false,
         };
         let json = serde_json::to_string(&entry).unwrap();
         let back: ApprovalAuditEntry = serde_json::from_str(&json).unwrap();

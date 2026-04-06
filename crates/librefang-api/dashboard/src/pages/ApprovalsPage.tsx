@@ -288,8 +288,12 @@ export function ApprovalsPage() {
     await executeDecision(id, decision);
   }
 
+  // Accept 6-digit TOTP codes or xxxx-xxxx recovery codes
+  const isValidTotpOrRecovery = (v: string) =>
+    /^\d{6}$/.test(v) || /^\d{4}-\d{4}$/.test(v);
+
   async function handleTotpSubmit() {
-    if (!totpPromptId || totpInput.length !== 6) return;
+    if (!totpPromptId || !isValidTotpOrRecovery(totpInput)) return;
     await executeDecision(totpPromptId, "approve", totpInput);
     setTotpPromptId(null);
     setTotpInput("");
@@ -495,13 +499,11 @@ export function ApprovalsPage() {
                       <div className="mt-3 flex items-center gap-2">
                         <input
                           type="text"
-                          inputMode="numeric"
-                          maxLength={6}
-                          pattern="[0-9]*"
+                          maxLength={9}
                           value={totpInput}
-                          onChange={(e) => setTotpInput(e.target.value.replace(/\D/g, "").slice(0, 6))}
-                          placeholder="000000"
-                          className="w-28 rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono tracking-widest text-center focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none transition-colors"
+                          onChange={(e) => setTotpInput(e.target.value.replace(/[^0-9-]/g, "").slice(0, 9))}
+                          placeholder="000000 / 0000-0000"
+                          className="w-40 rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono tracking-widest text-center focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none transition-colors"
                           autoFocus
                           onKeyDown={(e) => e.key === "Enter" && handleTotpSubmit()}
                         />
@@ -509,7 +511,7 @@ export function ApprovalsPage() {
                           variant="success"
                           size="sm"
                           onClick={handleTotpSubmit}
-                          disabled={totpInput.length !== 6 || pendingId === a.id}
+                          disabled={!isValidTotpOrRecovery(totpInput) || pendingId === a.id}
                           isLoading={pendingId === a.id}
                         >
                           {t("approvals.approve")}

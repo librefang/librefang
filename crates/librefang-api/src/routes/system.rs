@@ -81,8 +81,9 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             axum::routing::post(
                 |state: State<Arc<AppState>>,
                  id: Path<String>,
-                 lang: Option<axum::Extension<RequestLanguage>>| async move {
-                    approve_request(state, id, lang).await
+                 lang: Option<axum::Extension<RequestLanguage>>,
+                 body: Json<ApproveRequestBody>| async move {
+                    approve_request(state, id, lang, body).await
                 },
             ),
         )
@@ -1914,14 +1915,20 @@ pub async fn totp_revoke(
         return ApiErrorResponse::bad_request("TOTP is not enrolled.").into_json_tuple();
     }
 
-    // Verify the provided code
+    // Verify the provided code (recovery codes are consumed on use)
     let verified = if body.code.contains('-') {
         match state.kernel.vault_get("totp_recovery_codes") {
-            Some(stored) => librefang_kernel::approval::ApprovalManager::verify_recovery_code(
-                &stored, &body.code,
-            )
-            .map(|(ok, _)| ok)
-            .unwrap_or(false),
+            Some(stored) => {
+                match librefang_kernel::approval::ApprovalManager::verify_recovery_code(
+                    &stored, &body.code,
+                ) {
+                    Ok((true, updated)) => {
+                        let _ = state.kernel.vault_set("totp_recovery_codes", &updated);
+                        true
+                    }
+                    _ => false,
+                }
+            }
             None => false,
         }
     } else {

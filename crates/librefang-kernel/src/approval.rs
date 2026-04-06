@@ -675,7 +675,7 @@ impl ApprovalManager {
 
     /// Generate 8 random recovery codes (format: xxxx-xxxx).
     pub fn generate_recovery_codes() -> Vec<String> {
-        use rand::Rng;
+        use rand::RngExt;
         let mut rng = rand::rng();
         (0..8)
             .map(|_| {
@@ -1391,7 +1391,7 @@ mod tests {
         assert!(!id.is_nil());
 
         // Cleanup
-        let _ = mgr.resolve(id, ApprovalDecision::Denied, None);
+        let _ = mgr.resolve(id, ApprovalDecision::Denied, None, false, None);
     }
 
     #[tokio::test]
@@ -1412,8 +1412,9 @@ mod tests {
         let id = mgr.submit_request(req, deferred.clone()).unwrap();
 
         // Verify deferred is stored by resolving and checking the returned deferred
-        let (response, returned_deferred) =
-            mgr.resolve(id, ApprovalDecision::Denied, None).unwrap();
+        let (response, returned_deferred) = mgr
+            .resolve(id, ApprovalDecision::Denied, None, false, None)
+            .unwrap();
         assert_eq!(response.decision, ApprovalDecision::Denied);
         assert!(returned_deferred.is_some());
         let stored = returned_deferred.unwrap();
@@ -1443,7 +1444,13 @@ mod tests {
 
         // Resolve and verify atomic return
         let (response, returned_deferred) = mgr
-            .resolve(id, ApprovalDecision::Approved, Some("admin".to_string()))
+            .resolve(
+                id,
+                ApprovalDecision::Approved,
+                Some("admin".to_string()),
+                false,
+                None,
+            )
             .unwrap();
         assert_eq!(response.decision, ApprovalDecision::Approved);
         assert!(returned_deferred.is_some());
@@ -1556,7 +1563,7 @@ mod tests {
         assert!(result.unwrap_err().contains("Duplicate"));
 
         // Cleanup
-        let _ = mgr.resolve(id1, ApprovalDecision::Denied, None);
+        let _ = mgr.resolve(id1, ApprovalDecision::Denied, None, false, None);
     }
 
     #[tokio::test]
@@ -1589,8 +1596,8 @@ mod tests {
 
         let id2 = mgr.submit_request(req2, deferred2).unwrap();
 
-        let _ = mgr.resolve(id1, ApprovalDecision::Denied, None);
-        let _ = mgr.resolve(id2, ApprovalDecision::Denied, None);
+        let _ = mgr.resolve(id1, ApprovalDecision::Denied, None, false, None);
+        let _ = mgr.resolve(id2, ApprovalDecision::Denied, None, false, None);
     }
 
     #[tokio::test]
@@ -1648,9 +1655,9 @@ mod tests {
 
         // Cleanup
         for id in ids {
-            let _ = mgr.resolve(id, ApprovalDecision::Denied, None);
+            let _ = mgr.resolve(id, ApprovalDecision::Denied, None, false, None);
         }
-        let _ = mgr.resolve(result.unwrap(), ApprovalDecision::Denied, None);
+        let _ = mgr.resolve(result.unwrap(), ApprovalDecision::Denied, None, false, None);
     }
 
     #[test]
@@ -1828,7 +1835,7 @@ mod tests {
             totp_grace_period_secs: 0,
             ..Default::default()
         };
-        let mgr = ApprovalManager::new(policy);
+        let mgr = ApprovalManager::new(policy.clone());
         // Even after recording grace, zero period means no grace
         mgr.record_totp_grace("admin");
         assert!(!mgr.is_within_totp_grace("admin", &policy));
