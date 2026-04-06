@@ -1269,6 +1269,7 @@ export async function updateSchedule(
     enabled?: boolean;
     name?: string;
     cron?: string;
+    tz?: string;
     agent_id?: string;
     message?: string;
   }

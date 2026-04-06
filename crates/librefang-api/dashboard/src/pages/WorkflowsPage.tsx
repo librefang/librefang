@@ -612,6 +612,7 @@ export function WorkflowsPage() {
           title={t("nav.scheduler")}
           subtitle={workflows.find(w => w.id === scheduleWorkflowId)?.name}
           initialCron={(workflows.find(w => w.id === scheduleWorkflowId) as any)?.schedule?.cron || "0 9 * * *"}
+          initialTz={(workflows.find(w => w.id === scheduleWorkflowId) as any)?.schedule?.tz}
           onSave={async (cron, tz) => {
             const wf = workflows.find(w => w.id === scheduleWorkflowId);
             try {
