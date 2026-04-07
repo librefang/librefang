@@ -2267,6 +2267,51 @@ pub struct ContextEngineHooks {
     /// a vector database). Set higher if your hooks do heavy I/O at startup.
     #[serde(default)]
     pub hook_timeout_secs: Option<u64>,
+    /// What to do when a hook script fails (crash, timeout, bad JSON).
+    ///
+    /// - `"warn"` (default) — log a warning, continue with fallback behaviour.
+    /// - `"abort"` — propagate the error to the caller; the agent turn fails.
+    /// - `"skip"` — silently ignore the failure, no log, use fallback.
+    #[serde(default)]
+    pub on_hook_failure: HookFailurePolicy,
+    /// How many times to retry a failing hook before applying `on_hook_failure`.
+    ///
+    /// Defaults to `0` (no retries). Each retry respects the same timeout.
+    /// Useful for hooks that call flaky external services.
+    #[serde(default)]
+    pub max_retries: u32,
+    /// Milliseconds to wait between hook retries.
+    ///
+    /// Defaults to `500`. Ignored when `max_retries = 0`.
+    #[serde(default = "default_hook_retry_delay_ms")]
+    pub retry_delay_ms: u64,
+    /// Optional substring filter for the `ingest` hook.
+    ///
+    /// When set, the ingest hook is only invoked if the incoming user message
+    /// contains this string (case-sensitive). If the message does not match,
+    /// the default recall path runs without starting a subprocess.
+    ///
+    /// Example: `ingest_filter = "remember"` — only index messages that
+    /// explicitly ask the agent to remember something.
+    #[serde(default)]
+    pub ingest_filter: Option<String>,
+}
+
+fn default_hook_retry_delay_ms() -> u64 {
+    500
+}
+
+/// What to do when a hook script invocation fails.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HookFailurePolicy {
+    /// Log a warning and continue with the engine's built-in fallback (default).
+    #[default]
+    Warn,
+    /// Propagate the error to the caller — the current agent operation fails.
+    Abort,
+    /// Silently ignore the failure and proceed with fallback, no log emitted.
+    Skip,
 }
 
 /// Plugin manifest — parsed from `~/.librefang/plugins/<name>/plugin.toml`.
@@ -2315,6 +2360,17 @@ pub struct PluginManifest {
     /// ```
     #[serde(default)]
     pub env: std::collections::HashMap<String, String>,
+    /// Minimum LibreFang version required by this plugin.
+    ///
+    /// The runtime refuses to load the plugin when the running daemon's version
+    /// is lower than this string (compared lexicographically on the semver
+    /// portion before any `-` pre-release suffix). Omit to allow all versions.
+    ///
+    /// ```toml
+    /// librefang_min_version = "2026.4.0"
+    /// ```
+    #[serde(default)]
+    pub librefang_min_version: Option<String>,
 }
 
 /// client_secret_env = "GITHUB_OAUTH_CLIENT_SECRET"

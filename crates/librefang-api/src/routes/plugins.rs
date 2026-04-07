@@ -9,6 +9,7 @@ use std::sync::Arc;
 use super::AppState;
 
 use crate::types::ApiErrorResponse;
+use librefang_runtime::context_engine::ContextEngine as _;
 /// Build routes for the context engine plugin domain.
 pub fn router() -> axum::Router<Arc<AppState>> {
     axum::Router::new()
@@ -23,12 +24,20 @@ pub fn router() -> axum::Router<Arc<AppState>> {
         .route("/plugins/doctor", axum::routing::get(plugin_doctor))
         .route("/plugins/{name}", axum::routing::get(get_plugin))
         .route(
+            "/plugins/{name}/status",
+            axum::routing::get(plugin_status),
+        )
+        .route(
             "/plugins/{name}/install-deps",
             axum::routing::post(install_plugin_deps),
         )
         .route(
             "/plugins/{name}/reload",
             axum::routing::post(reload_plugin),
+        )
+        .route(
+            "/context-engine/metrics",
+            axum::routing::get(context_engine_metrics),
         )
 }
 
@@ -356,6 +365,80 @@ pub async fn reload_plugin(Path(name): Path<String>) -> impl IntoResponse {
         )
             .into_response(),
         Err(e) => ApiErrorResponse::bad_request(e).into_response(),
+    }
+}
+
+/// GET /api/plugins/:name/status — Current runtime status of an installed plugin.
+///
+/// Returns the plugin's manifest info plus whether it is currently active in the
+/// running context engine (i.e. matches the configured `plugin` or appears in
+/// `plugin_stack`).
+#[utoipa::path(
+    get,
+    path = "/api/plugins/{name}/status",
+    tag = "plugins",
+    params(("name" = String, Path, description = "Plugin name")),
+    responses(
+        (status = 200, description = "Plugin status", body = serde_json::Value),
+        (status = 400, description = "Plugin not found or invalid name")
+    )
+)]
+pub async fn plugin_status(
+    Path(name): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let info = match librefang_runtime::plugin_manager::get_plugin_info(&name) {
+        Ok(i) => i,
+        Err(e) => return ApiErrorResponse::bad_request(e).into_response(),
+    };
+
+    let cfg = state.kernel.config_ref();
+    let ctx_cfg = &cfg.context_engine;
+
+    // Determine whether this plugin is the currently active one.
+    let active_single = ctx_cfg
+        .plugin
+        .as_deref()
+        .map(|p| p == name)
+        .unwrap_or(false);
+    let stack_position: Option<usize> = ctx_cfg.plugin_stack.as_ref().and_then(|stack| {
+        stack.iter().position(|p| p == &name)
+    });
+    let is_active = active_single || stack_position.is_some();
+
+    Json(serde_json::json!({
+        "name": info.manifest.name,
+        "version": info.manifest.version,
+        "description": info.manifest.description,
+        "hooks_valid": info.hooks_valid,
+        "size_bytes": info.size_bytes,
+        "path": info.path.display().to_string(),
+        "active": is_active,
+        "active_as_single": active_single,
+        "stack_position": stack_position,
+        "min_version_required": info.manifest.librefang_min_version,
+    }))
+    .into_response()
+}
+
+/// GET /api/context-engine/metrics — Hook invocation metrics for the running context engine.
+///
+/// Returns per-hook counters (calls, successes, failures, cumulative latency in ms).
+/// Returns 204 when the active context engine does not expose metrics (e.g. the
+/// default engine with no plugin configured).
+#[utoipa::path(
+    get,
+    path = "/api/context-engine/metrics",
+    tag = "plugins",
+    responses(
+        (status = 200, description = "Hook metrics snapshot", body = serde_json::Value),
+        (status = 204, description = "No metrics available (no plugin engine active)")
+    )
+)]
+pub async fn context_engine_metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match state.kernel.context_engine_ref().and_then(|e| e.hook_metrics()) {
+        Some(metrics) => (StatusCode::OK, Json(serde_json::to_value(&metrics).unwrap_or_default())).into_response(),
+        None => StatusCode::NO_CONTENT.into_response(),
     }
 }
 

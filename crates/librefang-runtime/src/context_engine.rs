@@ -191,6 +191,15 @@ pub trait ContextEngine: Send + Sync {
     /// so budget-based caps scale correctly per agent.
     /// Default implementation uses head+tail truncation strategy.
     fn truncate_tool_result(&self, content: &str, context_window_tokens: usize) -> String;
+
+    /// Return a snapshot of hook invocation metrics, if the engine tracks them.
+    ///
+    /// Returns `None` for the default engine (no hooks to instrument).
+    /// `ScriptableContextEngine` returns live counters; `StackedContextEngine`
+    /// returns aggregated counters across all stacked engines.
+    fn hook_metrics(&self) -> Option<HookMetrics> {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -465,14 +474,50 @@ pub struct ScriptableContextEngine {
     plugin_env: Vec<(String, String)>,
     /// Live invocation counters. Shared so callers can snapshot without &mut self.
     metrics: std::sync::Arc<std::sync::Mutex<HookMetrics>>,
+    /// What to do when a hook fails after all retries are exhausted.
+    on_hook_failure: librefang_types::config::HookFailurePolicy,
+    /// How many times to retry a failing hook before applying `on_hook_failure`.
+    max_retries: u32,
+    /// Milliseconds to wait between retries.
+    retry_delay_ms: u64,
+    /// Optional substring filter for the `ingest` hook.
+    ingest_filter: Option<String>,
 }
 
 impl ScriptableContextEngine {
     /// Create a scriptable context engine from config.
+    ///
+    /// Also validates that every declared hook script file actually exists.
+    /// Missing scripts are logged as warnings at construction time (not fatal)
+    /// so the engine degrades gracefully rather than refusing to start.
     pub fn new(
         inner: DefaultContextEngine,
         hooks: &librefang_types::config::ContextEngineHooks,
     ) -> Self {
+        // Warn at construction time for any declared script that cannot be found.
+        let all_declared: &[(&str, &Option<String>)] = &[
+            ("ingest",           &hooks.ingest),
+            ("after_turn",       &hooks.after_turn),
+            ("bootstrap",        &hooks.bootstrap),
+            ("assemble",         &hooks.assemble),
+            ("compact",          &hooks.compact),
+            ("prepare_subagent", &hooks.prepare_subagent),
+            ("merge_subagent",   &hooks.merge_subagent),
+        ];
+        for (name, path_opt) in all_declared {
+            if let Some(path) = path_opt {
+                let resolved = Self::resolve_script_path(path);
+                if !std::path::Path::new(&resolved).exists() {
+                    warn!(
+                        hook = *name,
+                        path = resolved.as_str(),
+                        "Hook script declared in plugin.toml does not exist; \
+                         hook will be skipped at runtime"
+                    );
+                }
+            }
+        }
+
         Self {
             inner,
             ingest_script: hooks.ingest.clone(),
@@ -484,8 +529,12 @@ impl ScriptableContextEngine {
             merge_subagent_script: hooks.merge_subagent.clone(),
             runtime: crate::plugin_runtime::PluginRuntime::from_tag(hooks.runtime.as_deref()),
             hook_timeout_secs: hooks.hook_timeout_secs.unwrap_or(30),
-            plugin_env: Vec::new(), // populated by load_plugin via with_plugin_env()
+            plugin_env: Vec::new(), // populated via with_plugin_env()
             metrics: std::sync::Arc::new(std::sync::Mutex::new(HookMetrics::default())),
+            on_hook_failure: hooks.on_hook_failure.clone(),
+            max_retries: hooks.max_retries,
+            retry_delay_ms: hooks.retry_delay_ms,
+            ingest_filter: hooks.ingest_filter.clone(),
         }
     }
 
@@ -540,15 +589,17 @@ impl ScriptableContextEngine {
 
     /// Run a hook script with JSON input, return `(output, elapsed_ms)`.
     ///
-    /// `timeout_secs` controls how long the subprocess is allowed to run.
-    /// `plugin_env` are the key-value pairs from `[env]` in plugin.toml.
-    /// Dispatches to the runtime picked in config (Python by default).
+    /// Retries up to `max_retries` times with `retry_delay_ms` between attempts
+    /// before returning the final error. `elapsed_ms` reflects total wall time
+    /// across all attempts.
     async fn run_hook(
         script_path: &str,
         runtime: crate::plugin_runtime::PluginRuntime,
         input: serde_json::Value,
         timeout_secs: u64,
         plugin_env: &[(String, String)],
+        max_retries: u32,
+        retry_delay_ms: u64,
     ) -> Result<(serde_json::Value, u64), String> {
         let resolved = Self::resolve_script_path(script_path);
 
@@ -563,11 +614,49 @@ impl ScriptableContextEngine {
         };
 
         let t = std::time::Instant::now();
-        let result = crate::plugin_runtime::run_hook_json(&resolved, runtime, &input, &config)
-            .await
-            .map_err(|e| format!("Hook script failed: {e}"));
+        let mut last_err = String::new();
+        for attempt in 0..=max_retries {
+            if attempt > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(retry_delay_ms)).await;
+                debug!(
+                    script = resolved.as_str(),
+                    attempt,
+                    max_retries,
+                    "Retrying hook after failure: {last_err}"
+                );
+            }
+            match crate::plugin_runtime::run_hook_json(&resolved, runtime, &input, &config).await {
+                Ok(v) => {
+                    let elapsed_ms = t.elapsed().as_millis() as u64;
+                    return Ok((v, elapsed_ms));
+                }
+                Err(e) => last_err = e.to_string(),
+            }
+        }
         let elapsed_ms = t.elapsed().as_millis() as u64;
-        result.map(|v| (v, elapsed_ms))
+        Err(format!("Hook script failed after {max_retries} retries: {last_err}"))
+    }
+
+    /// Apply the configured failure policy to a hook error.
+    ///
+    /// Returns `Ok(None)` when the policy is Warn or Skip (continue with
+    /// fallback), or `Err(…)` when the policy is Abort.
+    fn apply_failure_policy(
+        &self,
+        hook: &str,
+        err: &str,
+    ) -> LibreFangResult<()> {
+        use librefang_types::config::HookFailurePolicy;
+        match self.on_hook_failure {
+            HookFailurePolicy::Warn => {
+                warn!(hook, error = err, "Hook failed (warn policy — using fallback)");
+                Ok(())
+            }
+            HookFailurePolicy::Skip => Ok(()), // silent
+            HookFailurePolicy::Abort => Err(crate::error::LibreFangError::Internal(
+                format!("Hook '{hook}' failed (abort policy): {err}"),
+            )),
+        }
     }
 }
 
@@ -622,14 +711,16 @@ impl ContextEngine for ScriptableContextEngine {
                 "stable_prefix_mode": config.stable_prefix_mode,
                 "max_recall_results": config.max_recall_results,
             });
-            match Self::run_hook(script, self.runtime, input, bootstrap_timeout, &self.plugin_env).await {
+            match Self::run_hook(script, self.runtime, input, bootstrap_timeout, &self.plugin_env, self.max_retries, self.retry_delay_ms).await {
                 Ok((_, ms)) => {
                     Self::record_hook(&self.metrics, "bootstrap", ms, true);
                     debug!("Bootstrap hook completed (timeout={bootstrap_timeout}s, {ms}ms)");
                 }
                 Err(e) => {
                     Self::record_hook(&self.metrics, "bootstrap", 0, false);
-                    warn!("Bootstrap hook failed (non-fatal): {e}");
+                    // Bootstrap is inherently non-fatal (best-effort init), so
+                    // we respect the policy for logging but never abort here.
+                    let _ = self.apply_failure_policy("bootstrap", &e);
                 }
             }
         }
@@ -655,10 +746,21 @@ impl ContextEngine for ScriptableContextEngine {
             return self.inner.ingest(agent_id, user_message, peer_id).await;
         };
 
+        // Apply ingest_filter — skip hook (use default recall) when message doesn't match.
+        if let Some(ref filter) = self.ingest_filter {
+            if !user_message.contains(filter.as_str()) {
+                debug!(
+                    filter = filter.as_str(),
+                    "Ingest hook skipped (message does not match filter)"
+                );
+                return self.inner.ingest(agent_id, user_message, peer_id).await;
+            }
+        }
+
         // Run default recall first (for embedding-based memories)
         let default_result = self.inner.ingest(agent_id, user_message, peer_id).await?;
 
-        // Run the Python hook for additional/custom recall
+        // Run the hook for additional/custom recall
         let input = serde_json::json!({
             "type": "ingest",
             "agent_id": agent_id.0.to_string(),
@@ -666,7 +768,7 @@ impl ContextEngine for ScriptableContextEngine {
             "peer_id": peer_id,
         });
 
-        match Self::run_hook(script, self.runtime, input, self.hook_timeout_secs, &self.plugin_env).await {
+        match Self::run_hook(script, self.runtime, input, self.hook_timeout_secs, &self.plugin_env, self.max_retries, self.retry_delay_ms).await {
             Ok((output, ms)) => {
                 Self::record_hook(&self.metrics, "ingest", ms, true);
                 // Merge hook memories with default memories
@@ -699,7 +801,7 @@ impl ContextEngine for ScriptableContextEngine {
             }
             Err(e) => {
                 Self::record_hook(&self.metrics, "ingest", 0, false);
-                warn!("Ingest hook failed, using default result: {e}");
+                self.apply_failure_policy("ingest", &e)?;
                 Ok(default_result)
             }
         }
@@ -734,7 +836,7 @@ impl ContextEngine for ScriptableContextEngine {
             "context_window_tokens": context_window_tokens,
         });
 
-        match Self::run_hook(script, self.runtime, input, self.hook_timeout_secs, &self.plugin_env).await {
+        match Self::run_hook(script, self.runtime, input, self.hook_timeout_secs, &self.plugin_env, self.max_retries, self.retry_delay_ms).await {
             Ok((output, ms)) => {
                 if let Some(new_msgs) = output.get("messages").and_then(|v| v.as_array()) {
                     let assembled: Vec<Message> = new_msgs
@@ -762,7 +864,7 @@ impl ContextEngine for ScriptableContextEngine {
             }
             Err(e) => {
                 Self::record_hook(&self.metrics, "assemble", 0, false);
-                warn!("Assemble hook failed, falling back to default: {e}");
+                self.apply_failure_policy("assemble", &e)?;
                 self.inner
                     .assemble(agent_id, messages, system_prompt, tools, context_window_tokens)
                     .await
@@ -799,7 +901,7 @@ impl ContextEngine for ScriptableContextEngine {
             "context_window_tokens": context_window_tokens,
         });
 
-        match Self::run_hook(script, self.runtime, input, self.hook_timeout_secs, &self.plugin_env).await {
+        match Self::run_hook(script, self.runtime, input, self.hook_timeout_secs, &self.plugin_env, self.max_retries, self.retry_delay_ms).await {
             Ok((output, ms)) => {
                 if let Some(new_msgs) = output.get("messages").and_then(|v| v.as_array()) {
                     let compacted: Vec<Message> = new_msgs
@@ -835,7 +937,7 @@ impl ContextEngine for ScriptableContextEngine {
             }
             Err(e) => {
                 Self::record_hook(&self.metrics, "compact", 0, false);
-                warn!("Compact hook failed, falling back to default: {e}");
+                self.apply_failure_policy("compact", &e)?;
                 self.inner
                     .compact(agent_id, messages, driver, model, context_window_tokens)
                     .await
@@ -871,8 +973,10 @@ impl ContextEngine for ScriptableContextEngine {
         let timeout_secs = self.hook_timeout_secs;
         let plugin_env = self.plugin_env.clone();
         let metrics = std::sync::Arc::clone(&self.metrics);
+        let max_retries = self.max_retries;
+        let retry_delay_ms = self.retry_delay_ms;
         let handle = tokio::spawn(async move {
-            match Self::run_hook(&script, runtime, input, timeout_secs, &plugin_env).await {
+            match Self::run_hook(&script, runtime, input, timeout_secs, &plugin_env, max_retries, retry_delay_ms).await {
                 Ok((_, ms)) => {
                     Self::record_hook(&metrics, "after_turn", ms, true);
                     debug!("After-turn hook completed ({ms}ms)");
@@ -907,14 +1011,14 @@ impl ContextEngine for ScriptableContextEngine {
                 "parent_id": parent_id.0.to_string(),
                 "child_id": child_id.0.to_string(),
             });
-            match Self::run_hook(script, self.runtime, input, self.hook_timeout_secs, &self.plugin_env).await {
+            match Self::run_hook(script, self.runtime, input, self.hook_timeout_secs, &self.plugin_env, self.max_retries, self.retry_delay_ms).await {
                 Ok((_, ms)) => {
                     Self::record_hook(&self.metrics, "prepare_subagent", ms, true);
                     debug!("Prepare-subagent hook completed ({ms}ms)");
                 }
                 Err(e) => {
                     Self::record_hook(&self.metrics, "prepare_subagent", 0, false);
-                    warn!("Prepare-subagent hook failed (non-fatal): {e}");
+                    self.apply_failure_policy("prepare_subagent", &e)?;
                 }
             }
         }
@@ -937,14 +1041,14 @@ impl ContextEngine for ScriptableContextEngine {
                 "parent_id": parent_id.0.to_string(),
                 "child_id": child_id.0.to_string(),
             });
-            match Self::run_hook(script, self.runtime, input, self.hook_timeout_secs, &self.plugin_env).await {
+            match Self::run_hook(script, self.runtime, input, self.hook_timeout_secs, &self.plugin_env, self.max_retries, self.retry_delay_ms).await {
                 Ok((_, ms)) => {
                     Self::record_hook(&self.metrics, "merge_subagent", ms, true);
                     debug!("Merge-subagent hook completed ({ms}ms)");
                 }
                 Err(e) => {
                     Self::record_hook(&self.metrics, "merge_subagent", 0, false);
-                    warn!("Merge-subagent hook failed (non-fatal): {e}");
+                    self.apply_failure_policy("merge_subagent", &e)?;
                 }
             }
         }
@@ -955,6 +1059,10 @@ impl ContextEngine for ScriptableContextEngine {
     fn truncate_tool_result(&self, content: &str, context_window_tokens: usize) -> String {
         self.inner
             .truncate_tool_result(content, context_window_tokens)
+    }
+
+    fn hook_metrics(&self) -> Option<HookMetrics> {
+        Some(self.metrics())
     }
 }
 
@@ -1338,6 +1446,33 @@ impl ContextEngine for StackedContextEngine {
             .first()
             .expect("engines is non-empty")
             .truncate_tool_result(content, context_window_tokens)
+    }
+
+    fn hook_metrics(&self) -> Option<HookMetrics> {
+        // Aggregate metrics from all stacked engines that expose them.
+        let mut aggregate = HookMetrics::default();
+        let mut any = false;
+        for engine in &self.engines {
+            if let Some(m) = engine.hook_metrics() {
+                any = true;
+                macro_rules! add_stats {
+                    ($field:ident) => {
+                        aggregate.$field.calls += m.$field.calls;
+                        aggregate.$field.successes += m.$field.successes;
+                        aggregate.$field.failures += m.$field.failures;
+                        aggregate.$field.total_ms += m.$field.total_ms;
+                    };
+                }
+                add_stats!(ingest);
+                add_stats!(after_turn);
+                add_stats!(bootstrap);
+                add_stats!(assemble);
+                add_stats!(compact);
+                add_stats!(prepare_subagent);
+                add_stats!(merge_subagent);
+            }
+        }
+        if any { Some(aggregate) } else { None }
     }
 }
 

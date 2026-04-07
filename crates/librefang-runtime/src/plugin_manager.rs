@@ -96,6 +96,9 @@ pub enum PluginSource {
 }
 
 /// Load and validate a plugin manifest from a directory.
+///
+/// Also enforces `librefang_min_version` compatibility: returns an error when
+/// the running daemon is older than what the plugin requires.
 pub fn load_plugin_manifest(plugin_dir: &Path) -> Result<PluginManifest, String> {
     let manifest_path = plugin_dir.join("plugin.toml");
     if !manifest_path.exists() {
@@ -111,7 +114,47 @@ pub fn load_plugin_manifest(plugin_dir: &Path) -> Result<PluginManifest, String>
     let manifest: PluginManifest =
         toml::from_str(&content).map_err(|e| format!("Invalid plugin.toml: {e}"))?;
 
+    // Enforce minimum version requirement declared by the plugin.
+    if let Some(ref min_ver) = manifest.librefang_min_version {
+        const DAEMON_VERSION: &str = env!("CARGO_PKG_VERSION");
+        if !version_satisfies(DAEMON_VERSION, min_ver) {
+            return Err(format!(
+                "Plugin '{}' requires LibreFang >= {min_ver} but running {DAEMON_VERSION}. \
+                 Upgrade the daemon or use an older plugin version.",
+                manifest.name
+            ));
+        }
+    }
+
     Ok(manifest)
+}
+
+/// Returns `true` when `running` >= `required` for the leading semver portion.
+///
+/// Strips any `-` pre-release suffix before comparing, then does a
+/// lexicographic comparison on dot-separated numeric segments (left-padded so
+/// component widths align). This is intentionally simple: LibreFang uses
+/// `YYYY.M.D-betaN` versioning, so a real semver library is overkill.
+fn version_satisfies(running: &str, required: &str) -> bool {
+    fn semver_parts(v: &str) -> Vec<u64> {
+        v.split('-').next().unwrap_or(v)
+            .split('.')
+            .filter_map(|p| p.parse().ok())
+            .collect()
+    }
+    let run = semver_parts(running);
+    let req = semver_parts(required);
+    let len = run.len().max(req.len());
+    for i in 0..len {
+        let r = run.get(i).copied().unwrap_or(0);
+        let q = req.get(i).copied().unwrap_or(0);
+        match r.cmp(&q) {
+            std::cmp::Ordering::Greater => return true,
+            std::cmp::Ordering::Less => return false,
+            std::cmp::Ordering::Equal => {}
+        }
+    }
+    true // equal
 }
 
 /// Get detailed info about a single installed plugin.
@@ -585,13 +628,19 @@ pub fn scaffold_plugin(
         r#"name = "{name}"
 version = "0.1.0"
 description = "{description}"
+# librefang_min_version = "2026.4.0"   # refuse to load on older daemons
 {runtime_line}
-# hook_timeout_secs = 30  # per-invocation timeout; bootstrap gets 2× this value
+# hook_timeout_secs = 30   # per-invocation timeout; bootstrap gets 2× this value
+# max_retries       = 0    # retry hook on failure (0 = no retry)
+# retry_delay_ms    = 500  # wait between retries
+# on_hook_failure   = "warn"   # "warn" | "abort" | "skip"
 
 [hooks]
 # --- Active hooks ---
 ingest    = "hooks/{ingest_file}"
 after_turn = "hooks/{after_file}"
+
+# ingest_filter = "remember"  # only run ingest when message contains this string
 
 # --- Optional hooks (uncomment to activate; template files already written) ---
 # bootstrap        = "hooks/{bootstrap_file}"   # runs once at startup (2× timeout)
@@ -599,6 +648,10 @@ after_turn = "hooks/{after_file}"
 # compact          = "hooks/{compact_file}"     # custom context compression
 # prepare_subagent = "hooks/{prepare_file}"     # called before sub-agent spawns
 # merge_subagent   = "hooks/{merge_file}"       # called after sub-agent completes
+
+# [env]
+# MY_SERVICE_URL = "http://localhost:6333"
+# MY_API_KEY     = "${{MY_API_KEY}}"   # expanded from daemon environment at runtime
 {requirements_line}"#,
         name = name,
         description = description,
