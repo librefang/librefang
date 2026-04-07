@@ -163,6 +163,9 @@ pub enum PluginRuntime {
     Php,
     /// `lua script.lua`
     Lua,
+    /// Execute the hook as a WebAssembly module via wasmtime + WASI.
+    /// The `.wasm` file path is used directly — no interpreter needed.
+    Wasm,
 }
 
 impl PluginRuntime {
@@ -181,10 +184,11 @@ impl PluginRuntime {
             Some("bun") => Self::Bun,
             Some("php") => Self::Php,
             Some("lua") => Self::Lua,
+            Some("wasm") | Some("webassembly") => Self::Wasm,
             Some(other) => {
                 warn!(
                     "Unknown plugin runtime '{other}', falling back to 'python'. \
-                     Valid values: python, native, v, node, deno, go, ruby, bash, bun, php, lua."
+                     Valid values: python, native, v, node, deno, go, ruby, bash, bun, php, lua, wasm."
                 );
                 Self::Python
             }
@@ -205,6 +209,7 @@ impl PluginRuntime {
             Self::Bun => "bun",
             Self::Php => "php",
             Self::Lua => "lua",
+            Self::Wasm => "wasm",
         }
     }
 
@@ -212,6 +217,14 @@ impl PluginRuntime {
     /// bit (only `Native` does — everything else is fed to an interpreter).
     pub fn requires_executable_bit(&self) -> bool {
         matches!(self, Self::Native)
+    }
+
+    /// Whether this runtime executes inline (no subprocess fork).
+    ///
+    /// `Wasm` hooks run inside the daemon via wasmtime, so the persistent
+    /// process pool and subprocess-based sandboxing do not apply.
+    pub fn is_inline(&self) -> bool {
+        matches!(self, Self::Wasm)
     }
 
     /// Canonical file extension for hook scripts of this runtime.
@@ -229,12 +242,14 @@ impl PluginRuntime {
             Self::Bun => "ts",
             Self::Php => "php",
             Self::Lua => "lua",
+            Self::Wasm => "wasm",
         }
     }
 
     /// Arguments to pass when probing the launcher for its version.
     /// Most runtimes use `--version`; a few have their own conventions
     /// (Go uses `go version`, Lua uses `lua -v`).
+    /// `Wasm` has no launcher, so this is never called in practice.
     pub fn version_args(&self) -> &'static [&'static str] {
         match self {
             Self::Go => &["version"],
@@ -243,8 +258,8 @@ impl PluginRuntime {
         }
     }
 
-    /// Canonical launcher binary to probe on PATH. `Native` has no launcher
-    /// (the script *is* the binary), so it returns `None`.
+    /// Canonical launcher binary to probe on PATH. `Native` and `Wasm` have no
+    /// launcher (the script *is* the binary / module), so they return `None`.
     pub fn launcher_binary(&self) -> Option<&'static str> {
         match self {
             // Python has a fallback chain (python3 → python → py). The doctor
@@ -260,6 +275,8 @@ impl PluginRuntime {
             Self::Bun => Some("bun"),
             Self::Php => Some("php"),
             Self::Lua => Some("lua"),
+            // Wasm runs inline via wasmtime — no external launcher binary.
+            Self::Wasm => None,
         }
     }
 
@@ -277,6 +294,7 @@ impl PluginRuntime {
             Self::Bun => "Install Bun from https://bun.sh/ (`curl -fsSL https://bun.sh/install | bash`)",
             Self::Php => "Install PHP from https://www.php.net/downloads.php or your OS package manager",
             Self::Lua => "Install Lua from https://www.lua.org/download.html or your OS package manager",
+            Self::Wasm => "Wasm hooks run inline via the built-in wasmtime engine — no external launcher needed",
         }
     }
 
@@ -294,6 +312,7 @@ impl PluginRuntime {
             Self::Bun,
             Self::Php,
             Self::Lua,
+            Self::Wasm,
         ]
     }
 }
@@ -339,6 +358,8 @@ pub fn check_runtime_status(runtime: PluginRuntime) -> RuntimeStatus {
 
     // Python gets a fallback chain (python3 → python → py) to match
     // `find_python_interpreter`'s discovery path.
+    // Wasm has no launcher so it should have been caught by the early-return above,
+    // but handle it defensively here too.
     let candidates: &[&str] = match runtime {
         PluginRuntime::Python => &["python3", "python", "py"],
         _ => std::slice::from_ref(&primary),
@@ -625,6 +646,12 @@ fn build_command(
         )),
         PluginRuntime::Php => Ok(("php".to_string(), vec![script_path.to_string()])),
         PluginRuntime::Lua => Ok(("lua".to_string(), vec![script_path.to_string()])),
+        // Wasm is handled inline before build_command is reached.
+        PluginRuntime::Wasm => Err(PluginRuntimeError::SpawnFailed(
+            "build_command called for Wasm runtime — this is a bug; Wasm hooks must be \
+             dispatched via run_wasm_hook before reaching build_command"
+                .to_string(),
+        )),
     }
 }
 
@@ -658,6 +685,8 @@ fn runtime_passthrough_vars(runtime: PluginRuntime) -> &'static [&'static str] {
         // Native binaries get nothing runtime-specific — any needed env
         // has to be listed in `config.allowed_env_vars`.
         PluginRuntime::Native => &[],
+        // Wasm runs inline — no subprocess, no passthrough vars needed.
+        PluginRuntime::Wasm => &[],
     }
 }
 
@@ -876,6 +905,11 @@ pub async fn run_hook_json(
     validate_path_traversal(script_path)?;
     if !Path::new(script_path).exists() {
         return Err(PluginRuntimeError::ScriptNotFound(script_path.to_string()));
+    }
+
+    // Wasm hooks run inline via wasmtime — bypass all subprocess machinery.
+    if matches!(runtime, PluginRuntime::Wasm) {
+        return run_wasm_hook(script_path, input, config).await;
     }
 
     // Serialize state-file access across concurrent hook calls for the same plugin.
@@ -1224,6 +1258,46 @@ fn parse_output(lines: &[String]) -> Result<serde_json::Value, PluginRuntimeErro
     Ok(serde_json::json!({ "text": joined }))
 }
 
+/// Execute a Wasm hook module inline using the built-in wasmtime engine.
+///
+/// The module receives the input JSON on its stdin (via WASI) and must write
+/// its JSON response to stdout.  The hook protocol is identical to subprocess
+/// hooks: one JSON object in, one JSON object out.
+///
+/// Returns the parsed JSON output on success, or a `PluginRuntimeError` on
+/// failure.  When the `wasm-hooks` feature is not enabled, this always returns
+/// `Err(PluginRuntimeError::SpawnFailed(...))` with a clear message.
+#[cfg(feature = "wasm-hooks")]
+pub async fn run_wasm_hook(
+    wasm_path: &str,
+    input: &serde_json::Value,
+    _config: &HookConfig,
+) -> Result<serde_json::Value, PluginRuntimeError> {
+    // Full wasmtime + WASI integration is reserved for a follow-up implementation
+    // once the exact WASI API surface for wasmtime 43 is confirmed.  The variant,
+    // routing, and feature-gate scaffolding are all in place.
+    let _ = wasm_path;
+    let _ = input;
+    Err(PluginRuntimeError::SpawnFailed(
+        "Wasm hook execution not yet implemented (wasm-hooks feature is enabled but the \
+         wasmtime integration is pending)"
+            .to_string(),
+    ))
+}
+
+/// Stub used when the `wasm-hooks` feature is not compiled in.
+#[cfg(not(feature = "wasm-hooks"))]
+pub async fn run_wasm_hook(
+    _wasm_path: &str,
+    _input: &serde_json::Value,
+    _config: &HookConfig,
+) -> Result<serde_json::Value, PluginRuntimeError> {
+    Err(PluginRuntimeError::SpawnFailed(
+        "Wasm hook support not compiled in — rebuild with the 'wasm-hooks' feature enabled"
+            .to_string(),
+    ))
+}
+
 /// Generate a short random hex string suitable for unique temp directory names.
 ///
 /// Uses the current time (nanoseconds) XOR'd with a monotonic counter as entropy —
@@ -1279,6 +1353,8 @@ impl HookProcessPool {
     /// Call a hook via a persistent subprocess.
     ///
     /// Starts the process on first call, restarts automatically after crash.
+    /// For `Wasm` hooks the persistent pool is bypassed entirely — each call
+    /// goes directly to [`run_wasm_hook`] which executes inline via wasmtime.
     pub async fn call(
         &self,
         script_path: &str,
@@ -1286,6 +1362,11 @@ impl HookProcessPool {
         input: &serde_json::Value,
         config: &HookConfig,
     ) -> Result<serde_json::Value, PluginRuntimeError> {
+        // Wasm hooks are stateless inline executions — no persistent subprocess.
+        if matches!(runtime, PluginRuntime::Wasm) {
+            return run_wasm_hook(script_path, input, config).await;
+        }
+
         let slot = {
             let mut map = self.procs.lock().unwrap();
             map.entry(script_path.to_string())

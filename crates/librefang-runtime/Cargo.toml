@@ -55,6 +55,7 @@ seccompiler = { version = "0.4", optional = true }
 [features]
 landlock-sandbox = ["dep:landlock"]
 seccomp-sandbox = ["dep:seccompiler"]
+wasm-hooks = []
 
 [dev-dependencies]
 tokio-test = { workspace = true }

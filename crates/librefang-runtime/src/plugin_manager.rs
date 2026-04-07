@@ -67,6 +67,76 @@ fn verify_registry_index(
         .map_err(|e| format!("Signature verification failed: {e}"))
 }
 
+/// Verify an Ed25519 signature over plugin archive bytes.
+///
+/// The registry is expected to serve a companion file `{archive_url}.sig`
+/// containing the raw 64-byte Ed25519 signature, base64-encoded.
+///
+/// Returns `Ok(())` if the signature is valid or if no signature file exists
+/// (signature is optional — absence is a warning, not an error).
+/// Returns `Err(reason)` if a signature file exists but is invalid.
+async fn verify_archive_signature(
+    client: &reqwest::Client,
+    archive_url: &str,
+    archive_bytes: &[u8],
+    pubkey_b64: &str,
+) -> Result<(), String> {
+    use base64::Engine as _;
+
+    // Try to fetch the signature file.
+    let sig_url = format!("{archive_url}.sig");
+    let sig_resp = client.get(&sig_url).send().await;
+    let sig_b64 = match sig_resp {
+        Ok(r) if r.status().is_success() => match r.text().await {
+            Ok(t) => t.trim().to_string(),
+            Err(e) => {
+                warn!("Failed to read archive signature from {sig_url}: {e}");
+                return Ok(()); // treat as absent
+            }
+        },
+        _ => {
+            debug!("No archive signature found at {sig_url} — skipping");
+            return Ok(()); // absent is fine
+        }
+    };
+
+    // Decode and verify.
+    let sig_bytes = base64::engine::general_purpose::STANDARD
+        .decode(&sig_b64)
+        .map_err(|e| format!("Invalid base64 in archive signature: {e}"))?;
+    let pubkey_bytes = base64::engine::general_purpose::STANDARD
+        .decode(pubkey_b64)
+        .map_err(|e| format!("Invalid base64 in public key: {e}"))?;
+
+    if sig_bytes.len() != 64 {
+        return Err(format!(
+            "Archive signature must be 64 bytes, got {}",
+            sig_bytes.len()
+        ));
+    }
+    if pubkey_bytes.len() != 32 {
+        return Err(format!(
+            "Public key must be 32 bytes, got {}",
+            pubkey_bytes.len()
+        ));
+    }
+
+    let sig_array: [u8; 64] = sig_bytes.try_into().unwrap();
+    let pubkey_array: [u8; 32] = pubkey_bytes.try_into().unwrap();
+
+    let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&pubkey_array)
+        .map_err(|e| format!("Invalid public key: {e}"))?;
+    let signature = ed25519_dalek::Signature::from_bytes(&sig_array);
+
+    use ed25519_dalek::Verifier as _;
+    verifying_key
+        .verify(archive_bytes, &signature)
+        .map_err(|_| format!("Archive signature verification FAILED for {archive_url}"))?;
+
+    info!("Archive signature verified for {archive_url}");
+    Ok(())
+}
+
 /// Return the path used to cache a registry index locally.
 /// The filename is a sanitised form of the registry URL.
 fn registry_cache_path(registry: &str) -> std::path::PathBuf {
@@ -759,6 +829,19 @@ async fn install_from_registry(
                 "No checksum file found for this plugin release. \
                  Install proceeds without integrity verification."
             );
+        }
+    }
+
+    // Verify Ed25519 archive signature (optional — absent sig is OK, wrong sig is fatal).
+    let archive_bytes = std::fs::read(target_dir.join("plugin.toml")).unwrap_or_default();
+    if std::env::var("LIBREFANG_ARCHIVE_VERIFY").as_deref() == Ok("0") {
+        debug!("Archive signature verification disabled via LIBREFANG_ARCHIVE_VERIFY=0");
+    } else {
+        let pubkey = std::env::var("LIBREFANG_REGISTRY_PUBKEY")
+            .unwrap_or_else(|_| OFFICIAL_REGISTRY_PUBKEY_B64.to_string());
+        if let Err(e) = verify_archive_signature(&client, &listing_url, &archive_bytes, &pubkey).await {
+            let _ = std::fs::remove_dir_all(&target_dir);
+            return Err(e);
         }
     }
 
