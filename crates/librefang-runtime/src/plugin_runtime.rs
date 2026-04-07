@@ -37,6 +37,41 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tracing::{debug, warn};
 
+/// Classify a process exit status into a human-readable label.
+///
+/// Returns a short string like `"OOM-killed (exit 137)"`, `"SIGSEGV (exit 139)"`,
+/// `"killed by signal 9"`, or `"exit code 1"` for ordinary failures.
+#[cfg(unix)]
+fn classify_exit_status(status: &std::process::ExitStatus) -> String {
+    use std::os::unix::process::ExitStatusExt;
+    if let Some(signal) = status.signal() {
+        return match signal {
+            9  => format!("OOM-killed or SIGKILL (signal {signal})"),
+            11 => format!("SIGSEGV — segfault (signal {signal})"),
+            31 => format!("SIGSYS — disallowed syscall, seccomp triggered (signal {signal})"),
+            _  => format!("killed by signal {signal}"),
+        };
+    }
+    // On Unix, exit code 128+N means "killed by signal N" when reported via wait().
+    if let Some(code) = status.code() {
+        return match code {
+            137 => "OOM-killed or SIGKILL (exit 137)".to_string(),
+            139 => "SIGSEGV — segfault (exit 139)".to_string(),
+            159 => "SIGSYS — disallowed syscall, seccomp triggered (exit 159)".to_string(),
+            _   => format!("exit code {code}"),
+        };
+    }
+    "unknown exit status".to_string()
+}
+
+#[cfg(not(unix))]
+fn classify_exit_status(status: &std::process::ExitStatus) -> String {
+    match status.code() {
+        Some(code) => format!("exit code {code}"),
+        None => "unknown exit status".to_string(),
+    }
+}
+
 /// Per-path advisory locks for shared state files.
 ///
 /// Provides mutual exclusion within a single process. Cross-process safety
@@ -1072,20 +1107,21 @@ pub async fn run_hook_json(
             .await
             .map_err(|e| PluginRuntimeError::Io(e.to_string()))?;
 
-        Ok::<(Vec<String>, String, Option<i32>), PluginRuntimeError>((
+        Ok::<(Vec<String>, String, std::process::ExitStatus), PluginRuntimeError>((
             stdout_lines,
             stderr_text,
-            status.code(),
+            status.into(),
         ))
     })
     .await;
 
     let out = match result {
-        Ok(Ok((stdout_lines, stderr_text, exit_code))) => {
-            if exit_code != Some(0) {
+        Ok(Ok((stdout_lines, stderr_text, status))) => {
+            if !status.success() {
+                let label = classify_exit_status(&status);
                 Err(PluginRuntimeError::ScriptError {
-                    code: exit_code,
-                    stderr: stderr_text.trim().to_string(),
+                    code: status.code(),
+                    stderr: format!("{label}\nstderr: {}", stderr_text.trim()),
                 })
             } else {
                 if !stderr_text.trim().is_empty() {
@@ -1228,7 +1264,19 @@ impl HookProcessPool {
         // Try to call; on failure, evict the dead slot then restart and retry once.
         let result = Self::do_call(guard.as_mut().unwrap(), input).await;
         if result.is_err() {
-            warn!(script = script_path, "Persistent hook process crashed; restarting");
+            // Probe exit status before evicting so we can produce a classified label.
+            let exit_label = if let Some(ref mut proc) = *guard {
+                match proc.child.try_wait() {
+                    Ok(Some(status)) => {
+                        let label = classify_exit_status(&status);
+                        format!("Persistent hook process exited unexpectedly: {label}")
+                    }
+                    _ => "Persistent hook process crashed; restarting".to_string(),
+                }
+            } else {
+                "Persistent hook process crashed; restarting".to_string()
+            };
+            warn!(script = script_path, "{}", exit_label);
             // Evict before spawn so that a subsequent call never sees a dead process
             // even if the spawn below fails (returns Err and drops the guard).
             *guard = None;

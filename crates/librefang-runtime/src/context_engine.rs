@@ -95,6 +95,32 @@ pub struct StackHealth {
     pub layers_with_open_circuit: usize,
 }
 
+/// Fields that a plugin's `bootstrap` hook may override at runtime.
+///
+/// The bootstrap script returns a JSON object; any recognised keys here are
+/// applied to the running engine.  Unknown keys are silently ignored.
+///
+/// Example bootstrap output:
+/// ```json
+/// {
+///   "env_overrides": {"MY_PLUGIN_API_KEY": "secret"},
+///   "ingest_filter": "only_when_code_present",
+///   "allow_network": true
+/// }
+/// ```
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct BootstrapOverrides {
+    /// Additional env vars merged into `plugin_env` for subsequent hook calls.
+    #[serde(default)]
+    pub env_overrides: std::collections::HashMap<String, String>,
+    /// Override the ingest filter string.
+    #[serde(default)]
+    pub ingest_filter: Option<String>,
+    /// Override network permission for all subsequent hook calls.
+    #[serde(default)]
+    pub allow_network: Option<bool>,
+}
+
 /// Configuration for the context engine.
 #[derive(Debug, Clone)]
 pub struct ContextEngineConfig {
@@ -703,6 +729,8 @@ pub struct ScriptableContextEngine {
     after_turn_tasks: std::sync::Arc<std::sync::Mutex<tokio::task::JoinSet<()>>>,
     /// Memory substrate for after_turn hook memory injection.
     memory_substrate: std::sync::Arc<librefang_memory::MemorySubstrate>,
+    /// Overrides applied by the bootstrap hook at startup.
+    bootstrap_applied_overrides: std::sync::Arc<std::sync::Mutex<BootstrapOverrides>>,
 }
 
 impl ScriptableContextEngine {
@@ -822,6 +850,7 @@ impl ScriptableContextEngine {
             trace_store: None,          // filled in by with_plugin_name()
             after_turn_tasks: std::sync::Arc::new(std::sync::Mutex::new(tokio::task::JoinSet::new())),
             memory_substrate,
+            bootstrap_applied_overrides: std::sync::Arc::new(std::sync::Mutex::new(BootstrapOverrides::default())),
         }
     }
 
@@ -1468,12 +1497,25 @@ impl ScriptableContextEngine {
         input: serde_json::Value,
         timeout_secs: u64,
     ) -> Result<(serde_json::Value, u64), String> {
+        // Compute effective env and network permission, merging bootstrap overrides.
+        let (effective_env, effective_allow_network) = {
+            let guard = self.bootstrap_applied_overrides.lock().unwrap_or_else(|p| p.into_inner());
+            let mut env = self.plugin_env.clone();
+            for (k, v) in &guard.env_overrides {
+                if !env.iter().any(|(ek, _)| ek == k) {
+                    env.push((k.clone(), v.clone()));
+                }
+            }
+            let allow_net = guard.allow_network.unwrap_or(self.allow_network);
+            (env, allow_net)
+        };
+
         if self.persistent_subprocess {
             let config = crate::plugin_runtime::HookConfig {
                 timeout_secs,
-                plugin_env: self.plugin_env.clone(),
+                plugin_env: effective_env.clone(),
                 max_memory_mb: self.max_memory_mb,
-                allow_network: self.allow_network,
+                allow_network: effective_allow_network,
                 state_file: self.shared_state_path.clone(),
                 ..Default::default()
             };
@@ -1538,11 +1580,11 @@ impl ScriptableContextEngine {
                 self.runtime,
                 input,
                 timeout_secs,
-                &self.plugin_env,
+                &effective_env,
                 self.max_retries,
                 self.retry_delay_ms,
                 self.max_memory_mb,
-                self.allow_network,
+                effective_allow_network,
                 &self.traces,
                 &self.hook_schemas,
                 self.shared_state_path.as_deref(),
@@ -1626,6 +1668,40 @@ impl ScriptableContextEngine {
             recent_calls,
         }
     }
+
+    /// Apply overrides returned by the bootstrap hook.
+    ///
+    /// Parses the hook output JSON into a [`BootstrapOverrides`] value and
+    /// stores it in `bootstrap_applied_overrides` so subsequent hook calls
+    /// pick up the overridden `plugin_env`, `ingest_filter`, and
+    /// `allow_network` values.
+    fn apply_bootstrap_overrides(&self, output: &serde_json::Value) {
+        let overrides: BootstrapOverrides = match serde_json::from_value(output.clone()) {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(plugin = %self.plugin_name, "Failed to parse bootstrap overrides: {e}");
+                return;
+            }
+        };
+
+        if let Ok(mut guard) = self.bootstrap_applied_overrides.lock() {
+            // Merge env overrides: only add keys not already present in the initial
+            // plugin_env so that statically-configured vars take precedence.
+            for (k, v) in overrides.env_overrides {
+                if !self.plugin_env.iter().any(|(ek, _)| ek == &k) {
+                    guard.env_overrides.insert(k, v);
+                }
+            }
+
+            // Optional field overrides.
+            if let Some(filter) = overrides.ingest_filter {
+                guard.ingest_filter = Some(filter);
+            }
+            if let Some(allow) = overrides.allow_network {
+                guard.allow_network = Some(allow);
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -1680,9 +1756,10 @@ impl ContextEngine for ScriptableContextEngine {
                 "max_recall_results": config.max_recall_results,
             });
             match self.call_hook_dispatch("bootstrap", script, input, bootstrap_timeout, None).await {
-                Ok((_, ms)) => {
+                Ok((ref output, ms)) => {
                     Self::record_hook(&self.metrics, "bootstrap", ms, true);
                     debug!("Bootstrap hook completed (timeout={bootstrap_timeout}s, {ms}ms)");
+                    self.apply_bootstrap_overrides(output);
                 }
                 Err(e) => {
                     Self::record_hook(&self.metrics, "bootstrap", 0, false);
@@ -1713,7 +1790,12 @@ impl ContextEngine for ScriptableContextEngine {
         };
 
         // Apply ingest_filter — skip hook when message doesn't match.
-        if let Some(ref filter) = self.ingest_filter {
+        // Bootstrap overrides take precedence over the statically configured filter.
+        let effective_ingest_filter: Option<String> = {
+            let guard = self.bootstrap_applied_overrides.lock().unwrap_or_else(|p| p.into_inner());
+            guard.ingest_filter.clone().or_else(|| self.ingest_filter.clone())
+        };
+        if let Some(ref filter) = effective_ingest_filter {
             if !user_message.contains(filter.as_str()) {
                 debug!(filter = filter.as_str(), "Ingest hook skipped (filter mismatch)");
                 return self.inner.ingest(agent_id, user_message, peer_id).await;
@@ -2183,12 +2265,25 @@ impl ContextEngine for ScriptableContextEngine {
         let script = script.clone();
         let runtime = self.runtime;
         let timeout_secs = self.hook_timeout_secs;
-        let plugin_env = self.plugin_env.clone();
+        // Merge bootstrap env overrides into the env passed to the background task.
+        let plugin_env = {
+            let guard = self.bootstrap_applied_overrides.lock().unwrap_or_else(|p| p.into_inner());
+            let mut env = self.plugin_env.clone();
+            for (k, v) in &guard.env_overrides {
+                if !env.iter().any(|(ek, _)| ek == k) {
+                    env.push((k.clone(), v.clone()));
+                }
+            }
+            env
+        };
         let metrics = std::sync::Arc::clone(&self.metrics);
         let max_retries = self.max_retries;
         let retry_delay_ms = self.retry_delay_ms;
         let max_memory_mb = self.max_memory_mb;
-        let allow_network = self.allow_network;
+        let allow_network = {
+            let guard = self.bootstrap_applied_overrides.lock().unwrap_or_else(|p| p.into_inner());
+            guard.allow_network.unwrap_or(self.allow_network)
+        };
         let traces = std::sync::Arc::clone(&self.traces);
         let hook_schemas = self.hook_schemas.clone();
         let persistent_subprocess = self.persistent_subprocess;

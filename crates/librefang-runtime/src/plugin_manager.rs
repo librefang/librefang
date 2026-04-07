@@ -201,6 +201,25 @@ pub fn ensure_plugins_dir() -> std::io::Result<PathBuf> {
     Ok(dir)
 }
 
+/// Describes a single backward-incompatibility between an old and new plugin manifest.
+#[derive(Debug, Clone)]
+pub struct ManifestCompatWarning {
+    pub kind: ManifestCompatKind,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ManifestCompatKind {
+    /// A hook that was present in the old manifest is absent in the new one.
+    HookRemoved,
+    /// The runtime changed (e.g. Python → Node) — may break existing state files.
+    RuntimeChanged,
+    /// The major version decreased (downgrade).
+    MajorVersionDowngrade,
+    /// The plugin name changed — unusual and likely a mistake.
+    NameChanged,
+}
+
 /// Information about an installed plugin, returned by list/get operations.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PluginInfo {
@@ -2752,6 +2771,88 @@ pub fn disable_plugin(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Compare two plugin manifests and return a list of backward-incompatibility warnings.
+///
+/// An empty return value means the upgrade is safe.
+fn check_manifest_compat(
+    old: &PluginManifest,
+    new: &PluginManifest,
+) -> Vec<ManifestCompatWarning> {
+    let mut warnings = Vec::new();
+
+    // Name change
+    if old.name != new.name {
+        warnings.push(ManifestCompatWarning {
+            kind: ManifestCompatKind::NameChanged,
+            message: format!(
+                "plugin name changed from '{}' to '{}'",
+                old.name, new.name
+            ),
+        });
+    }
+
+    // Runtime change
+    if old.hooks.runtime != new.hooks.runtime {
+        warnings.push(ManifestCompatWarning {
+            kind: ManifestCompatKind::RuntimeChanged,
+            message: format!(
+                "hook runtime changed from {:?} to {:?}",
+                old.hooks.runtime, new.hooks.runtime
+            ),
+        });
+    }
+
+    // Removed hooks — check each of the 7 known hook script fields
+    let hook_pairs = [
+        ("bootstrap",        old.hooks.bootstrap.as_ref(),        new.hooks.bootstrap.as_ref()),
+        ("ingest",           old.hooks.ingest.as_ref(),           new.hooks.ingest.as_ref()),
+        ("assemble",         old.hooks.assemble.as_ref(),         new.hooks.assemble.as_ref()),
+        ("compact",          old.hooks.compact.as_ref(),          new.hooks.compact.as_ref()),
+        ("after_turn",       old.hooks.after_turn.as_ref(),       new.hooks.after_turn.as_ref()),
+        ("prepare_subagent", old.hooks.prepare_subagent.as_ref(), new.hooks.prepare_subagent.as_ref()),
+        ("merge_subagent",   old.hooks.merge_subagent.as_ref(),   new.hooks.merge_subagent.as_ref()),
+    ];
+    for (hook_name, old_script, new_script) in &hook_pairs {
+        if old_script.is_some() && new_script.is_none() {
+            warnings.push(ManifestCompatWarning {
+                kind: ManifestCompatKind::HookRemoved,
+                message: format!(
+                    "hook '{}' was present in old manifest but removed in new",
+                    hook_name
+                ),
+            });
+        }
+    }
+
+    // Major version downgrade — parse "major.minor.patch" tuples
+    if let (Some(old_ver), Some(new_ver)) = (
+        parse_semver_triple(&old.version),
+        parse_semver_triple(&new.version),
+    ) {
+        if new_ver.0 < old_ver.0 {
+            warnings.push(ManifestCompatWarning {
+                kind: ManifestCompatKind::MajorVersionDowngrade,
+                message: format!(
+                    "major version downgrade from {} to {}",
+                    old.version, new.version
+                ),
+            });
+        }
+    }
+
+    warnings
+}
+
+/// Parse "major.minor.patch" into a (u32, u32, u32) tuple.
+/// Returns None if the string doesn't match the pattern.
+fn parse_semver_triple(s: &str) -> Option<(u32, u32, u32)> {
+    let parts: Vec<&str> = s.split('.').collect();
+    let major = parts.first()?.parse().ok()?;
+    let minor = parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(0);
+    let patch = parts.get(2).and_then(|p| p.parse().ok()).unwrap_or(0);
+    Some((major, minor, patch))
+}
+
 /// Upgrade a plugin in-place: remove the old version, reinstall from source.
 ///
 /// The `.disabled` state is preserved across the upgrade.
@@ -2762,6 +2863,9 @@ pub async fn upgrade_plugin(name: &str, source: &PluginSource) -> Result<PluginI
         return Err(format!("Plugin '{name}' is not installed. Use install instead."));
     }
 
+    // Capture old manifest before removing so we can compare with the new one.
+    let old_manifest = load_plugin_manifest(&plugin_dir).ok();
+
     // Preserve the enabled/disabled state
     let was_disabled = plugin_dir.join(".disabled").exists();
 
@@ -2771,6 +2875,16 @@ pub async fn upgrade_plugin(name: &str, source: &PluginSource) -> Result<PluginI
 
     // Reinstall
     let info = install_plugin(source).await?;
+
+    // Check for breaking changes between old and new manifest.
+    if let Some(ref old) = old_manifest {
+        let compat_warnings = check_manifest_compat(old, &info.manifest);
+        if !compat_warnings.is_empty() {
+            for w in &compat_warnings {
+                warn!(plugin = %name, kind = ?w.kind, "{}", w.message);
+            }
+        }
+    }
 
     // Restore disabled state if it was set
     if was_disabled {
