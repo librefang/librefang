@@ -146,7 +146,7 @@ Depends on: Rounds 1-2 (types compile, CLI compiles). Creates infrastructure BEF
 
 | Change | File | Description | AC |
 |--------|------|-------------|-----|
-| Create AccountId extractor | `crates/librefang-api/src/extractors.rs` | `impl FromRequestParts for AccountId` — infallible, `X-Account-Id` header | AC-8 |
+| Implement FromRequestParts | `crates/librefang-api/src/middleware.rs` | `impl FromRequestParts for AccountId` in middleware, infallible, `X-Account-Id` header | AC-8 |
 | Create validate_account! macro | `crates/librefang-api/src/macros.rs` | Returns 400 if `AccountId(None)` | AC-9 |
 | Create account_or_system! macro | `crates/librefang-api/src/macros.rs` | Defaults to `"system"` if None | AC-10 |
 | Create check_account guard | `crates/librefang-api/src/routes/shared.rs` | Returns 404 (not 403) on cross-tenant | AC-11 |
@@ -158,12 +158,12 @@ Depends on: Rounds 1-2 (types compile, CLI compiles). Creates infrastructure BEF
 **TDD micro-cycles (4 batches, not 18-then-implement):**
 
 **Batch A: Extractor (RED→GREEN×6)**
-1. RED: `test_extract_account_id_from_header` → GREEN: implement `FromRequestParts`
-2. RED: `test_extract_account_id_missing_header` → GREEN: return `AccountId(None)`
+1. RED: `test_extract_account_id_from_header` → GREEN: implement `FromRequestParts` in middleware.rs
+2. RED: `test_extract_account_id_missing_header` → GREEN: return `AccountId(None)` via account.0
 3. RED: `test_extract_account_id_empty_header` → GREEN: treat empty as None
-4. RED: `test_extract_account_id_whitespace_trimmed` → GREEN: `.trim()`
+4. RED: `test_extract_account_id_whitespace_trimmed` → GREEN: `.trim()` in header extraction
 5. RED: `test_extract_account_id_case_sensitive` → GREEN: no `.to_lowercase()`
-6. RED: `test_extract_is_infallible` → GREEN: `Rejection = Infallible`
+6. RED: `test_extract_is_infallible` → GREEN: `Rejection = Infallible` trait impl
 
 **Batch B: Macros (RED→GREEN×4)**
 7. RED: `test_validate_account_rejects_none` → GREEN: implement `validate_account!`
@@ -231,7 +231,14 @@ pub async fn handler_name(
 | 1-50 | All 50 `pub async fn` in agents.rs | `check_account()` on reads after fetch, `validate_account!` on writes | AC-13–AC-17 |
 
 **Approach:**
-- GET/LIST: call `state.kernel.registry.list_by_account(&account)` or `get_scoped(id, &account)`
+- GET/LIST: match on `account.0` to extract &str, then call `state.kernel.registry.list_by_account(oid)` for Some or `.list()` for None
+- Pattern:
+  ```rust
+  let raw_agents = match account.0 {
+      Some(ref oid) => state.kernel.registry.list_by_account(oid),
+      None => state.kernel.registry.list(),
+  };
+  ```
 - POST/PUT: `validate_account!(account)` then `state.kernel.spawn_agent(manifest)` with account threaded
 - DELETE: fetch via `get_scoped()`, then delete — returns 404 if cross-tenant
 
@@ -281,6 +288,8 @@ cargo clippy -p librefang-api --all-targets -- -D warnings && \
 cargo test -p librefang-api && \
 echo "Round 4c PASS"
 ```
+
+**Note on set_account():** References to `state.kernel.registry.set_account(agent_id, oid.clone())` appear in handler code but the actual implementation is deferred to the storage team's separate multi-tenant initiative. Phase 1 adds the account extraction infrastructure; storage-team adds the registry persistence. Handlers call set_account() but it will be implemented in v18 migration by the storage team.
 
 ---
 
