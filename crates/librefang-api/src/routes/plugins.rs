@@ -1,6 +1,6 @@
 //! Context engine plugin management endpoints.
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
@@ -62,6 +62,27 @@ pub fn router() -> axum::Router<Arc<AppState>> {
             "/plugins/{name}/lint",
             axum::routing::get(lint_plugin),
         )
+        .route(
+            "/plugins/{name}/sign",
+            axum::routing::post(sign_plugin),
+        )
+        .route(
+            "/context-engine/health",
+            axum::routing::get(context_engine_health),
+        )
+        .route(
+            "/context-engine/chain",
+            axum::routing::get(context_engine_chain),
+        )
+}
+
+/// Query parameters for `GET /api/plugins`.
+#[derive(serde::Deserialize, Default)]
+pub struct ListPluginsQuery {
+    /// Filter by enabled state: `true` = enabled only, `false` = disabled only.
+    pub enabled: Option<bool>,
+    /// Filter to plugins with lint errors: `true` = broken plugins only.
+    pub has_errors: Option<bool>,
 }
 
 /// GET /api/plugins — List all installed context engine plugins.
@@ -73,8 +94,25 @@ pub fn router() -> axum::Router<Arc<AppState>> {
         (status = 200, description = "List installed plugins", body = serde_json::Value)
     )
 )]
-pub async fn list_plugins() -> impl IntoResponse {
-    let plugins = librefang_runtime::plugin_manager::list_plugins();
+pub async fn list_plugins(
+    Query(query): Query<ListPluginsQuery>,
+) -> impl IntoResponse {
+    let mut plugins = librefang_runtime::plugin_manager::list_plugins();
+
+    // Apply enabled filter
+    if let Some(enabled) = query.enabled {
+        plugins.retain(|p| p.enabled == enabled);
+    }
+
+    // Apply has_errors filter (runs lint on each plugin)
+    if let Some(want_errors) = query.has_errors {
+        plugins.retain(|p| {
+            let has_err = librefang_runtime::plugin_manager::lint_plugin(&p.manifest.name)
+                .map(|r| !r.ok)
+                .unwrap_or(false);
+            has_err == want_errors
+        });
+    }
     let items: Vec<serde_json::Value> = plugins
         .iter()
         .map(|p| {
@@ -869,6 +907,37 @@ pub async fn test_plugin_hook(
     }
 }
 
+/// POST /api/plugins/:name/sign — Compute and write SHA-256 integrity hashes into plugin.toml.
+///
+/// After signing, the plugin will be verified against these hashes on every load.
+/// Re-run after editing any hook scripts to keep the hashes up to date.
+#[utoipa::path(
+    post,
+    path = "/api/plugins/{name}/sign",
+    tag = "plugins",
+    params(("name" = String, Path, description = "Plugin name")),
+    responses(
+        (status = 200, description = "Hashes written to plugin.toml", body = serde_json::Value),
+        (status = 400, description = "Plugin not found or no hooks declared")
+    )
+)]
+pub async fn sign_plugin(Path(name): Path<String>) -> impl IntoResponse {
+    match librefang_runtime::plugin_manager::sign_plugin(&name) {
+        Ok(hashes) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "signed": true,
+                "plugin": name,
+                "hashes": hashes,
+                "count": hashes.len(),
+                "message": "Integrity hashes written to plugin.toml. Re-sign after editing hook scripts.",
+            })),
+        )
+            .into_response(),
+        Err(e) => ApiErrorResponse::bad_request(e).into_response(),
+    }
+}
+
 /// GET /api/plugins/:name/lint — Validate plugin manifest and hook script structure.
 ///
 /// Returns a lint report with errors (structural problems) and warnings
@@ -895,4 +964,154 @@ pub async fn lint_plugin(Path(name): Path<String>) -> impl IntoResponse {
         }
         Err(e) => ApiErrorResponse::bad_request(e).into_response(),
     }
+}
+
+/// GET /api/context-engine/health — Lightweight smoke test of the active plugin engine.
+///
+/// Verifies that all declared hook scripts exist on disk and are executable
+/// (for native runtime). Does not invoke any hook subprocess.
+/// Returns 200 when healthy, 503 when degraded.
+#[utoipa::path(
+    get,
+    path = "/api/context-engine/health",
+    tag = "plugins",
+    responses(
+        (status = 200, description = "Engine healthy"),
+        (status = 204, description = "No plugin engine configured"),
+        (status = 503, description = "Engine degraded — hook scripts missing or invalid")
+    )
+)]
+pub async fn context_engine_health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let cfg = state.kernel.config_ref();
+    let ctx_cfg = &cfg.context_engine;
+
+    // Determine which plugins are active
+    let mut active_plugins: Vec<String> = Vec::new();
+    if let Some(ref p) = ctx_cfg.plugin {
+        active_plugins.push(p.clone());
+    }
+    if let Some(ref stack) = ctx_cfg.plugin_stack {
+        for p in stack {
+            if !active_plugins.contains(p) {
+                active_plugins.push(p.clone());
+            }
+        }
+    }
+
+    if active_plugins.is_empty() {
+        return StatusCode::NO_CONTENT.into_response();
+    }
+
+    let mut issues: Vec<serde_json::Value> = Vec::new();
+    let mut all_ok = true;
+
+    for plugin_name in &active_plugins {
+        match librefang_runtime::plugin_manager::lint_plugin(plugin_name) {
+            Ok(report) => {
+                if !report.ok {
+                    all_ok = false;
+                    issues.push(serde_json::json!({
+                        "plugin": plugin_name,
+                        "errors": report.errors,
+                    }));
+                }
+            }
+            Err(e) => {
+                all_ok = false;
+                issues.push(serde_json::json!({
+                    "plugin": plugin_name,
+                    "errors": [e],
+                }));
+            }
+        }
+    }
+
+    let status = if all_ok {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+
+    (
+        status,
+        Json(serde_json::json!({
+            "healthy": all_ok,
+            "active_plugins": active_plugins,
+            "issues": issues,
+        })),
+    )
+        .into_response()
+}
+
+/// GET /api/context-engine/chain — Show the active context engine topology.
+///
+/// Describes whether the engine is the default (no plugin), a single plugin,
+/// or a stacked chain of plugins, and lists hook coverage for each.
+#[utoipa::path(
+    get,
+    path = "/api/context-engine/chain",
+    tag = "plugins",
+    responses(
+        (status = 200, description = "Engine chain topology", body = serde_json::Value)
+    )
+)]
+pub async fn context_engine_chain(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let cfg = state.kernel.config_ref();
+    let ctx_cfg = &cfg.context_engine;
+
+    let single = ctx_cfg.plugin.as_deref();
+    let stack = ctx_cfg.plugin_stack.as_deref().unwrap_or(&[]);
+
+    let mode = if !stack.is_empty() {
+        "stacked"
+    } else if single.is_some() {
+        "single"
+    } else {
+        "default"
+    };
+
+    // Build per-plugin hook coverage info
+    let mut chain: Vec<serde_json::Value> = Vec::new();
+
+    let plugins_to_describe: Vec<&str> = if !stack.is_empty() {
+        stack.iter().map(|s| s.as_str()).collect()
+    } else if let Some(p) = single {
+        vec![p]
+    } else {
+        vec![]
+    };
+
+    for plugin_name in &plugins_to_describe {
+        let hooks_info = match librefang_runtime::plugin_manager::get_plugin_info(plugin_name) {
+            Ok(info) => {
+                let hooks = &info.manifest.hooks;
+                serde_json::json!({
+                    "ingest": hooks.ingest.is_some(),
+                    "after_turn": hooks.after_turn.is_some(),
+                    "assemble": hooks.assemble.is_some(),
+                    "compact": hooks.compact.is_some(),
+                    "bootstrap": hooks.bootstrap.is_some(),
+                    "prepare_subagent": hooks.prepare_subagent.is_some(),
+                    "merge_subagent": hooks.merge_subagent.is_some(),
+                    "runtime": hooks.runtime,
+                    "enabled": info.enabled,
+                    "hooks_valid": info.hooks_valid,
+                    "cache_ttl_secs": hooks.hook_cache_ttl_secs,
+                })
+            }
+            Err(e) => serde_json::json!({ "error": e }),
+        };
+        chain.push(serde_json::json!({
+            "plugin": plugin_name,
+            "hooks": hooks_info,
+        }));
+    }
+
+    Json(serde_json::json!({
+        "mode": mode,
+        "chain": chain,
+        "chain_length": chain.len(),
+        "fallback": "default engine (embedding recall)",
+    }))
+    .into_response()
 }

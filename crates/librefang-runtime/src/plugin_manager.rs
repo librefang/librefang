@@ -2376,7 +2376,7 @@ async fn download_github_entry(
 
 /// Check that all declared hook scripts exist on disk and are within the plugin directory.
 /// Compute a hex-encoded SHA-256 digest of `bytes`.
-fn sha256_hex(bytes: &[u8]) -> String {
+pub fn sha256_hex(bytes: &[u8]) -> String {
 
     // NOTE: Rust's `DefaultHasher` is NOT cryptographic. We use a simple
     // hand-rolled SHA-256 here so we don't pull in a new crate. If the project
@@ -2520,6 +2520,120 @@ pub async fn upgrade_plugin(name: &str, source: &PluginSource) -> Result<PluginI
 
     info!(plugin = name, "Plugin upgraded");
     Ok(info)
+}
+
+/// Compute SHA-256 integrity hashes for all declared hook scripts and write
+/// them into `plugin.toml` under the `[integrity]` section.
+///
+/// Returns a map of `relative_path → sha256_hex` for every hook that was hashed.
+/// After this call the plugin can be loaded with integrity verification enabled.
+pub fn sign_plugin(name: &str) -> Result<std::collections::HashMap<String, String>, String> {
+    validate_plugin_name(name)?;
+    let plugin_dir = plugins_dir().join(name);
+    if !plugin_dir.exists() {
+        return Err(format!("Plugin '{name}' is not installed"));
+    }
+
+    let mut manifest = load_plugin_manifest_raw(&plugin_dir)?;
+
+    // Collect all declared hook script paths
+    let hooks = &manifest.hooks;
+    let mut hook_paths: Vec<String> = Vec::new();
+    for p in [
+        hooks.ingest.as_deref(),
+        hooks.after_turn.as_deref(),
+        hooks.assemble.as_deref(),
+        hooks.compact.as_deref(),
+        hooks.bootstrap.as_deref(),
+        hooks.prepare_subagent.as_deref(),
+        hooks.merge_subagent.as_deref(),
+    ]
+    .iter()
+    .flatten()
+    {
+        hook_paths.push(p.to_string());
+    }
+
+    if hook_paths.is_empty() {
+        return Err(format!("Plugin '{name}' has no hook scripts declared"));
+    }
+
+    let mut hashes = std::collections::HashMap::new();
+    for rel_path in &hook_paths {
+        let abs_path = plugin_dir.join(rel_path);
+        let bytes = std::fs::read(&abs_path).map_err(|e| {
+            format!("Cannot read '{}' for signing: {e}", abs_path.display())
+        })?;
+        hashes.insert(rel_path.clone(), sha256_hex(&bytes));
+    }
+
+    // Update manifest integrity map
+    manifest.integrity = hashes.clone();
+
+    // Rewrite plugin.toml with updated integrity section.
+    // We do a targeted TOML patch: read the original, remove any existing
+    // [integrity] table, then append a fresh one.
+    let manifest_path = plugin_dir.join("plugin.toml");
+    let original = std::fs::read_to_string(&manifest_path)
+        .map_err(|e| format!("Cannot read plugin.toml: {e}"))?;
+
+    // Strip existing [integrity] block (from "[integrity]" to next bare "[" section)
+    let stripped = strip_toml_section(&original, "integrity");
+
+    // Append new [integrity] block
+    let mut new_content = stripped.trim_end().to_string();
+    new_content.push_str("\n\n[integrity]\n");
+    for (path, hash) in &hashes {
+        new_content.push_str(&format!("\"{}\" = \"{}\"\n", path, hash));
+    }
+    new_content.push('\n');
+
+    std::fs::write(&manifest_path, &new_content)
+        .map_err(|e| format!("Failed to write plugin.toml: {e}"))?;
+
+    info!(plugin = name, hooks = hook_paths.len(), "Plugin signed — integrity hashes written");
+    Ok(hashes)
+}
+
+/// Load a plugin manifest from disk without running integrity/dependency checks.
+///
+/// Used internally for operations that need to read and then re-write the
+/// manifest (e.g. `sign_plugin`).
+fn load_plugin_manifest_raw(plugin_dir: &Path) -> Result<PluginManifest, String> {
+    let manifest_path = plugin_dir.join("plugin.toml");
+    let content = std::fs::read_to_string(&manifest_path)
+        .map_err(|e| format!("Failed to read {}: {e}", manifest_path.display()))?;
+    toml::from_str(&content).map_err(|e| format!("Invalid plugin.toml: {e}"))
+}
+
+/// Remove a TOML section (and its contents) from `src`.
+///
+/// Strips everything from `[section_name]` up to (but not including) the next
+/// bare `[` header, or to the end of the file. Case-sensitive.
+fn strip_toml_section(src: &str, section_name: &str) -> String {
+    let header = format!("[{section_name}]");
+    let mut result = String::with_capacity(src.len());
+    let mut skip = false;
+    for line in src.lines() {
+        let trimmed = line.trim();
+        if trimmed == header {
+            skip = true;
+            continue;
+        }
+        // Any new bare [section] ends the skip (but not [[array]] tables)
+        if skip
+            && trimmed.starts_with('[')
+            && !trimmed.starts_with("[[")
+            && trimmed != header
+        {
+            skip = false;
+        }
+        if !skip {
+            result.push_str(line);
+            result.push('\n');
+        }
+    }
+    result
 }
 
 /// Lint a plugin: validate its manifest, hook files, and structure.

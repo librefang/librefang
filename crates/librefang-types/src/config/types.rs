@@ -2340,6 +2340,20 @@ pub struct ContextEngineHooks {
     /// ```
     #[serde(default)]
     pub hook_schemas: std::collections::HashMap<String, HookSchema>,
+    /// Optional TTL (seconds) for caching `ingest` hook results.
+    ///
+    /// When set, the runtime caches the hook output keyed on the exact input
+    /// JSON. Subsequent calls with identical input within the TTL window skip
+    /// the subprocess entirely and return the cached result. Useful for
+    /// embedding-based recall hooks that are deterministic and expensive.
+    ///
+    /// Set to `0` or omit to disable caching (default).
+    ///
+    /// ```toml
+    /// hook_cache_ttl_secs = 60   # cache ingest results for 1 minute
+    /// ```
+    #[serde(default)]
+    pub hook_cache_ttl_secs: Option<u64>,
 }
 
 fn default_true_bool() -> bool {

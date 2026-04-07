@@ -531,6 +531,14 @@ pub struct ScriptableContextEngine {
     /// Hook protocol version declared by this plugin (stored for future compatibility checks).
     #[allow(dead_code)]
     hook_protocol_version: u32,
+    /// Optional TTL-based cache for the `ingest` hook (seconds). `None` = disabled.
+    ingest_cache_ttl_secs: Option<u64>,
+    /// In-memory cache: maps SHA-256(input_json) → (cached_output, expires_at).
+    ingest_cache: std::sync::Arc<
+        std::sync::Mutex<
+            std::collections::HashMap<String, (serde_json::Value, std::time::Instant)>,
+        >,
+    >,
 }
 
 impl ScriptableContextEngine {
@@ -603,6 +611,10 @@ impl ScriptableContextEngine {
             max_memory_mb: hooks.max_memory_mb,
             allow_network: hooks.allow_network,
             hook_protocol_version: proto,
+            ingest_cache_ttl_secs: hooks.hook_cache_ttl_secs,
+            ingest_cache: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
         }
     }
 
@@ -937,6 +949,93 @@ impl ContextEngine for ScriptableContextEngine {
             "message": user_message,
             "peer_id": peer_id,
         });
+
+        // TTL-based cache: skip subprocess if we have a fresh cached result.
+        if let Some(ttl_secs) = self.ingest_cache_ttl_secs {
+            let cache_key = {
+                let raw = serde_json::to_string(&input).unwrap_or_default();
+                crate::plugin_manager::sha256_hex(raw.as_bytes())
+            };
+            let cached = {
+                let guard = self.ingest_cache.lock().unwrap();
+                guard.get(&cache_key).and_then(|(val, exp)| {
+                    if exp.elapsed().as_secs() < ttl_secs { Some(val.clone()) } else { None }
+                })
+            };
+            if let Some(cached_output) = cached {
+                debug!("Ingest hook cache hit (ttl={}s)", ttl_secs);
+                let mut memories = default_result.recalled_memories;
+                if let Some(hook_memories) = cached_output.get("memories").and_then(|m| m.as_array()) {
+                    for mem in hook_memories {
+                        if let Some(content) = mem.get("content").and_then(|c| c.as_str()) {
+                            memories.push(MemoryFragment {
+                                id: librefang_types::memory::MemoryId::new(),
+                                agent_id,
+                                content: content.to_string(),
+                                embedding: None,
+                                metadata: std::collections::HashMap::new(),
+                                source: librefang_types::memory::MemorySource::System,
+                                confidence: 1.0,
+                                created_at: chrono::Utc::now(),
+                                accessed_at: chrono::Utc::now(),
+                                access_count: 0,
+                                scope: "hook_cached".to_string(),
+                                image_url: None,
+                                image_embedding: None,
+                                modality: Default::default(),
+                            });
+                        }
+                    }
+                }
+                return Ok(IngestResult { recalled_memories: memories });
+            }
+            // Cache miss — run hook and store result below
+            let cache_key_owned = cache_key;
+            let cache_arc = self.ingest_cache.clone();
+            match Self::run_hook("ingest", script, self.runtime, input.clone(), self.hook_timeout_secs, &self.plugin_env, self.max_retries, self.retry_delay_ms, self.max_memory_mb, self.allow_network, &self.traces, &self.hook_schemas).await {
+                Ok((output, ms)) => {
+                    Self::record_hook(&self.metrics, "ingest", ms, true);
+                    // Store in cache
+                    {
+                        let mut guard = cache_arc.lock().unwrap();
+                        guard.insert(cache_key_owned, (output.clone(), std::time::Instant::now()));
+                        // Evict expired entries when cache grows large
+                        if guard.len() > 512 {
+                            guard.retain(|_, (_, exp)| exp.elapsed().as_secs() < ttl_secs);
+                        }
+                    }
+                    let mut memories = default_result.recalled_memories;
+                    if let Some(hook_memories) = output.get("memories").and_then(|m| m.as_array()) {
+                        for mem in hook_memories {
+                            if let Some(content) = mem.get("content").and_then(|c| c.as_str()) {
+                                memories.push(MemoryFragment {
+                                    id: librefang_types::memory::MemoryId::new(),
+                                    agent_id,
+                                    content: content.to_string(),
+                                    embedding: None,
+                                    metadata: std::collections::HashMap::new(),
+                                    source: librefang_types::memory::MemorySource::System,
+                                    confidence: 1.0,
+                                    created_at: chrono::Utc::now(),
+                                    accessed_at: chrono::Utc::now(),
+                                    access_count: 0,
+                                    scope: "hook".to_string(),
+                                    image_url: None,
+                                    image_embedding: None,
+                                    modality: Default::default(),
+                                });
+                            }
+                        }
+                    }
+                    return Ok(IngestResult { recalled_memories: memories });
+                }
+                Err(err) => {
+                    Self::record_hook(&self.metrics, "ingest", 0, false);
+                    self.apply_failure_policy("ingest", &err)?;
+                    return Ok(default_result); // reached only for Warn/Skip policy
+                }
+            }
+        }
 
         match Self::run_hook("ingest", script, self.runtime, input, self.hook_timeout_secs, &self.plugin_env, self.max_retries, self.retry_delay_ms, self.max_memory_mb, self.allow_network, &self.traces, &self.hook_schemas).await {
             Ok((output, ms)) => {
@@ -1393,6 +1492,7 @@ pub fn load_plugin(
         allow_network: manifest.hooks.allow_network,
         only_for_agent_ids: manifest.hooks.only_for_agent_ids.clone(),
         hook_schemas: manifest.hooks.hook_schemas.clone(),
+        hook_cache_ttl_secs: manifest.hooks.hook_cache_ttl_secs,
     };
 
     debug!(
