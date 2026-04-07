@@ -10,9 +10,14 @@ This page covers the protocol, the manifest format, every supported runtime, and
 - [Hook Lifecycle](#hook-lifecycle)
 - [Protocol Specification](#protocol-specification)
 - [`plugin.toml` Manifest](#plugin-toml-manifest)
+- [Plugin Environment Variables (`[env]`)](#plugin-environment-variables-env)
+- [Hook Timeout Override (`hook_timeout_secs`)](#hook-timeout-override-hook_timeout_secs)
 - [Supported Runtimes](#supported-runtimes)
 - [Writing Your First Plugin](#writing-your-first-plugin)
+- [Plugin Stacking (`plugin_stack`)](#plugin-stacking-plugin_stack)
 - [Scaffolding via Dashboard or API](#scaffolding-via-dashboard-or-api)
+- [Hot-Reload Endpoint](#hot-reload-endpoint)
+- [Hook Invocation Metrics](#hook-invocation-metrics)
 - [Testing Locally](#testing-locally)
 - [Debugging with the Doctor Endpoint](#debugging-with-the-doctor-endpoint)
 - [Error Handling, Timeouts, and Logs](#error-handling-timeouts-and-logs)
@@ -307,6 +312,66 @@ requirements = "requirements.txt"
 
 ---
 
+## Plugin Environment Variables (`[env]`)
+
+The `[env]` section in `plugin.toml` lets a plugin declare the environment variables that every one of its hook subprocesses will receive. This keeps plugin-specific config out of the global agent config and makes plugins self-contained.
+
+```toml
+name = "qdrant-recall"
+version = "0.1.0"
+
+[env]
+QDRANT_URL     = "http://localhost:6333"
+COLLECTION     = "agent-memories"
+QDRANT_API_KEY = "${QDRANT_API_KEY}"
+
+[hooks]
+ingest    = "hooks/ingest.py"
+after_turn = "hooks/after_turn.py"
+runtime   = "python"
+```
+
+**Env-var expansion:** any value that begins with `${VAR_NAME}` is expanded from the daemon's own environment at invocation time. If `VAR_NAME` is not set in the daemon environment the variable is passed as an empty string and a `warn` log entry is emitted. Expansion applies only to values that start with `${` — static values like `"http://localhost:6333"` are forwarded verbatim.
+
+Your hook script can then read these from the environment in the usual way:
+
+```python
+import os
+qdrant_url = os.environ["QDRANT_URL"]
+api_key    = os.environ.get("QDRANT_API_KEY", "")
+```
+
+**Order of precedence** (highest wins): `[env]` values override LibreFang's baseline set (`LIBREFANG_AGENT_ID`, `PATH`, `HOME`, runtime passthrough vars) for any key that appears in both. Variables in the agent's `allowed_env_vars` list are applied after `[env]` and therefore take final precedence.
+
+---
+
+## Hook Timeout Override (`hook_timeout_secs`)
+
+By default every hook invocation is allowed 30 seconds before the subprocess is killed. You can raise or lower that limit per-plugin with the `hook_timeout_secs` field at the top level of `plugin.toml` (alongside `name`, `version`, etc. — not inside `[hooks]`):
+
+```toml
+name = "qdrant-recall"
+version = "0.2.0"
+
+hook_timeout_secs = 60   # all hooks get 60 s; bootstrap gets 120 s
+
+[context_engine_hooks]
+runtime = "python"
+ingest  = "hooks/ingest.py"
+```
+
+| Value | Hook timeout | `bootstrap` timeout |
+|-------|-------------|---------------------|
+| *(unset)* | 30 s (default) | 60 s |
+| `60` | 60 s | 120 s |
+| `10` | 10 s | 20 s |
+
+The `bootstrap` hook always receives **2× the configured timeout** because it runs only once at startup and may need extra time to connect to external services, warm a cache, or download embeddings.
+
+Use a higher value when your hooks call remote services with variable latency (vector stores, embedding APIs). Use a lower value when you want tighter failure-detection for lightweight hooks.
+
+---
+
 ## Supported Runtimes
 
 | Runtime | Command | Works out of the box in Docker? |
@@ -422,6 +487,37 @@ The next time a message arrives with a `peer_id`, your `ingest` hook runs and th
 
 ---
 
+## Plugin Stacking (`plugin_stack`)
+
+A single `plugin` entry in the agent config wires one plugin to the context engine. `plugin_stack` lets you chain **two or more plugins together** so that each hook phase draws from multiple plugins simultaneously.
+
+```toml
+[context_engine]
+plugin_stack = ["qdrant-recall", "my-indexer"]
+```
+
+The array must contain at least two plugin names. Each name must match a directory under `~/.librefang/plugins/`. Plugins are applied in array order.
+
+### Chain semantics
+
+| Hook | How the stack is applied |
+|------|--------------------------|
+| `ingest` | All plugins run; their `memories` arrays are **merged** (concatenated in order). |
+| `assemble` | Plugins run in order; the **first non-empty message list** wins and the rest are skipped. |
+| `compact` | Plugins run in order; the **first non-fallback result** wins (i.e. the first plugin that returns a non-empty message list). |
+| `after_turn` | All plugins run **sequentially**. Failures are logged individually and do not abort the chain. |
+| `bootstrap`, `prepare_subagent`, `merge_subagent` | All plugins run sequentially; failures are logged but do not abort the chain. |
+
+### When to use plugin stacking
+
+- **Recall + indexing separation**: use one plugin for vector-DB recall (`ingest`) and a second for post-turn indexing (`after_turn`) without mixing concerns inside a single plugin.
+- **Fallback assembly**: put your preferred `assemble` plugin first and a simpler fallback plugin second — the chain automatically uses the first plugin whose response is non-empty.
+- **Layered memory**: combine a fast local-cache recall plugin with a slower remote recall plugin so you always get low-latency results while still pulling from the full history.
+
+`plugin_stack` and `plugin` are mutually exclusive in the same `[context_engine]` block. If both are present, `plugin_stack` takes precedence.
+
+---
+
 ## Scaffolding via Dashboard or API
 
 The dashboard's Plugins page has a **Create Plugin** form with a runtime dropdown — pick your language and it emits a matching template (`ingest.rb` for Ruby, `ingest.go` for Go, etc.) that already speaks the protocol.
@@ -437,6 +533,77 @@ curl -X POST http://127.0.0.1:4545/api/plugins/scaffold \
     "runtime": "go"
   }'
 ```
+
+---
+
+## Hot-Reload Endpoint
+
+After editing a plugin's scripts or `plugin.toml`, you can apply the changes without restarting the daemon:
+
+```bash
+curl -X POST http://127.0.0.1:4545/api/plugins/qdrant-recall/reload
+```
+
+The endpoint re-reads `plugin.toml` from disk and replaces the in-memory plugin configuration. What changes take effect immediately vs. what requires a restart:
+
+| Change type | After `/reload` | Requires agent restart |
+|-------------|----------------|------------------------|
+| Script edits (logic changes inside `.py`, `.js`, etc.) | Yes — next hook invocation uses the updated file | No |
+| `hook_timeout_secs` change | Yes | No |
+| `[env]` additions or edits | Yes | No |
+| Adding or removing a hook entry in `plugin.toml` | No | Yes |
+| `runtime` change | No | Yes |
+| Renaming the plugin directory | No | Yes |
+
+A successful reload returns:
+
+```json
+{ "status": "ok", "plugin": "qdrant-recall" }
+```
+
+If the updated `plugin.toml` fails to parse, the daemon keeps the previous configuration and returns a 400 with an error message — the plugin continues to operate uninterrupted.
+
+---
+
+## Hook Invocation Metrics
+
+The context engine runtime accumulates per-hook statistics for every installed plugin. Retrieve them with:
+
+```bash
+curl http://127.0.0.1:4545/api/context-engine/metrics
+```
+
+Example response:
+
+```json
+{
+  "plugins": {
+    "qdrant-recall": {
+      "ingest": {
+        "calls":       142,
+        "successes":   140,
+        "failures":      2,
+        "latency_ms_total": 8421
+      },
+      "after_turn": {
+        "calls":       138,
+        "successes":   138,
+        "failures":      0,
+        "latency_ms_total": 2760
+      }
+    }
+  }
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `calls` | Total number of times this hook has been invoked since daemon start. |
+| `successes` | Invocations that exited with code 0 and returned valid JSON. |
+| `failures` | Invocations that timed out, exited non-zero, or produced unparseable output. |
+| `latency_ms_total` | Cumulative wall-clock time (ms) spent inside the hook subprocess. Divide by `calls` for mean latency. |
+
+Counters reset when the daemon restarts. Use this endpoint to identify slow hooks (`latency_ms_total / calls` is high), frequently failing hooks (`failures / calls` is high), or hooks that are never invoked (possibly missing a `plugin_stack` entry or an incorrect hook path).
 
 ---
 
