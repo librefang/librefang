@@ -612,7 +612,11 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             .collect())
     }
 
-    async fn spawn_agent_by_name(&self, manifest_name: &str) -> Result<AgentId, String> {
+    async fn spawn_agent_by_name(
+        &self,
+        manifest_name: &str,
+        account_id: Option<&str>,
+    ) -> Result<AgentId, String> {
         // Look for manifest at ~/.librefang/workspaces/agents/{name}/agent.toml
         let manifest_path = self
             .kernel
@@ -636,6 +640,16 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             .kernel
             .spawn_agent(manifest)
             .map_err(|e| format!("Failed to spawn agent: {e}"))?;
+
+        // Attach tenant ownership so the spawned agent is visible only to the
+        // owning account. Failure is a hard error — an unowned agent in a
+        // multi-tenant deployment is a security invariant violation.
+        if let Some(owner) = account_id {
+            self.kernel
+                .agent_registry()
+                .set_account_id(agent_id, Some(owner.to_string()))
+                .map_err(|e| format!("Failed to attach account_id to spawned agent: {e}"))?;
+        }
 
         Ok(agent_id)
     }
@@ -2691,7 +2705,10 @@ pub async fn start_channel_bridge_with_config(
             // Resolve agent name to ID
             let agent_id = match handle.find_agent_by_name(name).await {
                 Ok(Some(id)) => Some(id),
-                _ => match handle.spawn_agent_by_name(name).await {
+                _ => match handle
+                    .spawn_agent_by_name(name, account_id.as_deref())
+                    .await
+                {
                     Ok(id) => Some(id),
                     Err(e) => {
                         warn!(

@@ -180,19 +180,24 @@ use std::sync::{Arc, LazyLock};
 /// Assign tenant ownership to a freshly spawned agent.
 ///
 /// Calls [`AgentRegistry::set_account_id`] directly — no clone/mutate
-/// round-trip, eliminating the race window where the agent is visible
-/// without an owner. When `AccountId(None)` (system / admin mode) this
-/// is a no-op.
-fn finalize_spawned_agent_in_registry(state: &AppState, id: AgentId, account: &AccountId) {
+/// round-trip. When `AccountId(None)` (system / admin mode) this is a no-op.
+///
+/// Returns `Err` if ownership could not be attached. Callers **must** treat
+/// this as a hard failure: an agent that exists without `account_id` in a
+/// scoped request is a security invariant violation.
+fn finalize_spawned_agent_in_registry(
+    state: &AppState,
+    id: AgentId,
+    account: &AccountId,
+) -> Result<(), String> {
     if let Some(ref owner) = account.0 {
-        if let Err(e) = state
+        state
             .kernel
             .agent_registry()
             .set_account_id(id, Some(owner.clone()))
-        {
-            tracing::warn!("Failed to set account_id on spawned agent {id}: {e}");
-        }
+            .map_err(|e| format!("Failed to attach account_id to agent {id}: {e}"))?;
     }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -353,8 +358,16 @@ pub async fn spawn_agent(
 
     match state.kernel.spawn_agent(resolved.manifest) {
         Ok(id) => {
-            // Attach tenant ownership so subsequent access-control checks work.
-            finalize_spawned_agent_in_registry(&state, id, &account);
+            // Attach tenant ownership — failure is a hard error: an unowned
+            // agent in a scoped session is a security invariant violation.
+            if let Err(e) = finalize_spawned_agent_in_registry(&state, id, &account) {
+                // Best-effort cleanup: stop the agent so it does not linger unowned.
+                let _ = state.kernel.stop_agent(id);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": e})),
+                );
+            }
             (
                 StatusCode::CREATED,
                 Json(serde_json::json!(SpawnResponse {
@@ -450,8 +463,18 @@ pub async fn bulk_create_agents(
                 let name = resolved.name.clone();
                 match state.kernel.spawn_agent(resolved.manifest) {
                     Ok(id) => {
-                        // Attach tenant ownership to each spawned agent.
-                        finalize_spawned_agent_in_registry(&state, id, &account);
+                        // Attach tenant ownership — hard failure per spawn contract.
+                        if let Err(e) = finalize_spawned_agent_in_registry(&state, id, &account) {
+                            let _ = state.kernel.stop_agent(id);
+                            results.push(BulkCreateResult {
+                                index,
+                                success: false,
+                                agent_id: None,
+                                name: Some(name),
+                                error: Some(e),
+                            });
+                            continue;
+                        }
                         results.push(BulkCreateResult {
                             index,
                             success: true,
@@ -3967,8 +3990,15 @@ pub async fn clone_agent(
         }
     };
 
-    // Attach tenant ownership to the cloned agent.
-    finalize_spawned_agent_in_registry(&state, new_id, &account);
+    // Attach tenant ownership to the cloned agent — hard failure per spawn contract.
+    if let Err(e) = finalize_spawned_agent_in_registry(&state, new_id, &account) {
+        let _ = state.kernel.stop_agent(new_id);
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response();
+    }
 
     // Copy workspace files from source to destination
     let new_entry = state.kernel.agent_registry().get(new_id);

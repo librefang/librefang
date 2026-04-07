@@ -163,6 +163,11 @@ impl StructuredStore {
             "ALTER TABLE agents ADD COLUMN source_toml_path TEXT DEFAULT NULL",
             [],
         );
+        // Add account_id column for multi-tenant ownership (migration compat)
+        let _ = conn.execute(
+            "ALTER TABLE agents ADD COLUMN account_id TEXT DEFAULT NULL",
+            [],
+        );
 
         let identity_json = serde_json::to_string(&entry.identity)
             .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
@@ -172,9 +177,9 @@ impl StructuredStore {
             .map(|p| p.to_string_lossy().into_owned());
 
         conn.execute(
-            "INSERT INTO agents (id, name, manifest, state, created_at, updated_at, session_id, identity, source_toml_path)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-             ON CONFLICT(id) DO UPDATE SET name = ?2, manifest = ?3, state = ?4, updated_at = ?6, session_id = ?7, identity = ?8, source_toml_path = ?9",
+            "INSERT INTO agents (id, name, manifest, state, created_at, updated_at, session_id, identity, source_toml_path, account_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(id) DO UPDATE SET name = ?2, manifest = ?3, state = ?4, updated_at = ?6, session_id = ?7, identity = ?8, source_toml_path = ?9, account_id = ?10",
             rusqlite::params![
                 entry.id.0.to_string(),
                 entry.name,
@@ -185,6 +190,7 @@ impl StructuredStore {
                 entry.session_id.0.to_string(),
                 identity_json,
                 source_toml_path,
+                entry.account_id,
             ],
         )
         .map_err(|e| LibreFangError::Memory(e.to_string()))?;
@@ -199,7 +205,10 @@ impl StructuredStore {
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
         let mut stmt = conn
-            .prepare("SELECT id, name, manifest, state, created_at, updated_at, session_id, identity, source_toml_path FROM agents WHERE id = ?1")
+            .prepare("SELECT id, name, manifest, state, created_at, updated_at, session_id, identity, source_toml_path, account_id FROM agents WHERE id = ?1")
+            .or_else(|_| {
+                conn.prepare("SELECT id, name, manifest, state, created_at, updated_at, session_id, identity, source_toml_path FROM agents WHERE id = ?1")
+            })
             .or_else(|_| {
                 conn.prepare("SELECT id, name, manifest, state, created_at, updated_at, session_id, identity FROM agents WHERE id = ?1")
                     .or_else(|_| {
@@ -233,6 +242,11 @@ impl StructuredStore {
             } else {
                 None
             };
+            let account_id: Option<String> = if col_count >= 10 {
+                row.get(9).ok().flatten()
+            } else {
+                None
+            };
             Ok((
                 name,
                 manifest_blob,
@@ -241,6 +255,7 @@ impl StructuredStore {
                 session_id_str,
                 identity_str,
                 source_toml_path,
+                account_id,
             ))
         });
 
@@ -253,6 +268,7 @@ impl StructuredStore {
                 session_id_str,
                 identity_str,
                 source_toml_path,
+                account_id,
             )) => {
                 let mut manifest: librefang_types::agent::AgentManifest =
                     rmp_serde::from_slice(&manifest_blob)
@@ -299,7 +315,7 @@ impl StructuredStore {
                     onboarding_completed: false,
                     onboarding_completed_at: None,
                     is_hand,
-                    account_id: None,
+                    account_id,
                 }))
             }
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -372,11 +388,14 @@ impl StructuredStore {
             .lock()
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
-        // Try with identity+session_id columns first, fall back gracefully
+        // Try with account_id+identity+session_id columns first, fall back gracefully
         let mut stmt = conn
             .prepare(
-                "SELECT id, name, manifest, state, created_at, updated_at, session_id, identity, source_toml_path FROM agents",
+                "SELECT id, name, manifest, state, created_at, updated_at, session_id, identity, source_toml_path, account_id FROM agents",
             )
+            .or_else(|_| {
+                conn.prepare("SELECT id, name, manifest, state, created_at, updated_at, session_id, identity, source_toml_path FROM agents")
+            })
             .or_else(|_| {
                 conn.prepare("SELECT id, name, manifest, state, created_at, updated_at, session_id, identity FROM agents")
             })
@@ -411,6 +430,11 @@ impl StructuredStore {
                 } else {
                     None
                 };
+                let account_id: Option<String> = if col_count >= 10 {
+                    row.get(9).ok().flatten()
+                } else {
+                    None
+                };
                 Ok((
                     id_str,
                     name,
@@ -420,6 +444,7 @@ impl StructuredStore {
                     session_id_str,
                     identity_str,
                     source_toml_path,
+                    account_id,
                 ))
             })
             .map_err(|e| LibreFangError::Memory(e.to_string()))?;
@@ -438,6 +463,7 @@ impl StructuredStore {
                 session_id_str,
                 identity_str,
                 source_toml_path,
+                account_id,
             ) = match row {
                 Ok(r) => r,
                 Err(e) => {
@@ -538,7 +564,7 @@ impl StructuredStore {
                 onboarding_completed: false,
                 onboarding_completed_at: None,
                 is_hand,
-                account_id: None,
+                account_id,
             });
         }
 
@@ -662,6 +688,71 @@ mod tests {
         assert_eq!(
             loaded.source_toml_path,
             Some(std::path::PathBuf::from("/tmp/test-agent/agent.toml"))
+        );
+    }
+
+    #[test]
+    fn test_save_and_load_agent_account_id_roundtrip() {
+        let store = setup();
+        let agent_id = AgentId::new();
+        let entry = AgentEntry {
+            id: agent_id,
+            name: "tenant-agent".to_string(),
+            manifest: librefang_types::agent::AgentManifest::default(),
+            state: librefang_types::agent::AgentState::Running,
+            mode: Default::default(),
+            created_at: Utc::now(),
+            last_active: Utc::now(),
+            parent: None,
+            children: vec![],
+            session_id: librefang_types::agent::SessionId::new(),
+            source_toml_path: None,
+            tags: vec![],
+            identity: Default::default(),
+            onboarding_completed: false,
+            onboarding_completed_at: None,
+            is_hand: false,
+            account_id: Some("tenant-abc-123".to_string()),
+        };
+
+        store.save_agent(&entry).unwrap();
+        let loaded = store.load_agent(agent_id).unwrap().unwrap();
+        assert_eq!(
+            loaded.account_id,
+            Some("tenant-abc-123".to_string()),
+            "account_id must survive save/load roundtrip"
+        );
+    }
+
+    #[test]
+    fn test_save_and_load_agent_none_account_id() {
+        let store = setup();
+        let agent_id = AgentId::new();
+        let entry = AgentEntry {
+            id: agent_id,
+            name: "legacy-agent".to_string(),
+            manifest: librefang_types::agent::AgentManifest::default(),
+            state: librefang_types::agent::AgentState::Running,
+            mode: Default::default(),
+            created_at: Utc::now(),
+            last_active: Utc::now(),
+            parent: None,
+            children: vec![],
+            session_id: librefang_types::agent::SessionId::new(),
+            source_toml_path: None,
+            tags: vec![],
+            identity: Default::default(),
+            onboarding_completed: false,
+            onboarding_completed_at: None,
+            is_hand: false,
+            account_id: None,
+        };
+
+        store.save_agent(&entry).unwrap();
+        let loaded = store.load_agent(agent_id).unwrap().unwrap();
+        assert_eq!(
+            loaded.account_id, None,
+            "legacy agent with no account_id should load as None"
         );
     }
 }

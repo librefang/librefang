@@ -42,6 +42,7 @@ pub fn check_account(
 ///
 /// When `AccountId(None)` (system/admin mode), the agent remains unowned (legacy
 /// behavior). When `AccountId(Some(id))`, the agent is assigned to that tenant.
+#[allow(dead_code)] // Available for channels/config route scoping in Phase 2
 pub fn finalize_spawned_agent(entry: &mut AgentEntry, account: &AccountId) {
     if let Some(ref account_id) = account.0 {
         entry.account_id = Some(account_id.clone());
