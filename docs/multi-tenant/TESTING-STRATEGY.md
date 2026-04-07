@@ -15,7 +15,7 @@
 | Metric | Value |
 |--------|-------|
 | Total `#[test]` + `#[tokio::test]` functions in librefang | 3,458 |
-| Source files with `#[cfg(test)]` modules (in-crate) | 232 |
+| Source files with `#[cfg(test)]` modules (in-crate) | 241 |
 | Integration test files (`crates/*/tests/`) | 9 |
 | Multi-tenant tests | **0** |
 | Test framework | Rust native `#[test]` + `tokio::test`, `tempfile`, `uuid` |
