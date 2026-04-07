@@ -539,6 +539,28 @@ pub struct ScriptableContextEngine {
             std::collections::HashMap<String, (serde_json::Value, std::time::Instant)>,
         >,
     >,
+    /// Whether to use persistent subprocesses (process pool) for hooks.
+    persistent_subprocess: bool,
+    /// Shared pool of persistent hook subprocesses (used when `persistent_subprocess = true`).
+    process_pool: std::sync::Arc<crate::plugin_runtime::HookProcessPool>,
+    /// TTL-based cache for `assemble` hook results.
+    assemble_cache_ttl_secs: Option<u64>,
+    assemble_cache: std::sync::Arc<
+        std::sync::Mutex<
+            std::collections::HashMap<String, (serde_json::Value, std::time::Instant)>,
+        >,
+    >,
+    /// TTL-based cache for `compact` hook results.
+    compact_cache_ttl_secs: Option<u64>,
+    compact_cache: std::sync::Arc<
+        std::sync::Mutex<
+            std::collections::HashMap<String, (serde_json::Value, std::time::Instant)>,
+        >,
+    >,
+    /// Compiled regex filter for the `ingest` hook (from `ingest_regex` config).
+    ingest_regex: Option<regex_lite::Regex>,
+    /// Path to the per-plugin shared state JSON file (when `enable_shared_state = true`).
+    shared_state_path: Option<std::path::PathBuf>,
 }
 
 impl ScriptableContextEngine {
@@ -615,7 +637,49 @@ impl ScriptableContextEngine {
             ingest_cache: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::HashMap::new(),
             )),
+            persistent_subprocess: hooks.persistent_subprocess,
+            process_pool: std::sync::Arc::new(crate::plugin_runtime::HookProcessPool::new()),
+            assemble_cache_ttl_secs: hooks.assemble_cache_ttl_secs,
+            assemble_cache: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            compact_cache_ttl_secs: hooks.compact_cache_ttl_secs,
+            compact_cache: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            ingest_regex: hooks.ingest_regex.as_deref().and_then(|pat| {
+                match regex_lite::Regex::new(pat) {
+                    Ok(r) => Some(r),
+                    Err(e) => {
+                        warn!(pattern = pat, error = %e, "Invalid ingest_regex — ignored");
+                        None
+                    }
+                }
+            }),
+            // When enable_shared_state is true, set a placeholder path; the
+            // actual plugin-scoped path is filled in by `with_plugin_name()`.
+            shared_state_path: if hooks.enable_shared_state {
+                Some(std::path::PathBuf::from(".state.json"))
+            } else {
+                None
+            },
         }
+    }
+
+    /// Set the plugin name to resolve the per-plugin shared state file path.
+    ///
+    /// Call after `new()` when the plugin name is known. If `enable_shared_state`
+    /// was `false`, `shared_state_path` is `None` and this is a no-op.
+    pub fn with_plugin_name(mut self, name: &str) -> Self {
+        if self.shared_state_path.is_some() {
+            // Replace the placeholder with the actual plugin-scoped path.
+            self.shared_state_path = Some(
+                crate::plugin_manager::plugins_dir()
+                    .join(name)
+                    .join(".state.json"),
+            );
+        }
+        self
     }
 
     /// Set plugin-level env vars from `[env]` in plugin.toml.
@@ -739,6 +803,7 @@ impl ScriptableContextEngine {
         allow_network: bool,
         traces: &std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<HookTrace>>>,
         hook_schemas: &std::collections::HashMap<String, librefang_types::config::HookSchema>,
+        shared_state_path: Option<&std::path::Path>,
     ) -> Result<(serde_json::Value, u64), String> {
         let resolved = Self::resolve_script_path(script_path);
 
@@ -758,6 +823,7 @@ impl ScriptableContextEngine {
             plugin_env: plugin_env.to_vec(),
             max_memory_mb,
             allow_network,
+            state_file: shared_state_path.map(|p| p.to_path_buf()),
             ..Default::default()
         };
 
@@ -816,6 +882,56 @@ impl ScriptableContextEngine {
             output_preview: None,
         });
         Err(err_msg)
+    }
+
+    /// Dispatch a hook call to either the persistent process pool or a fresh subprocess.
+    ///
+    /// When `self.persistent_subprocess` is `true`, the call is routed through
+    /// `self.process_pool` (JSON-lines, long-lived process). Otherwise a fresh
+    /// subprocess is spawned via `Self::run_hook`. Either way the return is
+    /// `Ok((output, elapsed_ms))` or `Err(message)`.
+    async fn call_hook_dispatch(
+        &self,
+        hook_name: &str,
+        script_path: &str,
+        input: serde_json::Value,
+        timeout_secs: u64,
+    ) -> Result<(serde_json::Value, u64), String> {
+        if self.persistent_subprocess {
+            let config = crate::plugin_runtime::HookConfig {
+                timeout_secs,
+                plugin_env: self.plugin_env.clone(),
+                max_memory_mb: self.max_memory_mb,
+                allow_network: self.allow_network,
+                state_file: self.shared_state_path.clone(),
+                ..Default::default()
+            };
+            let t = std::time::Instant::now();
+            let result = self
+                .process_pool
+                .call(script_path, self.runtime, &input, &config)
+                .await
+                .map_err(|e| e.to_string())?;
+            let elapsed_ms = t.elapsed().as_millis() as u64;
+            Ok((result, elapsed_ms))
+        } else {
+            Self::run_hook(
+                hook_name,
+                script_path,
+                self.runtime,
+                input,
+                timeout_secs,
+                &self.plugin_env,
+                self.max_retries,
+                self.retry_delay_ms,
+                self.max_memory_mb,
+                self.allow_network,
+                &self.traces,
+                &self.hook_schemas,
+                self.shared_state_path.as_deref(),
+            )
+            .await
+        }
     }
 
     /// Apply the configured failure policy to a hook error.
@@ -892,7 +1008,7 @@ impl ContextEngine for ScriptableContextEngine {
                 "stable_prefix_mode": config.stable_prefix_mode,
                 "max_recall_results": config.max_recall_results,
             });
-            match Self::run_hook("bootstrap", script, self.runtime, input, bootstrap_timeout, &self.plugin_env, self.max_retries, self.retry_delay_ms, self.max_memory_mb, self.allow_network, &self.traces, &self.hook_schemas).await {
+            match self.call_hook_dispatch("bootstrap", script, input, bootstrap_timeout).await {
                 Ok((_, ms)) => {
                     Self::record_hook(&self.metrics, "bootstrap", ms, true);
                     debug!("Bootstrap hook completed (timeout={bootstrap_timeout}s, {ms}ms)");
@@ -929,6 +1045,14 @@ impl ContextEngine for ScriptableContextEngine {
         if let Some(ref filter) = self.ingest_filter {
             if !user_message.contains(filter.as_str()) {
                 debug!(filter = filter.as_str(), "Ingest hook skipped (filter mismatch)");
+                return self.inner.ingest(agent_id, user_message, peer_id).await;
+            }
+        }
+
+        // Apply ingest_regex filter.
+        if let Some(ref re) = self.ingest_regex {
+            if !re.is_match(user_message) {
+                debug!("Ingest hook skipped (ingest_regex mismatch)");
                 return self.inner.ingest(agent_id, user_message, peer_id).await;
             }
         }
@@ -992,7 +1116,7 @@ impl ContextEngine for ScriptableContextEngine {
             // Cache miss — run hook and store result below
             let cache_key_owned = cache_key;
             let cache_arc = self.ingest_cache.clone();
-            match Self::run_hook("ingest", script, self.runtime, input.clone(), self.hook_timeout_secs, &self.plugin_env, self.max_retries, self.retry_delay_ms, self.max_memory_mb, self.allow_network, &self.traces, &self.hook_schemas).await {
+            match self.call_hook_dispatch("ingest", script, input.clone(), self.hook_timeout_secs).await {
                 Ok((output, ms)) => {
                     Self::record_hook(&self.metrics, "ingest", ms, true);
                     // Store in cache
@@ -1037,7 +1161,7 @@ impl ContextEngine for ScriptableContextEngine {
             }
         }
 
-        match Self::run_hook("ingest", script, self.runtime, input, self.hook_timeout_secs, &self.plugin_env, self.max_retries, self.retry_delay_ms, self.max_memory_mb, self.allow_network, &self.traces, &self.hook_schemas).await {
+        match self.call_hook_dispatch("ingest", script, input, self.hook_timeout_secs).await {
             Ok((output, ms)) => {
                 Self::record_hook(&self.metrics, "ingest", ms, true);
                 // Merge hook memories with default memories
@@ -1110,7 +1234,71 @@ impl ContextEngine for ScriptableContextEngine {
             return self.inner.assemble(agent_id, messages, system_prompt, tools, context_window_tokens).await;
         }
 
-        match Self::run_hook("assemble", script, self.runtime, input, self.hook_timeout_secs, &self.plugin_env, self.max_retries, self.retry_delay_ms, self.max_memory_mb, self.allow_network, &self.traces, &self.hook_schemas).await {
+        // TTL-based cache for assemble hook.
+        if let Some(ttl_secs) = self.assemble_cache_ttl_secs {
+            let cache_key = crate::plugin_manager::sha256_hex(
+                serde_json::to_string(&input).unwrap_or_default().as_bytes(),
+            );
+            let cached = {
+                let guard = self.assemble_cache.lock().unwrap();
+                guard.get(&cache_key).and_then(|(val, exp)| {
+                    if exp.elapsed().as_secs() < ttl_secs { Some(val.clone()) } else { None }
+                })
+            };
+            if let Some(cached_output) = cached {
+                debug!("Assemble hook cache hit (ttl={}s)", ttl_secs);
+                if let Some(new_msgs) = cached_output.get("messages").and_then(|v| v.as_array()) {
+                    let assembled: Vec<Message> = new_msgs
+                        .iter()
+                        .filter_map(|v| serde_json::from_value(v.clone()).ok())
+                        .collect();
+                    if !assembled.is_empty() {
+                        *messages = assembled;
+                        return Ok(AssembleResult {
+                            recovery: crate::context_overflow::RecoveryStage::None,
+                        });
+                    }
+                }
+                // Cached result had no messages; fall through to default
+                return self.inner.assemble(agent_id, messages, system_prompt, tools, context_window_tokens).await;
+            }
+            // Cache miss — run hook and store result.
+            let cache_arc = self.assemble_cache.clone();
+            let result = self.call_hook_dispatch("assemble", script, input, self.hook_timeout_secs).await;
+            match result {
+                Ok((output, ms)) => {
+                    {
+                        let mut guard = cache_arc.lock().unwrap();
+                        guard.insert(cache_key, (output.clone(), std::time::Instant::now()));
+                        if guard.len() > 256 {
+                            guard.retain(|_, (_, exp)| exp.elapsed().as_secs() < ttl_secs);
+                        }
+                    }
+                    if let Some(new_msgs) = output.get("messages").and_then(|v| v.as_array()) {
+                        let assembled: Vec<Message> = new_msgs
+                            .iter()
+                            .filter_map(|v| serde_json::from_value(v.clone()).ok())
+                            .collect();
+                        if !assembled.is_empty() {
+                            Self::record_hook(&self.metrics, "assemble", ms, true);
+                            *messages = assembled;
+                            return Ok(AssembleResult {
+                                recovery: crate::context_overflow::RecoveryStage::None,
+                            });
+                        }
+                    }
+                    Self::record_hook(&self.metrics, "assemble", ms, false);
+                    return self.inner.assemble(agent_id, messages, system_prompt, tools, context_window_tokens).await;
+                }
+                Err(e) => {
+                    Self::record_hook(&self.metrics, "assemble", 0, false);
+                    self.apply_failure_policy("assemble", &e)?;
+                    return self.inner.assemble(agent_id, messages, system_prompt, tools, context_window_tokens).await;
+                }
+            }
+        }
+
+        match self.call_hook_dispatch("assemble", script, input, self.hook_timeout_secs).await {
             Ok((output, ms)) => {
                 if let Some(new_msgs) = output.get("messages").and_then(|v| v.as_array()) {
                     let assembled: Vec<Message> = new_msgs
@@ -1175,7 +1363,79 @@ impl ContextEngine for ScriptableContextEngine {
             "context_window_tokens": context_window_tokens,
         });
 
-        match Self::run_hook("compact", script, self.runtime, input, self.hook_timeout_secs, &self.plugin_env, self.max_retries, self.retry_delay_ms, self.max_memory_mb, self.allow_network, &self.traces, &self.hook_schemas).await {
+        // TTL-based cache for compact hook.
+        if let Some(ttl_secs) = self.compact_cache_ttl_secs {
+            let cache_key = crate::plugin_manager::sha256_hex(
+                serde_json::to_string(&input).unwrap_or_default().as_bytes(),
+            );
+            let cached = {
+                let guard = self.compact_cache.lock().unwrap();
+                guard.get(&cache_key).and_then(|(val, exp)| {
+                    if exp.elapsed().as_secs() < ttl_secs { Some(val.clone()) } else { None }
+                })
+            };
+            if let Some(cached_output) = cached {
+                debug!("Compact hook cache hit (ttl={}s)", ttl_secs);
+                if let Some(new_msgs) = cached_output.get("messages").and_then(|v| v.as_array()) {
+                    let compacted: Vec<Message> = new_msgs
+                        .iter()
+                        .filter_map(|v| serde_json::from_value(v.clone()).ok())
+                        .collect();
+                    if !compacted.is_empty() {
+                        let summary = cached_output.get("summary").and_then(|v| v.as_str())
+                            .unwrap_or("plugin compaction (cached)").to_string();
+                        return Ok(CompactionResult {
+                            summary,
+                            kept_messages: compacted,
+                            compacted_count: messages.len(),
+                            chunks_used: 1,
+                            used_fallback: false,
+                        });
+                    }
+                }
+                return self.inner.compact(agent_id, messages, driver, model, context_window_tokens).await;
+            }
+            // Cache miss — run hook and store result.
+            let cache_arc = self.compact_cache.clone();
+            let result = self.call_hook_dispatch("compact", script, input, self.hook_timeout_secs).await;
+            match result {
+                Ok((output, ms)) => {
+                    {
+                        let mut guard = cache_arc.lock().unwrap();
+                        guard.insert(cache_key, (output.clone(), std::time::Instant::now()));
+                        if guard.len() > 256 {
+                            guard.retain(|_, (_, exp)| exp.elapsed().as_secs() < ttl_secs);
+                        }
+                    }
+                    if let Some(new_msgs) = output.get("messages").and_then(|v| v.as_array()) {
+                        let compacted: Vec<Message> = new_msgs.iter()
+                            .filter_map(|v| serde_json::from_value(v.clone()).ok())
+                            .collect();
+                        if !compacted.is_empty() {
+                            Self::record_hook(&self.metrics, "compact", ms, true);
+                            let summary = output.get("summary").and_then(|v| v.as_str())
+                                .unwrap_or("plugin compaction").to_string();
+                            return Ok(CompactionResult {
+                                summary,
+                                kept_messages: compacted,
+                                compacted_count: messages.len(),
+                                chunks_used: 1,
+                                used_fallback: false,
+                            });
+                        }
+                    }
+                    Self::record_hook(&self.metrics, "compact", ms, false);
+                    return self.inner.compact(agent_id, messages, driver, model, context_window_tokens).await;
+                }
+                Err(e) => {
+                    Self::record_hook(&self.metrics, "compact", 0, false);
+                    self.apply_failure_policy("compact", &e)?;
+                    return self.inner.compact(agent_id, messages, driver, model, context_window_tokens).await;
+                }
+            }
+        }
+
+        match self.call_hook_dispatch("compact", script, input, self.hook_timeout_secs).await {
             Ok((output, ms)) => {
                 if let Some(new_msgs) = output.get("messages").and_then(|v| v.as_array()) {
                     let compacted: Vec<Message> = new_msgs
@@ -1258,8 +1518,29 @@ impl ContextEngine for ScriptableContextEngine {
         let allow_network = self.allow_network;
         let traces = std::sync::Arc::clone(&self.traces);
         let hook_schemas = self.hook_schemas.clone();
+        let persistent_subprocess = self.persistent_subprocess;
+        let process_pool = std::sync::Arc::clone(&self.process_pool);
+        let shared_state_path = self.shared_state_path.clone();
         let handle = tokio::spawn(async move {
-            match Self::run_hook("after_turn", &script, runtime, input, timeout_secs, &plugin_env, max_retries, retry_delay_ms, max_memory_mb, allow_network, &traces, &hook_schemas).await {
+            let result = if persistent_subprocess {
+                let config = crate::plugin_runtime::HookConfig {
+                    timeout_secs,
+                    plugin_env: plugin_env.clone(),
+                    max_memory_mb,
+                    allow_network,
+                    state_file: shared_state_path.clone(),
+                    ..Default::default()
+                };
+                let t = std::time::Instant::now();
+                process_pool
+                    .call(&script, runtime, &input, &config)
+                    .await
+                    .map(|v| (v, t.elapsed().as_millis() as u64))
+                    .map_err(|e| e.to_string())
+            } else {
+                Self::run_hook("after_turn", &script, runtime, input, timeout_secs, &plugin_env, max_retries, retry_delay_ms, max_memory_mb, allow_network, &traces, &hook_schemas, shared_state_path.as_deref()).await
+            };
+            match result {
                 Ok((_, ms)) => {
                     Self::record_hook(&metrics, "after_turn", ms, true);
                     debug!("After-turn hook completed ({ms}ms)");
@@ -1294,7 +1575,7 @@ impl ContextEngine for ScriptableContextEngine {
                 "parent_id": parent_id.0.to_string(),
                 "child_id": child_id.0.to_string(),
             });
-            match Self::run_hook("prepare_subagent", script, self.runtime, input, self.hook_timeout_secs, &self.plugin_env, self.max_retries, self.retry_delay_ms, self.max_memory_mb, self.allow_network, &self.traces, &self.hook_schemas).await {
+            match self.call_hook_dispatch("prepare_subagent", script, input, self.hook_timeout_secs).await {
                 Ok((_, ms)) => {
                     Self::record_hook(&self.metrics, "prepare_subagent", ms, true);
                     debug!("Prepare-subagent hook completed ({ms}ms)");
@@ -1324,7 +1605,7 @@ impl ContextEngine for ScriptableContextEngine {
                 "parent_id": parent_id.0.to_string(),
                 "child_id": child_id.0.to_string(),
             });
-            match Self::run_hook("merge_subagent", script, self.runtime, input, self.hook_timeout_secs, &self.plugin_env, self.max_retries, self.retry_delay_ms, self.max_memory_mb, self.allow_network, &self.traces, &self.hook_schemas).await {
+            match self.call_hook_dispatch("merge_subagent", script, input, self.hook_timeout_secs).await {
                 Ok((_, ms)) => {
                     Self::record_hook(&self.metrics, "merge_subagent", ms, true);
                     debug!("Merge-subagent hook completed ({ms}ms)");
@@ -1493,6 +1774,13 @@ pub fn load_plugin(
         only_for_agent_ids: manifest.hooks.only_for_agent_ids.clone(),
         hook_schemas: manifest.hooks.hook_schemas.clone(),
         hook_cache_ttl_secs: manifest.hooks.hook_cache_ttl_secs,
+        persistent_subprocess: manifest.hooks.persistent_subprocess,
+        assemble_cache_ttl_secs: manifest.hooks.assemble_cache_ttl_secs,
+        compact_cache_ttl_secs: manifest.hooks.compact_cache_ttl_secs,
+        priority: manifest.hooks.priority,
+        ingest_regex: manifest.hooks.ingest_regex.clone(),
+        env_schema: manifest.hooks.env_schema.clone(),
+        enable_shared_state: manifest.hooks.enable_shared_state,
     };
 
     debug!(
@@ -1579,10 +1867,21 @@ impl ContextEngine for StackedContextEngine {
         user_message: &str,
         peer_id: Option<&str>,
     ) -> LibreFangResult<IngestResult> {
+        // Run all engines concurrently — ingest is independent per engine
+        // (each has its own recall store), so parallel execution is safe and
+        // reduces total latency to max(individual latencies).
+        let futures: Vec<_> = self
+            .engines
+            .iter()
+            .map(|e| e.ingest(agent_id, user_message, peer_id))
+            .collect();
+
+        let results = futures::future::join_all(futures).await;
+
         let mut all_memories = Vec::new();
-        for engine in &self.engines {
-            match engine.ingest(agent_id, user_message, peer_id).await {
-                Ok(result) => all_memories.extend(result.recalled_memories),
+        for result in results {
+            match result {
+                Ok(r) => all_memories.extend(r.recalled_memories),
                 Err(e) => {
                     warn!(
                         error = %e,
@@ -1701,12 +2000,18 @@ impl ContextEngine for StackedContextEngine {
     }
 
     async fn after_turn(&self, agent_id: AgentId, messages: &[Message]) -> LibreFangResult<()> {
-        // Run all engines sequentially (best-effort); failures are logged but not propagated.
-        // Note: true parallel execution would require Arc-wrapping engines; sequential
-        // fire-and-ignore is sufficient since after_turn hook scripts are non-blocking
-        // subprocesses that already run in background tasks within each engine.
-        for (i, engine) in self.engines.iter().enumerate() {
-            if let Err(e) = engine.after_turn(agent_id, messages).await {
+        // Run all engines concurrently (best-effort). Each ScriptableContextEngine
+        // already fire-and-forgets its own subprocess, so this outer join simply
+        // dispatches all engines at once instead of waiting for each in sequence.
+        let futures: Vec<_> = self
+            .engines
+            .iter()
+            .map(|e| e.after_turn(agent_id, messages))
+            .collect();
+
+        let results = futures::future::join_all(futures).await;
+        for (i, result) in results.into_iter().enumerate() {
+            if let Err(e) = result {
                 warn!(
                     index = i,
                     error = %e,
@@ -1831,6 +2136,7 @@ pub fn build_context_engine(
                                 manifest.env.into_iter().collect();
                             engines.push(Box::new(
                                 ScriptableContextEngine::new(inner, &hooks)
+                                    .with_plugin_name(plugin_name)
                                     .with_plugin_env(env),
                             ));
                         } else {
@@ -1864,7 +2170,9 @@ pub fn build_context_engine(
                 if hooks.ingest.is_some() || hooks.after_turn.is_some() {
                     let env: Vec<(String, String)> = manifest.env.into_iter().collect();
                     return Box::new(
-                        ScriptableContextEngine::new(default, &hooks).with_plugin_env(env),
+                        ScriptableContextEngine::new(default, &hooks)
+                            .with_plugin_name(plugin_name)
+                            .with_plugin_env(env),
                     );
                 }
                 warn!(

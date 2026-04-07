@@ -2354,6 +2354,70 @@ pub struct ContextEngineHooks {
     /// ```
     #[serde(default)]
     pub hook_cache_ttl_secs: Option<u64>,
+    /// Keep hook subprocesses alive between calls (persistent process pool).
+    ///
+    /// When `true`, the runtime keeps one subprocess per hook script alive
+    /// between invocations, communicating via JSON-lines on stdin/stdout.
+    /// Eliminates interpreter startup overhead (significant for Python/Node).
+    /// Defaults to `false`.
+    ///
+    /// ```toml
+    /// persistent_subprocess = true
+    /// ```
+    #[serde(default)]
+    pub persistent_subprocess: bool,
+    /// Cache TTL (seconds) for `assemble` hook results.
+    ///
+    /// When set, identical assemble inputs (same messages + system_prompt) return
+    /// the cached output without invoking the subprocess. Useful for expensive
+    /// context-shaping hooks that produce deterministic output.
+    #[serde(default)]
+    pub assemble_cache_ttl_secs: Option<u64>,
+    /// Cache TTL (seconds) for `compact` hook results.
+    #[serde(default)]
+    pub compact_cache_ttl_secs: Option<u64>,
+    /// Execution priority in a stacked engine (higher = runs first).
+    ///
+    /// Plugins with higher priority run first for `ingest` and `assemble`
+    /// hooks. Plugins with equal priority keep declaration order.
+    /// Defaults to `0`.
+    ///
+    /// ```toml
+    /// priority = 10   # run before plugins with default priority 0
+    /// ```
+    #[serde(default)]
+    pub priority: i32,
+    /// Regex filter for the `ingest` hook (applied before `ingest_filter`).
+    ///
+    /// The hook is only invoked when the user message matches this regex.
+    /// ```toml
+    /// ingest_regex = "(?i)remember|note|save"
+    /// ```
+    #[serde(default)]
+    pub ingest_regex: Option<String>,
+    /// Declared environment variable schema for this plugin.
+    ///
+    /// Maps env var name → description. Keys prefixed with `!` are required;
+    /// the runtime warns at load time if a required var is not set.
+    ///
+    /// ```toml
+    /// [hooks.env_schema]
+    /// "!QDRANT_URL" = "Required: Qdrant HTTP endpoint"
+    /// "COLLECTION"  = "Optional: collection name (default: memories)"
+    /// ```
+    #[serde(default)]
+    pub env_schema: std::collections::HashMap<String, String>,
+    /// Enable shared state KV store for this plugin's hooks.
+    ///
+    /// When enabled, the runtime injects `LIBREFANG_STATE_FILE=/path/to/state.json`
+    /// into every hook subprocess. Hooks can read/write this JSON file to persist
+    /// state across calls. The file is scoped per-plugin.
+    ///
+    /// ```toml
+    /// enable_shared_state = true
+    /// ```
+    #[serde(default)]
+    pub enable_shared_state: bool,
 }
 
 fn default_true_bool() -> bool {

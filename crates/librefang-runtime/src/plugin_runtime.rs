@@ -353,6 +353,8 @@ pub enum PluginRuntimeError {
     ScriptError { code: Option<i32>, stderr: String },
     #[error("Hook produced no output")]
     EmptyOutput,
+    #[error("Hook output could not be parsed: {0}")]
+    InvalidOutput(String),
 }
 
 /// Minimum config shared by every runtime.
@@ -380,6 +382,13 @@ pub struct HookConfig {
     /// binary is available; on all platforms, injects `no_proxy=*`/`NO_PROXY=*`
     /// into the subprocess env. Defaults to `true`.
     pub allow_network: bool,
+    /// Path to the per-plugin shared state JSON file.
+    ///
+    /// When `Some`, the path is injected as `LIBREFANG_STATE_FILE` into the
+    /// subprocess environment. Hook scripts can read/write this file to persist
+    /// state across invocations. The file is created (as `{}`) if it does not
+    /// exist. `None` = shared state disabled (default).
+    pub state_file: Option<PathBuf>,
 }
 
 impl Default for HookConfig {
@@ -391,6 +400,7 @@ impl Default for HookConfig {
             plugin_env: Vec::new(),
             max_memory_mb: None,
             allow_network: true,
+            state_file: None,
         }
     }
 }
@@ -493,6 +503,40 @@ fn runtime_passthrough_vars(runtime: PluginRuntime) -> &'static [&'static str] {
     }
 }
 
+/// On Linux, attempt to wrap a command with `unshare --net` for true network
+/// namespace isolation when `allow_network == false`.
+///
+/// Returns `(launcher, args)` unchanged if `unshare` is not available or if
+/// we are not on Linux. The probe uses `--help` (which exits 0 on modern util-linux)
+/// rather than `--version` because some older builds don't support `--version`.
+#[cfg(target_os = "linux")]
+fn try_wrap_with_unshare(launcher: &str, args: &[String]) -> (String, Vec<String>) {
+    let available = std::process::Command::new("unshare")
+        .arg("--help")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    if available {
+        let mut new_args = vec![
+            "--net".to_string(),
+            "--".to_string(),
+            launcher.to_string(),
+        ];
+        new_args.extend_from_slice(args);
+        return ("unshare".to_string(), new_args);
+    }
+    (launcher.to_string(), args.to_vec())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn try_wrap_with_unshare(launcher: &str, args: &[String]) -> (String, Vec<String>) {
+    (launcher.to_string(), args.to_vec())
+}
+
 /// Run a hook script and parse the last JSON line of stdout.
 ///
 /// This is the main entry point — picks the right launcher based on
@@ -511,7 +555,18 @@ pub async fn run_hook_json(
 
     let input_line =
         serde_json::to_string(input).map_err(|e| PluginRuntimeError::Io(e.to_string()))?;
-    let (launcher, args) = build_command(runtime, script_path)?;
+    let (base_launcher, base_args) = build_command(runtime, script_path)?;
+
+    // On Linux, attempt true network namespace isolation via `unshare --net`.
+    // On other platforms, proxy-blocking env vars (set below) are the only mechanism.
+    let sandboxing_active = !config.allow_network;
+    let (launcher, args) = if sandboxing_active {
+        let string_args: Vec<String> = base_args.iter().map(|s| s.to_string()).collect();
+        try_wrap_with_unshare(&base_launcher, &string_args)
+    } else {
+        (base_launcher, base_args)
+    };
+
     let agent_id = input.get("agent_id").and_then(|v| v.as_str()).unwrap_or("");
     let message = input.get("message").and_then(|v| v.as_str()).unwrap_or("");
 
@@ -585,7 +640,9 @@ pub async fn run_hook_json(
 
     // Soft network isolation: inject proxy-blocking env vars so well-behaved
     // HTTP clients (requests, urllib, curl) honour the restriction.
-    // On Linux we additionally attempt to wrap with `unshare --net`.
+    // On Linux we additionally wrap with `unshare --net` (done above when building
+    // the launcher/args). Inject LIBREFANG_SANDBOX=1 so hook scripts can detect
+    // they are running in a sandboxed environment.
     if !config.allow_network {
         cmd.env("no_proxy", "*");
         cmd.env("NO_PROXY", "*");
@@ -593,6 +650,7 @@ pub async fn run_hook_json(
         cmd.env("https_proxy", "");
         cmd.env("HTTP_PROXY", "");
         cmd.env("HTTPS_PROXY", "");
+        cmd.env("LIBREFANG_SANDBOX", "1");
     }
 
     // Memory limit: expose to hook scripts via env var so well-behaved scripts
@@ -603,6 +661,19 @@ pub async fn run_hook_json(
     if let Some(mb) = config.max_memory_mb {
         cmd.env("LIBREFANG_MAX_MEMORY_MB", mb.to_string());
         debug!(max_memory_mb = mb, "Memory limit set (advisory via env var; hard limit requires libc dep)");
+    }
+
+    // Shared state KV store: ensure the file exists and inject its path so hook
+    // scripts can read/write persistent state across invocations.
+    if let Some(ref state_path) = config.state_file {
+        if !state_path.exists() {
+            if let Some(parent) = state_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(state_path, "{}");
+        }
+        cmd.env("LIBREFANG_STATE_FILE", state_path.to_string_lossy().as_ref());
+        debug!(state_file = %state_path.display(), "Shared state file injected");
     }
 
     let mut child = cmd.spawn().map_err(|e| {
@@ -722,6 +793,170 @@ fn parse_output(lines: &[String]) -> Result<serde_json::Value, PluginRuntimeErro
     }
     Ok(serde_json::json!({ "text": joined }))
 }
+
+/// Expand a plugin env value: `${VAR_NAME}` → parent env lookup, otherwise literal.
+fn expand_env_value(val: &str) -> String {
+    if let Some(inner) = val.strip_prefix("${").and_then(|s| s.strip_suffix('}')) {
+        std::env::var(inner).unwrap_or_default()
+    } else {
+        val.to_string()
+    }
+}
+
+/// A single persistent hook subprocess with its I/O handles.
+struct PersistentProcess {
+    stdin: tokio::process::ChildStdin,
+    stdout: BufReader<tokio::process::ChildStdout>,
+    /// Kept alive so `kill_on_drop` fires when this struct is dropped.
+    _child: tokio::process::Child,
+}
+
+/// Pool of persistent hook subprocesses, keyed by script path.
+///
+/// Each entry is `Arc<tokio::sync::Mutex<Option<PersistentProcess>>>` — `None` means
+/// the process crashed and needs restarting. The outer `std::sync::Mutex` lets
+/// the pool be shared across async tasks while providing exclusive access
+/// during a hook call (hooks are not reentrant by design).
+#[derive(Default)]
+pub struct HookProcessPool {
+    procs: std::sync::Mutex<
+        std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<Option<PersistentProcess>>>>,
+    >,
+}
+
+impl HookProcessPool {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Call a hook via a persistent subprocess.
+    ///
+    /// Starts the process on first call, restarts automatically after crash.
+    pub async fn call(
+        &self,
+        script_path: &str,
+        runtime: PluginRuntime,
+        input: &serde_json::Value,
+        config: &HookConfig,
+    ) -> Result<serde_json::Value, PluginRuntimeError> {
+        let slot = {
+            let mut map = self.procs.lock().unwrap();
+            map.entry(script_path.to_string())
+                .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(None)))
+                .clone()
+        };
+
+        let mut guard = slot.lock().await;
+
+        // Ensure process is running.
+        if guard.is_none() {
+            *guard = Some(Self::spawn(script_path, runtime, config).await?);
+        }
+
+        // Try to call; on failure, restart and retry once.
+        let result = Self::do_call(guard.as_mut().unwrap(), input).await;
+        if result.is_err() {
+            warn!(script = script_path, "Persistent hook process crashed; restarting");
+            *guard = Some(Self::spawn(script_path, runtime, config).await?);
+            return Self::do_call(guard.as_mut().unwrap(), input).await;
+        }
+        result
+    }
+
+    async fn spawn(
+        script_path: &str,
+        runtime: PluginRuntime,
+        config: &HookConfig,
+    ) -> Result<PersistentProcess, PluginRuntimeError> {
+        validate_path_traversal(script_path)?;
+        let (launcher, args) = build_command(runtime, script_path)?;
+        let mut cmd = tokio::process::Command::new(&launcher);
+        cmd.args(&args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+
+        // Inject env: start clean then re-add baseline.
+        cmd.env_clear();
+        for (k, v) in std::env::vars() {
+            cmd.env(k, v);
+        }
+        for (k, v) in &config.plugin_env {
+            let expanded = expand_env_value(v);
+            cmd.env(k, expanded);
+        }
+        if !config.allow_network {
+            cmd.env("no_proxy", "*")
+                .env("NO_PROXY", "*")
+                .env("http_proxy", "")
+                .env("https_proxy", "")
+                .env("HTTP_PROXY", "")
+                .env("HTTPS_PROXY", "");
+        }
+        if let Some(mb) = config.max_memory_mb {
+            cmd.env("LIBREFANG_MAX_MEMORY_MB", mb.to_string());
+        }
+
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| PluginRuntimeError::Io(e.to_string()))?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| PluginRuntimeError::Io("no stdin".into()))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| PluginRuntimeError::Io("no stdout".into()))?;
+
+        Ok(PersistentProcess {
+            stdin,
+            stdout: BufReader::new(stdout),
+            _child: child,
+        })
+    }
+
+    async fn do_call(
+        proc: &mut PersistentProcess,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, PluginRuntimeError> {
+        let mut line =
+            serde_json::to_string(input).map_err(|e| PluginRuntimeError::Io(e.to_string()))?;
+        line.push('\n');
+
+        proc.stdin
+            .write_all(line.as_bytes())
+            .await
+            .map_err(|e| PluginRuntimeError::Io(format!("write stdin: {e}")))?;
+        proc.stdin
+            .flush()
+            .await
+            .map_err(|e| PluginRuntimeError::Io(format!("flush stdin: {e}")))?;
+
+        let mut response = String::new();
+        proc.stdout
+            .read_line(&mut response)
+            .await
+            .map_err(|e| PluginRuntimeError::Io(format!("read stdout: {e}")))?;
+
+        if response.is_empty() {
+            return Err(PluginRuntimeError::Io(
+                "persistent process closed stdout".into(),
+            ));
+        }
+
+        serde_json::from_str(response.trim())
+            .map_err(|e| PluginRuntimeError::InvalidOutput(format!("JSON parse: {e}")))
+    }
+}
+
+// SAFETY: HookProcessPool is Send+Sync because:
+// - the outer Mutex<HashMap<...>> is std::sync::Mutex (Send+Sync)
+// - the slot values are Arc<tokio::sync::Mutex<Option<PersistentProcess>>>
+// - PersistentProcess holds ChildStdin/ChildStdout/Child which are Send
+unsafe impl Send for HookProcessPool {}
+unsafe impl Sync for HookProcessPool {}
 
 #[cfg(test)]
 mod tests {

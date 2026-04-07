@@ -74,6 +74,30 @@ pub fn router() -> axum::Router<Arc<AppState>> {
             "/context-engine/chain",
             axum::routing::get(context_engine_chain),
         )
+        .route(
+            "/context-engine/metrics/prometheus",
+            axum::routing::get(context_engine_metrics_prometheus),
+        )
+        .route(
+            "/plugins/batch",
+            axum::routing::post(batch_plugin_operation),
+        )
+        .route(
+            "/plugins/{name}/export",
+            axum::routing::get(export_plugin),
+        )
+        .route(
+            "/plugins/{name}/update-check",
+            axum::routing::get(plugin_update_check),
+        )
+        .route(
+            "/plugins/{name}/benchmark",
+            axum::routing::post(benchmark_plugin_hook),
+        )
+        .route(
+            "/plugins/{name}/state",
+            axum::routing::get(get_plugin_state).delete(reset_plugin_state),
+        )
 }
 
 /// Query parameters for `GET /api/plugins`.
@@ -1114,4 +1138,388 @@ pub async fn context_engine_chain(State(state): State<Arc<AppState>>) -> impl In
         "fallback": "default engine (embedding recall)",
     }))
     .into_response()
+}
+
+/// GET /api/context-engine/metrics/prometheus — Hook metrics in Prometheus text format.
+///
+/// Returns metrics for direct scraping by Prometheus or Grafana.
+/// Returns 204 when no plugin engine is active.
+pub async fn context_engine_metrics_prometheus(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let Some(metrics) = state.kernel.context_engine_ref().and_then(|e| e.hook_metrics()) else {
+        return (StatusCode::NO_CONTENT, String::new()).into_response();
+    };
+
+    let mut output = String::new();
+    output.push_str("# HELP librefang_hook_calls_total Total hook invocations\n");
+    output.push_str("# TYPE librefang_hook_calls_total counter\n");
+    output.push_str("# HELP librefang_hook_errors_total Total hook failures\n");
+    output.push_str("# TYPE librefang_hook_errors_total counter\n");
+    output.push_str("# HELP librefang_hook_latency_ms_total Cumulative hook latency in milliseconds\n");
+    output.push_str("# TYPE librefang_hook_latency_ms_total counter\n");
+
+    let hook_pairs = [
+        ("ingest", &metrics.ingest),
+        ("after_turn", &metrics.after_turn),
+        ("bootstrap", &metrics.bootstrap),
+        ("assemble", &metrics.assemble),
+        ("compact", &metrics.compact),
+        ("prepare_subagent", &metrics.prepare_subagent),
+        ("merge_subagent", &metrics.merge_subagent),
+    ];
+    for (hook, stats) in hook_pairs {
+        output.push_str(&format!(
+            "librefang_hook_calls_total{{hook=\"{}\"}} {}\n",
+            hook, stats.calls
+        ));
+        output.push_str(&format!(
+            "librefang_hook_errors_total{{hook=\"{}\"}} {}\n",
+            hook, stats.failures
+        ));
+        output.push_str(&format!(
+            "librefang_hook_latency_ms_total{{hook=\"{}\"}} {}\n",
+            hook, stats.total_ms
+        ));
+        if stats.calls > 0 {
+            let avg = stats.total_ms / stats.calls;
+            output.push_str(&format!(
+                "librefang_hook_latency_ms_avg{{hook=\"{}\"}} {}\n",
+                hook, avg
+            ));
+        }
+    }
+
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4")],
+        output,
+    )
+        .into_response()
+}
+
+/// POST /api/plugins/batch — Apply an operation to multiple plugins at once.
+///
+/// Request body:
+/// ```json
+/// {"operation": "enable", "plugins": ["plugin-a", "plugin-b"]}
+/// {"operation": "disable", "plugins": ["plugin-a"]}
+/// {"operation": "lint", "plugins": ["plugin-a", "plugin-b"]}
+/// {"operation": "sign", "plugins": ["plugin-a"]}
+/// ```
+pub async fn batch_plugin_operation(
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let operation = match body.get("operation").and_then(|o| o.as_str()) {
+        Some(op) => op.to_string(),
+        None => return ApiErrorResponse::bad_request("Missing 'operation' field").into_response(),
+    };
+    let plugins: Vec<String> = match body.get("plugins").and_then(|p| p.as_array()) {
+        Some(arr) => arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect(),
+        None => return ApiErrorResponse::bad_request("Missing 'plugins' array").into_response(),
+    };
+
+    if plugins.is_empty() {
+        return ApiErrorResponse::bad_request("'plugins' array is empty").into_response();
+    }
+
+    let mut results = Vec::new();
+    for name in &plugins {
+        let result = match operation.as_str() {
+            "enable" => librefang_runtime::plugin_manager::enable_plugin(name)
+                .map(|_| serde_json::json!({"ok": true}))
+                .unwrap_or_else(|e| serde_json::json!({"ok": false, "error": e})),
+            "disable" => librefang_runtime::plugin_manager::disable_plugin(name)
+                .map(|_| serde_json::json!({"ok": true}))
+                .unwrap_or_else(|e| serde_json::json!({"ok": false, "error": e})),
+            "lint" => librefang_runtime::plugin_manager::lint_plugin(name)
+                .map(|r| serde_json::to_value(&r).unwrap_or_default())
+                .unwrap_or_else(|e| serde_json::json!({"ok": false, "error": e})),
+            "sign" => librefang_runtime::plugin_manager::sign_plugin(name)
+                .map(|h| serde_json::json!({"ok": true, "hashes": h}))
+                .unwrap_or_else(|e| serde_json::json!({"ok": false, "error": e})),
+            _ => serde_json::json!({"ok": false, "error": format!("Unknown operation '{operation}'")}),
+        };
+        results.push(serde_json::json!({"plugin": name, "result": result}));
+    }
+
+    let all_ok = results.iter().all(|r| r["result"]["ok"].as_bool().unwrap_or(false));
+    Json(serde_json::json!({
+        "operation": operation,
+        "results": results,
+        "all_ok": all_ok,
+    }))
+    .into_response()
+}
+
+/// GET /api/plugins/:name/export — Download a plugin as a tar archive.
+///
+/// Returns a gzip-compressed tar of the plugin directory, suitable for
+/// backup or transfer to another installation.
+pub async fn export_plugin(Path(name): Path<String>) -> impl IntoResponse {
+    use axum::body::Body;
+
+    let info = match librefang_runtime::plugin_manager::get_plugin_info(&name) {
+        Ok(i) => i,
+        Err(e) => return ApiErrorResponse::not_found(e).into_response(),
+    };
+
+    // Build tar in memory
+    let tar_bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
+        let mut buf = Vec::new();
+        {
+            let enc = flate2::write::GzEncoder::new(&mut buf, flate2::Compression::default());
+            let mut tar = tar::Builder::new(enc);
+            tar.append_dir_all(&info.manifest.name, &info.path)
+                .map_err(|e| format!("Failed to create tar: {e}"))?;
+            tar.finish().map_err(|e| format!("Failed to finalize tar: {e}"))?;
+        }
+        Ok(buf)
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("Task panicked: {e}")));
+
+    match tar_bytes {
+        Ok(bytes) => (
+            StatusCode::OK,
+            [
+                (axum::http::header::CONTENT_TYPE, "application/gzip"),
+                (
+                    axum::http::header::CONTENT_DISPOSITION,
+                    &format!("attachment; filename=\"{name}.tar.gz\"") as &str,
+                ),
+            ],
+            Body::from(bytes),
+        )
+            .into_response(),
+        Err(e) => ApiErrorResponse::bad_request(e).into_response(),
+    }
+}
+
+/// GET /api/plugins/:name/update-check — Check if a newer version is available in the registry.
+///
+/// Compares the installed version against the registry manifest. Uses the
+/// configured default registry.
+pub async fn plugin_update_check(
+    Path(name): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let info = match librefang_runtime::plugin_manager::get_plugin_info(&name) {
+        Ok(i) => i,
+        Err(e) => return ApiErrorResponse::not_found(e).into_response(),
+    };
+
+    let registry = state
+        .kernel
+        .config_ref()
+        .context_engine
+        .plugin_registries
+        .first()
+        .map(|r| r.github_repo.clone())
+        .unwrap_or_else(|| "librefang/librefang-registry".to_string());
+
+    // Fetch registry manifest for this plugin
+    let client = match reqwest::Client::builder()
+        .user_agent("librefang-plugin-updater/1.0")
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": format!("HTTP client error: {e}")})),
+            )
+                .into_response();
+        }
+    };
+
+    let manifest_url = format!(
+        "https://raw.githubusercontent.com/{registry}/main/plugins/{name}/plugin.toml"
+    );
+
+    match client.get(&manifest_url).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            match resp.text().await {
+                Ok(text) => {
+                    let registry_version = toml::from_str::<toml::Value>(&text)
+                        .ok()
+                        .and_then(|v| v.get("version")?.as_str().map(str::to_string));
+
+                    let installed_version = &info.manifest.version;
+                    let update_available = registry_version
+                        .as_deref()
+                        .map(|rv| rv != installed_version)
+                        .unwrap_or(false);
+
+                    Json(serde_json::json!({
+                        "plugin": name,
+                        "installed_version": installed_version,
+                        "registry_version": registry_version,
+                        "update_available": update_available,
+                        "registry": registry,
+                    }))
+                    .into_response()
+                }
+                Err(e) => (
+                    StatusCode::BAD_GATEWAY,
+                    Json(serde_json::json!({"error": format!("Failed to read registry response: {e}")})),
+                )
+                    .into_response(),
+            }
+        }
+        Ok(resp) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "plugin": name,
+                "registry": registry,
+                "error": format!("Not found in registry (HTTP {})", resp.status()),
+            })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": format!("Registry unreachable: {e}")})),
+        )
+            .into_response(),
+    }
+}
+
+/// POST /api/plugins/:name/benchmark — Run a hook N times and report latency stats.
+///
+/// Request body:
+/// ```json
+/// {
+///   "hook": "ingest",
+///   "input": {"type": "ingest", "agent_id": "test", "message": "hello", "peer_id": null},
+///   "runs": 10
+/// }
+/// ```
+pub async fn benchmark_plugin_hook(
+    Path(name): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let hook_name = match body.get("hook").and_then(|h| h.as_str()) {
+        Some(h) => h.to_string(),
+        None => return ApiErrorResponse::bad_request("Missing 'hook' field").into_response(),
+    };
+    let input = body.get("input").cloned().unwrap_or(serde_json::json!({}));
+    let runs = body.get("runs").and_then(|r| r.as_u64()).unwrap_or(5).min(50) as usize;
+
+    let info = match librefang_runtime::plugin_manager::get_plugin_info(&name) {
+        Ok(i) => i,
+        Err(e) => return ApiErrorResponse::not_found(e).into_response(),
+    };
+
+    let hooks = &info.manifest.hooks;
+    let script_rel = match hook_name.as_str() {
+        "ingest" => hooks.ingest.as_deref(),
+        "after_turn" => hooks.after_turn.as_deref(),
+        "assemble" => hooks.assemble.as_deref(),
+        "compact" => hooks.compact.as_deref(),
+        "bootstrap" => hooks.bootstrap.as_deref(),
+        _ => return ApiErrorResponse::bad_request(format!("Unknown hook '{hook_name}'")).into_response(),
+    };
+    let script_rel = match script_rel {
+        Some(s) => s.to_string(),
+        None => return ApiErrorResponse::bad_request(format!("Hook '{hook_name}' not declared")).into_response(),
+    };
+
+    let script_abs = info.path.join(&script_rel);
+    let runtime = librefang_runtime::plugin_runtime::PluginRuntime::from_tag(hooks.runtime.as_deref());
+    let plugin_env: Vec<(String, String)> = info.manifest.env.iter()
+        .map(|(k, v): (&String, &String)| (k.clone(), v.clone()))
+        .collect();
+    let config = librefang_runtime::plugin_runtime::HookConfig {
+        timeout_secs: hooks.hook_timeout_secs.unwrap_or(30),
+        plugin_env,
+        max_memory_mb: hooks.max_memory_mb,
+        allow_network: hooks.allow_network,
+        ..Default::default()
+    };
+
+    let mut latencies_ms: Vec<u64> = Vec::with_capacity(runs);
+    let mut errors = 0u64;
+
+    for _ in 0..runs {
+        let start = std::time::Instant::now();
+        match librefang_runtime::plugin_runtime::run_hook_json(
+            &script_abs.to_string_lossy(),
+            runtime,
+            &input,
+            &config,
+        )
+        .await
+        {
+            Ok(_) => latencies_ms.push(start.elapsed().as_millis() as u64),
+            Err(_) => {
+                errors += 1;
+                latencies_ms.push(start.elapsed().as_millis() as u64);
+            }
+        }
+    }
+
+    latencies_ms.sort_unstable();
+    let total: u64 = latencies_ms.iter().sum();
+    let avg = if runs > 0 { total / runs as u64 } else { 0 };
+    let p50 = latencies_ms.get(runs / 2).copied().unwrap_or(0);
+    let p95 = latencies_ms.get(runs * 95 / 100).copied().unwrap_or(0);
+    let p99 = latencies_ms.get(runs * 99 / 100).copied().unwrap_or(0);
+    let min = latencies_ms.first().copied().unwrap_or(0);
+    let max = latencies_ms.last().copied().unwrap_or(0);
+
+    Json(serde_json::json!({
+        "hook": hook_name,
+        "plugin": name,
+        "runs": runs,
+        "errors": errors,
+        "latency_ms": {
+            "min": min,
+            "max": max,
+            "avg": avg,
+            "p50": p50,
+            "p95": p95,
+            "p99": p99,
+            "all": latencies_ms,
+        }
+    }))
+    .into_response()
+}
+
+/// GET /api/plugins/:name/state — Read the plugin's shared state JSON file.
+///
+/// Returns `{}` when the state file doesn't exist or shared state is not enabled.
+pub async fn get_plugin_state(Path(name): Path<String>) -> impl IntoResponse {
+    match librefang_runtime::plugin_manager::validate_plugin_name(&name) {
+        Ok(()) => {}
+        Err(e) => return ApiErrorResponse::bad_request(e).into_response(),
+    }
+    let state_path = librefang_runtime::plugin_manager::plugins_dir()
+        .join(&name)
+        .join(".state.json");
+
+    let content = if state_path.exists() {
+        std::fs::read_to_string(&state_path).unwrap_or_else(|_| "{}".to_string())
+    } else {
+        "{}".to_string()
+    };
+
+    let value: serde_json::Value = serde_json::from_str(&content).unwrap_or(serde_json::json!({}));
+    (StatusCode::OK, Json(value)).into_response()
+}
+
+/// DELETE /api/plugins/:name/state — Reset the plugin's shared state to `{}`.
+pub async fn reset_plugin_state(Path(name): Path<String>) -> impl IntoResponse {
+    match librefang_runtime::plugin_manager::validate_plugin_name(&name) {
+        Ok(()) => {}
+        Err(e) => return ApiErrorResponse::bad_request(e).into_response(),
+    }
+    let state_path = librefang_runtime::plugin_manager::plugins_dir()
+        .join(&name)
+        .join(".state.json");
+
+    match std::fs::write(&state_path, "{}") {
+        Ok(()) => Json(serde_json::json!({"reset": true, "plugin": name})).into_response(),
+        Err(e) => ApiErrorResponse::bad_request(format!("Failed to reset state: {e}")).into_response(),
+    }
 }

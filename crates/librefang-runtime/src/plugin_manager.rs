@@ -164,6 +164,23 @@ pub fn load_plugin_manifest(plugin_dir: &Path) -> Result<PluginManifest, String>
         debug!(plugin = manifest.name, "All integrity hashes verified");
     }
 
+    // Validate env_schema: warn for required vars that are not set in the daemon env.
+    for (key, desc) in &manifest.hooks.env_schema {
+        if let Some(required_key) = key.strip_prefix('!') {
+            // Check if it's configured in the plugin's [env] section or daemon environment
+            let in_plugin_env = manifest.env.contains_key(required_key);
+            let in_daemon_env = std::env::var(required_key).is_ok();
+            if !in_plugin_env && !in_daemon_env {
+                warn!(
+                    plugin = manifest.name,
+                    var = required_key,
+                    description = desc.as_str(),
+                    "Required env var is not set (declared in [hooks.env_schema])"
+                );
+            }
+        }
+    }
+
     // Check plugin dependencies are satisfied.
     if !manifest.plugin_depends.is_empty() {
         let plugins_root = plugin_dir.parent().unwrap_or(plugin_dir);
