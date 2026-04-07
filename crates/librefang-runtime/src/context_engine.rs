@@ -2486,7 +2486,7 @@ impl ContextEngine for ScriptableContextEngine {
             .collect();
 
         // Build token pressure metadata for the compact hook.
-        let used_tokens: usize = 0; // current usage not tracked at this call site
+        let used_tokens = crate::compactor::estimate_token_count(messages, None, None);
         let max_ctx = if context_window_tokens > 0 { context_window_tokens } else { 100_000 };
         let pressure = (used_tokens as f64 / max_ctx as f64).min(1.0);
         let recommendation = match pressure {
