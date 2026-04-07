@@ -431,6 +431,9 @@ pub struct HookConfig {
     /// state across invocations. The file is created (as `{}`) if it does not
     /// exist. `None` = shared state disabled (default).
     pub state_file: Option<PathBuf>,
+    /// Per-hook timeout overrides (seconds).  Hook names listed here override
+    /// `timeout_secs`.  Example: `{"bootstrap": 60, "ingest": 5}`.
+    pub hook_timeouts: std::collections::HashMap<String, u64>,
 }
 
 impl Default for HookConfig {
@@ -444,7 +447,19 @@ impl Default for HookConfig {
             allow_network: true,
             allow_filesystem: true,
             state_file: None,
+            hook_timeouts: std::collections::HashMap::new(),
         }
+    }
+}
+
+impl HookConfig {
+    /// Return the effective timeout for a given hook name.
+    /// Falls back to `self.timeout_secs` if no specific override is set.
+    pub fn timeout_for(&self, hook_name: &str) -> u64 {
+        self.hook_timeouts
+            .get(hook_name)
+            .copied()
+            .unwrap_or(self.timeout_secs)
     }
 }
 
@@ -750,6 +765,7 @@ fn apply_seccomp_allowlist(_allow_network: bool) -> bool {
 /// `runtime`, enforces the timeout, scrubs inherited env, and returns
 /// the raw JSON value the script emitted.
 pub async fn run_hook_json(
+    hook_name: &str,
     script_path: &str,
     runtime: PluginRuntime,
     input: &serde_json::Value,
@@ -982,8 +998,8 @@ pub async fn run_hook_json(
         drop(stdin);
     }
 
-    let timeout = Duration::from_secs(config.timeout_secs);
-    let result = tokio::time::timeout(timeout, async {
+    let effective_timeout = config.timeout_for(hook_name);
+    let result = tokio::time::timeout(Duration::from_secs(effective_timeout), async {
         let stdout = child
             .stdout
             .take()
@@ -1062,7 +1078,7 @@ pub async fn run_hook_json(
         Ok(Err(e)) => Err(e),
         Err(_) => {
             let _ = child.kill().await;
-            Err(PluginRuntimeError::Timeout(config.timeout_secs))
+            Err(PluginRuntimeError::Timeout(effective_timeout))
         }
     };
 
@@ -1589,6 +1605,7 @@ mod tests {
             "message": "hello",
         });
         let out = run_hook_json(
+            "ingest",
             hook.to_str().unwrap(),
             PluginRuntime::Native,
             &input,
@@ -1635,6 +1652,7 @@ mod tests {
             "message": "ping",
         });
         let out = run_hook_json(
+            "ingest",
             hook.to_str().unwrap(),
             PluginRuntime::Python,
             &input,
@@ -1661,6 +1679,7 @@ mod tests {
             ..Default::default()
         };
         let err = run_hook_json(
+            "ingest",
             hook.to_str().unwrap(),
             PluginRuntime::Native,
             &serde_json::json!({"type": "ingest"}),
@@ -1676,6 +1695,7 @@ mod tests {
     #[tokio::test]
     async fn missing_script_is_script_not_found() {
         let err = run_hook_json(
+            "test_hook",
             "hooks/does-not-exist.v",
             PluginRuntime::V,
             &serde_json::json!({}),

@@ -71,7 +71,7 @@ pub fn router() -> axum::Router<Arc<AppState>> {
             axum::routing::get(context_engine_traces),
         )
         .route(
-            "/context-engine/traces/:trace_id",
+            "/context-engine/traces/{trace_id}",
             axum::routing::get(get_trace_by_id),
         )
         .route(
@@ -169,6 +169,14 @@ pub fn router() -> axum::Router<Arc<AppState>> {
         .route(
             "/plugins/install-with-deps",
             axum::routing::post(install_plugin_with_deps_handler),
+        )
+        .route(
+            "/plugins/prewarm",
+            axum::routing::post(prewarm_plugins),
+        )
+        .route(
+            "/plugins/{name}/health",
+            axum::routing::get(plugin_health),
         )
 }
 
@@ -973,6 +981,7 @@ pub async fn test_plugin_hook(
 
     let start = std::time::Instant::now();
     match librefang_runtime::plugin_runtime::run_hook_json(
+        &hook_name,
         &script_abs.to_string_lossy(),
         runtime,
         &input,
@@ -1562,6 +1571,7 @@ pub async fn benchmark_plugin_hook(
     for _ in 0..runs {
         let start = std::time::Instant::now();
         match librefang_runtime::plugin_runtime::run_hook_json(
+            &hook_name,
             &script_abs.to_string_lossy(),
             runtime,
             &input,
@@ -2253,6 +2263,183 @@ pub async fn context_engine_sandbox_policy(
             "single"
         },
         "plugins": policies,
+    }))
+    .into_response()
+}
+
+/// GET /api/context-engine/traces/:trace_id — Look up a single trace by its trace_id.
+///
+/// The `trace_id` must be exactly 16 lowercase hex characters.  Returns 404 when
+/// no matching trace is found in the persistent SQLite store.
+pub async fn get_trace_by_id(Path(trace_id): Path<String>) -> impl IntoResponse {
+    // Validate: trace_id must be exactly 16 hex chars.
+    if trace_id.len() != 16 || !trace_id.chars().all(|c| c.is_ascii_hexdigit()) {
+        return ApiErrorResponse::bad_request("trace_id must be 16 lowercase hex characters").into_response();
+    }
+    match librefang_runtime::plugin_manager::open_trace_store() {
+        Ok(store) => match store.query_by_trace_id(&trace_id) {
+            Some(trace) => axum::Json(trace).into_response(),
+            None => ApiErrorResponse::not_found(format!("No trace found with id '{trace_id}'")).into_response(),
+        },
+        Err(e) => ApiErrorResponse::internal(e).into_response(),
+    }
+}
+
+/// POST /api/plugins/prewarm — Pre-warm hook process pools for one or more plugins.
+///
+/// Request body:
+/// ```json
+/// {"plugins": ["my_plugin", "another_plugin"]}
+/// ```
+/// Omit `plugins` (or pass an empty array) to pre-warm all installed plugins.
+pub async fn prewarm_plugins(
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    // Parse plugin list from request body; empty means "all installed plugins".
+    let names: Vec<String> = body
+        .get("plugins")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // If no names supplied, fall back to every installed plugin.
+    let target_names: Vec<String> = if names.is_empty() {
+        librefang_runtime::plugin_manager::list_plugins()
+            .into_iter()
+            .map(|p| p.manifest.name)
+            .collect()
+    } else {
+        names
+    };
+
+    let mut results = serde_json::Map::new();
+    for name in &target_names {
+        let entry = match librefang_runtime::plugin_manager::reload_plugin(name) {
+            Ok(_info) => serde_json::json!({"ok": true, "message": "pre-warmed"}),
+            Err(e) => {
+                if e.contains("not installed") || e.contains("not found") {
+                    serde_json::json!({"ok": false, "message": "plugin not found"})
+                } else {
+                    serde_json::json!({"ok": false, "message": e})
+                }
+            }
+        };
+        results.insert(name.clone(), entry);
+    }
+
+    Json(serde_json::json!({"results": results})).into_response()
+}
+
+/// GET /api/plugins/:name/health — Health summary for a single plugin.
+///
+/// Returns the plugin's load status, per-hook statistics derived from the active
+/// context engine metrics, recent traces filtered to the plugin, and circuit
+/// breaker configuration.  When no plugin engine is active the hook stats and
+/// recent traces sections are empty.
+pub async fn plugin_health(
+    Path(name): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    // Verify the plugin is installed.
+    let info = match librefang_runtime::plugin_manager::get_plugin_info(&name) {
+        Ok(i) => i,
+        Err(_) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "plugin not found", "name": name})),
+            )
+                .into_response();
+        }
+    };
+
+    // Build hook stats from the active context engine metrics when available.
+    // The global metrics reflect the single active plugin, so we only attach
+    // them when this plugin is actually the active one.
+    let cfg = state.kernel.config_ref();
+    let ctx_cfg = &cfg.context_engine;
+    let is_active = ctx_cfg
+        .plugin
+        .as_deref()
+        .map(|p| p == name)
+        .unwrap_or(false)
+        || ctx_cfg
+            .plugin_stack
+            .as_ref()
+            .map(|s| s.iter().any(|p| p == &name))
+            .unwrap_or(false);
+
+    let hook_stats: serde_json::Value = if is_active {
+        match state.kernel.context_engine_ref().and_then(|e| e.hook_metrics()) {
+            Some(metrics) => {
+                let make_stat = |calls: u64, failures: u64, total_ms: u64| {
+                    let error_rate_pct = if calls > 0 {
+                        (failures as f64 / calls as f64) * 100.0
+                    } else {
+                        0.0
+                    };
+                    let avg_elapsed_ms = if calls > 0 { total_ms / calls } else { 0 };
+                    serde_json::json!({
+                        "calls": calls,
+                        "errors": failures,
+                        "error_rate_pct": error_rate_pct,
+                        "avg_elapsed_ms": avg_elapsed_ms,
+                    })
+                };
+                serde_json::json!({
+                    "ingest":           make_stat(metrics.ingest.calls,           metrics.ingest.failures,           metrics.ingest.total_ms),
+                    "after_turn":       make_stat(metrics.after_turn.calls,       metrics.after_turn.failures,       metrics.after_turn.total_ms),
+                    "bootstrap":        make_stat(metrics.bootstrap.calls,        metrics.bootstrap.failures,        metrics.bootstrap.total_ms),
+                    "assemble":         make_stat(metrics.assemble.calls,         metrics.assemble.failures,         metrics.assemble.total_ms),
+                    "compact":          make_stat(metrics.compact.calls,          metrics.compact.failures,          metrics.compact.total_ms),
+                    "prepare_subagent": make_stat(metrics.prepare_subagent.calls, metrics.prepare_subagent.failures, metrics.prepare_subagent.total_ms),
+                    "merge_subagent":   make_stat(metrics.merge_subagent.calls,   metrics.merge_subagent.failures,   metrics.merge_subagent.total_ms),
+                })
+            }
+            None => serde_json::json!({}),
+        }
+    } else {
+        serde_json::json!({})
+    };
+
+    // Recent traces filtered to this plugin (substring match on hook field).
+    let recent_traces: Vec<serde_json::Value> = if is_active {
+        match state.kernel.context_engine_ref() {
+            Some(engine) => engine
+                .hook_traces()
+                .into_iter()
+                .filter(|t| t.hook.contains(name.as_str()))
+                .take(20)
+                .map(|t| serde_json::to_value(&t).unwrap_or_default())
+                .collect(),
+            None => vec![],
+        }
+    } else {
+        vec![]
+    };
+
+    // Circuit breaker configuration from the plugin manifest.
+    let circuit_breaker: serde_json::Value = match info.manifest.hooks.circuit_breaker.as_ref() {
+        Some(cb) => serde_json::json!({
+            "configured": true,
+            "max_failures": cb.max_failures,
+            "reset_secs": cb.reset_secs,
+        }),
+        None => serde_json::json!({"configured": false}),
+    };
+
+    Json(serde_json::json!({
+        "plugin": name,
+        "status": if info.enabled { "loaded" } else { "disabled" },
+        "active": is_active,
+        "version": info.manifest.version,
+        "hooks_valid": info.hooks_valid,
+        "hook_stats": hook_stats,
+        "recent_traces": recent_traces,
+        "circuit_breaker": circuit_breaker,
     }))
     .into_response()
 }

@@ -1283,7 +1283,7 @@ impl ScriptableContextEngine {
                     "Retrying hook after failure: {last_err}"
                 );
             }
-            match crate::plugin_runtime::run_hook_json(&resolved, runtime, &input, &config).await {
+            match crate::plugin_runtime::run_hook_json(hook_name, &resolved, runtime, &input, &config).await {
                 Ok(v) => {
                     let elapsed_ms = t.elapsed().as_millis() as u64;
                     // Validate output schema if declared.
