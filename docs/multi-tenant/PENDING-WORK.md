@@ -60,8 +60,8 @@ Notes:
 
 ### 3. HIGH: Remove `/api/uploads/*` account-enforcement bypass
 
-- [ ] Stop exempting `/api/uploads/*` from `require_account_id`
-- [ ] Add tenant ownership metadata for uploaded files, or make upload serving agent/account scoped
+- [x] Stop exempting `/api/uploads/*` from `require_account_id`
+- [x] Add tenant ownership metadata for uploaded files, or make upload serving agent/account scoped
 - [ ] Verify generated media uploads and agent uploads cannot be fetched cross-tenant
 
 Files to change:
@@ -101,9 +101,9 @@ Files to change:
 
 ### 6. MEDIUM: Add replay protection to HMAC
 
-- [ ] Bind signatures to more than raw `account_id`
-- [ ] Add timestamp and nonce, or timestamp plus method/path binding
-- [ ] Reject stale and replayed signatures
+- [x] Bind signatures to more than raw `account_id`
+- [x] Add timestamp and nonce, or timestamp plus method/path binding
+- [x] Reject stale and replayed signatures
 - [ ] Document the header contract and update examples/tests
 
 Files to change:
@@ -120,10 +120,10 @@ Suggested minimum:
 
 ### 7. MEDIUM: Restrict global telemetry endpoints for scoped tenants
 
-- [ ] Review `/api/status`
-- [ ] Review `/api/health/detail`
-- [ ] Decide whether scoped tenants get redacted data, tenant-local data, or denial
-- [ ] Add tests so scoped requests cannot read cluster-global telemetry
+- [x] Review `/api/status`
+- [x] Review `/api/health/detail`
+- [x] Decide whether scoped tenants get redacted data, tenant-local data, or denial — redacted
+- [x] Add tests so scoped requests cannot read cluster-global telemetry — 6 unit tests
 
 Files to change:
 - `crates/librefang-api/src/routes/config.rs`
@@ -159,11 +159,11 @@ Files to change:
 - [x] P0: Fix feature gating so multi-tenant mode is driven by config and missing `X-Account-Id` cannot degrade to `AccountId(None)` — done in `14e00fef`
 - [x] P0: Scope the unprotected route modules: `budget`, `memory`, `system`, `workflows`, `prompts` — AccountId extractor on all handlers
 - [x] P1: Scope `channels.rs` — 11/11 handlers scoped
-- [ ] P1: Close the `/api/uploads/*` leak
+- [x] P1: Close the `/api/uploads/*` leak — uploads no longer exempt from `require_account_id`
 - [x] P1: Replace insecure test expectations and add the missing integration suite — 13 tests in `account_tests.rs`
-- [ ] P2: Restrict global telemetry endpoints
-- [ ] P2: Add HMAC replay protection
-- [ ] P3: Refactor remaining handlers to use `get_scoped()`
+- [x] P2: Restrict global telemetry endpoints — `/api/status` and `/api/health/detail` redacted for tenants
+- [x] P2: Add HMAC replay protection — timestamp+method+path binding, 10 tests
+- [ ] P3: Refactor remaining handlers to use `get_scoped()` (45 call sites in agents.rs)
 
 ## Verification
 
