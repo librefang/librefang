@@ -17,6 +17,11 @@ leak data cross-tenant or allow one tenant to modify another's resources.
 Phase 2 must scope ALL remaining tenant-visible resources: skills, workflows,
 plugins, providers, budget, goals, inbox, media, memory, network, system (subset).
 
+> **Event bus isolation** is covered separately in **ADR-MT-005** (Event Bus Tenant
+> Isolation). This ADR covers API handler scoping; ADR-MT-005 covers the dispatch-side
+> filtering, `subscribe_account()`, and `history_for_account()` changes to the
+> EventBus struct.
+
 ## Blast Radius Scan
 
 ```bash
@@ -130,6 +135,18 @@ policies are more flexible.
 
 ## Consequences
 
-- **Positive:** Every tenant-visible endpoint is scoped. Cross-tenant access returns 404.
-- **Negative:** ~252 handler signatures change. Mechanical but high-volume.
-- **Phase 3 debt:** Memory recall filtering (account_id on memories table) and session scoping.
+### Positive
+- Every tenant-visible endpoint is scoped. Cross-tenant access returns 404.
+- Tiered guard system (check_account / validate_account! / account_or_system!) provides
+  per-route policy granularity
+- System defaults (providers, plugins) remain visible to all accounts
+
+### Negative
+- ~252 handler signatures change. Mechanical but high-volume.
+- Skills allowlist adds config complexity per account
+
+### Phase 3 Debt
+- Memory recall filtering (account_id on memories table) — see ADR-MT-004
+- Session scoping (account_id on sessions table) — see SPEC-MT-003
+- Event bus isolation (dispatch-side filtering) — see ADR-MT-005
+- Channel bridge per-adapter account routing (50+ adapters) — Phase 4

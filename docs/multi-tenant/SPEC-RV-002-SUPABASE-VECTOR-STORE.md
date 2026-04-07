@@ -301,3 +301,24 @@ echo "SPEC-RV-002 EXIT GATE: ALL PASS"
 | **Phase 2** | Direct sqlx::PgPool — bypass HTTP, co-hosted perf | After account model |
 | **Phase 3** | Account-scoped namespaces — RLS + account_id in VectorStore | After SPEC-MT-001 |
 | **Phase 4** | Advanced ruvector — hybrid search, learning, graphs | After basic ops proven |
+
+### ⚠️ RPC Function Naming Alignment (SPEC-MT-004)
+
+**Important:** This SPEC uses `ruvector_insert` and `ruvector_search` as RPC endpoint names
+in code examples. The actual qwntik Supabase deployment (SPEC-MT-004) uses `vector_insert`
+and `vector_search` as the RPC function names.
+
+| This SPEC (SPEC-RV-002) | Actual qwntik (SPEC-MT-004) | Reconciliation |
+|--------------------------|-----------------------------|-----------------|
+| `ruvector_insert(p_id, p_embedding, p_account_id)` | `vector_insert(doc_content, doc_embedding, doc_metadata, doc_user_id, doc_account_id)` | Use SPEC-MT-004 signatures — they match deployed migrations |
+| `ruvector_search(query_embedding, match_limit)` | `vector_search(query_embedding, match_count, match_threshold, caller_user_id, caller_account_id)` | Use SPEC-MT-004 signatures — they include account_id for defense-in-depth |
+
+**Resolution:** SPEC-MT-004 is the source of truth for RPC function signatures because it
+reflects the actual deployed Supabase migrations in qwntik (`20260413_vector_rpc_account_id.sql`).
+The `PostgresVectorStore` implementation in this SPEC should call `vector_insert` and
+`vector_search` (not `ruvector_insert` / `ruvector_search`).
+
+The `ruvector_*` prefix (e.g., `ruvector_embed()`, `ruvector_simd_info()`) is reserved
+for the PostgreSQL extension's native functions (59 functions from the pgrx crate).
+The `vector_*` prefix is for the PostgREST RPC wrapper functions that add account_id
+parameters and defense-in-depth filtering.
