@@ -1324,7 +1324,6 @@ pub fn spawn_fetch_memory_agents(backend: BackendRef, tx: mpsc::Sender<AppEvent>
                                 .map(|a| AgentEntry {
                                     id: a["id"].as_str().unwrap_or("").to_string(),
                                     name: a["name"].as_str().unwrap_or("").to_string(),
-                                    account_id: None,
                                 })
                                 .collect()
                         })
@@ -1341,7 +1340,6 @@ pub fn spawn_fetch_memory_agents(backend: BackendRef, tx: mpsc::Sender<AppEvent>
                 .map(|e| AgentEntry {
                     id: format!("{}", e.id),
                     name: e.name.clone(),
-                    account_id: None,
                 })
                 .collect();
             let _ = tx.send(AppEvent::MemoryAgentsLoaded(agents));

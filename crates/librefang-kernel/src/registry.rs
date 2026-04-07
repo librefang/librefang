@@ -453,6 +453,7 @@ mod tests {
             onboarding_completed: false,
             onboarding_completed_at: None,
             is_hand: false,
+            account_id: None,
         }
     }
 

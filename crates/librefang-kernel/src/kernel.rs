@@ -1698,9 +1698,12 @@ impl LibreFangKernel {
                             "vector_backend = \"supabase\" requires env var {key_env} to be set"
                         ))
                     })?;
-                    let store = std::sync::Arc::new(librefang_memory::SupabaseVectorStore::new(
-                        url, api_key,
-                    ));
+                    let mut store = librefang_memory::SupabaseVectorStore::new(url, api_key);
+                    if let Some(dims) = config.memory.vector_dimensions {
+                        store = store.with_expected_dimensions(dims);
+                        tracing::info!("Vector store dimensions: {dims}");
+                    }
+                    let store = std::sync::Arc::new(store);
                     substrate.set_vector_store(store);
                     tracing::info!("Vector store backend: supabase ({})", url);
                 }
@@ -2928,6 +2931,7 @@ system_prompt = "You are a helpful assistant."
             onboarding_completed: false,
             onboarding_completed_at: None,
             is_hand,
+            account_id: None,
         };
         self.registry
             .register(entry.clone())
@@ -11968,6 +11972,7 @@ mod tests {
             onboarding_completed_at: None,
             source_toml_path: None,
             is_hand: false,
+            account_id: None,
         };
         registry.register(entry).unwrap();
 
@@ -12007,6 +12012,7 @@ mod tests {
             onboarding_completed_at: None,
             source_toml_path: None,
             is_hand: false,
+            account_id: None,
         };
         registry.register(e1).unwrap();
 
@@ -12032,6 +12038,7 @@ mod tests {
             onboarding_completed_at: None,
             source_toml_path: None,
             is_hand: false,
+            account_id: None,
         };
         registry.register(e2).unwrap();
 

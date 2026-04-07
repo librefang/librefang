@@ -299,6 +299,7 @@ impl StructuredStore {
                     onboarding_completed: false,
                     onboarding_completed_at: None,
                     is_hand,
+                    account_id: None,
                 }))
             }
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -537,6 +538,7 @@ impl StructuredStore {
                 onboarding_completed: false,
                 onboarding_completed_at: None,
                 is_hand,
+                account_id: None,
             });
         }
 
@@ -652,6 +654,7 @@ mod tests {
             onboarding_completed: false,
             onboarding_completed_at: None,
             is_hand: false,
+            account_id: None,
         };
 
         store.save_agent(&entry).unwrap();
