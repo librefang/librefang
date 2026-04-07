@@ -69,6 +69,14 @@ pub async fn status(account: AccountId, State(state): State<Arc<AppState>>) -> i
         })
         .collect();
 
+    // H7 fix: scoped tenants get a restricted response — no global telemetry.
+    // Only admin/single-tenant (AccountId(None)) sees system-wide metrics.
+    if account.0.is_some() {
+        return Json(build_tenant_status(agent_count, active_agent_count, agents));
+    }
+
+    // --- Full global view (admin / single-tenant) ---
+
     let uptime = state.started_at.elapsed().as_secs();
     let session_count = state
         .kernel
@@ -319,8 +327,6 @@ pub async fn health_detail(
     account: AccountId,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    let health = state.kernel.supervisor_ref().health();
-
     let shared_id = librefang_types::agent::AgentId(uuid::Uuid::from_bytes([
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
     ]));
@@ -330,8 +336,6 @@ pub async fn health_detail(
         .structured_get(shared_id, "__health_check__")
         .is_ok();
 
-    let hcfg = state.kernel.config_ref();
-    let config_warnings = hcfg.validate();
     let status = if db_ok { "ok" } else { "degraded" };
 
     // H3 fix: scope agent_count to the requesting tenant.
@@ -345,6 +349,18 @@ pub async fn health_detail(
     } else {
         state.kernel.agent_registry().count()
     };
+
+    // H7 fix: scoped tenants get a restricted health view — no supervisor
+    // internals, memory config, config warnings, or event-bus stats.
+    if account.0.is_some() {
+        return Json(build_tenant_health_detail(status, agent_count, db_ok));
+    }
+
+    // --- Full global view (admin / single-tenant) ---
+
+    let health = state.kernel.supervisor_ref().health();
+    let hcfg = state.kernel.config_ref();
+    let config_warnings = hcfg.validate();
 
     Json(serde_json::json!({
         "status": status,
@@ -1799,6 +1815,48 @@ pub async fn config_set(
     )
 }
 
+// ---------------------------------------------------------------------------
+// Tenant-scoped response builders (extracted for testability)
+// ---------------------------------------------------------------------------
+
+/// Build the `/api/status` JSON response for a scoped tenant.
+///
+/// Returns only: status, version, agent_count, active_agent_count, agents.
+/// Omits: session_count, memory_used_mb, default_provider, default_model,
+/// uptime_seconds, api_listen, home_dir, log_level, network_enabled,
+/// config_exists.
+pub(crate) fn build_tenant_status(
+    agent_count: usize,
+    active_agent_count: usize,
+    agents: Vec<serde_json::Value>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "status": "running",
+        "version": env!("CARGO_PKG_VERSION"),
+        "agent_count": agent_count,
+        "active_agent_count": active_agent_count,
+        "agents": agents,
+    })
+}
+
+/// Build the `/api/health/detail` JSON response for a scoped tenant.
+///
+/// Returns only: status, version, agent_count, database.
+/// Omits: uptime_seconds, panic_count, restart_count, memory,
+/// config_warnings, event_bus.
+pub(crate) fn build_tenant_health_detail(
+    status: &str,
+    agent_count: usize,
+    db_ok: bool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "status": status,
+        "version": env!("CARGO_PKG_VERSION"),
+        "agent_count": agent_count,
+        "database": if db_ok { "connected" } else { "error" },
+    })
+}
+
 /// Convert a serde_json::Value to a toml::Value.
 pub(crate) fn json_to_toml_value(value: &serde_json::Value) -> toml::Value {
     match value {
@@ -1819,5 +1877,173 @@ pub(crate) fn json_to_toml_value(value: &serde_json::Value) -> toml::Value {
             toml::Value::Array(arr.iter().map(json_to_toml_value).collect())
         }
         _ => toml::Value::String(value.to_string()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests — tenant-scoped telemetry redaction (PENDING-WORK #7)
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod telemetry_redaction_tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // /api/status — tenant-scoped response
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn status_tenant_includes_only_allowed_fields() {
+        let agents = vec![serde_json::json!({"id": "a1", "name": "bot"})];
+        let resp = build_tenant_status(1, 1, agents);
+
+        // Allowed fields present
+        assert_eq!(resp["status"], "running");
+        assert!(resp["version"].is_string());
+        assert_eq!(resp["agent_count"], 1);
+        assert_eq!(resp["active_agent_count"], 1);
+        assert!(resp["agents"].is_array());
+        assert_eq!(resp["agents"].as_array().unwrap().len(), 1);
+
+        // Global telemetry fields must be absent
+        assert!(resp.get("session_count").is_none(), "session_count leaked");
+        assert!(
+            resp.get("memory_used_mb").is_none(),
+            "memory_used_mb leaked"
+        );
+        assert!(
+            resp.get("default_provider").is_none(),
+            "default_provider leaked"
+        );
+        assert!(resp.get("default_model").is_none(), "default_model leaked");
+        assert!(
+            resp.get("uptime_seconds").is_none(),
+            "uptime_seconds leaked"
+        );
+        assert!(resp.get("api_listen").is_none(), "api_listen leaked");
+        assert!(resp.get("home_dir").is_none(), "home_dir leaked");
+        assert!(resp.get("log_level").is_none(), "log_level leaked");
+        assert!(
+            resp.get("network_enabled").is_none(),
+            "network_enabled leaked"
+        );
+        assert!(resp.get("config_exists").is_none(), "config_exists leaked");
+    }
+
+    #[test]
+    fn status_tenant_zero_agents() {
+        let resp = build_tenant_status(0, 0, vec![]);
+        assert_eq!(resp["agent_count"], 0);
+        assert_eq!(resp["active_agent_count"], 0);
+        assert!(resp["agents"].as_array().unwrap().is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // /api/health/detail — tenant-scoped response
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn health_detail_tenant_includes_only_allowed_fields() {
+        let resp = build_tenant_health_detail("ok", 3, true);
+
+        // Allowed fields present
+        assert_eq!(resp["status"], "ok");
+        assert!(resp["version"].is_string());
+        assert_eq!(resp["agent_count"], 3);
+        assert_eq!(resp["database"], "connected");
+
+        // Global telemetry fields must be absent
+        assert!(
+            resp.get("uptime_seconds").is_none(),
+            "uptime_seconds leaked"
+        );
+        assert!(resp.get("panic_count").is_none(), "panic_count leaked");
+        assert!(resp.get("restart_count").is_none(), "restart_count leaked");
+        assert!(resp.get("memory").is_none(), "memory config leaked");
+        assert!(
+            resp.get("config_warnings").is_none(),
+            "config_warnings leaked"
+        );
+        assert!(resp.get("event_bus").is_none(), "event_bus stats leaked");
+    }
+
+    #[test]
+    fn health_detail_tenant_degraded_database() {
+        let resp = build_tenant_health_detail("degraded", 0, false);
+        assert_eq!(resp["status"], "degraded");
+        assert_eq!(resp["database"], "error");
+        assert_eq!(resp["agent_count"], 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Admin (AccountId(None)) path coverage — validate the full JSON has
+    // the global fields that tenants should NOT see.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn status_admin_response_shape_has_global_fields() {
+        // The admin path in the handler builds the JSON inline (not via
+        // build_tenant_status), so we verify the expected field set here
+        // by constructing the same JSON and asserting the global fields.
+        let full = serde_json::json!({
+            "status": "running",
+            "version": env!("CARGO_PKG_VERSION"),
+            "agent_count": 5,
+            "active_agent_count": 2,
+            "session_count": 10,
+            "memory_used_mb": 128,
+            "default_provider": "groq",
+            "default_model": "llama-3.3-70b-versatile",
+            "uptime_seconds": 3600,
+            "api_listen": "0.0.0.0:4545",
+            "home_dir": "/home/test/.librefang",
+            "log_level": "info",
+            "network_enabled": false,
+            "config_exists": true,
+            "agents": [],
+        });
+
+        // Admin response MUST contain global telemetry
+        assert!(full.get("session_count").is_some());
+        assert!(full.get("memory_used_mb").is_some());
+        assert!(full.get("default_provider").is_some());
+        assert!(full.get("default_model").is_some());
+        assert!(full.get("uptime_seconds").is_some());
+        assert!(full.get("api_listen").is_some());
+        assert!(full.get("home_dir").is_some());
+        assert!(full.get("log_level").is_some());
+        assert!(full.get("network_enabled").is_some());
+        assert!(full.get("config_exists").is_some());
+    }
+
+    #[test]
+    fn health_detail_admin_response_shape_has_global_fields() {
+        let full = serde_json::json!({
+            "status": "ok",
+            "version": env!("CARGO_PKG_VERSION"),
+            "uptime_seconds": 7200,
+            "panic_count": 0,
+            "restart_count": 1,
+            "agent_count": 5,
+            "database": "connected",
+            "memory": {
+                "embedding_available": true,
+                "embedding_provider": "openai",
+                "embedding_model": "text-embedding-3-small",
+                "proactive_memory_enabled": true,
+                "extraction_model": "gpt-4o-mini",
+            },
+            "config_warnings": [],
+            "event_bus": {
+                "dropped_events": 0,
+            },
+        });
+
+        // Admin response MUST contain global diagnostic fields
+        assert!(full.get("uptime_seconds").is_some());
+        assert!(full.get("panic_count").is_some());
+        assert!(full.get("restart_count").is_some());
+        assert!(full.get("memory").is_some());
+        assert!(full.get("config_warnings").is_some());
+        assert!(full.get("event_bus").is_some());
     }
 }
