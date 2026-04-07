@@ -72,6 +72,41 @@ fn classify_exit_status(status: &std::process::ExitStatus) -> String {
     }
 }
 
+/// Read the peak RSS (VmPeak or VmRSS) of a process from `/proc/{pid}/status`.
+///
+/// Returns the value in kilobytes, or `None` if unavailable (non-Linux, permission
+/// denied, or process already reaped).
+///
+/// We read `VmPeak` (peak virtual memory) as a proxy for maximum RSS since
+/// `VmRSS` is the current value and may already be 0 after exit.
+/// Falls back to `VmRSS` if `VmPeak` is absent.
+#[cfg(target_os = "linux")]
+fn read_proc_rss_kb(pid: u32) -> Option<u64> {
+    let path = format!("/proc/{pid}/status");
+    let content = std::fs::read_to_string(&path).ok()?;
+    // Try VmPeak first, then VmRSS.
+    for prefix in &["VmPeak:", "VmRSS:"] {
+        for line in content.lines() {
+            if line.starts_with(prefix) {
+                // Format: "VmPeak:   12345 kB"
+                let kb = line
+                    .split_whitespace()
+                    .nth(1)
+                    .and_then(|v| v.parse::<u64>().ok());
+                if kb.is_some() {
+                    return kb;
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
+fn read_proc_rss_kb(_pid: u32) -> Option<u64> {
+    None
+}
+
 /// Per-path advisory locks for shared state files.
 ///
 /// Provides mutual exclusion within a single process. Cross-process safety
@@ -1064,6 +1099,9 @@ pub async fn run_hook_json(
     }
 
     let effective_timeout = config.timeout_for(hook_name);
+    // Capture PID before moving `child` into the async block so we can read
+    // peak RSS from /proc/{pid}/status just before wait() reaps the process.
+    let child_pid = child.id();
     let result = tokio::time::timeout(Duration::from_secs(effective_timeout), async {
         let stdout = child
             .stdout
@@ -1099,6 +1137,13 @@ pub async fn run_hook_json(
                 Ok(0) => break,
                 Ok(_) => stderr_text.push_str(&err_line),
                 Err(_) => break,
+            }
+        }
+
+        // Read peak RSS before wait() reaps the process and removes /proc/{pid}.
+        if let Some(pid) = child_pid {
+            if let Some(rss_kb) = read_proc_rss_kb(pid) {
+                debug!(script = script_path, rss_kb, "hook process peak RSS");
             }
         }
 
@@ -1400,6 +1445,13 @@ impl HookProcessPool {
                 response.len(),
                 MAX_OUTPUT_BYTES
             )));
+        }
+
+        // The persistent process is still running, so /proc/{pid}/status is valid.
+        if let Some(pid) = proc.child.id() {
+            if let Some(rss_kb) = read_proc_rss_kb(pid) {
+                debug!(rss_kb, "persistent hook process current RSS");
+            }
         }
 
         serde_json::from_str(response.trim())

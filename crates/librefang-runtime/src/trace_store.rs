@@ -28,6 +28,7 @@ impl TraceStore {
             CREATE TABLE IF NOT EXISTS hook_traces (
                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
                 trace_id        TEXT    NOT NULL DEFAULT '',
+                correlation_id  TEXT    NOT NULL DEFAULT '',
                 plugin          TEXT    NOT NULL,
                 hook            TEXT    NOT NULL,
                 started_at      TEXT    NOT NULL,
@@ -37,9 +38,10 @@ impl TraceStore {
                 input_preview   TEXT,
                 output_preview  TEXT
             );
-            CREATE INDEX IF NOT EXISTS idx_started_at   ON hook_traces(started_at);
-            CREATE INDEX IF NOT EXISTS idx_plugin_hook  ON hook_traces(plugin, hook);
-            CREATE INDEX IF NOT EXISTS idx_trace_id     ON hook_traces(trace_id);
+            CREATE INDEX IF NOT EXISTS idx_started_at      ON hook_traces(started_at);
+            CREATE INDEX IF NOT EXISTS idx_plugin_hook     ON hook_traces(plugin, hook);
+            CREATE INDEX IF NOT EXISTS idx_trace_id        ON hook_traces(trace_id);
+            CREATE INDEX IF NOT EXISTS idx_correlation_id  ON hook_traces(correlation_id);
             ",
         )?;
         conn.execute_batch(
@@ -70,10 +72,11 @@ impl TraceStore {
 
         let _ = conn.execute(
             "INSERT INTO hook_traces \
-             (trace_id, plugin, hook, started_at, elapsed_ms, success, error, input_preview, output_preview) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+             (trace_id, correlation_id, plugin, hook, started_at, elapsed_ms, success, error, input_preview, output_preview) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 trace.trace_id,
+                trace.correlation_id,
                 plugin,
                 trace.hook,
                 trace.started_at,
@@ -130,7 +133,7 @@ impl TraceStore {
         };
 
         let sql = format!(
-            "SELECT trace_id, plugin, hook, started_at, elapsed_ms, success, error, \
+            "SELECT trace_id, correlation_id, plugin, hook, started_at, elapsed_ms, success, error, \
              input_preview, output_preview \
              FROM hook_traces {where_clause} ORDER BY id DESC LIMIT {limit}"
         );
@@ -145,14 +148,15 @@ impl TraceStore {
         stmt.query_map(param_refs.as_slice(), |row| {
             Ok(serde_json::json!({
                 "trace_id":        row.get::<_, String>(0)?,
-                "plugin":          row.get::<_, String>(1)?,
-                "hook":            row.get::<_, String>(2)?,
-                "started_at":      row.get::<_, String>(3)?,
-                "elapsed_ms":      row.get::<_, i64>(4)?,
-                "success":         row.get::<_, i64>(5)? != 0,
-                "error":           row.get::<_, Option<String>>(6)?,
-                "input_preview":   row.get::<_, Option<String>>(7)?,
-                "output_preview":  row.get::<_, Option<String>>(8)?,
+                "correlation_id":  row.get::<_, String>(1)?,
+                "plugin":          row.get::<_, String>(2)?,
+                "hook":            row.get::<_, String>(3)?,
+                "started_at":      row.get::<_, String>(4)?,
+                "elapsed_ms":      row.get::<_, i64>(5)?,
+                "success":         row.get::<_, i64>(6)? != 0,
+                "error":           row.get::<_, Option<String>>(7)?,
+                "input_preview":   row.get::<_, Option<String>>(8)?,
+                "output_preview":  row.get::<_, Option<String>>(9)?,
             }))
         })
         .ok()
@@ -164,20 +168,21 @@ impl TraceStore {
     pub fn query_by_trace_id(&self, trace_id: &str) -> Option<serde_json::Value> {
         let Ok(conn) = self.conn.lock() else { return None };
         conn.query_row(
-            "SELECT trace_id, plugin, hook, started_at, elapsed_ms, success, error, \
+            "SELECT trace_id, correlation_id, plugin, hook, started_at, elapsed_ms, success, error, \
              input_preview, output_preview FROM hook_traces WHERE trace_id = ?1",
             [trace_id],
             |row| {
                 Ok(serde_json::json!({
                     "trace_id":       row.get::<_, String>(0)?,
-                    "plugin":         row.get::<_, String>(1)?,
-                    "hook":           row.get::<_, String>(2)?,
-                    "started_at":     row.get::<_, String>(3)?,
-                    "elapsed_ms":     row.get::<_, i64>(4)?,
-                    "success":        row.get::<_, i64>(5)? != 0,
-                    "error":          row.get::<_, Option<String>>(6)?,
-                    "input_preview":  row.get::<_, Option<String>>(7)?,
-                    "output_preview": row.get::<_, Option<String>>(8)?,
+                    "correlation_id": row.get::<_, String>(1)?,
+                    "plugin":         row.get::<_, String>(2)?,
+                    "hook":           row.get::<_, String>(3)?,
+                    "started_at":     row.get::<_, String>(4)?,
+                    "elapsed_ms":     row.get::<_, i64>(5)?,
+                    "success":        row.get::<_, i64>(6)? != 0,
+                    "error":          row.get::<_, Option<String>>(7)?,
+                    "input_preview":  row.get::<_, Option<String>>(8)?,
+                    "output_preview": row.get::<_, Option<String>>(9)?,
                 }))
             },
         )
@@ -288,6 +293,7 @@ mod tests {
     fn make_trace(hook: &str, success: bool) -> HookTrace {
         HookTrace {
             trace_id: "test000000000000".to_string(),
+            correlation_id: String::new(),
             hook: hook.to_string(),
             started_at: "2026-04-07T00:00:00Z".to_string(),
             elapsed_ms: 42,

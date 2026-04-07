@@ -495,6 +495,9 @@ pub struct HookTrace {
     /// Unique identifier for this hook invocation. 16 hex chars (8 random bytes).
     /// Stable across retries — generated once before the retry loop.
     pub trace_id: String,
+    /// Shared ID for all hook calls within the same agent turn.
+    /// Empty string when not available (e.g. bootstrap, which runs outside a turn).
+    pub correlation_id: String,
     /// Hook name (`"ingest"`, `"assemble"`, …).
     pub hook: String,
     /// ISO-8601 timestamp of when the hook started.
@@ -1343,6 +1346,7 @@ impl ScriptableContextEngine {
         shared_state_path: Option<&std::path::Path>,
         trace_store: Option<&std::sync::Arc<crate::trace_store::TraceStore>>,
         plugin_name: &str,
+        correlation_id: &str,
         output_schema_strict: bool,
     ) -> Result<(serde_json::Value, u64), String> {
         let resolved = Self::resolve_script_path(script_path);
@@ -1414,6 +1418,7 @@ impl ScriptableContextEngine {
                     }
                     Self::push_trace(traces, HookTrace {
                         trace_id: trace_id.clone(),
+                        correlation_id: correlation_id.to_string(),
                         hook: hook_name.to_string(),
                         started_at: started_at.clone(),
                         elapsed_ms,
@@ -1432,6 +1437,7 @@ impl ScriptableContextEngine {
         let err_msg = format!("Hook script failed after {max_retries} retries: {last_err}");
         Self::push_trace(traces, HookTrace {
             trace_id: trace_id.clone(),
+            correlation_id: correlation_id.to_string(),
             hook: hook_name.to_string(),
             started_at,
             elapsed_ms,
@@ -1462,7 +1468,8 @@ impl ScriptableContextEngine {
         if self.circuit_is_open(hook_name, agent_id) {
             return Err(format!("circuit-open: '{hook_name}' suspended after repeated failures"));
         }
-        let result = self.call_hook_dispatch_raw(hook_name, script_path, input, timeout_secs).await;
+        let correlation_id = generate_trace_id();
+        let result = self.call_hook_dispatch_raw(hook_name, script_path, input, timeout_secs, &correlation_id).await;
         // Update circuit breaker
         match &result {
             Ok(_) => self.circuit_record(hook_name, agent_id, true),
@@ -1496,6 +1503,7 @@ impl ScriptableContextEngine {
         script_path: &str,
         input: serde_json::Value,
         timeout_secs: u64,
+        correlation_id: &str,
     ) -> Result<(serde_json::Value, u64), String> {
         // Compute effective env and network permission, merging bootstrap overrides.
         let (effective_env, effective_allow_network) = {
@@ -1538,6 +1546,7 @@ impl ScriptableContextEngine {
                         &self.traces,
                         HookTrace {
                             trace_id: trace_id.clone(),
+                            correlation_id: correlation_id.to_string(),
                             hook: hook_name.to_string(),
                             started_at,
                             elapsed_ms,
@@ -1558,6 +1567,7 @@ impl ScriptableContextEngine {
                         &self.traces,
                         HookTrace {
                             trace_id: trace_id.clone(),
+                            correlation_id: correlation_id.to_string(),
                             hook: hook_name.to_string(),
                             started_at,
                             elapsed_ms,
@@ -1590,6 +1600,7 @@ impl ScriptableContextEngine {
                 self.shared_state_path.as_deref(),
                 self.trace_store.as_ref(),
                 &self.plugin_name,
+                correlation_id,
                 self.inner.config.output_schema_strict,
             )
             .await
@@ -2295,10 +2306,12 @@ impl ContextEngine for ScriptableContextEngine {
         let agent_id_str = agent_id.0.to_string();
         let memory_substrate = std::sync::Arc::clone(&self.memory_substrate);
         let output_schema_strict = self.inner.config.output_schema_strict;
+        let after_turn_correlation_id = generate_trace_id();
         if let Ok(mut tasks) = self.after_turn_tasks.lock() {
             // Reap already-completed tasks to prevent unbounded growth.
             while tasks.try_join_next().is_some() {}
 
+            let correlation_id_at = after_turn_correlation_id.clone();
             tasks.spawn(async move {
                 // Bounded concurrency: acquire a semaphore permit before running the hook.
                 // `.ok()` is intentional: if the semaphore is closed (daemon shutting down),
@@ -2331,6 +2344,7 @@ impl ContextEngine for ScriptableContextEngine {
                                 &traces,
                                 HookTrace {
                                     trace_id: trace_id.clone(),
+                                    correlation_id: correlation_id_at.clone(),
                                     hook: "after_turn".to_string(),
                                     started_at,
                                     elapsed_ms,
@@ -2351,6 +2365,7 @@ impl ContextEngine for ScriptableContextEngine {
                                 &traces,
                                 HookTrace {
                                     trace_id: trace_id.clone(),
+                                    correlation_id: correlation_id_at.clone(),
                                     hook: "after_turn".to_string(),
                                     started_at,
                                     elapsed_ms,
@@ -2367,7 +2382,7 @@ impl ContextEngine for ScriptableContextEngine {
                         }
                     }
                 } else {
-                    Self::run_hook("after_turn", &script, runtime, input, timeout_secs, &plugin_env, max_retries, retry_delay_ms, max_memory_mb, allow_network, &traces, &hook_schemas, shared_state_path.as_deref(), trace_store.as_ref(), &plugin_name, output_schema_strict).await
+                    Self::run_hook("after_turn", &script, runtime, input, timeout_secs, &plugin_env, max_retries, retry_delay_ms, max_memory_mb, allow_network, &traces, &hook_schemas, shared_state_path.as_deref(), trace_store.as_ref(), &plugin_name, &correlation_id_at, output_schema_strict).await
                 };
                 match result {
                     Ok((output, ms)) => {

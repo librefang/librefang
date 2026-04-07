@@ -67,6 +67,48 @@ fn verify_registry_index(
         .map_err(|e| format!("Signature verification failed: {e}"))
 }
 
+/// Return the path used to cache a registry index locally.
+/// The filename is a sanitised form of the registry URL.
+fn registry_cache_path(registry: &str) -> std::path::PathBuf {
+    let cache_dir = dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".librefang")
+        .join("registry_cache");
+    // Sanitise the URL into a safe filename (replace non-alphanumeric with '_').
+    let safe_name: String = registry
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '.' { c } else { '_' })
+        .collect();
+    cache_dir.join(format!("{safe_name}.json"))
+}
+
+/// Return the default registry cache TTL in seconds (1 hour).
+fn default_registry_cache_ttl_secs() -> u64 {
+    3600
+}
+
+/// Try to load a cached registry index.
+/// Returns `Some(bytes)` if the cache file exists and is newer than `ttl_secs`.
+fn load_registry_cache(path: &std::path::Path, ttl_secs: u64) -> Option<Vec<u8>> {
+    let meta = std::fs::metadata(path).ok()?;
+    let modified = meta.modified().ok()?;
+    let age = std::time::SystemTime::now()
+        .duration_since(modified)
+        .unwrap_or(std::time::Duration::MAX);
+    if age.as_secs() > ttl_secs {
+        return None; // stale
+    }
+    std::fs::read(path).ok()
+}
+
+/// Write bytes to the registry cache, creating parent dirs as needed.
+fn save_registry_cache(path: &std::path::Path, bytes: &[u8]) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(path, bytes);
+}
+
 /// Fetch registry `index.json` and optionally verify its Ed25519 signature.
 ///
 /// Signature verification is skipped when:
@@ -81,6 +123,23 @@ pub async fn fetch_verified_index(
     registry: &str,
 ) -> Result<Vec<serde_json::Value>, String> {
     use base64::Engine as _;
+
+    let cache_path = registry_cache_path(registry);
+    let ttl = std::env::var("LIBREFANG_REGISTRY_CACHE_TTL_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(default_registry_cache_ttl_secs);
+
+    // Try cache first (skip if LIBREFANG_REGISTRY_NO_CACHE=1).
+    let skip_cache = std::env::var("LIBREFANG_REGISTRY_NO_CACHE").as_deref() == Ok("1");
+    if !skip_cache {
+        if let Some(cached) = load_registry_cache(&cache_path, ttl) {
+            if let Ok(value) = serde_json::from_slice::<Vec<serde_json::Value>>(&cached) {
+                debug!("Using cached registry index for {registry} (age < {ttl}s)");
+                return Ok(value);
+            }
+        }
+    }
 
     let index_url = format!(
         "https://raw.githubusercontent.com/{registry}/main/index.json"
@@ -142,6 +201,9 @@ pub async fn fetch_verified_index(
             }
         }
     }
+
+    // Persist to disk cache for future calls.
+    save_registry_cache(&cache_path, &index_bytes);
 
     serde_json::from_slice::<Vec<serde_json::Value>>(&index_bytes)
         .map_err(|e| format!("Failed to parse registry index JSON: {e}"))
@@ -704,6 +766,11 @@ async fn install_from_registry(
         plugin = name,
         "Plugin installed successfully (integrity verified)"
     );
+
+    // Bust the registry cache so subsequent searches see an up-to-date index.
+    let cache_path = registry_cache_path(github_repo);
+    let _ = std::fs::remove_file(&cache_path);
+
     get_plugin_info(name)
 }
 
