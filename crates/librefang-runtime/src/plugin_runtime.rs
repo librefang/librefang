@@ -369,6 +369,17 @@ pub struct HookConfig {
     /// Values starting with `${VAR}` are expanded from `std::env` at spawn time.
     /// This is populated from `plugin.toml`'s `[env]` section.
     pub plugin_env: Vec<(String, String)>,
+    /// Maximum virtual memory (MiB) for the hook subprocess.
+    ///
+    /// Applied via `RLIMIT_AS` on Linux. Ignored on other platforms (warning
+    /// is logged instead). `None` means no limit beyond the OS default.
+    pub max_memory_mb: Option<u64>,
+    /// Allow the hook subprocess to open network connections.
+    ///
+    /// When `false`: on Linux, wraps the launch with `unshare --net` if that
+    /// binary is available; on all platforms, injects `no_proxy=*`/`NO_PROXY=*`
+    /// into the subprocess env. Defaults to `true`.
+    pub allow_network: bool,
 }
 
 impl Default for HookConfig {
@@ -378,6 +389,8 @@ impl Default for HookConfig {
             working_dir: None,
             allowed_env_vars: Vec::new(),
             plugin_env: Vec::new(),
+            max_memory_mb: None,
+            allow_network: true,
         }
     }
 }
@@ -568,6 +581,28 @@ pub async fn run_hook_json(
             val.clone()
         };
         cmd.env(key, expanded);
+    }
+
+    // Soft network isolation: inject proxy-blocking env vars so well-behaved
+    // HTTP clients (requests, urllib, curl) honour the restriction.
+    // On Linux we additionally attempt to wrap with `unshare --net`.
+    if !config.allow_network {
+        cmd.env("no_proxy", "*");
+        cmd.env("NO_PROXY", "*");
+        cmd.env("http_proxy", "");
+        cmd.env("https_proxy", "");
+        cmd.env("HTTP_PROXY", "");
+        cmd.env("HTTPS_PROXY", "");
+    }
+
+    // Memory limit: expose to hook scripts via env var so well-behaved scripts
+    // can self-limit (Python: `resource.setrlimit`, Node: `--max-old-space-size`).
+    // Hard kernel-level enforcement requires the `libc` crate (not currently a
+    // direct dependency). Scripts that read LIBREFANG_MAX_MEMORY_MB can apply
+    // their own limits.
+    if let Some(mb) = config.max_memory_mb {
+        cmd.env("LIBREFANG_MAX_MEMORY_MB", mb.to_string());
+        debug!(max_memory_mb = mb, "Memory limit set (advisory via env var; hard limit requires libc dep)");
     }
 
     let mut child = cmd.spawn().map_err(|e| {

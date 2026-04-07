@@ -9,7 +9,6 @@ use std::sync::Arc;
 use super::AppState;
 
 use crate::types::ApiErrorResponse;
-use librefang_runtime::context_engine::ContextEngine as _;
 /// Build routes for the context engine plugin domain.
 pub fn router() -> axum::Router<Arc<AppState>> {
     axum::Router::new()
@@ -39,6 +38,30 @@ pub fn router() -> axum::Router<Arc<AppState>> {
             "/context-engine/metrics",
             axum::routing::get(context_engine_metrics),
         )
+        .route(
+            "/context-engine/traces",
+            axum::routing::get(context_engine_traces),
+        )
+        .route(
+            "/plugins/{name}/enable",
+            axum::routing::post(enable_plugin),
+        )
+        .route(
+            "/plugins/{name}/disable",
+            axum::routing::post(disable_plugin),
+        )
+        .route(
+            "/plugins/{name}/upgrade",
+            axum::routing::post(upgrade_plugin),
+        )
+        .route(
+            "/plugins/{name}/test-hook",
+            axum::routing::post(test_plugin_hook),
+        )
+        .route(
+            "/plugins/{name}/lint",
+            axum::routing::get(lint_plugin),
+        )
 }
 
 /// GET /api/plugins — List all installed context engine plugins.
@@ -63,6 +86,7 @@ pub async fn list_plugins() -> impl IntoResponse {
                 "hooks_valid": p.hooks_valid,
                 "size_bytes": p.size_bytes,
                 "path": p.path.display().to_string(),
+                "enabled": p.enabled,
                 "hooks": {
                     "ingest": p.manifest.hooks.ingest,
                     "after_turn": p.manifest.hooks.after_turn,
@@ -105,7 +129,10 @@ pub async fn get_plugin(Path(name): Path<String>) -> impl IntoResponse {
                 "hooks_valid": info.hooks_valid,
                 "size_bytes": info.size_bytes,
                 "path": info.path.display().to_string(),
+                "enabled": info.enabled,
                 "requirements": info.manifest.requirements,
+                "plugin_depends": info.manifest.plugin_depends,
+                "integrity_count": info.manifest.integrity.len(),
             })),
         ),
         Err(e) => ApiErrorResponse::not_found(e).into_json_tuple(),
@@ -413,6 +440,7 @@ pub async fn plugin_status(
         "hooks_valid": info.hooks_valid,
         "size_bytes": info.size_bytes,
         "path": info.path.display().to_string(),
+        "enabled": info.enabled,
         "active": is_active,
         "active_as_single": active_single,
         "stack_position": stack_position,
@@ -521,4 +549,350 @@ pub async fn list_plugin_registries(State(state): State<Arc<AppState>>) -> impl 
     }
 
     Json(serde_json::json!({ "registries": results }))
+}
+
+/// GET /api/context-engine/traces — Recent hook invocation traces (ring buffer, last 100).
+///
+/// Returns per-invocation debug data: hook name, timestamp, elapsed_ms, success/failure,
+/// input/output previews. Returns 204 when no plugin engine is active.
+#[utoipa::path(
+    get,
+    path = "/api/context-engine/traces",
+    tag = "plugins",
+    responses(
+        (status = 200, description = "Hook invocation traces", body = serde_json::Value),
+        (status = 204, description = "No plugin engine active")
+    )
+)]
+pub async fn context_engine_traces(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match state.kernel.context_engine_ref() {
+        Some(engine) => {
+            let traces = engine.hook_traces();
+            let count = traces.len();
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "traces": traces,
+                    "count": count,
+                })),
+            )
+                .into_response()
+        }
+        None => StatusCode::NO_CONTENT.into_response(),
+    }
+}
+
+/// POST /api/plugins/:name/enable — Enable a disabled plugin.
+///
+/// Removes the `.disabled` marker file. The running context engine must be
+/// restarted for the change to take effect.
+#[utoipa::path(
+    post,
+    path = "/api/plugins/{name}/enable",
+    tag = "plugins",
+    params(("name" = String, Path, description = "Plugin name")),
+    responses(
+        (status = 200, description = "Plugin enabled"),
+        (status = 400, description = "Plugin not found or already enabled")
+    )
+)]
+pub async fn enable_plugin(Path(name): Path<String>) -> impl IntoResponse {
+    match librefang_runtime::plugin_manager::enable_plugin(&name) {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "enabled": true,
+                "name": name,
+                "message": "Plugin enabled. Restart context engine for change to take effect.",
+            })),
+        )
+            .into_response(),
+        Err(e) => ApiErrorResponse::bad_request(e).into_response(),
+    }
+}
+
+/// POST /api/plugins/:name/disable — Disable a plugin without uninstalling it.
+///
+/// Creates a `.disabled` marker file. The running context engine must be
+/// restarted for the change to take effect.
+#[utoipa::path(
+    post,
+    path = "/api/plugins/{name}/disable",
+    tag = "plugins",
+    params(("name" = String, Path, description = "Plugin name")),
+    responses(
+        (status = 200, description = "Plugin disabled"),
+        (status = 400, description = "Plugin not found or already disabled")
+    )
+)]
+pub async fn disable_plugin(Path(name): Path<String>) -> impl IntoResponse {
+    match librefang_runtime::plugin_manager::disable_plugin(&name) {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "enabled": false,
+                "name": name,
+                "message": "Plugin disabled. Restart context engine for change to take effect.",
+            })),
+        )
+            .into_response(),
+        Err(e) => ApiErrorResponse::bad_request(e).into_response(),
+    }
+}
+
+/// POST /api/plugins/:name/upgrade — Upgrade an installed plugin from a new source.
+///
+/// Removes the current version and reinstalls from the given source. The
+/// `.disabled` state is preserved. Requires a context engine restart.
+///
+/// Request body (same as install):
+/// ```json
+/// {"source": "registry", "name": "qdrant-recall"}
+/// {"source": "local", "path": "/path/to/newer-version"}
+/// {"source": "git", "url": "https://github.com/user/plugin.git", "branch": "main"}
+/// ```
+#[utoipa::path(
+    post,
+    path = "/api/plugins/{name}/upgrade",
+    tag = "plugins",
+    params(("name" = String, Path, description = "Plugin name")),
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Plugin upgraded"),
+        (status = 400, description = "Plugin not installed or upgrade failed")
+    )
+)]
+pub async fn upgrade_plugin(
+    Path(name): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let source = match body.get("source").and_then(|s| s.as_str()) {
+        Some("registry") => {
+            let plugin_name = body
+                .get("name")
+                .and_then(|n| n.as_str())
+                .unwrap_or(&name)
+                .to_string();
+            let github_repo = body
+                .get("registry")
+                .and_then(|r| r.as_str())
+                .map(String::from);
+            librefang_runtime::plugin_manager::PluginSource::Registry {
+                name: plugin_name,
+                github_repo,
+            }
+        }
+        Some("local") => {
+            let path = match body.get("path").and_then(|p| p.as_str()) {
+                Some(p) => std::path::PathBuf::from(p),
+                None => {
+                    return ApiErrorResponse::bad_request("Missing 'path' for local upgrade")
+                        .into_response()
+                }
+            };
+            librefang_runtime::plugin_manager::PluginSource::Local { path }
+        }
+        Some("git") => {
+            let url = match body.get("url").and_then(|u| u.as_str()) {
+                Some(u) => u.to_string(),
+                None => {
+                    return ApiErrorResponse::bad_request("Missing 'url' for git upgrade")
+                        .into_response()
+                }
+            };
+            let branch = body
+                .get("branch")
+                .and_then(|b| b.as_str())
+                .map(String::from);
+            librefang_runtime::plugin_manager::PluginSource::Git { url, branch }
+        }
+        _ => {
+            // Default to upgrading from registry using the path parameter name
+            librefang_runtime::plugin_manager::PluginSource::Registry {
+                name: name.clone(),
+                github_repo: None,
+            }
+        }
+    };
+
+    match librefang_runtime::plugin_manager::upgrade_plugin(&name, &source).await {
+        Ok(info) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "upgraded": true,
+                "name": info.manifest.name,
+                "version": info.manifest.version,
+                "path": info.path.display().to_string(),
+                "restart_required": true,
+            })),
+        )
+            .into_response(),
+        Err(e) => ApiErrorResponse::bad_request(e).into_response(),
+    }
+}
+
+/// POST /api/plugins/:name/test-hook — Invoke a specific hook with test input.
+///
+/// Runs the hook subprocess with the given JSON input and returns the output.
+/// Useful for debugging and validating hook scripts without sending real messages.
+///
+/// Request body:
+/// ```json
+/// {
+///   "hook": "ingest",
+///   "input": {"type": "ingest", "agent_id": "test", "message": "hello", "peer_id": null}
+/// }
+/// ```
+#[utoipa::path(
+    post,
+    path = "/api/plugins/{name}/test-hook",
+    tag = "plugins",
+    params(("name" = String, Path, description = "Plugin name")),
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Hook output"),
+        (status = 400, description = "Hook not declared or invocation failed")
+    )
+)]
+pub async fn test_plugin_hook(
+    Path(name): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let hook_name = match body.get("hook").and_then(|h| h.as_str()) {
+        Some(h) => h.to_string(),
+        None => return ApiErrorResponse::bad_request("Missing 'hook' field").into_response(),
+    };
+    let input = body.get("input").cloned().unwrap_or(serde_json::json!({}));
+
+    // Load plugin manifest
+    let info = match librefang_runtime::plugin_manager::get_plugin_info(&name) {
+        Ok(i) => i,
+        Err(e) => return ApiErrorResponse::not_found(e).into_response(),
+    };
+
+    // Resolve the hook script path
+    let hooks = &info.manifest.hooks;
+    let script_rel = match hook_name.as_str() {
+        "ingest" => hooks.ingest.as_deref(),
+        "after_turn" => hooks.after_turn.as_deref(),
+        "assemble" => hooks.assemble.as_deref(),
+        "compact" => hooks.compact.as_deref(),
+        "bootstrap" => hooks.bootstrap.as_deref(),
+        "prepare_subagent" => hooks.prepare_subagent.as_deref(),
+        "merge_subagent" => hooks.merge_subagent.as_deref(),
+        _ => {
+            return ApiErrorResponse::bad_request(format!(
+                "Unknown hook '{hook_name}'. Valid hooks: ingest, after_turn, assemble, compact, bootstrap, prepare_subagent, merge_subagent"
+            ))
+            .into_response()
+        }
+    };
+
+    let script_rel = match script_rel {
+        Some(s) => s.to_string(),
+        None => {
+            return ApiErrorResponse::bad_request(format!(
+                "Hook '{hook_name}' is not declared in plugin '{name}'"
+            ))
+            .into_response()
+        }
+    };
+
+    let script_abs = info.path.join(&script_rel);
+    if !script_abs.exists() {
+        return ApiErrorResponse::bad_request(format!(
+            "Hook script '{script_rel}' does not exist on disk"
+        ))
+        .into_response();
+    }
+
+    let runtime = librefang_runtime::plugin_runtime::PluginRuntime::from_tag(
+        hooks.runtime.as_deref(),
+    );
+    let timeout_secs = hooks.hook_timeout_secs.unwrap_or(30);
+
+    // Build hook config and run
+    // Convert manifest env (HashMap<String, String>) to Vec<(String, String)>
+    // Note: env lives on PluginManifest, not on ContextEngineHooks
+    let plugin_env: Vec<(String, String)> = info
+        .manifest
+        .env
+        .iter()
+        .map(|(k, v): (&String, &String)| (k.clone(), v.clone()))
+        .collect();
+
+    let config = librefang_runtime::plugin_runtime::HookConfig {
+        timeout_secs,
+        plugin_env,
+        max_memory_mb: info.manifest.hooks.max_memory_mb,
+        allow_network: info.manifest.hooks.allow_network,
+        ..Default::default()
+    };
+
+    let start = std::time::Instant::now();
+    match librefang_runtime::plugin_runtime::run_hook_json(
+        &script_abs.to_string_lossy(),
+        runtime,
+        &input,
+        &config,
+    )
+    .await
+    {
+        Ok(output) => {
+            let elapsed_ms = start.elapsed().as_millis() as u64;
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "hook": hook_name,
+                    "plugin": name,
+                    "success": true,
+                    "elapsed_ms": elapsed_ms,
+                    "output": output,
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            let elapsed_ms = start.elapsed().as_millis() as u64;
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "hook": hook_name,
+                    "plugin": name,
+                    "success": false,
+                    "elapsed_ms": elapsed_ms,
+                    "error": e.to_string(),
+                })),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// GET /api/plugins/:name/lint — Validate plugin manifest and hook script structure.
+///
+/// Returns a lint report with errors (structural problems) and warnings
+/// (best-practice suggestions). Does not execute any hook scripts.
+#[utoipa::path(
+    get,
+    path = "/api/plugins/{name}/lint",
+    tag = "plugins",
+    params(("name" = String, Path, description = "Plugin name")),
+    responses(
+        (status = 200, description = "Lint report", body = serde_json::Value),
+        (status = 400, description = "Plugin not found")
+    )
+)]
+pub async fn lint_plugin(Path(name): Path<String>) -> impl IntoResponse {
+    match librefang_runtime::plugin_manager::lint_plugin(&name) {
+        Ok(report) => {
+            let status = if report.ok {
+                StatusCode::OK
+            } else {
+                StatusCode::UNPROCESSABLE_ENTITY
+            };
+            (status, Json(serde_json::to_value(&report).unwrap_or_default())).into_response()
+        }
+        Err(e) => ApiErrorResponse::bad_request(e).into_response(),
+    }
 }

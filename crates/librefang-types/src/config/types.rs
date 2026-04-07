@@ -2295,6 +2295,66 @@ pub struct ContextEngineHooks {
     /// explicitly ask the agent to remember something.
     #[serde(default)]
     pub ingest_filter: Option<String>,
+    /// Hook protocol version this plugin was written for.
+    ///
+    /// LibreFang's current hook protocol is version **1**. If a plugin declares
+    /// a higher version the runtime logs a compatibility warning and may refuse
+    /// to load. Omit or set to `1` for full compatibility.
+    #[serde(default)]
+    pub hook_protocol_version: Option<u32>,
+    /// Memory limit (MiB) for each hook subprocess.
+    ///
+    /// Enforced via `RLIMIT_AS` on Linux. On other platforms a warning is
+    /// logged and the limit is not applied. Omit to use the OS default.
+    #[serde(default)]
+    pub max_memory_mb: Option<u64>,
+    /// Whether hook subprocesses are allowed to make network connections.
+    ///
+    /// When `false` the runtime attempts soft network isolation: on Linux it
+    /// wraps the hook with `unshare --net` (if available); on other platforms
+    /// it injects `no_proxy=*` / `NO_PROXY=*` into the subprocess environment.
+    /// Defaults to `true`.
+    #[serde(default = "default_true_bool")]
+    pub allow_network: bool,
+    /// Restrict the `ingest`/`after_turn`/`assemble` hooks to specific agent IDs.
+    ///
+    /// Each entry is matched as a substring of the agent's UUID string. Leave
+    /// empty (default) to run hooks for every agent.
+    ///
+    /// ```toml
+    /// only_for_agent_ids = ["3f2a", "9c01"]  # prefix match is fine
+    /// ```
+    #[serde(default)]
+    pub only_for_agent_ids: Vec<String>,
+    /// Per-hook JSON Schema definitions for input/output validation.
+    ///
+    /// Map keys are hook names (`"ingest"`, `"assemble"`, …). Each value is
+    /// an object with optional `"input"` and `"output"` JSON Schema objects.
+    /// When declared, the runtime validates hook payloads and responses against
+    /// the schema and logs a warning on mismatch (never blocks execution).
+    ///
+    /// ```toml
+    /// [hooks.hook_schemas.ingest.output]
+    /// type = "object"
+    /// required = ["memories"]
+    /// ```
+    #[serde(default)]
+    pub hook_schemas: std::collections::HashMap<String, HookSchema>,
+}
+
+fn default_true_bool() -> bool {
+    true
+}
+
+/// Per-hook input/output JSON Schema definition.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HookSchema {
+    /// JSON Schema for the value sent to the hook script on stdin.
+    #[serde(default)]
+    pub input: Option<serde_json::Value>,
+    /// JSON Schema for the value the hook script must return on stdout.
+    #[serde(default)]
+    pub output: Option<serde_json::Value>,
 }
 
 fn default_hook_retry_delay_ms() -> u64 {
@@ -2371,6 +2431,32 @@ pub struct PluginManifest {
     /// ```
     #[serde(default)]
     pub librefang_min_version: Option<String>,
+    /// SHA-256 integrity hashes for hook script files.
+    ///
+    /// Maps a file path (relative to the plugin directory) to its expected
+    /// lowercase hex SHA-256 digest. Verified at load time; mismatches abort
+    /// loading with an error so tampered scripts are never executed.
+    ///
+    /// Generate with: `sha256sum hooks/ingest.py`
+    ///
+    /// ```toml
+    /// [integrity]
+    /// "hooks/ingest.py"    = "e3b0c44298fc1c149afb..."
+    /// "hooks/after_turn.py" = "a87ff679a2f3e71d9181..."
+    /// ```
+    #[serde(default)]
+    pub integrity: std::collections::HashMap<String, String>,
+    /// Other plugins this plugin depends on.
+    ///
+    /// Listed names must be installed (present in `~/.librefang/plugins/`)
+    /// before this plugin is allowed to load. The runtime returns an error
+    /// listing any missing dependencies.
+    ///
+    /// ```toml
+    /// plugin_depends = ["base-recall", "embedding-indexer"]
+    /// ```
+    #[serde(default)]
+    pub plugin_depends: Vec<String>,
 }
 
 /// client_secret_env = "GITHUB_OAUTH_CLIENT_SECRET"

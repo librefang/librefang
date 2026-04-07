@@ -200,6 +200,13 @@ pub trait ContextEngine: Send + Sync {
     fn hook_metrics(&self) -> Option<HookMetrics> {
         None
     }
+
+    /// Return recent hook invocation traces (last ≤100 calls) for debugging.
+    ///
+    /// Returns an empty vec for engines that don't record traces.
+    fn hook_traces(&self) -> Vec<HookTrace> {
+        Vec::new()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -392,6 +399,35 @@ impl ContextEngine for DefaultContextEngine {
 }
 
 // ---------------------------------------------------------------------------
+// Hook invocation traces
+// ---------------------------------------------------------------------------
+
+/// One recorded hook invocation — input, output, timing, and outcome.
+///
+/// Stored in a bounded ring buffer inside `ScriptableContextEngine` and
+/// surfaced via `GET /api/context-engine/traces` for debugging.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct HookTrace {
+    /// Hook name (`"ingest"`, `"assemble"`, …).
+    pub hook: String,
+    /// ISO-8601 timestamp of when the hook started.
+    pub started_at: String,
+    /// Wall-clock duration in milliseconds.
+    pub elapsed_ms: u64,
+    /// Whether the hook succeeded.
+    pub success: bool,
+    /// Error message, if the hook failed.
+    pub error: Option<String>,
+    /// JSON input sent to the hook script (may be truncated for large payloads).
+    pub input_preview: serde_json::Value,
+    /// JSON output returned by the hook script (None on failure).
+    pub output_preview: Option<serde_json::Value>,
+}
+
+/// Maximum number of traces kept in the ring buffer.
+const TRACE_BUFFER_CAPACITY: usize = 100;
+
+// ---------------------------------------------------------------------------
 // Hook invocation metrics
 // ---------------------------------------------------------------------------
 
@@ -482,6 +518,19 @@ pub struct ScriptableContextEngine {
     retry_delay_ms: u64,
     /// Optional substring filter for the `ingest` hook.
     ingest_filter: Option<String>,
+    /// Restrict hooks to specific agent ID substrings (empty = all agents).
+    agent_id_filter: Vec<String>,
+    /// Per-hook JSON Schema definitions for input/output validation.
+    hook_schemas: std::collections::HashMap<String, librefang_types::config::HookSchema>,
+    /// Bounded ring buffer of recent hook invocations for debugging.
+    traces: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<HookTrace>>>,
+    /// Memory limit (MiB) forwarded to HookConfig.
+    max_memory_mb: Option<u64>,
+    /// Whether hook subprocesses are allowed network access.
+    allow_network: bool,
+    /// Hook protocol version declared by this plugin (stored for future compatibility checks).
+    #[allow(dead_code)]
+    hook_protocol_version: u32,
 }
 
 impl ScriptableContextEngine {
@@ -518,6 +567,17 @@ impl ScriptableContextEngine {
             }
         }
 
+        const CURRENT_PROTOCOL: u32 = 1;
+        let proto = hooks.hook_protocol_version.unwrap_or(1);
+        if proto > CURRENT_PROTOCOL {
+            warn!(
+                declared = proto,
+                current = CURRENT_PROTOCOL,
+                "Plugin declares hook_protocol_version {proto} but runtime only supports \
+                 version {CURRENT_PROTOCOL}. The plugin may use unsupported features."
+            );
+        }
+
         Self {
             inner,
             ingest_script: hooks.ingest.clone(),
@@ -535,6 +595,14 @@ impl ScriptableContextEngine {
             max_retries: hooks.max_retries,
             retry_delay_ms: hooks.retry_delay_ms,
             ingest_filter: hooks.ingest_filter.clone(),
+            agent_id_filter: hooks.only_for_agent_ids.clone(),
+            hook_schemas: hooks.hook_schemas.clone(),
+            traces: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::VecDeque::with_capacity(TRACE_BUFFER_CAPACITY),
+            )),
+            max_memory_mb: hooks.max_memory_mb,
+            allow_network: hooks.allow_network,
+            hook_protocol_version: proto,
         }
     }
 
@@ -547,6 +615,60 @@ impl ScriptableContextEngine {
     /// Return a snapshot of all hook invocation metrics.
     pub fn metrics(&self) -> HookMetrics {
         self.metrics.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    /// Return recent hook invocation traces (up to `TRACE_BUFFER_CAPACITY`).
+    pub fn traces_snapshot(&self) -> Vec<HookTrace> {
+        self.traces
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .cloned()
+            .collect()
+    }
+
+    /// Push a trace record into the ring buffer, evicting the oldest if full.
+    fn push_trace(
+        traces: &std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<HookTrace>>>,
+        trace: HookTrace,
+    ) {
+        if let Ok(mut buf) = traces.lock() {
+            if buf.len() >= TRACE_BUFFER_CAPACITY {
+                buf.pop_front();
+            }
+            buf.push_back(trace);
+        }
+    }
+
+    /// Check whether a schema validation warning should be logged.
+    ///
+    /// Only validates that the output is an object (basic sanity).
+    /// Full JSON Schema validation is deferred — this is a structural check only.
+    fn validate_schema(schema: &serde_json::Value, value: &serde_json::Value, context: &str) {
+        if let Some(required) = schema.get("required").and_then(|r| r.as_array()) {
+            if let Some(obj) = value.as_object() {
+                for field in required {
+                    if let Some(field_str) = field.as_str() {
+                        if !obj.contains_key(field_str) {
+                            warn!(
+                                context,
+                                missing_field = field_str,
+                                "Hook schema validation: required field missing"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Returns true when the agent_id passes the configured agent_id_filter.
+    fn agent_passes_filter(&self, agent_id: &AgentId) -> bool {
+        if self.agent_id_filter.is_empty() {
+            return true;
+        }
+        let id_str = agent_id.0.to_string();
+        self.agent_id_filter.iter().any(|f| id_str.contains(f.as_str()))
     }
 
     /// Record the outcome of one hook invocation into the named slot.
@@ -589,10 +711,11 @@ impl ScriptableContextEngine {
 
     /// Run a hook script with JSON input, return `(output, elapsed_ms)`.
     ///
-    /// Retries up to `max_retries` times with `retry_delay_ms` between attempts
-    /// before returning the final error. `elapsed_ms` reflects total wall time
-    /// across all attempts.
+    /// Retries up to `max_retries` times with `retry_delay_ms` between attempts.
+    /// Records a `HookTrace` on every call (success or failure).
+    #[allow(clippy::too_many_arguments)]
     async fn run_hook(
+        hook_name: &str,
         script_path: &str,
         runtime: crate::plugin_runtime::PluginRuntime,
         input: serde_json::Value,
@@ -600,6 +723,10 @@ impl ScriptableContextEngine {
         plugin_env: &[(String, String)],
         max_retries: u32,
         retry_delay_ms: u64,
+        max_memory_mb: Option<u64>,
+        allow_network: bool,
+        traces: &std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<HookTrace>>>,
+        hook_schemas: &std::collections::HashMap<String, librefang_types::config::HookSchema>,
     ) -> Result<(serde_json::Value, u64), String> {
         let resolved = Self::resolve_script_path(script_path);
 
@@ -607,10 +734,27 @@ impl ScriptableContextEngine {
             return Err(format!("Hook script not found: {resolved}"));
         }
 
+        // Validate input schema if declared.
+        if let Some(schema) = hook_schemas.get(hook_name) {
+            if let Some(ref input_schema) = schema.input {
+                Self::validate_schema(input_schema, &input, &format!("{hook_name}/input"));
+            }
+        }
+
         let config = crate::plugin_runtime::HookConfig {
             timeout_secs,
             plugin_env: plugin_env.to_vec(),
+            max_memory_mb,
+            allow_network,
             ..Default::default()
+        };
+
+        let started_at = chrono::Utc::now().to_rfc3339();
+        // Truncate large inputs for trace preview.
+        let input_preview = if input.to_string().len() > 2048 {
+            serde_json::json!({"_truncated": true, "type": input.get("type")})
+        } else {
+            input.clone()
         };
 
         let t = std::time::Instant::now();
@@ -628,13 +772,38 @@ impl ScriptableContextEngine {
             match crate::plugin_runtime::run_hook_json(&resolved, runtime, &input, &config).await {
                 Ok(v) => {
                     let elapsed_ms = t.elapsed().as_millis() as u64;
+                    // Validate output schema if declared.
+                    if let Some(schema) = hook_schemas.get(hook_name) {
+                        if let Some(ref output_schema) = schema.output {
+                            Self::validate_schema(output_schema, &v, &format!("{hook_name}/output"));
+                        }
+                    }
+                    Self::push_trace(traces, HookTrace {
+                        hook: hook_name.to_string(),
+                        started_at: started_at.clone(),
+                        elapsed_ms,
+                        success: true,
+                        error: None,
+                        input_preview: input_preview.clone(),
+                        output_preview: Some(v.clone()),
+                    });
                     return Ok((v, elapsed_ms));
                 }
                 Err(e) => last_err = e.to_string(),
             }
         }
         let elapsed_ms = t.elapsed().as_millis() as u64;
-        Err(format!("Hook script failed after {max_retries} retries: {last_err}"))
+        let err_msg = format!("Hook script failed after {max_retries} retries: {last_err}");
+        Self::push_trace(traces, HookTrace {
+            hook: hook_name.to_string(),
+            started_at,
+            elapsed_ms,
+            success: false,
+            error: Some(err_msg.clone()),
+            input_preview,
+            output_preview: None,
+        });
+        Err(err_msg)
     }
 
     /// Apply the configured failure policy to a hook error.
@@ -653,7 +822,7 @@ impl ScriptableContextEngine {
                 Ok(())
             }
             HookFailurePolicy::Skip => Ok(()), // silent
-            HookFailurePolicy::Abort => Err(crate::error::LibreFangError::Internal(
+            HookFailurePolicy::Abort => Err(LibreFangError::Internal(
                 format!("Hook '{hook}' failed (abort policy): {err}"),
             )),
         }
@@ -711,15 +880,13 @@ impl ContextEngine for ScriptableContextEngine {
                 "stable_prefix_mode": config.stable_prefix_mode,
                 "max_recall_results": config.max_recall_results,
             });
-            match Self::run_hook(script, self.runtime, input, bootstrap_timeout, &self.plugin_env, self.max_retries, self.retry_delay_ms).await {
+            match Self::run_hook("bootstrap", script, self.runtime, input, bootstrap_timeout, &self.plugin_env, self.max_retries, self.retry_delay_ms, self.max_memory_mb, self.allow_network, &self.traces, &self.hook_schemas).await {
                 Ok((_, ms)) => {
                     Self::record_hook(&self.metrics, "bootstrap", ms, true);
                     debug!("Bootstrap hook completed (timeout={bootstrap_timeout}s, {ms}ms)");
                 }
                 Err(e) => {
                     Self::record_hook(&self.metrics, "bootstrap", 0, false);
-                    // Bootstrap is inherently non-fatal (best-effort init), so
-                    // we respect the policy for logging but never abort here.
                     let _ = self.apply_failure_policy("bootstrap", &e);
                 }
             }
@@ -746,15 +913,18 @@ impl ContextEngine for ScriptableContextEngine {
             return self.inner.ingest(agent_id, user_message, peer_id).await;
         };
 
-        // Apply ingest_filter — skip hook (use default recall) when message doesn't match.
+        // Apply ingest_filter — skip hook when message doesn't match.
         if let Some(ref filter) = self.ingest_filter {
             if !user_message.contains(filter.as_str()) {
-                debug!(
-                    filter = filter.as_str(),
-                    "Ingest hook skipped (message does not match filter)"
-                );
+                debug!(filter = filter.as_str(), "Ingest hook skipped (filter mismatch)");
                 return self.inner.ingest(agent_id, user_message, peer_id).await;
             }
+        }
+
+        // Apply agent_id_filter — skip hook for agents not in the allowlist.
+        if !self.agent_passes_filter(&agent_id) {
+            debug!("Ingest hook skipped (agent_id not in only_for_agent_ids filter)");
+            return self.inner.ingest(agent_id, user_message, peer_id).await;
         }
 
         // Run default recall first (for embedding-based memories)
@@ -768,7 +938,7 @@ impl ContextEngine for ScriptableContextEngine {
             "peer_id": peer_id,
         });
 
-        match Self::run_hook(script, self.runtime, input, self.hook_timeout_secs, &self.plugin_env, self.max_retries, self.retry_delay_ms).await {
+        match Self::run_hook("ingest", script, self.runtime, input, self.hook_timeout_secs, &self.plugin_env, self.max_retries, self.retry_delay_ms, self.max_memory_mb, self.allow_network, &self.traces, &self.hook_schemas).await {
             Ok((output, ms)) => {
                 Self::record_hook(&self.metrics, "ingest", ms, true);
                 // Merge hook memories with default memories
@@ -836,7 +1006,12 @@ impl ContextEngine for ScriptableContextEngine {
             "context_window_tokens": context_window_tokens,
         });
 
-        match Self::run_hook(script, self.runtime, input, self.hook_timeout_secs, &self.plugin_env, self.max_retries, self.retry_delay_ms).await {
+        // Apply agent_id_filter for assemble hook.
+        if !self.agent_passes_filter(&agent_id) {
+            return self.inner.assemble(agent_id, messages, system_prompt, tools, context_window_tokens).await;
+        }
+
+        match Self::run_hook("assemble", script, self.runtime, input, self.hook_timeout_secs, &self.plugin_env, self.max_retries, self.retry_delay_ms, self.max_memory_mb, self.allow_network, &self.traces, &self.hook_schemas).await {
             Ok((output, ms)) => {
                 if let Some(new_msgs) = output.get("messages").and_then(|v| v.as_array()) {
                     let assembled: Vec<Message> = new_msgs
@@ -901,7 +1076,7 @@ impl ContextEngine for ScriptableContextEngine {
             "context_window_tokens": context_window_tokens,
         });
 
-        match Self::run_hook(script, self.runtime, input, self.hook_timeout_secs, &self.plugin_env, self.max_retries, self.retry_delay_ms).await {
+        match Self::run_hook("compact", script, self.runtime, input, self.hook_timeout_secs, &self.plugin_env, self.max_retries, self.retry_delay_ms, self.max_memory_mb, self.allow_network, &self.traces, &self.hook_schemas).await {
             Ok((output, ms)) => {
                 if let Some(new_msgs) = output.get("messages").and_then(|v| v.as_array()) {
                     let compacted: Vec<Message> = new_msgs
@@ -968,6 +1143,11 @@ impl ContextEngine for ScriptableContextEngine {
 
         // Spawn as fire-and-forget — after_turn is best-effort, don't block the agent.
         // Log if the task panics so failures aren't silently swallowed.
+        // Apply agent_id_filter for after_turn hook.
+        if !self.agent_passes_filter(&agent_id) {
+            return Ok(());
+        }
+
         let script = script.clone();
         let runtime = self.runtime;
         let timeout_secs = self.hook_timeout_secs;
@@ -975,8 +1155,12 @@ impl ContextEngine for ScriptableContextEngine {
         let metrics = std::sync::Arc::clone(&self.metrics);
         let max_retries = self.max_retries;
         let retry_delay_ms = self.retry_delay_ms;
+        let max_memory_mb = self.max_memory_mb;
+        let allow_network = self.allow_network;
+        let traces = std::sync::Arc::clone(&self.traces);
+        let hook_schemas = self.hook_schemas.clone();
         let handle = tokio::spawn(async move {
-            match Self::run_hook(&script, runtime, input, timeout_secs, &plugin_env, max_retries, retry_delay_ms).await {
+            match Self::run_hook("after_turn", &script, runtime, input, timeout_secs, &plugin_env, max_retries, retry_delay_ms, max_memory_mb, allow_network, &traces, &hook_schemas).await {
                 Ok((_, ms)) => {
                     Self::record_hook(&metrics, "after_turn", ms, true);
                     debug!("After-turn hook completed ({ms}ms)");
@@ -1011,7 +1195,7 @@ impl ContextEngine for ScriptableContextEngine {
                 "parent_id": parent_id.0.to_string(),
                 "child_id": child_id.0.to_string(),
             });
-            match Self::run_hook(script, self.runtime, input, self.hook_timeout_secs, &self.plugin_env, self.max_retries, self.retry_delay_ms).await {
+            match Self::run_hook("prepare_subagent", script, self.runtime, input, self.hook_timeout_secs, &self.plugin_env, self.max_retries, self.retry_delay_ms, self.max_memory_mb, self.allow_network, &self.traces, &self.hook_schemas).await {
                 Ok((_, ms)) => {
                     Self::record_hook(&self.metrics, "prepare_subagent", ms, true);
                     debug!("Prepare-subagent hook completed ({ms}ms)");
@@ -1041,7 +1225,7 @@ impl ContextEngine for ScriptableContextEngine {
                 "parent_id": parent_id.0.to_string(),
                 "child_id": child_id.0.to_string(),
             });
-            match Self::run_hook(script, self.runtime, input, self.hook_timeout_secs, &self.plugin_env, self.max_retries, self.retry_delay_ms).await {
+            match Self::run_hook("merge_subagent", script, self.runtime, input, self.hook_timeout_secs, &self.plugin_env, self.max_retries, self.retry_delay_ms, self.max_memory_mb, self.allow_network, &self.traces, &self.hook_schemas).await {
                 Ok((_, ms)) => {
                     Self::record_hook(&self.metrics, "merge_subagent", ms, true);
                     debug!("Merge-subagent hook completed ({ms}ms)");
@@ -1063,6 +1247,10 @@ impl ContextEngine for ScriptableContextEngine {
 
     fn hook_metrics(&self) -> Option<HookMetrics> {
         Some(self.metrics())
+    }
+
+    fn hook_traces(&self) -> Vec<HookTrace> {
+        self.traces_snapshot()
     }
 }
 
@@ -1194,6 +1382,17 @@ pub fn load_plugin(
         // Propagate the runtime tag from the plugin manifest. `None` means
         // "use the default" which resolves to Python in PluginRuntime::from_tag.
         runtime: manifest.hooks.runtime.clone(),
+        // Propagate all extended hook config fields from the manifest.
+        hook_timeout_secs: manifest.hooks.hook_timeout_secs,
+        max_retries: manifest.hooks.max_retries,
+        retry_delay_ms: manifest.hooks.retry_delay_ms,
+        ingest_filter: manifest.hooks.ingest_filter.clone(),
+        on_hook_failure: manifest.hooks.on_hook_failure.clone(),
+        hook_protocol_version: manifest.hooks.hook_protocol_version,
+        max_memory_mb: manifest.hooks.max_memory_mb,
+        allow_network: manifest.hooks.allow_network,
+        only_for_agent_ids: manifest.hooks.only_for_agent_ids.clone(),
+        hook_schemas: manifest.hooks.hook_schemas.clone(),
     };
 
     debug!(
@@ -1446,6 +1645,17 @@ impl ContextEngine for StackedContextEngine {
             .first()
             .expect("engines is non-empty")
             .truncate_tool_result(content, context_window_tokens)
+    }
+
+    fn hook_traces(&self) -> Vec<HookTrace> {
+        let mut all = Vec::new();
+        for engine in &self.engines {
+            all.extend(engine.hook_traces());
+        }
+        // Sort by started_at so mixed-engine traces appear chronologically.
+        all.sort_by(|a, b| a.started_at.cmp(&b.started_at));
+        all.truncate(TRACE_BUFFER_CAPACITY);
+        all
     }
 
     fn hook_metrics(&self) -> Option<HookMetrics> {

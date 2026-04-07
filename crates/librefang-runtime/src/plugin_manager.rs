@@ -78,6 +78,17 @@ pub struct PluginInfo {
     pub hooks_valid: bool,
     /// Size of the plugin directory in bytes.
     pub size_bytes: u64,
+    /// Whether the plugin is enabled (not disabled via marker file).
+    pub enabled: bool,
+}
+
+/// Result of a plugin lint check.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PluginLintReport {
+    pub plugin: String,
+    pub ok: bool,
+    pub errors: Vec<String>,
+    pub warnings: Vec<String>,
 }
 
 /// Source for plugin installation.
@@ -123,6 +134,48 @@ pub fn load_plugin_manifest(plugin_dir: &Path) -> Result<PluginManifest, String>
                  Upgrade the daemon or use an older plugin version.",
                 manifest.name
             ));
+        }
+    }
+
+    // Verify integrity hashes for declared hook scripts.
+    if !manifest.integrity.is_empty() {
+        for (rel_path, expected_hex) in &manifest.integrity {
+            let abs_path = plugin_dir.join(rel_path);
+            match std::fs::read(&abs_path) {
+                Ok(bytes) => {
+                    let actual_hex = sha256_hex(&bytes);
+                    if actual_hex != *expected_hex {
+                        return Err(format!(
+                            "Plugin '{}': integrity check failed for '{}' \
+                             (expected {expected_hex}, got {actual_hex}). \
+                             The hook file may have been tampered with.",
+                            manifest.name, rel_path
+                        ));
+                    }
+                }
+                Err(e) => {
+                    return Err(format!(
+                        "Plugin '{}': cannot read '{}' for integrity check: {e}",
+                        manifest.name, rel_path
+                    ));
+                }
+            }
+        }
+        debug!(plugin = manifest.name, "All integrity hashes verified");
+    }
+
+    // Check plugin dependencies are satisfied.
+    if !manifest.plugin_depends.is_empty() {
+        let plugins_root = plugin_dir.parent().unwrap_or(plugin_dir);
+        for dep in &manifest.plugin_depends {
+            let dep_dir = plugins_root.join(dep);
+            if !dep_dir.join("plugin.toml").exists() {
+                return Err(format!(
+                    "Plugin '{}' requires plugin '{dep}' but it is not installed. \
+                     Install it first.",
+                    manifest.name
+                ));
+            }
         }
     }
 
@@ -173,11 +226,15 @@ pub fn get_plugin_info(plugin_name: &str) -> Result<PluginInfo, String> {
     // Calculate directory size
     let size_bytes = dir_size(&plugin_dir);
 
+    // Enabled unless a .disabled marker file exists
+    let enabled = !plugin_dir.join(".disabled").exists();
+
     Ok(PluginInfo {
         manifest,
         path: plugin_dir,
         hooks_valid,
         size_bytes,
+        enabled,
     })
 }
 
@@ -2318,6 +2375,272 @@ async fn download_github_entry(
 // ---------------------------------------------------------------------------
 
 /// Check that all declared hook scripts exist on disk and are within the plugin directory.
+/// Compute a hex-encoded SHA-256 digest of `bytes`.
+fn sha256_hex(bytes: &[u8]) -> String {
+
+    // NOTE: Rust's `DefaultHasher` is NOT cryptographic. We use a simple
+    // hand-rolled SHA-256 here so we don't pull in a new crate. If the project
+    // adds `sha2` in future, swap this implementation out.
+    //
+    // This is a pure-Rust SHA-256 implementation (RFC 6234).
+    const K: [u32; 64] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
+        0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+        0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+        0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+        0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
+        0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
+        0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+        0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+    ];
+
+    let mut h: [u32; 8] = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+    ];
+
+    // Pre-processing: padding
+    let bit_len = (bytes.len() as u64).wrapping_mul(8);
+    let mut msg = bytes.to_vec();
+    msg.push(0x80);
+    while msg.len() % 64 != 56 {
+        msg.push(0x00);
+    }
+    msg.extend_from_slice(&bit_len.to_be_bytes());
+
+    // Process each 512-bit (64-byte) block
+    for block in msg.chunks(64) {
+        let mut w = [0u32; 64];
+        for i in 0..16 {
+            w[i] = u32::from_be_bytes([block[i*4], block[i*4+1], block[i*4+2], block[i*4+3]]);
+        }
+        for i in 16..64 {
+            let s0 = w[i-15].rotate_right(7) ^ w[i-15].rotate_right(18) ^ (w[i-15] >> 3);
+            let s1 = w[i-2].rotate_right(17) ^ w[i-2].rotate_right(19) ^ (w[i-2] >> 10);
+            w[i] = w[i-16].wrapping_add(s0).wrapping_add(w[i-7]).wrapping_add(s1);
+        }
+        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh] =
+            [h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]];
+        for i in 0..64 {
+            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+            let ch = (e & f) ^ ((!e) & g);
+            let temp1 = hh.wrapping_add(s1).wrapping_add(ch).wrapping_add(K[i]).wrapping_add(w[i]);
+            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+            let maj = (a & b) ^ (a & c) ^ (b & c);
+            let temp2 = s0.wrapping_add(maj);
+            hh = g; g = f; f = e;
+            e = d.wrapping_add(temp1);
+            d = c; c = b; b = a;
+            a = temp1.wrapping_add(temp2);
+        }
+        h[0] = h[0].wrapping_add(a); h[1] = h[1].wrapping_add(b);
+        h[2] = h[2].wrapping_add(c); h[3] = h[3].wrapping_add(d);
+        h[4] = h[4].wrapping_add(e); h[5] = h[5].wrapping_add(f);
+        h[6] = h[6].wrapping_add(g); h[7] = h[7].wrapping_add(hh);
+    }
+
+    format!(
+        "{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}",
+        h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]
+    )
+}
+
+/// Enable a previously disabled plugin by removing the `.disabled` marker file.
+///
+/// Returns an error if the plugin does not exist or was not disabled.
+pub fn enable_plugin(name: &str) -> Result<(), String> {
+    validate_plugin_name(name)?;
+    let plugin_dir = plugins_dir().join(name);
+    if !plugin_dir.exists() {
+        return Err(format!("Plugin '{name}' is not installed"));
+    }
+    let marker = plugin_dir.join(".disabled");
+    if !marker.exists() {
+        return Err(format!("Plugin '{name}' is already enabled"));
+    }
+    std::fs::remove_file(&marker)
+        .map_err(|e| format!("Failed to enable plugin '{name}': {e}"))?;
+    info!(plugin = name, "Plugin enabled");
+    Ok(())
+}
+
+/// Disable a plugin by creating a `.disabled` marker file.
+///
+/// The running context engine will not pick up the change until it is
+/// restarted; this marks the intent so the next start skips the plugin.
+pub fn disable_plugin(name: &str) -> Result<(), String> {
+    validate_plugin_name(name)?;
+    let plugin_dir = plugins_dir().join(name);
+    if !plugin_dir.exists() {
+        return Err(format!("Plugin '{name}' is not installed"));
+    }
+    let marker = plugin_dir.join(".disabled");
+    if marker.exists() {
+        return Err(format!("Plugin '{name}' is already disabled"));
+    }
+    std::fs::write(&marker, "")
+        .map_err(|e| format!("Failed to disable plugin '{name}': {e}"))?;
+    info!(plugin = name, "Plugin disabled");
+    Ok(())
+}
+
+/// Upgrade a plugin in-place: remove the old version, reinstall from source.
+///
+/// The `.disabled` state is preserved across the upgrade.
+pub async fn upgrade_plugin(name: &str, source: &PluginSource) -> Result<PluginInfo, String> {
+    validate_plugin_name(name)?;
+    let plugin_dir = plugins_dir().join(name);
+    if !plugin_dir.exists() {
+        return Err(format!("Plugin '{name}' is not installed. Use install instead."));
+    }
+
+    // Preserve the enabled/disabled state
+    let was_disabled = plugin_dir.join(".disabled").exists();
+
+    // Remove old version
+    std::fs::remove_dir_all(&plugin_dir)
+        .map_err(|e| format!("Failed to remove old version of '{name}': {e}"))?;
+
+    // Reinstall
+    let info = install_plugin(source).await?;
+
+    // Restore disabled state if it was set
+    if was_disabled {
+        let marker = plugins_dir().join(name).join(".disabled");
+        let _ = std::fs::write(&marker, "");
+    }
+
+    info!(plugin = name, "Plugin upgraded");
+    Ok(info)
+}
+
+/// Lint a plugin: validate its manifest, hook files, and structure.
+///
+/// Returns a [`PluginLintReport`] with any errors and warnings found.
+/// This is a best-effort static analysis — it does not execute any hook scripts.
+pub fn lint_plugin(name: &str) -> Result<PluginLintReport, String> {
+    validate_plugin_name(name)?;
+    let plugin_dir = plugins_dir().join(name);
+    if !plugin_dir.exists() {
+        return Err(format!("Plugin '{name}' is not installed"));
+    }
+
+    let mut errors: Vec<String> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
+
+    // 1. Load and parse manifest (this also runs version and integrity checks)
+    let manifest = match load_plugin_manifest(&plugin_dir) {
+        Ok(m) => m,
+        Err(e) => {
+            return Ok(PluginLintReport {
+                plugin: name.to_string(),
+                ok: false,
+                errors: vec![e],
+                warnings,
+            });
+        }
+    };
+
+    // 2. Check that all declared hook scripts exist and have correct extension
+    let hooks = &manifest.hooks;
+    let check_hook = |rel: &str, errors: &mut Vec<String>, warnings: &mut Vec<String>| {
+        let abs = plugin_dir.join(rel);
+        if !abs.exists() {
+            errors.push(format!("Hook script not found: '{rel}'"));
+            return;
+        }
+        // Warn if runtime tag and extension mismatch (best effort)
+        if let Some(rt) = hooks.runtime.as_deref() {
+            let ext = abs.extension().and_then(|e| e.to_str()).unwrap_or("");
+            let expected = match rt {
+                "python" | "py" => "py",
+                "node" | "nodejs" => "js",
+                "deno" => "ts",
+                "go" | "golang" => "go",
+                "ruby" | "rb" => "rb",
+                "bash" | "sh" => "sh",
+                "bun" => "ts",
+                "php" => "php",
+                "lua" => "lua",
+                _ => "",
+            };
+            if !expected.is_empty() && ext != expected {
+                warnings.push(format!(
+                    "Hook '{rel}' has extension '.{ext}' but runtime is '{rt}' (expected '.{expected}')"
+                ));
+            }
+        }
+        // Check executable bit for native runtime
+        #[cfg(unix)]
+        if hooks.runtime.as_deref() == Some("native") {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(meta) = std::fs::metadata(&abs) {
+                if meta.permissions().mode() & 0o111 == 0 {
+                    errors.push(format!("Hook '{rel}' is not executable (chmod +x required for native runtime)"));
+                }
+            }
+        }
+    };
+
+    if let Some(ref p) = hooks.ingest { check_hook(p, &mut errors, &mut warnings); }
+    if let Some(ref p) = hooks.after_turn { check_hook(p, &mut errors, &mut warnings); }
+    if let Some(ref p) = hooks.assemble { check_hook(p, &mut errors, &mut warnings); }
+    if let Some(ref p) = hooks.compact { check_hook(p, &mut errors, &mut warnings); }
+    if let Some(ref p) = hooks.bootstrap { check_hook(p, &mut errors, &mut warnings); }
+    if let Some(ref p) = hooks.prepare_subagent { check_hook(p, &mut errors, &mut warnings); }
+    if let Some(ref p) = hooks.merge_subagent { check_hook(p, &mut errors, &mut warnings); }
+
+    // 3. Warn on missing optional but recommended fields
+    if manifest.description.is_none() {
+        warnings.push("Missing 'description' field in plugin.toml".to_string());
+    }
+    if manifest.author.is_none() {
+        warnings.push("Missing 'author' field in plugin.toml".to_string());
+    }
+    if manifest.version.is_empty() {
+        warnings.push("'version' field is empty in plugin.toml".to_string());
+    }
+
+    // 4. Warn if no hooks are declared at all
+    if hooks.ingest.is_none()
+        && hooks.after_turn.is_none()
+        && hooks.assemble.is_none()
+        && hooks.compact.is_none()
+        && hooks.bootstrap.is_none()
+    {
+        warnings.push("No hooks declared in [hooks] section — plugin is a no-op".to_string());
+    }
+
+    // 5. Warn if plugin_depends references unknown plugins
+    let plugins_root = plugin_dir.parent().unwrap_or(&plugin_dir);
+    for dep in &manifest.plugin_depends {
+        if !plugins_root.join(dep).join("plugin.toml").exists() {
+            warnings.push(format!("Declared dependency '{dep}' is not installed"));
+        }
+    }
+
+    // 6. If plugin is disabled, add informational warning
+    if plugin_dir.join(".disabled").exists() {
+        warnings.push("Plugin is currently disabled (.disabled marker present)".to_string());
+    }
+
+    let ok = errors.is_empty();
+    Ok(PluginLintReport {
+        plugin: name.to_string(),
+        ok,
+        errors,
+        warnings,
+    })
+}
+
 fn check_hooks_exist(plugin_dir: &Path, manifest: &PluginManifest) -> bool {
     // Canonicalize plugin_dir first so the starts_with check works even when
     // the input path contains symlinks (e.g. /tmp → /private/tmp on macOS).
