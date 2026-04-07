@@ -264,8 +264,8 @@ impl LoopGuard {
 
         // Ping-pong detection (runs even if individual hash counts are low)
         if let Some((ping_pong_msg, repeats, pattern_hashes)) = self.detect_ping_pong() {
-            self.ping_pong_detected = true;
             if repeats >= self.config.ping_pong_min_repeats {
+                self.ping_pong_detected = true;
                 self.blocked_calls += 1;
                 return LoopGuardVerdict::Block(ping_pong_msg);
             }

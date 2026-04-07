@@ -137,29 +137,31 @@ fn init_loop_guard(max_iterations: u32, loop_guard_config: Option<&LoopGuardConf
 /// postfixes in the same order.  Extracting this into a helper avoids the
 /// ~10-line duplication.
 fn apply_loop_guard_postfixes(
-    content: String,
+    mut content: String,
     verdict: &LoopGuardVerdict,
     outcome_warning: Option<&str>,
     poll_backoff_hint: Option<u64>,
 ) -> String {
-    let mut result = match verdict {
-        LoopGuardVerdict::Warn(warn_msg) => {
-            format!("{content}\n\n[LOOP GUARD] {warn_msg}")
-        }
-        _ => content,
-    };
+    if let LoopGuardVerdict::Warn(warn_msg) = verdict {
+        content.push_str("\n\n[LOOP GUARD] ");
+        content.push_str(warn_msg);
+    }
 
     if let Some(outcome) = outcome_warning {
-        result = format!("{result}\n\n[LOOP GUARD] {outcome}");
+        content.push_str("\n\n[LOOP GUARD] ");
+        content.push_str(outcome);
     }
 
     if let Some(backoff_ms) = poll_backoff_hint {
-        result = format!(
-            "{result}\n\n[LOOP GUARD: Consider waiting {backoff_ms}ms before polling again]"
+        use std::fmt::Write;
+        let _ = write!(
+            content,
+            "\n\n[LOOP GUARD: Consider waiting {}ms before polling again]",
+            backoff_ms
         );
     }
 
-    result
+    content
 }
 
 /// Safely trim message history to `MAX_HISTORY_MESSAGES`, cutting at
