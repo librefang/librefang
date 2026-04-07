@@ -769,6 +769,7 @@ fn try_apply_landlock_readonly(allow_write_dir: Option<&std::path::Path>) -> boo
 }
 
 #[cfg(not(all(target_os = "linux", feature = "landlock-sandbox")))]
+#[allow(dead_code)]
 fn try_apply_landlock_readonly(_allow_write_dir: Option<&std::path::Path>) -> bool {
     false
 }
@@ -855,6 +856,7 @@ fn apply_seccomp_allowlist(allow_network: bool) -> bool {
 }
 
 #[cfg(not(all(target_os = "linux", feature = "seccomp-sandbox")))]
+#[allow(dead_code)]
 fn apply_seccomp_allowlist(_allow_network: bool) -> bool {
     false
 }
@@ -1526,6 +1528,62 @@ impl HookProcessPool {
         for key in keys {
             self.evict(&key).await;
         }
+    }
+
+    /// Pre-warm a new hook process and, once ready, atomically replace the
+    /// existing pool entry for `script_path`.
+    ///
+    /// This enables zero-downtime hot-reload: the old process continues to
+    /// handle any in-flight request (it holds the slot lock) while the new
+    /// process is being spawned outside the lock.  Once the new process is
+    /// confirmed alive, we acquire the slot lock and swap it in, killing the
+    /// old process first.
+    ///
+    /// `hook_name` is used only for log messages.
+    /// Returns `1` on success (slot replaced), `0` on failure.
+    pub async fn swap_prewarm(
+        &self,
+        hook_name: &str,
+        script_path: &str,
+        runtime: PluginRuntime,
+        config: &HookConfig,
+    ) -> usize {
+        // Step 1: spawn the new process outside any lock so in-flight calls
+        // on the old process are not blocked.
+        let new_proc = match Self::spawn(script_path, runtime, config).await {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(hook = hook_name, "swap_prewarm: failed to spawn new process: {e}");
+                return 0;
+            }
+        };
+
+        // Step 2: verify the new process is alive — child.id() returns Some
+        // only while the process is still running.
+        if new_proc.child.id().is_none() {
+            tracing::warn!(hook = hook_name, "swap_prewarm: new process died immediately");
+            return 0;
+        }
+
+        // Step 3: atomically replace the pool entry.
+        // Acquire (or create) the slot arc under the std::sync::Mutex, then
+        // lock the inner tokio Mutex to swap the PersistentProcess.
+        let slot_arc = {
+            let mut procs = self.procs.lock().unwrap();
+            procs
+                .entry(script_path.to_string())
+                .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(None)))
+                .clone()
+        };
+
+        let mut guard = slot_arc.lock().await;
+        // Kill the old process best-effort before replacing it.
+        if let Some(ref mut old_proc) = *guard {
+            let _ = old_proc.child.kill().await;
+        }
+        *guard = Some(new_proc);
+        tracing::info!(hook = hook_name, script = script_path, "swap_prewarm: hot-reload complete, slot replaced");
+        1
     }
 
     /// Pre-warm a specific hook script by spawning its subprocess now.
