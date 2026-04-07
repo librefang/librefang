@@ -5,6 +5,19 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
+## [2026.4.7] - 2026-04-07
+
+### Fixed
+
+- Resume agent loops after approval without blocking (#2101) (@leszek3737)
+- Skip Discord notification when release workflows are cancelled (#2129) (@houko)
+- Embed dashboard in release binaries (#2132) (@houko)
+
+### Maintenance
+
+- Add desktop build/dev recipes to justfile (#2134) (@houko)
+
+
 ## [2026.4.6] - 2026-04-06
 
 ### Added

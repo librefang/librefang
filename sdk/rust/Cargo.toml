@@ -2,7 +2,7 @@
 
 [package]
 name = "librefang"
-version = "2026.4.6-beta15"
+version = "2026.4.7-beta16"
 edition = "2021"
 description = "Official Rust client for LibreFang Agent OS"
 license = "MIT"
