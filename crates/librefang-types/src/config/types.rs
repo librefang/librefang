@@ -1974,6 +1974,15 @@ pub struct KernelConfig {
     /// Individual endpoints may enforce tighter limits.
     #[serde(default = "default_max_request_body_bytes")]
     pub max_request_body_bytes: usize,
+    /// HMAC-SHA256 secret for verifying `X-Account-Sig` headers on
+    /// multi-tenant requests.  When set (non-empty), any request carrying
+    /// `X-Account-Id` must also include a valid `X-Account-Sig` computed as
+    /// `HMAC-SHA256(secret, account_id)` in hex.  When absent or empty, the
+    /// signature check is skipped (backward-compatible single-tenant mode).
+    ///
+    /// Generate with: `openssl rand -hex 32`
+    #[serde(default)]
+    pub account_sig_secret: Option<String>,
 }
 
 /// Input sanitization mode for channel messages.
@@ -2923,6 +2932,7 @@ impl Default for KernelConfig {
             max_concurrent_bg_llm: default_max_concurrent_bg_llm(),
             max_agent_call_depth: default_max_agent_call_depth(),
             max_request_body_bytes: default_max_request_body_bytes(),
+            account_sig_secret: None,
         }
     }
 }

@@ -6,6 +6,8 @@
 //! - HTTP metrics recording (when telemetry feature is enabled)
 //! - In-memory rate limiting (per IP)
 //! - Accept-Language header parsing for i18n error responses
+//! - Account identity extraction from X-Account-Id header
+//! - Account signature verification (HMAC-SHA256)
 
 use axum::body::Body;
 use axum::http::{Request, Response, StatusCode};
@@ -244,7 +246,8 @@ pub async fn auth(
         || (path == "/api/profiles" && is_get)
         || (path == "/api/config" && is_get)
         || (path == "/api/config/schema" && is_get)
-        || (path.starts_with("/api/uploads/") && is_get)
+        // SECURITY: /api/uploads/* removed from public endpoints — uploads
+        // require authentication to prevent unauthorized file access (H1 fix).
         // Dashboard read endpoints — allow unauthenticated so the SPA can
         // render before the user enters their API key.
         || (path == "/api/models" && is_get)
@@ -526,5 +529,583 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(response.headers()["x-api-version"], "v1");
+    }
+}
+
+// ── Account Management ────────────────────────────────────────────────────
+
+use hmac::{Hmac, Mac};
+use serde::{Deserialize, Serialize};
+use sha2::Sha256;
+
+type HmacSha256 = Hmac<Sha256>;
+
+/// Account ID extracted from the `X-Account-Id` HTTP header.
+///
+/// This is the **axum extractor** version of the account ID, local to the
+/// api crate so it can implement `FromRequestParts` (orphan rule requires
+/// the type to be crate-local for foreign trait impls).
+///
+/// The canonical domain model lives at `librefang_types::account::AccountId`.
+/// Both types are structurally identical (`pub Option<String>`). Use the
+/// `From` impls below to convert between them at crate boundaries.
+///
+/// - `AccountId(Some(...))` = scoped multi-tenant request
+/// - `AccountId(None)` = legacy / admin / system mode
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct AccountId(pub Option<String>);
+
+impl From<AccountId> for librefang_types::account::AccountId {
+    fn from(val: AccountId) -> Self {
+        librefang_types::account::AccountId(val.0)
+    }
+}
+
+impl From<librefang_types::account::AccountId> for AccountId {
+    fn from(val: librefang_types::account::AccountId) -> Self {
+        AccountId(val.0)
+    }
+}
+
+impl<S: Send + Sync> axum::extract::FromRequestParts<S> for AccountId {
+    type Rejection = std::convert::Infallible;
+
+    fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send {
+        let account = parts
+            .headers
+            .get("x-account-id")
+            .and_then(|v| v.to_str().ok())
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.to_string());
+        std::future::ready(Ok(AccountId(account)))
+    }
+}
+
+/// Verify that HMAC-SHA256(secret, account_id) matches the provided hex signature.
+/// Uses constant-time comparison via `hmac::Mac::verify_slice`.
+///
+/// # Security notes
+///
+/// - `hex::decode` is NOT constant-time: it will return early on invalid hex
+///   characters. This leaks whether the input was valid hex, but does NOT
+///   leak any bits of the expected signature. Acceptable trade-off: an
+///   attacker already knows the expected format is hex.
+/// - `verify_slice` internally uses `subtle::ConstantTimeEq`, so the actual
+///   HMAC comparison is timing-safe.
+pub fn verify_account_sig(secret: &str, account_id: &str, sig_hex: &str) -> bool {
+    let Ok(sig_bytes) = hex::decode(sig_hex) else {
+        return false;
+    };
+    let mut mac =
+        HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
+    mac.update(account_id.as_bytes());
+    mac.verify_slice(&sig_bytes).is_ok()
+}
+
+/// Middleware: verify `X-Account-Sig` HMAC-SHA256 signature when a shared
+/// secret is configured in `AppState.account_sig_secret`.
+///
+/// Behaviour:
+/// - No secret configured (`None`) -> pass through unconditionally.
+/// - Secret configured but no `X-Account-Id` header -> pass through (legacy /
+///   admin requests are allowed; `require_account_id` can gate that separately).
+/// - Secret + `X-Account-Id` present, but missing / invalid `X-Account-Sig`
+///   -> reject with 401 JSON error.
+/// - Secret + valid HMAC -> pass through.
+///
+/// Must run AFTER the `auth` middleware (so legitimate auth has already been
+/// checked) and BEFORE route handlers.
+pub async fn account_sig_check(
+    axum::extract::State(state): axum::extract::State<Arc<crate::routes::AppState>>,
+    request: Request<Body>,
+    next: Next,
+) -> Response<Body> {
+    let secret = match state.account_sig_secret.as_deref() {
+        Some(s) if !s.is_empty() => s,
+        _ => return next.run(request).await,
+    };
+
+    let account_id = request
+        .headers()
+        .get("x-account-id")
+        .and_then(|v| v.to_str().ok());
+    let sig = request
+        .headers()
+        .get("x-account-sig")
+        .and_then(|v| v.to_str().ok());
+
+    if let Some(err_msg) = account_sig_policy(Some(secret), account_id, sig) {
+        return Response::builder()
+            .status(StatusCode::UNAUTHORIZED)
+            .header("content-type", "application/json")
+            .body(Body::from(format!(r#"{{"error":"{}"}}"#, err_msg)))
+            .unwrap();
+    }
+
+    next.run(request).await
+}
+
+/// Core account signature policy check -- pure function, fully testable.
+///
+/// Returns None if the request should pass through, or Some(error_message)
+/// if it must be rejected with 401.
+///
+/// Policy matrix:
+/// | secret | account_id | sig     | Result                          |
+/// |--------|------------|---------|----------------------------------|
+/// | absent | any        | any     | None (pass)                      |
+/// | any    | absent     | any     | None (pass)                      |
+/// | present| present    | absent  | Some("Missing X-Account-Sig ...") |
+/// | present| present    | invalid | Some("Invalid account signature") |
+/// | present| present    | valid   | None (pass)                      |
+pub(crate) fn account_sig_policy(
+    secret: Option<&str>,
+    account_id: Option<&str>,
+    sig: Option<&str>,
+) -> Option<&'static str> {
+    let secret = secret?;
+    let account_id = account_id?;
+    match sig {
+        None => Some("Missing X-Account-Sig header"),
+        Some(s) if !verify_account_sig(secret, account_id, s) => Some("Invalid account signature"),
+        Some(_) => None,
+    }
+}
+
+/// Middleware: require `X-Account-Id` header in multi-tenant mode.
+///
+/// When multi-tenant isolation is enabled, requests without a valid
+/// `X-Account-Id` header must be rejected to prevent `AccountId(None)` from
+/// bypassing all tenant isolation (the `check_account()` function passes
+/// everything through when the account ID is `None`).
+///
+/// This middleware is **opt-in** -- add it to the middleware stack only when
+/// `config.multi_tenant.enabled = true`:
+///
+/// ```ignore
+/// .layer(axum::middleware::from_fn(require_account_id))
+/// ```
+///
+/// A small set of infrastructure endpoints (health, version, OpenAPI spec,
+/// uploads) are exempt because they are not tenant-scoped.
+pub async fn require_account_id(request: Request<Body>, next: Next) -> Response<Body> {
+    let path = request.uri().path();
+
+    // Allow health/version/public/auth endpoints without account ID.
+    // Auth endpoints are exempt because the user is in the process of
+    // authenticating and cannot yet carry an X-Account-Id header.
+    let is_exempt = path == "/api/health"
+        || path == "/api/version"
+        || path.starts_with("/api/uploads/")
+        || path.starts_with("/api/auth/")
+        || path.starts_with("/api/v1/auth/")
+        || path == "/openapi.json";
+
+    if !is_exempt {
+        let has_account = request
+            .headers()
+            .get("x-account-id")
+            .and_then(|v| v.to_str().ok())
+            .filter(|s| !s.trim().is_empty())
+            .is_some();
+
+        if !has_account {
+            return Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"error":"X-Account-Id header required in multi-tenant mode"}"#,
+                ))
+                .unwrap();
+        }
+    }
+
+    next.run(request).await
+}
+
+#[cfg(test)]
+mod account_tests {
+    use super::*;
+    use axum::http::request::Parts;
+
+    fn make_parts_with_header(name: &str, value: &str) -> Parts {
+        let req = axum::http::Request::builder()
+            .method(axum::http::Method::GET)
+            .uri("/")
+            .header(name, value)
+            .body(())
+            .unwrap();
+        req.into_parts().0
+    }
+
+    fn make_parts() -> Parts {
+        let req = axum::http::Request::builder()
+            .method(axum::http::Method::GET)
+            .uri("/")
+            .body(())
+            .unwrap();
+        req.into_parts().0
+    }
+
+    // ─── Header Extraction (4 tests) ───
+
+    #[tokio::test]
+    async fn test_account_id_from_x_account_id_header() {
+        let mut parts = make_parts_with_header("x-account-id", "tenant-123");
+        let account =
+            <AccountId as axum::extract::FromRequestParts<()>>::from_request_parts(&mut parts, &())
+                .await
+                .unwrap();
+        assert_eq!(account, AccountId(Some("tenant-123".to_string())));
+    }
+
+    #[tokio::test]
+    async fn test_account_id_filters_empty_header() {
+        let mut parts = make_parts_with_header("x-account-id", "");
+        let account =
+            <AccountId as axum::extract::FromRequestParts<()>>::from_request_parts(&mut parts, &())
+                .await
+                .unwrap();
+        assert_eq!(account, AccountId(None));
+    }
+
+    #[tokio::test]
+    async fn test_account_id_filters_whitespace_header() {
+        let mut parts = make_parts_with_header("x-account-id", "   ");
+        let account =
+            <AccountId as axum::extract::FromRequestParts<()>>::from_request_parts(&mut parts, &())
+                .await
+                .unwrap();
+        assert_eq!(account, AccountId(None));
+    }
+
+    #[tokio::test]
+    async fn test_account_id_defaults_to_none_when_absent() {
+        let mut parts = make_parts();
+        let account =
+            <AccountId as axum::extract::FromRequestParts<()>>::from_request_parts(&mut parts, &())
+                .await
+                .unwrap();
+        assert_eq!(account, AccountId(None));
+    }
+
+    // ─── Signature Verification (7 tests) ───
+
+    #[test]
+    fn test_verify_account_sig_valid_hmac() {
+        let secret = "my-secret";
+        let account_id = "tenant-123";
+        let sig_hex = {
+            let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
+            mac.update(account_id.as_bytes());
+            hex::encode(mac.finalize().into_bytes())
+        };
+        assert!(verify_account_sig(secret, account_id, &sig_hex));
+    }
+
+    #[test]
+    fn test_verify_account_sig_invalid_hmac() {
+        assert!(!verify_account_sig("secret", "tenant-123", "deadbeef"));
+    }
+
+    #[test]
+    fn test_verify_account_sig_malformed_hex() {
+        assert!(!verify_account_sig("secret", "tenant-123", "not-hex"));
+    }
+
+    #[test]
+    fn test_verify_account_sig_empty_hex() {
+        assert!(!verify_account_sig("secret", "tenant-123", ""));
+    }
+
+    #[test]
+    fn test_account_sig_policy_passes_when_no_secret() {
+        assert_eq!(account_sig_policy(None, Some("tenant-123"), None), None);
+    }
+
+    #[test]
+    fn test_account_sig_policy_passes_when_no_account_id() {
+        assert_eq!(account_sig_policy(Some("secret"), None, Some("sig")), None);
+    }
+
+    #[test]
+    fn test_account_sig_policy_requires_sig_when_secret_and_account_present() {
+        assert_eq!(
+            account_sig_policy(Some("secret"), Some("tenant-123"), None),
+            Some("Missing X-Account-Sig header")
+        );
+    }
+
+    #[test]
+    fn test_account_sig_policy_rejects_invalid_sig() {
+        assert_eq!(
+            account_sig_policy(Some("secret"), Some("tenant-123"), Some("invalid")),
+            Some("Invalid account signature")
+        );
+    }
+
+    #[test]
+    fn test_account_sig_policy_accepts_valid_sig() {
+        let secret = "my-secret";
+        let account_id = "tenant-123";
+        let sig_hex = {
+            let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
+            mac.update(account_id.as_bytes());
+            hex::encode(mac.finalize().into_bytes())
+        };
+        assert_eq!(
+            account_sig_policy(Some(secret), Some(account_id), Some(&sig_hex)),
+            None
+        );
+    }
+
+    #[test]
+    fn test_account_sig_policy_matrix_row_1_no_secret() {
+        // Row 1: no secret configured -> always pass regardless of other headers
+        assert_eq!(
+            account_sig_policy(None, Some("acc-123"), Some("any-sig")),
+            None
+        );
+        assert_eq!(account_sig_policy(None, Some("acc-123"), None), None);
+        assert_eq!(account_sig_policy(None, None, None), None);
+    }
+
+    #[test]
+    fn test_account_sig_policy_matrix_row_2_no_account_id() {
+        // Row 2: no account_id header -> pass regardless of secret/sig
+        assert_eq!(
+            account_sig_policy(Some("secret"), None, Some("any-sig")),
+            None
+        );
+        assert_eq!(account_sig_policy(Some("secret"), None, None), None);
+    }
+
+    // ─── From conversion between middleware and types-crate AccountId ───
+
+    #[test]
+    fn test_account_id_roundtrip_to_types_crate() {
+        let middleware_id = AccountId(Some("tenant-42".to_string()));
+        let types_id: librefang_types::account::AccountId = middleware_id.clone().into();
+        assert_eq!(types_id.0, Some("tenant-42".to_string()));
+        let back: AccountId = types_id.into();
+        assert_eq!(back, middleware_id);
+    }
+
+    #[test]
+    fn test_account_id_none_roundtrip_to_types_crate() {
+        let middleware_id = AccountId(None);
+        let types_id: librefang_types::account::AccountId = middleware_id.clone().into();
+        assert_eq!(types_id.0, None);
+        let back: AccountId = types_id.into();
+        assert_eq!(back, middleware_id);
+    }
+
+    // ─── require_account_id middleware (multi-tenant gate) ───
+
+    #[tokio::test]
+    async fn test_require_account_id_rejects_missing_header() {
+        use axum::routing::get;
+        use axum::Router;
+        use tower::ServiceExt;
+
+        let app = Router::new()
+            .route("/api/agents", get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn(require_account_id));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/agents")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_require_account_id_passes_with_header() {
+        use axum::routing::get;
+        use axum::Router;
+        use tower::ServiceExt;
+
+        let app = Router::new()
+            .route("/api/agents", get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn(require_account_id));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/agents")
+                    .header("x-account-id", "tenant-123")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_require_account_id_exempts_health_endpoint() {
+        use axum::routing::get;
+        use axum::Router;
+        use tower::ServiceExt;
+
+        let app = Router::new()
+            .route("/api/health", get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn(require_account_id));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+}
+
+// ── account_sig_check middleware integration tests ────────────────────────
+
+#[cfg(test)]
+mod account_sig_check_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use axum::routing::get;
+    use axum::Router;
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    /// Build a minimal `AppState` with an optional HMAC secret.
+    ///
+    /// Boots a real (but lightweight) kernel so the `AppState` struct is fully
+    /// populated.  Tests that only touch `account_sig_secret` are unaffected
+    /// by the kernel's internal state.
+    fn test_app_state(secret: Option<String>) -> (Arc<crate::routes::AppState>, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("sig-test");
+        std::fs::create_dir_all(&home).unwrap();
+        let config = librefang_types::config::KernelConfig {
+            home_dir: home.clone(),
+            data_dir: home.join("data"),
+            ..Default::default()
+        };
+        let kernel = Arc::new(librefang_kernel::LibreFangKernel::boot_with_config(config).unwrap());
+
+        let state = Arc::new(crate::routes::AppState {
+            kernel,
+            started_at: std::time::Instant::now(),
+            peer_registry: None,
+            bridge_manager: tokio::sync::Mutex::new(None),
+            channels_config: tokio::sync::RwLock::new(Default::default()),
+            shutdown_notify: Arc::new(tokio::sync::Notify::new()),
+            clawhub_cache: dashmap::DashMap::new(),
+            skillhub_cache: dashmap::DashMap::new(),
+            provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
+            provider_test_cache: dashmap::DashMap::new(),
+            webhook_store: crate::webhook_store::WebhookStore::load(home.join("webhooks.json")),
+            active_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            #[cfg(feature = "telemetry")]
+            prometheus_handle: None,
+            media_drivers: librefang_runtime::media::MediaDriverCache::new(),
+            webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(Router::new()))),
+            api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
+            account_sig_secret: secret,
+        });
+        (state, tmp)
+    }
+
+    /// Compute a valid HMAC-SHA256 hex signature for testing.
+    fn sign(secret: &str, account_id: &str) -> String {
+        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(account_id.as_bytes());
+        hex::encode(mac.finalize().into_bytes())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_sig_check_passes_when_no_secret_configured() {
+        let (state, _tmp) = test_app_state(None);
+        let app = Router::new().route("/test", get(|| async { "ok" })).layer(
+            axum::middleware::from_fn_with_state(state, account_sig_check),
+        );
+
+        // No secret configured -- any request should pass, even with a random
+        // X-Account-Id and no sig.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/test")
+                    .header("x-account-id", "tenant-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_sig_check_rejects_missing_sig_when_secret_set() {
+        let (state, _tmp) = test_app_state(Some("my-secret".into()));
+        let app = Router::new().route("/test", get(|| async { "ok" })).layer(
+            axum::middleware::from_fn_with_state(state, account_sig_check),
+        );
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/test")
+                    .header("x-account-id", "tenant-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "Missing X-Account-Sig header");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_sig_check_accepts_valid_hmac() {
+        let secret = "test-secret-key";
+        let account = "tenant-42";
+        let sig = sign(secret, account);
+
+        let (state, _tmp) = test_app_state(Some(secret.into()));
+        let app = Router::new().route("/test", get(|| async { "ok" })).layer(
+            axum::middleware::from_fn_with_state(state, account_sig_check),
+        );
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/test")
+                    .header("x-account-id", account)
+                    .header("x-account-sig", sig)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 }

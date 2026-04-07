@@ -1,5 +1,7 @@
 //! Proactive memory (mem0-style) API routes.
 
+// TODO(multi-tenant-phase2): Add AccountId parameter and tenant scoping
+
 use std::sync::Arc;
 
 use super::AppState;

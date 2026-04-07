@@ -21,6 +21,7 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
         .route("/shutdown", axum::routing::post(shutdown))
         .route("/init", axum::routing::post(quick_init))
 }
+use crate::middleware::AccountId;
 use crate::types::*;
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -36,11 +37,23 @@ use std::sync::Arc;
         (status = 200, description = "Daemon status", body = serde_json::Value)
     )
 )]
-pub async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let agents: Vec<serde_json::Value> = state
-        .kernel
-        .agent_registry()
-        .list()
+pub async fn status(account: AccountId, State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let mut entries = state.kernel.agent_registry().list();
+
+    // H3 fix: scope agent list to the requesting account's tenant.
+    // AccountId(None) = system/admin mode — sees everything (backward compat).
+    if let Some(ref owner_id) = account.0 {
+        entries.retain(|e| e.account_id.as_deref() == Some(owner_id.as_str()));
+    }
+
+    // Compute counts from the (already tenant-filtered) entries before consuming them.
+    let agent_count = entries.len();
+    let active_agent_count = entries
+        .iter()
+        .filter(|e| matches!(e.state, librefang_types::agent::AgentState::Running))
+        .count();
+
+    let agents: Vec<serde_json::Value> = entries
         .into_iter()
         .map(|e| {
             serde_json::json!({
@@ -57,14 +70,6 @@ pub async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         .collect();
 
     let uptime = state.started_at.elapsed().as_secs();
-    let agent_count = agents.len();
-    let active_agent_count = state
-        .kernel
-        .agent_registry()
-        .list()
-        .iter()
-        .filter(|e| matches!(e.state, librefang_types::agent::AgentState::Running))
-        .count();
     let session_count = state
         .kernel
         .memory_substrate()
@@ -310,7 +315,10 @@ pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         (status = 200, description = "Detailed health diagnostics", body = serde_json::Value)
     )
 )]
-pub async fn health_detail(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn health_detail(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
     let health = state.kernel.supervisor_ref().health();
 
     let shared_id = librefang_types::agent::AgentId(uuid::Uuid::from_bytes([
@@ -326,13 +334,25 @@ pub async fn health_detail(State(state): State<Arc<AppState>>) -> impl IntoRespo
     let config_warnings = hcfg.validate();
     let status = if db_ok { "ok" } else { "degraded" };
 
+    // H3 fix: scope agent_count to the requesting tenant.
+    // AccountId(None) = system/admin mode — sees total count (backward compat).
+    let agent_count = if let Some(ref owner_id) = account.0 {
+        let entries = state.kernel.agent_registry().list();
+        entries
+            .iter()
+            .filter(|e| e.account_id.as_deref() == Some(owner_id.as_str()))
+            .count()
+    } else {
+        state.kernel.agent_registry().count()
+    };
+
     Json(serde_json::json!({
         "status": status,
         "version": env!("CARGO_PKG_VERSION"),
         "uptime_seconds": state.started_at.elapsed().as_secs(),
         "panic_count": health.panic_count,
         "restart_count": health.restart_count,
-        "agent_count": state.kernel.agent_registry().count(),
+        "agent_count": agent_count,
         "database": if db_ok { "connected" } else { "error" },
         "memory": {
             "embedding_available": state.kernel.embedding().is_some(),
@@ -376,6 +396,10 @@ pub async fn health_detail(State(state): State<Arc<AppState>>) -> impl IntoRespo
         (status = 200, description = "Prometheus text-format metrics", body = serde_json::Value)
     )
 )]
+// TODO(Phase 2): Per-tenant metric scoping — currently prometheus_metrics
+// returns global counters/gauges across all tenants. Filtering Prometheus
+// text-format output by account_id requires label injection and per-tenant
+// aggregation, which is too complex for a quick fix. Tracked for Phase 2.
 pub async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let mut out = String::with_capacity(4096);
 

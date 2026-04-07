@@ -415,6 +415,49 @@ impl AgentRegistry {
         entry.last_active = chrono::Utc::now();
         Ok(())
     }
+
+    /// List agents belonging to a specific account (tenant).
+    ///
+    /// Returns only agents whose `account_id` matches the given owner string.
+    /// Unowned agents (`account_id: None`) are excluded. Results are sorted
+    /// by name for deterministic ordering, matching `list()`.
+    pub fn list_by_account(&self, owner: &str) -> Vec<AgentEntry> {
+        let mut entries: Vec<AgentEntry> = self
+            .agents
+            .iter()
+            .filter(|e| e.value().account_id.as_deref() == Some(owner))
+            .map(|e| e.value().clone())
+            .collect();
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
+        entries
+    }
+
+    /// Get an agent by ID, scoped to a specific account (tenant).
+    ///
+    /// Returns `Some(entry)` only if the agent exists AND its `account_id`
+    /// matches the given owner. Returns `None` for cross-tenant access or
+    /// if the agent is unowned (`account_id: None`).
+    pub fn get_scoped(&self, id: AgentId, owner: &str) -> Option<AgentEntry> {
+        self.agents
+            .get(&id)
+            .filter(|e| e.value().account_id.as_deref() == Some(owner))
+            .map(|e| e.value().clone())
+    }
+
+    /// Assign an account (tenant) owner to an agent.
+    ///
+    /// When `account_id` is `Some`, the agent is bound to that tenant for
+    /// subsequent access-control checks. When `None`, the agent remains
+    /// unowned (legacy / admin behaviour).
+    pub fn set_account_id(&self, id: AgentId, account_id: Option<String>) -> LibreFangResult<()> {
+        let mut entry = self
+            .agents
+            .get_mut(&id)
+            .ok_or_else(|| LibreFangError::AgentNotFound(id.to_string()))?;
+        entry.account_id = account_id;
+        entry.last_active = chrono::Utc::now();
+        Ok(())
+    }
 }
 
 impl Default for AgentRegistry {
@@ -544,6 +587,114 @@ mod tests {
 
         let names: Vec<String> = registry.list().iter().map(|e| e.name.clone()).collect();
         assert_eq!(names, vec!["alpha", "mu", "zeta"]);
+    }
+
+    // ── Multi-tenant: list_by_account ──────────────────────────
+
+    fn test_entry_with_account(name: &str, account_id: Option<&str>) -> AgentEntry {
+        let mut entry = test_entry(name);
+        entry.account_id = account_id.map(|s| s.to_string());
+        entry
+    }
+
+    #[test]
+    fn test_list_by_account_filters_to_owner() {
+        let registry = AgentRegistry::new();
+        registry
+            .register(test_entry_with_account("t1-agent", Some("tenant-1")))
+            .unwrap();
+        registry
+            .register(test_entry_with_account("t2-agent", Some("tenant-2")))
+            .unwrap();
+        registry
+            .register(test_entry_with_account("sys-agent", None))
+            .unwrap();
+
+        let t1_agents = registry.list_by_account("tenant-1");
+        assert_eq!(t1_agents.len(), 1);
+        assert_eq!(t1_agents[0].name, "t1-agent");
+    }
+
+    #[test]
+    fn test_list_by_account_returns_empty_for_unknown_tenant() {
+        let registry = AgentRegistry::new();
+        registry
+            .register(test_entry_with_account("t1-agent", Some("tenant-1")))
+            .unwrap();
+
+        let results = registry.list_by_account("tenant-999");
+        assert!(results.is_empty());
+    }
+
+    // ── Multi-tenant: get_scoped ────────────────────────────
+
+    #[test]
+    fn test_get_scoped_returns_owned_agent() {
+        let registry = AgentRegistry::new();
+        let entry = test_entry_with_account("owned", Some("tenant-1"));
+        let id = entry.id;
+        registry.register(entry).unwrap();
+
+        let result = registry.get_scoped(id, "tenant-1");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().name, "owned");
+    }
+
+    #[test]
+    fn test_get_scoped_cross_tenant_returns_none() {
+        let registry = AgentRegistry::new();
+        let entry = test_entry_with_account("secret", Some("tenant-1"));
+        let id = entry.id;
+        registry.register(entry).unwrap();
+
+        // tenant-2 must NOT see tenant-1's agent
+        let result = registry.get_scoped(id, "tenant-2");
+        assert!(result.is_none(), "cross-tenant access must return None");
+    }
+
+    #[test]
+    fn test_get_scoped_unowned_agent_returns_none() {
+        let registry = AgentRegistry::new();
+        let entry = test_entry_with_account("legacy", None);
+        let id = entry.id;
+        registry.register(entry).unwrap();
+
+        // Scoped request for an unowned agent → None (prevents leaking legacy data)
+        let result = registry.get_scoped(id, "tenant-1");
+        assert!(
+            result.is_none(),
+            "scoped request should not see unowned agent"
+        );
+    }
+
+    // ── Multi-tenant: set_account_id ────────────────────────
+
+    #[test]
+    fn test_set_account_id_assigns_owner() {
+        let registry = AgentRegistry::new();
+        let entry = test_entry("unowned");
+        let id = entry.id;
+        registry.register(entry).unwrap();
+
+        registry
+            .set_account_id(id, Some("tenant-1".to_string()))
+            .unwrap();
+
+        let updated = registry.get(id).unwrap();
+        assert_eq!(updated.account_id, Some("tenant-1".to_string()));
+    }
+
+    #[test]
+    fn test_set_account_id_clears_owner() {
+        let registry = AgentRegistry::new();
+        let entry = test_entry_with_account("owned", Some("tenant-1"));
+        let id = entry.id;
+        registry.register(entry).unwrap();
+
+        registry.set_account_id(id, None).unwrap();
+
+        let updated = registry.get(id).unwrap();
+        assert_eq!(updated.account_id, None);
     }
 
     #[test]

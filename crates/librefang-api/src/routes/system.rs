@@ -1,6 +1,8 @@
 //! Audit, logging, tools, profiles, templates, memory, approvals,
 //! bindings, pairing, webhooks, and miscellaneous system handlers.
 
+// TODO(multi-tenant-phase2): Add AccountId parameter and tenant scoping
+
 use super::AppState;
 
 /// Build routes for the system miscellaneous domain (audit, logs, tools, sessions, approvals, pairing, etc.).

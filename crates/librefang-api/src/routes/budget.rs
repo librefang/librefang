@@ -1,5 +1,7 @@
 //! Budget and usage tracking handlers.
 
+// TODO(multi-tenant-phase2): Add AccountId parameter and tenant scoping
+
 use super::AppState;
 use crate::types::ApiErrorResponse;
 

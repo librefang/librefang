@@ -155,7 +155,8 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             axum::routing::post(push_message),
         )
 }
-use crate::middleware::RequestLanguage;
+use crate::middleware::{AccountId, RequestLanguage};
+use crate::routes::shared::check_account;
 use crate::types::*;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -169,6 +170,30 @@ use librefang_types::agent::{AgentId, AgentIdentity, AgentManifest};
 use librefang_types::i18n::ErrorTranslator;
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
+
+// ---------------------------------------------------------------------------
+// Assign account ownership to a newly spawned agent
+// ---------------------------------------------------------------------------
+
+/// Attach tenant ownership to a freshly spawned agent in the registry.
+///
+/// Assign tenant ownership to a freshly spawned agent.
+///
+/// Calls [`AgentRegistry::set_account_id`] directly — no clone/mutate
+/// round-trip, eliminating the race window where the agent is visible
+/// without an owner. When `AccountId(None)` (system / admin mode) this
+/// is a no-op.
+fn finalize_spawned_agent_in_registry(state: &AppState, id: AgentId, account: &AccountId) {
+    if let Some(ref owner) = account.0 {
+        if let Err(e) = state
+            .kernel
+            .agent_registry()
+            .set_account_id(id, Some(owner.clone()))
+        {
+            tracing::warn!("Failed to set account_id on spawned agent {id}: {e}");
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Shared manifest resolution helper
@@ -303,6 +328,7 @@ async fn resolve_manifest(
 )]
 pub async fn spawn_agent(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     lang: Option<axum::Extension<RequestLanguage>>,
     Json(req): Json<SpawnRequest>,
 ) -> impl IntoResponse {
@@ -326,13 +352,17 @@ pub async fn spawn_agent(
     };
 
     match state.kernel.spawn_agent(resolved.manifest) {
-        Ok(id) => (
-            StatusCode::CREATED,
-            Json(serde_json::json!(SpawnResponse {
-                agent_id: id.to_string(),
-                name: resolved.name,
-            })),
-        ),
+        Ok(id) => {
+            // Attach tenant ownership so subsequent access-control checks work.
+            finalize_spawned_agent_in_registry(&state, id, &account);
+            (
+                StatusCode::CREATED,
+                Json(serde_json::json!(SpawnResponse {
+                    agent_id: id.to_string(),
+                    name: resolved.name,
+                })),
+            )
+        }
         Err(e) => {
             tracing::warn!("Spawn failed: {e}");
             let t = ErrorTranslator::new(l);
@@ -394,6 +424,7 @@ fn validate_bulk_size(
 )]
 pub async fn bulk_create_agents(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     lang: Option<axum::Extension<RequestLanguage>>,
     Json(req): Json<BulkCreateRequest>,
 ) -> impl IntoResponse {
@@ -419,6 +450,8 @@ pub async fn bulk_create_agents(
                 let name = resolved.name.clone();
                 match state.kernel.spawn_agent(resolved.manifest) {
                     Ok(id) => {
+                        // Attach tenant ownership to each spawned agent.
+                        finalize_spawned_agent_in_registry(&state, id, &account);
                         results.push(BulkCreateResult {
                             index,
                             success: true,
@@ -471,6 +504,7 @@ pub async fn bulk_create_agents(
 )]
 pub async fn bulk_delete_agents(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     lang: Option<axum::Extension<RequestLanguage>>,
     Json(req): Json<BulkAgentIdsRequest>,
 ) -> impl IntoResponse {
@@ -495,6 +529,18 @@ pub async fn bulk_delete_agents(
                 continue;
             }
         };
+        // Check account ownership before deleting
+        if let Some(entry) = state.kernel.agent_registry().get(agent_id) {
+            if check_account(&entry, &account).is_err() {
+                results.push(BulkActionResult {
+                    agent_id: id_str.clone(),
+                    success: false,
+                    message: None,
+                    error: Some(t.t("api-error-agent-not-found")),
+                });
+                continue;
+            }
+        }
         match state.kernel.kill_agent(agent_id) {
             Ok(()) => {
                 results.push(BulkActionResult {
@@ -541,6 +587,7 @@ pub async fn bulk_delete_agents(
 )]
 pub async fn bulk_start_agents(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     lang: Option<axum::Extension<RequestLanguage>>,
     Json(req): Json<BulkAgentIdsRequest>,
 ) -> impl IntoResponse {
@@ -567,6 +614,20 @@ pub async fn bulk_start_agents(
                 continue;
             }
         };
+
+        // Check account ownership before starting
+        if let Some(entry) = state.kernel.agent_registry().get(agent_id) {
+            if check_account(&entry, &account).is_err() {
+                results.push(BulkActionResult {
+                    agent_id: id_str.clone(),
+                    success: false,
+                    message: None,
+                    error: Some(t.t("api-error-agent-not-found")),
+                });
+                continue;
+            }
+        }
+
         match state
             .kernel
             .agent_registry()
@@ -617,6 +678,7 @@ pub async fn bulk_start_agents(
 )]
 pub async fn bulk_stop_agents(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     lang: Option<axum::Extension<RequestLanguage>>,
     Json(req): Json<BulkAgentIdsRequest>,
 ) -> impl IntoResponse {
@@ -641,6 +703,18 @@ pub async fn bulk_stop_agents(
                 continue;
             }
         };
+        // Check account ownership before stopping
+        if let Some(entry) = state.kernel.agent_registry().get(agent_id) {
+            if check_account(&entry, &account).is_err() {
+                results.push(BulkActionResult {
+                    agent_id: id_str.clone(),
+                    success: false,
+                    message: None,
+                    error: Some(t.t("api-error-agent-not-found")),
+                });
+                continue;
+            }
+        }
         match state.kernel.stop_agent_run(agent_id) {
             Ok(cancelled) => {
                 let msg = if cancelled {
@@ -773,6 +847,7 @@ pub(crate) fn effective_default_model(
 )]
 pub async fn list_agents(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     lang: Option<axum::Extension<RequestLanguage>>,
     Query(params): Query<AgentListQuery>,
 ) -> impl IntoResponse {
@@ -789,7 +864,12 @@ pub async fn list_agents(
         )
     };
 
-    let mut agents: Vec<librefang_types::agent::AgentEntry> = state.kernel.agent_registry().list();
+    // Multi-tenant isolation: use registry.list_by_account() for scoped requests,
+    // or registry.list() for admin/legacy mode (AccountId(None)).
+    let mut agents: Vec<librefang_types::agent::AgentEntry> = match account.0 {
+        Some(ref owner_id) => state.kernel.agent_registry().list_by_account(owner_id),
+        None => state.kernel.agent_registry().list(),
+    };
 
     // -- Filtering --
     // Exclude hand agents by default; pass ?include_hands=true to include them.
@@ -1054,6 +1134,7 @@ fn mime_from_url(url: &str) -> Option<String> {
 )]
 pub async fn send_message(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
     Json(req): Json<MessageRequest>,
@@ -1091,12 +1172,22 @@ pub async fn send_message(
         );
     }
 
-    // Check agent exists before processing
-    if state.kernel.agent_registry().get(agent_id).is_none() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": err_not_found})),
-        );
+    // Check agent exists and account ownership before processing
+    match state.kernel.agent_registry().get(agent_id) {
+        Some(entry) => {
+            if check_account(&entry, &account).is_err() {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({"error": err_not_found})),
+                );
+            }
+        }
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": err_not_found})),
+            );
+        }
     }
 
     // Reject messages when the agent's provider has no API key configured
@@ -1271,6 +1362,7 @@ fn request_sender_context(req: &MessageRequest) -> Option<SenderContext> {
 )]
 pub async fn get_agent_session(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
@@ -1294,6 +1386,12 @@ pub async fn get_agent_session(
             );
         }
     };
+    if check_account(&entry, &account).is_err() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+        );
+    }
 
     match state
         .kernel
@@ -1485,6 +1583,7 @@ pub async fn get_agent_session(
 )]
 pub async fn kill_agent(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
@@ -1498,6 +1597,23 @@ pub async fn kill_agent(
             );
         }
     };
+
+    // Check account ownership before killing
+    let entry = match state.kernel.agent_registry().get(agent_id) {
+        Some(e) => e,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": t.t("api-error-agent-not-found-or-terminated")})),
+            );
+        }
+    };
+    if check_account(&entry, &account).is_err() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": t.t("api-error-agent-not-found-or-terminated")})),
+        );
+    }
 
     match state.kernel.kill_agent(agent_id) {
         Ok(()) => (
@@ -1518,6 +1634,7 @@ pub async fn kill_agent(
 #[utoipa::path(put, path = "/api/agents/{id}/suspend", tag = "agents", params(("id" = String, Path, description = "Agent ID")), responses((status = 200, description = "Agent suspended")))]
 pub async fn suspend_agent(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     let agent_id: AgentId = match id.parse() {
@@ -1529,6 +1646,22 @@ pub async fn suspend_agent(
             )
         }
     };
+    // Check account ownership before suspending
+    let entry = match state.kernel.agent_registry().get(agent_id) {
+        Some(e) => e,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "Agent not found"})),
+            )
+        }
+    };
+    if check_account(&entry, &account).is_err() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Agent not found"})),
+        );
+    }
     match state.kernel.suspend_agent(agent_id) {
         Ok(()) => (
             StatusCode::OK,
@@ -1545,6 +1678,7 @@ pub async fn suspend_agent(
 #[utoipa::path(put, path = "/api/agents/{id}/resume", tag = "agents", params(("id" = String, Path, description = "Agent ID")), responses((status = 200, description = "Agent resumed")))]
 pub async fn resume_agent(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     let agent_id: AgentId = match id.parse() {
@@ -1556,6 +1690,22 @@ pub async fn resume_agent(
             )
         }
     };
+    // Check account ownership before resuming
+    let entry = match state.kernel.agent_registry().get(agent_id) {
+        Some(e) => e,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "Agent not found"})),
+            )
+        }
+    };
+    if check_account(&entry, &account).is_err() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Agent not found"})),
+        );
+    }
     match state.kernel.resume_agent(agent_id) {
         Ok(()) => (
             StatusCode::OK,
@@ -1581,6 +1731,7 @@ pub async fn resume_agent(
 )]
 pub async fn set_agent_mode(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
     Json(body): Json<SetModeRequest>,
@@ -1595,6 +1746,23 @@ pub async fn set_agent_mode(
             );
         }
     };
+
+    // Check account ownership before changing mode
+    let entry = match state.kernel.agent_registry().get(agent_id) {
+        Some(e) => e,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+            );
+        }
+    };
+    if check_account(&entry, &account).is_err() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+        );
+    }
 
     match state.kernel.agent_registry().set_mode(agent_id, body.mode) {
         Ok(()) => (
@@ -1629,6 +1797,7 @@ pub async fn set_agent_mode(
 )]
 pub async fn get_agent(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
@@ -1652,6 +1821,12 @@ pub async fn get_agent(
             );
         }
     };
+    if check_account(&entry, &account).is_err() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+        );
+    }
 
     (
         StatusCode::OK,
@@ -1706,6 +1881,7 @@ pub async fn get_agent(
 )]
 pub async fn send_message_stream(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
     Json(req): Json<MessageRequest>,
@@ -1745,12 +1921,23 @@ pub async fn send_message_stream(
         }
     };
 
-    if state.kernel.agent_registry().get(agent_id).is_none() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": err_not_found})),
-        )
-            .into_response();
+    match state.kernel.agent_registry().get(agent_id) {
+        Some(entry) => {
+            if check_account(&entry, &account).is_err() {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({"error": err_not_found})),
+                )
+                    .into_response();
+            }
+        }
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": err_not_found})),
+            )
+                .into_response();
+        }
     }
 
     // Resolve file attachments into image content blocks (same as non-streaming)
@@ -1833,6 +2020,7 @@ pub async fn send_message_stream(
 )]
 pub async fn list_agent_sessions(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
@@ -1846,6 +2034,22 @@ pub async fn list_agent_sessions(
             )
         }
     };
+    // Check account ownership
+    let entry = match state.kernel.agent_registry().get(agent_id) {
+        Some(e) => e,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+            )
+        }
+    };
+    if check_account(&entry, &account).is_err() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+        );
+    }
     match state.kernel.list_agent_sessions(agent_id) {
         Ok(sessions) => (
             StatusCode::OK,
@@ -1873,6 +2077,7 @@ pub async fn list_agent_sessions(
 )]
 pub async fn create_agent_session(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
     Json(req): Json<serde_json::Value>,
@@ -1887,6 +2092,22 @@ pub async fn create_agent_session(
             )
         }
     };
+    // Check account ownership
+    let entry = match state.kernel.agent_registry().get(agent_id) {
+        Some(e) => e,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+            )
+        }
+    };
+    if check_account(&entry, &account).is_err() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+        );
+    }
     let label = req.get("label").and_then(|v| v.as_str());
     match state.kernel.create_agent_session(agent_id, label) {
         Ok(session) => (StatusCode::OK, Json(session)),
@@ -1914,6 +2135,7 @@ pub async fn create_agent_session(
 )]
 pub async fn switch_agent_session(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path((id, session_id_str)): Path<(String, String)>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
@@ -1927,6 +2149,22 @@ pub async fn switch_agent_session(
             )
         }
     };
+    // Check account ownership
+    let entry = match state.kernel.agent_registry().get(agent_id) {
+        Some(e) => e,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+            )
+        }
+    };
+    if check_account(&entry, &account).is_err() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+        );
+    }
     let session_id = match session_id_str.parse::<uuid::Uuid>() {
         Ok(uuid) => librefang_types::agent::SessionId(uuid),
         Err(_) => {
@@ -1967,6 +2205,7 @@ pub async fn switch_agent_session(
 )]
 pub async fn export_session(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path((id, session_id_str)): Path<(String, String)>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
@@ -1980,6 +2219,22 @@ pub async fn export_session(
             )
         }
     };
+    // Check account ownership
+    let entry = match state.kernel.agent_registry().get(agent_id) {
+        Some(e) => e,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+            )
+        }
+    };
+    if check_account(&entry, &account).is_err() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+        );
+    }
     let session_id = match session_id_str.parse::<uuid::Uuid>() {
         Ok(uuid) => librefang_types::agent::SessionId(uuid),
         Err(_) => {
@@ -2016,6 +2271,7 @@ pub async fn export_session(
 )]
 pub async fn import_session(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
     Json(body): Json<serde_json::Value>,
@@ -2030,6 +2286,22 @@ pub async fn import_session(
             )
         }
     };
+    // Check account ownership
+    let entry = match state.kernel.agent_registry().get(agent_id) {
+        Some(e) => e,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+            )
+        }
+    };
+    if check_account(&entry, &account).is_err() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+        );
+    }
     let export: librefang_memory::session::SessionExport = match serde_json::from_value(body) {
         Ok(e) => e,
         Err(e) => {
@@ -2071,6 +2343,7 @@ pub async fn import_session(
 )]
 pub async fn reset_session(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
@@ -2084,6 +2357,22 @@ pub async fn reset_session(
             )
         }
     };
+    // Check account ownership
+    let entry = match state.kernel.agent_registry().get(agent_id) {
+        Some(e) => e,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+            )
+        }
+    };
+    if check_account(&entry, &account).is_err() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+        );
+    }
     match state.kernel.reset_session(agent_id) {
         Ok(()) => (
             StatusCode::OK,
@@ -2110,6 +2399,7 @@ pub async fn reset_session(
 )]
 pub async fn reboot_session(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
@@ -2123,6 +2413,22 @@ pub async fn reboot_session(
             )
         }
     };
+    // Check account ownership
+    let entry = match state.kernel.agent_registry().get(agent_id) {
+        Some(e) => e,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+            )
+        }
+    };
+    if check_account(&entry, &account).is_err() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+        );
+    }
     match state.kernel.reboot_session(agent_id) {
         Ok(()) => (
             StatusCode::OK,
@@ -2151,6 +2457,7 @@ pub async fn reboot_session(
 )]
 pub async fn clear_agent_history(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
@@ -2164,7 +2471,17 @@ pub async fn clear_agent_history(
             )
         }
     };
-    if state.kernel.agent_registry().get(agent_id).is_none() {
+    // Check account ownership
+    let entry = match state.kernel.agent_registry().get(agent_id) {
+        Some(e) => e,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+            )
+        }
+    };
+    if check_account(&entry, &account).is_err() {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
@@ -2196,13 +2513,17 @@ pub async fn clear_agent_history(
 )]
 pub async fn compact_session(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
     let l = super::resolve_lang(lang.as_ref());
-    let err_invalid_id = {
+    let (err_invalid_id, err_not_found) = {
         let t = ErrorTranslator::new(l);
-        t.t("api-error-agent-invalid-id")
+        (
+            t.t("api-error-agent-invalid-id"),
+            t.t("api-error-agent-not-found"),
+        )
     };
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
@@ -2213,6 +2534,22 @@ pub async fn compact_session(
             )
         }
     };
+    // Check account ownership
+    let entry = match state.kernel.agent_registry().get(agent_id) {
+        Some(e) => e,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": err_not_found})),
+            )
+        }
+    };
+    if check_account(&entry, &account).is_err() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": err_not_found})),
+        );
+    }
     match state.kernel.compact_agent_session(agent_id).await {
         Ok(msg) => (
             StatusCode::OK,
@@ -2242,6 +2579,7 @@ pub async fn compact_session(
 )]
 pub async fn stop_agent(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
@@ -2255,6 +2593,22 @@ pub async fn stop_agent(
             )
         }
     };
+    // Check account ownership
+    let entry = match state.kernel.agent_registry().get(agent_id) {
+        Some(e) => e,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+            )
+        }
+    };
+    if check_account(&entry, &account).is_err() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+        );
+    }
     match state.kernel.stop_agent_run(agent_id) {
         Ok(true) => (
             StatusCode::OK,
@@ -2285,6 +2639,7 @@ pub async fn stop_agent(
 )]
 pub async fn set_model(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
     Json(body): Json<serde_json::Value>,
@@ -2309,14 +2664,22 @@ pub async fn set_model(
         }
     };
     let explicit_provider = body["provider"].as_str();
-    // Check agent exists — kernel returns a generic error for missing
-    // agents that the match arm below would wrap as 500. Validate up
-    // front so the caller gets a 404 for the common case.
-    if state.kernel.agent_registry().get(agent_id).is_none() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
-        );
+    // Check agent exists and account ownership
+    match state.kernel.agent_registry().get(agent_id) {
+        Some(entry) => {
+            if check_account(&entry, &account).is_err() {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+                );
+            }
+        }
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+            );
+        }
     }
     match state
         .kernel
@@ -2368,6 +2731,7 @@ pub async fn set_model(
 )]
 pub async fn get_agent_traces(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
@@ -2382,12 +2746,22 @@ pub async fn get_agent_traces(
         }
     };
 
-    // Check agent exists
-    if state.kernel.agent_registry().get(agent_id).is_none() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
-        );
+    // Check agent exists and account ownership
+    match state.kernel.agent_registry().get(agent_id) {
+        Some(entry) => {
+            if check_account(&entry, &account).is_err() {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+                );
+            }
+        }
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+            );
+        }
     }
 
     let traces = state
@@ -2415,6 +2789,7 @@ pub async fn get_agent_traces(
 )]
 pub async fn get_agent_tools(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
@@ -2437,6 +2812,12 @@ pub async fn get_agent_tools(
             )
         }
     };
+    if check_account(&entry, &account).is_err() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+        );
+    }
     (
         StatusCode::OK,
         Json(serde_json::json!({
@@ -2460,6 +2841,7 @@ pub async fn get_agent_tools(
 )]
 pub async fn set_agent_tools(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
     Json(body): Json<serde_json::Value>,
@@ -2498,14 +2880,22 @@ pub async fn set_agent_tools(
         );
     }
 
-    // Check agent exists — kernel returns a generic error for missing
-    // agents that the match arm below would wrap as 500. Validate up
-    // front so the caller gets a 404 for the common case.
-    if state.kernel.agent_registry().get(agent_id).is_none() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
-        );
+    // Check agent exists and account ownership
+    match state.kernel.agent_registry().get(agent_id) {
+        Some(entry) => {
+            if check_account(&entry, &account).is_err() {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+                );
+            }
+        }
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+            );
+        }
     }
 
     match state
@@ -2536,6 +2926,7 @@ pub async fn set_agent_tools(
 )]
 pub async fn get_agent_skills(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
@@ -2558,6 +2949,12 @@ pub async fn get_agent_skills(
             )
         }
     };
+    if check_account(&entry, &account).is_err() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+        );
+    }
     let available = state
         .kernel
         .skill_registry_ref()
@@ -2588,6 +2985,7 @@ pub async fn get_agent_skills(
 )]
 pub async fn set_agent_skills(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
     Json(body): Json<serde_json::Value>,
@@ -2602,6 +3000,22 @@ pub async fn set_agent_skills(
             )
         }
     };
+    // Check account ownership
+    let entry = match state.kernel.agent_registry().get(agent_id) {
+        Some(e) => e,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+            )
+        }
+    };
+    if check_account(&entry, &account).is_err() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+        );
+    }
     let skills: Vec<String> = body["skills"]
         .as_array()
         .map(|arr| {
@@ -2636,6 +3050,7 @@ pub async fn set_agent_skills(
 )]
 pub async fn get_agent_mcp_servers(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
@@ -2658,6 +3073,12 @@ pub async fn get_agent_mcp_servers(
             )
         }
     };
+    if check_account(&entry, &account).is_err() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+        );
+    }
     // Collect known MCP server names from connected tools
     let mut available: Vec<String> = Vec::new();
     if let Ok(mcp_tools) = state.kernel.mcp_tools_ref().lock() {
@@ -2707,6 +3128,7 @@ pub async fn get_agent_mcp_servers(
 )]
 pub async fn set_agent_mcp_servers(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
     Json(body): Json<serde_json::Value>,
@@ -2721,6 +3143,22 @@ pub async fn set_agent_mcp_servers(
             )
         }
     };
+    // Check account ownership
+    let entry = match state.kernel.agent_registry().get(agent_id) {
+        Some(e) => e,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+            )
+        }
+    };
+    if check_account(&entry, &account).is_err() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+        );
+    }
     let servers: Vec<String> = body["mcp_servers"]
         .as_array()
         .map(|arr| {
@@ -2763,6 +3201,7 @@ pub async fn set_agent_mcp_servers(
 )]
 pub async fn update_agent(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
     Json(req): Json<AgentUpdateRequest>,
@@ -2778,11 +3217,21 @@ pub async fn update_agent(
         }
     };
 
-    if state.kernel.agent_registry().get(agent_id).is_none() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
-        );
+    match state.kernel.agent_registry().get(agent_id) {
+        Some(entry) => {
+            if check_account(&entry, &account).is_err() {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+                );
+            }
+        }
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+            );
+        }
     }
 
     // Parse the new manifest
@@ -2821,6 +3270,7 @@ pub async fn update_agent(
 )]
 pub async fn patch_agent(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
     Json(body): Json<serde_json::Value>,
@@ -2836,11 +3286,21 @@ pub async fn patch_agent(
         }
     };
 
-    if state.kernel.agent_registry().get(agent_id).is_none() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
-        );
+    match state.kernel.agent_registry().get(agent_id) {
+        Some(entry) => {
+            if check_account(&entry, &account).is_err() {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+                );
+            }
+        }
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+            );
+        }
     }
 
     // Apply partial updates using dedicated registry methods
@@ -2951,6 +3411,7 @@ pub struct UpdateIdentityRequest {
 )]
 pub async fn update_agent_identity(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
     Json(req): Json<UpdateIdentityRequest>,
@@ -2965,6 +3426,23 @@ pub async fn update_agent_identity(
             );
         }
     };
+
+    // Check account ownership
+    let entry = match state.kernel.agent_registry().get(agent_id) {
+        Some(e) => e,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+            );
+        }
+    };
+    if check_account(&entry, &account).is_err() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+        );
+    }
 
     // Validate color format if provided
     if let Some(ref color) = req.color {
@@ -3064,6 +3542,7 @@ pub struct PatchAgentConfigRequest {
 )]
 pub async fn patch_agent_config(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
     Json(req): Json<PatchAgentConfigRequest>,
@@ -3078,6 +3557,23 @@ pub async fn patch_agent_config(
             );
         }
     };
+
+    // Check account ownership
+    let entry = match state.kernel.agent_registry().get(agent_id) {
+        Some(e) => e,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+            );
+        }
+    };
+    if check_account(&entry, &account).is_err() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+        );
+    }
 
     // Input length limits
     const MAX_NAME_LEN: usize = 256;
@@ -3402,6 +3898,7 @@ fn skill_assignment_mode(manifest: &librefang_types::agent::AgentManifest) -> &'
 )]
 pub async fn clone_agent(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
     Json(req): Json<CloneAgentRequest>,
@@ -3442,6 +3939,12 @@ pub async fn clone_agent(
             );
         }
     };
+    if check_account(&source, &account).is_err() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+        );
+    }
 
     // Deep-clone manifest with new name
     let mut cloned_manifest = source.manifest.clone();
@@ -3463,6 +3966,9 @@ pub async fn clone_agent(
             );
         }
     };
+
+    // Attach tenant ownership to the cloned agent.
+    finalize_spawned_agent_in_registry(&state, new_id, &account);
 
     // Copy workspace files from source to destination
     let new_entry = state.kernel.agent_registry().get(new_id);
@@ -3517,6 +4023,7 @@ pub async fn clone_agent(
 )]
 pub async fn reload_agent_manifest(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
@@ -3530,6 +4037,22 @@ pub async fn reload_agent_manifest(
             );
         }
     };
+    // Check account ownership
+    let entry = match state.kernel.agent_registry().get(agent_id) {
+        Some(e) => e,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+            );
+        }
+    };
+    if check_account(&entry, &account).is_err() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+        );
+    }
     match state.kernel.reload_agent_from_disk(agent_id) {
         Ok(()) => (
             StatusCode::OK,
@@ -3572,6 +4095,7 @@ const KNOWN_IDENTITY_FILES: &[&str] = &[
 )]
 pub async fn list_agent_files(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
@@ -3595,6 +4119,12 @@ pub async fn list_agent_files(
             );
         }
     };
+    if check_account(&entry, &account).is_err() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+        );
+    }
 
     let workspace = match entry.manifest.workspace {
         Some(ref ws) => ws.clone(),
@@ -3640,6 +4170,7 @@ pub async fn list_agent_files(
 )]
 pub async fn get_agent_file(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path((id, filename)): Path<(String, String)>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
@@ -3671,6 +4202,12 @@ pub async fn get_agent_file(
             );
         }
     };
+    if check_account(&entry, &account).is_err() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+        );
+    }
 
     let workspace = match entry.manifest.workspace {
         Some(ref ws) => ws.clone(),
@@ -3752,6 +4289,7 @@ pub struct SetAgentFileRequest {
 )]
 pub async fn set_agent_file(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path((id, filename)): Path<(String, String)>,
     lang: Option<axum::Extension<RequestLanguage>>,
     Json(req): Json<SetAgentFileRequest>,
@@ -3793,6 +4331,12 @@ pub async fn set_agent_file(
             );
         }
     };
+    if check_account(&entry, &account).is_err() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+        );
+    }
 
     let workspace = match entry.manifest.workspace {
         Some(ref ws) => ws.clone(),
@@ -3885,6 +4429,7 @@ pub async fn set_agent_file(
 )]
 pub async fn delete_agent_file(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path((id, filename)): Path<(String, String)>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
@@ -3908,15 +4453,23 @@ pub async fn delete_agent_file(
     }
 
     let workspace = match state.kernel.agent_registry().get(agent_id) {
-        Some(e) => match e.manifest.workspace {
-            Some(ref ws) => ws.clone(),
-            None => {
+        Some(e) => {
+            if check_account(&e, &account).is_err() {
                 return (
                     StatusCode::NOT_FOUND,
-                    Json(serde_json::json!({"error": t.t("api-error-agent-no-workspace")})),
+                    Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
                 );
             }
-        },
+            match e.manifest.workspace {
+                Some(ref ws) => ws.clone(),
+                None => {
+                    return (
+                        StatusCode::NOT_FOUND,
+                        Json(serde_json::json!({"error": t.t("api-error-agent-no-workspace")})),
+                    );
+                }
+            }
+        }
         None => {
             return (
                 StatusCode::NOT_FOUND,
@@ -4027,6 +4580,7 @@ fn is_allowed_content_type(ct: &str) -> bool {
 )]
 pub async fn upload_file(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
     headers: axum::http::HeaderMap,
@@ -4035,6 +4589,7 @@ pub async fn upload_file(
     let l = super::resolve_lang(lang.as_ref());
     let (
         err_invalid_id,
+        err_not_found,
         err_unsupported_type,
         err_too_large_upload,
         err_empty_body,
@@ -4044,6 +4599,7 @@ pub async fn upload_file(
         let t = ErrorTranslator::new(l);
         (
             t.t("api-error-agent-invalid-id"),
+            t.t("api-error-agent-not-found"),
             t.t("api-error-file-unsupported-type"),
             t.t_args("api-error-file-too-large", &[("max", "10MB")]),
             t.t("api-error-file-empty-body"),
@@ -4061,6 +4617,23 @@ pub async fn upload_file(
             );
         }
     };
+
+    // Check account ownership
+    let entry = match state.kernel.agent_registry().get(_agent_id) {
+        Some(e) => e,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": err_not_found})),
+            );
+        }
+    };
+    if check_account(&entry, &account).is_err() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": err_not_found})),
+        );
+    }
 
     // Extract content type
     let content_type = headers
@@ -4244,6 +4817,7 @@ pub async fn serve_upload(Path(file_id): Path<String>) -> impl IntoResponse {
 )]
 pub async fn get_agent_deliveries(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
     Query(params): Query<HashMap<String, String>>,
@@ -4264,6 +4838,23 @@ pub async fn get_agent_deliveries(
             }
         }
     };
+
+    // Check account ownership
+    let entry = match state.kernel.agent_registry().get(agent_id) {
+        Some(e) => e,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+            );
+        }
+    };
+    if check_account(&entry, &account).is_err() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+        );
+    }
 
     let limit = params
         .get("limit")
@@ -4307,6 +4898,7 @@ pub async fn get_agent_deliveries(
 )]
 pub async fn inject_message(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
     Json(req): Json<InjectMessageRequest>,
 ) -> impl IntoResponse {
@@ -4316,6 +4908,17 @@ pub async fn inject_message(
             return ApiErrorResponse::bad_request("invalid agent ID").into_response();
         }
     };
+
+    // Check account ownership
+    let entry = match state.kernel.agent_registry().get(agent_id) {
+        Some(e) => e,
+        None => {
+            return ApiErrorResponse::not_found("Agent not found").into_response();
+        }
+    };
+    if check_account(&entry, &account).is_err() {
+        return ApiErrorResponse::not_found("Agent not found").into_response();
+    }
 
     // Reject oversized injection messages
     const MAX_INJECT_SIZE: usize = 16 * 1024; // 16KB
@@ -4351,6 +4954,7 @@ pub async fn inject_message(
 /// counterpart of the built-in `channel_send` tool that agents can self-invoke.
 pub async fn push_message(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
     Json(req): Json<crate::types::PushMessageRequest>,
@@ -4374,12 +4978,22 @@ pub async fn push_message(
         }
     };
 
-    // Validate agent exists
-    if state.kernel.agent_registry().get(agent_id).is_none() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": err_not_found})),
-        );
+    // Validate agent exists and check account ownership
+    match state.kernel.agent_registry().get(agent_id) {
+        Some(entry) => {
+            if check_account(&entry, &account).is_err() {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({"error": err_not_found})),
+                );
+            }
+        }
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": err_not_found})),
+            );
+        }
     }
 
     // Validate request fields
@@ -4668,6 +5282,7 @@ mod tests {
 /// average response time (estimated), and cost data.
 pub async fn agent_metrics(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
@@ -4691,6 +5306,12 @@ pub async fn agent_metrics(
             );
         }
     };
+    if check_account(&entry, &account).is_err() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+        );
+    }
 
     // Session-level token/tool stats from the scheduler (in-memory, windowed).
     let sched_snap = state
@@ -4785,6 +5406,7 @@ pub async fn agent_metrics(
 /// - `offset`: number of matching entries to skip for pagination (default 0)
 pub async fn agent_logs(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
     Query(params): Query<HashMap<String, String>>,
@@ -4800,12 +5422,22 @@ pub async fn agent_logs(
         }
     };
 
-    // Verify the agent exists.
-    if state.kernel.agent_registry().get(agent_id).is_none() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
-        );
+    // Verify the agent exists and check account ownership.
+    match state.kernel.agent_registry().get(agent_id) {
+        Some(entry) => {
+            if check_account(&entry, &account).is_err() {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+                );
+            }
+        }
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+            );
+        }
     }
 
     let max_entries: usize = params
@@ -4903,6 +5535,7 @@ mod monitoring_tests {
             media_drivers: librefang_runtime::media::MediaDriverCache::new(),
             webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
             api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
+            account_sig_secret: None,
         });
         (state, tmp)
     }
@@ -4930,9 +5563,16 @@ mod monitoring_tests {
         let (state, _tmp) = monitoring_test_app_state();
         let agent_id = spawn_monitoring_test_agent(&state, "metrics-shape");
 
-        let (status, body) =
-            json_response(agent_metrics(State(state), Path(agent_id.to_string()), None).await)
-                .await;
+        let (status, body) = json_response(
+            agent_metrics(
+                State(state),
+                AccountId(None),
+                Path(agent_id.to_string()),
+                None,
+            )
+            .await,
+        )
+        .await;
 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["agent_id"], agent_id.to_string());
@@ -4946,7 +5586,13 @@ mod monitoring_tests {
         let (state, _tmp) = monitoring_test_app_state();
 
         let (status, body) = json_response(
-            agent_metrics(State(state), Path(AgentId::new().to_string()), None).await,
+            agent_metrics(
+                State(state),
+                AccountId(None),
+                Path(AgentId::new().to_string()),
+                None,
+            )
+            .await,
         )
         .await;
 
@@ -4976,9 +5622,17 @@ mod monitoring_tests {
         let mut params = HashMap::new();
         params.insert("level".to_string(), "custom_error".to_string());
 
-        let (status, body) =
-            json_response(agent_logs(State(state), Path(agent_id_str), None, Query(params)).await)
-                .await;
+        let (status, body) = json_response(
+            agent_logs(
+                State(state),
+                AccountId(None),
+                Path(agent_id_str),
+                None,
+                Query(params),
+            )
+            .await,
+        )
+        .await;
 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["count"], 1);
