@@ -52,6 +52,30 @@ use crate::context_overflow::{recover_from_overflow, RecoveryStage};
 use crate::embedding::EmbeddingDriver;
 use crate::llm_driver::LlmDriver;
 
+/// Return the state file path scoped to a specific agent.
+///
+/// If `agent_id` is `None` or empty, returns the shared (plugin-level) path.
+/// Otherwise returns `{plugin_state_dir}/agents/{agent_id}/state.json`.
+fn agent_scoped_state_path(
+    base_path: &std::path::Path,
+    agent_id: Option<&str>,
+) -> std::path::PathBuf {
+    match agent_id.filter(|s| !s.is_empty()) {
+        Some(id) => {
+            // Sanitise the agent ID — keep only alphanumeric, '-', '_'.
+            let safe_id: String = id
+                .chars()
+                .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+                .collect();
+            // base_path is e.g. `/home/user/.librefang/plugins/my_plugin/state.json`
+            // We place agent state alongside: `…/agents/{safe_id}/state.json`
+            let parent = base_path.parent().unwrap_or(base_path);
+            parent.join("agents").join(&safe_id).join("state.json")
+        }
+        None => base_path.to_path_buf(),
+    }
+}
+
 /// Generate a compact random trace ID (16 lowercase hex characters = 64-bit entropy).
 fn generate_trace_id() -> String {
     use std::collections::hash_map::DefaultHasher;
@@ -93,6 +117,43 @@ pub struct StackHealth {
     pub layers: Vec<EngineLayerHealth>,
     pub total_layers: usize,
     pub layers_with_open_circuit: usize,
+}
+
+/// An event emitted by a plugin hook.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PluginEvent {
+    /// Event name, e.g. `"code_detected"`, `"user_frustrated"`.
+    pub name: String,
+    /// Arbitrary JSON payload attached to the event.
+    #[serde(default)]
+    pub payload: serde_json::Value,
+    /// Plugin that emitted the event.
+    pub source_plugin: String,
+}
+
+/// A simple in-process event bus for plugin events.
+///
+/// Backed by a `tokio::sync::broadcast` channel so multiple engines can
+/// receive the same event without coordination.
+pub struct PluginEventBus {
+    tx: tokio::sync::broadcast::Sender<PluginEvent>,
+}
+
+impl PluginEventBus {
+    pub fn new(capacity: usize) -> Self {
+        let (tx, _) = tokio::sync::broadcast::channel(capacity);
+        Self { tx }
+    }
+
+    /// Publish an event to all subscribers.
+    pub fn emit(&self, event: PluginEvent) {
+        let _ = self.tx.send(event); // ignore SendError (no subscribers yet)
+    }
+
+    /// Subscribe to the event stream.
+    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<PluginEvent> {
+        self.tx.subscribe()
+    }
 }
 
 /// Fields that a plugin's `bootstrap` hook may override at runtime.
@@ -775,6 +836,11 @@ pub struct ScriptableContextEngine {
     bootstrap_applied_overrides: std::sync::Arc<std::sync::Mutex<BootstrapOverrides>>,
     /// Per-hook sliding-window rate limiters.
     rate_limiters: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, HookRateLimiter>>>,
+    /// Script to invoke when an event is received from the event bus.
+    on_event_script: Option<String>,
+    /// Optional shared event bus. When set, events emitted by this plugin's
+    /// hooks are published to all subscribers.
+    event_bus: Option<std::sync::Arc<PluginEventBus>>,
 }
 
 impl ScriptableContextEngine {
@@ -796,6 +862,7 @@ impl ScriptableContextEngine {
             ("compact",          &hooks.compact),
             ("prepare_subagent", &hooks.prepare_subagent),
             ("merge_subagent",   &hooks.merge_subagent),
+            ("on_event",         &hooks.on_event),
         ];
         for (name, path_opt) in all_declared {
             if let Some(path) = path_opt {
@@ -896,6 +963,8 @@ impl ScriptableContextEngine {
             memory_substrate,
             bootstrap_applied_overrides: std::sync::Arc::new(std::sync::Mutex::new(BootstrapOverrides::default())),
             rate_limiters: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            on_event_script: hooks.on_event.clone(),
+            event_bus: None,
         }
     }
 
@@ -960,6 +1029,15 @@ impl ScriptableContextEngine {
     /// Set plugin-level env vars from `[env]` in plugin.toml.
     pub fn with_plugin_env(mut self, env: Vec<(String, String)>) -> Self {
         self.plugin_env = env;
+        self
+    }
+
+    /// Attach a shared event bus to this engine.
+    ///
+    /// When set, events extracted from `after_turn` hook output are published
+    /// to the bus so other engines can subscribe and dispatch their `on_event` hooks.
+    pub fn with_event_bus(mut self, bus: std::sync::Arc<PluginEventBus>) -> Self {
+        self.event_bus = Some(bus);
         self
     }
 
@@ -1179,6 +1257,7 @@ impl ScriptableContextEngine {
             ("bootstrap", &self.bootstrap_script),
             ("assemble", &self.assemble_script),
             ("compact", &self.compact_script),
+            ("on_event", &self.on_event_script),
         ];
         for (name, script_opt) in hooks {
             if let Some(ref script) = script_opt {
@@ -1206,6 +1285,7 @@ impl ScriptableContextEngine {
             &self.bootstrap_script,
             &self.assemble_script,
             &self.compact_script,
+            &self.on_event_script,
         ];
         for script_opt in hooks {
             if let Some(ref script) = script_opt {
@@ -1292,6 +1372,8 @@ impl ScriptableContextEngine {
         output: &serde_json::Value,
         agent_id: &str,
         memory_substrate: Option<&std::sync::Arc<librefang_memory::MemorySubstrate>>,
+        plugin_name: &str,
+        event_bus: Option<&std::sync::Arc<PluginEventBus>>,
     ) {
         // "log" field — emit as info log from the plugin's perspective.
         if let Some(msg) = output.get("log").and_then(|v| v.as_str()) {
@@ -1310,51 +1392,133 @@ impl ScriptableContextEngine {
 
         // "memories" field — store each entry in the memory substrate.
         if let Some(mems) = output.get("memories").and_then(|v| v.as_array()) {
-            let Some(substrate) = memory_substrate else { return };
-            for mem in mems {
-                let content = match mem.get("content").and_then(|v| v.as_str()) {
-                    Some(c) if !c.is_empty() => c.to_string(),
-                    _ => continue,
-                };
-                let tags: Vec<String> = mem
-                    .get("tags")
-                    .and_then(|v| v.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                           .filter_map(|t| t.as_str().map(String::from))
-                           .take(16)
-                           .collect()
-                    })
-                    .unwrap_or_default();
-
-                // Fire-and-forget: memory injection is best-effort and must not block.
-                let substrate = std::sync::Arc::clone(substrate);
-                let agent_id_owned = agent_id.to_string();
-                tokio::spawn(async move {
-                    use librefang_types::memory::Memory as _;
-                    let parsed_id = uuid::Uuid::parse_str(&agent_id_owned)
-                        .map(librefang_types::agent::AgentId)
-                        .unwrap_or_else(|_| librefang_types::agent::AgentId::new());
-                    let scope = if tags.is_empty() {
-                        "hook".to_string()
-                    } else {
-                        tags.join(",")
+            if let Some(substrate) = memory_substrate {
+                for mem in mems {
+                    let content = match mem.get("content").and_then(|v| v.as_str()) {
+                        Some(c) if !c.is_empty() => c.to_string(),
+                        _ => continue,
                     };
-                    if let Err(e) = substrate
-                        .remember(
-                            parsed_id,
-                            &content,
-                            librefang_types::memory::MemorySource::System,
-                            &scope,
-                            std::collections::HashMap::new(),
-                        )
-                        .await
-                    {
-                        tracing::warn!(error = %e, "after_turn hook: failed to inject memory");
-                    }
-                });
+                    let tags: Vec<String> = mem
+                        .get("tags")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                               .filter_map(|t| t.as_str().map(String::from))
+                               .take(16)
+                               .collect()
+                        })
+                        .unwrap_or_default();
+
+                    // Fire-and-forget: memory injection is best-effort and must not block.
+                    let substrate = std::sync::Arc::clone(substrate);
+                    let agent_id_owned = agent_id.to_string();
+                    tokio::spawn(async move {
+                        use librefang_types::memory::Memory as _;
+                        let parsed_id = uuid::Uuid::parse_str(&agent_id_owned)
+                            .map(librefang_types::agent::AgentId)
+                            .unwrap_or_else(|_| librefang_types::agent::AgentId::new());
+                        let scope = if tags.is_empty() {
+                            "hook".to_string()
+                        } else {
+                            tags.join(",")
+                        };
+                        if let Err(e) = substrate
+                            .remember(
+                                parsed_id,
+                                &content,
+                                librefang_types::memory::MemorySource::System,
+                                &scope,
+                                std::collections::HashMap::new(),
+                            )
+                            .await
+                        {
+                            tracing::warn!(error = %e, "after_turn hook: failed to inject memory");
+                        }
+                    });
+                }
             }
         }
+
+        // "events" field — publish named events to the event bus.
+        if let Some(events) = output.get("events").and_then(|v| v.as_array()) {
+            for ev in events {
+                if let (Some(name), payload) = (
+                    ev.get("name").and_then(|v| v.as_str()),
+                    ev.get("payload").cloned().unwrap_or(serde_json::Value::Null),
+                ) {
+                    let event = PluginEvent {
+                        name: name.to_string(),
+                        payload,
+                        source_plugin: plugin_name.to_string(),
+                    };
+                    if let Some(bus) = event_bus {
+                        bus.emit(event);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Dispatch a plugin event to the `on_event` hook script, if configured.
+    ///
+    /// The hook receives: `{"event": {"name": ..., "payload": ..., "source_plugin": ...}}`
+    /// The hook's return value is ignored (fire-and-forget, spawned as background task).
+    pub async fn dispatch_event(&self, event: &PluginEvent) {
+        let script = match &self.on_event_script {
+            Some(s) => s.clone(),
+            None => return, // no on_event hook configured
+        };
+
+        let input = serde_json::json!({"event": event});
+        let plugin_name = self.plugin_name.clone();
+        let runtime = self.runtime;
+        let timeout_secs = self.hook_timeout_secs;
+        let plugin_env = {
+            let guard = self.bootstrap_applied_overrides.lock().unwrap_or_else(|p| p.into_inner());
+            let mut env = self.plugin_env.clone();
+            for (k, v) in &guard.env_overrides {
+                if !env.iter().any(|(ek, _)| ek == k) {
+                    env.push((k.clone(), v.clone()));
+                }
+            }
+            env
+        };
+        let traces = std::sync::Arc::clone(&self.traces);
+        let hook_schemas = self.hook_schemas.clone();
+        let shared_state_path = self.shared_state_path.clone();
+        let trace_store = self.trace_store.clone();
+        let max_retries = 0u32; // events are best-effort
+        let retry_delay_ms = 0u64;
+        let max_memory_mb = self.max_memory_mb;
+        let allow_network = {
+            let guard = self.bootstrap_applied_overrides.lock().unwrap_or_else(|p| p.into_inner());
+            guard.allow_network.unwrap_or(self.allow_network)
+        };
+        let output_schema_strict = self.inner.config.output_schema_strict;
+        let event_name = event.name.clone();
+        debug!(plugin = %plugin_name, event = %event_name, "dispatching on_event hook");
+        tokio::spawn(async move {
+            let _ = Self::run_hook(
+                "on_event",
+                &script,
+                runtime,
+                input,
+                timeout_secs,
+                &plugin_env,
+                max_retries,
+                retry_delay_ms,
+                max_memory_mb,
+                allow_network,
+                &traces,
+                &hook_schemas,
+                shared_state_path.as_deref(),
+                trace_store.as_ref(),
+                &plugin_name,
+                &generate_trace_id(),
+                output_schema_strict,
+            )
+            .await;
+        });
     }
 
     /// Resolve a script path, expanding `~` to the user's home directory.
@@ -1526,7 +1690,8 @@ impl ScriptableContextEngine {
             }
         }
         let correlation_id = generate_trace_id();
-        let result = self.call_hook_dispatch_raw(hook_name, script_path, input, timeout_secs, &correlation_id).await;
+        let agent_id_str = agent_id.map(|id| id.0.to_string());
+        let result = self.call_hook_dispatch_raw(hook_name, script_path, input, timeout_secs, &correlation_id, agent_id_str.as_deref()).await;
         // Update circuit breaker
         match &result {
             Ok(_) => self.circuit_record(hook_name, agent_id, true),
@@ -1561,6 +1726,7 @@ impl ScriptableContextEngine {
         input: serde_json::Value,
         timeout_secs: u64,
         correlation_id: &str,
+        agent_id: Option<&str>,
     ) -> Result<(serde_json::Value, u64), String> {
         // Compute effective env and network permission, merging bootstrap overrides.
         let (effective_env, effective_allow_network) = {
@@ -1575,13 +1741,18 @@ impl ScriptableContextEngine {
             (env, allow_net)
         };
 
+        // Scope state file to this agent when agent_id is known.
+        let effective_state_path = self.shared_state_path.as_deref().map(|p| {
+            agent_scoped_state_path(p, agent_id)
+        });
+
         if self.persistent_subprocess {
             let config = crate::plugin_runtime::HookConfig {
                 timeout_secs,
                 plugin_env: effective_env.clone(),
                 max_memory_mb: self.max_memory_mb,
                 allow_network: effective_allow_network,
-                state_file: self.shared_state_path.clone(),
+                state_file: effective_state_path.clone(),
                 ..Default::default()
             };
             let trace_id = generate_trace_id();
@@ -1654,7 +1825,7 @@ impl ScriptableContextEngine {
                 effective_allow_network,
                 &self.traces,
                 &self.hook_schemas,
-                self.shared_state_path.as_deref(),
+                effective_state_path.as_deref(),
                 self.trace_store.as_ref(),
                 &self.plugin_name,
                 correlation_id,
@@ -1723,6 +1894,7 @@ impl ScriptableContextEngine {
             &self.compact_script,
             &self.prepare_subagent_script,
             &self.merge_subagent_script,
+            &self.on_event_script,
         ]
         .iter()
         .filter(|opt| opt.is_some())
@@ -1784,6 +1956,7 @@ impl ContextEngine for ScriptableContextEngine {
             ("compact", &self.compact_script),
             ("prepare_subagent", &self.prepare_subagent_script),
             ("merge_subagent", &self.merge_subagent_script),
+            ("on_event", &self.on_event_script),
         ] {
             if let Some(ref path) = opt_path {
                 let resolved = Self::resolve_script_path(path);
@@ -2356,14 +2529,18 @@ impl ContextEngine for ScriptableContextEngine {
         let hook_schemas = self.hook_schemas.clone();
         let persistent_subprocess = self.persistent_subprocess;
         let process_pool = std::sync::Arc::clone(&self.process_pool);
-        let shared_state_path = self.shared_state_path.clone();
         let sem = std::sync::Arc::clone(&self.after_turn_sem);
         let trace_store = self.trace_store.clone();
         let plugin_name = self.plugin_name.clone();
         let agent_id_str = agent_id.0.to_string();
+        // Compute agent-scoped state path for this after_turn call.
+        let shared_state_path = self.shared_state_path.as_deref().map(|p| {
+            agent_scoped_state_path(p, Some(agent_id_str.as_str()))
+        });
         let memory_substrate = std::sync::Arc::clone(&self.memory_substrate);
         let output_schema_strict = self.inner.config.output_schema_strict;
         let after_turn_correlation_id = generate_trace_id();
+        let event_bus_arc = self.event_bus.clone();
         if let Ok(mut tasks) = self.after_turn_tasks.lock() {
             // Reap already-completed tasks to prevent unbounded growth.
             while tasks.try_join_next().is_some() {}
@@ -2446,7 +2623,7 @@ impl ContextEngine for ScriptableContextEngine {
                         Self::record_hook(&metrics, "after_turn", ms, true);
                         debug!("After-turn hook completed ({ms}ms)");
                         // Inspect hook output for memories, logs, and annotations.
-                        Self::process_after_turn_output(&output, &agent_id_str, Some(&memory_substrate));
+                        Self::process_after_turn_output(&output, &agent_id_str, Some(&memory_substrate), &plugin_name, event_bus_arc.as_ref());
                     }
                     Err(e) => {
                         Self::record_hook(&metrics, "after_turn", 0, false);
@@ -2689,6 +2866,12 @@ pub fn load_plugin(
         prewarm_subprocesses: manifest.hooks.prewarm_subprocesses,
         allow_filesystem: manifest.hooks.allow_filesystem,
         otel_endpoint: manifest.hooks.otel_endpoint.clone(),
+        on_event: manifest
+            .hooks
+            .on_event
+            .as_ref()
+            .map(|p| resolve_and_sandbox(p))
+            .transpose()?,
     };
 
     debug!(
@@ -2745,6 +2928,8 @@ pub fn list_installed_plugins() -> Vec<librefang_types::config::PluginManifest> 
 /// - `truncate_tool_result`: delegates to the first (primary) engine.
 pub struct StackedContextEngine {
     engines: Vec<Box<dyn ContextEngine>>,
+    /// Shared event bus for inter-plugin event dispatch.
+    event_bus: std::sync::Arc<PluginEventBus>,
 }
 
 impl StackedContextEngine {
@@ -2756,7 +2941,13 @@ impl StackedContextEngine {
             !engines.is_empty(),
             "StackedContextEngine requires at least one engine"
         );
-        Self { engines }
+        let bus = std::sync::Arc::new(PluginEventBus::new(256));
+        Self { engines, event_bus: bus }
+    }
+
+    /// Return a reference to the shared event bus.
+    pub fn event_bus(&self) -> &std::sync::Arc<PluginEventBus> {
+        &self.event_bus
     }
 
     /// Return a health snapshot for the entire engine stack.
