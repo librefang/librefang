@@ -2534,10 +2534,11 @@ impl ContextEngine for ScriptableContextEngine {
                     if !compacted.is_empty() {
                         let summary = cached_output.get("summary").and_then(|v| v.as_str())
                             .unwrap_or("plugin compaction (cached)").to_string();
+                        let removed = messages.len().saturating_sub(compacted.len());
                         return Ok(CompactionResult {
                             summary,
                             kept_messages: compacted,
-                            compacted_count: messages.len(),
+                            compacted_count: removed,
                             chunks_used: 1,
                             used_fallback: false,
                         });
@@ -2565,10 +2566,11 @@ impl ContextEngine for ScriptableContextEngine {
                             Self::record_hook(&self.metrics, "compact", ms, true);
                             let summary = output.get("summary").and_then(|v| v.as_str())
                                 .unwrap_or("plugin compaction").to_string();
+                            let removed = messages.len().saturating_sub(compacted.len());
                             return Ok(CompactionResult {
                                 summary,
                                 kept_messages: compacted,
-                                compacted_count: messages.len(),
+                                compacted_count: removed,
                                 chunks_used: 1,
                                 used_fallback: false,
                             });
@@ -2600,10 +2602,11 @@ impl ContextEngine for ScriptableContextEngine {
                             .and_then(|v| v.as_str())
                             .unwrap_or("plugin compaction")
                             .to_string();
+                        let removed = messages.len().saturating_sub(compacted.len());
                         return Ok(CompactionResult {
                             summary,
                             kept_messages: compacted,
-                            compacted_count: messages.len(),
+                            compacted_count: removed,
                             chunks_used: 1,
                             used_fallback: false,
                         });
