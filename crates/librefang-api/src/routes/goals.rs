@@ -26,6 +26,7 @@ use librefang_types::agent::AgentId;
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use crate::middleware::AccountId;
 use crate::types::ApiErrorResponse;
 // ---------------------------------------------------------------------------
 // Goals endpoints
@@ -43,7 +44,10 @@ fn goals_shared_agent_id() -> AgentId {
 }
 
 /// GET /api/goals — List all goals.
-pub async fn list_goals(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn list_goals(
+    _account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
     let agent_id = goals_shared_agent_id();
     match state
         .kernel
@@ -64,6 +68,7 @@ pub async fn list_goals(State(state): State<Arc<AppState>>) -> impl IntoResponse
 
 /// GET /api/goals/{id} — Get a specific goal by ID.
 pub async fn get_goal(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
@@ -90,6 +95,7 @@ pub async fn get_goal(
 
 /// GET /api/goals/{id}/children — Get all direct children of a goal.
 pub async fn get_goal_children(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
@@ -117,6 +123,7 @@ pub async fn get_goal_children(
 
 /// POST /api/goals — Create a new goal.
 pub async fn create_goal(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(req): Json<serde_json::Value>,
 ) -> impl IntoResponse {
@@ -209,6 +216,7 @@ pub async fn create_goal(
 
 /// PUT /api/goals/{id} — Update a goal.
 pub async fn update_goal_by_id(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Json(req): Json<serde_json::Value>,
@@ -355,6 +363,7 @@ pub async fn update_goal_by_id(
 
 /// DELETE /api/goals/{id} — Delete a goal and all its descendants.
 pub async fn delete_goal(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
@@ -422,7 +431,7 @@ pub async fn delete_goal(
         (status = 200, description = "Goal templates", body = serde_json::Value)
     )
 )]
-pub async fn list_goal_templates() -> impl IntoResponse {
+pub async fn list_goal_templates(_account: AccountId) -> impl IntoResponse {
     let templates = serde_json::json!([
         {
             "id": "product_launch",

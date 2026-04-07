@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use super::AppState;
 
+use crate::middleware::AccountId;
 use crate::types::ApiErrorResponse;
 /// Build routes for the context engine plugin domain.
 pub fn router() -> axum::Router<Arc<AppState>> {
@@ -37,7 +38,7 @@ pub fn router() -> axum::Router<Arc<AppState>> {
         (status = 200, description = "List installed plugins", body = serde_json::Value)
     )
 )]
-pub async fn list_plugins() -> impl IntoResponse {
+pub async fn list_plugins(_account: AccountId) -> impl IntoResponse {
     let plugins = librefang_runtime::plugin_manager::list_plugins();
     let items: Vec<serde_json::Value> = plugins
         .iter()
@@ -76,7 +77,7 @@ pub async fn list_plugins() -> impl IntoResponse {
         (status = 404, description = "Plugin not found")
     )
 )]
-pub async fn get_plugin(Path(name): Path<String>) -> impl IntoResponse {
+pub async fn get_plugin(_account: AccountId, Path(name): Path<String>) -> impl IntoResponse {
     match librefang_runtime::plugin_manager::get_plugin_info(&name) {
         Ok(info) => (
             StatusCode::OK,
@@ -118,7 +119,10 @@ pub async fn get_plugin(Path(name): Path<String>) -> impl IntoResponse {
         (status = 409, description = "Plugin already installed")
     )
 )]
-pub async fn install_plugin(Json(body): Json<serde_json::Value>) -> impl IntoResponse {
+pub async fn install_plugin(
+    _account: AccountId,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
     let source = match body.get("source").and_then(|s| s.as_str()) {
         Some("registry") => {
             let name = match body.get("name").and_then(|n| n.as_str()) {
@@ -201,7 +205,10 @@ pub async fn install_plugin(Json(body): Json<serde_json::Value>) -> impl IntoRes
         (status = 404, description = "Plugin not found")
     )
 )]
-pub async fn uninstall_plugin(Json(body): Json<serde_json::Value>) -> impl IntoResponse {
+pub async fn uninstall_plugin(
+    _account: AccountId,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
     let name = match body.get("name").and_then(|n| n.as_str()) {
         Some(n) => n,
         None => return ApiErrorResponse::bad_request("Missing 'name'").into_json_tuple(),
@@ -243,7 +250,10 @@ pub async fn uninstall_plugin(Json(body): Json<serde_json::Value>) -> impl IntoR
         (status = 409, description = "Plugin already exists")
     )
 )]
-pub async fn scaffold_plugin(Json(body): Json<serde_json::Value>) -> impl IntoResponse {
+pub async fn scaffold_plugin(
+    _account: AccountId,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
     let name = match body.get("name").and_then(|n| n.as_str()) {
         Some(n) => n,
         None => return ApiErrorResponse::bad_request("Missing 'name'").into_json_tuple(),
@@ -288,7 +298,7 @@ pub async fn scaffold_plugin(Json(body): Json<serde_json::Value>) -> impl IntoRe
         (status = 200, description = "Runtime availability + per-plugin diagnostics", body = serde_json::Value)
     )
 )]
-pub async fn plugin_doctor() -> impl IntoResponse {
+pub async fn plugin_doctor(_account: AccountId) -> impl IntoResponse {
     // `run_doctor` spawns subprocesses — keep it off the async runtime.
     let report = tokio::task::spawn_blocking(librefang_runtime::plugin_manager::run_doctor)
         .await
@@ -313,7 +323,10 @@ pub async fn plugin_doctor() -> impl IntoResponse {
         (status = 400, description = "Installation failed")
     )
 )]
-pub async fn install_plugin_deps(Path(name): Path<String>) -> impl IntoResponse {
+pub async fn install_plugin_deps(
+    _account: AccountId,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
     match librefang_runtime::plugin_manager::install_requirements(&name).await {
         Ok(output) => (
             StatusCode::OK,
@@ -332,7 +345,10 @@ pub async fn install_plugin_deps(Path(name): Path<String>) -> impl IntoResponse 
         (status = 200, description = "Configured registries with available plugins", body = serde_json::Value)
     )
 )]
-pub async fn list_plugin_registries(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn list_plugin_registries(
+    _account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
     // Ensure the official registry is always present.
     let mut registries = state
         .kernel

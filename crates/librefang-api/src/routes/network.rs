@@ -61,6 +61,7 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
 
+use crate::middleware::AccountId;
 use crate::types::ApiErrorResponse;
 // ---------------------------------------------------------------------------
 // Peer endpoints
@@ -75,7 +76,10 @@ use crate::types::ApiErrorResponse;
         (status = 200, description = "List known OFP peers", body = serde_json::Value)
     )
 )]
-pub async fn list_peers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn list_peers(
+    _account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
     // Peers are tracked in the wire module's PeerRegistry.
     // The kernel doesn't directly hold a PeerRegistry, so we return an empty list
     // unless one is available. The API server can be extended to inject a registry.
@@ -116,6 +120,7 @@ pub async fn list_peers(State(state): State<Arc<AppState>>) -> impl IntoResponse
     )
 )]
 pub async fn get_peer(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
@@ -155,7 +160,10 @@ pub async fn get_peer(
         (status = 200, description = "OFP network status summary", body = serde_json::Value)
     )
 )]
-pub async fn network_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn network_status(
+    _account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
     let cfg = state.kernel.config_ref();
     let enabled = cfg.network_enabled && !cfg.network.shared_secret.is_empty();
     drop(cfg);
@@ -190,7 +198,10 @@ pub async fn network_status(State(state): State<Arc<AppState>>) -> impl IntoResp
         (status = 200, description = "Get the A2A agent card", body = serde_json::Value)
     )
 )]
-pub async fn a2a_agent_card(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn a2a_agent_card(
+    _account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
     let agents = state.kernel.agent_registry().list();
     let cfg = state.kernel.config_ref();
     let base_url = format!("http://{}", cfg.api_listen);
@@ -246,7 +257,10 @@ pub async fn a2a_agent_card(State(state): State<Arc<AppState>>) -> impl IntoResp
         (status = 200, description = "List all A2A agent cards", body = serde_json::Value)
     )
 )]
-pub async fn a2a_list_agents(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn a2a_list_agents(
+    _account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
     let agents = state.kernel.agent_registry().list();
     let base_url = format!("http://{}", state.kernel.config_ref().api_listen);
 
@@ -279,6 +293,7 @@ pub async fn a2a_list_agents(State(state): State<Arc<AppState>>) -> impl IntoRes
     )
 )]
 pub async fn a2a_send_task(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(request): Json<serde_json::Value>,
 ) -> impl IntoResponse {
@@ -375,6 +390,7 @@ pub async fn a2a_send_task(
     )
 )]
 pub async fn a2a_get_task(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(task_id): Path<String>,
 ) -> impl IntoResponse {
@@ -402,6 +418,7 @@ pub async fn a2a_get_task(
     )
 )]
 pub async fn a2a_cancel_task(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(task_id): Path<String>,
 ) -> impl IntoResponse {
@@ -431,7 +448,10 @@ pub async fn a2a_cancel_task(
         (status = 200, description = "List discovered external A2A agents", body = serde_json::Value)
     )
 )]
-pub async fn a2a_list_external_agents(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn a2a_list_external_agents(
+    _account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
     let agents = state
         .kernel
         .a2a_agents()
@@ -628,6 +648,7 @@ fn is_private_ip(ip: &IpAddr) -> bool {
     )
 )]
 pub async fn a2a_get_external_agent(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
@@ -678,6 +699,7 @@ pub async fn a2a_get_external_agent(
     )
 )]
 pub async fn a2a_discover_external(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
@@ -742,6 +764,7 @@ pub async fn a2a_discover_external(
     )
 )]
 pub async fn a2a_send_external(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
@@ -794,6 +817,7 @@ pub async fn a2a_send_external(
     )
 )]
 pub async fn a2a_external_task_status(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(task_id): Path<String>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
@@ -846,6 +870,7 @@ pub async fn a2a_external_task_status(
     )
 )]
 pub async fn mcp_http(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(request): Json<serde_json::Value>,
 ) -> impl IntoResponse {
@@ -964,7 +989,10 @@ pub async fn mcp_http(
         (status = 200, description = "Build agent topology graph", body = serde_json::Value)
     )
 )]
-pub async fn comms_topology(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn comms_topology(
+    _account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
     use librefang_types::comms::{EdgeKind, TopoEdge, TopoNode, Topology};
 
     let agents = state.kernel.agent_registry().list();
@@ -1193,6 +1221,7 @@ fn audit_to_comms_event(
     )
 )]
 pub async fn comms_events(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
@@ -1242,7 +1271,10 @@ pub async fn comms_events(
         (status = 200, description = "SSE stream of inter-agent events", body = serde_json::Value)
     )
 )]
-pub async fn comms_events_stream(State(state): State<Arc<AppState>>) -> axum::response::Response {
+pub async fn comms_events_stream(
+    _account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> axum::response::Response {
     use axum::response::sse::{Event, KeepAlive, Sse};
 
     let (tx, rx) = tokio::sync::mpsc::channel::<
@@ -1300,6 +1332,7 @@ pub async fn comms_events_stream(State(state): State<Arc<AppState>>) -> axum::re
     )
 )]
 pub async fn comms_send(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(req): Json<librefang_types::comms::CommsSendRequest>,
 ) -> impl IntoResponse {
@@ -1381,6 +1414,7 @@ pub async fn comms_send(
     )
 )]
 pub async fn comms_task(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(req): Json<librefang_types::comms::CommsTaskRequest>,
 ) -> impl IntoResponse {

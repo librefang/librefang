@@ -156,6 +156,7 @@ use super::channels::FieldType;
 use super::config::json_to_toml_value;
 use super::AppState;
 use super::RequestLanguage;
+use crate::middleware::AccountId;
 use crate::types::*;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -179,7 +180,10 @@ use std::time::Instant;
         (status = 200, description = "List installed skills", body = Vec<serde_json::Value>)
     )
 )]
-pub async fn list_skills(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn list_skills(
+    _account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
     let skills_dir = state.kernel.home_dir().join("skills");
     let mut registry = librefang_skills::registry::SkillRegistry::new(skills_dir);
     if let Err(e) = registry.load_all() {
@@ -235,6 +239,7 @@ pub async fn list_skills(State(state): State<Arc<AppState>>) -> impl IntoRespons
     )
 )]
 pub async fn install_skill(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(req): Json<SkillInstallRequest>,
 ) -> impl IntoResponse {
@@ -317,6 +322,7 @@ pub async fn install_skill(
     )
 )]
 pub async fn uninstall_skill(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(req): Json<SkillUninstallRequest>,
 ) -> impl IntoResponse {
@@ -351,7 +357,10 @@ pub async fn uninstall_skill(
         (status = 200, description = "Rescan the skills directory from disk", body = serde_json::Value)
     )
 )]
-pub async fn reload_skills(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn reload_skills(
+    _account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
     state.kernel.reload_skills();
     let count = state
         .kernel
@@ -374,7 +383,10 @@ pub async fn reload_skills(State(state): State<Arc<AppState>>) -> impl IntoRespo
         (status = 200, description = "Official skills available in the FangHub registry", body = serde_json::Value)
     )
 )]
-pub async fn list_skill_registry(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn list_skill_registry(
+    _account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
     let registry_skills_dir = state.kernel.home_dir().join("registry").join("skills");
 
     if !registry_skills_dir.exists() {
@@ -438,6 +450,7 @@ pub async fn list_skill_registry(State(state): State<Arc<AppState>>) -> impl Int
     )
 )]
 pub async fn marketplace_search(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
@@ -500,6 +513,7 @@ pub async fn marketplace_search(
     )
 )]
 pub async fn clawhub_search(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
@@ -586,6 +600,7 @@ pub async fn clawhub_search(
     )
 )]
 pub async fn clawhub_browse(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
@@ -660,6 +675,7 @@ pub async fn clawhub_browse(
     )
 )]
 pub async fn clawhub_skill_detail(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(slug): Path<String>,
 ) -> impl IntoResponse {
@@ -736,6 +752,7 @@ pub async fn clawhub_skill_detail(
     )
 )]
 pub async fn clawhub_skill_code(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(slug): Path<String>,
 ) -> impl IntoResponse {
@@ -786,6 +803,7 @@ pub async fn clawhub_skill_code(
     )
 )]
 pub async fn clawhub_install(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(req): Json<crate::types::ClawHubInstallRequest>,
 ) -> impl IntoResponse {
@@ -873,6 +891,7 @@ pub async fn clawhub_install(
 
 /// GET /api/skillhub/search — Search Skillhub skills.
 pub async fn skillhub_search(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
@@ -943,6 +962,7 @@ pub async fn skillhub_search(
 
 /// GET /api/skillhub/browse — Browse Skillhub skills from the static index.
 pub async fn skillhub_browse(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
@@ -1002,6 +1022,7 @@ pub async fn skillhub_browse(
 
 /// GET /api/skillhub/skill/{slug} — Get detailed info about a Skillhub skill.
 pub async fn skillhub_skill_detail(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(slug): Path<String>,
 ) -> impl IntoResponse {
@@ -1072,13 +1093,17 @@ pub async fn skillhub_skill_detail(
 }
 
 /// GET /api/skillhub/skill/{slug}/code — Source code viewing is not available for Skillhub skills.
-pub async fn skillhub_skill_code(Path(_slug): Path<String>) -> impl IntoResponse {
+pub async fn skillhub_skill_code(
+    _account: AccountId,
+    Path(_slug): Path<String>,
+) -> impl IntoResponse {
     ApiErrorResponse::not_found("Source code viewing is not available for Skillhub skills")
         .into_json_tuple()
 }
 
 /// POST /api/skillhub/install — Install a skill from Skillhub.
 pub async fn skillhub_install(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(req): Json<crate::types::ClawHubInstallRequest>,
 ) -> impl IntoResponse {
@@ -1211,6 +1236,7 @@ fn server_platform() -> &'static str {
     )
 )]
 pub async fn list_hands(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
@@ -1290,7 +1316,10 @@ pub async fn list_hands(
         (status = 200, description = "List active hand instances", body = serde_json::Value)
     )
 )]
-pub async fn list_active_hands(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn list_active_hands(
+    _account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
     let instances = state.kernel.hands().list_instances();
     let items: Vec<serde_json::Value> = instances
         .iter()
@@ -1323,6 +1352,7 @@ pub async fn list_active_hands(State(state): State<Arc<AppState>>) -> impl IntoR
     )
 )]
 pub async fn get_hand(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(hand_id): Path<String>,
     headers: axum::http::HeaderMap,
@@ -1464,6 +1494,7 @@ pub async fn get_hand(
     )
 )]
 pub async fn check_hand_deps(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(hand_id): Path<String>,
 ) -> impl IntoResponse {
@@ -1526,6 +1557,7 @@ pub async fn check_hand_deps(
     )
 )]
 pub async fn install_hand_deps(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(hand_id): Path<String>,
 ) -> impl IntoResponse {
@@ -1769,6 +1801,7 @@ pub async fn install_hand_deps(
     )
 )]
 pub async fn install_hand(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
@@ -1814,6 +1847,7 @@ pub async fn install_hand(
     )
 )]
 pub async fn activate_hand(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(hand_id): Path<String>,
     body: Option<Json<librefang_hands::ActivateHandRequest>>,
@@ -1873,6 +1907,7 @@ pub async fn activate_hand(
     )
 )]
 pub async fn pause_hand(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<uuid::Uuid>,
 ) -> impl IntoResponse {
@@ -1898,6 +1933,7 @@ pub async fn pause_hand(
     )
 )]
 pub async fn resume_hand(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<uuid::Uuid>,
 ) -> impl IntoResponse {
@@ -1923,6 +1959,7 @@ pub async fn resume_hand(
     )
 )]
 pub async fn deactivate_hand(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<uuid::Uuid>,
 ) -> impl IntoResponse {
@@ -1945,6 +1982,7 @@ pub async fn deactivate_hand(
     responses((status = 200, description = "Secret saved", body = serde_json::Value))
 )]
 pub async fn set_hand_secret(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(hand_id): Path<String>,
     Json(body): Json<serde_json::Value>,
@@ -2017,6 +2055,7 @@ pub async fn set_hand_secret(
     )
 )]
 pub async fn get_hand_settings(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
     Path(hand_id): Path<String>,
@@ -2072,6 +2111,7 @@ pub async fn get_hand_settings(
     )
 )]
 pub async fn update_hand_settings(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(hand_id): Path<String>,
     Json(config): Json<std::collections::HashMap<String, serde_json::Value>>,
@@ -2117,7 +2157,10 @@ pub async fn update_hand_settings(
         (status = 200, description = "Reload hand definitions from disk", body = serde_json::Value)
     )
 )]
-pub async fn reload_hands(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn reload_hands(
+    _account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
     let (added, updated) = state.kernel.reload_hands();
     let total = state.kernel.hands().list_definitions().len();
     (
@@ -2144,6 +2187,7 @@ pub async fn reload_hands(State(state): State<Arc<AppState>>) -> impl IntoRespon
     )
 )]
 pub async fn hand_stats(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<uuid::Uuid>,
 ) -> impl IntoResponse {
@@ -2219,6 +2263,7 @@ pub async fn hand_stats(
     )
 )]
 pub async fn hand_instance_browser(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<uuid::Uuid>,
 ) -> impl IntoResponse {
@@ -2346,6 +2391,7 @@ fn resolve_hand_agent(
 /// This is the primary user-facing chat endpoint.  Internally it proxies to
 /// the underlying agent, but users never need to know the agent ID.
 pub async fn hand_send_message(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<uuid::Uuid>,
     Json(req): Json<MessageRequest>,
@@ -2432,6 +2478,7 @@ pub async fn hand_send_message(
 
 /// GET /api/hands/instances/:id/session — Get hand conversation history.
 pub async fn hand_get_session(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<uuid::Uuid>,
 ) -> impl IntoResponse {
@@ -2538,6 +2585,7 @@ pub async fn hand_get_session(
 /// Returns everything the dashboard needs in one call: hand metadata,
 /// activation state, agent runtime info, and model details.
 pub async fn hand_instance_status(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<uuid::Uuid>,
     headers: axum::http::HeaderMap,
@@ -2688,7 +2736,10 @@ fn serialize_mcp_transport(
         (status = 200, description = "List configured MCP servers and their tools", body = serde_json::Value)
     )
 )]
-pub async fn list_mcp_servers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn list_mcp_servers(
+    _account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
     // Get configured servers from config
     let config_servers: Vec<serde_json::Value> = state
         .kernel
@@ -2755,6 +2806,7 @@ pub async fn list_mcp_servers(State(state): State<Arc<AppState>>) -> impl IntoRe
     )
 )]
 pub async fn get_mcp_server(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
@@ -2818,6 +2870,7 @@ pub async fn get_mcp_server(
     )
 )]
 pub async fn add_mcp_server(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
@@ -2909,6 +2962,7 @@ pub async fn add_mcp_server(
     )
 )]
 pub async fn update_mcp_server(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
@@ -3004,6 +3058,7 @@ pub async fn update_mcp_server(
     )
 )]
 pub async fn delete_mcp_server(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
@@ -3177,6 +3232,7 @@ fn validate_static_file_path(
     )
 )]
 pub async fn create_skill(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
@@ -3503,7 +3559,10 @@ fn integration_status_str(
         (status = 200, description = "List installed integrations with status", body = serde_json::Value)
     )
 )]
-pub async fn list_integrations(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn list_integrations(
+    _account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
     let registry = state
         .kernel
         .extensions()
@@ -3549,6 +3608,7 @@ pub async fn list_integrations(State(state): State<Arc<AppState>>) -> impl IntoR
     )
 )]
 pub async fn get_integration(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
@@ -3617,7 +3677,10 @@ pub async fn get_integration(
         (status = 200, description = "List all available integration templates", body = serde_json::Value)
     )
 )]
-pub async fn list_available_integrations(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn list_available_integrations(
+    _account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
     let registry = state
         .kernel
         .extensions()
@@ -3666,6 +3729,7 @@ pub async fn list_available_integrations(State(state): State<Arc<AppState>>) -> 
     )
 )]
 pub async fn add_integration(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(req): Json<serde_json::Value>,
 ) -> impl IntoResponse {
@@ -3742,6 +3806,7 @@ pub async fn add_integration(
     )
 )]
 pub async fn remove_integration(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
@@ -3788,6 +3853,7 @@ pub async fn remove_integration(
     )
 )]
 pub async fn reconnect_integration(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
@@ -3834,7 +3900,10 @@ pub async fn reconnect_integration(
         (status = 200, description = "Health status for all integrations", body = serde_json::Value)
     )
 )]
-pub async fn integrations_health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn integrations_health(
+    _account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
     let health_entries = state.kernel.extension_monitor().all_health();
     let entries: Vec<serde_json::Value> = health_entries
         .iter()
@@ -3868,7 +3937,10 @@ pub async fn integrations_health(State(state): State<Arc<AppState>>) -> impl Int
         (status = 200, description = "Hot-reload integration configs and reconnect MCP", body = serde_json::Value)
     )
 )]
-pub async fn reload_integrations(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn reload_integrations(
+    _account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
     match state.kernel.reload_extension_mcps().await {
         Ok(connected) => (
             StatusCode::OK,
@@ -3894,7 +3966,10 @@ pub async fn reload_integrations(State(state): State<Arc<AppState>>) -> impl Int
         (status = 200, description = "List all installed extensions with status", body = serde_json::Value)
     )
 )]
-pub async fn list_extensions(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn list_extensions(
+    _account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
     let registry = state
         .kernel
         .extensions()
@@ -3947,6 +4022,7 @@ pub async fn list_extensions(State(state): State<Arc<AppState>>) -> impl IntoRes
     )
 )]
 pub async fn get_extension(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
@@ -4020,6 +4096,7 @@ pub async fn get_extension(
     )
 )]
 pub async fn install_extension(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(req): Json<ExtensionInstallRequest>,
 ) -> impl IntoResponse {
@@ -4091,6 +4168,7 @@ pub async fn install_extension(
     )
 )]
 pub async fn uninstall_extension(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(req): Json<ExtensionUninstallRequest>,
 ) -> impl IntoResponse {

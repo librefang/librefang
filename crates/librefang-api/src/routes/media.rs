@@ -1,6 +1,7 @@
 //! Media generation API routes — image, TTS, video, and music generation.
 
 use super::AppState;
+use crate::middleware::AccountId;
 use crate::types::ApiErrorResponse;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -100,6 +101,7 @@ fn save_upload(data: &[u8], filename: &str, content_type: &str) -> Result<String
 
 /// Generate one or more images from a text prompt.
 pub async fn generate_image(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(body): Json<MediaImageRequest>,
 ) -> impl IntoResponse {
@@ -170,6 +172,7 @@ pub async fn generate_image(
 
 /// Synthesize speech from text (TTS).
 pub async fn synthesize_speech(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(body): Json<MediaTtsRequest>,
 ) -> impl IntoResponse {
@@ -221,6 +224,7 @@ pub async fn synthesize_speech(
 
 /// Submit a video generation task (async — returns a task ID for polling).
 pub async fn submit_video(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(body): Json<MediaVideoRequest>,
 ) -> impl IntoResponse {
@@ -259,6 +263,7 @@ pub async fn submit_video(
 /// Query parameter `provider` is required to route the poll to the correct
 /// driver (the task ID is provider-specific).
 pub async fn poll_video_task(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(task_id): Path<String>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
@@ -315,6 +320,7 @@ pub async fn poll_video_task(
 
 /// Generate music from a prompt and/or lyrics.
 pub async fn generate_music(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(body): Json<MediaMusicRequest>,
 ) -> impl IntoResponse {
@@ -363,7 +369,10 @@ pub async fn generate_music(
 // ── GET /media/providers ────────────────────────────────────────────────
 
 /// List available media providers with their capabilities and config status.
-pub async fn list_media_providers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn list_media_providers(
+    _account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
     let mut providers = Vec::new();
 
     for &name in KNOWN_MEDIA_PROVIDERS {

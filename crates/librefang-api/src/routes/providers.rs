@@ -60,6 +60,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 
+use crate::middleware::AccountId;
 use crate::types::ApiErrorResponse;
 #[utoipa::path(
     get,
@@ -70,6 +71,7 @@ use crate::types::ApiErrorResponse;
     )
 )]
 pub async fn list_models(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
@@ -146,7 +148,10 @@ pub async fn list_models(
 }
 
 #[utoipa::path(get, path = "/api/models/aliases", tag = "models", responses((status = 200, description = "List model aliases", body = serde_json::Value)))]
-pub async fn list_aliases(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn list_aliases(
+    _account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
     let aliases = state
         .kernel
         .model_catalog_ref()
@@ -178,6 +183,7 @@ pub async fn list_aliases(State(state): State<Arc<AppState>>) -> impl IntoRespon
 /// Body: `{ "alias": "my-alias", "model_id": "gpt-4o" }`
 #[utoipa::path(post, path = "/api/models/aliases", tag = "models", request_body = serde_json::Value, responses((status = 200, description = "Alias created", body = serde_json::Value)))]
 pub async fn create_alias(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
@@ -223,6 +229,7 @@ pub async fn create_alias(
 /// DELETE /api/models/aliases/{alias} — Remove an alias mapping.
 #[utoipa::path(delete, path = "/api/models/aliases/{alias}", tag = "models", params(("alias" = String, Path, description = "Alias name")), responses((status = 200, description = "Alias deleted")))]
 pub async fn delete_alias(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(alias): Path<String>,
 ) -> impl IntoResponse {
@@ -245,6 +252,7 @@ pub async fn delete_alias(
 
 #[utoipa::path(get, path = "/api/models/{id}", tag = "models", params(("id" = String, Path, description = "Model ID")), responses((status = 200, description = "Model details", body = serde_json::Value)))]
 pub async fn get_model(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
@@ -324,7 +332,10 @@ fn attach_probe_result(
         (status = 200, description = "List configured providers", body = Vec<serde_json::Value>)
     )
 )]
-pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn list_providers(
+    _account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
     let provider_list: Vec<librefang_types::model_catalog::ProviderInfo> = {
         let catalog = state
             .kernel
@@ -449,6 +460,7 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
     )
 )]
 pub async fn get_provider(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
@@ -532,6 +544,7 @@ pub async fn get_provider(
 /// available in the catalog.
 #[utoipa::path(post, path = "/api/models/custom", tag = "models", request_body = serde_json::Value, responses((status = 200, description = "Custom model added", body = serde_json::Value)))]
 pub async fn add_custom_model(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
@@ -633,6 +646,7 @@ pub async fn add_custom_model(
 /// DELETE /api/models/custom/{id} — Remove a custom model.
 #[utoipa::path(delete, path = "/api/models/custom/{id}", tag = "models", params(("id" = String, Path, description = "Model ID")), responses((status = 200, description = "Custom model removed")))]
 pub async fn remove_custom_model(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     axum::extract::Path(model_id): axum::extract::Path<String>,
 ) -> impl IntoResponse {
@@ -671,6 +685,7 @@ pub async fn remove_custom_model(
 
 #[utoipa::path(post, path = "/api/providers/{name}/key", tag = "models", params(("name" = String, Path, description = "Provider name")), request_body = serde_json::Value, responses((status = 200, description = "API key set", body = serde_json::Value)))]
 pub async fn set_provider_key(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
     Json(body): Json<serde_json::Value>,
@@ -864,6 +879,7 @@ pub async fn set_provider_key(
 /// DELETE /api/providers/{name}/key — Remove an API key for a provider.
 #[utoipa::path(delete, path = "/api/providers/{name}/key", tag = "models", params(("name" = String, Path, description = "Provider name")), responses((status = 200, description = "API key deleted")))]
 pub async fn delete_provider_key(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
@@ -915,6 +931,7 @@ pub async fn delete_provider_key(
 /// POST /api/providers/{name}/test — Test a provider's connectivity.
 #[utoipa::path(post, path = "/api/providers/{name}/test", tag = "models", params(("name" = String, Path, description = "Provider name")), responses((status = 200, description = "Provider test result", body = serde_json::Value)))]
 pub async fn test_provider(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
@@ -1150,6 +1167,7 @@ pub async fn test_provider(
 /// PUT /api/providers/{name}/url — Set a custom base URL for a provider.
 #[utoipa::path(put, path = "/api/providers/{name}/url", tag = "models", params(("name" = String, Path, description = "Provider name")), request_body = serde_json::Value, responses((status = 200, description = "Provider URL set", body = serde_json::Value)))]
 pub async fn set_provider_url(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
     Json(body): Json<serde_json::Value>,
@@ -1228,6 +1246,7 @@ pub async fn set_provider_url(
     )
 )]
 pub async fn set_default_provider(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
@@ -1427,7 +1446,7 @@ static COPILOT_FLOWS: LazyLock<DashMap<String, CopilotFlowState>> = LazyLock::ne
 /// Initiates a GitHub device flow for Copilot authentication.
 /// Returns a user code and verification URI that the user visits in their browser.
 #[utoipa::path(post, path = "/api/providers/github-copilot/oauth/start", tag = "models", responses((status = 200, description = "OAuth flow started", body = serde_json::Value)))]
-pub async fn copilot_oauth_start() -> impl IntoResponse {
+pub async fn copilot_oauth_start(_account: AccountId) -> impl IntoResponse {
     // Clean up expired flows first
     COPILOT_FLOWS.retain(|_, state| state.expires_at > Instant::now());
 
@@ -1469,6 +1488,7 @@ pub async fn copilot_oauth_start() -> impl IntoResponse {
 /// On `complete`, saves the token to secrets.env and sets GITHUB_TOKEN.
 #[utoipa::path(get, path = "/api/providers/github-copilot/oauth/poll/{poll_id}", tag = "models", params(("poll_id" = String, Path, description = "Poll ID")), responses((status = 200, description = "OAuth poll result", body = serde_json::Value)))]
 pub async fn copilot_oauth_poll(
+    _account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(poll_id): Path<String>,
 ) -> impl IntoResponse {
@@ -1570,7 +1590,10 @@ pub async fn copilot_oauth_poll(
 /// Downloads the latest catalog TOML files from GitHub and caches them locally.
 /// After syncing, the kernel's in-memory catalog is refreshed.
 #[utoipa::path(post, path = "/api/catalog/update", tag = "models", responses((status = 200, description = "Catalog updated", body = serde_json::Value)))]
-pub async fn catalog_update(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn catalog_update(
+    _account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
     let cfg = state.kernel.config_ref();
     let mirror = &cfg.registry.registry_mirror;
     match librefang_runtime::catalog_sync::sync_catalog_to(state.kernel.home_dir(), mirror).await {
@@ -1619,7 +1642,10 @@ pub async fn catalog_update(State(state): State<Arc<AppState>>) -> impl IntoResp
 
 /// GET /api/catalog/status — Check last catalog sync time.
 #[utoipa::path(get, path = "/api/catalog/status", tag = "models", responses((status = 200, description = "Catalog sync status", body = serde_json::Value)))]
-pub async fn catalog_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn catalog_status(
+    _account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
     let last_sync = librefang_runtime::catalog_sync::last_sync_time_for(state.kernel.home_dir());
     Json(serde_json::json!({
         "last_sync": last_sync,
@@ -1627,7 +1653,7 @@ pub async fn catalog_status(State(state): State<Arc<AppState>>) -> impl IntoResp
 }
 
 /// GET /api/providers/ollama/detect — Probe localhost for Ollama availability
-pub async fn detect_ollama() -> impl IntoResponse {
+pub async fn detect_ollama(_account: AccountId) -> impl IntoResponse {
     let client = match librefang_runtime::http_client::client_builder()
         .timeout(std::time::Duration::from_secs(3))
         .build()
