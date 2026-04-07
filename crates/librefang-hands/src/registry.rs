@@ -611,7 +611,21 @@ impl HandRegistry {
                 self.active_index.insert(hand_id, instance_id);
             }
             HandStatus::Paused | HandStatus::Error(_) | HandStatus::Inactive => {
-                self.active_index.remove(&hand_id);
+                // Only remove from active_index if it still points to this instance,
+                // and re-insert another active instance of the same hand_id if one exists.
+                if let Some(active_id) = self.active_index.get(&hand_id) {
+                    if *active_id == instance_id {
+                        drop(active_id);
+                        self.active_index.remove(&hand_id);
+                        if let Some(other) = self
+                            .instances
+                            .iter()
+                            .find(|e| e.hand_id == hand_id && e.status == HandStatus::Active)
+                        {
+                            self.active_index.insert(hand_id, other.instance_id);
+                        }
+                    }
+                }
             }
         }
         Ok(())
