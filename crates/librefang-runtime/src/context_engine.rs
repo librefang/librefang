@@ -137,6 +137,9 @@ pub struct ContextEngineConfig {
     /// to return an error instead of logging a warning.  Defaults to `false` for
     /// backward compatibility.
     pub output_schema_strict: bool,
+    /// Maximum number of times any single hook may be called per 60-second window.
+    /// `0` means unlimited.  Defaults to `0`.
+    pub max_hook_calls_per_minute: u32,
 }
 
 impl Default for ContextEngineConfig {
@@ -147,6 +150,7 @@ impl Default for ContextEngineConfig {
             max_recall_results: 5,
             compaction: None,
             output_schema_strict: false,
+            max_hook_calls_per_minute: 0,
         }
     }
 }
@@ -608,6 +612,41 @@ impl CircuitBreakerState {
 }
 
 // ---------------------------------------------------------------------------
+// Per-hook sliding-window rate limiter
+// ---------------------------------------------------------------------------
+
+/// Sliding-window call counter for one hook.
+#[derive(Default)]
+struct HookRateLimiter {
+    /// Ring of timestamps (as `std::time::Instant`) for recent calls.
+    calls: std::collections::VecDeque<std::time::Instant>,
+}
+
+impl HookRateLimiter {
+    /// Record a call and return whether the call is allowed.
+    ///
+    /// Evicts entries older than 60 seconds, then checks the count against
+    /// `max_per_minute`.  Returns `true` if the call may proceed, `false` if
+    /// the rate limit is exceeded.
+    fn check_and_record(&mut self, max_per_minute: u32) -> bool {
+        if max_per_minute == 0 {
+            return true; // unlimited
+        }
+        let now = std::time::Instant::now();
+        let window = std::time::Duration::from_secs(60);
+        // Evict calls older than the window.
+        while self.calls.front().map_or(false, |t| now.duration_since(*t) > window) {
+            self.calls.pop_front();
+        }
+        if self.calls.len() >= max_per_minute as usize {
+            return false; // rate limit exceeded
+        }
+        self.calls.push_back(now);
+        true
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Scriptable context engine — wraps DefaultContextEngine + Python script hooks
 // ---------------------------------------------------------------------------
 
@@ -734,6 +773,8 @@ pub struct ScriptableContextEngine {
     memory_substrate: std::sync::Arc<librefang_memory::MemorySubstrate>,
     /// Overrides applied by the bootstrap hook at startup.
     bootstrap_applied_overrides: std::sync::Arc<std::sync::Mutex<BootstrapOverrides>>,
+    /// Per-hook sliding-window rate limiters.
+    rate_limiters: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, HookRateLimiter>>>,
 }
 
 impl ScriptableContextEngine {
@@ -854,6 +895,7 @@ impl ScriptableContextEngine {
             after_turn_tasks: std::sync::Arc::new(std::sync::Mutex::new(tokio::task::JoinSet::new())),
             memory_substrate,
             bootstrap_applied_overrides: std::sync::Arc::new(std::sync::Mutex::new(BootstrapOverrides::default())),
+            rate_limiters: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -1467,6 +1509,21 @@ impl ScriptableContextEngine {
         // Circuit breaker: reject immediately when open
         if self.circuit_is_open(hook_name, agent_id) {
             return Err(format!("circuit-open: '{hook_name}' suspended after repeated failures"));
+        }
+        // Rate limiting check.
+        let max_rpm = self.inner.config.max_hook_calls_per_minute;
+        if max_rpm > 0 {
+            let mut limiters = self.rate_limiters.lock().unwrap_or_else(|e| e.into_inner());
+            let limiter = limiters.entry(hook_name.to_string()).or_default();
+            if !limiter.check_and_record(max_rpm) {
+                warn!(
+                    hook = hook_name,
+                    max_rpm,
+                    "hook rate limit exceeded — skipping call"
+                );
+                // Return a neutral result: empty object (passthrough for callers).
+                return Ok((serde_json::Value::Object(serde_json::Map::new()), 0));
+            }
         }
         let correlation_id = generate_trace_id();
         let result = self.call_hook_dispatch_raw(hook_name, script_path, input, timeout_secs, &correlation_id).await;
