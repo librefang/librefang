@@ -2326,6 +2326,8 @@ impl LibreFangKernel {
             stable_prefix_mode: config.stable_prefix_mode,
             max_recall_results: 5,
             compaction: Some(config.compaction.clone()),
+            output_schema_strict: false,
+            max_hook_calls_per_minute: 0,
         };
         let context_engine: Option<Box<dyn librefang_runtime::context_engine::ContextEngine>> = {
             let emb_arc: Option<

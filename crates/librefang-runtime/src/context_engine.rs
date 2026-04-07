@@ -702,7 +702,7 @@ impl HookRateLimiter {
         let now = std::time::Instant::now();
         let window = std::time::Duration::from_secs(60);
         // Evict calls older than the window.
-        while self.calls.front().map_or(false, |t| now.duration_since(*t) > window) {
+        while self.calls.front().is_some_and(|t| now.duration_since(*t) > window) {
             self.calls.pop_front();
         }
         if self.calls.len() >= max_per_minute as usize {
@@ -1380,11 +1380,9 @@ impl ScriptableContextEngine {
             &self.compact_script,
             &self.on_event_script,
         ];
-        for script_opt in hooks {
-            if let Some(ref script) = script_opt {
-                let resolved = Self::resolve_script_path(script);
-                self.process_pool.evict(&resolved).await;
-            }
+        for script in hooks.iter().copied().flatten() {
+            let resolved = Self::resolve_script_path(script);
+            self.process_pool.evict(&resolved).await;
         }
     }
 
@@ -1788,7 +1786,7 @@ impl ScriptableContextEngine {
             // rate limit for all other agents sharing the same plugin.
             let rl_key = format!(
                 "{}:{}",
-                agent_id.map(|id| id.0.as_str()).unwrap_or(""),
+                agent_id.map(|id| id.0.to_string()).unwrap_or_default(),
                 hook_name
             );
             let limiter = limiters.entry(rl_key).or_default();
@@ -3859,12 +3857,14 @@ print(json.dumps({"type": payload.get("type"), "message": payload.get("message")
             None,
             None,
             "",
+            "",
+            false,
         )
         .await
         .unwrap();
 
-        assert_eq!(output["type"], "ingest");
-        assert_eq!(output["message"], "hello");
+        assert_eq!(output.0["type"], "ingest");
+        assert_eq!(output.0["message"], "hello");
     }
 
     #[test]

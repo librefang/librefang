@@ -1200,7 +1200,7 @@ pub async fn run_hook_json(
         Ok::<(Vec<String>, String, std::process::ExitStatus), PluginRuntimeError>((
             stdout_lines,
             stderr_text,
-            status.into(),
+            status,
         ))
     })
     .await;

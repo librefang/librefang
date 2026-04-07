@@ -1281,6 +1281,17 @@ fn hook_templates(runtime: crate::plugin_runtime::PluginRuntime) -> HookFiles {
             prepare_subagent: ("prepare_subagent", STUB_LIFECYCLE_NATIVE),
             merge_subagent: ("merge_subagent", STUB_LIFECYCLE_NATIVE),
         },
+        R::Wasm => HookFiles {
+            // WASM modules are pre-compiled binaries — no script templates needed.
+            // Users provide their own .wasm files following the stdin/stdout protocol.
+            ingest: ("ingest.wasm", STUB_LIFECYCLE_NATIVE),
+            after_turn: ("after_turn.wasm", STUB_LIFECYCLE_NATIVE),
+            assemble: ("assemble.wasm", STUB_ASSEMBLE_NATIVE),
+            compact: ("compact.wasm", STUB_COMPACT_NATIVE),
+            bootstrap: ("bootstrap.wasm", STUB_LIFECYCLE_NATIVE),
+            prepare_subagent: ("prepare_subagent.wasm", STUB_LIFECYCLE_NATIVE),
+            merge_subagent: ("merge_subagent.wasm", STUB_LIFECYCLE_NATIVE),
+        },
     }
 }
 
@@ -2865,7 +2876,7 @@ async fn fetch_checksum(
                     // checksums.txt format: "<sha256>  <filename>" per line
                     for line in text.lines() {
                         let parts: Vec<&str> = line.splitn(2, ' ').collect();
-                        if parts.len() >= 1 {
+                        if !parts.is_empty() {
                             let hash = parts[0].trim();
                             if hash.len() == 64 && hash.chars().all(|c| c.is_ascii_hexdigit()) {
                                 // If it's a checksums.txt, check the filename matches
@@ -3838,9 +3849,13 @@ after_turn = "hooks/after_turn.py"
             hooks: librefang_types::config::ContextEngineHooks {
                 ingest: Some("hooks/ingest.py".to_string()),
                 after_turn: Some("hooks/after_turn.py".to_string()), // missing
-                runtime: None,
+                ..Default::default()
             },
             requirements: None,
+            env: Default::default(),
+            integrity: Default::default(),
+            librefang_min_version: None,
+            plugin_depends: Default::default(),
         };
 
         assert!(!check_hooks_exist(&plugin_dir, &manifest));
@@ -3857,10 +3872,13 @@ after_turn = "hooks/after_turn.py"
             author: None,
             hooks: librefang_types::config::ContextEngineHooks {
                 ingest: Some("../../etc/passwd".to_string()),
-                after_turn: None,
-                runtime: None,
+                ..Default::default()
             },
             requirements: None,
+            env: Default::default(),
+            integrity: Default::default(),
+            librefang_min_version: None,
+            plugin_depends: Default::default(),
         };
         assert!(!check_hooks_exist(&plugin_dir, &manifest_escape));
     }
