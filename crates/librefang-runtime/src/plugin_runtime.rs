@@ -1678,7 +1678,8 @@ impl HookProcessPool {
         runtime: PluginRuntime,
         plugin_env: &[(String, String)],
     ) -> Result<(), PluginRuntimeError> {
-        let key = format!("{:?}::{}", runtime, script_path);
+        // Use the same key as `call()` so the pre-warmed slot is found on first use.
+        let key = script_path.to_string();
         let slot_arc = {
             let mut procs = self.procs.lock().unwrap();
             procs

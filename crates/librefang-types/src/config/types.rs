@@ -2167,6 +2167,21 @@ pub struct ContextEngineTomlConfig {
     /// ```
     #[serde(default)]
     pub plugin_stack: Option<Vec<String>>,
+    /// Priority weight for each layer in `plugin_stack` (default 1.0).
+    ///
+    /// Higher weights cause that layer's recalled memories to appear first in
+    /// the merged ingest result.  Values are matched by position — the first
+    /// weight applies to the first entry in `plugin_stack`, and so on.
+    /// Missing trailing weights default to `1.0`.
+    ///
+    /// Example:
+    /// ```toml
+    /// [context_engine]
+    /// plugin_stack = ["qdrant-recall", "my-indexer"]
+    /// plugin_stack_weights = [2.0, 1.0]   # qdrant-recall has higher priority
+    /// ```
+    #[serde(default)]
+    pub plugin_stack_weights: Vec<f32>,
     /// Optional Python script hooks that override specific lifecycle methods.
     pub hooks: ContextEngineHooks,
     /// Plugin registries (GitHub repos) to browse for installable plugins.
@@ -2181,6 +2196,7 @@ impl Default for ContextEngineTomlConfig {
             engine: "default".to_string(),
             plugin: None,
             plugin_stack: None,
+            plugin_stack_weights: Vec::new(),
             hooks: ContextEngineHooks::default(),
             plugin_registries: default_plugin_registries(),
         }

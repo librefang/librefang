@@ -2351,13 +2351,33 @@ impl ContextEngine for ScriptableContextEngine {
             .map(|m| serde_json::to_value(m).unwrap_or_default())
             .collect();
 
-        let input = serde_json::json!({
+        // Build token pressure metadata for the compact hook.
+        let used_tokens: usize = 0; // current usage not tracked at this call site
+        let max_ctx = if context_window_tokens > 0 { context_window_tokens } else { 100_000 };
+        let pressure = (used_tokens as f64 / max_ctx as f64).min(1.0);
+        let recommendation = match pressure {
+            p if p >= 0.9 => "critical",
+            p if p >= 0.8 => "aggressive",
+            p if p >= 0.6 => "moderate",
+            _ => "light",
+        };
+        let token_pressure = serde_json::json!({
+            "used_tokens": used_tokens,
+            "max_tokens": max_ctx,
+            "pressure": pressure,
+            "recommendation": recommendation,
+        });
+
+        let mut input = serde_json::json!({
             "type": "compact",
             "agent_id": agent_id.0.to_string(),
             "messages": msg_values,
             "model": model,
             "context_window_tokens": context_window_tokens,
         });
+        if let Some(obj) = input.as_object_mut() {
+            obj.insert("token_pressure".to_string(), token_pressure);
+        }
 
         // TTL-based cache for compact hook.
         if let Some(ttl_secs) = self.compact_cache_ttl_secs {
@@ -2928,6 +2948,10 @@ pub fn list_installed_plugins() -> Vec<librefang_types::config::PluginManifest> 
 /// - `truncate_tool_result`: delegates to the first (primary) engine.
 pub struct StackedContextEngine {
     engines: Vec<Box<dyn ContextEngine>>,
+    /// Per-layer priority weights for ingest result ordering.
+    /// Higher weights cause a layer's memories to appear first in the merged
+    /// result. Defaults to `1.0` for every layer.
+    layer_weights: Vec<f32>,
     /// Shared event bus for inter-plugin event dispatch.
     event_bus: std::sync::Arc<PluginEventBus>,
 }
@@ -2942,7 +2966,17 @@ impl StackedContextEngine {
             "StackedContextEngine requires at least one engine"
         );
         let bus = std::sync::Arc::new(PluginEventBus::new(256));
-        Self { engines, event_bus: bus }
+        let layer_weights = vec![1.0f32; engines.len()];
+        Self { engines, layer_weights, event_bus: bus }
+    }
+
+    /// Override the default per-layer weights (all `1.0`) with caller-supplied
+    /// values.  Weights are matched by position — the first weight applies to
+    /// the first engine, and so on.  Weights beyond `engines.len()` are
+    /// silently ignored; missing trailing weights default to `1.0`.
+    pub fn with_weights(mut self, weights: Vec<f32>) -> Self {
+        self.layer_weights = weights;
+        self
     }
 
     /// Return a reference to the shared event bus.
@@ -3060,13 +3094,23 @@ impl ContextEngine for StackedContextEngine {
             }
         });
 
+        let default_weight = 1.0f32;
         let mut succeeded: usize = 0;
         let mut failed: usize = 0;
-        let mut all_memories = Vec::new();
-        for memories in futures::future::join_all(futs).await {
+
+        // Collect (weight, memories) pairs, preserving layer index so we can
+        // sort by weight without losing provenance.
+        let mut weighted_results: Vec<(f32, Vec<MemoryFragment>)> = Vec::new();
+        for (i, memories) in futures::future::join_all(futs).await.into_iter().enumerate() {
             match memories {
-                Some(m) => { succeeded += 1; all_memories.extend(m); }
-                None => { failed += 1; }
+                Some(m) => {
+                    succeeded += 1;
+                    let w = *self.layer_weights.get(i).unwrap_or(&default_weight);
+                    weighted_results.push((w, m));
+                }
+                None => {
+                    failed += 1;
+                }
             }
         }
         if failed > 0 {
@@ -3076,6 +3120,16 @@ impl ContextEngine for StackedContextEngine {
                 "StackedContextEngine: ingest completed with some engine failures"
             );
         }
+
+        // Sort layers by weight descending so higher-priority layers' memories
+        // appear first in the merged result.
+        weighted_results.sort_by(|a, b| {
+            b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let all_memories: Vec<MemoryFragment> =
+            weighted_results.into_iter().flat_map(|(_, m)| m).collect();
+
         Ok(IngestResult {
             recalled_memories: all_memories,
         })
