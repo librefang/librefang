@@ -319,8 +319,8 @@ Depends on: Rounds 1-4 (everything compiles and all round gates pass).
 
 | Change | File | Description | AC |
 |--------|------|-------------|-----|
-| Create test file | `crates/librefang-api/tests/account_tests.rs` | All 33 account tests from SPEC Claims table | AC-20–AC-33 |
-| Integration tests | same file | TestServer harness with `post_agent`, `get_agents`, `delete_agent` | AC-25–AC-33 |
+| Create test file | `crates/librefang-api/tests/account_tests.rs` | Integration tests (8 batches × ~3-4 tests = ~25+ tests) + Round 3 infrastructure tests (19 micro-cycles) = ~44 total account-related tests | AC-20–AC-33 |
+| Integration harness | same file | TestServer with helper functions for `spawn_agent`, `list_agents`, `get_agent`, `delete_agent` scoped by AccountId | AC-25–AC-33 |
 
 **TDD micro-cycles:**
 
@@ -337,6 +337,11 @@ Depends on: Rounds 1-4 (everything compiles and all round gates pass).
 **Batch C: Security (RED→GREEN×2)**
 7. RED: `test_error_body_never_leaks_account_id` → GREEN: 404 body = generic message
 8. RED: `test_legacy_agent_roundtrip` → GREEN: legacy agents (no account_id) API-accessible with AccountId(None)
+
+**Test Coverage Summary:**
+- Round 3 infrastructure tests: 19 micro-cycles (Batches A-D, extractor + macros + guard + HMAC)
+- Round 5 integration tests: ~25+ tests (Batches A-C, CRUD scoping + legacy mode + security)
+- **Total account-related tests: 44+**, covering all SPEC Claims
 
 **Round 5 gate:**
 ```bash
