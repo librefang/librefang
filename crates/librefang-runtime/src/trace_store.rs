@@ -202,6 +202,7 @@ mod tests {
             } else {
                 None
             },
+            annotations: None,
         }
     }
 

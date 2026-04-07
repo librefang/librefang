@@ -380,7 +380,7 @@ pub fn list_plugins() -> Vec<PluginInfo> {
 pub async fn install_plugin(source: &PluginSource) -> Result<PluginInfo, String> {
     let plugins = ensure_plugins_dir().map_err(|e| format!("Cannot create plugins dir: {e}"))?;
 
-    match source {
+    let info = match source {
         PluginSource::Local { path } => install_from_local(path, &plugins),
         PluginSource::Registry { name, github_repo } => {
             let repo = github_repo
@@ -391,7 +391,18 @@ pub async fn install_plugin(source: &PluginSource) -> Result<PluginInfo, String>
         PluginSource::Git { url, branch } => {
             install_from_git(url, branch.as_deref(), &plugins).await
         }
+    }?;
+
+    // Check that all declared plugin dependencies are already installed.
+    let raw_toml = std::fs::read_to_string(info.path.join("plugin.toml")).unwrap_or_default();
+    let needs = extract_needs(&raw_toml);
+    if let Err(e) = check_plugin_needs(&needs) {
+        // Don't remove the partially-installed plugin — let the user decide.
+        // Just warn so they know what to install next.
+        warn!("{e}");
     }
+
+    Ok(info)
 }
 
 /// Install from a local directory by copying.
@@ -2638,6 +2649,93 @@ fn extract_needs(raw_toml: &str) -> Vec<String> {
         .collect()
 }
 
+/// Check whether all plugins listed in `needs` are already installed.
+///
+/// Returns `Ok(())` if all dependencies are present, or an error listing
+/// which dependencies are missing.
+pub fn check_plugin_needs(needs: &[String]) -> Result<(), String> {
+    if needs.is_empty() {
+        return Ok(());
+    }
+    let installed: std::collections::HashSet<String> = list_plugins()
+        .into_iter()
+        .map(|p| p.manifest.name.clone())
+        .collect();
+
+    let missing: Vec<&str> = needs
+        .iter()
+        .filter(|dep| !installed.contains(*dep))
+        .map(String::as_str)
+        .collect();
+
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Unmet plugin dependencies: [{}]. Install them first or use install_plugin for each.",
+            missing.join(", ")
+        ))
+    }
+}
+
+/// Resolve installation order for a plugin and all its transitive dependencies.
+///
+/// Performs a topological sort using DFS. Returns an ordered list of plugin
+/// names to install (dependencies first). Detects circular dependencies.
+///
+/// Only resolves plugins available in the registry index (`registry_plugins`).
+/// Unknown dependencies are returned as-is and the caller decides whether
+/// to error.
+pub fn resolve_install_order(
+    root: &str,
+    registry_plugins: &[serde_json::Value],
+) -> Result<Vec<String>, String> {
+    let mut order: Vec<String> = Vec::new();
+    let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut in_stack: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    fn dfs(
+        name: &str,
+        registry: &[serde_json::Value],
+        order: &mut Vec<String>,
+        visited: &mut std::collections::HashSet<String>,
+        in_stack: &mut std::collections::HashSet<String>,
+    ) -> Result<(), String> {
+        if visited.contains(name) {
+            return Ok(());
+        }
+        if in_stack.contains(name) {
+            return Err(format!("Circular dependency detected: '{name}' depends on itself"));
+        }
+        in_stack.insert(name.to_string());
+
+        // Find the plugin in the registry index
+        let needs: Vec<String> = registry
+            .iter()
+            .find(|p| p.get("name").and_then(|v| v.as_str()) == Some(name))
+            .and_then(|p| p.get("needs"))
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                   .filter_map(|v| v.as_str().map(String::from))
+                   .collect()
+            })
+            .unwrap_or_default();
+
+        for dep in &needs {
+            dfs(dep, registry, order, visited, in_stack)?;
+        }
+
+        in_stack.remove(name);
+        visited.insert(name.to_string());
+        order.push(name.to_string());
+        Ok(())
+    }
+
+    dfs(root, registry_plugins, &mut order, &mut visited, &mut in_stack)?;
+    Ok(order)
+}
+
 /// Load a plugin manifest from disk without running integrity/dependency checks.
 ///
 /// Used internally for operations that need to read and then re-write the
@@ -3001,6 +3099,52 @@ pub async fn install_plugin_deps(name: &str) -> Result<Vec<String>, String> {
     }
 
     Ok(log)
+}
+
+/// Install a plugin and all its declared dependencies from the registry.
+///
+/// Resolves the dependency graph, then installs each plugin in topological
+/// order (dependencies first). Already-installed plugins are skipped.
+/// Returns the list of plugin names that were newly installed.
+pub async fn install_plugin_with_deps(
+    name: &str,
+    github_repo: Option<&str>,
+) -> Result<Vec<String>, String> {
+    validate_plugin_name(name)?;
+
+    // Fetch the registry index to resolve the dependency graph.
+    let repo = github_repo.unwrap_or("librefang/librefang-registry");
+    let index_url = format!("https://raw.githubusercontent.com/{repo}/main/index.json");
+    let registry_plugins: Vec<serde_json::Value> = reqwest::Client::new()
+        .get(&index_url)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to fetch registry index: {e}"))?
+        .json()
+        .await
+        .unwrap_or_default();
+
+    let order = resolve_install_order(name, &registry_plugins)?;
+
+    let installed_names: std::collections::HashSet<String> = list_plugins()
+        .into_iter()
+        .map(|p| p.manifest.name.clone())
+        .collect();
+
+    let mut newly_installed = Vec::new();
+    for dep_name in &order {
+        if installed_names.contains(dep_name) {
+            info!(plugin = dep_name.as_str(), "Dependency already installed, skipping");
+            continue;
+        }
+        let source = PluginSource::Registry {
+            name: dep_name.clone(),
+            github_repo: github_repo.map(String::from),
+        };
+        install_plugin(&source).await?;
+        newly_installed.push(dep_name.clone());
+    }
+    Ok(newly_installed)
 }
 
 /// Open (or create) the persistent hook trace store at the default location.

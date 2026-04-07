@@ -37,6 +37,29 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tracing::{debug, warn};
 
+/// Per-path advisory locks for shared state files.
+///
+/// Provides mutual exclusion within a single process. Cross-process safety
+/// (e.g. two daemon instances) is out of scope — only one daemon should own
+/// a plugin's state file at a time.
+static STATE_FILE_LOCKS: once_cell::sync::Lazy<
+    std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
+> = once_cell::sync::Lazy::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// Acquire the in-process advisory lock for a state file path.
+///
+/// Returns a guard that must be held for the duration of any read-modify-write
+/// operation on the file. Dropping the guard releases the lock.
+pub async fn lock_state_file(path: &std::path::Path) -> tokio::sync::OwnedMutexGuard<()> {
+    let arc = {
+        let mut map = STATE_FILE_LOCKS.lock().unwrap();
+        map.entry(path.to_string_lossy().into_owned())
+           .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+           .clone()
+    };
+    arc.lock_owned().await
+}
+
 /// Which launcher runs a hook script.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PluginRuntime {
@@ -896,6 +919,17 @@ pub async fn run_hook_json(
                 if !stderr_text.trim().is_empty() {
                     debug!("hook stderr: {}", stderr_text.trim());
                 }
+                // Guard against misbehaving scripts that emit enormous outputs.
+                const MAX_OUTPUT_BYTES: usize = 4 * 1024 * 1024; // 4 MiB
+                let total_output_bytes: usize = stdout_lines.iter().map(|l| l.len()).sum();
+                if total_output_bytes > MAX_OUTPUT_BYTES {
+                    return Err(PluginRuntimeError::InvalidOutput(format!(
+                        "Hook output exceeds maximum size ({} bytes > {} bytes limit). \
+                         Truncate your hook's JSON response.",
+                        total_output_bytes,
+                        MAX_OUTPUT_BYTES
+                    )));
+                }
                 parse_output(&stdout_lines)
             }
         }
@@ -1105,6 +1139,17 @@ impl HookProcessPool {
             return Err(PluginRuntimeError::Io(
                 "persistent process closed stdout".into(),
             ));
+        }
+
+        // Guard against misbehaving scripts that emit enormous outputs.
+        const MAX_OUTPUT_BYTES: usize = 4 * 1024 * 1024; // 4 MiB
+        if response.len() > MAX_OUTPUT_BYTES {
+            return Err(PluginRuntimeError::InvalidOutput(format!(
+                "Hook output exceeds maximum size ({} bytes > {} bytes limit). \
+                 Truncate your hook's JSON response.",
+                response.len(),
+                MAX_OUTPUT_BYTES
+            )));
         }
 
         serde_json::from_str(response.trim())

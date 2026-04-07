@@ -162,6 +162,10 @@ pub fn router() -> axum::Router<Arc<AppState>> {
             "/context-engine/sandbox-policy",
             axum::routing::get(context_engine_sandbox_policy),
         )
+        .route(
+            "/plugins/install-with-deps",
+            axum::routing::post(install_plugin_with_deps_handler),
+        )
 }
 
 /// Query parameters for `GET /api/plugins`.
@@ -2225,4 +2229,35 @@ pub async fn context_engine_sandbox_policy(
         "plugins": policies,
     }))
     .into_response()
+}
+
+/// POST /api/plugins/install-with-deps — Install a plugin and all its dependencies.
+pub async fn install_plugin_with_deps_handler(
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let name = match body.get("name").and_then(|v| v.as_str()) {
+        Some(n) => n.to_string(),
+        None => return ApiErrorResponse::bad_request("Missing 'name' field").into_response(),
+    };
+    if let Err(e) = librefang_runtime::plugin_manager::validate_plugin_name(&name) {
+        return ApiErrorResponse::bad_request(e).into_response();
+    }
+    let registry = body.get("registry").and_then(|v| v.as_str()).map(String::from);
+    match librefang_runtime::plugin_manager::install_plugin_with_deps(
+        &name,
+        registry.as_deref(),
+    )
+    .await
+    {
+        Ok(installed) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "installed": installed,
+                "count": installed.len(),
+                "message": format!("Installed {} plugin(s) including dependencies", installed.len()),
+            })),
+        )
+            .into_response(),
+        Err(e) => ApiErrorResponse::bad_request(e).into_response(),
+    }
 }

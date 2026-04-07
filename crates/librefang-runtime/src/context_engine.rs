@@ -427,6 +427,10 @@ pub struct HookTrace {
     pub input_preview: serde_json::Value,
     /// JSON output returned by the hook script (None on failure).
     pub output_preview: Option<serde_json::Value>,
+    /// Arbitrary metadata from the hook's `"annotations"` response field.
+    /// Stored for observability — surfaced in trace history queries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<serde_json::Value>,
 }
 
 /// Maximum number of traces kept in the ring buffer.
@@ -1086,6 +1090,84 @@ impl ScriptableContextEngine {
         }
     }
 
+    /// Process the JSON output returned by an after_turn hook.
+    ///
+    /// Recognised fields:
+    /// - `"memories"`: inject new memories for the agent
+    /// - `"log"`:      emit the value as an info-level log line
+    /// - `"annotations"`: arbitrary metadata (logged at debug level)
+    ///
+    /// Unknown fields are silently ignored so future hook versions stay
+    /// backwards-compatible with older runtimes.
+    fn process_after_turn_output(
+        output: &serde_json::Value,
+        agent_id: &str,
+        memory_substrate: Option<&std::sync::Arc<librefang_memory::MemorySubstrate>>,
+    ) {
+        // "log" field — emit as info log from the plugin's perspective.
+        if let Some(msg) = output.get("log").and_then(|v| v.as_str()) {
+            let trimmed = msg.chars().take(512).collect::<String>();
+            tracing::info!(agent_id, plugin_log = trimmed.as_str(), "after_turn hook log");
+        }
+
+        // "annotations" field — debug-level dump for observability.
+        if let Some(ann) = output.get("annotations") {
+            tracing::debug!(
+                agent_id,
+                annotations = ann.to_string().chars().take(1024).collect::<String>().as_str(),
+                "after_turn hook annotations"
+            );
+        }
+
+        // "memories" field — store each entry in the memory substrate.
+        if let Some(mems) = output.get("memories").and_then(|v| v.as_array()) {
+            let Some(substrate) = memory_substrate else { return };
+            for mem in mems {
+                let content = match mem.get("content").and_then(|v| v.as_str()) {
+                    Some(c) if !c.is_empty() => c.to_string(),
+                    _ => continue,
+                };
+                let tags: Vec<String> = mem
+                    .get("tags")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                           .filter_map(|t| t.as_str().map(String::from))
+                           .take(16)
+                           .collect()
+                    })
+                    .unwrap_or_default();
+
+                // Fire-and-forget: memory injection is best-effort and must not block.
+                let substrate = std::sync::Arc::clone(substrate);
+                let agent_id_owned = agent_id.to_string();
+                tokio::spawn(async move {
+                    use librefang_types::memory::Memory as _;
+                    let parsed_id = uuid::Uuid::parse_str(&agent_id_owned)
+                        .map(librefang_types::agent::AgentId)
+                        .unwrap_or_else(|_| librefang_types::agent::AgentId::new());
+                    let scope = if tags.is_empty() {
+                        "hook".to_string()
+                    } else {
+                        tags.join(",")
+                    };
+                    if let Err(e) = substrate
+                        .remember(
+                            parsed_id,
+                            &content,
+                            librefang_types::memory::MemorySource::System,
+                            &scope,
+                            std::collections::HashMap::new(),
+                        )
+                        .await
+                    {
+                        tracing::warn!(error = %e, "after_turn hook: failed to inject memory");
+                    }
+                });
+            }
+        }
+    }
+
     /// Resolve a script path, expanding `~` to the user's home directory.
     fn resolve_script_path(path: &str) -> String {
         if let Some(rest) = path.strip_prefix("~/") {
@@ -1177,6 +1259,7 @@ impl ScriptableContextEngine {
                         error: None,
                         input_preview: input_preview.clone(),
                         output_preview: Some(v.clone()),
+                        annotations: v.get("annotations").cloned(),
                     }, trace_store, plugin_name);
                     return Ok((v, elapsed_ms));
                 }
@@ -1193,6 +1276,7 @@ impl ScriptableContextEngine {
             error: Some(err_msg.clone()),
             input_preview,
             output_preview: None,
+            annotations: None,
         }, trace_store, plugin_name);
         Err(err_msg)
     }
@@ -1271,6 +1355,7 @@ impl ScriptableContextEngine {
                             error: None,
                             input_preview,
                             output_preview: Some(output.clone()),
+                            annotations: output.get("annotations").cloned(),
                         },
                         self.trace_store.as_ref(),
                         &self.plugin_name,
@@ -1289,6 +1374,7 @@ impl ScriptableContextEngine {
                             error: Some(err_msg.clone()),
                             input_preview,
                             output_preview: None,
+                            annotations: None,
                         },
                         self.trace_store.as_ref(),
                         &self.plugin_name,
@@ -1910,6 +1996,7 @@ impl ContextEngine for ScriptableContextEngine {
         let sem = std::sync::Arc::clone(&self.after_turn_sem);
         let trace_store = self.trace_store.clone();
         let plugin_name = self.plugin_name.clone();
+        let agent_id_str = agent_id.0.to_string();
         if let Ok(mut tasks) = self.after_turn_tasks.lock() {
             // Reap already-completed tasks to prevent unbounded growth.
             while tasks.try_join_next().is_some() {}
@@ -1951,6 +2038,7 @@ impl ContextEngine for ScriptableContextEngine {
                                     error: None,
                                     input_preview,
                                     output_preview: Some(output.clone()),
+                                    annotations: output.get("annotations").cloned(),
                                 },
                                 trace_store.as_ref(),
                                 &plugin_name,
@@ -1969,6 +2057,7 @@ impl ContextEngine for ScriptableContextEngine {
                                     error: Some(err_msg.clone()),
                                     input_preview,
                                     output_preview: None,
+                                    annotations: None,
                                 },
                                 trace_store.as_ref(),
                                 &plugin_name,
@@ -1980,9 +2069,11 @@ impl ContextEngine for ScriptableContextEngine {
                     Self::run_hook("after_turn", &script, runtime, input, timeout_secs, &plugin_env, max_retries, retry_delay_ms, max_memory_mb, allow_network, &traces, &hook_schemas, shared_state_path.as_deref(), trace_store.as_ref(), &plugin_name).await
                 };
                 match result {
-                    Ok((_, ms)) => {
+                    Ok((output, ms)) => {
                         Self::record_hook(&metrics, "after_turn", ms, true);
                         debug!("After-turn hook completed ({ms}ms)");
+                        // Inspect hook output for memories, logs, and annotations.
+                        Self::process_after_turn_output(&output, &agent_id_str, None);
                     }
                     Err(e) => {
                         Self::record_hook(&metrics, "after_turn", 0, false);
