@@ -16,7 +16,7 @@ use librefang_types::i18n;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use librefang_telemetry::metrics;
 
@@ -409,6 +409,170 @@ pub async fn security_headers(request: Request<Body>, next: Next) -> Response<Bo
     response
 }
 
+// ---------------------------------------------------------------------------
+// Multi-tenant HMAC account signature verification (with replay protection)
+// ---------------------------------------------------------------------------
+
+/// Result of verifying an account HMAC signature.
+#[derive(Debug, PartialEq)]
+pub enum AccountSigResult {
+    /// Signature is valid (new format with timestamp replay protection).
+    Valid,
+    /// Signature is valid using the legacy format (account_id only, no timestamp).
+    ValidLegacy,
+    /// No `X-Account-Id` header present — skip account-level auth.
+    NoHeader,
+    /// Timestamp is missing but signature does not match legacy format either.
+    InvalidSignature,
+    /// Timestamp is too old or too far in the future.
+    SignatureExpired,
+}
+
+/// Maximum allowed clock skew into the future (seconds).
+const HMAC_MAX_FUTURE_SECS: u64 = 60;
+
+/// Verify an HMAC-signed account request.
+///
+/// **New header contract (with replay protection):**
+/// - `X-Account-Id: <account_id>`
+/// - `X-Account-Timestamp: <unix_epoch_seconds>`
+/// - `X-Account-Sig: <hex_hmac>`
+///
+/// Signature input: `HMAC-SHA256(secret, "{account_id}\n{method}\n{path}\n{timestamp}")`
+///
+/// **Legacy fallback** (when `X-Account-Timestamp` is absent):
+/// Signature input: `HMAC-SHA256(secret, account_id)`
+pub fn verify_account_signature(
+    secret: &str,
+    account_id: &str,
+    method: &str,
+    path: &str,
+    timestamp: Option<&str>,
+    signature_hex: &str,
+    hmac_max_age_secs: u64,
+) -> AccountSigResult {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    type HmacSha256 = Hmac<Sha256>;
+
+    // Try new format first if timestamp is provided.
+    if let Some(ts_str) = timestamp {
+        let ts: u64 = match ts_str.parse() {
+            Ok(v) => v,
+            Err(_) => return AccountSigResult::InvalidSignature,
+        };
+
+        // Staleness check
+        if hmac_max_age_secs > 0 {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+
+            if ts + hmac_max_age_secs < now {
+                return AccountSigResult::SignatureExpired;
+            }
+            if ts > now + HMAC_MAX_FUTURE_SECS {
+                return AccountSigResult::SignatureExpired;
+            }
+        }
+
+        // Build message: "{account_id}\n{method}\n{path}\n{timestamp}"
+        let message = format!("{}\n{}\n{}\n{}", account_id, method, path, ts_str);
+        let mut mac =
+            HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key size");
+        mac.update(message.as_bytes());
+        let expected = hex::encode(mac.finalize().into_bytes());
+
+        if constant_time_eq(expected.as_bytes(), signature_hex.as_bytes()) {
+            return AccountSigResult::Valid;
+        }
+
+        // New-format signature didn't match — do NOT fall back to legacy
+        // when a timestamp was explicitly provided.
+        return AccountSigResult::InvalidSignature;
+    }
+
+    // Legacy fallback: signature = HMAC-SHA256(secret, account_id)
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key size");
+    mac.update(account_id.as_bytes());
+    let expected = hex::encode(mac.finalize().into_bytes());
+
+    if constant_time_eq(expected.as_bytes(), signature_hex.as_bytes()) {
+        warn!(
+            account_id = %account_id,
+            "Legacy HMAC signature format used (no timestamp). \
+             Migrate to include X-Account-Timestamp for replay protection."
+        );
+        return AccountSigResult::ValidLegacy;
+    }
+
+    AccountSigResult::InvalidSignature
+}
+
+/// Constant-time byte-slice equality to prevent timing attacks.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    use subtle::ConstantTimeEq;
+    a.len() == b.len() && a.ct_eq(b).into()
+}
+
+/// Extract and verify multi-tenant account identity from request headers.
+///
+/// Reads `X-Account-Id`, `X-Account-Timestamp` (optional), and `X-Account-Sig`.
+/// Returns `Ok(Some(account_id))` if valid, `Ok(None)` if no account headers,
+/// or `Err(Response)` with 401 error.
+pub fn extract_verified_account(
+    headers: &axum::http::HeaderMap,
+    method: &str,
+    path: &str,
+    hmac_secret: &str,
+    hmac_max_age_secs: u64,
+) -> Result<Option<String>, Response<Body>> {
+    let account_id = match headers.get("x-account-id").and_then(|v| v.to_str().ok()) {
+        Some(id) => id,
+        None => return Ok(None),
+    };
+
+    let signature = match headers.get("x-account-sig").and_then(|v| v.to_str().ok()) {
+        Some(sig) => sig,
+        None => {
+            return Err(Response::builder()
+                .status(StatusCode::UNAUTHORIZED)
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"error":"Missing X-Account-Sig header"}"#))
+                .unwrap_or_default());
+        }
+    };
+
+    let timestamp = headers
+        .get("x-account-timestamp")
+        .and_then(|v| v.to_str().ok());
+
+    match verify_account_signature(
+        hmac_secret,
+        account_id,
+        method,
+        path,
+        timestamp,
+        signature,
+        hmac_max_age_secs,
+    ) {
+        AccountSigResult::Valid | AccountSigResult::ValidLegacy => Ok(Some(account_id.to_string())),
+        AccountSigResult::NoHeader => Ok(None),
+        AccountSigResult::SignatureExpired => Err(Response::builder()
+            .status(StatusCode::UNAUTHORIZED)
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"error":"Signature expired"}"#))
+            .unwrap_or_default()),
+        AccountSigResult::InvalidSignature => Err(Response::builder()
+            .status(StatusCode::UNAUTHORIZED)
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"error":"Invalid account signature"}"#))
+            .unwrap_or_default()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -529,6 +693,172 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(response.headers()["x-api-version"], "v1");
+    }
+
+    // -----------------------------------------------------------------------
+    // HMAC account signature verification tests (replay protection)
+    // -----------------------------------------------------------------------
+
+    /// Helper: compute HMAC-SHA256 and return hex string.
+    fn compute_hmac(secret: &str, message: &str) -> String {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        type HmacSha256 = Hmac<Sha256>;
+        let mut mac =
+            HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key size");
+        mac.update(message.as_bytes());
+        hex::encode(mac.finalize().into_bytes())
+    }
+
+    /// Helper: current unix timestamp.
+    fn now_unix() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    #[test]
+    fn test_hmac_with_timestamp_valid() {
+        let secret = "test-secret-key";
+        let account_id = "acct_123";
+        let method = "GET";
+        let path = "/api/agents";
+        let ts = now_unix().to_string();
+        let message = format!("{}\n{}\n{}\n{}", account_id, method, path, ts);
+        let sig = compute_hmac(secret, &message);
+
+        let result =
+            verify_account_signature(secret, account_id, method, path, Some(&ts), &sig, 300);
+        assert_eq!(result, AccountSigResult::Valid);
+    }
+
+    #[test]
+    fn test_hmac_with_timestamp_expired() {
+        let secret = "test-secret-key";
+        let account_id = "acct_123";
+        let method = "GET";
+        let path = "/api/agents";
+        let ts = (now_unix() - 600).to_string();
+        let message = format!("{}\n{}\n{}\n{}", account_id, method, path, ts);
+        let sig = compute_hmac(secret, &message);
+
+        let result =
+            verify_account_signature(secret, account_id, method, path, Some(&ts), &sig, 300);
+        assert_eq!(result, AccountSigResult::SignatureExpired);
+    }
+
+    #[test]
+    fn test_hmac_with_timestamp_future() {
+        let secret = "test-secret-key";
+        let account_id = "acct_123";
+        let method = "POST";
+        let path = "/api/agents";
+        let ts = (now_unix() + 120).to_string();
+        let message = format!("{}\n{}\n{}\n{}", account_id, method, path, ts);
+        let sig = compute_hmac(secret, &message);
+
+        let result =
+            verify_account_signature(secret, account_id, method, path, Some(&ts), &sig, 300);
+        assert_eq!(result, AccountSigResult::SignatureExpired);
+    }
+
+    #[test]
+    fn test_hmac_legacy_still_works() {
+        let secret = "test-secret-key";
+        let account_id = "acct_legacy";
+        let sig = compute_hmac(secret, account_id);
+
+        let result =
+            verify_account_signature(secret, account_id, "GET", "/api/agents", None, &sig, 300);
+        assert_eq!(result, AccountSigResult::ValidLegacy);
+    }
+
+    #[test]
+    fn test_hmac_replay_different_path() {
+        let secret = "test-secret-key";
+        let account_id = "acct_123";
+        let method = "GET";
+        let original_path = "/api/agents";
+        let ts = now_unix().to_string();
+        let message = format!("{}\n{}\n{}\n{}", account_id, method, original_path, ts);
+        let sig = compute_hmac(secret, &message);
+
+        let result = verify_account_signature(
+            secret,
+            account_id,
+            method,
+            "/api/config",
+            Some(&ts),
+            &sig,
+            300,
+        );
+        assert_eq!(result, AccountSigResult::InvalidSignature);
+    }
+
+    #[test]
+    fn test_hmac_replay_different_method() {
+        let secret = "test-secret-key";
+        let account_id = "acct_123";
+        let path = "/api/agents";
+        let ts = now_unix().to_string();
+        let message = format!("{}\n{}\n{}\n{}", account_id, "GET", path, ts);
+        let sig = compute_hmac(secret, &message);
+
+        let result =
+            verify_account_signature(secret, account_id, "POST", path, Some(&ts), &sig, 300);
+        assert_eq!(result, AccountSigResult::InvalidSignature);
+    }
+
+    #[test]
+    fn test_hmac_invalid_timestamp_format() {
+        let result = verify_account_signature(
+            "test-secret",
+            "acct_123",
+            "GET",
+            "/api/agents",
+            Some("not-a-number"),
+            "deadbeef",
+            300,
+        );
+        assert_eq!(result, AccountSigResult::InvalidSignature);
+    }
+
+    #[test]
+    fn test_hmac_wrong_secret() {
+        let account_id = "acct_123";
+        let method = "GET";
+        let path = "/api/agents";
+        let ts = now_unix().to_string();
+        let message = format!("{}\n{}\n{}\n{}", account_id, method, path, ts);
+        let sig = compute_hmac("correct-secret", &message);
+
+        let result = verify_account_signature(
+            "wrong-secret",
+            account_id,
+            method,
+            path,
+            Some(&ts),
+            &sig,
+            300,
+        );
+        assert_eq!(result, AccountSigResult::InvalidSignature);
+    }
+
+    #[test]
+    fn test_extract_verified_account_no_headers() {
+        let headers = axum::http::HeaderMap::new();
+        let result = extract_verified_account(&headers, "GET", "/api/agents", "secret", 300);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), None);
+    }
+
+    #[test]
+    fn test_extract_verified_account_missing_sig() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("x-account-id", "acct_123".parse().unwrap());
+        let result = extract_verified_account(&headers, "GET", "/api/agents", "secret", 300);
+        assert!(result.is_err());
     }
 }
 

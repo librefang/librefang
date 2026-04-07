@@ -1974,6 +1974,11 @@ pub struct KernelConfig {
     /// Individual endpoints may enforce tighter limits.
     #[serde(default = "default_max_request_body_bytes")]
     pub max_request_body_bytes: usize,
+    /// Maximum age (in seconds) for HMAC-signed account requests.
+    /// Timestamps older than this are rejected as expired (replay protection).
+    /// Default: 300 (5 minutes). Set to 0 to disable staleness checks.
+    #[serde(default = "default_hmac_max_age_secs")]
+    pub hmac_max_age_secs: u64,
     /// Enable config-driven API multi-tenant enforcement.
     ///
     /// When `true`, the API requires `X-Account-Id` on all non-exempt
@@ -2482,6 +2487,10 @@ fn default_max_request_body_bytes() -> usize {
     1_024 * 1_024
 }
 
+fn default_hmac_max_age_secs() -> u64 {
+    300
+}
+
 /// Audit log configuration.
 ///
 /// Configure in config.toml:
@@ -2939,6 +2948,7 @@ impl Default for KernelConfig {
             max_concurrent_bg_llm: default_max_concurrent_bg_llm(),
             max_agent_call_depth: default_max_agent_call_depth(),
             max_request_body_bytes: default_max_request_body_bytes(),
+            hmac_max_age_secs: default_hmac_max_age_secs(),
             multi_tenant: false,
             account_sig_secret: None,
         }
