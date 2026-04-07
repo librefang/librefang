@@ -138,6 +138,25 @@ pub trait KernelHandle: Send + Sync {
         Err("Cron scheduler not available".to_string())
     }
 
+    /// Cancel a cron job only if it belongs to the given agent.
+    /// More efficient than cron_list + filter for large job counts.
+    /// Override in kernel implementation for O(1) ownership check.
+    async fn cron_cancel_if_owned(&self, agent_id: &str, job_id: &str) -> Result<(), String> {
+        // Default implementation: list + filter (O(n))
+        let jobs = self.cron_list(agent_id).await?;
+        let owns_job = jobs.iter().any(|job| {
+            job.get("id")
+                .and_then(|v| v.as_str())
+                .is_some_and(|id| id == job_id)
+        });
+        if !owns_job {
+            return Err(format!(
+                "Cron job '{job_id}' not found or not owned by agent '{agent_id}'"
+            ));
+        }
+        self.cron_cancel(job_id).await
+    }
+
     /// Check if a tool requires approval based on current policy.
     fn requires_approval(&self, tool_name: &str) -> bool {
         let _ = tool_name;
