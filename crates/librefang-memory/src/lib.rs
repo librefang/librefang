@@ -25,6 +25,7 @@ pub mod prompt;
 pub mod semantic;
 pub mod session;
 pub mod structured;
+pub mod supabase_vector_store;
 pub mod usage;
 
 mod substrate;
@@ -44,3 +45,4 @@ pub use prompt::PromptStore;
 // Re-export vector store implementations
 pub use http_vector_store::HttpVectorStore;
 pub use semantic::SqliteVectorStore;
+pub use supabase_vector_store::SupabaseVectorStore;

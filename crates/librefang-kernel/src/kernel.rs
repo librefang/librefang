@@ -1678,6 +1678,28 @@ impl LibreFangKernel {
                     substrate.set_vector_store(store);
                     tracing::info!("Vector store backend: http ({})", url);
                 }
+                "supabase" => {
+                    let url = config.memory.vector_store_url.as_deref().ok_or_else(|| {
+                        KernelError::BootFailed(
+                            "vector_backend = \"supabase\" requires vector_store_url".into(),
+                        )
+                    })?;
+                    let key_env = config
+                        .memory
+                        .vector_store_api_key_env
+                        .as_deref()
+                        .unwrap_or("SUPABASE_ANON_KEY");
+                    let api_key = std::env::var(key_env).map_err(|_| {
+                        KernelError::BootFailed(format!(
+                            "vector_backend = \"supabase\" requires env var {key_env} to be set"
+                        ))
+                    })?;
+                    let store = std::sync::Arc::new(librefang_memory::SupabaseVectorStore::new(
+                        url, api_key,
+                    ));
+                    substrate.set_vector_store(store);
+                    tracing::info!("Vector store backend: supabase ({})", url);
+                }
                 "sqlite" | "" => { /* default — no external backend */ }
                 other => {
                     return Err(KernelError::BootFailed(format!(

@@ -3152,12 +3152,16 @@ pub struct MemoryConfig {
     /// Chunking configuration for long documents.
     #[serde(default)]
     pub chunking: ChunkConfig,
-    /// Vector store backend: `"sqlite"` (default) or `"http"`.
+    /// Vector store backend: `"sqlite"` (default), `"http"`, or `"supabase"`.
     #[serde(default)]
     pub vector_backend: Option<String>,
     /// Base URL for the HTTP vector store (used when `vector_backend = "http"`).
     #[serde(default)]
     pub vector_store_url: Option<String>,
+    /// Environment variable name holding the Supabase anon or service-role key
+    /// (used when `vector_backend = "supabase"`). Defaults to `"SUPABASE_ANON_KEY"`.
+    #[serde(default)]
+    pub vector_store_api_key_env: Option<String>,
 }
 
 /// Configuration for splitting long documents into overlapping chunks.
@@ -3202,6 +3206,7 @@ impl Default for MemoryConfig {
             chunking: ChunkConfig::default(),
             vector_backend: None,
             vector_store_url: None,
+            vector_store_api_key_env: None,
         }
     }
 }
