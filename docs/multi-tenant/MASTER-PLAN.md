@@ -36,6 +36,7 @@ The memory backend (Supabase + RuVector PostgreSQL extension via HTTP) was previ
 | 10 | SPEC | SPEC-MT-004: Supabase RLS Policies | Copy-pasteable SQL for RLS policies on qwntik Supabase tables | SPEC-MT-001, ADR-RV-001 |
 | 11 | SPEC | SPEC-RV-001: Extension Port Acceptance Criteria | 26 acceptance criteria across 6 groups (adapted from openfang SPEC-033) | ADR-RV-001 |
 | 12 | SPEC | SPEC-RV-002: Supabase Vector Store Integration | PostgresVectorStore impl, RPC functions, kernel integration | ADR-RV-001, SPEC-MT-004 |
+| 19 | SPEC | SPEC-RV-003: Supabase Memory Wiring | SupabaseVectorStore (HTTP/PostgREST), config, substrate wiring, 12 ACs | Phase 0 verified, ADR-RV-001 |
 | 13 | PLAN | PLAN-MT-001: Phase 1 Implementation | Foundation: types, middleware, extractors, guards, v18 migration, 76 handlers | All MT ADRs, SPEC-MT-001 |
 | 14 | PLAN | PLAN-MT-002: Phases 2–4 Implementation | Resource isolation, data isolation, hardening — 241 remaining handlers | PLAN-MT-001 |
 | 15 | PLAN | PLAN-RV-001: Phase 0 RuVector Port | 7-crate port, Docker image, Supabase integration, acceptance tests | ADR-RV-001, SPEC-RV-001 |
