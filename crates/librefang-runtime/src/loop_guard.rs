@@ -778,9 +778,8 @@ mod tests {
 
         // Should detect ping-pong and block (3 full repeats)
         assert!(
-            matches!(v, LoopGuardVerdict::Block(ref msg) if msg.contains("Ping-pong"))
-                || matches!(v, LoopGuardVerdict::Warn(ref msg) if msg.contains("Ping-pong")),
-            "Expected ping-pong detection, got: {:?}",
+            matches!(v, LoopGuardVerdict::Block(ref msg) if msg.contains("Ping-pong")),
+            "Expected Block for ping-pong with 3+ repeats, got: {:?}",
             v
         );
     }
@@ -1225,22 +1224,527 @@ mod tests {
         );
     }
 
+
+    // ========================================================================
+    // New tests — Private Helper Function Coverage
+    // ========================================================================
+
     #[test]
-    fn test_outcome_hash_differs_for_different_results() {
+    fn test_starts_with_ignore_case() {
+        // haystack shorter than needle
+        assert!(!starts_with_ignore_case("ab", "abc"));
+        // case-insensitive match
+        assert!(starts_with_ignore_case("DOCKER ps", "docker"));
+        assert!(starts_with_ignore_case("Hello World", "HELLO"));
+        // case-insensitive non-match
+        assert!(!starts_with_ignore_case("Hello World", "world"));
+        // empty needle matches
+        assert!(starts_with_ignore_case("anything", ""));
+        // empty haystack with non-empty needle
+        assert!(!starts_with_ignore_case("", "x"));
+    }
+
+    #[test]
+    fn test_contains_ignore_case() {
+        // haystack shorter than needle
+        assert!(!contains_ignore_case("ab", "abc"));
+        // match in middle
+        assert!(contains_ignore_case("fooBARbaz", "bar"));
+        // no match
+        assert!(!contains_ignore_case("hello world", "xyz"));
+        // match at start
+        assert!(contains_ignore_case("PS aux", "ps "));
+        // match at end
+        assert!(contains_ignore_case("run ps ", "ps "));
+        // case-insensitive
+        assert!(contains_ignore_case("xxxPS yyy", "ps "));
+    }
+
+    #[test]
+    fn test_contains_keyword_ignore_case_word_boundary() {
+        // "tail" embedded in "detail" → false (key reason this function exists)
+        assert!(!contains_keyword_ignore_case("detail", "tail"));
+        // "check" embedded in "healthcheck" → false
+        assert!(!contains_keyword_ignore_case("healthcheck", "check"));
+        // match at string start → true (no preceding char = word boundary)
+        assert!(contains_keyword_ignore_case("tail -f /var/log", "tail"));
+        // match at string end → true (no following char = word boundary)
+        assert!(contains_keyword_ignore_case("run status", "status"));
+        // surrounded by non-alphanumeric (dash) → true
+        assert!(contains_keyword_ignore_case("--check-status", "check"));
+        assert!(contains_keyword_ignore_case("--check-status", "status"));
+        // surrounded by spaces → true
+        assert!(contains_keyword_ignore_case("check status now", "status"));
+        // case-insensitive with word boundary
+        assert!(contains_keyword_ignore_case("HEALTH endpoint", "health"));
+    }
+
+    // ========================================================================
+    // New tests — Poll Detection Sub-Path Coverage
+    // ========================================================================
+
+    #[test]
+    fn test_poll_param_non_boolean_falls_through() {
+        // "poll": 1 is an integer, not bool — as_bool() returns None, falls through.
+        // Detection still succeeds because "docker ps" matches POLL_COMMAND_PREFIXES.
+        let result = LoopGuard::is_poll_call(
+            "shell_exec",
+            &serde_json::json!({"command": "docker ps", "poll": 1}),
+        );
+        assert!(result);
+    }
+
+    #[test]
+    fn test_poll_substring_ps_match() {
+        // "ps aux" does NOT match any POLL_COMMAND_PREFIXES (none start with "ps "),
+        // but it DOES match POLL_SUBSTRINGS via contains_ignore_case for "ps ".
+        let result = LoopGuard::is_poll_call(
+            "shell_exec",
+            &serde_json::json!({"command": "ps aux"}),
+        );
+        assert!(result);
+    }
+
+    #[test]
+    fn test_poll_detection_via_param_key_status() {
+        // "custom-cmd" doesn't match any prefix/substring/keyword,
+        // but the param key "status_check" contains "status".
+        let result = LoopGuard::is_poll_call(
+            "shell_exec",
+            &serde_json::json!({"command": "custom-cmd", "status_check": true}),
+        );
+        assert!(result);
+    }
+
+    #[test]
+    fn test_poll_detection_via_param_key_poll() {
+        // Param key "poll_interval" contains "poll".
+        let result = LoopGuard::is_poll_call(
+            "shell_exec",
+            &serde_json::json!({"command": "custom-cmd", "poll_interval": 5000}),
+        );
+        assert!(result);
+    }
+
+    #[test]
+    fn test_poll_detection_via_param_key_wait() {
+        // Param key "wait_timeout" contains "wait".
+        let result = LoopGuard::is_poll_call(
+            "shell_exec",
+            &serde_json::json!({"command": "custom-cmd", "wait_timeout": 30}),
+        );
+        assert!(result);
+    }
+
+    #[test]
+    fn test_is_poll_call_null_params() {
+        // Null has no "poll" key, no "command" key, is not an object.
+        let result = LoopGuard::is_poll_call("shell_exec", &serde_json::Value::Null);
+        assert!(!result);
+    }
+
+    #[test]
+    fn test_is_poll_call_array_params() {
+        // Array has no "poll" key, no "command" key, as_object() returns None.
+        let result = LoopGuard::is_poll_call(
+            "shell_exec",
+            &serde_json::json!([1, 2, 3]),
+        );
+        assert!(!result);
+    }
+
+    #[test]
+    fn test_non_poll_tool_explicit_poll_true() {
+        // "custom_tool" is NOT in POLL_TOOLS, but explicit poll=true works
+        // for any tool (first check in is_poll_call, before POLL_TOOLS gate).
+        let result = LoopGuard::is_poll_call(
+            "custom_tool",
+            &serde_json::json!({"poll": true}),
+        );
+        assert!(result);
+    }
+
+    // ========================================================================
+    // Config Correction Edge Cases
+    // ========================================================================
+
+    #[test]
+    fn test_zero_block_threshold_corrected() {
+        let config = LoopGuardConfig {
+            block_threshold: 0,
+            ..LoopGuardConfig::default()
+        };
+        let mut guard = LoopGuard::new(config);
+        let params = serde_json::json!({"x": 1});
+
+        // block_threshold=0 is corrected to 5 in new()
+        // warn_threshold remains default 3
+        // Calls 1-4: Allow or Warn (count < corrected block=5)
+        for _ in 0..4 {
+            let v = guard.check("tool", &params);
+            assert!(
+                matches!(v, LoopGuardVerdict::Allow | LoopGuardVerdict::Warn(_)),
+                "Calls 1-4 should be Allow or Warn, got: {:?}",
+                v
+            );
+        }
+
+        // Call 5: count==5 hits corrected block_threshold, should Block
+        let v = guard.check("tool", &params);
+        assert!(
+            matches!(v, LoopGuardVerdict::Block(_)),
+            "5th call should be Block after block_threshold=0 corrected to 5, got: {:?}",
+            v
+        );
+    }
+
+    #[test]
+    fn test_warn_eq_block_no_swap() {
+        let config = LoopGuardConfig {
+            warn_threshold: 5,
+            block_threshold: 5,
+            ..LoopGuardConfig::default()
+        };
+        let mut guard = LoopGuard::new(config);
+        let params = serde_json::json!({"x": 1});
+
+        // The swap in new() only triggers when warn > block, so equal values
+        // should NOT swap. Both thresholds remain at 5.
+        // Calls 1-4: Allow (count < 5)
+        for _ in 0..4 {
+            let v = guard.check("tool", &params);
+            assert_eq!(
+                v,
+                LoopGuardVerdict::Allow,
+                "Calls 1-4 should be Allow when warn==block==5, got: {:?}",
+                v
+            );
+        }
+
+        // Call 5: count==5 hits block_threshold (block is checked BEFORE warn
+        // in check()), so it should be Block, not Warn.
+        let v = guard.check("tool", &params);
+        assert!(
+            matches!(v, LoopGuardVerdict::Block(_)),
+            "5th call should be Block (not Warn) proving no swap happened, got: {:?}",
+            v
+        );
+    }
+
+    // ========================================================================
+    // New tests — Record Outcome & Stats Edge Cases
+    // ========================================================================
+
+    #[test]
+    fn test_outcome_below_block_threshold() {
         let mut guard = LoopGuard::new(LoopGuardConfig::default());
-        let params = serde_json::json!({"query": "test"});
+        let params = serde_json::json!({"key": "val"});
 
-        // Call check() first to populate last_call_hash (normal flow)
+        // Establish last_call_hash via check() (normal flow)
         guard.check("tool", &params);
 
-        // Record different outcomes — should not escalate
-        guard.record_outcome("tool", &params, "result alpha");
-        guard.record_outcome("tool", &params, "result beta");
-        guard.record_outcome("tool", &params, "result gamma");
+        // First identical outcome: count=1, below outcome_warn_threshold=2 => None
+        let w = guard.record_outcome("tool", &params, "same result");
+        assert!(w.is_none());
 
-        // Next check should still be allowed (outcomes were different)
-        guard.check("tool", &params);
-        // This should NOT be blocked by outcome detection
-        // (but may warn based on call count — that's fine)
+        // Second identical outcome: count=2, hits outcome_warn_threshold=2 => Some
+        let w = guard.record_outcome("tool", &params, "same result");
+        assert!(w.is_some());
+        assert!(w.unwrap().contains("identical results"));
+
+        // count=2 is still below outcome_block_threshold=3, so the call hash
+        // should NOT have been added to blocked_outcomes.
+        // A subsequent check() may Warn from call counting but must NOT Block
+        // with "identical results".
+        let v = guard.check("tool", &params);
+        match v {
+            LoopGuardVerdict::Block(ref msg) => {
+                assert!(
+                    !msg.contains("identical results"),
+                    "Should NOT be blocked by outcome detection (only 2 identical outcomes, need 3), got: {}",
+                    msg
+                );
+            }
+            LoopGuardVerdict::Allow | LoopGuardVerdict::Warn(_) | LoopGuardVerdict::CircuitBreak(_) => {
+                // Acceptable — call counting may warn, but outcome did not block
+            }
+        }
+    }
+
+    #[test]
+    fn test_stats_empty_guard() {
+        let guard = LoopGuard::new(LoopGuardConfig::default());
+
+        let stats = guard.stats();
+        assert_eq!(stats.total_calls, 0);
+        assert_eq!(stats.unique_calls, 0);
+        assert_eq!(stats.blocked_calls, 0);
+        assert!(!stats.ping_pong_detected);
+        assert_eq!(stats.most_repeated_tool, None);
+        assert_eq!(stats.most_repeated_count, 0);
+    }
+
+    // ========================================================================
+    // New tests — Ping-Pong Detection Edge Cases
+    // ========================================================================
+
+    #[test]
+    fn test_ping_pong_all_same_not_detected() {
+        let mut guard = LoopGuard::new(LoopGuardConfig {
+            warn_threshold: 100,
+            block_threshold: 100,
+            ..Default::default()
+        });
+        let params = serde_json::json!({"x": 1});
+
+        // 9 identical calls — all-same is repetition, NOT ping-pong
+        for _ in 0..9 {
+            guard.check("tool_a", &params);
+        }
+
+        assert!(
+            !guard.stats().ping_pong_detected,
+            "All-same pattern should NOT trigger ping-pong detection"
+        );
+    }
+
+    #[test]
+    fn test_ping_pong_many_repeats() {
+        let mut guard = LoopGuard::new(LoopGuardConfig {
+            warn_threshold: 100,
+            block_threshold: 100,
+            ping_pong_min_repeats: 3,
+            ..Default::default()
+        });
+        let params_a = serde_json::json!({"file": "a.txt"});
+        let params_b = serde_json::json!({"file": "b.txt"});
+
+        // A-B pattern repeated 6 times = 12 total calls
+        let mut last_verdict = LoopGuardVerdict::Allow;
+        for _ in 0..6 {
+            guard.check("file_read", &params_a);
+            last_verdict = guard.check("file_write", &params_b);
+        }
+
+        assert!(
+            guard.stats().ping_pong_detected,
+            "6 repeats of A-B should trigger ping-pong detection"
+        );
+
+        // After the loop, check the last verdict
+        assert!(
+            matches!(last_verdict, LoopGuardVerdict::Block(ref msg) if msg.contains("file_read") || msg.contains("file_write")),
+            "Expected Block for ping-pong with 6 repeats, got: {:?}",
+            last_verdict
+        );
+    }
+
+    #[test]
+    fn test_ping_pong_insufficient_history() {
+        let mut guard = LoopGuard::new(LoopGuardConfig {
+            warn_threshold: 100,
+            block_threshold: 100,
+            ..Default::default()
+        });
+        let params_a = serde_json::json!({"a": 1});
+        let params_b = serde_json::json!({"b": 2});
+
+        // Only 4 calls: A-B-A-B — need 6 for pattern_len=2 (3 repeats)
+        guard.check("tool_a", &params_a);
+        guard.check("tool_b", &params_b);
+        guard.check("tool_a", &params_a);
+        guard.check("tool_b", &params_b);
+
+        assert!(
+            !guard.stats().ping_pong_detected,
+            "4 calls (2 repeats) should NOT trigger ping-pong — need at least 3 repeats"
+        );
+    }
+
+    #[test]
+    fn test_ping_pong_flag_persists() {
+        let mut guard = LoopGuard::new(LoopGuardConfig {
+            warn_threshold: 100,
+            block_threshold: 100,
+            ping_pong_min_repeats: 3,
+            ..Default::default()
+        });
+        let params_a = serde_json::json!({"a": 1});
+        let params_b = serde_json::json!({"b": 2});
+
+        // Build A-B pattern x 3 to trigger detection
+        for _ in 0..3 {
+            guard.check("file_read", &params_a);
+            guard.check("file_write", &params_b);
+        }
+
+        assert!(
+            guard.stats().ping_pong_detected,
+            "3 repeats of A-B should trigger ping-pong detection"
+        );
+
+        // Now make 5 more unique calls (no pattern)
+        for i in 0..5 {
+            let params = serde_json::json!({"unique": i});
+            guard.check("tool_unique", &params);
+        }
+
+        // The flag should STILL be true — it is a latching flag
+        assert!(
+            guard.stats().ping_pong_detected,
+            "Ping-pong flag should persist after detection, even with subsequent unique calls"
+        );
+    }
+
+    // ========================================================================
+    // Outcome Hash Truncation Boundaries
+    // ========================================================================
+
+    #[test]
+    fn test_outcome_hash_long_result_truncated() {
+        let mut guard = LoopGuard::new(LoopGuardConfig::default());
+        let params = serde_json::json!({"q": 1});
+
+        // result_a = "A" * 2000 (longer than 1000 bytes)
+        let result_a = "A".repeat(2000);
+
+        // Call 1: no warning (count = 1)
+        let w = guard.record_outcome("tool", &params, &result_a);
+        assert!(w.is_none(), "First identical outcome should not warn");
+
+        // Call 2 with identical result: warning (count = 2, outcome_warn_threshold = 2)
+        let w = guard.record_outcome("tool", &params, &result_a);
+        assert!(w.is_some(), "Second identical outcome should warn");
+        assert!(w.unwrap().contains("identical results"));
+
+        // Now build result_b that differs only in the middle (truncated zone):
+        // first 500 bytes = "A", middle 1000 bytes = "B", last 500 bytes = "A"
+        let mut result_b = "A".repeat(2000);
+        {
+            let bytes = unsafe { result_b.as_bytes_mut() };
+            for b in bytes.iter_mut().take(1500).skip(500) {
+                *b = b'B';
+            }
+        }
+
+        // Both results should produce the same outcome hash because truncation
+        // captures only [0..500] and [len-500..len], and the difference is in
+        // the truncated middle (bytes 500..1499).
+        // Call 3 with result_b: count = 3 -> outcome_block_threshold reached
+        let w = guard.record_outcome("tool", &params, &result_b);
+        assert!(
+            w.is_some(),
+            "Third outcome with same truncated hash should warn/block"
+        );
+        assert!(w.unwrap().contains("identical results"));
+
+        // Negative case: result_c differs from result_a in the FIRST 500 bytes
+        // (captured region), so it must produce a DIFFERENT hash.
+        let mut result_c = "A".repeat(2000);
+        result_c.replace_range(0..10, "BBBBBBBBBB");
+        let w = guard.record_outcome("tool", &params, &result_c);
+        assert!(
+            w.is_none(),
+            "Result differing in captured region should produce different hash — no warning"
+        );
+    }
+
+    #[test]
+    fn test_outcome_hash_exactly_1000_bytes() {
+        let mut guard = LoopGuard::new(LoopGuardConfig::default());
+        let params = serde_json::json!({"q": 1});
+
+        // Exactly 1000 bytes — the full-hash path (no truncation)
+        let result = "x".repeat(1000);
+
+        // Call 1: no warning (count = 1)
+        let w = guard.record_outcome("tool", &params, &result);
+        assert!(w.is_none(), "First outcome should not warn");
+
+        // Call 2 with identical result: warning (count = 2, outcome_warn_threshold = 2)
+        let w = guard.record_outcome("tool", &params, &result);
+        assert!(w.is_some(), "Second identical outcome should warn");
+        assert!(w.unwrap().contains("identical results"));
+    }
+
+    #[test]
+    fn test_outcome_hash_exactly_1001_bytes() {
+        let mut guard = LoopGuard::new(LoopGuardConfig::default());
+        let params = serde_json::json!({"q": 1});
+
+        // result_a = "A" * 1001 (truncation path: first 500 + last 500, byte at
+        // index 500 is discarded)
+        let result_a = "A".repeat(1001);
+
+        // result_b differs from result_a only at byte index 500 (in truncated zone):
+        // first 500 bytes = "A", byte 500 = "X", bytes 501..1001 = "A"
+        let mut result_b = "A".repeat(1001);
+        result_b.replace_range(500..501, "X");
+
+        // Call 1 with result_a: no warning (count = 1)
+        let w = guard.record_outcome("tool", &params, &result_a);
+        assert!(w.is_none(), "First outcome should not warn");
+
+        // Call 2 with result_b: truncation captures bytes [0..500] and [len-500..len] = [501..1001]
+        // byte at index 500 is in the truncated gap — excluded from hash.
+        // Both result_a and result_b have identical first 500 and last 500 bytes,
+        // hence identical truncated hash.
+        // count = 2 -> outcome_warn_threshold reached -> Some(warning)
+        let w = guard.record_outcome("tool", &params, &result_b);
+        assert!(
+            w.is_some(),
+            "Second outcome with same truncated hash (differing only in truncated zone) should warn"
+        );
+        assert!(w.unwrap().contains("identical results"));
+    }
+
+    #[test]
+    fn test_ping_pong_warning_exhaustion() {
+        // When ping-pong is detected below min_repeats, warnings are emitted.
+        // After max_warnings_per_call warnings for the pattern key, the guard
+        // stops emitting warnings (returns Allow instead of Warn).
+        let mut guard = LoopGuard::new(LoopGuardConfig {
+            warn_threshold: 100,
+            block_threshold: 100,
+            global_circuit_breaker: 200,
+            ping_pong_min_repeats: 100, // set very high so ping-pong never blocks via repeat count
+            max_warnings_per_call: 2,
+            ..Default::default()
+        });
+        let params_a = serde_json::json!({"a": 1});
+        let params_b = serde_json::json!({"b": 2});
+
+        // Create AB pattern many times but below min_repeats.
+        // Each cycle of 2 calls triggers one ping-pong detection with a Warn.
+        // After max_warnings_per_call warnings, the guard stops warning.
+        let mut warn_count = 0;
+        let mut allow_after_exhaustion = false;
+        for _ in 0..20 {
+            guard.check("tool_a", &params_a);
+            let v = guard.check("tool_b", &params_b);
+            match v {
+                LoopGuardVerdict::Warn(ref msg) if msg.contains("Ping-pong") => {
+                    warn_count += 1;
+                }
+                LoopGuardVerdict::Allow => {
+                    // After warnings are exhausted, ping-pong detection stops warning
+                    allow_after_exhaustion = true;
+                }
+                other => {
+                    panic!("Unexpected verdict: {:?}", other);
+                }
+            }
+        }
+
+        // Should have received exactly max_warnings_per_call warnings
+        assert_eq!(
+            warn_count, 2,
+            "Expected exactly 2 ping-pong warnings before exhaustion"
+        );
+        // After exhaustion, should return Allow (warnings suppressed)
+        assert!(
+            allow_after_exhaustion,
+            "Expected Allow after ping-pong warning exhaustion"
+        );
     }
 }
