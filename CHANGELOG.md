@@ -20,6 +20,11 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 - Replace librefang.dev with librefang.ai across codebase (#2147)
 - Align OpenAPI version to v2026.4.6-beta15
 
+### Changed
+
+- Update contributors and star history (#2160) (@houko)
+- Update contributors and star history (#2139) (@houko)
+
 ### Maintenance
 
 - Add desktop build/dev recipes to justfile (#2134) (@houko)
