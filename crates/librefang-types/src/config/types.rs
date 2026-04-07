@@ -2245,6 +2245,13 @@ pub struct ContextEngineHooks {
     /// `"deno"`, `"go"` (`go run *.go`). Unknown values fall back to
     /// `"python"` with a warning.
     pub runtime: Option<String>,
+    /// Per-invocation timeout for hook scripts, in seconds.
+    ///
+    /// Defaults to `30`. The `bootstrap` hook gets **double** this value because
+    /// it runs only once and may need time to connect to external services (e.g.
+    /// a vector database). Set higher if your hooks do heavy I/O at startup.
+    #[serde(default)]
+    pub hook_timeout_secs: Option<u64>,
 }
 
 /// Plugin manifest — parsed from `~/.librefang/plugins/<name>/plugin.toml`.

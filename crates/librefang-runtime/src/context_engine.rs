@@ -427,6 +427,8 @@ pub struct ScriptableContextEngine {
     prepare_subagent_script: Option<String>,
     merge_subagent_script: Option<String>,
     runtime: crate::plugin_runtime::PluginRuntime,
+    /// Per-invocation timeout for all hooks. Bootstrap uses 2× this.
+    hook_timeout_secs: u64,
 }
 
 impl ScriptableContextEngine {
@@ -445,6 +447,7 @@ impl ScriptableContextEngine {
             prepare_subagent_script: hooks.prepare_subagent.clone(),
             merge_subagent_script: hooks.merge_subagent.clone(),
             runtime: crate::plugin_runtime::PluginRuntime::from_tag(hooks.runtime.as_deref()),
+            hook_timeout_secs: hooks.hook_timeout_secs.unwrap_or(30),
         }
     }
 
@@ -460,11 +463,13 @@ impl ScriptableContextEngine {
 
     /// Run a hook script with JSON input, return parsed JSON output.
     ///
+    /// `timeout_secs` controls how long the subprocess is allowed to run.
     /// Dispatches to the runtime picked in config (Python by default).
     async fn run_hook(
         script_path: &str,
         runtime: crate::plugin_runtime::PluginRuntime,
         input: serde_json::Value,
+        timeout_secs: u64,
     ) -> Result<serde_json::Value, String> {
         let resolved = Self::resolve_script_path(script_path);
 
@@ -473,7 +478,7 @@ impl ScriptableContextEngine {
         }
 
         let config = crate::plugin_runtime::HookConfig {
-            timeout_secs: 30, // hooks should be fast
+            timeout_secs,
             ..Default::default()
         };
 
@@ -486,7 +491,7 @@ impl ScriptableContextEngine {
 #[async_trait]
 impl ContextEngine for ScriptableContextEngine {
     async fn bootstrap(&self, config: &ContextEngineConfig) -> LibreFangResult<()> {
-        // Validate all declared hook scripts exist at startup
+        // Validate all declared hook scripts at startup: existence + executable bit.
         for (name, opt_path) in [
             ("ingest", &self.ingest_script),
             ("after_turn", &self.after_turn_script),
@@ -498,9 +503,24 @@ impl ContextEngine for ScriptableContextEngine {
         ] {
             if let Some(ref path) = opt_path {
                 let resolved = Self::resolve_script_path(path);
-                if !std::path::Path::new(&resolved).exists() {
+                let p = std::path::Path::new(&resolved);
+                if !p.exists() {
                     warn!("{name} hook script not found: {resolved}");
                 } else {
+                    // On Unix, check executable bit so we surface "chmod +x" issues early
+                    // rather than getting a cryptic "permission denied" at runtime.
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        if let Ok(meta) = std::fs::metadata(p) {
+                            let mode = meta.permissions().mode();
+                            if mode & 0o111 == 0 {
+                                warn!(
+                                    "{name} hook script is not executable (run `chmod +x {resolved}`)"
+                                );
+                            }
+                        }
+                    }
                     debug!("{name} hook configured: {resolved}");
                 }
             }
@@ -508,16 +528,19 @@ impl ContextEngine for ScriptableContextEngine {
 
         self.inner.bootstrap(config).await?;
 
-        // Run bootstrap script if configured
+        // Run bootstrap script if configured.
+        // Bootstrap runs once and may need extra time for external connections,
+        // so it gets double the configured hook timeout.
         if let Some(ref script) = self.bootstrap_script {
+            let bootstrap_timeout = self.hook_timeout_secs.saturating_mul(2);
             let input = serde_json::json!({
                 "type": "bootstrap",
                 "context_window_tokens": config.context_window_tokens,
                 "stable_prefix_mode": config.stable_prefix_mode,
                 "max_recall_results": config.max_recall_results,
             });
-            match Self::run_hook(script, self.runtime, input).await {
-                Ok(_) => debug!("Bootstrap hook completed"),
+            match Self::run_hook(script, self.runtime, input, bootstrap_timeout).await {
+                Ok(_) => debug!("Bootstrap hook completed (timeout={bootstrap_timeout}s)"),
                 Err(e) => warn!("Bootstrap hook failed (non-fatal): {e}"),
             }
         }
@@ -554,7 +577,7 @@ impl ContextEngine for ScriptableContextEngine {
             "peer_id": peer_id,
         });
 
-        match Self::run_hook(script, self.runtime, input).await {
+        match Self::run_hook(script, self.runtime, input, self.hook_timeout_secs).await {
             Ok(output) => {
                 // Merge hook memories with default memories
                 let mut memories = default_result.recalled_memories;
@@ -618,7 +641,7 @@ impl ContextEngine for ScriptableContextEngine {
             "context_window_tokens": context_window_tokens,
         });
 
-        match Self::run_hook(script, self.runtime, input).await {
+        match Self::run_hook(script, self.runtime, input, self.hook_timeout_secs).await {
             Ok(output) => {
                 if let Some(new_msgs) = output.get("messages").and_then(|v| v.as_array()) {
                     let assembled: Vec<Message> = new_msgs
@@ -680,7 +703,7 @@ impl ContextEngine for ScriptableContextEngine {
             "context_window_tokens": context_window_tokens,
         });
 
-        match Self::run_hook(script, self.runtime, input).await {
+        match Self::run_hook(script, self.runtime, input, self.hook_timeout_secs).await {
             Ok(output) => {
                 if let Some(new_msgs) = output.get("messages").and_then(|v| v.as_array()) {
                     let compacted: Vec<Message> = new_msgs
@@ -746,8 +769,9 @@ impl ContextEngine for ScriptableContextEngine {
         // Log if the task panics so failures aren't silently swallowed.
         let script = script.clone();
         let runtime = self.runtime;
+        let timeout_secs = self.hook_timeout_secs;
         let handle = tokio::spawn(async move {
-            match Self::run_hook(&script, runtime, input).await {
+            match Self::run_hook(&script, runtime, input, timeout_secs).await {
                 Ok(_) => debug!("After-turn hook completed"),
                 Err(e) => warn!("After-turn hook failed: {e}"),
             }
@@ -776,7 +800,7 @@ impl ContextEngine for ScriptableContextEngine {
                 "parent_id": parent_id.0.to_string(),
                 "child_id": child_id.0.to_string(),
             });
-            match Self::run_hook(script, self.runtime, input).await {
+            match Self::run_hook(script, self.runtime, input, self.hook_timeout_secs).await {
                 Ok(_) => debug!("Prepare-subagent hook completed"),
                 Err(e) => warn!("Prepare-subagent hook failed (non-fatal): {e}"),
             }
@@ -800,7 +824,7 @@ impl ContextEngine for ScriptableContextEngine {
                 "parent_id": parent_id.0.to_string(),
                 "child_id": child_id.0.to_string(),
             });
-            match Self::run_hook(script, self.runtime, input).await {
+            match Self::run_hook(script, self.runtime, input, self.hook_timeout_secs).await {
                 Ok(_) => debug!("Merge-subagent hook completed"),
                 Err(e) => warn!("Merge-subagent hook failed (non-fatal): {e}"),
             }

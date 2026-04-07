@@ -26,17 +26,20 @@ A plugin is a directory under `~/.librefang/plugins/<name>/` containing:
 
 ```
 my-recall-plugin/
-├── plugin.toml          # manifest
+├── plugin.toml               # manifest
 └── hooks/
-    ├── ingest.py        # (or .js / .go / .rb / ...)
-    ├── after_turn.py
-    ├── assemble.py      # optional: control what the LLM sees
-    └── compact.py       # optional: custom compaction strategy
+    ├── ingest.py             # (or .js / .go / .rb / ...)  active by default
+    ├── after_turn.py         # active by default
+    ├── assemble.py           # scaffolded — uncomment in plugin.toml to activate
+    ├── compact.py            # scaffolded — uncomment in plugin.toml to activate
+    ├── bootstrap.py          # scaffolded — runs once at startup (2× timeout)
+    ├── prepare_subagent.py   # scaffolded — called before sub-agent spawns
+    └── merge_subagent.py     # scaffolded — called after sub-agent completes
 ```
 
 LibreFang loads the manifest, wires the declared hook scripts into the context engine, and runs them as subprocesses at well-defined lifecycle points. Each hook invocation is a fresh subprocess: one JSON object in on stdin, one JSON object out on stdout.
 
-Plugins are sandboxed by default — env vars are scrubbed to a safe baseline, the working directory is controlled, and a 30-second timeout kills runaway hooks.
+Plugins are sandboxed by default — env vars are scrubbed to a safe baseline, the working directory is controlled, and a configurable timeout (default 30 seconds) kills runaway hooks. The `bootstrap` hook gets double the configured timeout since it runs only once and may need time to connect to external services.
 
 ---
 
@@ -267,18 +270,20 @@ version = "0.1.0"
 description = "Recall from a Qdrant vector store"
 author = "Evan"
 
+# hook_timeout_secs = 30  # per-invocation timeout; bootstrap gets 2× this value
+
 [hooks]
-# Core hooks (most commonly used)
-ingest = "hooks/ingest.py"
+# --- Active hooks ---
+ingest    = "hooks/ingest.py"
 after_turn = "hooks/after_turn.py"
 runtime = "python"
 
-# Optional hooks (enable as needed)
-# bootstrap        = "hooks/bootstrap.py"
-# assemble         = "hooks/assemble.py"
-# compact          = "hooks/compact.py"
-# prepare_subagent = "hooks/prepare_subagent.py"
-# merge_subagent   = "hooks/merge_subagent.py"
+# --- Optional hooks (template files are already scaffolded — just uncomment) ---
+# bootstrap        = "hooks/bootstrap.py"   # runs once at startup (2× timeout)
+# assemble         = "hooks/assemble.py"    # control what the LLM sees (powerful)
+# compact          = "hooks/compact.py"     # custom context compression
+# prepare_subagent = "hooks/prepare_subagent.py"   # before sub-agent spawns
+# merge_subagent   = "hooks/merge_subagent.py"     # after sub-agent completes
 
 requirements = "requirements.txt"
 ```
@@ -289,9 +294,10 @@ requirements = "requirements.txt"
 | `version` | string | yes | Semver. |
 | `description` | string | no | Shown in the dashboard plugin list. |
 | `author` | string | no | Free-form. |
+| `hook_timeout_secs` | integer | no | Per-invocation timeout in seconds (default `30`). The `bootstrap` hook gets **2×** this value since it runs once and may need extra time for external connections. |
 | `hooks.ingest` | string | no | Recall memories when a new message arrives. |
 | `hooks.after_turn` | string | no | Persist / update indexes after a turn completes. |
-| `hooks.bootstrap` | string | no | Runs once at engine initialisation. |
+| `hooks.bootstrap` | string | no | Runs once at engine initialisation (2× timeout). |
 | `hooks.assemble` | string | no | **Full control over the messages the LLM sees** — the most powerful hook. |
 | `hooks.compact` | string | no | Custom compaction strategy when context pressure is high. |
 | `hooks.prepare_subagent` | string | no | Isolate memory scope before a sub-agent starts. |

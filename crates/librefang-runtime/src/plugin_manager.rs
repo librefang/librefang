@@ -546,6 +546,9 @@ pub fn scaffold_plugin(
     let (after_file, after_body) = files.after_turn;
     let (assemble_file, assemble_body) = files.assemble;
     let (compact_file, compact_body) = files.compact;
+    let (bootstrap_file, bootstrap_body) = files.bootstrap;
+    let (prepare_file, prepare_body) = files.prepare_subagent;
+    let (merge_file, merge_body) = files.merge_subagent;
 
     // Write plugin.toml as a hand-crafted string so we can include comments
     // that guide users toward the new hook slots.
@@ -564,28 +567,32 @@ pub fn scaffold_plugin(
         r#"name = "{name}"
 version = "0.1.0"
 description = "{description}"
+{runtime_line}
+# hook_timeout_secs = 30  # per-invocation timeout; bootstrap gets 2× this value
 
 [hooks]
-# --- Core hooks ---
+# --- Active hooks ---
 ingest    = "hooks/{ingest_file}"
 after_turn = "hooks/{after_file}"
-{runtime_line}
-# --- Optional lifecycle hooks (uncomment + implement to activate) ---
-# assemble = "hooks/{assemble_file}"   # control what the LLM sees (most powerful)
-# compact  = "hooks/{compact_file}"    # custom context compression
-# bootstrap      = "hooks/bootstrap.{ext}"
-# prepare_subagent = "hooks/prepare_subagent.{ext}"
-# merge_subagent   = "hooks/merge_subagent.{ext}"
+
+# --- Optional hooks (uncomment to activate; template files already written) ---
+# bootstrap        = "hooks/{bootstrap_file}"   # runs once at startup (2× timeout)
+# assemble         = "hooks/{assemble_file}"    # control what the LLM sees (powerful)
+# compact          = "hooks/{compact_file}"     # custom context compression
+# prepare_subagent = "hooks/{prepare_file}"     # called before sub-agent spawns
+# merge_subagent   = "hooks/{merge_file}"       # called after sub-agent completes
 {requirements_line}"#,
         name = name,
         description = description,
         ingest_file = ingest_file,
         after_file = after_file,
+        bootstrap_file = bootstrap_file,
         assemble_file = assemble_file,
         compact_file = compact_file,
+        prepare_file = prepare_file,
+        merge_file = merge_file,
         runtime_line = runtime_line,
         requirements_line = requirements_line,
-        ext = runtime_kind.script_extension(),
     );
     std::fs::write(plugin_dir.join("plugin.toml"), manifest_toml)
         .map_err(|e| format!("Failed to write plugin.toml: {e}"))?;
@@ -594,6 +601,9 @@ after_turn = "hooks/{after_file}"
     let after_path = hooks_dir.join(after_file);
     let assemble_path = hooks_dir.join(assemble_file);
     let compact_path = hooks_dir.join(compact_file);
+    let bootstrap_path = hooks_dir.join(bootstrap_file);
+    let prepare_path = hooks_dir.join(prepare_file);
+    let merge_path = hooks_dir.join(merge_file);
     std::fs::write(&ingest_path, ingest_body)
         .map_err(|e| format!("Failed to write {ingest_file}: {e}"))?;
     std::fs::write(&after_path, after_body)
@@ -602,6 +612,14 @@ after_turn = "hooks/{after_file}"
         .map_err(|e| format!("Failed to write {assemble_file}: {e}"))?;
     std::fs::write(&compact_path, compact_body)
         .map_err(|e| format!("Failed to write {compact_file}: {e}"))?;
+    std::fs::write(&bootstrap_path, bootstrap_body)
+        .map_err(|e| format!("Failed to write {bootstrap_file}: {e}"))?;
+    // prepare_subagent and merge_subagent may share the same template body;
+    // write them to distinct files so users can customise them independently.
+    std::fs::write(&prepare_path, prepare_body)
+        .map_err(|e| format!("Failed to write {prepare_file}: {e}"))?;
+    std::fs::write(&merge_path, merge_body)
+        .map_err(|e| format!("Failed to write {merge_file}: {e}"))?;
 
     // Native plugins exec the file directly, so the scaffolded shell wrapper
     // needs the executable bit. No-op on Windows (which uses extension-based
@@ -610,7 +628,15 @@ after_turn = "hooks/{after_file}"
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            for path in [&ingest_path, &after_path, &assemble_path, &compact_path] {
+            for path in [
+                &ingest_path,
+                &after_path,
+                &assemble_path,
+                &compact_path,
+                &bootstrap_path,
+                &prepare_path,
+                &merge_path,
+            ] {
                 if let Ok(meta) = std::fs::metadata(path) {
                     let mut perms = meta.permissions();
                     perms.set_mode(0o755);
@@ -645,6 +671,12 @@ struct HookFiles {
     after_turn: (&'static str, &'static str),
     assemble: (&'static str, &'static str),
     compact: (&'static str, &'static str),
+    /// One-shot startup hook (connect to vector DB, warm cache, etc.)
+    bootstrap: (&'static str, &'static str),
+    /// Called before a sub-agent spawns.
+    prepare_subagent: (&'static str, &'static str),
+    /// Called after a sub-agent completes.
+    merge_subagent: (&'static str, &'static str),
 }
 
 /// Return scaffolded hook filenames + body content for a given runtime.
@@ -660,60 +692,90 @@ fn hook_templates(runtime: crate::plugin_runtime::PluginRuntime) -> HookFiles {
             after_turn: ("after_turn.py", PY_AFTER_TURN),
             assemble: ("assemble.py", PY_ASSEMBLE),
             compact: ("compact.py", PY_COMPACT),
+            bootstrap: ("bootstrap.py", PY_BOOTSTRAP),
+            prepare_subagent: ("prepare_subagent.py", PY_PREPARE_SUBAGENT),
+            merge_subagent: ("merge_subagent.py", PY_MERGE_SUBAGENT),
         },
         R::Node => HookFiles {
             ingest: ("ingest.js", NODE_INGEST),
             after_turn: ("after_turn.js", NODE_AFTER_TURN),
             assemble: ("assemble.js", NODE_ASSEMBLE),
             compact: ("compact.js", NODE_COMPACT),
+            bootstrap: ("bootstrap.js", NODE_BOOTSTRAP),
+            prepare_subagent: ("prepare_subagent.js", STUB_BOOTSTRAP_NODE),
+            merge_subagent: ("merge_subagent.js", STUB_BOOTSTRAP_NODE),
         },
         R::Deno => HookFiles {
             ingest: ("ingest.ts", DENO_INGEST),
             after_turn: ("after_turn.ts", DENO_AFTER_TURN),
             assemble: ("assemble.ts", DENO_ASSEMBLE),
             compact: ("compact.ts", DENO_COMPACT),
+            bootstrap: ("bootstrap.ts", DENO_BOOTSTRAP),
+            prepare_subagent: ("prepare_subagent.ts", STUB_LIFECYCLE_DENO),
+            merge_subagent: ("merge_subagent.ts", STUB_LIFECYCLE_DENO),
         },
         R::Go => HookFiles {
             ingest: ("ingest.go", GO_INGEST),
             after_turn: ("after_turn.go", GO_AFTER_TURN),
             assemble: ("assemble.go", GO_ASSEMBLE),
             compact: ("compact.go", GO_COMPACT),
+            bootstrap: ("bootstrap.go", GO_BOOTSTRAP),
+            prepare_subagent: ("prepare_subagent.go", STUB_LIFECYCLE_GO),
+            merge_subagent: ("merge_subagent.go", STUB_LIFECYCLE_GO),
         },
         R::V => HookFiles {
             ingest: ("ingest.v", V_INGEST),
             after_turn: ("after_turn.v", V_AFTER_TURN),
             assemble: ("assemble.v", STUB_ASSEMBLE_V),
             compact: ("compact.v", STUB_COMPACT_V),
+            bootstrap: ("bootstrap.v", STUB_LIFECYCLE_V),
+            prepare_subagent: ("prepare_subagent.v", STUB_LIFECYCLE_V),
+            merge_subagent: ("merge_subagent.v", STUB_LIFECYCLE_V),
         },
         R::Ruby => HookFiles {
             ingest: ("ingest.rb", RUBY_INGEST),
             after_turn: ("after_turn.rb", RUBY_AFTER_TURN),
             assemble: ("assemble.rb", STUB_ASSEMBLE_RUBY),
             compact: ("compact.rb", STUB_COMPACT_RUBY),
+            bootstrap: ("bootstrap.rb", STUB_LIFECYCLE_RUBY),
+            prepare_subagent: ("prepare_subagent.rb", STUB_LIFECYCLE_RUBY),
+            merge_subagent: ("merge_subagent.rb", STUB_LIFECYCLE_RUBY),
         },
         R::Bash => HookFiles {
             ingest: ("ingest.sh", BASH_INGEST),
             after_turn: ("after_turn.sh", BASH_AFTER_TURN),
             assemble: ("assemble.sh", STUB_ASSEMBLE_BASH),
             compact: ("compact.sh", STUB_COMPACT_BASH),
+            bootstrap: ("bootstrap.sh", STUB_LIFECYCLE_BASH),
+            prepare_subagent: ("prepare_subagent.sh", STUB_LIFECYCLE_BASH),
+            merge_subagent: ("merge_subagent.sh", STUB_LIFECYCLE_BASH),
         },
         R::Bun => HookFiles {
             ingest: ("ingest.ts", BUN_INGEST),
             after_turn: ("after_turn.ts", BUN_AFTER_TURN),
             assemble: ("assemble.ts", STUB_ASSEMBLE_BUN),
             compact: ("compact.ts", STUB_COMPACT_BUN),
+            bootstrap: ("bootstrap.ts", STUB_LIFECYCLE_BUN),
+            prepare_subagent: ("prepare_subagent.ts", STUB_LIFECYCLE_BUN),
+            merge_subagent: ("merge_subagent.ts", STUB_LIFECYCLE_BUN),
         },
         R::Php => HookFiles {
             ingest: ("ingest.php", PHP_INGEST),
             after_turn: ("after_turn.php", PHP_AFTER_TURN),
             assemble: ("assemble.php", STUB_ASSEMBLE_PHP),
             compact: ("compact.php", STUB_COMPACT_PHP),
+            bootstrap: ("bootstrap.php", STUB_LIFECYCLE_PHP),
+            prepare_subagent: ("prepare_subagent.php", STUB_LIFECYCLE_PHP),
+            merge_subagent: ("merge_subagent.php", STUB_LIFECYCLE_PHP),
         },
         R::Lua => HookFiles {
             ingest: ("ingest.lua", LUA_INGEST),
             after_turn: ("after_turn.lua", LUA_AFTER_TURN),
             assemble: ("assemble.lua", STUB_ASSEMBLE_LUA),
             compact: ("compact.lua", STUB_COMPACT_LUA),
+            bootstrap: ("bootstrap.lua", STUB_LIFECYCLE_LUA),
+            prepare_subagent: ("prepare_subagent.lua", STUB_LIFECYCLE_LUA),
+            merge_subagent: ("merge_subagent.lua", STUB_LIFECYCLE_LUA),
         },
         R::Native => HookFiles {
             // Shell wrapper — users replace with a real pre-compiled binary.
@@ -721,6 +783,9 @@ fn hook_templates(runtime: crate::plugin_runtime::PluginRuntime) -> HookFiles {
             after_turn: ("after_turn", NATIVE_AFTER_TURN),
             assemble: ("assemble", STUB_ASSEMBLE_NATIVE),
             compact: ("compact", STUB_COMPACT_NATIVE),
+            bootstrap: ("bootstrap", STUB_LIFECYCLE_NATIVE),
+            prepare_subagent: ("prepare_subagent", STUB_LIFECYCLE_NATIVE),
+            merge_subagent: ("merge_subagent", STUB_LIFECYCLE_NATIVE),
         },
     }
 }
@@ -916,6 +981,125 @@ def main():
         compacted = pinned + rest
 
     print(json.dumps({"type": "compact_result", "messages": compacted}))
+
+if __name__ == "__main__":
+    main()
+"#;
+
+// --- Python lifecycle hooks (bootstrap / prepare_subagent / merge_subagent) ---
+
+const PY_BOOTSTRAP: &str = r#"#!/usr/bin/env python3
+"""Context engine bootstrap hook — runs ONCE when the engine initialises.
+
+Use this to connect to external services (vector databases, caches, HTTP APIs)
+and warm any state your other hooks will read at runtime.
+
+Receives via stdin:
+    {
+      "type": "bootstrap",
+      "context_window_tokens": 200000,
+      "stable_prefix_mode": false,
+      "max_recall_results": 10
+    }
+
+Should print to stdout:
+    {"type": "ok"}
+
+Failures here are non-fatal — the engine continues without your bootstrap work,
+but the missing connection may cause later hooks to fail silently.
+
+Note: bootstrap gets DOUBLE the configured hook_timeout_secs.
+"""
+import json
+import sys
+
+def main():
+    request = json.loads(sys.stdin.read())
+    context_window_tokens = request.get("context_window_tokens", 200000)
+    stable_prefix_mode = request.get("stable_prefix_mode", False)
+
+    # TODO: Connect to your data store here.
+    # Example: initialise a SQLite connection, ping a vector DB, etc.
+    #
+    # import sqlite3
+    # db = sqlite3.connect(os.path.expanduser("~/.librefang/my-plugin.db"))
+    # db.execute("CREATE TABLE IF NOT EXISTS memories (...)")
+    # db.commit()
+    # db.close()
+    #
+    # Any errors raised here are caught and logged as warnings.
+
+    print(json.dumps({"type": "ok"}))
+
+if __name__ == "__main__":
+    main()
+"#;
+
+const PY_PREPARE_SUBAGENT: &str = r#"#!/usr/bin/env python3
+"""Context engine prepare_subagent hook.
+
+Called just before a sub-agent is spawned. Use this to isolate memory scope,
+snapshot parent state, or set up any resources the child agent needs.
+
+Receives via stdin:
+    {
+      "type": "prepare_subagent",
+      "parent_id": "uuid-of-parent-agent",
+      "child_id":  "uuid-of-child-agent"
+    }
+
+Should print to stdout:
+    {"type": "ok"}
+
+Non-fatal: failures are logged as warnings and the sub-agent still spawns.
+"""
+import json
+import sys
+
+def main():
+    request = json.loads(sys.stdin.read())
+    parent_id = request["parent_id"]
+    child_id = request["child_id"]
+
+    # TODO: Snapshot or fork per-agent state here.
+    # Example: copy parent memories to child scope in your data store.
+
+    print(json.dumps({"type": "ok"}))
+
+if __name__ == "__main__":
+    main()
+"#;
+
+const PY_MERGE_SUBAGENT: &str = r#"#!/usr/bin/env python3
+"""Context engine merge_subagent hook.
+
+Called after a sub-agent completes. Use this to merge the child agent's
+findings or memories back into the parent context.
+
+Receives via stdin:
+    {
+      "type": "merge_subagent",
+      "parent_id": "uuid-of-parent-agent",
+      "child_id":  "uuid-of-child-agent"
+    }
+
+Should print to stdout:
+    {"type": "ok"}
+
+Non-fatal: failures are logged as warnings; the parent agent continues normally.
+"""
+import json
+import sys
+
+def main():
+    request = json.loads(sys.stdin.read())
+    parent_id = request["parent_id"]
+    child_id = request["child_id"]
+
+    # TODO: Merge child agent state into the parent here.
+    # Example: copy child memories back to parent scope in your data store.
+
+    print(json.dumps({"type": "ok"}))
 
 if __name__ == "__main__":
     main()
@@ -1208,6 +1392,156 @@ func main() {
 	os.Stdout.Write(out)
 	os.Stdout.Write([]byte("\n"))
 }
+"#;
+
+// --- Node / Deno / Go bootstrap templates ---
+
+const NODE_BOOTSTRAP: &str = r#"#!/usr/bin/env node
+// Context engine bootstrap hook (Node.js).
+// Runs ONCE at engine startup — connect to external services here.
+// Receives: { type, context_window_tokens, stable_prefix_mode, max_recall_results }
+// Returns:  { type: "ok" }
+'use strict';
+const { stdin } = process;
+let raw = '';
+stdin.setEncoding('utf8');
+stdin.on('data', chunk => { raw += chunk; });
+stdin.on('end', () => {
+  // const req = JSON.parse(raw);
+  // TODO: initialise your data store, warm caches, etc.
+  process.stdout.write(JSON.stringify({ type: 'ok' }) + '\n');
+});
+"#;
+
+const DENO_BOOTSTRAP: &str = r#"// Context engine bootstrap hook (Deno / TypeScript).
+// Runs ONCE at engine startup — connect to external services here.
+// Receives: { type, context_window_tokens, stable_prefix_mode, max_recall_results }
+// Returns:  { type: "ok" }
+const raw = new TextDecoder().decode(await Deno.readAll(Deno.stdin));
+// const req = JSON.parse(raw);
+// TODO: initialise your data store, warm caches, etc.
+console.log(JSON.stringify({ type: 'ok' }));
+"#;
+
+const GO_BOOTSTRAP: &str = r#"// Context engine bootstrap hook (Go).
+// Runs ONCE at engine startup — connect to external services here.
+// go run bootstrap.go
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+)
+
+type BootstrapRequest struct {
+	Type               string `json:"type"`
+	ContextWindowTokens int   `json:"context_window_tokens"`
+	StablePrefixMode   bool   `json:"stable_prefix_mode"`
+	MaxRecallResults   int    `json:"max_recall_results"`
+}
+
+func main() {
+	var req BootstrapRequest
+	if err := json.NewDecoder(os.Stdin).Decode(&req); err != nil {
+		fmt.Fprintln(os.Stderr, "bootstrap: invalid JSON on stdin:", err)
+		os.Exit(1)
+	}
+
+	// TODO: connect to your database, warm caches, etc.
+
+	fmt.Println(`{"type":"ok"}`)
+}
+"#;
+
+// --- Minimal lifecycle stubs for other runtimes ---
+// bootstrap / prepare_subagent / merge_subagent all use the same "ok" response.
+// These stubs print {"type":"ok"} and exit — sufficient to acknowledge the hook.
+
+const STUB_BOOTSTRAP_NODE: &str = r#"#!/usr/bin/env node
+// Lifecycle hook stub (Node.js) — bootstrap / prepare_subagent / merge_subagent.
+// Replace body with your logic; response must be {"type":"ok"}.
+'use strict';
+let raw = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', c => { raw += c; });
+process.stdin.on('end', () => {
+  // const req = JSON.parse(raw);
+  process.stdout.write(JSON.stringify({ type: 'ok' }) + '\n');
+});
+"#;
+
+const STUB_LIFECYCLE_DENO: &str = r#"// Lifecycle hook stub (Deno / TypeScript).
+// bootstrap / prepare_subagent / merge_subagent — all return {"type":"ok"}.
+await Deno.readAll(Deno.stdin); // consume stdin
+console.log(JSON.stringify({ type: 'ok' }));
+"#;
+
+const STUB_LIFECYCLE_GO: &str = r#"// Lifecycle hook stub (Go).
+// bootstrap / prepare_subagent / merge_subagent — all return {"type":"ok"}.
+// go run <hook>.go
+package main
+
+import (
+	"fmt"
+	"io"
+	"os"
+)
+
+func main() {
+	io.ReadAll(os.Stdin) // consume stdin
+	fmt.Println(`{"type":"ok"}`)
+}
+"#;
+
+const STUB_LIFECYCLE_V: &str = r#"// Lifecycle hook stub (V).
+// bootstrap / prepare_subagent / merge_subagent — all return {"type":"ok"}.
+import os
+
+fn main() {
+    os.get_raw_stdin()  // consume stdin
+    println('{"type":"ok"}')
+}
+"#;
+
+const STUB_LIFECYCLE_RUBY: &str = r#"# Lifecycle hook stub (Ruby).
+# bootstrap / prepare_subagent / merge_subagent — all return {"type":"ok"}.
+require 'json'
+$stdin.read  # consume stdin
+puts JSON.generate({ type: 'ok' })
+"#;
+
+const STUB_LIFECYCLE_BASH: &str = r#"#!/usr/bin/env bash
+# Lifecycle hook stub (Bash).
+# bootstrap / prepare_subagent / merge_subagent — all return {"type":"ok"}.
+cat /dev/stdin > /dev/null   # consume stdin
+printf '{"type":"ok"}\n'
+"#;
+
+const STUB_LIFECYCLE_BUN: &str = r#"// Lifecycle hook stub (Bun / TypeScript).
+// bootstrap / prepare_subagent / merge_subagent — all return {"type":"ok"}.
+await Bun.stdin.text(); // consume stdin
+console.log(JSON.stringify({ type: 'ok' }));
+"#;
+
+const STUB_LIFECYCLE_PHP: &str = r#"<?php
+// Lifecycle hook stub (PHP).
+// bootstrap / prepare_subagent / merge_subagent — all return {"type":"ok"}.
+file_get_contents('php://stdin'); // consume stdin
+echo json_encode(['type' => 'ok']) . "\n";
+"#;
+
+const STUB_LIFECYCLE_LUA: &str = r#"-- Lifecycle hook stub (Lua).
+-- bootstrap / prepare_subagent / merge_subagent — all return {"type":"ok"}.
+io.read("*a")  -- consume stdin
+print('{"type":"ok"}')
+"#;
+
+const STUB_LIFECYCLE_NATIVE: &str = r#"#!/bin/sh
+# Lifecycle hook stub (native/shell wrapper).
+# bootstrap / prepare_subagent / merge_subagent — all return {"type":"ok"}.
+cat > /dev/null  # consume stdin
+printf '{"type":"ok"}\n'
 "#;
 
 // --- Minimal stubs for other runtimes (assemble + compact) ---
