@@ -17,10 +17,18 @@ members = [
     "crates/librefang-telemetry",
     "xtask",
     "crates/librefang-testing",
+    # RuVector PG extension crates (uncomment to build docker image):
+    # "crates/ruvector-postgres",
+    # "crates/ruvector-solver",
+    # "crates/ruvector-math",
+    # "crates/ruvector-attention",
+    # "crates/ruvector-sona",
+    # "crates/ruvector-domain-expansion",
+    # "crates/ruvector-mincut-gated-transformer",
 ]
 
 [workspace.package]
-version = "2026.4.6-beta15"
+version = "2026.4.7-beta16"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/librefang/librefang"

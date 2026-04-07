@@ -172,7 +172,7 @@ Features:\n\
 - [A2A protocol](https://a2a.example.com) integration\n\
 - **budget tracking** with per-agent cost limits\n\
 \n\
-Visit the [docs](https://docs.librefang.dev) for more info.";
+Visit the [docs](https://docs.librefang.ai) for more info.";
 
 const SHORT_TEXT: &str = "Hello world!";
 
