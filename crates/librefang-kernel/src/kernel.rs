@@ -1684,6 +1684,10 @@ impl LibreFangKernel {
                             "vector_backend = \"supabase\" requires vector_store_url".into(),
                         )
                     })?;
+                    // Fail fast on malformed URLs instead of deferring to first RPC call.
+                    let _ = reqwest::Url::parse(url).map_err(|e| {
+                        KernelError::BootFailed(format!("vector_store_url is not a valid URL: {e}"))
+                    })?;
                     let key_env = config
                         .memory
                         .vector_store_api_key_env
