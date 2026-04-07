@@ -7,15 +7,25 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
 ## [2026.4.7] - 2026-04-07
 
+### Added
+
+- SupabaseVectorStore for PostgREST vector operations (30c0431a)
+- 7 extension crates and Docker build for PostgreSQL 17 to ruvector (6323b299)
+
 ### Fixed
 
 - Resume agent loops after approval without blocking (#2101) (@leszek3737)
 - Skip Discord notification when release workflows are cancelled (#2129) (@houko)
 - Embed dashboard in release binaries (#2132) (@houko)
+- Replace librefang.dev with librefang.ai across codebase (#2147)
+- Align OpenAPI version to v2026.4.6-beta15
 
 ### Maintenance
 
 - Add desktop build/dev recipes to justfile (#2134) (@houko)
+- Add claude-flow MCP config and gitignore .swarm/ (b39a16a2)
+- Exclude dev workflow tooling from tracking (805efc4f)
+- Consolidate skills to global architecture (a348030a)
 
 
 ## [2026.4.6] - 2026-04-06
