@@ -14,6 +14,139 @@ use librefang_types::config::PluginManifest;
 use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
 
+/// Well-known public key for the official LibreFang plugin registry.
+///
+/// This is an Ed25519 public key (32 bytes, base64url-encoded).
+/// Override via `LIBREFANG_REGISTRY_PUBKEY` env var for custom registries.
+/// Set to `LIBREFANG_REGISTRY_VERIFY=0` to skip verification entirely.
+const OFFICIAL_REGISTRY_PUBKEY_B64: &str =
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+    // ^ placeholder — real key would be the registry operator's public key
+
+/// Verify an Ed25519 signature over registry index JSON bytes.
+///
+/// The registry is expected to serve a companion file `index.json.sig`
+/// containing the raw 64-byte Ed25519 signature, base64-encoded.
+///
+/// # Arguments
+/// - `index_bytes`: the raw bytes of `index.json`
+/// - `sig_b64`: base64-encoded 64-byte signature from `index.json.sig`
+/// - `pubkey_b64`: base64-encoded 32-byte Ed25519 public key
+///
+/// Returns `Ok(())` if the signature is valid, `Err(reason)` otherwise.
+fn verify_registry_index(
+    index_bytes: &[u8],
+    sig_b64: &str,
+    pubkey_b64: &str,
+) -> Result<(), String> {
+    use base64::Engine as _;
+    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+
+    let sig_bytes = base64::engine::general_purpose::STANDARD
+        .decode(sig_b64.trim())
+        .map_err(|e| format!("Invalid signature encoding: {e}"))?;
+
+    let key_bytes = base64::engine::general_purpose::STANDARD
+        .decode(pubkey_b64.trim())
+        .map_err(|e| format!("Invalid public key encoding: {e}"))?;
+
+    let sig_arr: [u8; 64] = sig_bytes
+        .try_into()
+        .map_err(|_| "Signature must be exactly 64 bytes".to_string())?;
+
+    let key_arr: [u8; 32] = key_bytes
+        .try_into()
+        .map_err(|_| "Public key must be exactly 32 bytes".to_string())?;
+
+    let signature = Signature::from_bytes(&sig_arr);
+    let verifying_key = VerifyingKey::from_bytes(&key_arr)
+        .map_err(|e| format!("Invalid public key: {e}"))?;
+
+    verifying_key
+        .verify(index_bytes, &signature)
+        .map_err(|e| format!("Signature verification failed: {e}"))
+}
+
+/// Fetch registry `index.json` and optionally verify its Ed25519 signature.
+///
+/// Signature verification is skipped when:
+/// - `LIBREFANG_REGISTRY_VERIFY=0` env var is set
+/// - No `index.json.sig` companion file exists at the registry
+/// - The configured public key is the placeholder value (all-zero bytes)
+///
+/// A missing signature file produces a warning; a present but invalid
+/// signature is always a hard error.
+pub async fn fetch_verified_index(
+    client: &reqwest::Client,
+    registry: &str,
+) -> Result<Vec<serde_json::Value>, String> {
+    use base64::Engine as _;
+
+    let index_url = format!(
+        "https://raw.githubusercontent.com/{registry}/main/index.json"
+    );
+    let sig_url = format!(
+        "https://raw.githubusercontent.com/{registry}/main/index.json.sig"
+    );
+
+    // Fetch index bytes.
+    let index_resp = client
+        .get(&index_url)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to fetch registry index: {e}"))?;
+
+    if !index_resp.status().is_success() {
+        return Err(format!(
+            "Registry index returned HTTP {}",
+            index_resp.status()
+        ));
+    }
+
+    let index_bytes = index_resp
+        .bytes()
+        .await
+        .map_err(|e| format!("Failed to read registry index body: {e}"))?;
+
+    // Skip verification if explicitly disabled.
+    if std::env::var("LIBREFANG_REGISTRY_VERIFY").as_deref() == Ok("0") {
+        warn!("Registry signature verification disabled via LIBREFANG_REGISTRY_VERIFY=0");
+    } else {
+        // Resolve which public key to use.
+        let pubkey = std::env::var("LIBREFANG_REGISTRY_PUBKEY")
+            .unwrap_or_else(|_| OFFICIAL_REGISTRY_PUBKEY_B64.to_string());
+
+        // Only verify if the key is not the all-zero placeholder.
+        let key_bytes = base64::engine::general_purpose::STANDARD
+            .decode(pubkey.trim())
+            .unwrap_or_default();
+        let is_placeholder = key_bytes.iter().all(|&b| b == 0) || key_bytes.len() != 32;
+
+        if !is_placeholder {
+            // Try to fetch the signature file.
+            match client.get(&sig_url).send().await {
+                Ok(sig_resp) if sig_resp.status().is_success() => {
+                    let sig_text = sig_resp
+                        .text()
+                        .await
+                        .map_err(|e| format!("Failed to read signature: {e}"))?;
+                    verify_registry_index(&index_bytes, sig_text.trim(), &pubkey)?;
+                    info!(registry, "Registry index signature verified OK");
+                }
+                _ => {
+                    warn!(
+                        registry,
+                        "No index.json.sig found — registry index not signature-verified"
+                    );
+                }
+            }
+        }
+    }
+
+    serde_json::from_slice::<Vec<serde_json::Value>>(&index_bytes)
+        .map_err(|e| format!("Failed to parse registry index JSON: {e}"))
+}
+
 /// Validate that a plugin name is a safe directory component (no path traversal).
 pub fn validate_plugin_name(name: &str) -> Result<(), String> {
     if name.is_empty() {
@@ -3201,15 +3334,12 @@ pub async fn install_plugin_with_deps(
 
     // Fetch the registry index to resolve the dependency graph.
     let repo = github_repo.unwrap_or("librefang/librefang-registry");
-    let index_url = format!("https://raw.githubusercontent.com/{repo}/main/index.json");
-    let registry_plugins: Vec<serde_json::Value> = reqwest::Client::new()
-        .get(&index_url)
-        .send()
-        .await
-        .map_err(|e| format!("Failed to fetch registry index: {e}"))?
-        .json()
-        .await
-        .unwrap_or_default();
+    let client = reqwest::Client::builder()
+        .user_agent("librefang-plugin-installer/1.0")
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("HTTP client error: {e}"))?;
+    let registry_plugins = fetch_verified_index(&client, repo).await?;
 
     let order = resolve_install_order(name, &registry_plugins)?;
 

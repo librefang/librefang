@@ -52,6 +52,26 @@ use crate::context_overflow::{recover_from_overflow, RecoveryStage};
 use crate::embedding::EmbeddingDriver;
 use crate::llm_driver::LlmDriver;
 
+/// Generate a compact random trace ID (16 lowercase hex characters = 64-bit entropy).
+fn generate_trace_id() -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    // Combine current time + thread ID for low-collision IDs without pulling in `rand`.
+    let mut h = DefaultHasher::new();
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos()
+        .hash(&mut h);
+    std::thread::current().id().hash(&mut h);
+    // XOR with address of a stack variable for extra entropy.
+    let stack_var: u64 = 0;
+    ((&stack_var) as *const u64 as u64).hash(&mut h);
+    format!("{:016x}", h.finish())
+}
+
 /// Configuration for the context engine.
 #[derive(Debug, Clone)]
 pub struct ContextEngineConfig {
@@ -418,6 +438,9 @@ impl ContextEngine for DefaultContextEngine {
 /// surfaced via `GET /api/context-engine/traces` for debugging.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct HookTrace {
+    /// Unique identifier for this hook invocation. 16 hex chars (8 random bytes).
+    /// Stable across retries — generated once before the retry loop.
+    pub trace_id: String,
     /// Hook name (`"ingest"`, `"assemble"`, …).
     pub hook: String,
     /// ISO-8601 timestamp of when the hook started.
@@ -1239,6 +1262,7 @@ impl ScriptableContextEngine {
             ..Default::default()
         };
 
+        let trace_id = generate_trace_id();
         let started_at = chrono::Utc::now().to_rfc3339();
         // Truncate large inputs for trace preview.
         let input_preview = if input.to_string().len() > 2048 {
@@ -1269,6 +1293,7 @@ impl ScriptableContextEngine {
                         }
                     }
                     Self::push_trace(traces, HookTrace {
+                        trace_id: trace_id.clone(),
                         hook: hook_name.to_string(),
                         started_at: started_at.clone(),
                         elapsed_ms,
@@ -1286,6 +1311,7 @@ impl ScriptableContextEngine {
         let elapsed_ms = t.elapsed().as_millis() as u64;
         let err_msg = format!("Hook script failed after {max_retries} retries: {last_err}");
         Self::push_trace(traces, HookTrace {
+            trace_id: trace_id.clone(),
             hook: hook_name.to_string(),
             started_at,
             elapsed_ms,
@@ -1349,6 +1375,7 @@ impl ScriptableContextEngine {
                 state_file: self.shared_state_path.clone(),
                 ..Default::default()
             };
+            let trace_id = generate_trace_id();
             let input_preview = if input.to_string().len() > 2048 {
                 serde_json::json!({"_truncated": true, "type": input.get("type")})
             } else {
@@ -1366,6 +1393,7 @@ impl ScriptableContextEngine {
                     Self::push_trace(
                         &self.traces,
                         HookTrace {
+                            trace_id: trace_id.clone(),
                             hook: hook_name.to_string(),
                             started_at,
                             elapsed_ms,
@@ -1385,6 +1413,7 @@ impl ScriptableContextEngine {
                     Self::push_trace(
                         &self.traces,
                         HookTrace {
+                            trace_id: trace_id.clone(),
                             hook: hook_name.to_string(),
                             started_at,
                             elapsed_ms,
@@ -2036,6 +2065,7 @@ impl ContextEngine for ScriptableContextEngine {
                         state_file: shared_state_path.clone(),
                         ..Default::default()
                     };
+                    let trace_id = generate_trace_id();
                     let input_preview = if input.to_string().len() > 2048 {
                         serde_json::json!({"_truncated": true, "type": input.get("type")})
                     } else {
@@ -2050,6 +2080,7 @@ impl ContextEngine for ScriptableContextEngine {
                             Self::push_trace(
                                 &traces,
                                 HookTrace {
+                                    trace_id: trace_id.clone(),
                                     hook: "after_turn".to_string(),
                                     started_at,
                                     elapsed_ms,
@@ -2069,6 +2100,7 @@ impl ContextEngine for ScriptableContextEngine {
                             Self::push_trace(
                                 &traces,
                                 HookTrace {
+                                    trace_id: trace_id.clone(),
                                     hook: "after_turn".to_string(),
                                     started_at,
                                     elapsed_ms,

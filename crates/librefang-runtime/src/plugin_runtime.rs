@@ -418,6 +418,11 @@ pub struct HookConfig {
     /// - `LIBREFANG_READONLY_FS=1` env var is injected (advisory, for well-behaved scripts)
     /// - On Linux 5.13+: Landlock LSM restriction applied in child before exec (enforced)
     /// - On Linux (older): best-effort `unshare --mount` (requires user namespaces)
+    ///
+    /// Syscall sandboxing (seccomp-sandbox feature):
+    /// - Applied unconditionally on Linux when feature is enabled
+    /// - Allowlist of ~60 syscalls; any other syscall kills the process with SIGSYS
+    /// - Does not require root or user namespaces
     pub allow_filesystem: bool,
     /// Path to the per-plugin shared state JSON file.
     ///
@@ -653,6 +658,91 @@ fn try_apply_landlock_readonly(_allow_write_dir: Option<&std::path::Path>) -> bo
     false
 }
 
+/// Apply a seccomp syscall allowlist in the current process (intended for use
+/// in `pre_exec` after fork, before exec).
+///
+/// Allows only the syscalls a well-behaved interpreter (Python/Node/etc.) needs:
+/// file I/O, memory management, process control, networking (optional), and IPC.
+/// Any other syscall causes the process to be killed with SIGSYS.
+///
+/// Returns `true` if seccomp was applied successfully, `false` on error or
+/// when compiled without the `seccomp-sandbox` feature.
+#[cfg(all(target_os = "linux", feature = "seccomp-sandbox"))]
+fn apply_seccomp_allowlist(allow_network: bool) -> bool {
+    use seccompiler::{
+        BpfProgram, SeccompAction, SeccompFilter, SeccompRule,
+        syscall_name_to_num,
+    };
+
+    // Core syscalls every process needs.
+    let allowed: Vec<&str> = vec![
+        // Memory
+        "mmap", "mprotect", "munmap", "brk", "madvise", "mremap",
+        // File I/O
+        "read", "write", "readv", "writev", "pread64", "pwrite64",
+        "open", "openat", "close", "fstat", "stat", "lstat",
+        "lseek", "dup", "dup2", "dup3", "pipe", "pipe2",
+        "fcntl", "ioctl", "fsync", "fdatasync",
+        "mkdir", "rmdir", "unlink", "rename", "symlink", "readlink",
+        "getcwd", "chdir",
+        // Process
+        "exit", "exit_group", "getpid", "getppid", "gettid",
+        "set_tid_address", "futex", "nanosleep", "clock_gettime",
+        "clock_nanosleep", "getrlimit", "setrlimit", "prlimit64",
+        "uname", "sysinfo", "times",
+        // Signals
+        "rt_sigaction", "rt_sigprocmask", "rt_sigreturn", "sigaltstack",
+        "kill", "tgkill",
+        // Threads
+        "clone", "clone3", "fork", "execve", "execveat", "wait4", "waitid",
+        // I/O multiplexing
+        "select", "pselect6", "poll", "ppoll", "epoll_create", "epoll_create1",
+        "epoll_ctl", "epoll_wait", "epoll_pwait",
+        // Sockets (needed even without network for Unix domain sockets / IPC)
+        "socket", "connect", "bind", "listen", "accept", "accept4",
+        "getsockopt", "setsockopt", "getsockname", "getpeername",
+        "sendto", "recvfrom", "sendmsg", "recvmsg", "shutdown",
+        // Anonymous pipes / tmpfiles
+        "eventfd", "eventfd2", "timerfd_create", "timerfd_settime", "timerfd_gettime",
+        // Misc
+        "arch_prctl", "prctl", "getdents", "getdents64",
+        "access", "faccessat", "newfstatat",
+        "readdir", "getuid", "getgid", "geteuid", "getegid",
+        "getgroups", "setgroups",
+        "mlock", "munlock", "mlockall", "munlockall",
+        "getrandom",
+    ];
+
+    // Convert names to numbers, skip unknowns (different kernel versions).
+    let rules: Vec<(i64, Vec<SeccompRule>)> = allowed
+        .iter()
+        .filter_map(|name| syscall_name_to_num(name).ok().map(|n| (n as i64, vec![])))
+        .collect();
+
+    let _ = allow_network; // reserved for future per-syscall network filtering
+
+    let filter = match SeccompFilter::new(
+        rules.into_iter().collect(),
+        SeccompAction::KillProcess,
+        SeccompAction::Allow,
+        std::env::consts::ARCH.try_into().unwrap_or(seccompiler::TargetArch::x86_64),
+    ) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+
+    let prog: BpfProgram = match filter.try_into() {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+
+    seccompiler::apply_filter(&prog).is_ok()
+}
+
+#[cfg(not(all(target_os = "linux", feature = "seccomp-sandbox")))]
+fn apply_seccomp_allowlist(_allow_network: bool) -> bool {
+    false
+}
 
 /// Run a hook script and parse the last JSON line of stdout.
 ///
@@ -841,6 +931,28 @@ pub async fn run_hook_json(
         unsafe {
             cmd.pre_exec(move || {
                 try_apply_landlock_readonly(write_dir.as_deref());
+                Ok(())
+            });
+        }
+    }
+
+    // Apply seccomp syscall allowlist (requires seccomp-sandbox feature).
+    // Applied unconditionally when the feature is enabled — seccomp is a
+    // defence-in-depth measure independent of filesystem restrictions.
+    #[cfg(all(target_os = "linux", feature = "seccomp-sandbox"))]
+    {
+        let allow_net = config.allow_network;
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            cmd.pre_exec(move || {
+                // Non-fatal: log failure but don't abort the spawn.
+                if !apply_seccomp_allowlist(allow_net) {
+                    // Can't use tracing here (post-fork), use stderr.
+                    let _ = std::io::Write::write_all(
+                        &mut std::io::stderr(),
+                        b"[librefang] seccomp filter failed to apply\n",
+                    );
+                }
                 Ok(())
             });
         }
@@ -1113,6 +1225,28 @@ impl HookProcessPool {
         }
         if let Some(mb) = config.max_memory_mb {
             cmd.env("LIBREFANG_MAX_MEMORY_MB", mb.to_string());
+        }
+
+        // Apply seccomp syscall allowlist (requires seccomp-sandbox feature).
+        // Applied unconditionally when the feature is enabled — seccomp is a
+        // defence-in-depth measure independent of filesystem restrictions.
+        #[cfg(all(target_os = "linux", feature = "seccomp-sandbox"))]
+        {
+            let allow_net = config.allow_network;
+            use std::os::unix::process::CommandExt;
+            unsafe {
+                cmd.pre_exec(move || {
+                    // Non-fatal: log failure but don't abort the spawn.
+                    if !apply_seccomp_allowlist(allow_net) {
+                        // Can't use tracing here (post-fork), use stderr.
+                        let _ = std::io::Write::write_all(
+                            &mut std::io::stderr(),
+                            b"[librefang] seccomp filter failed to apply\n",
+                        );
+                    }
+                    Ok(())
+                });
+            }
         }
 
         let mut child = cmd

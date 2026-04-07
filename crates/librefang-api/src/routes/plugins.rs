@@ -71,6 +71,10 @@ pub fn router() -> axum::Router<Arc<AppState>> {
             axum::routing::get(context_engine_traces),
         )
         .route(
+            "/context-engine/traces/:trace_id",
+            axum::routing::get(get_trace_by_id),
+        )
+        .route(
             "/plugins/{name}/enable",
             axum::routing::post(enable_plugin),
         )
