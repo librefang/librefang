@@ -2655,6 +2655,13 @@ impl ContextEngine for ScriptableContextEngine {
 
         // Spawn as fire-and-forget — after_turn is best-effort, don't block the agent.
         // Log if the task panics so failures aren't silently swallowed.
+
+        // Circuit-breaker check: skip spawning if the circuit is already open.
+        if self.circuit_is_open("after_turn", Some(&agent_id)) {
+            debug!("after_turn hook skipped — circuit breaker is open");
+            return Ok(());
+        }
+
         // Apply agent_id_filter for after_turn hook.
         if !self.agent_passes_filter(&agent_id) {
             return Ok(());
@@ -2698,6 +2705,10 @@ impl ContextEngine for ScriptableContextEngine {
         let output_schema_strict = self.inner.config.output_schema_strict;
         let after_turn_correlation_id = generate_trace_id();
         let event_bus_arc = self.event_bus.clone();
+        // Clone circuit-breaker state for updating from the background task.
+        let cb_breakers = std::sync::Arc::clone(&self.circuit_breakers);
+        let cb_cfg = self.circuit_breaker_cfg.clone();
+        let cb_trace_store = self.trace_store.clone();
         {
             let mut tasks = self.after_turn_tasks.lock().await;
             // Reap already-completed tasks to prevent unbounded growth.
@@ -2776,6 +2787,7 @@ impl ContextEngine for ScriptableContextEngine {
                 } else {
                     Self::run_hook("after_turn", &script, runtime, input, timeout_secs, &plugin_env, max_retries, retry_delay_ms, max_memory_mb, allow_network, &traces, &hook_schemas, shared_state_path.as_deref(), trace_store.as_ref(), &plugin_name, &correlation_id_at, output_schema_strict).await
                 };
+                let success = result.is_ok();
                 match result {
                     Ok((output, ms)) => {
                         Self::record_hook(&metrics, "after_turn", ms, true);
@@ -2786,6 +2798,37 @@ impl ContextEngine for ScriptableContextEngine {
                     Err(e) => {
                         Self::record_hook(&metrics, "after_turn", 0, false);
                         warn!("After-turn hook failed: {e}");
+                    }
+                }
+                // Update circuit breaker from the background task so that repeated
+                // after_turn failures can trip the circuit and stop future spawns.
+                if let Some(ref cfg) = cb_cfg {
+                    let key = format!("{}:after_turn", agent_id_str);
+                    let (failures, opened_at_rfc3339, just_reset) = {
+                        let mut guard = cb_breakers.lock().unwrap();
+                        let state = guard.entry(key.clone()).or_insert_with(CircuitBreakerState::new);
+                        if success {
+                            state.record_success();
+                            (0u32, None::<String>, true)
+                        } else {
+                            state.record_failure(cfg.max_failures);
+                            if state.consecutive_failures == cfg.max_failures {
+                                warn!(hook = "after_turn", cooldown_secs = cfg.reset_secs, "Hook circuit breaker opened");
+                            }
+                            let opened_str = state.opened_at.map(|instant| {
+                                let elapsed = instant.elapsed();
+                                (chrono::Utc::now() - chrono::Duration::from_std(elapsed).unwrap_or_default())
+                                    .to_rfc3339()
+                            });
+                            (state.consecutive_failures, opened_str, false)
+                        }
+                    };
+                    if let Some(ref store) = cb_trace_store {
+                        if just_reset {
+                            let _ = store.delete_circuit_state(&key);
+                        } else {
+                            let _ = store.save_circuit_state(&key, failures, opened_at_rfc3339.as_deref());
+                        }
                     }
                 }
             });
