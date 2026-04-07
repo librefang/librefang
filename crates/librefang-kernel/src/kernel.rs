@@ -6259,7 +6259,7 @@ system_prompt = "You are a helpful assistant."
         hand_id: &str,
         config: std::collections::HashMap<String, serde_json::Value>,
     ) -> KernelResult<librefang_hands::HandInstance> {
-        self.activate_hand_with_id(hand_id, config, None)
+        self.activate_hand_with_id(hand_id, config, None, None)
     }
 
     /// Like [`activate_hand`](Self::activate_hand) but allows specifying an
@@ -6269,6 +6269,7 @@ system_prompt = "You are a helpful assistant."
         hand_id: &str,
         config: std::collections::HashMap<String, serde_json::Value>,
         instance_id: Option<uuid::Uuid>,
+        timestamps: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
     ) -> KernelResult<librefang_hands::HandInstance> {
         let cfg = self.config.load();
         use librefang_hands::HandError;
@@ -6304,7 +6305,7 @@ system_prompt = "You are a helpful assistant."
         // Create the instance in the registry
         let instance = self
             .hand_registry
-            .activate_with_id(hand_id, config, instance_id)
+            .activate_with_id(hand_id, config, instance_id, timestamps)
             .map_err(|e| match e {
                 HandError::AlreadyActive(id) => KernelError::LibreFang(LibreFangError::Internal(
                     format!("Hand already active: {id}"),
@@ -7246,7 +7247,15 @@ system_prompt = "You are a helpful assistant."
                         }
                     }
                 }
-                match self.activate_hand_with_id(&hand_id, config, persisted_instance_id) {
+                let timestamps = saved_hand
+                    .activated_at
+                    .and_then(|a| saved_hand.updated_at.map(|u| (a, u)));
+                match self.activate_hand_with_id(
+                    &hand_id,
+                    config,
+                    persisted_instance_id,
+                    timestamps,
+                ) {
                     Ok(inst) => {
                         if matches!(status, librefang_hands::HandStatus::Paused) {
                             if let Err(e) = self.pause_hand(inst.instance_id) {
