@@ -47,6 +47,10 @@ toml = { workspace = true }
 url = { workspace = true }
 dirs = { workspace = true }
 tempfile = { workspace = true }
+landlock = { version = "0.4", optional = true }
+
+[features]
+landlock-sandbox = ["dep:landlock"]
 
 [dev-dependencies]
 tokio-test = { workspace = true }

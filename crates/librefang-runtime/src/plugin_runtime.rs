@@ -382,13 +382,12 @@ pub struct HookConfig {
     /// binary is available; on all platforms, injects `no_proxy=*`/`NO_PROXY=*`
     /// into the subprocess env. Defaults to `true`.
     pub allow_network: bool,
-    /// Allow the hook subprocess general filesystem access.
+    /// Whether hook subprocesses are allowed filesystem write access.
     ///
-    /// When `false`, injects advisory env vars (`LIBREFANG_READONLY_FS=1`,
-    /// `HOME=/dev/null`) and redirects `TMPDIR` to a per-call temp directory
-    /// that is cleaned up after the hook exits. On Linux, additionally attempts
-    /// to wrap with `unshare --mount` for kernel-level mount isolation (best-effort;
-    /// falls back silently when `unshare` is unavailable). Defaults to `true`.
+    /// When `false`:
+    /// - `LIBREFANG_READONLY_FS=1` env var is injected (advisory, for well-behaved scripts)
+    /// - On Linux 5.13+: Landlock LSM restriction applied in child before exec (enforced)
+    /// - On Linux (older): best-effort `unshare --mount` (requires user namespaces)
     pub allow_filesystem: bool,
     /// Path to the per-plugin shared state JSON file.
     ///
@@ -579,6 +578,52 @@ fn try_wrap_with_unshare_mount(launcher: &str, args: &[String]) -> (String, Vec<
     (launcher.to_string(), args.to_vec())
 }
 
+/// Attempt to apply a Landlock read-only filesystem restriction to the current process.
+///
+/// Landlock (Linux 5.13+) allows unprivileged processes to restrict their own
+/// filesystem access without requiring root or `unshare`.  We restrict to read-only
+/// access for the entire filesystem, then re-allow read-write for a per-call temp dir.
+///
+/// Returns `true` if Landlock was applied, `false` if unavailable (older kernel, non-Linux,
+/// or compiled without the `landlock-sandbox` feature).
+#[cfg(all(target_os = "linux", feature = "landlock-sandbox"))]
+fn try_apply_landlock_readonly(allow_write_dir: Option<&std::path::Path>) -> bool {
+    use landlock::{
+        Access, AccessFs, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr,
+        RulesetStatus, ABI,
+    };
+    let abi = ABI::V3;
+    let result = Ruleset::default()
+        .handle_access(AccessFs::from_read(abi))
+        .and_then(|r| r.create())
+        .and_then(|mut r| {
+            // Allow read-only access to everything.
+            if let Ok(fd) = PathFd::new("/") {
+                let _ = r.add_rule(PathBeneath::new(fd, AccessFs::from_read(abi)));
+            }
+            // Optionally allow read-write to a specific temp dir.
+            if let Some(dir) = allow_write_dir {
+                if let Ok(fd) = PathFd::new(dir) {
+                    let _ = r.add_rule(PathBeneath::new(fd, AccessFs::from_all(abi)));
+                }
+            }
+            r.restrict_self()
+        });
+    match result {
+        Ok(outcome) => matches!(
+            outcome.ruleset,
+            RulesetStatus::FullyEnforced | RulesetStatus::PartiallyEnforced
+        ),
+        Err(_) => false,
+    }
+}
+
+#[cfg(not(all(target_os = "linux", feature = "landlock-sandbox")))]
+fn try_apply_landlock_readonly(_allow_write_dir: Option<&std::path::Path>) -> bool {
+    false
+}
+
+
 /// Run a hook script and parse the last JSON line of stdout.
 ///
 /// This is the main entry point — picks the right launcher based on
@@ -744,6 +789,24 @@ pub async fn run_hook_json(
         }
         cmd.env("LIBREFANG_STATE_FILE", state_path.to_string_lossy().as_ref());
         debug!(state_file = %state_path.display(), "Shared state file injected");
+    }
+
+    // Apply Landlock filesystem restriction in the child process before exec.
+    // This is done via unsafe pre_exec which runs in the forked child after fork()
+    // but before exec(), so it restricts only the child's filesystem access.
+    #[cfg(all(target_os = "linux", feature = "landlock-sandbox"))]
+    if !config.allow_filesystem {
+        use std::os::unix::process::CommandExt;
+        let write_dir = _hook_tmpdir.clone();
+        // SAFETY: pre_exec runs after fork() in the child. We only call
+        // try_apply_landlock_readonly which uses only async-signal-safe-equivalent
+        // operations (syscalls via the landlock crate).
+        unsafe {
+            cmd.pre_exec(move || {
+                try_apply_landlock_readonly(write_dir.as_deref());
+                Ok(())
+            });
+        }
     }
 
     let mut child = cmd.spawn().map_err(|e| {

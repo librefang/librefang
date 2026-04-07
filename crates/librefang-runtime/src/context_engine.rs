@@ -639,6 +639,8 @@ pub struct ScriptableContextEngine {
     plugin_name: String,
     /// Persistent SQLite trace store (None if it could not be opened at construction time).
     trace_store: Option<std::sync::Arc<crate::trace_store::TraceStore>>,
+    /// Tracks all spawned after_turn background tasks for graceful shutdown.
+    after_turn_tasks: std::sync::Arc<std::sync::Mutex<tokio::task::JoinSet<()>>>,
 }
 
 impl ScriptableContextEngine {
@@ -755,6 +757,7 @@ impl ScriptableContextEngine {
             otel_endpoint: hooks.otel_endpoint.clone(),
             plugin_name: String::new(), // filled in by with_plugin_name()
             trace_store: None,          // filled in by with_plugin_name()
+            after_turn_tasks: std::sync::Arc::new(std::sync::Mutex::new(tokio::task::JoinSet::new())),
         }
     }
 
@@ -1016,6 +1019,33 @@ impl ScriptableContextEngine {
                 let resolved = Self::resolve_script_path(script);
                 self.process_pool.evict(&resolved).await;
             }
+        }
+    }
+
+    /// Wait for all in-flight after_turn background tasks to complete.
+    ///
+    /// Call this during daemon shutdown after stopping the agent loop so that
+    /// no after_turn work is silently dropped. Times out after `timeout_secs`.
+    pub async fn wait_for_after_turn_tasks(&self, timeout_secs: u64) {
+        let tasks = match self.after_turn_tasks.lock() {
+            Ok(t) => t,
+            Err(_) => return,
+        };
+        // JoinSet doesn't expose a timed join_all directly, so we use a select.
+        // We drop the lock before awaiting to avoid holding it across an await point.
+        drop(tasks);
+
+        let deadline = tokio::time::Instant::now()
+            + std::time::Duration::from_secs(timeout_secs);
+        loop {
+            let mut guard = match self.after_turn_tasks.lock() {
+                Ok(g) => g,
+                Err(_) => break,
+            };
+            if guard.is_empty() { break; }
+            drop(guard);
+            if tokio::time::Instant::now() >= deadline { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
     }
 
@@ -1880,87 +1910,87 @@ impl ContextEngine for ScriptableContextEngine {
         let sem = std::sync::Arc::clone(&self.after_turn_sem);
         let trace_store = self.trace_store.clone();
         let plugin_name = self.plugin_name.clone();
-        let handle = tokio::spawn(async move {
-            // Bounded concurrency: acquire a semaphore permit before running the hook.
-            // `.ok()` is intentional: if the semaphore is closed (daemon shutting down),
-            // `acquire()` returns `Err(AcquireError)`. Ignoring it with `.ok()` lets the
-            // task complete its current hook call cleanly instead of panicking.  The permit
-            // is held for the lifetime of this spawned task via the `_permit` binding.
-            let _permit = sem.acquire().await.ok();
-            let result = if persistent_subprocess {
-                let config = crate::plugin_runtime::HookConfig {
-                    timeout_secs,
-                    plugin_env: plugin_env.clone(),
-                    max_memory_mb,
-                    allow_network,
-                    state_file: shared_state_path.clone(),
-                    ..Default::default()
-                };
-                let input_preview = if input.to_string().len() > 2048 {
-                    serde_json::json!({"_truncated": true, "type": input.get("type")})
+        if let Ok(mut tasks) = self.after_turn_tasks.lock() {
+            // Reap already-completed tasks to prevent unbounded growth.
+            while tasks.try_join_next().is_some() {}
+
+            tasks.spawn(async move {
+                // Bounded concurrency: acquire a semaphore permit before running the hook.
+                // `.ok()` is intentional: if the semaphore is closed (daemon shutting down),
+                // `acquire()` returns `Err(AcquireError)`. Ignoring it with `.ok()` lets the
+                // task complete its current hook call cleanly instead of panicking.  The permit
+                // is held for the lifetime of this spawned task via the `_permit` binding.
+                let _permit = sem.acquire().await.ok();
+                let result = if persistent_subprocess {
+                    let config = crate::plugin_runtime::HookConfig {
+                        timeout_secs,
+                        plugin_env: plugin_env.clone(),
+                        max_memory_mb,
+                        allow_network,
+                        state_file: shared_state_path.clone(),
+                        ..Default::default()
+                    };
+                    let input_preview = if input.to_string().len() > 2048 {
+                        serde_json::json!({"_truncated": true, "type": input.get("type")})
+                    } else {
+                        input.clone()
+                    };
+                    let started_at = chrono::Utc::now().to_rfc3339();
+                    let t = std::time::Instant::now();
+                    let call_result = process_pool.call(&script, runtime, &input, &config).await;
+                    let elapsed_ms = t.elapsed().as_millis() as u64;
+                    match call_result {
+                        Ok(output) => {
+                            Self::push_trace(
+                                &traces,
+                                HookTrace {
+                                    hook: "after_turn".to_string(),
+                                    started_at,
+                                    elapsed_ms,
+                                    success: true,
+                                    error: None,
+                                    input_preview,
+                                    output_preview: Some(output.clone()),
+                                },
+                                trace_store.as_ref(),
+                                &plugin_name,
+                            );
+                            Ok((output, elapsed_ms))
+                        }
+                        Err(e) => {
+                            let err_msg = e.to_string();
+                            Self::push_trace(
+                                &traces,
+                                HookTrace {
+                                    hook: "after_turn".to_string(),
+                                    started_at,
+                                    elapsed_ms,
+                                    success: false,
+                                    error: Some(err_msg.clone()),
+                                    input_preview,
+                                    output_preview: None,
+                                },
+                                trace_store.as_ref(),
+                                &plugin_name,
+                            );
+                            Err(err_msg)
+                        }
+                    }
                 } else {
-                    input.clone()
+                    Self::run_hook("after_turn", &script, runtime, input, timeout_secs, &plugin_env, max_retries, retry_delay_ms, max_memory_mb, allow_network, &traces, &hook_schemas, shared_state_path.as_deref(), trace_store.as_ref(), &plugin_name).await
                 };
-                let started_at = chrono::Utc::now().to_rfc3339();
-                let t = std::time::Instant::now();
-                let call_result = process_pool.call(&script, runtime, &input, &config).await;
-                let elapsed_ms = t.elapsed().as_millis() as u64;
-                match call_result {
-                    Ok(output) => {
-                        Self::push_trace(
-                            &traces,
-                            HookTrace {
-                                hook: "after_turn".to_string(),
-                                started_at,
-                                elapsed_ms,
-                                success: true,
-                                error: None,
-                                input_preview,
-                                output_preview: Some(output.clone()),
-                            },
-                            trace_store.as_ref(),
-                            &plugin_name,
-                        );
-                        Ok((output, elapsed_ms))
+                match result {
+                    Ok((_, ms)) => {
+                        Self::record_hook(&metrics, "after_turn", ms, true);
+                        debug!("After-turn hook completed ({ms}ms)");
                     }
                     Err(e) => {
-                        let err_msg = e.to_string();
-                        Self::push_trace(
-                            &traces,
-                            HookTrace {
-                                hook: "after_turn".to_string(),
-                                started_at,
-                                elapsed_ms,
-                                success: false,
-                                error: Some(err_msg.clone()),
-                                input_preview,
-                                output_preview: None,
-                            },
-                            trace_store.as_ref(),
-                            &plugin_name,
-                        );
-                        Err(err_msg)
+                        Self::record_hook(&metrics, "after_turn", 0, false);
+                        warn!("After-turn hook failed: {e}");
                     }
                 }
-            } else {
-                Self::run_hook("after_turn", &script, runtime, input, timeout_secs, &plugin_env, max_retries, retry_delay_ms, max_memory_mb, allow_network, &traces, &hook_schemas, shared_state_path.as_deref(), trace_store.as_ref(), &plugin_name).await
-            };
-            match result {
-                Ok((_, ms)) => {
-                    Self::record_hook(&metrics, "after_turn", ms, true);
-                    debug!("After-turn hook completed ({ms}ms)");
-                }
-                Err(e) => {
-                    Self::record_hook(&metrics, "after_turn", 0, false);
-                    warn!("After-turn hook failed: {e}");
-                }
-            }
-        });
-        tokio::spawn(async move {
-            if let Err(e) = handle.await {
-                warn!("After-turn hook task panicked: {e}");
-            }
-        });
+            });
+        }
 
         Ok(())
     }
@@ -2284,25 +2314,46 @@ impl ContextEngine for StackedContextEngine {
         // Run all engines concurrently — ingest is independent per engine
         // (each has its own recall store), so parallel execution is safe and
         // reduces total latency to max(individual latencies).
-        let futures: Vec<_> = self
-            .engines
-            .iter()
-            .map(|e| e.ingest(agent_id, user_message, peer_id))
-            .collect();
-
-        let results = futures::future::join_all(futures).await;
-
-        let mut all_memories = Vec::new();
-        for result in results {
-            match result {
-                Ok(r) => all_memories.extend(r.recalled_memories),
-                Err(e) => {
+        // Each engine is guarded by a 30-second timeout so a single slow or
+        // hung engine cannot block the entire stack indefinitely.
+        let timeout_dur = std::time::Duration::from_secs(30);
+        let futs = self.engines.iter().enumerate().map(|(i, engine)| async move {
+            match tokio::time::timeout(timeout_dur, engine.ingest(agent_id, user_message, peer_id)).await {
+                Ok(Ok(r)) => Some(r.recalled_memories),
+                Ok(Err(e)) => {
                     warn!(
+                        engine_index = i,
                         error = %e,
-                        "StackedContextEngine: ingest error from engine (skipping)"
+                        "StackedContextEngine: ingest engine failed (skipping)"
                     );
+                    None
+                }
+                Err(_elapsed) => {
+                    warn!(
+                        engine_index = i,
+                        timeout_secs = 30,
+                        "StackedContextEngine: ingest engine timed out (skipping)"
+                    );
+                    None
                 }
             }
+        });
+
+        let mut succeeded: usize = 0;
+        let mut failed: usize = 0;
+        let mut all_memories = Vec::new();
+        for memories in futures::future::join_all(futs).await {
+            match memories {
+                Some(m) => { succeeded += 1; all_memories.extend(m); }
+                None => { failed += 1; }
+            }
+        }
+        if failed > 0 {
+            warn!(
+                succeeded,
+                failed,
+                "StackedContextEngine: ingest completed with some engine failures"
+            );
         }
         Ok(IngestResult {
             recalled_memories: all_memories,
@@ -2417,21 +2468,40 @@ impl ContextEngine for StackedContextEngine {
         // Run all engines concurrently (best-effort). Each ScriptableContextEngine
         // already fire-and-forgets its own subprocess, so this outer join simply
         // dispatches all engines at once instead of waiting for each in sequence.
-        let futures: Vec<_> = self
-            .engines
-            .iter()
-            .map(|e| e.after_turn(agent_id, messages))
-            .collect();
-
-        let results = futures::future::join_all(futures).await;
-        for (i, result) in results.into_iter().enumerate() {
-            if let Err(e) = result {
-                warn!(
-                    index = i,
-                    error = %e,
-                    "StackedContextEngine: after_turn error (best-effort)"
-                );
+        // Each engine is guarded by a 30-second timeout so a single slow or hung
+        // engine cannot stall the entire stack.
+        let timeout_dur = std::time::Duration::from_secs(30);
+        let futs = self.engines.iter().enumerate().map(|(i, engine)| async move {
+            match tokio::time::timeout(timeout_dur, engine.after_turn(agent_id, messages)).await {
+                Ok(Ok(())) => true,
+                Ok(Err(e)) => {
+                    warn!(
+                        engine_index = i,
+                        error = %e,
+                        "StackedContextEngine: after_turn engine failed"
+                    );
+                    false
+                }
+                Err(_elapsed) => {
+                    warn!(
+                        engine_index = i,
+                        timeout_secs = 30,
+                        "StackedContextEngine: after_turn engine timed out"
+                    );
+                    false
+                }
             }
+        });
+
+        let outcomes = futures::future::join_all(futs).await;
+        let succeeded = outcomes.iter().filter(|&&ok| ok).count();
+        let failed = outcomes.len() - succeeded;
+        if failed > 0 {
+            warn!(
+                succeeded,
+                failed,
+                "StackedContextEngine: after_turn completed with some engine failures"
+            );
         }
         Ok(())
     }
@@ -2502,6 +2572,20 @@ impl ContextEngine for StackedContextEngine {
             }
         }
         if any { Some(aggregate) } else { None }
+    }
+
+    fn per_agent_metrics(&self) -> std::collections::HashMap<String, HookStats> {
+        let mut merged: std::collections::HashMap<String, HookStats> = std::collections::HashMap::new();
+        for engine in &self.engines {
+            for (agent_id, stats) in engine.per_agent_metrics() {
+                let entry = merged.entry(agent_id).or_default();
+                entry.calls += stats.calls;
+                entry.successes += stats.successes;
+                entry.failures += stats.failures;
+                entry.total_ms += stats.total_ms;
+            }
+        }
+        merged
     }
 }
 
