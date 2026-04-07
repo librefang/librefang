@@ -132,9 +132,9 @@ shell = false
 network = false
 "#;
 
-        let signed = SignedManifest::sign(manifest, &signing_key, "test@librefang.dev");
+        let signed = SignedManifest::sign(manifest, &signing_key, "test@librefang.ai");
         assert_eq!(signed.content_hash, hash_manifest(manifest));
-        assert_eq!(signed.signer_id, "test@librefang.dev");
+        assert_eq!(signed.signer_id, "test@librefang.ai");
         assert!(signed.verify().is_ok());
     }
 
