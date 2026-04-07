@@ -43,6 +43,7 @@ pub mod model_catalog;
 pub mod pii_filter;
 pub mod plugin_manager;
 pub mod plugin_runtime;
+pub mod trace_store;
 pub mod proactive_memory;
 pub mod process_manager;
 pub mod prompt_builder;
