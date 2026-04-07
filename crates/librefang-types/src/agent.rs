@@ -712,6 +712,8 @@ pub struct AgentIdentity {
 pub struct AgentEntry {
     /// Unique agent ID.
     pub id: AgentId,
+    /// Account (tenant) ID for multi-tenant isolation. None = legacy/system, Some = scoped tenant.
+    pub account_id: Option<String>,
     /// Human-readable name.
     pub name: String,
     /// Full manifest.
@@ -1200,6 +1202,7 @@ mod tests {
     fn test_agent_entry_with_mode() {
         let entry = AgentEntry {
             id: AgentId::new(),
+            account_id: None,
             name: "test".to_string(),
             manifest: AgentManifest::default(),
             state: AgentState::Running,
@@ -1259,6 +1262,7 @@ mod tests {
     fn test_agent_entry_identity_in_serde() {
         let entry = AgentEntry {
             id: AgentId::new(),
+            account_id: None,
             name: "bot".to_string(),
             manifest: AgentManifest::default(),
             state: AgentState::Running,

@@ -64,6 +64,10 @@ pub struct SupabaseVectorStore {
     /// Default 0.5 means only results with cosine distance < 0.5
     /// (i.e. similarity > 0.5) are returned.
     match_threshold: f32,
+    /// Expected embedding dimensions (e.g. 384 for `all-MiniLM-L6-v2`).
+    /// When set, `insert` / `search` / `insert_batch` reject embeddings
+    /// with a mismatched length — preventing a cryptic PostgreSQL cast error.
+    expected_dimensions: Option<usize>,
 }
 
 // Manual Debug impl to redact the API key from logs.
@@ -73,6 +77,7 @@ impl std::fmt::Debug for SupabaseVectorStore {
             .field("base_url", &self.base_url)
             .field("api_key", &"***REDACTED***")
             .field("match_threshold", &self.match_threshold)
+            .field("expected_dimensions", &self.expected_dimensions)
             .finish()
     }
 }
@@ -92,6 +97,7 @@ impl SupabaseVectorStore {
             base_url: base_url.into().trim_end_matches('/').to_string(),
             api_key: api_key.into(),
             match_threshold: 0.5,
+            expected_dimensions: None,
         }
     }
 
@@ -107,6 +113,34 @@ impl SupabaseVectorStore {
         );
         self.match_threshold = threshold;
         self
+    }
+
+    /// Set the expected embedding dimensions for client-side validation.
+    ///
+    /// Must match the DB column definition (e.g. `ruvector(384)`).
+    /// Embeddings of wrong length are rejected before the HTTP call.
+    pub fn with_expected_dimensions(mut self, dims: usize) -> Self {
+        assert!(dims > 0, "expected_dimensions must be > 0, got {dims}");
+        self.expected_dimensions = Some(dims);
+        self
+    }
+
+    /// Validate embedding dimensions and emptiness.
+    fn validate_embedding(&self, embedding: &[f32], context: &str) -> LibreFangResult<()> {
+        if embedding.is_empty() {
+            return Err(LibreFangError::Internal(format!(
+                "Supabase {context}: embedding cannot be empty"
+            )));
+        }
+        if let Some(expected) = self.expected_dimensions {
+            if embedding.len() != expected {
+                return Err(LibreFangError::Internal(format!(
+                    "Supabase {context}: expected {expected}-dim embedding, got {}-dim",
+                    embedding.len()
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Build the full URL for an RPC function.
@@ -214,6 +248,11 @@ impl SupabaseVectorStore {
             return Ok(vec![]);
         }
 
+        // Validate all embeddings up front before any network call.
+        for (i, (_, embedding, _, _)) in items.iter().enumerate() {
+            self.validate_embedding(embedding, &format!("vector_insert_batch[{i}]"))?;
+        }
+
         // Extract tenant context from the first item's metadata.
         let doc_user_id = items[0]
             .3
@@ -295,6 +334,8 @@ impl VectorStore for SupabaseVectorStore {
         payload: &str,
         metadata: HashMap<String, serde_json::Value>,
     ) -> LibreFangResult<()> {
+        self.validate_embedding(embedding, "vector_insert")?;
+
         // Extract user_id and account_id from metadata before we move it.
         // NOTE: user_id is REQUIRED by the Supabase RPC (FK to auth.users).
         // If neither user_id nor an active auth session exists, insert will fail.
@@ -302,6 +343,12 @@ impl VectorStore for SupabaseVectorStore {
             .get("user_id")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
+        if doc_user_id.is_none() {
+            tracing::warn!(
+                "Supabase vector_insert: no user_id in metadata — \
+                 RPC falls back to auth.uid() which is NULL for anon keys"
+            );
+        }
         let doc_account_id = metadata
             .get("account_id")
             .and_then(|v| v.as_str())
@@ -354,6 +401,8 @@ impl VectorStore for SupabaseVectorStore {
         limit: usize,
         filter: Option<MemoryFilter>,
     ) -> LibreFangResult<Vec<VectorSearchResult>> {
+        self.validate_embedding(query_embedding, "vector_search")?;
+
         let caller_user_id = filter
             .as_ref()
             .and_then(|f| f.metadata.get("user_id"))
@@ -1035,6 +1084,62 @@ mod tests {
             .map(|s| s.to_string());
         // First item wins — RPC applies uniformly
         assert_eq!(doc_user_id.as_deref(), Some("user-A"));
+    }
+
+    // ── Dimension validation tests ─────────────────────────────────
+
+    #[test]
+    fn test_validate_embedding_correct_dimensions() {
+        let store =
+            SupabaseVectorStore::new("https://x.co/rest/v1", "k").with_expected_dimensions(384);
+        let embedding = vec![0.1_f32; 384];
+        assert!(store.validate_embedding(&embedding, "test").is_ok());
+    }
+
+    #[test]
+    fn test_validate_embedding_wrong_dimensions() {
+        let store =
+            SupabaseVectorStore::new("https://x.co/rest/v1", "k").with_expected_dimensions(384);
+        let embedding = vec![0.1_f32; 768];
+        let err = store.validate_embedding(&embedding, "test").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("384-dim"), "Should mention expected: {msg}");
+        assert!(msg.contains("768-dim"), "Should mention actual: {msg}");
+    }
+
+    #[test]
+    fn test_validate_embedding_empty() {
+        let store = SupabaseVectorStore::new("https://x.co/rest/v1", "k");
+        let err = store.validate_embedding(&[], "test").unwrap_err();
+        assert!(
+            err.to_string().contains("empty"),
+            "Should mention empty: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_embedding_no_expected_dims_passes() {
+        // Without expected_dimensions, any non-empty embedding is accepted
+        let store = SupabaseVectorStore::new("https://x.co/rest/v1", "k");
+        assert!(store.validate_embedding(&[0.1, 0.2], "test").is_ok());
+        assert!(store.validate_embedding(&[0.1; 1536], "test").is_ok());
+    }
+
+    #[test]
+    #[should_panic(expected = "must be > 0")]
+    fn test_expected_dimensions_rejects_zero() {
+        SupabaseVectorStore::new("https://x.co/rest/v1", "k").with_expected_dimensions(0);
+    }
+
+    #[test]
+    fn test_debug_shows_expected_dimensions() {
+        let store =
+            SupabaseVectorStore::new("https://x.co/rest/v1", "k").with_expected_dimensions(384);
+        let debug = format!("{:?}", store);
+        assert!(
+            debug.contains("384"),
+            "Debug should show dimensions: {debug}"
+        );
     }
 
     // ── Real-world dimension test ────────────────────────────────────

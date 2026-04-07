@@ -3162,6 +3162,11 @@ pub struct MemoryConfig {
     /// (used when `vector_backend = "supabase"`). Defaults to `"SUPABASE_ANON_KEY"`.
     #[serde(default)]
     pub vector_store_api_key_env: Option<String>,
+    /// Expected vector dimensions (e.g. 384 for `all-MiniLM-L6-v2`).
+    /// Used for client-side validation in the Supabase backend.
+    /// Must match the DB column definition (`ruvector(N)`).
+    #[serde(default)]
+    pub vector_dimensions: Option<usize>,
 }
 
 /// Configuration for splitting long documents into overlapping chunks.
@@ -3207,6 +3212,7 @@ impl Default for MemoryConfig {
             vector_backend: None,
             vector_store_url: None,
             vector_store_api_key_env: None,
+            vector_dimensions: None,
         }
     }
 }

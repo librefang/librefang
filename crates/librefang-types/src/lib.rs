@@ -6,6 +6,7 @@
 /// The LibreFang version, derived from the workspace `Cargo.toml` at compile time.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+pub mod account;
 pub mod agent;
 pub mod approval;
 pub mod capability;

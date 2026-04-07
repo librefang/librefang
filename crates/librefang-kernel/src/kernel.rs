@@ -1698,9 +1698,12 @@ impl LibreFangKernel {
                             "vector_backend = \"supabase\" requires env var {key_env} to be set"
                         ))
                     })?;
-                    let store = std::sync::Arc::new(librefang_memory::SupabaseVectorStore::new(
-                        url, api_key,
-                    ));
+                    let mut store = librefang_memory::SupabaseVectorStore::new(url, api_key);
+                    if let Some(dims) = config.memory.vector_dimensions {
+                        store = store.with_expected_dimensions(dims);
+                        tracing::info!("Vector store dimension validation: {dims}-dim");
+                    }
+                    let store = std::sync::Arc::new(store);
                     substrate.set_vector_store(store);
                     tracing::info!("Vector store backend: supabase ({})", url);
                 }
