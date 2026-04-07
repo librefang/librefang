@@ -32,7 +32,7 @@ use librefang_runtime::routing::ModelRouter;
 use librefang_runtime::sandbox::{SandboxConfig, WasmSandbox};
 use librefang_runtime::tool_runner::builtin_tool_definitions;
 use librefang_types::agent::*;
-use librefang_types::capability::Capability;
+use librefang_types::capability::{glob_matches, Capability};
 use librefang_types::config::{AuthProfile, KernelConfig};
 use librefang_types::error::LibreFangError;
 use librefang_types::event::*;
@@ -2628,9 +2628,17 @@ impl LibreFangKernel {
                         info!(agent = %name, "Agent disabled in config — starting as Suspended");
                     }
 
-                    // Inherit kernel exec_policy for agents that lack one
+                    // Inherit kernel exec_policy for agents that lack one.
+                    // Promote to Full when shell_exec is declared in capabilities.
                     if restored_entry.manifest.exec_policy.is_none() {
-                        restored_entry.manifest.exec_policy = Some(cfg.exec_policy.clone());
+                        if restored_entry.manifest.capabilities.tools.iter().any(|t| t == "shell_exec" || t == "*") {
+                            restored_entry.manifest.exec_policy = Some(librefang_types::config::ExecPolicy {
+                                mode: librefang_types::config::ExecSecurityMode::Full,
+                                ..cfg.exec_policy.clone()
+                            });
+                        } else {
+                            restored_entry.manifest.exec_policy = Some(cfg.exec_policy.clone());
+                        }
                     }
 
                     // Apply global budget defaults to restored agents
@@ -2849,11 +2857,20 @@ system_prompt = "You are a helpful assistant."
             .create_session(agent_id)
             .map_err(KernelError::LibreFang)?;
 
-        // Inherit kernel exec_policy as fallback if agent manifest doesn't have one
+        // Inherit kernel exec_policy as fallback if agent manifest doesn't have one.
+        // Exception: if the agent declares shell_exec in capabilities.tools, promote
+        // to Full mode so the tool actually works rather than silently being blocked.
         let cfg = self.config.load();
         let mut manifest = manifest;
         if manifest.exec_policy.is_none() {
-            manifest.exec_policy = Some(cfg.exec_policy.clone());
+            if manifest.capabilities.tools.iter().any(|t| t == "shell_exec" || t == "*") {
+                manifest.exec_policy = Some(librefang_types::config::ExecPolicy {
+                    mode: librefang_types::config::ExecSecurityMode::Full,
+                    ..cfg.exec_policy.clone()
+                });
+            } else {
+                manifest.exec_policy = Some(cfg.exec_policy.clone());
+            }
         }
         info!(agent = %name, id = %agent_id, exec_mode = ?manifest.exec_policy.as_ref().map(|p| &p.mode), "Agent exec_policy resolved");
 
@@ -8872,7 +8889,7 @@ system_prompt = "You are a helpful assistant."
             // Agent declares specific tools — only include matching builtins
             all_builtins
                 .into_iter()
-                .filter(|t| declared_tools.iter().any(|d| d == &t.name))
+                .filter(|t| declared_tools.iter().any(|d| glob_matches(d, &t.name)))
                 .collect()
         } else {
             // No specific tools declared — fall back to profile or all builtins
@@ -8908,7 +8925,7 @@ system_prompt = "You are a helpful assistant."
         };
         for skill_tool in skill_tools {
             // If agent declares specific tools, only include matching skill tools
-            if !tools_unrestricted && !declared_tools.iter().any(|d| d == &skill_tool.name) {
+            if !tools_unrestricted && !declared_tools.iter().any(|d| glob_matches(d, &skill_tool.name)) {
                 continue;
             }
             all_tools.push(ToolDefinition {
@@ -8951,7 +8968,7 @@ system_prompt = "You are a helpful assistant."
             };
             for t in mcp_candidates {
                 // If agent declares specific tools, only include matching MCP tools
-                if !tools_unrestricted && !declared_tools.iter().any(|d| d == &t.name) {
+                if !tools_unrestricted && !declared_tools.iter().any(|d| glob_matches(d, &t.name)) {
                     continue;
                 }
                 all_tools.push(t);
@@ -12299,6 +12316,118 @@ mod tests {
         assert!(
             tools.is_empty(),
             "disabled tools should suppress all builtin, skill, and MCP tools"
+        );
+
+        kernel.shutdown();
+    }
+
+    #[test]
+    fn test_available_tools_glob_pattern_matches_mcp_tools() {
+        // Regression: declared tools used exact == match, so "mcp_filesystem_*"
+        // never matched "mcp_filesystem_list_directory" etc. and MCP tools were
+        // silently dropped from available_tools().
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("librefang-kernel-glob-mcp-test");
+        std::fs::create_dir_all(&home_dir).unwrap();
+
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            ..KernelConfig::default()
+        };
+
+        let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+        // Agent with a glob pattern in declared tools — should match builtins
+        let manifest = AgentManifest {
+            name: "glob-tools".to_string(),
+            description: "agent using glob in tools".to_string(),
+            author: "test".to_string(),
+            module: "builtin:chat".to_string(),
+            capabilities: ManifestCapabilities {
+                tools: vec!["file_*".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
+        let tools = kernel.available_tools(agent_id);
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+
+        assert!(
+            names.contains(&"file_read"),
+            "file_* should match file_read, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"file_write"),
+            "file_* should match file_write, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"file_list"),
+            "file_* should match file_list, got: {names:?}"
+        );
+        assert!(
+            !names.contains(&"web_fetch"),
+            "file_* should NOT match web_fetch, got: {names:?}"
+        );
+        assert!(
+            !names.contains(&"shell_exec"),
+            "file_* should NOT match shell_exec, got: {names:?}"
+        );
+
+        kernel.shutdown();
+    }
+
+    #[test]
+    fn test_shell_exec_available_when_declared_in_tools_without_explicit_exec_policy() {
+        // Regression: agents without an explicit exec_policy inherited the global
+        // ExecPolicy whose default mode is Deny, causing shell_exec to be stripped
+        // from available_tools() even when explicitly listed in capabilities.tools.
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("librefang-kernel-shell-exec-policy-test");
+        std::fs::create_dir_all(&home_dir).unwrap();
+
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            // Global exec_policy stays at default (Deny) — this is the scenario
+            // that triggered the bug.
+            ..KernelConfig::default()
+        };
+
+        let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+        let manifest = AgentManifest {
+            name: "shell-agent".to_string(),
+            description: "agent with shell_exec in tools, no exec_policy".to_string(),
+            author: "test".to_string(),
+            module: "builtin:chat".to_string(),
+            capabilities: ManifestCapabilities {
+                tools: vec!["shell_exec".to_string(), "file_read".to_string()],
+                shell: vec!["*".to_string()],
+                ..Default::default()
+            },
+            exec_policy: None, // no explicit policy — must auto-promote
+            ..Default::default()
+        };
+
+        let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
+
+        // Verify exec_policy was promoted to Full
+        let entry = kernel.registry.get(agent_id).expect("agent must be registered");
+        assert_eq!(
+            entry.manifest.exec_policy.as_ref().map(|p| p.mode),
+            Some(librefang_types::config::ExecSecurityMode::Full),
+            "exec_policy should be auto-promoted to Full when shell_exec is declared"
+        );
+
+        // Verify shell_exec appears in available_tools
+        let tools = kernel.available_tools(agent_id);
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        assert!(
+            names.contains(&"shell_exec"),
+            "shell_exec must be in available_tools when declared in capabilities.tools, got: {names:?}"
         );
 
         kernel.shutdown();
