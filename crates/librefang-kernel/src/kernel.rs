@@ -7247,10 +7247,15 @@ system_prompt = "You are a helpful assistant."
                         }
                     }
                 }
-                let timestamps = saved_hand.activated_at.and_then(|a| {
-                    saved_hand.updated_at.map(|u| (a, u))
-                });
-                match self.activate_hand_with_id(&hand_id, config, persisted_instance_id, timestamps) {
+                let timestamps = saved_hand
+                    .activated_at
+                    .and_then(|a| saved_hand.updated_at.map(|u| (a, u)));
+                match self.activate_hand_with_id(
+                    &hand_id,
+                    config,
+                    persisted_instance_id,
+                    timestamps,
+                ) {
                     Ok(inst) => {
                         if matches!(status, librefang_hands::HandStatus::Paused) {
                             if let Err(e) = self.pause_hand(inst.instance_id) {

@@ -14,11 +14,6 @@ use std::sync::Mutex;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-/// Default timestamp for serde deserialization fallback (backward compat with v3).
-fn default_now() -> DateTime<Utc> {
-    Utc::now()
-}
-
 /// Current version of the persisted hand state format.
 const PERSIST_VERSION: u32 = 4;
 
@@ -39,10 +34,12 @@ struct PersistedInstance {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     coordinator_role: Option<String>,
     status: HandStatus,
-    #[serde(default = "default_now")]
-    activated_at: DateTime<Utc>,
-    #[serde(default = "default_now")]
-    updated_at: DateTime<Utc>,
+    /// When the hand was originally activated. `None` for legacy v1/v2/v3 state files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    activated_at: Option<DateTime<Utc>>,
+    /// Last status change before persist. `None` for legacy v1/v2/v3 state files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    updated_at: Option<DateTime<Utc>>,
 }
 
 /// Wrapper struct for HAND.toml files that use the documented `[hand]` section format.
@@ -215,7 +212,10 @@ impl HandRegistry {
     /// across daemon restarts. Error-state instances are also persisted so
     /// the user can see what went wrong after a restart.
     pub fn persist_state(&self, path: &std::path::Path) -> HandResult<()> {
-        let _guard = self.persist_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = self.persist_lock.lock().unwrap_or_else(|e| {
+            warn!("persist_state: persist_lock poisoned, recovering: {e}");
+            e.into_inner()
+        });
         let instances: Vec<PersistedInstance> = self
             .instances
             .iter()
@@ -227,8 +227,8 @@ impl HandRegistry {
                 agent_ids: e.agent_ids.clone(),
                 coordinator_role: e.coordinator_role.clone(),
                 status: e.status.clone(),
-                activated_at: e.activated_at,
-                updated_at: e.updated_at,
+                activated_at: Some(e.activated_at),
+                updated_at: Some(e.updated_at),
             })
             .collect();
         let state = PersistedState {
@@ -287,8 +287,8 @@ impl HandRegistry {
                         coordinator_role,
                         status,
                         instance_id: Some(inst.instance_id),
-                        activated_at: Some(inst.activated_at),
-                        updated_at: Some(inst.updated_at),
+                        activated_at: inst.activated_at,
+                        updated_at: inst.updated_at,
                     })
                 })
                 .collect();
@@ -573,7 +573,24 @@ impl HandRegistry {
             .ok_or(HandError::InstanceNotFound(instance_id))?;
         // Clean up reverse indexes.
         self.agent_index.retain(|_, v| *v != instance_id);
-        self.active_index.remove(&instance.hand_id);
+        // Only remove from active_index if it still points to this instance.
+        // When multiple instances of the same hand_id exist (restart recovery),
+        // we must not clobber the entry if another instance took over.
+        if let Some(active_id) = self.active_index.get(&instance.hand_id) {
+            if *active_id == instance_id {
+                drop(active_id);
+                self.active_index.remove(&instance.hand_id);
+                // Re-insert another active instance of the same hand_id if one exists.
+                if let Some(other) = self
+                    .instances
+                    .iter()
+                    .find(|e| e.hand_id == instance.hand_id && e.status == HandStatus::Active)
+                {
+                    self.active_index
+                        .insert(instance.hand_id.clone(), other.instance_id);
+                }
+            }
+        }
         info!(hand = %instance.hand_id, instance = %instance_id, "Hand deactivated");
         Ok(instance)
     }
@@ -648,7 +665,9 @@ impl HandRegistry {
     /// Find the hand instance associated with an agent (O(1) via reverse index).
     pub fn find_by_agent(&self, agent_id: AgentId) -> Option<HandInstance> {
         let instance_id = self.agent_index.get(&agent_id.to_string())?;
-        self.instances.get(instance_id.value()).map(|e| e.value().clone())
+        self.instances
+            .get(instance_id.value())
+            .map(|e| e.value().clone())
     }
 
     /// List all active hand instances.

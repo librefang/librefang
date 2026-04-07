@@ -360,6 +360,22 @@ fn test_hand_state_persistence() {
 
     let inst = &instances[0];
     assert_eq!(inst["hand_id"], "test-clip");
+
+    // Validate v4 typed persistence fields
+    assert!(
+        inst["instance_id"].is_string(),
+        "v4 should have string instance_id"
+    );
+    assert!(inst["status"].is_string(), "v4 should have string status");
+    assert!(
+        inst["activated_at"].is_string(),
+        "v4 should have string activated_at"
+    );
+    assert!(
+        inst["updated_at"].is_string(),
+        "v4 should have string updated_at"
+    );
+
     // v3 uses agent_ids map
     let agent_ids_map = inst["agent_ids"].as_object().unwrap();
     assert!(agent_ids_map
