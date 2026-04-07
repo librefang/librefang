@@ -39,6 +39,15 @@ pub const LIBREFANG_ID_KEY: &str = "librefang_id";
 /// [`delete()`] expects.  Delete is **idempotent** — deleting a non-existent
 /// ID logs a warning and returns `Ok(())`.
 ///
+/// # Multi-tenant support
+///
+/// The Supabase RPCs accept `account_id` parameters for tenant isolation.
+/// Pass `account_id` in the metadata `HashMap` on insert, and in the
+/// [`MemoryFilter`] metadata on search.  If omitted, the RPC defaults to
+/// `NULL` (no tenant filtering).  `user_id` is **required** — the RPC
+/// falls back to `auth.uid()`, but if neither is set the insert will fail
+/// with a PostgreSQL exception.
+///
 /// # Embedding precision
 ///
 /// Embeddings are formatted with 8 fixed decimal places. Values below `1e-8`
@@ -143,6 +152,8 @@ struct SupabaseInsertRequest<'a> {
     doc_metadata: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     doc_user_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    doc_account_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -152,6 +163,8 @@ struct SupabaseSearchRequest {
     match_threshold: f32,
     #[serde(skip_serializing_if = "Option::is_none")]
     caller_user_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    caller_account_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -179,9 +192,15 @@ impl VectorStore for SupabaseVectorStore {
         payload: &str,
         metadata: HashMap<String, serde_json::Value>,
     ) -> LibreFangResult<()> {
-        // Extract user_id from metadata before we move it.
+        // Extract user_id and account_id from metadata before we move it.
+        // NOTE: user_id is REQUIRED by the Supabase RPC (FK to auth.users).
+        // If neither user_id nor an active auth session exists, insert will fail.
         let doc_user_id = metadata
             .get("user_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let doc_account_id = metadata
+            .get("account_id")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
@@ -199,6 +218,7 @@ impl VectorStore for SupabaseVectorStore {
             doc_embedding: embedding_to_text(embedding),
             doc_metadata,
             doc_user_id,
+            doc_account_id,
         };
 
         let resp = self
@@ -236,12 +256,18 @@ impl VectorStore for SupabaseVectorStore {
             .and_then(|f| f.metadata.get("user_id"))
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
+        let caller_account_id = filter
+            .as_ref()
+            .and_then(|f| f.metadata.get("account_id"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
 
         let body = SupabaseSearchRequest {
             query_embedding: embedding_to_text(query_embedding),
             match_count: limit,
             match_threshold: self.match_threshold,
             caller_user_id,
+            caller_account_id,
         };
 
         let resp = self
@@ -528,6 +554,7 @@ mod tests {
             doc_embedding: embedding_to_text(&[0.1, 0.2]),
             doc_metadata: serde_json::json!({"source": "test", "librefang_id": "orig-42"}),
             doc_user_id: Some("00000000-0000-0000-0000-000000000001".to_string()),
+            doc_account_id: None,
         };
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["doc_content"], "hello world");
@@ -537,12 +564,74 @@ mod tests {
     }
 
     #[test]
+    fn test_insert_request_includes_account_id() {
+        let req = SupabaseInsertRequest {
+            doc_content: "multi-tenant",
+            doc_embedding: "[0.1]".to_string(),
+            doc_metadata: serde_json::json!({}),
+            doc_user_id: Some("user-uuid".to_string()),
+            doc_account_id: Some("account-uuid".to_string()),
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["doc_account_id"], "account-uuid");
+        assert_eq!(json["doc_user_id"], "user-uuid");
+    }
+
+    #[test]
+    fn test_insert_request_skips_null_account_id() {
+        let req = SupabaseInsertRequest {
+            doc_content: "no tenant",
+            doc_embedding: "[0.1]".to_string(),
+            doc_metadata: serde_json::json!({}),
+            doc_user_id: Some("user".to_string()),
+            doc_account_id: None,
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert!(
+            !json.as_object().unwrap().contains_key("doc_account_id"),
+            "doc_account_id=None should be omitted"
+        );
+    }
+
+    #[test]
+    fn test_search_request_includes_account_id() {
+        let req = SupabaseSearchRequest {
+            query_embedding: "[0.1]".to_string(),
+            match_count: 5,
+            match_threshold: 0.5,
+            caller_user_id: None,
+            caller_account_id: Some("tenant-123".to_string()),
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["caller_account_id"], "tenant-123");
+        assert!(!json.as_object().unwrap().contains_key("caller_user_id"));
+    }
+
+    #[test]
+    fn test_account_id_extraction_from_metadata() {
+        let mut metadata = HashMap::new();
+        metadata.insert("account_id".to_string(), serde_json::json!("acct-456"));
+        metadata.insert("user_id".to_string(), serde_json::json!("user-789"));
+        let account = metadata
+            .get("account_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let user = metadata
+            .get("user_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        assert_eq!(account.as_deref(), Some("acct-456"));
+        assert_eq!(user.as_deref(), Some("user-789"));
+    }
+
+    #[test]
     fn test_insert_request_skips_null_user_id() {
         let req = SupabaseInsertRequest {
             doc_content: "no user",
             doc_embedding: "[0.1]".to_string(),
             doc_metadata: serde_json::json!({}),
             doc_user_id: None,
+            doc_account_id: None,
         };
         let json = serde_json::to_value(&req).unwrap();
         // skip_serializing_if = None means the key should be absent
@@ -559,6 +648,7 @@ mod tests {
             match_count: 10,
             match_threshold: 0.3,
             caller_user_id: Some("user-uuid".to_string()),
+            caller_account_id: None,
         };
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["match_count"], 10);
@@ -573,6 +663,7 @@ mod tests {
             match_count: 5,
             match_threshold: 0.5,
             caller_user_id: None,
+            caller_account_id: None,
         };
         let json = serde_json::to_value(&req).unwrap();
         assert!(!json.as_object().unwrap().contains_key("caller_user_id"));
