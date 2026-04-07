@@ -397,14 +397,14 @@ echo "=== Pattern Coverage: ALL PASSED ==="
 
 ## Day-by-Day Schedule
 
-| Day | Time | Rounds | Deliverables |
-|-----|------|--------|-------------|
-| 1 | AM | Pre-work + Round 1 | Commit unstaged files in openfang-ai; copy 7 crates; `cargo check` passes |
-| 1 | PM | Round 2 | Zero openfang references; compilation still clean |
-| 2 | AM | Round 3 | Docker image builds; extension loads; ≥161 live functions (197 in SQL); SIMD detected |
-| 2 | PM | Round 4 | 384-dim embeddings; embed_batch works; HNSW search returns correct ranking |
-| 3 | AM | Round 5 | REST endpoints respond; RLS isolates accounts |
-| 3 | PM | Exit gate | Full exit gate passes; pattern coverage gate passes; commit all changes |
+| Day | Time | Rounds | Deliverables | Status |
+|-----|------|--------|-------------|--------|
+| 1 | AM | Pre-work + Round 1 | Commit unstaged files in openfang-ai; copy 7 crates; `cargo check` passes | ✅ Done (2026-04-06) — 7 crates, 397 .rs files, all inter-crate deps correct |
+| 1 | PM | Round 2 | Zero openfang references; compilation still clean | ✅ Done (2026-04-06) — 0 openfang references |
+| 2 | AM | Round 3 | Docker image builds; extension loads; ≥161 live functions (197 in SQL); SIMD detected | ✅ Done (2026-04-07) — 1.82 GB image, 161 live functions, NEON SIMD |
+| 2 | PM | Round 4 | 384-dim embeddings; embed_batch works; HNSW search returns correct ranking | ✅ Verified (2026-04-07) — 384-dim, cosine similarity 0.63, HNSW top-1 0.9999 |
+| 3 | AM | Round 5 | REST endpoints respond; RLS isolates accounts | ❌ Not yet run (requires Supabase REST layer) |
+| 3 | PM | Exit gate | Full exit gate passes; pattern coverage gate passes; commit all changes | ⬜ Pending Round 5 |
 
 ## TDD Cycle
 

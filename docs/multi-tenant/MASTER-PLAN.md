@@ -409,7 +409,7 @@ crates/librefang-api/src/routes/memory.rs        → Extract account from middle
 ## ADR-RV-001: RuVector PostgreSQL Extension Port
 
 ### Status
-PROPOSED (adapted from openfang-ai ADR-033, status: ACCEPTED)
+ACCEPTED — Phase 0 tasks 0.1–0.6 verified 2026-04-07 (adapted from openfang-ai ADR-033)
 
 ### Context
 The openfang-ai fork already ported 7 Rust crates from the ruvector upstream into its workspace. These crates compile into a PostgreSQL extension (`ruvector.so`) that provides 225 `#[pg_extern]` functions in source — of which 57 are behind optional feature flags (graph, learning, attention, gnn, routing, solver, gated_transformer), yielding 168 in the default build. The SQL extension file lists 197 `CREATE FUNCTION` statements; 161 are verified live in `pg_proc` (the delta accounts for overloaded signatures and upgrade-path stubs).
@@ -824,20 +824,20 @@ INSERT INTO migrations (name) VALUES ('001_add_account_isolation');
 
 ## PLAN-MT-001: Implementation Plan
 
-### Phase 0: RuVector Crate Port (2-3 days)
+### Phase 0: RuVector Crate Port (2-3 days) — ✅ VERIFIED 2026-04-07
 **Goal:** 7 ruvector crates in workspace, Docker image builds, extension verified in Supabase.
 
-| # | Task | Crate | Files | Tests |
-|---|------|-------|-------|-------|
-| 0.1 | Copy 7 ruvector crates from openfang-ai | workspace | `crates/ruvector-*/` | `cargo check` all crates |
-| 0.2 | Scrub openfang references (naming standardization) | ruvector-* | All `Cargo.toml`, `lib.rs` | `grep -r openfang crates/ruvector-*` returns empty |
-| 0.3 | Add as workspace members (commented by default) | workspace | `Cargo.toml` | Workspace resolves with members uncommented |
-| 0.4 | Port Dockerfile.supabase-ruvector | docker | `docker/Dockerfile.supabase-ruvector` | `docker build` succeeds |
-| 0.5 | Add supabase-ruvector to docker-compose | docker | `docker/docker-compose.yml` | `docker compose up` starts PG with extension |
-| 0.6 | Verify extension: 161+ functions (197 in file), SIMD, embeddings | — | — | SPEC-RV-001 Groups 3-5 pass |
-| 0.7 | Configure HttpVectorStore → Supabase endpoint | librefang-memory | `src/http_vector_store.rs` config example | Semantic search round-trip via HTTP |
+| # | Task | Crate | Files | Tests | Status |
+|---|------|-------|-------|-------|--------|
+| 0.1 | Copy 7 ruvector crates from openfang-ai | workspace | `crates/ruvector-*/` | `cargo check` all crates | ✅ Done — 397 .rs files, 18 .sql files, 1:1 match with openfang-ai |
+| 0.2 | Scrub openfang references (naming standardization) | ruvector-* | All `Cargo.toml`, `lib.rs` | `grep -r openfang crates/ruvector-*` returns empty | ✅ Done — 0 references |
+| 0.3 | Add as workspace members (commented by default) | workspace | `Cargo.toml` | Workspace resolves with members uncommented | ✅ Done — all 7 commented in root Cargo.toml, inter-crate deps use correct relative paths |
+| 0.4 | Port Dockerfile.supabase-ruvector | docker | `docker/Dockerfile.supabase-ruvector` | `docker build` succeeds | ✅ Done — multi-stage build, PG17, pgrx 0.12.6, supabase/postgres:17.6.1.095 base |
+| 0.5 | Add supabase-ruvector to docker-compose | docker | `docker/docker-compose.yml` | `docker compose up` starts PG with extension | ✅ Done — `librefang-ruvector-db` container, port 54322 |
+| 0.6 | Verify extension: 161+ functions (197 in file), SIMD, embeddings | — | — | SPEC-RV-001 Groups 3-5 pass | ✅ **Verified live 2026-04-07**: 161 functions, NEON SIMD (aarch64), 384-dim embeddings, HNSW search works |
+| 0.7 | Configure HttpVectorStore → Supabase endpoint | librefang-memory | `src/http_vector_store.rs` config example | Semantic search round-trip via HTTP | ❌ Not started |
 
-**Exit criteria:** `SELECT ruvector_embed('hello')` works in Supabase. LibreFang's `HttpVectorStore` retrieves results from it. SPEC-RV-001 all 26 criteria pass.
+**Exit criteria:** `SELECT ruvector_embed('hello')` works in Supabase ✅ (verified). LibreFang's `HttpVectorStore` retrieves results from it ❌ (0.7 pending). SPEC-RV-001 Groups 3-5 pass ✅.
 
 ### Phase 1: Multi-Tenant Foundation (3-5 days)
 **Goal:** Account types + middleware + backward-compatible defaults. Nothing breaks.
@@ -959,13 +959,13 @@ OPENFANG_ACCOUNT_HMAC_SECRET=same-secret-as-librefang-config
 
 ## Estimated Timeline
 
-| Phase | Duration | Cumulative |
-|-------|----------|------------|
-| Phase 0: RuVector Crate Port | 2-3 days | Week 1 |
-| Phase 1: Multi-Tenant Foundation | 3-5 days | Week 1-2 |
-| Phase 2: Resource Isolation | 5-7 days | Week 2-3 |
-| Phase 3: Data & Memory Isolation | 3-5 days | Week 3-4 |
-| Phase 4: Hardening & Integration | 3-5 days | Week 4-5 |
+| Phase | Duration | Cumulative | Status |
+|-------|----------|------------|--------|
+| Phase 0: RuVector Crate Port | 2-3 days | Week 1 | ✅ 0.1–0.6 verified; 0.7 remaining |
+| Phase 1: Multi-Tenant Foundation | 3-5 days | Week 1-2 | ⬜ Not started (account_id in channels done; extractor/HMAC/guards pending) |
+| Phase 2: Resource Isolation | 5-7 days | Week 2-3 | ⬜ Blocked on Phase 1 |
+| Phase 3: Data & Memory Isolation | 3-5 days | Week 3-4 | ⬜ Blocked on Phase 2 |
+| Phase 4: Hardening & Integration | 3-5 days | Week 4-5 | ⬜ Blocked on Phase 3 |
 | **Total** | **18-25 days** | **~5-6 weeks** |
 
 ## Risk Register

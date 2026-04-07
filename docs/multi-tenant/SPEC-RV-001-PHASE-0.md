@@ -145,28 +145,32 @@ limitations L1 and L2 from REPORT-033.
 
 ### Group 3: Docker Image (5 criteria)
 
-#### AC-3.1: Docker Build Succeeds
+#### AC-3.1: Docker Build Succeeds ✅ VERIFIED 2026-04-07
 - **Given:** `Dockerfile.supabase-ruvector` in `docker/`, build context = workspace root
 - **When:** `docker build -f docker/Dockerfile.supabase-ruvector --tag supabase-ruvector:latest .`
 - **Then:** Build completes, image created
+- **Result:** 1.82 GB image (`supabase-ruvector:latest`), multi-stage build with pgrx 0.12.6 on PG17
 - **And NOT:** No compilation errors, no missing crate dependencies
 
-#### AC-3.2: Extension Loads on Startup
+#### AC-3.2: Extension Loads on Startup ✅ VERIFIED 2026-04-07
 - **Given:** Container started from `supabase-ruvector:latest`
 - **When:** `CREATE EXTENSION IF NOT EXISTS ruvector`
 - **Then:** Extension created successfully
+- **Result:** `ruvector 0.3.0` auto-loaded via `zz-ruvector-init.sql` init script
 - **And NOT:** No "could not load library" or "control file not found" errors
 
-#### AC-3.3: SQL Objects Registered
+#### AC-3.3: SQL Objects Registered ✅ VERIFIED 2026-04-07
 - **Given:** Extension loaded
 - **When:** `SELECT count(*) FROM pg_proc WHERE proname LIKE 'ruvector_%'`
 - **Then:** Returns ≥ 161 (verified baseline from live Docker smoke test)
 - **And NOT:** Count does not drop below 161
+- **Result:** Exactly **161** live functions. 10 distance functions available (cosine, L1, L2, Lorentz, Poincaré, Wasserstein, Sinkhorn, spherical, bottleneck, product manifold)
 
-#### AC-3.4: SIMD Detection
+#### AC-3.4: SIMD Detection ✅ VERIFIED 2026-04-07
 - **Given:** Extension loaded
 - **When:** `SELECT ruvector_simd_info()`
 - **Then:** Returns detected architecture string (`avx2`, `avx512`, `neon`, or `none`)
+- **Result:** `architecture: aarch64, active: neon, floats_per_op: 4`
 - **And NOT:** No runtime crash, no NULL return
 
 #### AC-3.5: Base Image Correct
@@ -177,10 +181,11 @@ limitations L1 and L2 from REPORT-033.
 
 ### Group 4: Local Embeddings (4 criteria)
 
-#### AC-4.1: Embed Function Returns Float Array
+#### AC-4.1: Embed Function Returns Float Array ✅ VERIFIED 2026-04-07
 - **Given:** Extension loaded, model auto-downloads on first call
 - **When:** `SELECT ruvector_embed('hello world')`
 - **Then:** Returns `real[]` with 384 elements
+- **Result:** `array_length = 384`
 - **And NOT:** No external API calls — all computation is local ONNX inference
 
 #### AC-4.2: Correct Model
@@ -189,10 +194,11 @@ limitations L1 and L2 from REPORT-033.
 - **Then:** Model is `all-MiniLM-L6-v2` (384-dim, ONNX via fastembed)
 - **And NOT:** Not `all-mpnet-base-v2` (768-dim) — that is the ruvbot model, not the PG extension
 
-#### AC-4.3: Dimension Consistency
+#### AC-4.3: Dimension Consistency ✅ VERIFIED 2026-04-07
 - **Given:** Extension loaded
 - **When:** `SELECT array_length(ruvector_embed('test'), 1)`
 - **Then:** Returns exactly `384`
+- **Result:** `384` confirmed
 - **And NOT:** Does not return NULL, 0, or any other dimension
 
 #### AC-4.4: Batch Embedding Functional
