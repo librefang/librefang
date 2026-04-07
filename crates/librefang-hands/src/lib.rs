@@ -20,6 +20,8 @@ pub enum HandError {
     NotFound(String),
     #[error("Hand already active: {0}")]
     AlreadyActive(String),
+    #[error("Hand already registered: {0}")]
+    AlreadyRegistered(String),
     #[error("Hand instance not found: {0}")]
     InstanceNotFound(Uuid),
     #[error("Activation failed: {0}")]

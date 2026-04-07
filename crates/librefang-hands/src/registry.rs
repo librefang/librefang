@@ -42,41 +42,37 @@ pub fn parse_hand_toml(
 
 /// Scan `home_dir/registry/hands/` for subdirectories containing HAND.toml.
 fn scan_hands_dir(home_dir: &Path) -> Vec<(String, String, String)> {
-    let mut seen = std::collections::HashSet::new();
     let mut results = Vec::new();
+    let hands_dir = home_dir.join("registry").join("hands");
 
-    let dirs = [home_dir.join("registry").join("hands")];
+    let entries = match std::fs::read_dir(&hands_dir) {
+        Ok(e) => e,
+        Err(_) => return results,
+    };
 
-    for hands_dir in &dirs {
-        if let Ok(entries) = std::fs::read_dir(hands_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if !path.is_dir() {
-                    continue;
-                }
-                let id = match path.file_name().and_then(|n| n.to_str()) {
-                    Some(n) => n.to_string(),
-                    None => continue,
-                };
-                if !seen.insert(id.clone()) {
-                    continue;
-                }
-                let toml_path = path.join("HAND.toml");
-                let skill_path = path.join("SKILL.md");
-                if !toml_path.exists() {
-                    continue;
-                }
-                let toml = match std::fs::read_to_string(&toml_path) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        warn!(path = %toml_path.display(), error = %e, "Failed to read HAND.toml");
-                        continue;
-                    }
-                };
-                let skill = std::fs::read_to_string(&skill_path).unwrap_or_default();
-                results.push((id, toml, skill));
-            }
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
         }
+        let id = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n.to_string(),
+            None => continue,
+        };
+        let toml_path = path.join("HAND.toml");
+        let skill_path = path.join("SKILL.md");
+        if !toml_path.exists() {
+            continue;
+        }
+        let toml = match std::fs::read_to_string(&toml_path) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(path = %toml_path.display(), error = %e, "Failed to read HAND.toml");
+                continue;
+            }
+        };
+        let skill = std::fs::read_to_string(&skill_path).unwrap_or_default();
+        results.push((id, toml, skill));
     }
 
     results.sort_by(|a, b| a.0.cmp(&b.0));
@@ -315,10 +311,7 @@ impl HandRegistry {
         let def = parse_hand_toml(&toml_content, &skill_content)?;
 
         if self.definitions.contains_key(&def.id) {
-            return Err(HandError::AlreadyActive(format!(
-                "Hand '{}' already registered",
-                def.id
-            )));
+            return Err(HandError::AlreadyRegistered(def.id.clone()));
         }
 
         info!(hand = %def.id, name = %def.name, path = %path.display(), "Installed hand from path");
@@ -335,10 +328,7 @@ impl HandRegistry {
         let def = parse_hand_toml(toml_content, skill_content)?;
 
         if self.definitions.contains_key(&def.id) {
-            return Err(HandError::AlreadyActive(format!(
-                "Hand '{}' already registered",
-                def.id
-            )));
+            return Err(HandError::AlreadyRegistered(def.id.clone()));
         }
 
         info!(hand = %def.id, name = %def.name, "Installed hand from content");
@@ -357,10 +347,7 @@ impl HandRegistry {
         let def = parse_hand_toml(toml_content, skill_content)?;
 
         if self.definitions.contains_key(&def.id) {
-            return Err(HandError::AlreadyActive(format!(
-                "Hand '{}' already registered",
-                def.id
-            )));
+            return Err(HandError::AlreadyRegistered(def.id.clone()));
         }
 
         let hand_dir = home_dir.join("workspaces").join(&def.id);
@@ -432,6 +419,12 @@ impl HandRegistry {
                 if entry.hand_id == hand_id && entry.status == HandStatus::Active {
                     return Err(HandError::AlreadyActive(hand_id.to_string()));
                 }
+            }
+        } else if let Some(id) = instance_id {
+            if self.instances.contains_key(&id) {
+                return Err(HandError::ActivationFailed(format!(
+                    "Instance {id} already exists"
+                )));
             }
         }
 
@@ -765,6 +758,9 @@ fn run_returns_python3(cmd: &str) -> bool {
 }
 
 /// Check if a binary is on PATH (cross-platform).
+///
+/// On Unix, also verifies the execute bit is set. Empty PATH segments are
+/// treated as the current directory per POSIX convention.
 fn which_binary(name: &str) -> bool {
     let path_var = std::env::var("PATH").unwrap_or_default();
     let separator = if cfg!(windows) { ';' } else { ':' };
@@ -774,15 +770,38 @@ fn which_binary(name: &str) -> bool {
         vec![""]
     };
 
-    for dir in path_var.split(separator) {
+    for raw_dir in path_var.split(separator) {
+        // POSIX: empty PATH segment means current directory.
+        let dir = if raw_dir.is_empty() && !cfg!(windows) {
+            "."
+        } else {
+            raw_dir
+        };
         for ext in &extensions {
             let candidate = std::path::Path::new(dir).join(format!("{name}{ext}"));
-            if candidate.is_file() {
+            if candidate.is_file() && is_executable(&candidate) {
                 return true;
             }
         }
     }
     false
+}
+
+/// Check if a path is executable. On Unix, verifies the execute bit.
+/// On Windows, all files are considered executable (permissions are ACL-based).
+fn is_executable(path: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        path.metadata()
+            .map(|m| m.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        true
+    }
 }
 
 /// Check if a setting option is available based on its provider_env and binary.
