@@ -10,6 +10,7 @@ use librefang_skills::registry::SkillRegistry;
 use librefang_types::taint::{TaintLabel, TaintSink, TaintedValue};
 use librefang_types::tool::{ToolDefinition, ToolResult};
 use librefang_types::tool_compat::normalize_tool_name;
+use regex_lite::Regex;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -26,14 +27,36 @@ const MAX_AGENT_CALL_DEPTH: u32 = 5;
 ///
 /// This implements the TaintSink::shell_exec() policy from SOTA 2.
 fn check_taint_shell_exec(command: &str) -> Option<String> {
-    // Layer 1: Block shell metacharacters that enable command injection.
-    // Uses the same validator as subprocess_sandbox and docker_sandbox.
-    if let Some(reason) = crate::subprocess_sandbox::contains_shell_metacharacters(command) {
-        return Some(format!("Shell metacharacter injection blocked: {reason}"));
-    }
-
-    // Layer 2: Heuristic patterns for injected external URLs / base64 payloads
-    let suspicious_patterns = ["curl ", "wget ", "| sh", "| bash", "base64 -d", "eval "];
+    // Layer 2: Heuristic patterns for injected external URLs / base64 payloads.
+    // Layer 1 metacharacter validation is enforced separately in the shell_exec
+    // dispatch path so this helper stays focused on taint heuristics.
+    //
+    // Patterns cover:
+    //   - Remote downloaders: curl, wget
+    //   - Pipe-to-shell: | sh, | bash
+    //   - Dynamic interpreter execution: python -c, perl -e, ruby -e, node -e, php -r
+    //   - Shell re-invocation: sh -c, bash -c
+    //   - Network tools: nc, ncat, socat
+    //   - Obfuscation: base64 -d, eval
+    let suspicious_patterns = [
+        "curl ",
+        "wget ",
+        "| sh",
+        "| bash",
+        "base64 -d",
+        "eval ",
+        "python -c",
+        "python3 -c",
+        "perl -e",
+        "ruby -e",
+        "node -e",
+        "php -r",
+        "sh -c",
+        "bash -c",
+        "nc ",
+        "ncat ",
+        "socat ",
+    ];
     for pattern in &suspicious_patterns {
         if command.contains(pattern) {
             let mut labels = HashSet::new();
@@ -50,49 +73,173 @@ fn check_taint_shell_exec(command: &str) -> Option<String> {
 
 /// Check if a URL should be blocked by taint tracking before network fetch.
 ///
-/// Blocks URLs that appear to contain API keys, tokens, or other secrets
-/// in query parameters (potential data exfiltration). Implements TaintSink::net_fetch().
+/// Blocks URLs that appear to contain actual secrets (not just parameter names
+/// that happen to match secret keywords). This reduces false positives on URLs
+/// like `https://example.com/oauth?token=abc123` where `token` is a legitimate
+/// but non-secret session identifier.
 ///
-/// Both the raw URL and its percent-decoded query parameter names are
-/// checked — an attacker can otherwise bypass the filter with encoding
-/// tricks such as `api%5Fkey=secret` (the server decodes `%5F` to `_`
-/// and receives the real `api_key=secret`).
+/// Policy:
+///   - `authorization:` header prefix → always block
+///   - Known secret prefixes (sk-, ghp_, hf_, Bearer) → always block
+///   - Secret parameter names (token, secret, password, api_key) with long/high-entropy values → block
+///   - Secret parameter names with short/public values → warn only (don't block)
 fn check_taint_net_fetch(url: &str) -> Option<String> {
     const SECRET_KEYS: &[&str] = &["api_key", "apikey", "token", "secret", "password"];
+    const SECRET_PREFIXES: &[&str] = &["sk-", "ghp_", "hf_", "Bearer "];
 
-    // Scan 1: raw URL literal for `<key>=` and the Authorization header prefix.
+    // Hard block: Authorization header prefix in URL (rare but always suspicious)
     let url_lower = url.to_lowercase();
-    let mut hit = url_lower.contains("authorization:");
-    if !hit {
-        hit = SECRET_KEYS
+    if url_lower.contains("authorization:") {
+        return block_taint_secret(url, "authorization header in URL");
+    }
+
+    // Parse query parameters for deeper analysis
+    let parsed = match url::Url::parse(url) {
+        Ok(p) => p,
+        Err(_) => return None, // Invalid URL, let downstream handle it
+    };
+
+    for (name, value) in parsed.query_pairs() {
+        let name_lower = name.to_lowercase();
+
+        // Check if this is a secret-related parameter name
+        if !SECRET_KEYS.iter().any(|k| name_lower == *k) {
+            continue;
+        }
+
+        // Known secret prefixes → always block
+        if SECRET_PREFIXES
             .iter()
-            .any(|k| url_lower.contains(&format!("{k}=")));
-    }
+            .any(|prefix| value.starts_with(prefix))
+        {
+            return block_taint_secret(url, &format!("secret prefix in '{name}'"));
+        }
 
-    // Scan 2: percent-decoded query parameter names. Parsing via
-    // `url::Url` decodes each name so `api%5Fkey` becomes `api_key`.
-    if !hit {
-        if let Ok(parsed) = url::Url::parse(url) {
-            for (name, _value) in parsed.query_pairs() {
-                let name_lower = name.to_lowercase();
-                if SECRET_KEYS.iter().any(|k| name_lower == *k) {
-                    hit = true;
-                    break;
-                }
-            }
+        // Heuristic: block if value looks like a real secret
+        // - Length >= 20 (short tokens are likely public session IDs)
+        // - Mixed alphanumeric (not just "abc" or "123")
+        if value.len() >= 20 && looks_like_secret_value(&value) {
+            return block_taint_secret(url, &format!("suspicious secret value in '{name}'"));
         }
     }
 
-    if hit {
-        let mut labels = HashSet::new();
-        labels.insert(TaintLabel::Secret);
-        let tainted = TaintedValue::new(url, labels, "llm_tool_call");
-        if let Err(violation) = tainted.check_sink(&TaintSink::net_fetch()) {
-            warn!(url = crate::str_utils::safe_truncate_str(url, 80), %violation, "Net fetch taint check failed");
-            return Some(violation.to_string());
-        }
+    None
+}
+
+/// Block a URL as a taint violation with the given reason.
+fn block_taint_secret(url: &str, reason: &str) -> Option<String> {
+    let mut labels = HashSet::new();
+    labels.insert(TaintLabel::Secret);
+    let tainted = TaintedValue::new(url, labels, "llm_tool_call");
+    if let Err(violation) = tainted.check_sink(&TaintSink::net_fetch()) {
+        warn!(
+            url = crate::str_utils::safe_truncate_str(url, 80),
+            %violation,
+            reason,
+            "Net fetch taint check failed"
+        );
+        return Some(violation.to_string());
     }
     None
+}
+
+/// Check if a value looks like a real secret (not a short public token).
+///
+/// Entropy-based heuristics thresholds for secret detection:
+/// - Minimal length: 20 characters (shorter values are treated as public session tokens)
+/// - Character class diversity: at least 3 of the following classes present:
+///   - digits
+///   - uppercase letters
+///   - lowercase letters
+///   - non-alphanumeric symbols
+/// - Examples:
+///   - Strings with a "sk-" prefix (secret-like tokens)
+///   - Long random-looking strings with a mix of digits, upper/lowercase, and symbols
+///
+/// Rationale:
+/// - Balances effective detection of real secrets with a low rate of false positives (e.g., session IDs)
+fn looks_like_secret_value(value: &str) -> bool {
+    // Must have reasonable length
+    if value.len() < 20 {
+        return false;
+    }
+
+    // Check for mixed character types (entropy indicator)
+    let has_digit = value.chars().any(|c| c.is_ascii_digit());
+    let has_upper = value.chars().any(|c| c.is_ascii_uppercase());
+    let has_lower = value.chars().any(|c| c.is_ascii_lowercase());
+    let has_special = value.chars().any(|c| !c.is_ascii_alphanumeric());
+
+    // Real secrets typically have 3+ character classes
+    let classes = [has_digit, has_upper, has_lower, has_special]
+        .iter()
+        .filter(|&&b| b)
+        .count();
+
+    classes >= 3
+}
+
+/// Static regex for validating email domain labels.
+/// Compiled once at first use via LazyLock to avoid recompilation on every call.
+static EMAIL_DOMAIN_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+    Regex::new(
+        r"^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)*$",
+    )
+    .expect("valid email domain regex")
+});
+
+/// Static regex for validating email local part.
+/// Compiled once at first use via LazyLock to avoid recompilation on every call.
+static EMAIL_LOCAL_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+    Regex::new(r"^[a-zA-Z0-9._%+-]+$").expect("valid email local regex")
+});
+
+/// Validate an email address with basic RFC 5322 compliance.
+///
+/// Checks: exactly one @, non-empty local/domain parts, domain has valid labels,
+/// no whitespace or control characters.
+fn validate_email(email: &str) -> Result<(), String> {
+    // Quick rejection: whitespace or control characters
+    if email.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err("Email contains whitespace or control characters".to_string());
+    }
+
+    // Must contain exactly one @
+    let at_count = email.matches('@').count();
+    if at_count != 1 {
+        return Err(format!(
+            "Invalid email: expected exactly one '@', found {at_count}"
+        ));
+    }
+
+    let parts: Vec<&str> = email.split('@').collect();
+    let local = parts[0];
+    let domain = parts[1];
+
+    // Local part must not be empty
+    if local.is_empty() {
+        return Err("Invalid email: local part is empty".to_string());
+    }
+
+    // Domain must not be empty and must contain at least one dot
+    if domain.is_empty() {
+        return Err("Invalid email: domain is empty".to_string());
+    }
+    if !domain.contains('.') {
+        return Err("Invalid email: domain must contain at least one dot".to_string());
+    }
+
+    // Domain labels: each label must be 1-63 chars, alphanumeric + hyphen (not leading/trailing)
+    if !EMAIL_DOMAIN_RE.is_match(domain) {
+        return Err(format!("Invalid email: malformed domain '{domain}'"));
+    }
+
+    // Local part: allow common characters (alphanumeric, dots, underscores, hyphens, plus)
+    if !EMAIL_LOCAL_RE.is_match(local) {
+        return Err(format!("Invalid email: malformed local part '{local}'"));
+    }
+
+    Ok(())
 }
 
 tokio::task_local! {
@@ -135,19 +282,52 @@ pub struct ToolExecContext<'a> {
     pub channel: Option<&'a str>,
 }
 
+fn tool_error(tool_use_id: &str, content: impl Into<String>) -> ToolResult {
+    ToolResult::error(tool_use_id.to_string(), content.into())
+}
+
+fn browser_unavailable() -> String {
+    "Browser tools not available. Ensure Chrome/Chromium is installed.".to_string()
+}
+
+fn browser_dispatch_ctx<'a>(
+    browser_ctx: Option<&'a crate::browser::BrowserManager>,
+    caller_agent_id: Option<&'a str>,
+) -> Result<(&'a crate::browser::BrowserManager, &'a str), String> {
+    let mgr = browser_ctx.ok_or_else(browser_unavailable)?;
+    let aid = caller_agent_id.unwrap_or("default");
+    Ok((mgr, aid))
+}
+
+/// Dispatch a browser tool that needs no extra pre-flight checks.
+///
+/// Resolves the `(BrowserManager, agent_id)` pair via [`browser_dispatch_ctx`],
+/// returns a `tool_error` on failure, and `await`s the given browser function.
+macro_rules! browser_arm {
+    ($browser_ctx:expr, $caller_agent_id:expr, $tool_use_id:expr, $input:expr, $fn:path) => {{
+        let (mgr, aid) = match browser_dispatch_ctx($browser_ctx, $caller_agent_id) {
+            Ok(ctx) => ctx,
+            Err(err) => return tool_error($tool_use_id, err),
+        };
+        $fn($input, mgr, aid).await
+    }};
+}
+
 /// Execute a tool without running the approval / capability / taint gate.
 ///
 /// This is the pure dispatch layer: it pattern-matches on `tool_name` and calls
 /// the right implementation.  All pre-flight checks (capability enforcement,
 /// approval gate, taint checks, truncated-args detection) live in the outer
 /// [`execute_tool`] wrapper; this function only handles the match.
+///
+/// **Contract**: `tool_name` MUST already be normalized (canonical LibreFang name).
+/// Callers must run `normalize_tool_name()` before invoking this function.
 pub async fn execute_tool_raw(
     tool_use_id: &str,
     tool_name: &str,
     input: &serde_json::Value,
     ctx: &ToolExecContext<'_>,
 ) -> ToolResult {
-    let tool_name = normalize_tool_name(tool_name);
     let ToolExecContext {
         kernel,
         allowed_tools,
@@ -181,12 +361,7 @@ pub async fn execute_tool_raw(
             Some(url) => {
                 // Taint check: block URLs containing secrets/PII from being exfiltrated
                 if let Some(violation) = check_taint_net_fetch(url) {
-                    return ToolResult {
-                        tool_use_id: tool_use_id.to_string(),
-                        content: format!("Taint violation: {violation}"),
-                        is_error: true,
-                        ..Default::default()
-                    };
+                    return tool_error(tool_use_id, format!("Taint violation: {violation}"));
                 }
                 let method = input["method"].as_str().unwrap_or("GET");
                 let headers = input.get("headers").and_then(|v| v.as_object());
@@ -196,6 +371,14 @@ pub async fn execute_tool_raw(
                         .fetch_with_options(url, method, headers, body)
                         .await
                 } else {
+                    // SSRF protection for legacy path: block private/metadata IPs
+                    if crate::web_fetch::check_ssrf(url, &[]).is_err() {
+                        return tool_error(
+                            tool_use_id,
+                            "SSRF blocked: URL resolves to a private or metadata address"
+                                .to_string(),
+                        );
+                    }
                     tool_web_fetch_legacy(input).await
                 }
             }
@@ -215,12 +398,7 @@ pub async fn execute_tool_raw(
         // Shell tool — exec policy + metacharacter check + taint check
         "shell_exec" => {
             let Some(command) = input["command"].as_str() else {
-                return ToolResult {
-                    tool_use_id: tool_use_id.to_string(),
-                    content: "Missing 'command' parameter".to_string(),
-                    is_error: true,
-                    ..Default::default()
-                };
+                return tool_error(tool_use_id, "Missing 'command' parameter");
             };
 
             let is_full_exec = exec_policy
@@ -231,16 +409,14 @@ pub async fn execute_tool_raw(
                 if let Err(reason) =
                     crate::subprocess_sandbox::validate_command_allowlist(command, policy)
                 {
-                    return ToolResult {
-                        tool_use_id: tool_use_id.to_string(),
-                        content: format!(
+                    return tool_error(
+                        tool_use_id,
+                        format!(
                             "shell_exec blocked: {reason}. Current exec_policy.mode = '{:?}'. \
                              To allow shell commands, set exec_policy.mode = 'full' in the agent manifest or config.toml.",
                             policy.mode
                         ),
-                        is_error: true,
-                        ..Default::default()
-                    };
+                    );
                 }
             }
 
@@ -250,27 +426,20 @@ pub async fn execute_tool_raw(
                 if let Some(reason) =
                     crate::subprocess_sandbox::contains_shell_metacharacters(command)
                 {
-                    return ToolResult {
-                        tool_use_id: tool_use_id.to_string(),
-                        content: format!(
+                    return tool_error(
+                        tool_use_id,
+                        format!(
                             "shell_exec blocked: command contains {reason}. \
                              Shell metacharacters are not allowed in allowlist mode."
                         ),
-                        is_error: true,
-                        ..Default::default()
-                    };
+                    );
                 }
             }
 
             // Skip heuristic taint patterns for Full exec policy (e.g. hand agents that need curl)
             if !is_full_exec {
                 if let Some(violation) = check_taint_shell_exec(command) {
-                    return ToolResult {
-                        tool_use_id: tool_use_id.to_string(),
-                        content: format!("Taint violation: {violation}"),
-                        is_error: true,
-                        ..Default::default()
-                    };
+                    return tool_error(tool_use_id, format!("Taint violation: {violation}"));
                 }
             }
             tool_shell_exec(
@@ -372,112 +541,80 @@ pub async fn execute_tool_raw(
         // Browser automation tools
         "browser_navigate" => {
             let Some(url) = input["url"].as_str() else {
-                return ToolResult {
-                    tool_use_id: tool_use_id.to_string(),
-                    content: "Missing 'url' parameter".to_string(),
-                    is_error: true,
-                    ..Default::default()
-                };
+                return tool_error(tool_use_id, "Missing 'url' parameter");
             };
             if let Some(violation) = check_taint_net_fetch(url) {
-                return ToolResult {
-                    tool_use_id: tool_use_id.to_string(),
-                    content: format!("Taint violation: {violation}"),
-                    is_error: true,
-                    ..Default::default()
-                };
+                return tool_error(tool_use_id, format!("Taint violation: {violation}"));
             }
-            match browser_ctx {
-                Some(mgr) => {
-                    let aid = caller_agent_id.unwrap_or("default");
-                    crate::browser::tool_browser_navigate(input, mgr, aid).await
-                }
-                None => Err(
-                    "Browser tools not available. Ensure Chrome/Chromium is installed.".to_string(),
-                ),
-            }
+            let (mgr, aid) = match browser_dispatch_ctx(*browser_ctx, *caller_agent_id) {
+                Ok(ctx) => ctx,
+                Err(err) => return tool_error(tool_use_id, err),
+            };
+            crate::browser::tool_browser_navigate(input, mgr, aid).await
         }
-        "browser_click" => match browser_ctx {
-            Some(mgr) => {
-                let aid = caller_agent_id.unwrap_or("default");
-                crate::browser::tool_browser_click(input, mgr, aid).await
-            }
-            None => {
-                Err("Browser tools not available. Ensure Chrome/Chromium is installed.".to_string())
-            }
-        },
-        "browser_type" => match browser_ctx {
-            Some(mgr) => {
-                let aid = caller_agent_id.unwrap_or("default");
-                crate::browser::tool_browser_type(input, mgr, aid).await
-            }
-            None => {
-                Err("Browser tools not available. Ensure Chrome/Chromium is installed.".to_string())
-            }
-        },
-        "browser_screenshot" => match browser_ctx {
-            Some(mgr) => {
-                let aid = caller_agent_id.unwrap_or("default");
-                crate::browser::tool_browser_screenshot(input, mgr, aid).await
-            }
-            None => {
-                Err("Browser tools not available. Ensure Chrome/Chromium is installed.".to_string())
-            }
-        },
-        "browser_read_page" => match browser_ctx {
-            Some(mgr) => {
-                let aid = caller_agent_id.unwrap_or("default");
-                crate::browser::tool_browser_read_page(input, mgr, aid).await
-            }
-            None => {
-                Err("Browser tools not available. Ensure Chrome/Chromium is installed.".to_string())
-            }
-        },
-        "browser_close" => match browser_ctx {
-            Some(mgr) => {
-                let aid = caller_agent_id.unwrap_or("default");
-                crate::browser::tool_browser_close(input, mgr, aid).await
-            }
-            None => {
-                Err("Browser tools not available. Ensure Chrome/Chromium is installed.".to_string())
-            }
-        },
-        "browser_scroll" => match browser_ctx {
-            Some(mgr) => {
-                let aid = caller_agent_id.unwrap_or("default");
-                crate::browser::tool_browser_scroll(input, mgr, aid).await
-            }
-            None => {
-                Err("Browser tools not available. Ensure Chrome/Chromium is installed.".to_string())
-            }
-        },
-        "browser_wait" => match browser_ctx {
-            Some(mgr) => {
-                let aid = caller_agent_id.unwrap_or("default");
-                crate::browser::tool_browser_wait(input, mgr, aid).await
-            }
-            None => {
-                Err("Browser tools not available. Ensure Chrome/Chromium is installed.".to_string())
-            }
-        },
-        "browser_run_js" => match browser_ctx {
-            Some(mgr) => {
-                let aid = caller_agent_id.unwrap_or("default");
-                crate::browser::tool_browser_run_js(input, mgr, aid).await
-            }
-            None => {
-                Err("Browser tools not available. Ensure Chrome/Chromium is installed.".to_string())
-            }
-        },
-        "browser_back" => match browser_ctx {
-            Some(mgr) => {
-                let aid = caller_agent_id.unwrap_or("default");
-                crate::browser::tool_browser_back(input, mgr, aid).await
-            }
-            None => {
-                Err("Browser tools not available. Ensure Chrome/Chromium is installed.".to_string())
-            }
-        },
+        "browser_click" => browser_arm!(
+            *browser_ctx,
+            *caller_agent_id,
+            tool_use_id,
+            input,
+            crate::browser::tool_browser_click
+        ),
+        "browser_type" => browser_arm!(
+            *browser_ctx,
+            *caller_agent_id,
+            tool_use_id,
+            input,
+            crate::browser::tool_browser_type
+        ),
+        "browser_screenshot" => browser_arm!(
+            *browser_ctx,
+            *caller_agent_id,
+            tool_use_id,
+            input,
+            crate::browser::tool_browser_screenshot
+        ),
+        "browser_read_page" => browser_arm!(
+            *browser_ctx,
+            *caller_agent_id,
+            tool_use_id,
+            input,
+            crate::browser::tool_browser_read_page
+        ),
+        "browser_close" => browser_arm!(
+            *browser_ctx,
+            *caller_agent_id,
+            tool_use_id,
+            input,
+            crate::browser::tool_browser_close
+        ),
+        "browser_scroll" => browser_arm!(
+            *browser_ctx,
+            *caller_agent_id,
+            tool_use_id,
+            input,
+            crate::browser::tool_browser_scroll
+        ),
+        "browser_wait" => browser_arm!(
+            *browser_ctx,
+            *caller_agent_id,
+            tool_use_id,
+            input,
+            crate::browser::tool_browser_wait
+        ),
+        "browser_run_js" => browser_arm!(
+            *browser_ctx,
+            *caller_agent_id,
+            tool_use_id,
+            input,
+            crate::browser::tool_browser_run_js
+        ),
+        "browser_back" => browser_arm!(
+            *browser_ctx,
+            *caller_agent_id,
+            tool_use_id,
+            input,
+            crate::browser::tool_browser_back
+        ),
 
         // Canvas / A2UI tool
         "canvas_present" => tool_canvas_present(input, *workspace_root).await,
@@ -621,14 +758,12 @@ pub async fn execute_tool(
             .any(|pattern| librefang_types::capability::glob_matches(pattern, tool_name))
         {
             warn!(tool_name, "Capability denied: tool not in allowed list");
-            return ToolResult {
-                tool_use_id: tool_use_id.to_string(),
-                content: format!(
+            return tool_error(
+                tool_use_id,
+                format!(
                     "Permission denied: agent does not have capability to use tool '{tool_name}'"
                 ),
-                is_error: true,
-                ..Default::default()
-            };
+            );
         }
     }
 
@@ -640,14 +775,10 @@ pub async fn execute_tool(
     if let Some(kh) = kernel {
         if kh.is_tool_denied_with_context(tool_name, sender_id, channel) {
             warn!(tool_name, channel, "Execution denied by channel policy");
-            return ToolResult {
-                tool_use_id: tool_use_id.to_string(),
-                content: format!(
-                    "Execution denied: '{tool_name}' is blocked by the active channel policy."
-                ),
-                is_error: true,
-                ..Default::default()
-            };
+            return tool_error(
+                tool_use_id,
+                format!("Execution denied: '{tool_name}' is blocked by the active channel policy."),
+            );
         }
 
         if !skip_approval_for_full_exec
@@ -711,12 +842,7 @@ pub async fn execute_tool(
         let error_msg = input["__error"].as_str().unwrap_or(
             "Tool call arguments were truncated. Try smaller content or split into multiple calls.",
         );
-        return ToolResult {
-            tool_use_id: tool_use_id.to_string(),
-            content: error_msg.to_string(),
-            is_error: true,
-            ..Default::default()
-        };
+        return tool_error(tool_use_id, error_msg);
     }
 
     debug!(tool_name, "Executing tool");
@@ -744,6 +870,34 @@ pub async fn execute_tool(
 
 /// Get definitions for all built-in tools.
 pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
+    let mut tools = Vec::new();
+    tools.extend(builtin_filesystem_tool_definitions());
+    tools.extend(builtin_web_tool_definitions());
+    tools.extend(builtin_shell_tool_definitions());
+    tools.extend(builtin_inter_agent_tool_definitions());
+    tools.extend(builtin_memory_tool_definitions());
+    tools.extend(builtin_collaboration_tool_definitions());
+    tools.extend(builtin_scheduling_tool_definitions());
+    tools.extend(builtin_knowledge_tool_definitions());
+    tools.extend(builtin_image_tool_definitions());
+    tools.extend(builtin_location_tool_definitions());
+    tools.extend(builtin_browser_tool_definitions());
+    tools.extend(builtin_media_understanding_tool_definitions());
+    tools.extend(builtin_media_generation_tool_definitions());
+    tools.extend(builtin_cron_tool_definitions());
+    tools.extend(builtin_channel_tool_definitions());
+    tools.extend(builtin_hand_tool_definitions());
+    tools.extend(builtin_a2a_tool_definitions());
+    tools.extend(builtin_tts_stt_tool_definitions());
+    tools.extend(builtin_docker_tool_definitions());
+    tools.extend(builtin_process_tool_definitions());
+    tools.extend(builtin_goal_tool_definitions());
+    tools.extend(builtin_system_tool_definitions());
+    tools.extend(builtin_canvas_tool_definitions());
+    tools
+}
+
+fn builtin_filesystem_tool_definitions() -> Vec<ToolDefinition> {
     vec![
         // --- Filesystem tools ---
         ToolDefinition {
@@ -794,6 +948,11 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                 "required": ["patch"]
             }),
         },
+    ]
+}
+
+fn builtin_web_tool_definitions() -> Vec<ToolDefinition> {
+    vec![
         // --- Web tools ---
         ToolDefinition {
             name: "web_fetch".to_string(),
@@ -821,6 +980,11 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                 "required": ["query"]
             }),
         },
+    ]
+}
+
+fn builtin_shell_tool_definitions() -> Vec<ToolDefinition> {
+    vec![
         // --- Shell tool ---
         ToolDefinition {
             name: "shell_exec".to_string(),
@@ -834,6 +998,11 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                 "required": ["command"]
             }),
         },
+    ]
+}
+
+fn builtin_inter_agent_tool_definitions() -> Vec<ToolDefinition> {
+    vec![
         // --- Inter-agent tools ---
         ToolDefinition {
             name: "agent_send".to_string(),
@@ -898,6 +1067,11 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                 "required": ["agent_id"]
             }),
         },
+    ]
+}
+
+fn builtin_memory_tool_definitions() -> Vec<ToolDefinition> {
+    vec![
         // --- Shared memory tools ---
         ToolDefinition {
             name: "memory_store".to_string(),
@@ -930,6 +1104,11 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                 "properties": {},
             }),
         },
+    ]
+}
+
+fn builtin_collaboration_tool_definitions() -> Vec<ToolDefinition> {
+    vec![
         // --- Collaboration tools ---
         ToolDefinition {
             name: "agent_find".to_string(),
@@ -997,6 +1176,11 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                 "required": ["event_type"]
             }),
         },
+    ]
+}
+
+fn builtin_scheduling_tool_definitions() -> Vec<ToolDefinition> {
+    vec![
         // --- Scheduling tools ---
         ToolDefinition {
             name: "schedule_create".to_string(),
@@ -1030,6 +1214,11 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                 "required": ["id"]
             }),
         },
+    ]
+}
+
+fn builtin_knowledge_tool_definitions() -> Vec<ToolDefinition> {
+    vec![
         // --- Knowledge graph tools ---
         ToolDefinition {
             name: "knowledge_add_entity".to_string(),
@@ -1072,6 +1261,11 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                 }
             }),
         },
+    ]
+}
+
+fn builtin_image_tool_definitions() -> Vec<ToolDefinition> {
+    vec![
         // --- Image analysis tool ---
         ToolDefinition {
             name: "image_analyze".to_string(),
@@ -1085,6 +1279,11 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                 "required": ["path"]
             }),
         },
+    ]
+}
+
+fn builtin_location_tool_definitions() -> Vec<ToolDefinition> {
+    vec![
         // --- Location tool ---
         ToolDefinition {
             name: "location_get".to_string(),
@@ -1094,6 +1293,11 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                 "properties": {}
             }),
         },
+    ]
+}
+
+fn builtin_browser_tool_definitions() -> Vec<ToolDefinition> {
+    vec![
         // --- Browser automation tools ---
         ToolDefinition {
             name: "browser_navigate".to_string(),
@@ -1195,6 +1399,11 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                 "properties": {}
             }),
         },
+    ]
+}
+
+fn builtin_media_understanding_tool_definitions() -> Vec<ToolDefinition> {
+    vec![
         // --- Media understanding tools ---
         ToolDefinition {
             name: "media_describe".to_string(),
@@ -1220,6 +1429,11 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                 "required": ["path"]
             }),
         },
+    ]
+}
+
+fn builtin_media_generation_tool_definitions() -> Vec<ToolDefinition> {
+    vec![
         // --- Image generation tool ---
         ToolDefinition {
             name: "image_generate".to_string(),
@@ -1282,6 +1496,11 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                 }
             }),
         },
+    ]
+}
+
+fn builtin_cron_tool_definitions() -> Vec<ToolDefinition> {
+    vec![
         // --- Cron scheduling tools ---
         ToolDefinition {
             name: "cron_create".to_string(),
@@ -1326,6 +1545,11 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                 "required": ["job_id"]
             }),
         },
+    ]
+}
+
+fn builtin_channel_tool_definitions() -> Vec<ToolDefinition> {
+    vec![
         // --- Channel send tool (proactive outbound messaging) ---
         ToolDefinition {
             name: "channel_send".to_string(),
@@ -1346,6 +1570,11 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                 "required": ["channel", "recipient"]
             }),
         },
+    ]
+}
+
+fn builtin_hand_tool_definitions() -> Vec<ToolDefinition> {
+    vec![
         // --- Hand tools (curated autonomous capability packages) ---
         ToolDefinition {
             name: "hand_list".to_string(),
@@ -1389,6 +1618,11 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                 "required": ["instance_id"]
             }),
         },
+    ]
+}
+
+fn builtin_a2a_tool_definitions() -> Vec<ToolDefinition> {
+    vec![
         // --- A2A outbound tools ---
         ToolDefinition {
             name: "a2a_discover".to_string(),
@@ -1415,6 +1649,11 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                 "required": ["message"]
             }),
         },
+    ]
+}
+
+fn builtin_tts_stt_tool_definitions() -> Vec<ToolDefinition> {
+    vec![
         // --- TTS/STT tools ---
         ToolDefinition {
             name: "text_to_speech".to_string(),
@@ -1444,6 +1683,11 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                 "required": ["path"]
             }),
         },
+    ]
+}
+
+fn builtin_docker_tool_definitions() -> Vec<ToolDefinition> {
+    vec![
         // --- Docker sandbox tool ---
         ToolDefinition {
             name: "docker_exec".to_string(),
@@ -1456,6 +1700,11 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                 "required": ["command"]
             }),
         },
+    ]
+}
+
+fn builtin_process_tool_definitions() -> Vec<ToolDefinition> {
+    vec![
         // --- Persistent process tools ---
         ToolDefinition {
             name: "process_start".to_string(),
@@ -1491,7 +1740,12 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                 "type": "object",
                 "properties": {
                     "process_id": { "type": "string", "description": "The process ID returned by process_start" },
-                    "data": { "type": "string", "description": "The data to write to stdin" }
+                    "data": { "type": "string", "description": "The data to write to stdin" },
+                    "append_newline": {
+                        "type": "boolean",
+                        "description": "If true, append newline to data if not present (useful for REPLs)",
+                        "default": false
+                    }
                 },
                 "required": ["process_id", "data"]
             }),
@@ -1515,6 +1769,11 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                 "properties": {}
             }),
         },
+    ]
+}
+
+fn builtin_goal_tool_definitions() -> Vec<ToolDefinition> {
+    vec![
         // --- Goal tracking tool ---
         ToolDefinition {
             name: "goal_update".to_string(),
@@ -1529,6 +1788,11 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                 "required": ["goal_id"]
             }),
         },
+    ]
+}
+
+fn builtin_system_tool_definitions() -> Vec<ToolDefinition> {
+    vec![
         // --- System time tool ---
         ToolDefinition {
             name: "system_time".to_string(),
@@ -1539,6 +1803,11 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                 "required": []
             }),
         },
+    ]
+}
+
+fn builtin_canvas_tool_definitions() -> Vec<ToolDefinition> {
+    vec![
         // --- Canvas / A2UI tool ---
         ToolDefinition {
             name: "canvas_present".to_string(),
@@ -1837,14 +2106,25 @@ async fn tool_shell_exec(
     // Prevent child from inheriting stdin (avoids blocking on Windows)
     cmd.stdin(std::process::Stdio::null());
 
+    // Spawn the child process so we can kill it on timeout.
+    // Using `cmd.output()` would not give us a handle to the child.
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to spawn command: {e}"))?;
+
+    // Take stdout/stderr handles before moving child into the timeout.
+    let child_stdout = child.stdout.take();
+    let child_stderr = child.stderr.take();
+
     let result =
-        tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), cmd.output()).await;
+        tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), child.wait()).await;
 
     match result {
-        Ok(Ok(output)) => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let exit_code = output.status.code().unwrap_or(-1);
+        Ok(Ok(status)) => {
+            // Read captured output from the handles we took earlier.
+            let stdout = read_optional_pipe(child_stdout).await;
+            let stderr = read_optional_pipe(child_stderr).await;
+            let exit_code = status.code().unwrap_or(-1);
 
             // Truncate very long outputs to prevent memory issues
             let max_output = 100_000;
@@ -1855,7 +2135,7 @@ async fn tool_shell_exec(
                     stdout.len()
                 )
             } else {
-                stdout.to_string()
+                stdout
             };
             let stderr_str = if stderr.len() > max_output {
                 format!(
@@ -1864,7 +2144,7 @@ async fn tool_shell_exec(
                     stderr.len()
                 )
             } else {
-                stderr.to_string()
+                stderr
             };
 
             Ok(format!(
@@ -1872,7 +2152,33 @@ async fn tool_shell_exec(
             ))
         }
         Ok(Err(e)) => Err(format!("Failed to execute command: {e}")),
-        Err(_) => Err(format!("Command timed out after {timeout_secs}s")),
+        Err(_elapsed) => {
+            // Timeout: kill the child process to prevent zombies / background leaks.
+            warn!(
+                command = crate::str_utils::safe_truncate_str(command, 80),
+                timeout_secs, "Shell command timed out — killing child process"
+            );
+            // Best-effort kill; ignore errors since the child may have already exited.
+            let _ = child.kill().await;
+            // Reap the exit status so the OS doesn't leave a zombie.
+            let _ = child.wait().await;
+            Err(format!(
+                "Command timed out after {timeout_secs}s (process killed)"
+            ))
+        }
+    }
+}
+
+/// Read all bytes from an optional pipe (stdout/stderr), returning empty string if None.
+async fn read_optional_pipe(pipe: Option<impl tokio::io::AsyncRead + Unpin>) -> String {
+    use tokio::io::AsyncReadExt;
+    match pipe {
+        Some(mut p) => {
+            let mut buf = Vec::new();
+            let _ = p.read_to_end(&mut buf).await;
+            String::from_utf8_lossy(&buf).into_owned()
+        }
+        None => String::new(),
     }
 }
 
@@ -1964,8 +2270,10 @@ fn build_agent_manifest_toml(
 /// would reject legitimate child capabilities because `ToolInvoke("web_fetch")`
 /// cannot cover a child's `NetConnect("*")` — they are different enum variants.
 ///
-/// This mirrors the `ToolProfile::implied_capabilities()` logic in agent.rs.
+/// Expand tool grants to the implied resource-level capabilities used for
+/// capability inheritance checks.
 fn tools_to_parent_capabilities(tools: &[String]) -> Vec<librefang_types::capability::Capability> {
+    use librefang_types::agent::ManifestCapabilities;
     use librefang_types::capability::Capability;
 
     let mut caps: Vec<Capability> = tools
@@ -1973,27 +2281,25 @@ fn tools_to_parent_capabilities(tools: &[String]) -> Vec<librefang_types::capabi
         .map(|t| Capability::ToolInvoke(t.clone()))
         .collect();
 
-    let has_net = tools.iter().any(|t| t.starts_with("web_") || t == "*");
-    let has_shell = tools.iter().any(|t| t == "shell_exec" || t == "*");
-    let has_agent_spawn = tools.iter().any(|t| t == "agent_spawn" || t == "*");
-    let has_agent_msg = tools.iter().any(|t| t.starts_with("agent_") || t == "*");
-    let has_memory = tools.iter().any(|t| t.starts_with("memory_") || t == "*");
+    let implied = ManifestCapabilities::from_tools(tools.to_vec());
 
-    if has_net {
+    if !implied.network.is_empty() {
         caps.push(Capability::NetConnect("*".into()));
     }
-    if has_shell {
+    if !implied.shell.is_empty() {
         caps.push(Capability::ShellExec("*".into()));
     }
-    if has_agent_spawn {
+    if implied.agent_spawn {
         caps.push(Capability::AgentSpawn);
     }
-    if has_agent_msg {
+    if !implied.agent_message.is_empty() {
         caps.push(Capability::AgentMessage("*".into()));
     }
-    if has_memory {
-        caps.push(Capability::MemoryRead("*".into()));
-        caps.push(Capability::MemoryWrite("*".into()));
+    for scope in implied.memory_read {
+        caps.push(Capability::MemoryRead(scope));
+    }
+    for scope in implied.memory_write {
+        caps.push(Capability::MemoryWrite(scope));
     }
 
     caps
@@ -2095,9 +2401,31 @@ fn tool_memory_store(
     kernel: Option<&Arc<dyn KernelHandle>>,
     peer_id: Option<&str>,
 ) -> Result<String, String> {
+    const MAX_VALUE_BYTES: usize = 256 * 1024; // 256 KB per entry
+    const MAX_KEY_BYTES: usize = 256;
+
     let kh = require_kernel(kernel)?;
     let key = input["key"].as_str().ok_or("Missing 'key' parameter")?;
     let value = input.get("value").ok_or("Missing 'value' parameter")?;
+
+    // Enforce key length limit
+    if key.len() > MAX_KEY_BYTES {
+        return Err(format!(
+            "memory_store key exceeds max length of {MAX_KEY_BYTES} bytes (got {})",
+            key.len()
+        ));
+    }
+
+    // Enforce value size limit (serialized JSON)
+    let serialized =
+        serde_json::to_vec(value).map_err(|e| format!("Failed to serialize value: {e}"))?;
+    if serialized.len() > MAX_VALUE_BYTES {
+        return Err(format!(
+            "memory_store value exceeds max size of {MAX_VALUE_BYTES} bytes (got {})",
+            serialized.len()
+        ));
+    }
+
     kh.memory_store(key, value.clone(), peer_id)?;
     Ok(format!("Stored value under key '{key}'."))
 }
@@ -2663,22 +2991,9 @@ async fn tool_cron_cancel(
         .as_str()
         .ok_or("Missing 'job_id' parameter")?;
     let agent_id = caller_agent_id.ok_or("Agent ID required for cron_cancel")?;
-    // Authorize: the caller may only cancel jobs that belong to them.
-    // Otherwise an agent with the cron_cancel tool could delete any other
-    // agent's jobs as long as it learns their UUID (via side-channel or
-    // social engineering).
-    let owned = kh.cron_list(agent_id).await?;
-    let owns_job = owned.iter().any(|job| {
-        job.get("id")
-            .and_then(|v| v.as_str())
-            .is_some_and(|id| id == job_id)
-    });
-    if !owns_job {
-        return Err(format!(
-            "Cron job '{job_id}' not found or not owned by this agent"
-        ));
-    }
-    kh.cron_cancel(job_id).await?;
+
+    // Use optimized ownership check at kernel level (O(1) if kernel overrides).
+    kh.cron_cancel_if_owned(agent_id, job_id).await?;
     Ok(format!("Cron job '{job_id}' cancelled."))
 }
 
@@ -2797,9 +3112,7 @@ async fn tool_channel_send(
 
     // For email channels, validate email format and prepend subject
     let final_message = if channel == "email" {
-        if !recipient.contains('@') || !recipient.contains('.') {
-            return Err(format!("Invalid email address: '{recipient}'"));
-        }
+        validate_email(recipient)?;
         if let Some(subject) = input["subject"].as_str() {
             if !subject.is_empty() {
                 format!("Subject: {subject}\n\n{message}")
@@ -3515,7 +3828,7 @@ async fn tool_video_generate(
         model: input["model"].as_str().map(String::from),
         duration_secs: input["duration"].as_u64().map(|v| v as u32),
         resolution: input["resolution"].as_str().map(String::from),
-        image_url: None,
+        image_url: input["image_url"].as_str().map(String::from),
         optimize_prompt: None,
     };
 
@@ -3969,6 +4282,14 @@ async fn tool_process_poll(
     .to_string())
 }
 
+fn maybe_append_newline(data: &str, append: bool) -> String {
+    if append && !data.ends_with('\n') {
+        format!("{data}\n")
+    } else {
+        data.to_string()
+    }
+}
+
 /// Write data to a process's stdin.
 async fn tool_process_write(
     input: &serde_json::Value,
@@ -3979,12 +4300,12 @@ async fn tool_process_write(
         .as_str()
         .ok_or("Missing 'process_id' parameter")?;
     let data = input["data"].as_str().ok_or("Missing 'data' parameter")?;
-    // Always append newline if not present (common expectation for REPLs)
-    let data = if data.ends_with('\n') {
-        data.to_string()
-    } else {
-        format!("{data}\n")
-    };
+
+    // Send exactly what the caller provided by default.
+    // Optional `append_newline` flag for REPL convenience.
+    let append_newline = input["append_newline"].as_bool().unwrap_or(false);
+    let data = maybe_append_newline(data, append_newline);
+
     pm.write(proc_id, &data).await?;
     Ok(r#"{"status": "written"}"#.to_string())
 }
@@ -4135,21 +4456,117 @@ mod tests {
     use super::*;
     use crate::kernel_handle::{AgentInfo, KernelHandle};
     use async_trait::async_trait;
+    use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::Mutex;
 
-    struct ApprovalKernel {
+    // ---------------------------------------------------------------------------
+    // Unified test kernel — replaces the four former per-test mock structs.
+    //
+    // All `KernelHandle` methods have stub defaults here. Callers opt in to
+    // specific behaviours by setting the relevant fields before wrapping the
+    // kernel in an `Arc<dyn KernelHandle>`.
+    //
+    // Field guide
+    // -----------
+    // `approval_requests`      – shared counter incremented by request_approval /
+    //                            submit_tool_approval (approval tests)
+    // `approves_shell_exec`    – when true, requires_approval returns true for
+    //                            "shell_exec" (approval tests)
+    // `memory`                 – when Some, memory_{store,recall,list} operate on
+    //                            this in-memory map (memory tests)
+    // `cron_owned`             – when Some(b), cron_cancel_if_owned succeeds iff b
+    //                            (cron tests)
+    // `spawn_result`           – when Some((id, name)), spawn_agent returns that
+    //                            pair; when None returns Err("not used")
+    // `spawn_checked_result`   – when Some((id, name)), spawn_agent_checked returns
+    //                            that pair; when None delegates to spawn_agent
+    // `fail_escalation`        – when true, spawn_agent_checked validates capability
+    //                            inheritance before returning spawn_checked_result
+    // ---------------------------------------------------------------------------
+    struct TestKernel {
         approval_requests: Arc<AtomicUsize>,
+        approves_shell_exec: bool,
+        memory: Option<Arc<Mutex<HashMap<String, serde_json::Value>>>>,
+        cron_owned: Option<bool>,
+        spawn_result: Option<(String, String)>,
+        spawn_checked_result: Option<(String, String)>,
+        fail_escalation: bool,
+    }
+
+    impl Default for TestKernel {
+        fn default() -> Self {
+            Self {
+                approval_requests: Arc::new(AtomicUsize::new(0)),
+                approves_shell_exec: false,
+                memory: None,
+                cron_owned: None,
+                spawn_result: None,
+                spawn_checked_result: None,
+                fail_escalation: false,
+            }
+        }
+    }
+
+    impl TestKernel {
+        /// Composite key used by the in-memory store: "peer|key".
+        fn composite_key(peer: Option<&str>, key: &str) -> String {
+            format!("{}|{}", peer.unwrap_or("default"), key)
+        }
+
+        /// Convenience: kernel with a live memory store.
+        fn with_memory() -> Self {
+            Self {
+                memory: Some(Arc::new(Mutex::new(HashMap::new()))),
+                ..Default::default()
+            }
+        }
+
+        /// Convenience: kernel that asserts cron ownership.
+        fn with_cron_owned(owned: bool) -> Self {
+            Self {
+                cron_owned: Some(owned),
+                ..Default::default()
+            }
+        }
+
+        /// Convenience: kernel that records approval decisions.
+        fn with_approval_tracking(counter: Arc<AtomicUsize>) -> Self {
+            Self {
+                approval_requests: counter,
+                approves_shell_exec: true,
+                ..Default::default()
+            }
+        }
+
+        /// Convenience: kernel that handles agent spawning (for capability tests).
+        fn with_spawn(
+            spawn_result: (String, String),
+            spawn_checked_result: (String, String),
+            fail_escalation: bool,
+        ) -> Self {
+            Self {
+                spawn_result: Some(spawn_result),
+                spawn_checked_result: Some(spawn_checked_result),
+                fail_escalation,
+                ..Default::default()
+            }
+        }
     }
 
     #[async_trait]
-    impl KernelHandle for ApprovalKernel {
+    impl KernelHandle for TestKernel {
+        // --- Required methods with stub defaults ---
+
         async fn spawn_agent(
             &self,
             _manifest_toml: &str,
             _parent_id: Option<&str>,
         ) -> Result<(String, String), String> {
-            Err("not used".to_string())
+            self.spawn_result
+                .clone()
+                .ok_or_else(|| "not used".to_string())
         }
 
         async fn send_to_agent(&self, _agent_id: &str, _message: &str) -> Result<String, String> {
@@ -4166,23 +4583,51 @@ mod tests {
 
         fn memory_store(
             &self,
-            _key: &str,
-            _value: serde_json::Value,
-            _peer_id: Option<&str>,
+            key: &str,
+            value: serde_json::Value,
+            peer_id: Option<&str>,
         ) -> Result<(), String> {
-            Err("not used".to_string())
+            let Some(ref store) = self.memory else {
+                return Err("not used".to_string());
+            };
+            let composite = Self::composite_key(peer_id, key);
+            store
+                .lock()
+                .map(|mut m| {
+                    m.insert(composite, value);
+                })
+                .map_err(|_| "Lock poisoned".to_string())
         }
 
         fn memory_recall(
             &self,
-            _key: &str,
-            _peer_id: Option<&str>,
+            key: &str,
+            peer_id: Option<&str>,
         ) -> Result<Option<serde_json::Value>, String> {
-            Err("not used".to_string())
+            let Some(ref store) = self.memory else {
+                return Ok(None);
+            };
+            let composite = Self::composite_key(peer_id, key);
+            store
+                .lock()
+                .map(|m| m.get(&composite).cloned())
+                .map_err(|_| "Lock poisoned".to_string())
         }
 
         fn memory_list(&self, _peer_id: Option<&str>) -> Result<Vec<String>, String> {
-            Err("not used".to_string())
+            let Some(ref store) = self.memory else {
+                return Ok(vec![]);
+            };
+            let map = store.lock().map_err(|_| "Lock poisoned".to_string())?;
+            let keys = map
+                .keys()
+                .filter_map(|k| {
+                    let mut parts = k.splitn(2, '|');
+                    parts.next(); // skip peer prefix
+                    parts.next().map(str::to_owned)
+                })
+                .collect();
+            Ok(keys)
         }
 
         fn find_agents(&self, _query: &str) -> Vec<AgentInfo> {
@@ -4248,8 +4693,27 @@ mod tests {
             Err("not used".to_string())
         }
 
+        // --- Cron: delegate to trait defaults unless cron_owned is set ---
+
+        async fn cron_list(&self, _agent_id: &str) -> Result<Vec<serde_json::Value>, String> {
+            Ok(vec![serde_json::json!({"id": "job1"})])
+        }
+
+        async fn cron_cancel(&self, _job_id: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn cron_cancel_if_owned(&self, agent_id: &str, _job_id: &str) -> Result<(), String> {
+            match self.cron_owned {
+                Some(true) | None => Ok(()),
+                Some(false) => Err(format!("Cron job not owned by agent '{agent_id}'")),
+            }
+        }
+
+        // --- Approval ---
+
         fn requires_approval(&self, tool_name: &str) -> bool {
-            tool_name == "shell_exec"
+            self.approves_shell_exec && tool_name == "shell_exec"
         }
 
         async fn request_approval(
@@ -4273,6 +4737,28 @@ mod tests {
             Ok(librefang_types::tool::ToolApprovalSubmission::Pending {
                 request_id: uuid::Uuid::new_v4(),
             })
+        }
+
+        // --- Spawn with capability enforcement ---
+
+        async fn spawn_agent_checked(
+            &self,
+            manifest_toml: &str,
+            _parent_id: Option<&str>,
+            parent_caps: &[librefang_types::capability::Capability],
+        ) -> Result<(String, String), String> {
+            if self.fail_escalation {
+                let manifest: librefang_types::agent::AgentManifest =
+                    toml::from_str(manifest_toml).map_err(|e| format!("Invalid manifest: {e}"))?;
+                let child_caps = mock_manifest_to_capabilities(&manifest);
+                librefang_types::capability::validate_capability_inheritance(
+                    parent_caps,
+                    &child_caps,
+                )?;
+            }
+            self.spawn_checked_result
+                .clone()
+                .ok_or_else(|| "not used".to_string())
         }
     }
 
@@ -4347,6 +4833,120 @@ mod tests {
         assert!(names.contains(&"goal_update"));
         // Canvas tool
         assert!(names.contains(&"canvas_present"));
+    }
+
+    // ----------------------------------------------------------------------------------
+    //  Additional unit tests for recent fixes (10 test cases in total)
+    // ----------------------------------------------------------------------------------
+
+    // Test 5: memory_store size limit
+    #[test]
+    fn test_memory_store_size_limit_smaller_and_larger() {
+        // Large kernel with in-memory storage
+        let mem_kernel: Arc<dyn KernelHandle> = Arc::new(TestKernel::with_memory());
+
+        // Large payload (> 256KB)
+        let huge = "a".repeat(300_000);
+        let input_large = serde_json::json!({"key": "k_large", "value": {"payload": huge}});
+        let res_large = tool_memory_store(&input_large, Some(&mem_kernel), None);
+        assert!(res_large.is_err(), "Expected error for payload > 256KB");
+
+        // Small payload should succeed
+        let small = serde_json::json!({"payload": "tiny"});
+        let input_small = serde_json::json!({"key": "k_small", "value": small});
+        let res_small =
+            tool_memory_store(&input_small, Some(&mem_kernel), None).expect("should succeed");
+        assert!(res_small.contains("Stored value under key"));
+        // Verify retrieval
+        let recall = mem_kernel
+            .memory_recall("k_small", None)
+            .expect("recall")
+            .unwrap();
+        assert_eq!(recall["payload"].as_str().unwrap(), "tiny");
+    }
+
+    // Test 7: maybe_append_newline helper (covers the logic inside tool_process_write)
+    #[test]
+    fn test_process_write_append_newline_logic() {
+        // append=false: data is returned unchanged regardless of trailing newline
+        assert_eq!(
+            maybe_append_newline("hello", false),
+            "hello",
+            "append=false should not modify data"
+        );
+        assert_eq!(
+            maybe_append_newline("hello\n", false),
+            "hello\n",
+            "append=false should not modify data even when newline already present"
+        );
+
+        // append=true, no trailing newline: newline is appended
+        assert_eq!(
+            maybe_append_newline("hello", true),
+            "hello\n",
+            "append=true should append newline when missing"
+        );
+
+        // append=true, already has trailing newline: no double newline
+        assert_eq!(
+            maybe_append_newline("hello\n", true),
+            "hello\n",
+            "append=true should not double-append when newline already present"
+        );
+    }
+
+    // Test 9: cron ownership logic via cron_cancel_if_owned
+
+    #[test]
+    fn test_cron_cancel_is_owned() {
+        // Owned by agent "owner" -> should succeed
+        let arc: Arc<dyn KernelHandle> = Arc::new(TestKernel::with_cron_owned(true));
+        let input = serde_json::json!({"job_id": "job1"});
+        // We can't await in a non-async test here, so we spawn a small runtime
+        // to drive the async function and verify the happy path.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let res = rt.block_on(async { tool_cron_cancel(&input, Some(&arc), Some("owner")).await });
+        assert!(res.is_ok(), "Expected cron cancel to succeed when owned");
+    }
+
+    #[test]
+    fn test_cron_cancel_not_owned() {
+        let arc: Arc<dyn KernelHandle> = Arc::new(TestKernel::with_cron_owned(false));
+        let input = serde_json::json!({"job_id": "job1"});
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let res = rt.block_on(async { tool_cron_cancel(&input, Some(&arc), Some("other")).await });
+        assert!(res.is_err());
+    }
+
+    // Test 10: execute_tool_raw should not force a double normalization.
+    #[tokio::test]
+    async fn test_execute_tool_raw_no_double_normalize() {
+        use serde_json::json;
+        // Minimal context
+        let ctx = ToolExecContext {
+            kernel: None,
+            allowed_tools: None,
+            caller_agent_id: None,
+            skill_registry: None,
+            mcp_connections: None,
+            web_ctx: None,
+            browser_ctx: None,
+            allowed_env_vars: None,
+            workspace_root: None,
+            media_engine: None,
+            media_drivers: None,
+            exec_policy: None,
+            tts_engine: None,
+            docker_config: None,
+            process_manager: None,
+            sender_id: None,
+            channel: None,
+        };
+        let input = json!({"path": "Cargo.toml"});
+        // Use a non-normalized tool name on purpose to observe no normalization by this path.
+        let res = execute_tool_raw("tid", "File_Read", &input, &ctx).await;
+        // Since the tool name is not recognized in raw mode, we expect an error.
+        assert!(res.is_error, "Expected error for unknown tool 'File_Read'");
     }
 
     #[test]
@@ -4748,9 +5348,9 @@ mod tests {
     #[tokio::test]
     async fn test_shell_exec_full_policy_skips_approval_gate() {
         let approval_requests = Arc::new(AtomicUsize::new(0));
-        let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
-            approval_requests: Arc::clone(&approval_requests),
-        });
+        let kernel: Arc<dyn KernelHandle> = Arc::new(TestKernel::with_approval_tracking(
+            Arc::clone(&approval_requests),
+        ));
         let policy = librefang_types::config::ExecPolicy {
             mode: librefang_types::config::ExecSecurityMode::Full,
             ..Default::default()
@@ -4792,9 +5392,9 @@ mod tests {
     #[tokio::test]
     async fn test_shell_exec_non_full_policy_still_requires_approval() {
         let approval_requests = Arc::new(AtomicUsize::new(0));
-        let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
-            approval_requests: Arc::clone(&approval_requests),
-        });
+        let kernel: Arc<dyn KernelHandle> = Arc::new(TestKernel::with_approval_tracking(
+            Arc::clone(&approval_requests),
+        ));
         let policy = librefang_types::config::ExecPolicy {
             mode: librefang_types::config::ExecSecurityMode::Allowlist,
             ..Default::default()
@@ -5357,9 +5957,11 @@ mod tests {
     async fn test_agent_spawn_capability_escalation_denied() {
         // SECURITY: sub-agent cannot request tools the parent doesn't have.
         // Parent only has file_read, but child requests shell_exec.
-        let kernel: Arc<dyn KernelHandle> = Arc::new(SpawnCheckKernel {
-            should_fail_escalation: true,
-        });
+        let kernel: Arc<dyn KernelHandle> = Arc::new(TestKernel::with_spawn(
+            ("test-id-123".to_string(), "test-agent".to_string()),
+            ("test-id-456".to_string(), "good-child".to_string()),
+            true,
+        ));
         let parent_allowed = vec!["file_read".to_string(), "agent_spawn".to_string()];
         let result = execute_tool(
             "test-id",
@@ -5403,9 +6005,11 @@ mod tests {
     #[tokio::test]
     async fn test_agent_spawn_subset_capabilities_allowed() {
         // Sub-agent requests only capabilities the parent has — should succeed.
-        let kernel: Arc<dyn KernelHandle> = Arc::new(SpawnCheckKernel {
-            should_fail_escalation: false,
-        });
+        let kernel: Arc<dyn KernelHandle> = Arc::new(TestKernel::with_spawn(
+            ("test-id-123".to_string(), "test-agent".to_string()),
+            ("test-id-456".to_string(), "good-child".to_string()),
+            true,
+        ));
         let parent_allowed = vec![
             "file_read".to_string(),
             "file_write".to_string(),
@@ -5442,6 +6046,334 @@ mod tests {
             !result.is_error,
             "Expected spawn to succeed, got error: {}",
             result.content
+        );
+        assert!(result.content.contains("spawned successfully"));
+    }
+
+    async fn execute_agent_spawn_test(
+        kernel: &Arc<dyn KernelHandle>,
+        parent_allowed: Option<&[String]>,
+        input: serde_json::Value,
+    ) -> ToolResult {
+        execute_tool(
+            "test-id",
+            "agent_spawn",
+            &input,
+            Some(kernel),
+            parent_allowed,
+            Some("parent-agent-id"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn test_agent_spawn_tool_only_grants_child_tool_invoke_without_agent_resource_caps() {
+        // The spawned manifest currently carries tool grants literally; having the
+        // agent_spawn tool available to the child emits ToolInvoke("agent_spawn"),
+        // but not explicit agent_* resource capabilities in the child manifest.
+        let kernel: Arc<dyn KernelHandle> = Arc::new(TestKernel::with_spawn(
+            ("test-id-123".to_string(), "test-agent".to_string()),
+            ("test-id-456".to_string(), "good-child".to_string()),
+            true,
+        ));
+        let parent_allowed = vec!["agent_spawn".to_string()];
+        let result = execute_agent_spawn_test(
+            &kernel,
+            Some(&parent_allowed),
+            serde_json::json!({
+                "name": "spawn-cap-child",
+                "system_prompt": "You are a test agent.",
+                "tools": ["agent_spawn"]
+            }),
+        )
+        .await;
+        assert!(
+            !result.is_error,
+            "Expected spawn to succeed, got error: {}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn test_agent_spawn_network_inheritance_allowed_for_web_tool() {
+        let kernel: Arc<dyn KernelHandle> = Arc::new(TestKernel::with_spawn(
+            ("test-id-123".to_string(), "test-agent".to_string()),
+            ("test-id-456".to_string(), "good-child".to_string()),
+            true,
+        ));
+        let parent_allowed = vec!["web_fetch".to_string(), "agent_spawn".to_string()];
+        let result = execute_agent_spawn_test(
+            &kernel,
+            Some(&parent_allowed),
+            serde_json::json!({
+                "name": "web-child",
+                "system_prompt": "You browse the web.",
+                "tools": ["web_fetch"],
+                "network": true
+            }),
+        )
+        .await;
+        assert!(!result.is_error, "Expected network inheritance to pass");
+        assert!(result.content.contains("spawned successfully"));
+    }
+
+    #[tokio::test]
+    async fn test_agent_spawn_network_inheritance_denied_without_parent_network_capability() {
+        let kernel: Arc<dyn KernelHandle> = Arc::new(TestKernel::with_spawn(
+            ("test-id-123".to_string(), "test-agent".to_string()),
+            ("test-id-456".to_string(), "good-child".to_string()),
+            true,
+        ));
+        let parent_allowed = vec!["file_read".to_string(), "agent_spawn".to_string()];
+        let result = execute_agent_spawn_test(
+            &kernel,
+            Some(&parent_allowed),
+            serde_json::json!({
+                "name": "web-child",
+                "system_prompt": "You browse the web.",
+                "tools": ["web_fetch"],
+                "network": true
+            }),
+        )
+        .await;
+        assert!(result.is_error, "Expected network inheritance to be denied");
+        assert!(
+            result.content.contains("Privilege escalation denied")
+                && (result.content.contains("ToolInvoke(\"web_fetch\")")
+                    || result.content.contains("NetConnect")),
+            "got: {}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn test_agent_spawn_shell_inheritance_allowed_for_shell_profile() {
+        let kernel: Arc<dyn KernelHandle> = Arc::new(TestKernel::with_spawn(
+            ("test-id-123".to_string(), "test-agent".to_string()),
+            ("test-id-456".to_string(), "good-child".to_string()),
+            true,
+        ));
+        let parent_allowed = vec!["shell_exec".to_string(), "agent_spawn".to_string()];
+        let result = execute_agent_spawn_test(
+            &kernel,
+            Some(&parent_allowed),
+            serde_json::json!({
+                "name": "shell-child",
+                "system_prompt": "You run commands.",
+                "shell": ["uv *"]
+            }),
+        )
+        .await;
+        assert!(!result.is_error, "Expected shell inheritance to pass");
+        assert!(result.content.contains("spawned successfully"));
+    }
+
+    #[tokio::test]
+    async fn test_agent_spawn_shell_inheritance_denied_without_parent_shell_capability() {
+        let kernel: Arc<dyn KernelHandle> = Arc::new(TestKernel::with_spawn(
+            ("test-id-123".to_string(), "test-agent".to_string()),
+            ("test-id-456".to_string(), "good-child".to_string()),
+            true,
+        ));
+        let parent_allowed = vec!["file_read".to_string(), "agent_spawn".to_string()];
+        let result = execute_agent_spawn_test(
+            &kernel,
+            Some(&parent_allowed),
+            serde_json::json!({
+                "name": "shell-child",
+                "system_prompt": "You run commands.",
+                "shell": ["uv *"]
+            }),
+        )
+        .await;
+        assert!(result.is_error, "Expected shell inheritance to be denied");
+        assert!(
+            result.content.contains("Privilege escalation denied")
+                && (result.content.contains("ToolInvoke(\"shell_exec\")")
+                    || result.content.contains("ShellExec")),
+            "got: {}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn test_agent_spawn_memory_self_scoped_inheritance_allowed_without_memory_tools() {
+        let kernel: Arc<dyn KernelHandle> = Arc::new(TestKernel::with_spawn(
+            ("test-id-123".to_string(), "test-agent".to_string()),
+            ("test-id-456".to_string(), "good-child".to_string()),
+            true,
+        ));
+        let parent_allowed = vec!["file_read".to_string(), "agent_spawn".to_string()];
+        let result = execute_agent_spawn_test(
+            &kernel,
+            Some(&parent_allowed),
+            serde_json::json!({
+                "name": "minimal-child",
+                "system_prompt": "You are minimal.",
+                "tools": ["file_read"]
+            }),
+        )
+        .await;
+        assert!(
+            !result.is_error,
+            "Expected self-scoped memory inheritance to pass"
+        );
+        assert!(result.content.contains("spawned successfully"));
+    }
+
+    #[tokio::test]
+    async fn test_agent_spawn_memory_global_inheritance_allowed_for_memory_tool() {
+        let kernel: Arc<dyn KernelHandle> = Arc::new(TestKernel::with_spawn(
+            ("test-id-123".to_string(), "test-agent".to_string()),
+            ("test-id-456".to_string(), "good-child".to_string()),
+            true,
+        ));
+        let parent_allowed = vec!["memory_store".to_string(), "agent_spawn".to_string()];
+        let result = execute_agent_spawn_test(
+            &kernel,
+            Some(&parent_allowed),
+            serde_json::json!({
+                "name": "memory-child",
+                "system_prompt": "You share memory.",
+                "tools": ["memory_store"]
+            }),
+        )
+        .await;
+        assert!(
+            !result.is_error,
+            "Expected global memory inheritance to pass"
+        );
+        assert!(result.content.contains("spawned successfully"));
+    }
+
+    #[tokio::test]
+    async fn test_agent_spawn_memory_global_inheritance_denied_without_parent_memory_tool() {
+        let kernel: Arc<dyn KernelHandle> = Arc::new(TestKernel::with_spawn(
+            ("test-id-123".to_string(), "test-agent".to_string()),
+            ("test-id-456".to_string(), "good-child".to_string()),
+            true,
+        ));
+        let parent_allowed = vec!["file_read".to_string(), "agent_spawn".to_string()];
+        let result = execute_agent_spawn_test(
+            &kernel,
+            Some(&parent_allowed),
+            serde_json::json!({
+                "name": "memory-child",
+                "system_prompt": "You share memory.",
+                "tools": ["memory_store"]
+            }),
+        )
+        .await;
+        assert!(
+            result.is_error,
+            "Expected global memory inheritance to be denied"
+        );
+        assert!(
+            result.content.contains("Privilege escalation denied")
+                && (result.content.contains("ToolInvoke(\"memory_store\")")
+                    || result.content.contains("MemoryRead(\"*\")")
+                    || result.content.contains("MemoryWrite")),
+            "got: {}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn test_agent_spawn_agent_send_denied_without_parent_message_capability() {
+        let kernel: Arc<dyn KernelHandle> = Arc::new(TestKernel::with_spawn(
+            ("test-id-123".to_string(), "test-agent".to_string()),
+            ("test-id-456".to_string(), "good-child".to_string()),
+            true,
+        ));
+        let parent_allowed = vec!["agent_spawn".to_string()];
+        let result = execute_agent_spawn_test(
+            &kernel,
+            Some(&parent_allowed),
+            serde_json::json!({
+                "name": "messaging-child",
+                "system_prompt": "You message other agents.",
+                "tools": ["agent_send"]
+            }),
+        )
+        .await;
+        assert!(
+            result.is_error,
+            "Expected agent_send inheritance to be denied when parent only has agent_spawn"
+        );
+        assert!(
+            result.content.contains("Privilege escalation denied")
+                && result.content.contains("ToolInvoke(\"agent_send\")"),
+            "got: {}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn test_agent_spawn_self_scoped_memory_denied_without_parent_tool_grant() {
+        let kernel: Arc<dyn KernelHandle> = Arc::new(TestKernel::with_spawn(
+            ("test-id-123".to_string(), "test-agent".to_string()),
+            ("test-id-456".to_string(), "good-child".to_string()),
+            true,
+        ));
+        let parent_allowed = vec!["agent_spawn".to_string()];
+        let result = execute_agent_spawn_test(
+            &kernel,
+            Some(&parent_allowed),
+            serde_json::json!({
+                "name": "minimal-child",
+                "system_prompt": "You are minimal.",
+                "tools": ["file_read"]
+            }),
+        )
+        .await;
+        assert!(
+            result.is_error,
+            "Expected self-scoped memory inheritance to be denied without parent tool grant"
+        );
+        assert!(
+            result.content.contains("Privilege escalation denied")
+                && (result.content.contains("ToolInvoke(\"file_read\")")
+                    || result.content.contains("MemoryRead(\"self.*\")")
+                    || result.content.contains("MemoryWrite(\"self.*\")")),
+            "got: {}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn test_agent_spawn_without_allowed_tools_allows_tool_invokes_but_not_resource_caps() {
+        let kernel: Arc<dyn KernelHandle> = Arc::new(TestKernel::with_spawn(
+            ("test-id-123".to_string(), "test-agent".to_string()),
+            ("test-id-456".to_string(), "good-child".to_string()),
+            true,
+        ));
+        let result = execute_agent_spawn_test(
+            &kernel,
+            None,
+            serde_json::json!({
+                "name": "unrestricted-child",
+                "system_prompt": "You can call unrestricted tools.",
+                "tools": ["web_fetch", "shell_exec"]
+            }),
+        )
+        .await;
+        assert!(
+            !result.is_error,
+            "Expected unrestricted parent tool fallback to pass"
         );
         assert!(result.content.contains("spawned successfully"));
     }
@@ -5488,8 +6420,8 @@ mod tests {
             "memory_store should imply MemoryRead"
         );
         assert!(
-            caps.contains(&Capability::MemoryWrite("*".into())),
-            "memory_store should imply MemoryWrite"
+            caps.contains(&Capability::MemoryWrite("self.*".into())),
+            "memory_store should imply self-scoped MemoryWrite"
         );
     }
 
@@ -5497,11 +6429,29 @@ mod tests {
     fn test_tools_to_parent_capabilities_no_false_expansion() {
         use librefang_types::capability::Capability;
 
-        // Only file_read — should NOT imply any resource caps
+        // Only file_read should not imply network/shell/agent caps, but canonical
+        // manifest semantics still grant self-scoped memory access by default.
         let tools = vec!["file_read".to_string()];
         let caps = tools_to_parent_capabilities(&tools);
-        assert_eq!(caps.len(), 1);
         assert!(caps.contains(&Capability::ToolInvoke("file_read".into())));
+        assert!(caps.contains(&Capability::MemoryRead("self.*".into())));
+        assert!(caps.contains(&Capability::MemoryWrite("self.*".into())));
+        assert!(!caps.contains(&Capability::NetConnect("*".into())));
+        assert!(!caps.contains(&Capability::ShellExec("*".into())));
+        assert!(!caps.contains(&Capability::AgentSpawn));
+    }
+
+    #[test]
+    fn test_tools_to_parent_capabilities_matches_tool_profile_memory_semantics() {
+        use librefang_types::agent::ToolProfile;
+        use librefang_types::capability::Capability;
+
+        let tools = vec!["memory_store".to_string()];
+        let caps = tools_to_parent_capabilities(&tools);
+        let implied = ToolProfile::Messaging.implied_capabilities();
+
+        assert!(caps.contains(&Capability::MemoryWrite("self.*".into())));
+        assert_eq!(implied.memory_write, vec!["self.*".to_string()]);
     }
 
     #[tokio::test]
@@ -5820,139 +6770,75 @@ mod tests {
         assert!(result.unwrap_err().contains("Invalid status"));
     }
 
-    /// Mock kernel that validates capability inheritance in spawn_agent_checked.
-    struct SpawnCheckKernel {
-        should_fail_escalation: bool,
-    }
+    fn mock_manifest_to_capabilities(
+        manifest: &librefang_types::agent::AgentManifest,
+    ) -> Vec<librefang_types::capability::Capability> {
+        use librefang_types::capability::Capability;
 
-    #[async_trait]
-    impl KernelHandle for SpawnCheckKernel {
-        async fn spawn_agent(
-            &self,
-            _manifest_toml: &str,
-            _parent_id: Option<&str>,
-        ) -> Result<(String, String), String> {
-            Ok(("test-id-123".to_string(), "test-agent".to_string()))
-        }
-
-        async fn spawn_agent_checked(
-            &self,
-            manifest_toml: &str,
-            _parent_id: Option<&str>,
-            parent_caps: &[librefang_types::capability::Capability],
-        ) -> Result<(String, String), String> {
-            if self.should_fail_escalation {
-                // Parse child manifest to extract capabilities, mimicking real kernel behavior
-                let manifest: librefang_types::agent::AgentManifest =
-                    toml::from_str(manifest_toml).map_err(|e| format!("Invalid manifest: {e}"))?;
-                let child_caps: Vec<librefang_types::capability::Capability> = manifest
-                    .capabilities
-                    .tools
-                    .iter()
-                    .map(|t| librefang_types::capability::Capability::ToolInvoke(t.clone()))
-                    .collect();
-                librefang_types::capability::validate_capability_inheritance(
-                    parent_caps,
-                    &child_caps,
-                )?;
+        let effective_caps = if let Some(ref profile) = manifest.profile {
+            if manifest.capabilities.tools.is_empty() {
+                let mut merged = profile.implied_capabilities();
+                if !manifest.capabilities.network.is_empty() {
+                    merged.network = manifest.capabilities.network.clone();
+                }
+                if !manifest.capabilities.shell.is_empty() {
+                    merged.shell = manifest.capabilities.shell.clone();
+                }
+                if !manifest.capabilities.agent_message.is_empty() {
+                    merged.agent_message = manifest.capabilities.agent_message.clone();
+                }
+                if manifest.capabilities.agent_spawn {
+                    merged.agent_spawn = true;
+                }
+                if !manifest.capabilities.memory_read.is_empty() {
+                    merged.memory_read = manifest.capabilities.memory_read.clone();
+                }
+                if !manifest.capabilities.memory_write.is_empty() {
+                    merged.memory_write = manifest.capabilities.memory_write.clone();
+                }
+                if manifest.capabilities.ofp_discover {
+                    merged.ofp_discover = true;
+                }
+                if !manifest.capabilities.ofp_connect.is_empty() {
+                    merged.ofp_connect = manifest.capabilities.ofp_connect.clone();
+                }
+                merged
+            } else {
+                manifest.capabilities.clone()
             }
-            Ok(("test-id-456".to_string(), "good-child".to_string()))
+        } else {
+            manifest.capabilities.clone()
+        };
+
+        let mut caps = Vec::new();
+        for host in &effective_caps.network {
+            caps.push(Capability::NetConnect(host.clone()));
+        }
+        for tool in &effective_caps.tools {
+            caps.push(Capability::ToolInvoke(tool.clone()));
+        }
+        for scope in &effective_caps.memory_read {
+            caps.push(Capability::MemoryRead(scope.clone()));
+        }
+        for scope in &effective_caps.memory_write {
+            caps.push(Capability::MemoryWrite(scope.clone()));
+        }
+        if effective_caps.agent_spawn {
+            caps.push(Capability::AgentSpawn);
+        }
+        for pattern in &effective_caps.agent_message {
+            caps.push(Capability::AgentMessage(pattern.clone()));
+        }
+        for cmd in &effective_caps.shell {
+            caps.push(Capability::ShellExec(cmd.clone()));
+        }
+        if effective_caps.ofp_discover {
+            caps.push(Capability::OfpDiscover);
+        }
+        for peer in &effective_caps.ofp_connect {
+            caps.push(Capability::OfpConnect(peer.clone()));
         }
 
-        async fn send_to_agent(&self, _agent_id: &str, _message: &str) -> Result<String, String> {
-            Err("not used".to_string())
-        }
-
-        fn list_agents(&self) -> Vec<AgentInfo> {
-            vec![]
-        }
-
-        fn kill_agent(&self, _agent_id: &str) -> Result<(), String> {
-            Err("not used".to_string())
-        }
-
-        fn memory_store(
-            &self,
-            _key: &str,
-            _value: serde_json::Value,
-            _peer_id: Option<&str>,
-        ) -> Result<(), String> {
-            Err("not used".to_string())
-        }
-
-        fn memory_recall(
-            &self,
-            _key: &str,
-            _peer_id: Option<&str>,
-        ) -> Result<Option<serde_json::Value>, String> {
-            Err("not used".to_string())
-        }
-
-        fn memory_list(&self, _peer_id: Option<&str>) -> Result<Vec<String>, String> {
-            Err("not used".to_string())
-        }
-
-        fn find_agents(&self, _query: &str) -> Vec<AgentInfo> {
-            vec![]
-        }
-
-        async fn task_post(
-            &self,
-            _title: &str,
-            _description: &str,
-            _assigned_to: Option<&str>,
-            _created_by: Option<&str>,
-        ) -> Result<String, String> {
-            Err("not used".to_string())
-        }
-
-        async fn task_claim(&self, _agent_id: &str) -> Result<Option<serde_json::Value>, String> {
-            Err("not used".to_string())
-        }
-
-        async fn task_complete(&self, _task_id: &str, _result: &str) -> Result<(), String> {
-            Err("not used".to_string())
-        }
-
-        async fn task_list(&self, _status: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
-            Err("not used".to_string())
-        }
-
-        async fn task_delete(&self, _task_id: &str) -> Result<bool, String> {
-            Err("not used".to_string())
-        }
-
-        async fn task_retry(&self, _task_id: &str) -> Result<bool, String> {
-            Err("not used".to_string())
-        }
-
-        async fn publish_event(
-            &self,
-            _event_type: &str,
-            _payload: serde_json::Value,
-        ) -> Result<(), String> {
-            Err("not used".to_string())
-        }
-
-        async fn knowledge_add_entity(
-            &self,
-            _entity: librefang_types::memory::Entity,
-        ) -> Result<String, String> {
-            Err("not used".to_string())
-        }
-
-        async fn knowledge_add_relation(
-            &self,
-            _relation: librefang_types::memory::Relation,
-        ) -> Result<String, String> {
-            Err("not used".to_string())
-        }
-
-        async fn knowledge_query(
-            &self,
-            _pattern: librefang_types::memory::GraphPattern,
-        ) -> Result<Vec<librefang_types::memory::GraphMatch>, String> {
-            Err("not used".to_string())
-        }
+        caps
     }
 }

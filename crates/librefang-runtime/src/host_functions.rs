@@ -11,7 +11,9 @@ use librefang_types::capability::{capability_matches, Capability};
 use serde_json::json;
 use std::net::ToSocketAddrs;
 use std::path::{Component, Path};
+use std::time::Duration;
 use tracing::debug;
+use wait_timeout::ChildExt;
 
 /// Dispatch a host call to the appropriate handler.
 ///
@@ -380,21 +382,69 @@ fn host_shell_exec(state: &GuestState, params: &serde_json::Value) -> serde_json
         .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
         .unwrap_or_default();
 
+    // Optional timeout (in seconds). If > 0, enforce timeout and kill on timeout.
+    let timeout_secs: u64 = params.get("timeout").and_then(|t| t.as_u64()).unwrap_or(0);
+
     // Command::new does NOT use a shell — safe from shell injection.
     // Each argument is passed directly to the process.
-    match std::process::Command::new(command).args(&args).output() {
-        Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            json!({
-                "ok": {
-                    "exit_code": output.status.code(),
-                    "stdout": stdout,
-                    "stderr": stderr,
+    match std::process::Command::new(command)
+        .args(&args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(mut child) => {
+            if timeout_secs > 0 {
+                let timeout = Duration::from_secs(timeout_secs);
+                match child.wait_timeout(timeout).expect("wait_timeout failed") {
+                    Some(_status) => {
+                        // Process finished before timeout; capture output.
+                        match child.wait_with_output() {
+                            Ok(output) => {
+                                let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                                json!({
+                                    "ok": {
+                                        "exit_code": output.status.code(),
+                                        "stdout": stdout,
+                                        "stderr": stderr,
+                                    }
+                                })
+                            }
+                            Err(e) => json!({"error": format!("shell_exec failed capture: {e}")}),
+                        }
+                    }
+                    None => {
+                        // Timeout occurred; kill the child process and collect partial state.
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        json!({
+                            "ok": {
+                                "timed_out": true,
+                                "stderr": "Process killed due to timeout (timed out)"
+                            }
+                        })
+                    }
                 }
-            })
+            } else {
+                // No timeout: wait for completion and capture output
+                match child.wait_with_output() {
+                    Ok(output) => {
+                        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                        json!({
+                            "ok": {
+                                "exit_code": output.status.code(),
+                                "stdout": stdout,
+                                "stderr": stderr,
+                            }
+                        })
+                    }
+                    Err(e) => json!({"error": format!("shell_exec failed: {e}")}),
+                }
+            }
         }
-        Err(e) => json!({"error": format!("shell_exec failed: {e}")}),
+        Err(e) => json!({"error": format!("shell_exec failed to spawn: {e}")}),
     }
 }
 
@@ -579,6 +629,39 @@ mod tests {
         let result = host_shell_exec(&state, &json!({"command": "ls"}));
         let err = result["error"].as_str().unwrap();
         assert!(err.contains("denied"));
+    }
+
+    #[tokio::test]
+    async fn test_shell_exec_timeout_kills_zombie() {
+        // Grant permission for the command 'sleep'
+        let state = test_state(vec![Capability::ShellExec("sleep".to_string())]);
+        // Execute a long sleep with a short timeout to force termination
+        let result = host_shell_exec(
+            &state,
+            &json!({"command": "sleep", "args": ["60"], "timeout": 1}),
+        );
+
+        // Expect a timeout indication in the result
+        let ok = result.get("ok").expect("Expected 'ok' field");
+        // It should contain a timed_out flag set to true
+        let timed_out = ok
+            .get("timed_out")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        assert!(
+            timed_out,
+            "Expected timeout path to be taken, got: {result}"
+        );
+
+        // The stderr should mention timeout or kill for visibility
+        if let Some(stderr) = ok.get("stderr").and_then(|v| v.as_str()) {
+            let lower = stderr.to_lowercase();
+            assert!(
+                lower.contains("timed") || lower.contains("killed"),
+                "Expected stderr to mention timeout or kill, got: {}",
+                stderr
+            );
+        }
     }
 
     #[tokio::test]

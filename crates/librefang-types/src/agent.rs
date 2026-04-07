@@ -389,26 +389,7 @@ impl ToolProfile {
 
     /// Derive ManifestCapabilities implied by this profile.
     pub fn implied_capabilities(&self) -> ManifestCapabilities {
-        let tools = self.tools();
-        let has_net = tools.iter().any(|t| t.starts_with("web_") || t == "*");
-        let has_shell = tools.iter().any(|t| t == "shell_exec" || t == "*");
-        let has_agent = tools.iter().any(|t| t.starts_with("agent_") || t == "*");
-        let has_memory = tools.iter().any(|t| t.starts_with("memory_") || t == "*");
-        ManifestCapabilities {
-            tools,
-            network: if has_net { vec!["*".into()] } else { vec![] },
-            shell: if has_shell { vec!["*".into()] } else { vec![] },
-            agent_spawn: has_agent,
-            agent_message: if has_agent { vec!["*".into()] } else { vec![] },
-            memory_read: if has_memory {
-                vec!["*".into()]
-            } else {
-                vec!["self.*".into()]
-            },
-            memory_write: vec!["self.*".into()],
-            ofp_discover: false,
-            ofp_connect: vec![],
-        }
+        ManifestCapabilities::from_tools(self.tools())
     }
 }
 
@@ -650,6 +631,32 @@ pub struct ManifestCapabilities {
     /// Allowed OFP peer patterns.
     #[serde(default, deserialize_with = "crate::serde_compat::vec_lenient")]
     pub ofp_connect: Vec<String>,
+}
+
+impl ManifestCapabilities {
+    /// Derive manifest capabilities implied by a set of tool grants.
+    pub fn from_tools(tools: Vec<String>) -> Self {
+        let has_net = tools.iter().any(|t| t.starts_with("web_") || t == "*");
+        let has_shell = tools.iter().any(|t| t == "shell_exec" || t == "*");
+        let has_agent = tools.iter().any(|t| t.starts_with("agent_") || t == "*");
+        let has_memory = tools.iter().any(|t| t.starts_with("memory_") || t == "*");
+
+        Self {
+            tools,
+            network: if has_net { vec!["*".into()] } else { vec![] },
+            shell: if has_shell { vec!["*".into()] } else { vec![] },
+            agent_spawn: has_agent,
+            agent_message: if has_agent { vec!["*".into()] } else { vec![] },
+            memory_read: if has_memory {
+                vec!["*".into()]
+            } else {
+                vec!["self.*".into()]
+            },
+            memory_write: vec!["self.*".into()],
+            ofp_discover: false,
+            ofp_connect: vec![],
+        }
+    }
 }
 
 /// Human-readable session label (e.g., "support inbox", "research").
