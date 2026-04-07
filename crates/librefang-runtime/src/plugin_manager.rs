@@ -3175,9 +3175,17 @@ impl DepSpec {
         if parts.len() < 2 {
             return None;
         }
-        let major = parts[0].parse().ok()?;
-        let minor = parts[1].parse().ok()?;
-        let patch = parts.get(2).and_then(|p| p.parse().ok()).unwrap_or(0);
+        // Strip pre-release / build-metadata suffixes (e.g. "0-alpha", "1+build.1")
+        // before parsing so that semver strings like "1.2.0-alpha" are accepted.
+        let numeric_prefix = |p: &str| -> Option<u32> {
+            p.split(|c: char| !c.is_ascii_digit())
+                .next()
+                .filter(|n| !n.is_empty())
+                .and_then(|n| n.parse().ok())
+        };
+        let major = numeric_prefix(parts[0])?;
+        let minor = numeric_prefix(parts[1])?;
+        let patch = parts.get(2).and_then(|p| numeric_prefix(p)).unwrap_or(0);
         Some((major, minor, patch))
     }
 
