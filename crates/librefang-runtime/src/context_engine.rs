@@ -84,6 +84,10 @@ pub struct ContextEngineConfig {
     /// User-facing compaction configuration (from `[compaction]` TOML section).
     /// When `None`, runtime defaults are used.
     pub compaction: Option<librefang_types::config::CompactionTomlConfig>,
+    /// When `true`, hook output that fails schema validation causes the hook call
+    /// to return an error instead of logging a warning.  Defaults to `false` for
+    /// backward compatibility.
+    pub output_schema_strict: bool,
 }
 
 impl Default for ContextEngineConfig {
@@ -93,6 +97,7 @@ impl Default for ContextEngineConfig {
             stable_prefix_mode: false,
             max_recall_results: 5,
             compaction: None,
+            output_schema_strict: false,
         }
     }
 }
@@ -822,6 +827,36 @@ impl ScriptableContextEngine {
             })
             .ok();
 
+        // Restore circuit breaker state from SQLite so tripped circuits survive daemon restarts.
+        if let Some(ref store) = self.trace_store {
+            if let Ok(saved) = store.load_circuit_states() {
+                if let Ok(mut guard) = self.circuit_breakers.lock() {
+                    for (key, (failures, opened_at)) in saved {
+                        guard.entry(key).or_insert_with(|| {
+                            let opened_instant = opened_at.as_deref().and_then(|s| {
+                                chrono::DateTime::parse_from_rfc3339(s).ok().map(|dt| {
+                                    // Convert persisted UTC timestamp to a std::time::Instant
+                                    // approximation: compute how many seconds ago it opened.
+                                    let elapsed_secs = chrono::Utc::now()
+                                        .signed_duration_since(dt.with_timezone(&chrono::Utc))
+                                        .num_seconds()
+                                        .max(0) as u64;
+                                    std::time::Instant::now()
+                                        .checked_sub(std::time::Duration::from_secs(elapsed_secs))
+                                        .unwrap_or_else(std::time::Instant::now)
+                                })
+                            });
+                            CircuitBreakerState {
+                                consecutive_failures: failures,
+                                opened_at: opened_instant,
+                                half_open: false,
+                            }
+                        });
+                    }
+                }
+            }
+        }
+
         self
     }
 
@@ -881,9 +916,11 @@ impl ScriptableContextEngine {
     /// - `minLength` / `maxLength`: string length (strings only)
     /// - `properties`: recursively validate each declared property
     ///
-    /// All violations are logged as warnings — validation is non-fatal so a
-    /// schema mismatch never takes a hook offline.
-    fn validate_schema(schema: &serde_json::Value, value: &serde_json::Value, context: &str) {
+    /// Returns a list of human-readable violation messages (empty = valid).
+    /// The caller decides whether to warn or error based on `output_schema_strict`.
+    fn validate_schema(schema: &serde_json::Value, value: &serde_json::Value, context: &str) -> Vec<String> {
+        let mut errors: Vec<String> = Vec::new();
+
         // --- type check ---
         if let Some(expected_type) = schema.get("type").and_then(|t| t.as_str()) {
             let actual_matches = match expected_type {
@@ -897,23 +934,20 @@ impl ScriptableContextEngine {
                 _         => true, // unknown type — don't reject
             };
             if !actual_matches {
-                warn!(
-                    context,
-                    expected = expected_type,
-                    actual = value.to_string().chars().take(80).collect::<String>(),
-                    "Hook schema validation: type mismatch"
-                );
+                errors.push(format!(
+                    "[{context}] type mismatch: expected={expected_type}, actual={}",
+                    value.to_string().chars().take(80).collect::<String>()
+                ));
             }
         }
 
         // --- enum check ---
         if let Some(variants) = schema.get("enum").and_then(|e| e.as_array()) {
             if !variants.contains(value) {
-                warn!(
-                    context,
-                    value = value.to_string().chars().take(80).collect::<String>(),
-                    "Hook schema validation: value not in enum"
-                );
+                errors.push(format!(
+                    "[{context}] value not in enum: {}",
+                    value.to_string().chars().take(80).collect::<String>()
+                ));
             }
         }
 
@@ -921,12 +955,12 @@ impl ScriptableContextEngine {
         if let Some(n) = value.as_f64() {
             if let Some(min) = schema.get("minimum").and_then(|v| v.as_f64()) {
                 if n < min {
-                    warn!(context, value = n, minimum = min, "Hook schema validation: below minimum");
+                    errors.push(format!("[{context}] below minimum: value={n}, minimum={min}"));
                 }
             }
             if let Some(max) = schema.get("maximum").and_then(|v| v.as_f64()) {
                 if n > max {
-                    warn!(context, value = n, maximum = max, "Hook schema validation: above maximum");
+                    errors.push(format!("[{context}] above maximum: value={n}, maximum={max}"));
                 }
             }
         }
@@ -935,12 +969,12 @@ impl ScriptableContextEngine {
         if let Some(s) = value.as_str() {
             if let Some(min_len) = schema.get("minLength").and_then(|v| v.as_u64()) {
                 if (s.len() as u64) < min_len {
-                    warn!(context, len = s.len(), min_len, "Hook schema validation: string too short");
+                    errors.push(format!("[{context}] string too short: len={}, min_len={min_len}", s.len()));
                 }
             }
             if let Some(max_len) = schema.get("maxLength").and_then(|v| v.as_u64()) {
                 if (s.len() as u64) > max_len {
-                    warn!(context, len = s.len(), max_len, "Hook schema validation: string too long");
+                    errors.push(format!("[{context}] string too long: len={}, max_len={max_len}", s.len()));
                 }
             }
         }
@@ -951,11 +985,7 @@ impl ScriptableContextEngine {
                 for field in required {
                     if let Some(field_str) = field.as_str() {
                         if !obj.contains_key(field_str) {
-                            warn!(
-                                context,
-                                missing_field = field_str,
-                                "Hook schema validation: required field missing"
-                            );
+                            errors.push(format!("[{context}] required field missing: {field_str}"));
                         }
                     }
                 }
@@ -967,15 +997,17 @@ impl ScriptableContextEngine {
             if let Some(obj) = value.as_object() {
                 for (key, prop_schema) in props {
                     if let Some(prop_value) = obj.get(key) {
-                        Self::validate_schema(
+                        errors.extend(Self::validate_schema(
                             prop_schema,
                             prop_value,
                             &format!("{context}.{key}"),
-                        );
+                        ));
                     }
                 }
             }
         }
+
+        errors
     }
 
     fn circuit_is_open(&self, hook: &str, agent_id: Option<&AgentId>) -> bool {
@@ -996,14 +1028,34 @@ impl ScriptableContextEngine {
             Some(id) => format!("{}:{}", id.0, hook),
             None => hook.to_string(),
         };
-        let mut guard = self.circuit_breakers.lock().unwrap();
-        let state = guard.entry(key).or_insert_with(CircuitBreakerState::new);
-        if success {
-            state.record_success();
-        } else {
-            state.record_failure(cfg.max_failures);
-            if state.consecutive_failures == cfg.max_failures {
-                warn!(hook, cooldown_secs = cfg.reset_secs, "Hook circuit breaker opened");
+        let (failures, opened_at_rfc3339, just_reset) = {
+            let mut guard = self.circuit_breakers.lock().unwrap();
+            let state = guard.entry(key.clone()).or_insert_with(CircuitBreakerState::new);
+            if success {
+                state.record_success();
+                // Reset — signal deletion from SQLite.
+                (0u32, None::<String>, true)
+            } else {
+                state.record_failure(cfg.max_failures);
+                if state.consecutive_failures == cfg.max_failures {
+                    warn!(hook, cooldown_secs = cfg.reset_secs, "Hook circuit breaker opened");
+                }
+                // Compute RFC-3339 opened_at from the stored Instant if available.
+                let opened_str = state.opened_at.map(|instant| {
+                    let elapsed = instant.elapsed();
+                    (chrono::Utc::now() - chrono::Duration::from_std(elapsed).unwrap_or_default())
+                        .to_rfc3339()
+                });
+                (state.consecutive_failures, opened_str, false)
+            }
+        };
+
+        // Persist to SQLite if trace store is available.
+        if let Some(ref store) = self.trace_store {
+            if just_reset {
+                let _ = store.delete_circuit_state(&key);
+            } else {
+                let _ = store.save_circuit_state(&key, failures, opened_at_rfc3339.as_deref());
             }
         }
     }
@@ -1239,6 +1291,7 @@ impl ScriptableContextEngine {
         shared_state_path: Option<&std::path::Path>,
         trace_store: Option<&std::sync::Arc<crate::trace_store::TraceStore>>,
         plugin_name: &str,
+        output_schema_strict: bool,
     ) -> Result<(serde_json::Value, u64), String> {
         let resolved = Self::resolve_script_path(script_path);
 
@@ -1246,10 +1299,13 @@ impl ScriptableContextEngine {
             return Err(format!("Hook script not found: {resolved}"));
         }
 
-        // Validate input schema if declared.
+        // Validate input schema if declared (always warn-only — input validation is advisory).
         if let Some(schema) = hook_schemas.get(hook_name) {
             if let Some(ref input_schema) = schema.input {
-                Self::validate_schema(input_schema, &input, &format!("{hook_name}/input"));
+                let errs = Self::validate_schema(input_schema, &input, &format!("{hook_name}/input"));
+                for e in &errs {
+                    warn!("{e}");
+                }
             }
         }
 
@@ -1289,7 +1345,18 @@ impl ScriptableContextEngine {
                     // Validate output schema if declared.
                     if let Some(schema) = hook_schemas.get(hook_name) {
                         if let Some(ref output_schema) = schema.output {
-                            Self::validate_schema(output_schema, &v, &format!("{hook_name}/output"));
+                            let errs = Self::validate_schema(output_schema, &v, &format!("{hook_name}/output"));
+                            if !errs.is_empty() {
+                                if output_schema_strict {
+                                    return Err(format!(
+                                        "hook {hook_name} output failed schema validation: {}",
+                                        errs.join("; ")
+                                    ));
+                                }
+                                for e in &errs {
+                                    warn!("{e}");
+                                }
+                            }
                         }
                     }
                     Self::push_trace(traces, HookTrace {
@@ -1352,7 +1419,18 @@ impl ScriptableContextEngine {
         if let Ok((ref output, _)) = result {
             if let Some(schema) = self.hook_schemas.get(hook_name) {
                 if let Some(ref output_schema) = schema.output {
-                    Self::validate_schema(output_schema, output, &format!("{hook_name}/output"));
+                    let errs = Self::validate_schema(output_schema, output, &format!("{hook_name}/output"));
+                    if !errs.is_empty() {
+                        if self.inner.config.output_schema_strict {
+                            return Err(format!(
+                                "hook {hook_name} output failed schema validation: {}",
+                                errs.join("; ")
+                            ));
+                        }
+                        for e in &errs {
+                            warn!("{e}");
+                        }
+                    }
                 }
             }
         }
@@ -1446,6 +1524,7 @@ impl ScriptableContextEngine {
                 self.shared_state_path.as_deref(),
                 self.trace_store.as_ref(),
                 &self.plugin_name,
+                self.inner.config.output_schema_strict,
             )
             .await
         }
@@ -2045,6 +2124,7 @@ impl ContextEngine for ScriptableContextEngine {
         let plugin_name = self.plugin_name.clone();
         let agent_id_str = agent_id.0.to_string();
         let memory_substrate = std::sync::Arc::clone(&self.memory_substrate);
+        let output_schema_strict = self.inner.config.output_schema_strict;
         if let Ok(mut tasks) = self.after_turn_tasks.lock() {
             // Reap already-completed tasks to prevent unbounded growth.
             while tasks.try_join_next().is_some() {}
@@ -2117,7 +2197,7 @@ impl ContextEngine for ScriptableContextEngine {
                         }
                     }
                 } else {
-                    Self::run_hook("after_turn", &script, runtime, input, timeout_secs, &plugin_env, max_retries, retry_delay_ms, max_memory_mb, allow_network, &traces, &hook_schemas, shared_state_path.as_deref(), trace_store.as_ref(), &plugin_name).await
+                    Self::run_hook("after_turn", &script, runtime, input, timeout_secs, &plugin_env, max_retries, retry_delay_ms, max_memory_mb, allow_network, &traces, &hook_schemas, shared_state_path.as_deref(), trace_store.as_ref(), &plugin_name, output_schema_strict).await
                 };
                 match result {
                     Ok((output, ms)) => {

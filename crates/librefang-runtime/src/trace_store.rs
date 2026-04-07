@@ -5,6 +5,7 @@
 //! ring buffer (which resets on restart).
 
 use rusqlite::{params, Connection};
+use std::collections::HashMap;
 use std::path::Path;
 
 use crate::context_engine::HookTrace;
@@ -40,6 +41,13 @@ impl TraceStore {
             CREATE INDEX IF NOT EXISTS idx_plugin_hook  ON hook_traces(plugin, hook);
             CREATE INDEX IF NOT EXISTS idx_trace_id     ON hook_traces(trace_id);
             ",
+        )?;
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS circuit_breaker_states (
+                key        TEXT PRIMARY KEY,
+                failures   INTEGER NOT NULL DEFAULT 0,
+                opened_at  TEXT
+            );",
         )?;
         Ok(Self {
             conn: std::sync::Mutex::new(conn),
@@ -206,6 +214,70 @@ impl TraceStore {
 
         conn.query_row(&sql, param_refs.as_slice(), |r| r.get(0))
             .unwrap_or(0)
+    }
+
+    /// Persist circuit breaker state for one key.
+    ///
+    /// `opened_at` is an RFC-3339 timestamp when the circuit opened, or `None`
+    /// if the circuit is currently closed.
+    pub fn save_circuit_state(
+        &self,
+        key: &str,
+        failures: u32,
+        opened_at: Option<&str>,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().map_err(|_| {
+            rusqlite::Error::InvalidParameterName("mutex poisoned".to_string())
+        })?;
+        conn.execute(
+            "INSERT INTO circuit_breaker_states (key, failures, opened_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET
+                 failures  = excluded.failures,
+                 opened_at = excluded.opened_at",
+            rusqlite::params![key, failures as i64, opened_at],
+        )?;
+        Ok(())
+    }
+
+    /// Load all persisted circuit breaker states.
+    ///
+    /// Returns a map of `key → (failures, opened_at)`.
+    pub fn load_circuit_states(
+        &self,
+    ) -> rusqlite::Result<HashMap<String, (u32, Option<String>)>> {
+        let conn = self.conn.lock().map_err(|_| {
+            rusqlite::Error::InvalidParameterName("mutex poisoned".to_string())
+        })?;
+        let mut stmt = conn.prepare(
+            "SELECT key, failures, opened_at FROM circuit_breaker_states",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)? as u32,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })?;
+        let mut map = HashMap::new();
+        for row in rows {
+            let (key, failures, opened_at) = row?;
+            map.insert(key, (failures, opened_at));
+        }
+        Ok(map)
+    }
+
+    /// Remove the persisted state for a key (e.g. when circuit resets to closed
+    /// with zero failures).
+    pub fn delete_circuit_state(&self, key: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().map_err(|_| {
+            rusqlite::Error::InvalidParameterName("mutex poisoned".to_string())
+        })?;
+        conn.execute(
+            "DELETE FROM circuit_breaker_states WHERE key = ?1",
+            rusqlite::params![key],
+        )?;
+        Ok(())
     }
 }
 
