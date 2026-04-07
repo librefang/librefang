@@ -1,6 +1,6 @@
 # SPEC-RV-001: RuVector PostgreSQL Extension Port — Phase 0
 
-**ADR:** ADR-MT-001 (Multi-Tenant Master Plan, Phase 0)
+**ADR:** ADR-RV-001 (RuVector PostgreSQL Extension Port)
 **Date:** 2026-04-06
 **Author:** Engineering
 
@@ -297,7 +297,7 @@ PSQL="psql -h localhost -p 54322 -U postgres -d postgres -tAc"
 echo "=== Gate 5: Extension loads ==="
 $PSQL "CREATE EXTENSION IF NOT EXISTS ruvector"
 
-echo "=== Gate 6: Function count ≥ 197 ==="
+echo "=== Gate 6: Function count ≥ 161 ==="
 FCOUNT=$($PSQL "SELECT count(*) FROM pg_proc WHERE proname LIKE 'ruvector_%'" | tr -d ' ')
 echo "Functions: $FCOUNT"
 [ "$FCOUNT" -ge 161 ]

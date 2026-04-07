@@ -67,7 +67,7 @@ Layer 2: AccountId extraction (X-Account-Id header)  ← NEW
     ▼
 Layer 3: HMAC signature verification  ← NEW
     │  - If HMAC_SECRET env set AND X-Account-Id present:
-    │    verify X-Account-Signature = HMAC-SHA256(secret, account_id)
+    │    verify X-Account-Sig = HMAC-SHA256(secret, account_id)
     │  - If HMAC_SECRET not set: skip (dev mode)
     │  - If sig invalid: 401 Unauthorized
     │  - Constant-time comparison (verify_slice, not ==)
@@ -105,7 +105,7 @@ Every request that carries account context MUST follow this pattern:
 
 ```
 X-Account-Id: <opaque-string>
-X-Account-Signature: <hex-encoded-hmac-sha256>
+X-Account-Sig: <hex-encoded-hmac-sha256>
 ```
 
 The signature is computed as:

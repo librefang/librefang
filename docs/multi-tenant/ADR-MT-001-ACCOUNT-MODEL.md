@@ -15,7 +15,7 @@ sessions, memories, skills, channels, workflows, goals, plugins, and media.
 
 There is no concept of an "account." The kernel holds a single `AgentRegistry`
 (`DashMap<AgentId, AgentEntry>`), the SQLite schema has no `account_id` column in
-any table, the auth middleware validates a single global API key, and all 297 HTTP
+any table, the auth middleware validates a single global API key, and all 317 HTTP
 handlers assume they operate on the one global dataset.
 
 This blocks:
@@ -27,20 +27,20 @@ This blocks:
 
 | Component | File | Key Finding |
 |-----------|------|-------------|
-| Kernel | `librefang-kernel/src/kernel.rs` (12,492 lines) | Singleton, no account partitioning |
+| Kernel | `librefang-kernel/src/kernel.rs` (12,491 lines) | Singleton, no account partitioning |
 | Agent Registry | `librefang-kernel/src/registry.rs` (570 lines) | `DashMap<AgentId, AgentEntry>` — flat, global |
-| Auth Middleware | `librefang-api/src/middleware.rs` (531 lines) | Single API key + session tokens, no tenant extraction |
+| Auth Middleware | `librefang-api/src/middleware.rs` (530 lines) | Single API key + session tokens, no tenant extraction |
 | Agent types | `librefang-types/src/agent.rs` | `AgentEntry` has no `account_id` field |
 | Memory types | `librefang-types/src/memory.rs` | `MemoryFragment` has `agent_id` but no `account_id` |
 | Session store | `librefang-memory/src/session.rs` | `Session { id, agent_id, messages }` — no account |
 | Config | `librefang-types/src/config/types.rs` | `UserConfig` has role but no account association |
-| DB migrations | `librefang-memory/src/migration.rs` (1,552 lines, 17 versions) | Zero tables have `account_id` |
+| DB migrations | `librefang-memory/src/migration.rs` (654 lines, 16 versions) | Zero tables have `account_id` |
 
 ---
 
 ## Blast Radius Scan
 
-### 1. API Route Handlers (297 total, 0 account-scoped)
+### 1. API Route Handlers (317 total, 0 account-scoped)
 
 Scan: count all `pub async fn` handlers in each route file.
 
@@ -60,7 +60,7 @@ Scan: count all `pub async fn` handlers in each route file.
 | `routes/goals.rs` | 7 | 0 | 7 |
 | `routes/media.rs` | 6 | 0 | 6 |
 | `routes/inbox.rs` | 1 | 0 | 1 |
-| **Total** | **297** | **0** | **297** |
+| **Total** | **317** | **0** | **317** |
 
 ### 2. Database Tables (15+ tables, 0 with account_id)
 
@@ -86,7 +86,7 @@ Scan: count all `pub async fn` handlers in each route file.
 
 | Component | File | Lines | Issue |
 |-----------|------|-------|-------|
-| Kernel | `kernel.rs` | 12,492 | Singleton, no account in `spawn_agent()` |
+| Kernel | `kernel.rs` | 12,491 | Singleton, no account in `spawn_agent()` |
 | Agent Registry | `registry.rs` | 570 | `DashMap<AgentId, AgentEntry>` — flat global |
 | Agent Loop | `agent_loop.rs` | 6,465 | No account context in execution |
 | Memory Substrate | `substrate.rs` | ~2,000 | `recall()` / `remember()` take agent_id only |
@@ -104,7 +104,7 @@ Scan: count all `pub async fn` handlers in each route file.
 | Users | `Vec<UserConfig>` with roles but no account | Need account_id field |
 | CORS | Single `cors_origin` list | May need per-account origins |
 
-**Scope decision:** ALL 297 handlers and ALL 15+ tables require `account_id`. The pattern
+**Scope decision:** ALL 317 handlers and ALL 15+ tables require `account_id`. The pattern
 is universal — there are zero existing account-scoped paths to preserve.
 
 ---
@@ -324,7 +324,7 @@ echo ""
 echo "=== ADR-MT-001 Gate: ALL PASSED ==="
 ```
 
-### Full-scope gate (runs after Phase 4 — all 297 handlers):
+### Full-scope gate (runs after Phase 4 — all 317 handlers):
 
 ```bash
 for f in "$ROUTES_DIR"/*.rs; do
@@ -385,7 +385,7 @@ CAN fall back to `X-Account-Id` header for testing convenience, gated behind a
 - Foundation for SaaS, team isolation, and enterprise features
 
 ### Negative
-- 297 handler signatures change (large diff, multi-phase rollout)
+- 317 handler signatures change (large diff, multi-phase rollout)
 - Every SQL query must include `AND account_id = ?` (easy to miss)
 - Kernel becomes account-aware — adds complexity to `spawn_agent()`, `list_agents()`
 - Testing surface area multiplies (single-tenant + multi-tenant + cross-tenant negative tests)
@@ -419,7 +419,7 @@ CAN fall back to `X-Account-Id` header for testing convenience, gated behind a
 
 ## Quality Checks
 
-- [x] Blast radius scan is present with actual numbers (297 handlers, 15+ tables)
+- [x] Blast radius scan is present with actual numbers (317 handlers, 15+ tables)
 - [x] Scope covers ALL affected code in touched files, not just known symptoms
 - [x] Verification gate is a runnable command, not prose
 - [x] Pattern definition is structural (grepable), not a list of function names
