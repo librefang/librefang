@@ -1718,29 +1718,12 @@ impl ScriptableContextEngine {
         let correlation_id = generate_trace_id();
         let agent_id_str = agent_id.map(|id| id.0.to_string());
         let result = self.call_hook_dispatch_raw(hook_name, script_path, input, timeout_secs, &correlation_id, agent_id_str.as_deref()).await;
-        // Update circuit breaker
+        // Update circuit breaker.
+        // Schema validation is performed inside call_hook_dispatch_raw (persistent path)
+        // and run_hook (non-persistent path) so that Err propagates here correctly.
         match &result {
             Ok(_) => self.circuit_record(hook_name, agent_id, true),
             Err(_) => self.circuit_record(hook_name, agent_id, false),
-        }
-        // Validate output schema if declared
-        if let Ok((ref output, _)) = result {
-            if let Some(schema) = self.hook_schemas.get(hook_name) {
-                if let Some(ref output_schema) = schema.output {
-                    let errs = Self::validate_schema(output_schema, output, &format!("{hook_name}/output"));
-                    if !errs.is_empty() {
-                        if self.inner.config.output_schema_strict {
-                            return Err(format!(
-                                "hook {hook_name} output failed schema validation: {}",
-                                errs.join("; ")
-                            ));
-                        }
-                        for e in &errs {
-                            warn!("{e}");
-                        }
-                    }
-                }
-            }
         }
         result
     }
@@ -1796,6 +1779,44 @@ impl ScriptableContextEngine {
             let elapsed_ms = t.elapsed().as_millis() as u64;
             match call_result {
                 Ok(output) => {
+                    // Validate output schema before recording a success trace so that
+                    // schema violations are reflected in both the trace and the circuit
+                    // breaker (the Err propagates to call_hook_dispatch which calls
+                    // circuit_record(false)).  Mirrors the identical logic in run_hook().
+                    if let Some(schema) = self.hook_schemas.get(hook_name) {
+                        if let Some(ref output_schema) = schema.output {
+                            let errs = Self::validate_schema(output_schema, &output, &format!("{hook_name}/output"));
+                            if !errs.is_empty() {
+                                if self.inner.config.output_schema_strict {
+                                    let err_msg = format!(
+                                        "hook {hook_name} output failed schema validation: {}",
+                                        errs.join("; ")
+                                    );
+                                    Self::push_trace(
+                                        &self.traces,
+                                        HookTrace {
+                                            trace_id: trace_id.clone(),
+                                            correlation_id: correlation_id.to_string(),
+                                            hook: hook_name.to_string(),
+                                            started_at,
+                                            elapsed_ms,
+                                            success: false,
+                                            error: Some(err_msg.clone()),
+                                            input_preview,
+                                            output_preview: None,
+                                            annotations: None,
+                                        },
+                                        self.trace_store.as_ref(),
+                                        &self.plugin_name,
+                                    );
+                                    return Err(err_msg);
+                                }
+                                for e in &errs {
+                                    warn!("{e}");
+                                }
+                            }
+                        }
+                    }
                     Self::push_trace(
                         &self.traces,
                         HookTrace {
