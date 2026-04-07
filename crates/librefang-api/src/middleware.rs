@@ -689,8 +689,8 @@ pub(crate) fn account_sig_policy(
 /// .layer(axum::middleware::from_fn(require_account_id))
 /// ```
 ///
-/// A small set of infrastructure endpoints (health, version, OpenAPI spec,
-/// uploads) are exempt because they are not tenant-scoped.
+/// A small set of infrastructure endpoints (health, version, OpenAPI spec)
+/// are exempt because they are not tenant-scoped.
 pub async fn require_account_id(request: Request<Body>, next: Next) -> Response<Body> {
     let path = request.uri().path();
 
@@ -699,7 +699,6 @@ pub async fn require_account_id(request: Request<Body>, next: Next) -> Response<
     // authenticating and cannot yet carry an X-Account-Id header.
     let is_exempt = path == "/api/health"
         || path == "/api/version"
-        || path.starts_with("/api/uploads/")
         || path.starts_with("/api/auth/")
         || path.starts_with("/api/v1/auth/")
         || path == "/openapi.json";
@@ -994,6 +993,30 @@ mod account_tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_require_account_id_rejects_upload_without_header() {
+        use axum::routing::get;
+        use axum::Router;
+        use tower::ServiceExt;
+
+        let app = Router::new()
+            .route("/api/uploads/some-file-id", get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn(require_account_id));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/uploads/some-file-id")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Upload endpoints are NOT exempt — they require X-Account-Id
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 }
 

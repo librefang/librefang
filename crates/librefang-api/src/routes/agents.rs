@@ -4776,7 +4776,7 @@ pub async fn upload_file(
         (status = 200, description = "Serve an uploaded file by ID", body = serde_json::Value)
     )
 )]
-pub async fn serve_upload(Path(file_id): Path<String>) -> impl IntoResponse {
+pub async fn serve_upload(_account: AccountId, Path(file_id): Path<String>) -> impl IntoResponse {
     // Validate file_id is a UUID to prevent path traversal
     if uuid::Uuid::parse_str(&file_id).is_err() {
         return (
