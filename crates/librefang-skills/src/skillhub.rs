@@ -106,6 +106,8 @@ pub struct SkillhubClient {
     inner: ClawHubClient,
     /// Separate HTTP client for the static index fetch.
     http: reqwest::Client,
+    /// Base API URL (e.g. `https://skillhub.tencent.com/api/v1`).
+    base_url: String,
 }
 
 impl SkillhubClient {
@@ -119,6 +121,7 @@ impl SkillhubClient {
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
                 .expect("HTTP client build"),
+            base_url: base_url.to_string(),
         }
     }
 
@@ -142,7 +145,7 @@ impl SkillhubClient {
     ) -> Result<ClawHubSearchResponse, SkillError> {
         let url = format!(
             "{}/search?q={}&limit={}",
-            DEFAULT_SKILLHUB_URL,
+            self.base_url,
             percent_encode(query),
             limit.min(50)
         );
@@ -167,34 +170,35 @@ impl SkillhubClient {
             SkillError::Network(format!("Failed to read Skillhub search response: {e}"))
         })?;
 
-        // Try ClawHub-compatible format first (camelCase, `results` key).
-        if let Ok(clawhub_resp) = serde_json::from_slice::<ClawHubSearchResponse>(&body) {
-            return Ok(clawhub_resp);
+        // Try SkillHub-native format first (snake_case, `skills` or `results` key).
+        // We parse this first because ClawHubSearchResponse with serde(default)
+        // would accept any JSON as empty results, masking the real data.
+        if let Ok(skillhub_resp) = serde_json::from_slice::<SkillhubSearchResponse>(&body) {
+            if !skillhub_resp.results.is_empty() {
+                return Ok(ClawHubSearchResponse {
+                    results: skillhub_resp
+                        .results
+                        .into_iter()
+                        .map(|e| ClawHubSearchEntry {
+                            score: e.score,
+                            slug: e.slug,
+                            display_name: e.name,
+                            summary: e.description,
+                            version: if e.version.is_empty() {
+                                None
+                            } else {
+                                Some(e.version)
+                            },
+                            updated_at: e.updated_at,
+                        })
+                        .collect(),
+                });
+            }
         }
 
-        // Fall back to SkillHub-native format (snake_case, may use `skills` key).
-        let skillhub_resp: SkillhubSearchResponse =
-            serde_json::from_slice(&body).map_err(|e| {
-                SkillError::Network(format!("Failed to parse Skillhub search response: {e}"))
-            })?;
-
-        Ok(ClawHubSearchResponse {
-            results: skillhub_resp
-                .results
-                .into_iter()
-                .map(|e| ClawHubSearchEntry {
-                    score: e.score,
-                    slug: e.slug,
-                    display_name: e.name,
-                    summary: e.description,
-                    version: if e.version.is_empty() {
-                        None
-                    } else {
-                        Some(e.version)
-                    },
-                    updated_at: e.updated_at,
-                })
-                .collect(),
+        // Fall back to ClawHub-compatible format (camelCase, `results` key).
+        serde_json::from_slice::<ClawHubSearchResponse>(&body).map_err(|e| {
+            SkillError::Network(format!("Failed to parse Skillhub search response: {e}"))
         })
     }
 
@@ -350,7 +354,7 @@ impl SkillhubClient {
     }
 }
 
-/// RFC 3986 percent-encoding for URL query parameters.
+/// URL query parameter encoding (`application/x-www-form-urlencoded`).
 /// Unreserved characters pass through unchanged, space becomes `+`,
 /// everything else is `%XX` encoded.
 fn percent_encode(s: &str) -> String {
