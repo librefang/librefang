@@ -1,6 +1,6 @@
 # Context Engine Plugins
 
-Context engine plugins customize what goes *into* an agent's context window: they recall memories relevant to the current user message, and they react to each completed turn. Plugins speak a tiny JSON-over-stdin/stdout protocol, so they can be written in almost any language that can read stdin and print stdout.
+Context engine plugins give you full control over an agent's context management: memory recall, context window assembly, context compaction, and sub-agent lifecycle. Plugins speak a tiny JSON-over-stdin/stdout protocol, so they can be written in almost any language that can read stdin and print stdout.
 
 This page covers the protocol, the manifest format, every supported runtime, and a full worked example.
 
@@ -29,7 +29,9 @@ my-recall-plugin/
 ├── plugin.toml          # manifest
 └── hooks/
     ├── ingest.py        # (or .js / .go / .rb / ...)
-    └── after_turn.py
+    ├── after_turn.py
+    ├── assemble.py      # optional: control what the LLM sees
+    └── compact.py       # optional: custom compaction strategy
 ```
 
 LibreFang loads the manifest, wires the declared hook scripts into the context engine, and runs them as subprocesses at well-defined lifecycle points. Each hook invocation is a fresh subprocess: one JSON object in on stdin, one JSON object out on stdout.
@@ -40,15 +42,21 @@ Plugins are sandboxed by default — env vars are scrubbed to a safe baseline, t
 
 ## Hook Lifecycle
 
-Two hooks are supported today:
+All 7 hooks are supported, covering the full context engine lifecycle:
 
-| Hook | When it fires | Purpose | Blocks turn? |
-|------|---------------|---------|--------------|
-| `ingest` | A new user message enters the session, before the LLM is called | Recall memories / inject custom context | Yes |
-| `after_turn` | After an LLM turn completes (response sent) | Index, persist, trigger background work | No (fire-and-forget) |
+| Hook | When it fires | Purpose | Blocks turn? | On failure |
+|------|---------------|---------|--------------|------------|
+| `bootstrap` | Engine initialisation, once only | Connect to vector store, warm cache | Yes (at startup) | Warn, continue |
+| `ingest` | A new user message enters the session, before the LLM is called | Recall memories / inject custom context | Yes | Fallback to default recall |
+| `assemble` | **Before every LLM call** | **Full control over context window contents** | Yes | Fallback to default trimming |
+| `compact` | When context pressure is high | Custom compaction strategy | Yes | Fallback to LLM compaction |
+| `after_turn` | After an LLM turn completes (response sent) | Index, persist, trigger background work | No (fire-and-forget) | Warn, ignore |
+| `prepare_subagent` | Before a sub-agent starts | Isolate memory scope | Yes | Warn, continue |
+| `merge_subagent` | After a sub-agent completes | Merge context | Yes | Warn, continue |
 
 **Key properties:**
 
+- `assemble` is the most powerful hook — it completely replaces the default context window assembly. Your script decides every message the LLM sees.
 - `ingest` runs *in addition to* the built-in memory recall — its returned memories are merged with the default ones, not a replacement.
 - `after_turn` is best-effort: a failure here is logged, never surfaced to the user.
 - If `stable_prefix_mode` is on in context engine config, the `ingest` hook is skipped.
@@ -104,8 +112,8 @@ Two hooks are supported today:
   "type": "after_turn",
   "agent_id": "0f3b…-uuid",
   "messages": [
-    { "role": "user", "content": "What was the last thing I asked about Kafka?" },
-    { "role": "assistant", "content": "You asked about consumer groups on…" }
+    { "role": "user", "content": "What was the last thing I asked about Kafka?", "pinned": false },
+    { "role": "assistant", "content": "You asked about consumer groups on…", "pinned": false }
   ]
 }
 ```
@@ -119,6 +127,129 @@ Each message `content` is truncated to the first 500 characters to keep the hook
 ```
 
 The return value is ignored — it just signals completion. Return anything valid and exit with code 0.
+
+---
+
+### `bootstrap` hook
+
+Called once when the engine initialises. Use it for connection checks, cache warm-up, or any one-time setup work.
+
+**Request:**
+
+```json
+{
+  "type": "bootstrap",
+  "context_window_tokens": 200000,
+  "stable_prefix_mode": false,
+  "max_recall_results": 5
+}
+```
+
+**Response:**
+
+```json
+{ "type": "ok" }
+```
+
+A failure is logged at `warn` level and does not prevent the engine from starting.
+
+---
+
+### `assemble` hook ⭐ most powerful hook
+
+Fires before every LLM call and gives you **complete control over the message list the LLM receives**.
+
+**Request:**
+
+```json
+{
+  "type": "assemble",
+  "system_prompt": "You are a helpful assistant.",
+  "messages": [
+    { "role": "user", "content": "Check my Kafka config for me", "pinned": false },
+    {
+      "role": "assistant",
+      "content": [
+        { "type": "tool_use", "id": "tu_01", "name": "file_read", "input": { "path": "/etc/kafka.conf" } }
+      ],
+      "pinned": false
+    },
+    {
+      "role": "user",
+      "content": [
+        { "type": "tool_result", "tool_use_id": "tu_01", "content": "broker=localhost:9092\n...", "is_error": false }
+      ],
+      "pinned": false
+    }
+  ],
+  "context_window_tokens": 200000
+}
+```
+
+Messages carry their **full structure**, including `tool_use` / `tool_result` / `image` / `thinking` blocks. Messages with `pinned: true` must not be dropped.
+
+**Response:**
+
+```json
+{
+  "type": "assemble_result",
+  "messages": [...]
+}
+```
+
+Return the trimmed / reordered message list. If you return an empty list or the hook fails, LibreFang automatically falls back to the default trimming strategy.
+
+---
+
+### `compact` hook
+
+Fires when context pressure is too high, allowing you to compress the conversation history with a custom strategy.
+
+**Request:**
+
+```json
+{
+  "type": "compact",
+  "agent_id": "0f3b…-uuid",
+  "messages": [...],
+  "model": "llama-3.3-70b-versatile",
+  "context_window_tokens": 200000
+}
+```
+
+The message format is the same as `assemble`.
+
+**Response:**
+
+```json
+{
+  "type": "compact_result",
+  "messages": [...]
+}
+```
+
+Return the compacted message list. An empty list or a failure falls back to the built-in LLM compaction.
+
+---
+
+### `prepare_subagent` / `merge_subagent` hooks
+
+Sub-agent lifecycle hooks, useful when you need to isolate or merge memory scope across agent boundaries.
+
+**Requests:**
+
+```json
+{ "type": "prepare_subagent", "parent_id": "...", "child_id": "..." }
+{ "type": "merge_subagent",   "parent_id": "...", "child_id": "..." }
+```
+
+**Response:**
+
+```json
+{ "type": "ok" }
+```
+
+---
 
 ### Errors
 
@@ -137,9 +268,17 @@ description = "Recall from a Qdrant vector store"
 author = "Evan"
 
 [hooks]
+# Core hooks (most commonly used)
 ingest = "hooks/ingest.py"
 after_turn = "hooks/after_turn.py"
 runtime = "python"
+
+# Optional hooks (enable as needed)
+# bootstrap        = "hooks/bootstrap.py"
+# assemble         = "hooks/assemble.py"
+# compact          = "hooks/compact.py"
+# prepare_subagent = "hooks/prepare_subagent.py"
+# merge_subagent   = "hooks/merge_subagent.py"
 
 requirements = "requirements.txt"
 ```
@@ -150,8 +289,13 @@ requirements = "requirements.txt"
 | `version` | string | yes | Semver. |
 | `description` | string | no | Shown in the dashboard plugin list. |
 | `author` | string | no | Free-form. |
-| `hooks.ingest` | string | no | Path relative to the plugin directory. Omit if you only use `after_turn`. |
-| `hooks.after_turn` | string | no | Path relative to the plugin directory. |
+| `hooks.ingest` | string | no | Recall memories when a new message arrives. |
+| `hooks.after_turn` | string | no | Persist / update indexes after a turn completes. |
+| `hooks.bootstrap` | string | no | Runs once at engine initialisation. |
+| `hooks.assemble` | string | no | **Full control over the messages the LLM sees** — the most powerful hook. |
+| `hooks.compact` | string | no | Custom compaction strategy when context pressure is high. |
+| `hooks.prepare_subagent` | string | no | Isolate memory scope before a sub-agent starts. |
+| `hooks.merge_subagent` | string | no | Merge context after a sub-agent completes. |
 | `hooks.runtime` | string | no | One of `python`, `native`, `v`, `node`, `deno`, `go`, `ruby`, `bash`, `bun`, `php`, `lua`. Defaults to `python`. Unknown values fall back to `python` with a warning. |
 | `requirements` | string | no | Only read for `python` runtime; path to `requirements.txt` installable via `pip3 install --user -r …`. Other runtimes manage deps out-of-band (`go.mod`, `package.json`, `Gemfile`, etc.). |
 

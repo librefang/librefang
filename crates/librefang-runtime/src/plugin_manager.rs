@@ -541,7 +541,11 @@ pub fn scaffold_plugin(
 
     // Each runtime declares its own hook filenames + template body so the
     // manifest + files stay in sync.
-    let (ingest_file, ingest_body, after_file, after_body) = hook_templates(runtime_kind);
+    let files = hook_templates(runtime_kind);
+    let (ingest_file, ingest_body) = files.ingest;
+    let (after_file, after_body) = files.after_turn;
+    let (assemble_file, assemble_body) = files.assemble;
+    let (compact_file, compact_body) = files.compact;
 
     // Write plugin.toml as a hand-crafted string so we can include comments
     // that guide users toward the new hook slots.
@@ -562,14 +566,14 @@ version = "0.1.0"
 description = "{description}"
 
 [hooks]
-# --- Always-on hooks (uncomment to activate) ---
-ingest = "hooks/{ingest_file}"
+# --- Core hooks ---
+ingest    = "hooks/{ingest_file}"
 after_turn = "hooks/{after_file}"
 {runtime_line}
-# --- Optional lifecycle hooks ---
-# bootstrap      = "hooks/bootstrap.{ext}"   # called once on engine init
-# assemble       = "hooks/assemble.{ext}"    # control what the LLM sees (most powerful)
-# compact        = "hooks/compact.{ext}"     # custom context compression
+# --- Optional lifecycle hooks (uncomment + implement to activate) ---
+# assemble = "hooks/{assemble_file}"   # control what the LLM sees (most powerful)
+# compact  = "hooks/{compact_file}"    # custom context compression
+# bootstrap      = "hooks/bootstrap.{ext}"
 # prepare_subagent = "hooks/prepare_subagent.{ext}"
 # merge_subagent   = "hooks/merge_subagent.{ext}"
 {requirements_line}"#,
@@ -577,6 +581,8 @@ after_turn = "hooks/{after_file}"
         description = description,
         ingest_file = ingest_file,
         after_file = after_file,
+        assemble_file = assemble_file,
+        compact_file = compact_file,
         runtime_line = runtime_line,
         requirements_line = requirements_line,
         ext = runtime_kind.script_extension(),
@@ -586,10 +592,16 @@ after_turn = "hooks/{after_file}"
 
     let ingest_path = hooks_dir.join(ingest_file);
     let after_path = hooks_dir.join(after_file);
+    let assemble_path = hooks_dir.join(assemble_file);
+    let compact_path = hooks_dir.join(compact_file);
     std::fs::write(&ingest_path, ingest_body)
         .map_err(|e| format!("Failed to write {ingest_file}: {e}"))?;
     std::fs::write(&after_path, after_body)
         .map_err(|e| format!("Failed to write {after_file}: {e}"))?;
+    std::fs::write(&assemble_path, assemble_body)
+        .map_err(|e| format!("Failed to write {assemble_file}: {e}"))?;
+    std::fs::write(&compact_path, compact_body)
+        .map_err(|e| format!("Failed to write {compact_file}: {e}"))?;
 
     // Native plugins exec the file directly, so the scaffolded shell wrapper
     // needs the executable bit. No-op on Windows (which uses extension-based
@@ -598,7 +610,7 @@ after_turn = "hooks/{after_file}"
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            for path in [&ingest_path, &after_path] {
+            for path in [&ingest_path, &after_path, &assemble_path, &compact_path] {
                 if let Ok(meta) = std::fs::metadata(path) {
                     let mut perms = meta.permissions();
                     perms.set_mode(0o755);
@@ -626,36 +638,90 @@ after_turn = "hooks/{after_file}"
     Ok(plugin_dir)
 }
 
+/// All hook file names and template bodies for a given runtime.
+struct HookFiles {
+    /// `(filename, template_body)` pairs for each hook.
+    ingest: (&'static str, &'static str),
+    after_turn: (&'static str, &'static str),
+    assemble: (&'static str, &'static str),
+    compact: (&'static str, &'static str),
+}
+
 /// Return scaffolded hook filenames + body content for a given runtime.
 ///
-/// Returns `(ingest_filename, ingest_body, after_turn_filename, after_turn_body)`.
-/// The scaffolded code is deliberately minimal — it shows the stdin/stdout
-/// protocol, picks "no-op" defaults, and leaves a `TODO` comment.
-fn hook_templates(
-    runtime: crate::plugin_runtime::PluginRuntime,
-) -> (&'static str, &'static str, &'static str, &'static str) {
+/// Each hook gets a working template showing the stdin/stdout protocol.
+/// Python, Node, Go, and Deno get full implementations with token-budget
+/// logic; other runtimes get minimal no-op stubs with protocol comments.
+fn hook_templates(runtime: crate::plugin_runtime::PluginRuntime) -> HookFiles {
     use crate::plugin_runtime::PluginRuntime as R;
     match runtime {
-        R::Python => ("ingest.py", PY_INGEST, "after_turn.py", PY_AFTER_TURN),
-        R::V => ("ingest.v", V_INGEST, "after_turn.v", V_AFTER_TURN),
-        R::Node => ("ingest.js", NODE_INGEST, "after_turn.js", NODE_AFTER_TURN),
-        R::Deno => ("ingest.ts", DENO_INGEST, "after_turn.ts", DENO_AFTER_TURN),
-        R::Go => ("ingest.go", GO_INGEST, "after_turn.go", GO_AFTER_TURN),
-        R::Ruby => ("ingest.rb", RUBY_INGEST, "after_turn.rb", RUBY_AFTER_TURN),
-        R::Bash => ("ingest.sh", BASH_INGEST, "after_turn.sh", BASH_AFTER_TURN),
-        // Bun uses TypeScript by convention; same format Deno uses.
-        R::Bun => ("ingest.ts", BUN_INGEST, "after_turn.ts", BUN_AFTER_TURN),
-        R::Php => ("ingest.php", PHP_INGEST, "after_turn.php", PHP_AFTER_TURN),
-        R::Lua => ("ingest.lua", LUA_INGEST, "after_turn.lua", LUA_AFTER_TURN),
-        R::Native => (
-            // For native, we scaffold a shell wrapper so the plugin works
-            // out of the box; users replace the script body with a real
-            // pre-compiled binary (or a shebang'd interpreted script).
-            "ingest",
-            NATIVE_INGEST,
-            "after_turn",
-            NATIVE_AFTER_TURN,
-        ),
+        R::Python => HookFiles {
+            ingest: ("ingest.py", PY_INGEST),
+            after_turn: ("after_turn.py", PY_AFTER_TURN),
+            assemble: ("assemble.py", PY_ASSEMBLE),
+            compact: ("compact.py", PY_COMPACT),
+        },
+        R::Node => HookFiles {
+            ingest: ("ingest.js", NODE_INGEST),
+            after_turn: ("after_turn.js", NODE_AFTER_TURN),
+            assemble: ("assemble.js", NODE_ASSEMBLE),
+            compact: ("compact.js", NODE_COMPACT),
+        },
+        R::Deno => HookFiles {
+            ingest: ("ingest.ts", DENO_INGEST),
+            after_turn: ("after_turn.ts", DENO_AFTER_TURN),
+            assemble: ("assemble.ts", DENO_ASSEMBLE),
+            compact: ("compact.ts", DENO_COMPACT),
+        },
+        R::Go => HookFiles {
+            ingest: ("ingest.go", GO_INGEST),
+            after_turn: ("after_turn.go", GO_AFTER_TURN),
+            assemble: ("assemble.go", GO_ASSEMBLE),
+            compact: ("compact.go", GO_COMPACT),
+        },
+        R::V => HookFiles {
+            ingest: ("ingest.v", V_INGEST),
+            after_turn: ("after_turn.v", V_AFTER_TURN),
+            assemble: ("assemble.v", STUB_ASSEMBLE_V),
+            compact: ("compact.v", STUB_COMPACT_V),
+        },
+        R::Ruby => HookFiles {
+            ingest: ("ingest.rb", RUBY_INGEST),
+            after_turn: ("after_turn.rb", RUBY_AFTER_TURN),
+            assemble: ("assemble.rb", STUB_ASSEMBLE_RUBY),
+            compact: ("compact.rb", STUB_COMPACT_RUBY),
+        },
+        R::Bash => HookFiles {
+            ingest: ("ingest.sh", BASH_INGEST),
+            after_turn: ("after_turn.sh", BASH_AFTER_TURN),
+            assemble: ("assemble.sh", STUB_ASSEMBLE_BASH),
+            compact: ("compact.sh", STUB_COMPACT_BASH),
+        },
+        R::Bun => HookFiles {
+            ingest: ("ingest.ts", BUN_INGEST),
+            after_turn: ("after_turn.ts", BUN_AFTER_TURN),
+            assemble: ("assemble.ts", STUB_ASSEMBLE_BUN),
+            compact: ("compact.ts", STUB_COMPACT_BUN),
+        },
+        R::Php => HookFiles {
+            ingest: ("ingest.php", PHP_INGEST),
+            after_turn: ("after_turn.php", PHP_AFTER_TURN),
+            assemble: ("assemble.php", STUB_ASSEMBLE_PHP),
+            compact: ("compact.php", STUB_COMPACT_PHP),
+        },
+        R::Lua => HookFiles {
+            ingest: ("ingest.lua", LUA_INGEST),
+            after_turn: ("after_turn.lua", LUA_AFTER_TURN),
+            assemble: ("assemble.lua", STUB_ASSEMBLE_LUA),
+            compact: ("compact.lua", STUB_COMPACT_LUA),
+        },
+        R::Native => HookFiles {
+            // Shell wrapper — users replace with a real pre-compiled binary.
+            ingest: ("ingest", NATIVE_INGEST),
+            after_turn: ("after_turn", NATIVE_AFTER_TURN),
+            assemble: ("assemble", STUB_ASSEMBLE_NATIVE),
+            compact: ("compact", STUB_COMPACT_NATIVE),
+        },
     }
 }
 
@@ -853,6 +919,416 @@ def main():
 
 if __name__ == "__main__":
     main()
+"#;
+
+// --- Node templates (assemble + compact) ---
+
+const NODE_ASSEMBLE: &str = r#"#!/usr/bin/env node
+// Context engine assemble hook (Node.js).
+// Controls what the LLM sees — called before every LLM request.
+//
+// Receives on stdin:
+//   {
+//     "type": "assemble",
+//     "system_prompt": "...",
+//     "messages": [{"role":"user"|"assistant", "content": ..., "pinned": false}, ...],
+//     "context_window_tokens": 200000
+//   }
+// content can be a plain string or an array of blocks (tool_use, tool_result, image, thinking).
+//
+// Emits on stdout:
+//   {"type": "assemble_result", "messages": [...]}
+//
+// Return an empty list or fail to trigger fallback to LibreFang's default trimming.
+
+"use strict";
+
+function estimateTokens(msg) {
+  const text = typeof msg.content === "string"
+    ? msg.content
+    : (Array.isArray(msg.content)
+        ? msg.content.map(b => b.text || b.content || "").join(" ")
+        : "");
+  return Math.max(1, Math.ceil(text.length / 4));
+}
+
+let buf = "";
+process.stdin.on("data", chunk => { buf += chunk.toString("utf8"); });
+process.stdin.on("end", () => {
+  const req = JSON.parse(buf);
+  const messages = req.messages;
+  const budget = req.context_window_tokens - 4000; // headroom for system + response
+
+  // Keep newest messages that fit within the token budget.
+  let used = 0;
+  const kept = [];
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const tokens = estimateTokens(messages[i]);
+    if (used + tokens > budget) break;
+    kept.unshift(messages[i]);
+    used += tokens;
+  }
+
+  process.stdout.write(JSON.stringify({ type: "assemble_result", messages: kept }) + "\n");
+});
+"#;
+
+const NODE_COMPACT: &str = r#"#!/usr/bin/env node
+// Context engine compact hook (Node.js).
+// Custom context compression — called under context pressure.
+//
+// Receives on stdin:
+//   {
+//     "type": "compact",
+//     "agent_id": "...",
+//     "messages": [...],
+//     "model": "...",
+//     "context_window_tokens": 200000
+//   }
+//
+// Emits on stdout:
+//   {"type": "compact_result", "messages": [...]}
+//
+// Return an empty list or fail to trigger fallback to LLM-based compaction.
+
+"use strict";
+
+let buf = "";
+process.stdin.on("data", chunk => { buf += chunk.toString("utf8"); });
+process.stdin.on("end", () => {
+  const req = JSON.parse(buf);
+  const messages = req.messages;
+
+  const pinned = messages.filter(m => m.pinned);
+  const rest   = messages.filter(m => !m.pinned);
+
+  // Keep last 10 non-pinned messages; summarise the rest with a placeholder.
+  let compacted;
+  if (rest.length > 10) {
+    const summary = { role: "assistant", content: "... (older messages summarised) ...", pinned: false };
+    compacted = [...pinned, summary, ...rest.slice(-10)];
+  } else {
+    compacted = [...pinned, ...rest];
+  }
+
+  process.stdout.write(JSON.stringify({ type: "compact_result", messages: compacted }) + "\n");
+});
+"#;
+
+// --- Deno / TypeScript templates (assemble + compact) ---
+
+const DENO_ASSEMBLE: &str = r#"// Context engine assemble hook (Deno / TypeScript).
+// Controls what the LLM sees — called before every LLM request.
+//
+// Run via: deno run --allow-read assemble.ts
+
+type ContentBlock = { type: string; text?: string; content?: string; [k: string]: unknown };
+type Message = { role: string; content: string | ContentBlock[]; pinned: boolean };
+
+function estimateTokens(msg: Message): number {
+  const text = typeof msg.content === "string"
+    ? msg.content
+    : msg.content.map((b: ContentBlock) => b.text ?? b.content ?? "").join(" ");
+  return Math.max(1, Math.ceil(text.length / 4));
+}
+
+const raw = new TextDecoder().decode(await Deno.readAll(Deno.stdin));
+const req = JSON.parse(raw) as { type: string; messages: Message[]; context_window_tokens: number };
+const budget = req.context_window_tokens - 4000;
+
+let used = 0;
+const kept: Message[] = [];
+for (let i = req.messages.length - 1; i >= 0; i--) {
+  const tokens = estimateTokens(req.messages[i]);
+  if (used + tokens > budget) break;
+  kept.unshift(req.messages[i]);
+  used += tokens;
+}
+
+console.log(JSON.stringify({ type: "assemble_result", messages: kept }));
+"#;
+
+const DENO_COMPACT: &str = r#"// Context engine compact hook (Deno / TypeScript).
+// Custom context compression — called under context pressure.
+//
+// Run via: deno run --allow-read compact.ts
+
+type Message = { role: string; content: unknown; pinned: boolean };
+
+const raw = new TextDecoder().decode(await Deno.readAll(Deno.stdin));
+const req = JSON.parse(raw) as { type: string; messages: Message[] };
+const messages = req.messages;
+
+const pinned = messages.filter((m: Message) => m.pinned);
+const rest   = messages.filter((m: Message) => !m.pinned);
+
+const summary: Message = { role: "assistant", content: "... (older messages summarised) ...", pinned: false };
+const compacted = rest.length > 10
+  ? [...pinned, summary, ...rest.slice(-10)]
+  : [...pinned, ...rest];
+
+console.log(JSON.stringify({ type: "compact_result", messages: compacted }));
+"#;
+
+// --- Go templates (assemble + compact) ---
+
+const GO_ASSEMBLE: &str = r#"// Context engine assemble hook (Go).
+// Controls what the LLM sees — called before every LLM request.
+//
+// Run with: go run assemble.go
+package main
+
+import (
+	"encoding/json"
+	"io"
+	"os"
+)
+
+type Message struct {
+	Role    string `json:"role"`
+	Content any    `json:"content"`
+	Pinned  bool   `json:"pinned"`
+}
+
+type AssembleRequest struct {
+	Type                string    `json:"type"`
+	SystemPrompt        string    `json:"system_prompt"`
+	Messages            []Message `json:"messages"`
+	ContextWindowTokens int       `json:"context_window_tokens"`
+}
+
+type AssembleResult struct {
+	Type     string    `json:"type"`
+	Messages []Message `json:"messages"`
+}
+
+func estimateTokens(m Message) int {
+	text := ""
+	switch v := m.Content.(type) {
+	case string:
+		text = v
+	}
+	tokens := len(text) / 4
+	if tokens < 1 {
+		tokens = 1
+	}
+	return tokens
+}
+
+func main() {
+	raw, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		os.Exit(1)
+	}
+	var req AssembleRequest
+	if err := json.Unmarshal(raw, &req); err != nil {
+		os.Exit(1)
+	}
+
+	budget := req.ContextWindowTokens - 4000
+	used := 0
+	kept := []Message{}
+	for i := len(req.Messages) - 1; i >= 0; i-- {
+		tokens := estimateTokens(req.Messages[i])
+		if used+tokens > budget {
+			break
+		}
+		kept = append([]Message{req.Messages[i]}, kept...)
+		used += tokens
+	}
+
+	out, _ := json.Marshal(AssembleResult{Type: "assemble_result", Messages: kept})
+	os.Stdout.Write(out)
+	os.Stdout.Write([]byte("\n"))
+}
+"#;
+
+const GO_COMPACT: &str = r#"// Context engine compact hook (Go).
+// Custom context compression — called under context pressure.
+//
+// Run with: go run compact.go
+package main
+
+import (
+	"encoding/json"
+	"io"
+	"os"
+)
+
+type Message struct {
+	Role    string `json:"role"`
+	Content any    `json:"content"`
+	Pinned  bool   `json:"pinned"`
+}
+
+type CompactRequest struct {
+	Type                string    `json:"type"`
+	AgentID             string    `json:"agent_id"`
+	Messages            []Message `json:"messages"`
+	Model               string    `json:"model"`
+	ContextWindowTokens int       `json:"context_window_tokens"`
+}
+
+type CompactResult struct {
+	Type     string    `json:"type"`
+	Messages []Message `json:"messages"`
+}
+
+func main() {
+	raw, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		os.Exit(1)
+	}
+	var req CompactRequest
+	if err := json.Unmarshal(raw, &req); err != nil {
+		os.Exit(1)
+	}
+
+	var pinned, rest []Message
+	for _, m := range req.Messages {
+		if m.Pinned {
+			pinned = append(pinned, m)
+		} else {
+			rest = append(rest, m)
+		}
+	}
+
+	compacted := append(pinned, rest...)
+	if len(rest) > 10 {
+		summary := Message{
+			Role:    "assistant",
+			Content: "... (older messages summarised) ...",
+			Pinned:  false,
+		}
+		compacted = append(pinned, summary)
+		compacted = append(compacted, rest[len(rest)-10:]...)
+	}
+
+	out, _ := json.Marshal(CompactResult{Type: "compact_result", Messages: compacted})
+	os.Stdout.Write(out)
+	os.Stdout.Write([]byte("\n"))
+}
+"#;
+
+// --- Minimal stubs for other runtimes (assemble + compact) ---
+// These fall back gracefully — returning an empty messages list causes
+// LibreFang to use its default overflow recovery / LLM compaction.
+
+const STUB_ASSEMBLE_V: &str = r#"// Context engine assemble hook stub (V).
+// See docs/agent/plugins for the full protocol.
+// Returning empty messages triggers LibreFang's default context trimming.
+module main
+import os
+import json
+
+fn main() {
+    _ := os.get_raw_stdin().bytestr()
+    // TODO: implement assemble logic or delete this file to use default trimming.
+    println(json.encode({ 'type': 'assemble_result', 'messages': [] }))
+}
+"#;
+
+const STUB_COMPACT_V: &str = r#"// Context engine compact hook stub (V).
+module main
+import os
+import json
+
+fn main() {
+    _ := os.get_raw_stdin().bytestr()
+    // TODO: implement compact logic or delete this file to use LLM compaction.
+    println(json.encode({ 'type': 'compact_result', 'messages': [] }))
+}
+"#;
+
+const STUB_ASSEMBLE_RUBY: &str = r#"# Context engine assemble hook stub (Ruby).
+# See docs/agent/plugins for the full protocol.
+require "json"
+_req = JSON.parse($stdin.read)
+# TODO: implement assemble logic, or delete this file to use default trimming.
+puts JSON.generate({ "type" => "assemble_result", "messages" => [] })
+"#;
+
+const STUB_COMPACT_RUBY: &str = r#"# Context engine compact hook stub (Ruby).
+require "json"
+_req = JSON.parse($stdin.read)
+# TODO: implement compact logic, or delete this file to use LLM compaction.
+puts JSON.generate({ "type" => "compact_result", "messages" => [] })
+"#;
+
+const STUB_ASSEMBLE_BASH: &str = r#"#!/usr/bin/env bash
+# Context engine assemble hook stub (Bash).
+# See docs/agent/plugins for the full protocol.
+# For non-trivial logic, pipe stdin through `jq` or call a helper binary.
+set -euo pipefail
+_input=$(cat)
+# TODO: implement assemble logic, or delete this file to use default trimming.
+printf '{"type":"assemble_result","messages":[]}\n'
+"#;
+
+const STUB_COMPACT_BASH: &str = r#"#!/usr/bin/env bash
+# Context engine compact hook stub (Bash).
+set -euo pipefail
+_input=$(cat)
+# TODO: implement compact logic, or delete this file to use LLM compaction.
+printf '{"type":"compact_result","messages":[]}\n'
+"#;
+
+const STUB_ASSEMBLE_BUN: &str = r#"// Context engine assemble hook stub (Bun / TypeScript).
+// See docs/agent/plugins for the full protocol.
+const _req = JSON.parse(await Bun.stdin.text());
+// TODO: implement assemble logic, or delete this file to use default trimming.
+console.log(JSON.stringify({ type: "assemble_result", messages: [] }));
+"#;
+
+const STUB_COMPACT_BUN: &str = r#"// Context engine compact hook stub (Bun / TypeScript).
+const _req = JSON.parse(await Bun.stdin.text());
+// TODO: implement compact logic, or delete this file to use LLM compaction.
+console.log(JSON.stringify({ type: "compact_result", messages: [] }));
+"#;
+
+const STUB_ASSEMBLE_PHP: &str = r#"<?php
+// Context engine assemble hook stub (PHP).
+// See docs/agent/plugins for the full protocol.
+$_req = json_decode(file_get_contents('php://stdin'), true);
+// TODO: implement assemble logic, or delete this file to use default trimming.
+echo json_encode(['type' => 'assemble_result', 'messages' => []]) . "\n";
+"#;
+
+const STUB_COMPACT_PHP: &str = r#"<?php
+// Context engine compact hook stub (PHP).
+$_req = json_decode(file_get_contents('php://stdin'), true);
+// TODO: implement compact logic, or delete this file to use LLM compaction.
+echo json_encode(['type' => 'compact_result', 'messages' => []]) . "\n";
+"#;
+
+const STUB_ASSEMBLE_LUA: &str = r#"-- Context engine assemble hook stub (Lua).
+-- See docs/agent/plugins for the full protocol.
+local json = require("json")  -- install lua-cjson or dkjson
+local _req = json.decode(io.read("*a"))
+-- TODO: implement assemble logic, or delete this file to use default trimming.
+print(json.encode({ type = "assemble_result", messages = {} }))
+"#;
+
+const STUB_COMPACT_LUA: &str = r#"-- Context engine compact hook stub (Lua).
+local json = require("json")
+local _req = json.decode(io.read("*a"))
+-- TODO: implement compact logic, or delete this file to use LLM compaction.
+print(json.encode({ type = "compact_result", messages = {} }))
+"#;
+
+const STUB_ASSEMBLE_NATIVE: &str = r#"#!/bin/sh
+# Context engine assemble hook stub (native shell wrapper).
+# Replace this script with a pre-compiled binary that speaks the JSON protocol.
+# Returning empty messages triggers LibreFang's default context trimming.
+read -r _input
+printf '{"type":"assemble_result","messages":[]}\n'
+"#;
+
+const STUB_COMPACT_NATIVE: &str = r#"#!/bin/sh
+# Context engine compact hook stub (native shell wrapper).
+# Replace with a pre-compiled binary that speaks the JSON protocol.
+read -r _input
+printf '{"type":"compact_result","messages":[]}\n'
 "#;
 
 // --- V language templates ---
