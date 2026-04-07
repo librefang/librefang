@@ -26,6 +26,10 @@ pub fn router() -> axum::Router<Arc<AppState>> {
             "/plugins/{name}/install-deps",
             axum::routing::post(install_plugin_deps),
         )
+        .route(
+            "/plugins/{name}/reload",
+            axum::routing::post(reload_plugin),
+        )
 }
 
 /// GET /api/plugins — List all installed context engine plugins.
@@ -320,6 +324,38 @@ pub async fn install_plugin_deps(Path(name): Path<String>) -> impl IntoResponse 
             Json(serde_json::json!({"success": true, "output": output})),
         ),
         Err(e) => ApiErrorResponse::bad_request(e).into_json_tuple(),
+    }
+}
+
+/// POST /api/plugins/:name/reload — Re-read `plugin.toml` from disk and validate it.
+///
+/// Script changes (edits to hook `.py` / binary files) take effect immediately
+/// because scripts are re-executed fresh on every invocation. Manifest changes
+/// (adding or removing hook declarations) are reflected in the response but
+/// require an **agent restart** to become active in the running context engine.
+#[utoipa::path(
+    post,
+    path = "/api/plugins/{name}/reload",
+    tag = "plugins",
+    params(("name" = String, Path, description = "Plugin name")),
+    responses(
+        (status = 200, description = "Manifest reloaded", body = serde_json::Value),
+        (status = 400, description = "Reload failed (invalid name or bad manifest)")
+    )
+)]
+pub async fn reload_plugin(Path(name): Path<String>) -> impl IntoResponse {
+    match librefang_runtime::plugin_manager::reload_plugin(&name) {
+        Ok(info) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "name": info.manifest.name,
+                "version": info.manifest.version,
+                "hooks_valid": info.hooks_valid,
+                "message": "Manifest reloaded. Script changes take effect immediately; hook additions/removals require agent restart."
+            })),
+        )
+            .into_response(),
+        Err(e) => ApiErrorResponse::bad_request(e).into_response(),
     }
 }
 

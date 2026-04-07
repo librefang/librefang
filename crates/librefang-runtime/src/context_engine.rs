@@ -131,6 +131,7 @@ pub trait ContextEngine: Send + Sync {
     /// guard compaction, and session repair.
     async fn assemble(
         &self,
+        agent_id: AgentId,
         messages: &mut Vec<Message>,
         system_prompt: &str,
         tools: &[ToolDefinition],
@@ -313,6 +314,7 @@ impl ContextEngine for DefaultContextEngine {
 
     async fn assemble(
         &self,
+        _agent_id: AgentId,
         messages: &mut Vec<Message>,
         system_prompt: &str,
         tools: &[ToolDefinition],
@@ -381,6 +383,36 @@ impl ContextEngine for DefaultContextEngine {
 }
 
 // ---------------------------------------------------------------------------
+// Hook invocation metrics
+// ---------------------------------------------------------------------------
+
+/// Per-hook invocation counters.  Stored inside `ScriptableContextEngine` behind
+/// an `Arc<Mutex<…>>` so callers can read them without holding the engine lock.
+#[derive(Debug, Default, Clone, serde::Serialize)]
+pub struct HookStats {
+    /// Total invocations (includes failures).
+    pub calls: u64,
+    /// Successful invocations.
+    pub successes: u64,
+    /// Failed invocations (timeout, crash, bad JSON, …).
+    pub failures: u64,
+    /// Cumulative wall-clock time of all invocations in milliseconds.
+    pub total_ms: u64,
+}
+
+/// Snapshot of all hook stats for a `ScriptableContextEngine`.
+#[derive(Debug, Default, Clone, serde::Serialize)]
+pub struct HookMetrics {
+    pub ingest: HookStats,
+    pub after_turn: HookStats,
+    pub bootstrap: HookStats,
+    pub assemble: HookStats,
+    pub compact: HookStats,
+    pub prepare_subagent: HookStats,
+    pub merge_subagent: HookStats,
+}
+
+// ---------------------------------------------------------------------------
 // Scriptable context engine — wraps DefaultContextEngine + Python script hooks
 // ---------------------------------------------------------------------------
 
@@ -429,6 +461,10 @@ pub struct ScriptableContextEngine {
     runtime: crate::plugin_runtime::PluginRuntime,
     /// Per-invocation timeout for all hooks. Bootstrap uses 2× this.
     hook_timeout_secs: u64,
+    /// Plugin-declared env vars (from `[env]` in plugin.toml), passed to every hook.
+    plugin_env: Vec<(String, String)>,
+    /// Live invocation counters. Shared so callers can snapshot without &mut self.
+    metrics: std::sync::Arc<std::sync::Mutex<HookMetrics>>,
 }
 
 impl ScriptableContextEngine {
@@ -448,6 +484,47 @@ impl ScriptableContextEngine {
             merge_subagent_script: hooks.merge_subagent.clone(),
             runtime: crate::plugin_runtime::PluginRuntime::from_tag(hooks.runtime.as_deref()),
             hook_timeout_secs: hooks.hook_timeout_secs.unwrap_or(30),
+            plugin_env: Vec::new(), // populated by load_plugin via with_plugin_env()
+            metrics: std::sync::Arc::new(std::sync::Mutex::new(HookMetrics::default())),
+        }
+    }
+
+    /// Set plugin-level env vars from `[env]` in plugin.toml.
+    pub fn with_plugin_env(mut self, env: Vec<(String, String)>) -> Self {
+        self.plugin_env = env;
+        self
+    }
+
+    /// Return a snapshot of all hook invocation metrics.
+    pub fn metrics(&self) -> HookMetrics {
+        self.metrics.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    /// Record the outcome of one hook invocation into the named slot.
+    fn record_hook(
+        metrics: &std::sync::Arc<std::sync::Mutex<HookMetrics>>,
+        slot: &str,
+        elapsed_ms: u64,
+        ok: bool,
+    ) {
+        if let Ok(mut m) = metrics.lock() {
+            let stats = match slot {
+                "ingest" => &mut m.ingest,
+                "after_turn" => &mut m.after_turn,
+                "bootstrap" => &mut m.bootstrap,
+                "assemble" => &mut m.assemble,
+                "compact" => &mut m.compact,
+                "prepare_subagent" => &mut m.prepare_subagent,
+                "merge_subagent" => &mut m.merge_subagent,
+                _ => return,
+            };
+            stats.calls += 1;
+            stats.total_ms += elapsed_ms;
+            if ok {
+                stats.successes += 1;
+            } else {
+                stats.failures += 1;
+            }
         }
     }
 
@@ -461,16 +538,18 @@ impl ScriptableContextEngine {
         path.to_string()
     }
 
-    /// Run a hook script with JSON input, return parsed JSON output.
+    /// Run a hook script with JSON input, return `(output, elapsed_ms)`.
     ///
     /// `timeout_secs` controls how long the subprocess is allowed to run.
+    /// `plugin_env` are the key-value pairs from `[env]` in plugin.toml.
     /// Dispatches to the runtime picked in config (Python by default).
     async fn run_hook(
         script_path: &str,
         runtime: crate::plugin_runtime::PluginRuntime,
         input: serde_json::Value,
         timeout_secs: u64,
-    ) -> Result<serde_json::Value, String> {
+        plugin_env: &[(String, String)],
+    ) -> Result<(serde_json::Value, u64), String> {
         let resolved = Self::resolve_script_path(script_path);
 
         if !std::path::Path::new(&resolved).exists() {
@@ -479,12 +558,16 @@ impl ScriptableContextEngine {
 
         let config = crate::plugin_runtime::HookConfig {
             timeout_secs,
+            plugin_env: plugin_env.to_vec(),
             ..Default::default()
         };
 
-        crate::plugin_runtime::run_hook_json(&resolved, runtime, &input, &config)
+        let t = std::time::Instant::now();
+        let result = crate::plugin_runtime::run_hook_json(&resolved, runtime, &input, &config)
             .await
-            .map_err(|e| format!("Hook script failed: {e}"))
+            .map_err(|e| format!("Hook script failed: {e}"));
+        let elapsed_ms = t.elapsed().as_millis() as u64;
+        result.map(|v| (v, elapsed_ms))
     }
 }
 
@@ -539,9 +622,15 @@ impl ContextEngine for ScriptableContextEngine {
                 "stable_prefix_mode": config.stable_prefix_mode,
                 "max_recall_results": config.max_recall_results,
             });
-            match Self::run_hook(script, self.runtime, input, bootstrap_timeout).await {
-                Ok(_) => debug!("Bootstrap hook completed (timeout={bootstrap_timeout}s)"),
-                Err(e) => warn!("Bootstrap hook failed (non-fatal): {e}"),
+            match Self::run_hook(script, self.runtime, input, bootstrap_timeout, &self.plugin_env).await {
+                Ok((_, ms)) => {
+                    Self::record_hook(&self.metrics, "bootstrap", ms, true);
+                    debug!("Bootstrap hook completed (timeout={bootstrap_timeout}s, {ms}ms)");
+                }
+                Err(e) => {
+                    Self::record_hook(&self.metrics, "bootstrap", 0, false);
+                    warn!("Bootstrap hook failed (non-fatal): {e}");
+                }
             }
         }
 
@@ -577,8 +666,9 @@ impl ContextEngine for ScriptableContextEngine {
             "peer_id": peer_id,
         });
 
-        match Self::run_hook(script, self.runtime, input, self.hook_timeout_secs).await {
-            Ok(output) => {
+        match Self::run_hook(script, self.runtime, input, self.hook_timeout_secs, &self.plugin_env).await {
+            Ok((output, ms)) => {
+                Self::record_hook(&self.metrics, "ingest", ms, true);
                 // Merge hook memories with default memories
                 let mut memories = default_result.recalled_memories;
                 if let Some(hook_memories) = output.get("memories").and_then(|m| m.as_array()) {
@@ -608,6 +698,7 @@ impl ContextEngine for ScriptableContextEngine {
                 })
             }
             Err(e) => {
+                Self::record_hook(&self.metrics, "ingest", 0, false);
                 warn!("Ingest hook failed, using default result: {e}");
                 Ok(default_result)
             }
@@ -616,6 +707,7 @@ impl ContextEngine for ScriptableContextEngine {
 
     async fn assemble(
         &self,
+        agent_id: AgentId,
         messages: &mut Vec<Message>,
         system_prompt: &str,
         tools: &[ToolDefinition],
@@ -624,7 +716,7 @@ impl ContextEngine for ScriptableContextEngine {
         let Some(ref script) = self.assemble_script else {
             return self
                 .inner
-                .assemble(messages, system_prompt, tools, context_window_tokens)
+                .assemble(agent_id, messages, system_prompt, tools, context_window_tokens)
                 .await;
         };
 
@@ -636,13 +728,14 @@ impl ContextEngine for ScriptableContextEngine {
 
         let input = serde_json::json!({
             "type": "assemble",
+            "agent_id": agent_id.0.to_string(),
             "system_prompt": system_prompt,
             "messages": msg_values,
             "context_window_tokens": context_window_tokens,
         });
 
-        match Self::run_hook(script, self.runtime, input, self.hook_timeout_secs).await {
-            Ok(output) => {
+        match Self::run_hook(script, self.runtime, input, self.hook_timeout_secs, &self.plugin_env).await {
+            Ok((output, ms)) => {
                 if let Some(new_msgs) = output.get("messages").and_then(|v| v.as_array()) {
                     let assembled: Vec<Message> = new_msgs
                         .iter()
@@ -650,6 +743,7 @@ impl ContextEngine for ScriptableContextEngine {
                         .collect();
 
                     if !assembled.is_empty() {
+                        Self::record_hook(&self.metrics, "assemble", ms, true);
                         *messages = assembled;
                         return Ok(AssembleResult {
                             recovery: crate::context_overflow::RecoveryStage::None,
@@ -661,14 +755,16 @@ impl ContextEngine for ScriptableContextEngine {
                         "Assemble hook returned no 'messages' field, falling back to default"
                     );
                 }
+                Self::record_hook(&self.metrics, "assemble", ms, false);
                 self.inner
-                    .assemble(messages, system_prompt, tools, context_window_tokens)
+                    .assemble(agent_id, messages, system_prompt, tools, context_window_tokens)
                     .await
             }
             Err(e) => {
+                Self::record_hook(&self.metrics, "assemble", 0, false);
                 warn!("Assemble hook failed, falling back to default: {e}");
                 self.inner
-                    .assemble(messages, system_prompt, tools, context_window_tokens)
+                    .assemble(agent_id, messages, system_prompt, tools, context_window_tokens)
                     .await
             }
         }
@@ -703,8 +799,8 @@ impl ContextEngine for ScriptableContextEngine {
             "context_window_tokens": context_window_tokens,
         });
 
-        match Self::run_hook(script, self.runtime, input, self.hook_timeout_secs).await {
-            Ok(output) => {
+        match Self::run_hook(script, self.runtime, input, self.hook_timeout_secs, &self.plugin_env).await {
+            Ok((output, ms)) => {
                 if let Some(new_msgs) = output.get("messages").and_then(|v| v.as_array()) {
                     let compacted: Vec<Message> = new_msgs
                         .iter()
@@ -712,8 +808,14 @@ impl ContextEngine for ScriptableContextEngine {
                         .collect();
 
                     if !compacted.is_empty() {
+                        Self::record_hook(&self.metrics, "compact", ms, true);
+                        let summary = output
+                            .get("summary")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("plugin compaction")
+                            .to_string();
                         return Ok(CompactionResult {
-                            summary: String::from("script"),
+                            summary,
                             kept_messages: compacted,
                             compacted_count: messages.len(),
                             chunks_used: 1,
@@ -726,11 +828,13 @@ impl ContextEngine for ScriptableContextEngine {
                         "Compact hook returned no 'messages' field, falling back to default"
                     );
                 }
+                Self::record_hook(&self.metrics, "compact", ms, false);
                 self.inner
                     .compact(agent_id, messages, driver, model, context_window_tokens)
                     .await
             }
             Err(e) => {
+                Self::record_hook(&self.metrics, "compact", 0, false);
                 warn!("Compact hook failed, falling back to default: {e}");
                 self.inner
                     .compact(agent_id, messages, driver, model, context_window_tokens)
@@ -748,21 +852,16 @@ impl ContextEngine for ScriptableContextEngine {
             return Ok(());
         };
 
-        // Build a compact representation of messages (not full content, to keep it fast)
-        let msg_summaries: Vec<serde_json::Value> = messages
+        // Send full message structure so scripts can index tool_use/tool_result/image blocks.
+        let msg_values: Vec<serde_json::Value> = messages
             .iter()
-            .map(|m| {
-                serde_json::json!({
-                    "role": serde_json::to_value(m.role).unwrap_or_default(),
-                    "content": m.content.text_content().chars().take(500).collect::<String>(),
-                })
-            })
+            .map(|m| serde_json::to_value(m).unwrap_or_default())
             .collect();
 
         let input = serde_json::json!({
             "type": "after_turn",
             "agent_id": agent_id.0.to_string(),
-            "messages": msg_summaries,
+            "messages": msg_values,
         });
 
         // Spawn as fire-and-forget — after_turn is best-effort, don't block the agent.
@@ -770,10 +869,18 @@ impl ContextEngine for ScriptableContextEngine {
         let script = script.clone();
         let runtime = self.runtime;
         let timeout_secs = self.hook_timeout_secs;
+        let plugin_env = self.plugin_env.clone();
+        let metrics = std::sync::Arc::clone(&self.metrics);
         let handle = tokio::spawn(async move {
-            match Self::run_hook(&script, runtime, input, timeout_secs).await {
-                Ok(_) => debug!("After-turn hook completed"),
-                Err(e) => warn!("After-turn hook failed: {e}"),
+            match Self::run_hook(&script, runtime, input, timeout_secs, &plugin_env).await {
+                Ok((_, ms)) => {
+                    Self::record_hook(&metrics, "after_turn", ms, true);
+                    debug!("After-turn hook completed ({ms}ms)");
+                }
+                Err(e) => {
+                    Self::record_hook(&metrics, "after_turn", 0, false);
+                    warn!("After-turn hook failed: {e}");
+                }
             }
         });
         tokio::spawn(async move {
@@ -800,9 +907,15 @@ impl ContextEngine for ScriptableContextEngine {
                 "parent_id": parent_id.0.to_string(),
                 "child_id": child_id.0.to_string(),
             });
-            match Self::run_hook(script, self.runtime, input, self.hook_timeout_secs).await {
-                Ok(_) => debug!("Prepare-subagent hook completed"),
-                Err(e) => warn!("Prepare-subagent hook failed (non-fatal): {e}"),
+            match Self::run_hook(script, self.runtime, input, self.hook_timeout_secs, &self.plugin_env).await {
+                Ok((_, ms)) => {
+                    Self::record_hook(&self.metrics, "prepare_subagent", ms, true);
+                    debug!("Prepare-subagent hook completed ({ms}ms)");
+                }
+                Err(e) => {
+                    Self::record_hook(&self.metrics, "prepare_subagent", 0, false);
+                    warn!("Prepare-subagent hook failed (non-fatal): {e}");
+                }
             }
         }
 
@@ -824,9 +937,15 @@ impl ContextEngine for ScriptableContextEngine {
                 "parent_id": parent_id.0.to_string(),
                 "child_id": child_id.0.to_string(),
             });
-            match Self::run_hook(script, self.runtime, input, self.hook_timeout_secs).await {
-                Ok(_) => debug!("Merge-subagent hook completed"),
-                Err(e) => warn!("Merge-subagent hook failed (non-fatal): {e}"),
+            match Self::run_hook(script, self.runtime, input, self.hook_timeout_secs, &self.plugin_env).await {
+                Ok((_, ms)) => {
+                    Self::record_hook(&self.metrics, "merge_subagent", ms, true);
+                    debug!("Merge-subagent hook completed ({ms}ms)");
+                }
+                Err(e) => {
+                    Self::record_hook(&self.metrics, "merge_subagent", 0, false);
+                    warn!("Merge-subagent hook failed (non-fatal): {e}");
+                }
             }
         }
 
@@ -1004,20 +1123,237 @@ pub fn list_installed_plugins() -> Vec<librefang_types::config::PluginManifest> 
         .collect()
 }
 
+// ---------------------------------------------------------------------------
+// Stacked context engine — chains multiple engines in declaration order
+// ---------------------------------------------------------------------------
+
+/// A context engine that chains multiple engines in order.
+///
+/// Hook semantics per method:
+/// - `bootstrap`: all engines in order; first error is fatal.
+/// - `ingest`: memories from all engines are merged into a single result.
+/// - `assemble`: first engine that returns non-empty messages wins; the rest
+///   are skipped. Falls back to the last engine if all return empty.
+/// - `compact`: first engine that succeeds with a non-fallback result wins;
+///   the rest are skipped. Falls back through the chain until one succeeds.
+/// - `after_turn`: all engines run concurrently (best-effort); individual
+///   failures are logged but do not propagate.
+/// - `prepare_subagent` / `merge_subagent`: all engines in order.
+/// - `truncate_tool_result`: delegates to the first (primary) engine.
+pub struct StackedContextEngine {
+    engines: Vec<Box<dyn ContextEngine>>,
+}
+
+impl StackedContextEngine {
+    /// Create a stacked engine from an ordered list of constituent engines.
+    ///
+    /// Panics if `engines` is empty.
+    pub fn new(engines: Vec<Box<dyn ContextEngine>>) -> Self {
+        assert!(
+            !engines.is_empty(),
+            "StackedContextEngine requires at least one engine"
+        );
+        Self { engines }
+    }
+}
+
+#[async_trait]
+impl ContextEngine for StackedContextEngine {
+    async fn bootstrap(&self, config: &ContextEngineConfig) -> LibreFangResult<()> {
+        for engine in &self.engines {
+            engine.bootstrap(config).await?;
+        }
+        Ok(())
+    }
+
+    async fn ingest(
+        &self,
+        agent_id: AgentId,
+        user_message: &str,
+        peer_id: Option<&str>,
+    ) -> LibreFangResult<IngestResult> {
+        let mut all_memories = Vec::new();
+        for engine in &self.engines {
+            match engine.ingest(agent_id, user_message, peer_id).await {
+                Ok(result) => all_memories.extend(result.recalled_memories),
+                Err(e) => {
+                    warn!(
+                        error = %e,
+                        "StackedContextEngine: ingest error from engine (skipping)"
+                    );
+                }
+            }
+        }
+        Ok(IngestResult {
+            recalled_memories: all_memories,
+        })
+    }
+
+    async fn assemble(
+        &self,
+        agent_id: AgentId,
+        messages: &mut Vec<Message>,
+        system_prompt: &str,
+        tools: &[ToolDefinition],
+        context_window_tokens: usize,
+    ) -> LibreFangResult<AssembleResult> {
+        // First engine that returns non-empty messages wins.
+        // Clone the buffer for trial runs so we don't corrupt the original.
+        for (i, engine) in self.engines.iter().enumerate() {
+            let mut candidate = messages.clone();
+            match engine
+                .assemble(
+                    agent_id,
+                    &mut candidate,
+                    system_prompt,
+                    tools,
+                    context_window_tokens,
+                )
+                .await
+            {
+                Ok(result) if !candidate.is_empty() => {
+                    *messages = candidate;
+                    return Ok(result);
+                }
+                Ok(_) => {
+                    debug!(
+                        index = i,
+                        "StackedContextEngine: assemble returned empty messages, trying next"
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        index = i,
+                        error = %e,
+                        "StackedContextEngine: assemble error, trying next engine"
+                    );
+                }
+            }
+        }
+        // All engines returned empty — fall back to the last engine on the original buffer.
+        self.engines
+            .last()
+            .expect("engines is non-empty")
+            .assemble(
+                agent_id,
+                messages,
+                system_prompt,
+                tools,
+                context_window_tokens,
+            )
+            .await
+    }
+
+    async fn compact(
+        &self,
+        agent_id: AgentId,
+        messages: &[Message],
+        driver: Arc<dyn LlmDriver>,
+        model: &str,
+        context_window_tokens: usize,
+    ) -> LibreFangResult<CompactionResult> {
+        // First engine that succeeds with a non-fallback result wins.
+        let mut last_fallback: Option<CompactionResult> = None;
+        for (i, engine) in self.engines.iter().enumerate() {
+            match engine
+                .compact(
+                    agent_id,
+                    messages,
+                    driver.clone(),
+                    model,
+                    context_window_tokens,
+                )
+                .await
+            {
+                Ok(result) if !result.used_fallback => return Ok(result),
+                Ok(fallback_result) => {
+                    debug!(
+                        index = i,
+                        "StackedContextEngine: compact used fallback, trying next engine"
+                    );
+                    last_fallback = Some(fallback_result);
+                }
+                Err(e) => {
+                    warn!(
+                        index = i,
+                        error = %e,
+                        "StackedContextEngine: compact error, trying next engine"
+                    );
+                }
+            }
+        }
+        // Return the last successful fallback result, or delegate to the primary engine.
+        if let Some(fb) = last_fallback {
+            return Ok(fb);
+        }
+        self.engines
+            .first()
+            .expect("engines is non-empty")
+            .compact(agent_id, messages, driver, model, context_window_tokens)
+            .await
+    }
+
+    async fn after_turn(&self, agent_id: AgentId, messages: &[Message]) -> LibreFangResult<()> {
+        // Run all engines sequentially (best-effort); failures are logged but not propagated.
+        // Note: true parallel execution would require Arc-wrapping engines; sequential
+        // fire-and-ignore is sufficient since after_turn hook scripts are non-blocking
+        // subprocesses that already run in background tasks within each engine.
+        for (i, engine) in self.engines.iter().enumerate() {
+            if let Err(e) = engine.after_turn(agent_id, messages).await {
+                warn!(
+                    index = i,
+                    error = %e,
+                    "StackedContextEngine: after_turn error (best-effort)"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    async fn prepare_subagent_context(
+        &self,
+        parent_id: AgentId,
+        child_id: AgentId,
+    ) -> LibreFangResult<()> {
+        for engine in &self.engines {
+            engine.prepare_subagent_context(parent_id, child_id).await?;
+        }
+        Ok(())
+    }
+
+    async fn merge_subagent_context(
+        &self,
+        parent_id: AgentId,
+        child_id: AgentId,
+    ) -> LibreFangResult<()> {
+        for engine in &self.engines {
+            engine.merge_subagent_context(parent_id, child_id).await?;
+        }
+        Ok(())
+    }
+
+    fn truncate_tool_result(&self, content: &str, context_window_tokens: usize) -> String {
+        // Delegate to the primary (first) engine.
+        self.engines
+            .first()
+            .expect("engines is non-empty")
+            .truncate_tool_result(content, context_window_tokens)
+    }
+}
+
 /// Build a context engine from config.
 ///
 /// Resolution order:
-/// 1. If `plugin` is set, load plugin manifest and use its hooks
-/// 2. If manual `hooks` are set, use them directly
-/// 3. Otherwise, return a plain `DefaultContextEngine`
+/// 1. If `plugin_stack` has 2+ entries, build a `StackedContextEngine`
+/// 2. If `plugin` is set, load plugin manifest and use its hooks
+/// 3. If manual `hooks` are set, use them directly
+/// 4. Otherwise, return a plain `DefaultContextEngine`
 pub fn build_context_engine(
     toml_config: &librefang_types::config::ContextEngineTomlConfig,
     runtime_config: ContextEngineConfig,
     memory: Arc<MemorySubstrate>,
     embedding_driver: Option<Arc<dyn EmbeddingDriver + Send + Sync>>,
 ) -> Box<dyn ContextEngine> {
-    let default = DefaultContextEngine::new(runtime_config, memory, embedding_driver);
-
     // Warn if an unknown engine name is configured
     if toml_config.engine != "default" {
         warn!(
@@ -1027,12 +1363,64 @@ pub fn build_context_engine(
         );
     }
 
-    // Plugin takes precedence
+    // Plugin stack: 2+ plugins → StackedContextEngine
+    if let Some(ref stack) = toml_config.plugin_stack {
+        if stack.len() >= 2 {
+            let mut engines: Vec<Box<dyn ContextEngine>> = Vec::with_capacity(stack.len());
+            for plugin_name in stack {
+                let eng_memory = memory.clone();
+                let eng_emb = embedding_driver.clone();
+                let inner =
+                    DefaultContextEngine::new(runtime_config.clone(), eng_memory, eng_emb);
+                match load_plugin(plugin_name) {
+                    Ok((manifest, hooks)) => {
+                        if hooks.ingest.is_some()
+                            || hooks.after_turn.is_some()
+                            || hooks.bootstrap.is_some()
+                            || hooks.assemble.is_some()
+                            || hooks.compact.is_some()
+                            || hooks.prepare_subagent.is_some()
+                            || hooks.merge_subagent.is_some()
+                        {
+                            let env: Vec<(String, String)> =
+                                manifest.env.into_iter().collect();
+                            engines.push(Box::new(
+                                ScriptableContextEngine::new(inner, &hooks)
+                                    .with_plugin_env(env),
+                            ));
+                        } else {
+                            warn!(
+                                plugin = plugin_name.as_str(),
+                                "Plugin in stack defines no hooks — adding default engine in its place"
+                            );
+                            engines.push(Box::new(inner));
+                        }
+                    }
+                    Err(e) => {
+                        warn!(
+                            plugin = plugin_name.as_str(),
+                            error = %e,
+                            "Failed to load plugin for stack — using default engine in its place"
+                        );
+                        engines.push(Box::new(inner));
+                    }
+                }
+            }
+            return Box::new(StackedContextEngine::new(engines));
+        }
+    }
+
+    let default = DefaultContextEngine::new(runtime_config, memory, embedding_driver);
+
+    // Single plugin takes precedence over manual hooks
     if let Some(ref plugin_name) = toml_config.plugin {
         match load_plugin(plugin_name) {
-            Ok((_manifest, hooks)) => {
+            Ok((manifest, hooks)) => {
                 if hooks.ingest.is_some() || hooks.after_turn.is_some() {
-                    return Box::new(ScriptableContextEngine::new(default, &hooks));
+                    let env: Vec<(String, String)> = manifest.env.into_iter().collect();
+                    return Box::new(
+                        ScriptableContextEngine::new(default, &hooks).with_plugin_env(env),
+                    );
                 }
                 warn!(
                     plugin = plugin_name.as_str(),
@@ -1129,7 +1517,7 @@ mod tests {
         let engine = DefaultContextEngine::new(config, make_memory(), None);
         let mut messages = vec![Message::user("hi"), Message::assistant("hello")];
         let result = engine
-            .assemble(&mut messages, "system", &[], 200_000)
+            .assemble(AgentId::new(), &mut messages, "system", &[], 200_000)
             .await
             .unwrap();
         assert_eq!(result.recovery, RecoveryStage::None);
@@ -1155,7 +1543,7 @@ mod tests {
             .collect();
 
         let result = engine
-            .assemble(&mut messages, "system", &[], 100)
+            .assemble(AgentId::new(), &mut messages, "system", &[], 100)
             .await
             .unwrap();
         assert_ne!(result.recovery, RecoveryStage::None);

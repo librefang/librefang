@@ -2153,6 +2153,20 @@ pub struct ContextEngineTomlConfig {
     /// Plugin name. Resolves to `~/.librefang/plugins/<name>/plugin.toml`.
     /// Takes precedence over manual `hooks` if set.
     pub plugin: Option<String>,
+    /// Stack multiple plugins on a single context engine.
+    ///
+    /// When 2 or more plugin names are listed the runtime builds a
+    /// [`StackedContextEngine`] that chains them in declaration order.
+    /// Ignored when fewer than 2 entries are present; use `plugin` for the
+    /// single-plugin case instead.
+    ///
+    /// Example:
+    /// ```toml
+    /// [context_engine]
+    /// plugin_stack = ["qdrant-recall", "my-indexer"]
+    /// ```
+    #[serde(default)]
+    pub plugin_stack: Option<Vec<String>>,
     /// Optional Python script hooks that override specific lifecycle methods.
     pub hooks: ContextEngineHooks,
     /// Plugin registries (GitHub repos) to browse for installable plugins.
@@ -2166,6 +2180,7 @@ impl Default for ContextEngineTomlConfig {
         Self {
             engine: "default".to_string(),
             plugin: None,
+            plugin_stack: None,
             hooks: ContextEngineHooks::default(),
             plugin_registries: default_plugin_registries(),
         }
@@ -2287,6 +2302,19 @@ pub struct PluginManifest {
     /// Other runtimes ignore this field (use `go.mod`, `package.json`, etc. directly).
     #[serde(default)]
     pub requirements: Option<String>,
+    /// Environment variables injected into every hook subprocess spawned by this plugin.
+    ///
+    /// Values starting with `${VAR_NAME}` are expanded from the daemon's own environment
+    /// at invocation time. Unknown references expand to an empty string.
+    ///
+    /// ```toml
+    /// [env]
+    /// QDRANT_URL     = "http://localhost:6333"
+    /// COLLECTION     = "agent-memories"
+    /// QDRANT_API_KEY = "${QDRANT_API_KEY}"   # expanded from daemon env
+    /// ```
+    #[serde(default)]
+    pub env: std::collections::HashMap<String, String>,
 }
 
 /// client_secret_env = "GITHUB_OAUTH_CLIENT_SECRET"

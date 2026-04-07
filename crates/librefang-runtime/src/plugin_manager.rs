@@ -138,6 +138,24 @@ pub fn get_plugin_info(plugin_name: &str) -> Result<PluginInfo, String> {
     })
 }
 
+/// Re-read a plugin's `plugin.toml` from disk and validate it.
+///
+/// This is semantically equivalent to [`get_plugin_info`] but signals
+/// intent: callers use this when they want to pick up manifest changes
+/// (e.g. after editing `plugin.toml`).
+///
+/// **Hot-reload semantics:**
+/// - Hook *script* changes take effect immediately — scripts are re-executed
+///   fresh on each call, so edits to `.py` / `.js` / binary hooks are live.
+/// - Manifest changes (adding or removing hook declarations) are reflected in
+///   the returned [`PluginInfo`], but the running agent's context engine is
+///   not restarted. A full agent restart is required for new hooks to become
+///   active.
+pub fn reload_plugin(name: &str) -> Result<PluginInfo, String> {
+    validate_plugin_name(name)?;
+    get_plugin_info(name)
+}
+
 /// Doctor entry for a single installed plugin.
 ///
 /// Tells the user whether the plugin is structurally valid (hook scripts

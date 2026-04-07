@@ -362,8 +362,13 @@ pub struct HookConfig {
     pub timeout_secs: u64,
     /// Working directory for the spawned process.
     pub working_dir: Option<PathBuf>,
-    /// Extra env vars to pass through from the parent process.
+    /// Extra env var names to pass through from the parent process.
     pub allowed_env_vars: Vec<String>,
+    /// Plugin-declared env vars injected directly (key=value).
+    ///
+    /// Values starting with `${VAR}` are expanded from `std::env` at spawn time.
+    /// This is populated from `plugin.toml`'s `[env]` section.
+    pub plugin_env: Vec<(String, String)>,
 }
 
 impl Default for HookConfig {
@@ -372,6 +377,7 @@ impl Default for HookConfig {
             timeout_secs: 30,
             working_dir: None,
             allowed_env_vars: Vec::new(),
+            plugin_env: Vec::new(),
         }
     }
 }
@@ -552,6 +558,16 @@ pub async fn run_hook_json(
         if let Ok(val) = std::env::var(var) {
             cmd.env(var, val);
         }
+    }
+    // Plugin-declared env vars from [env] in plugin.toml.
+    // Values of the form `${VAR_NAME}` are expanded from the daemon's env.
+    for (key, val) in &config.plugin_env {
+        let expanded = if let Some(inner) = val.strip_prefix("${").and_then(|s| s.strip_suffix('}')) {
+            std::env::var(inner).unwrap_or_default()
+        } else {
+            val.clone()
+        };
+        cmd.env(key, expanded);
     }
 
     let mut child = cmd.spawn().map_err(|e| {
