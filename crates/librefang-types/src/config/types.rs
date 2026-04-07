@@ -2443,6 +2443,10 @@ pub struct ContextEngineHooks {
     /// OTel OTLP gRPC endpoint for hook span export (overrides global setting).
     #[serde(default)]
     pub otel_endpoint: Option<String>,
+    /// Script path for the `on_event` hook.
+    /// Called when another plugin emits an event via the event bus.
+    #[serde(default)]
+    pub on_event: Option<String>,
 }
 
 /// Circuit-breaker settings for a hook.
@@ -2456,9 +2460,15 @@ pub struct CircuitBreakerConfig {
     pub reset_secs: u64,
 }
 
-fn default_cb_max_failures() -> u32 { 5 }
-fn default_cb_reset_secs() -> u64 { 60 }
-fn default_after_turn_queue_depth() -> u32 { 16 }
+fn default_cb_max_failures() -> u32 {
+    5
+}
+fn default_cb_reset_secs() -> u64 {
+    60
+}
+fn default_after_turn_queue_depth() -> u32 {
+    16
+}
 
 fn default_true_bool() -> bool {
     true

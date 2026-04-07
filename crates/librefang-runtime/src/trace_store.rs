@@ -231,9 +231,10 @@ impl TraceStore {
         failures: u32,
         opened_at: Option<&str>,
     ) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().map_err(|_| {
-            rusqlite::Error::InvalidParameterName("mutex poisoned".to_string())
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| rusqlite::Error::InvalidParameterName("mutex poisoned".to_string()))?;
         conn.execute(
             "INSERT INTO circuit_breaker_states (key, failures, opened_at)
              VALUES (?1, ?2, ?3)
@@ -251,9 +252,10 @@ impl TraceStore {
     pub fn load_circuit_states(
         &self,
     ) -> rusqlite::Result<HashMap<String, (u32, Option<String>)>> {
-        let conn = self.conn.lock().map_err(|_| {
-            rusqlite::Error::InvalidParameterName("mutex poisoned".to_string())
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| rusqlite::Error::InvalidParameterName("mutex poisoned".to_string()))?;
         let mut stmt = conn.prepare(
             "SELECT key, failures, opened_at FROM circuit_breaker_states",
         )?;
@@ -275,9 +277,10 @@ impl TraceStore {
     /// Remove the persisted state for a key (e.g. when circuit resets to closed
     /// with zero failures).
     pub fn delete_circuit_state(&self, key: &str) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().map_err(|_| {
-            rusqlite::Error::InvalidParameterName("mutex poisoned".to_string())
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| rusqlite::Error::InvalidParameterName("mutex poisoned".to_string()))?;
         conn.execute(
             "DELETE FROM circuit_breaker_states WHERE key = ?1",
             rusqlite::params![key],
@@ -355,7 +358,10 @@ mod tests {
         // Insert more than 10 000 rows in a tight loop — should not panic.
         // We only test a small batch here; the prune SQL is what matters.
         for i in 0..20 {
-            store.insert("plug", &make_trace(if i % 2 == 0 { "ingest" } else { "after_turn" }, true));
+            store.insert(
+                "plug",
+                &make_trace(if i % 2 == 0 { "ingest" } else { "after_turn" }, true),
+            );
         }
         assert!(store.count(None, false) <= 10_000);
     }
