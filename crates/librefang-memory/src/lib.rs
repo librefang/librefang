@@ -45,4 +45,4 @@ pub use prompt::PromptStore;
 // Re-export vector store implementations
 pub use http_vector_store::HttpVectorStore;
 pub use semantic::SqliteVectorStore;
-pub use supabase_vector_store::SupabaseVectorStore;
+pub use supabase_vector_store::{SupabaseVectorStore, LIBREFANG_ID_KEY};
