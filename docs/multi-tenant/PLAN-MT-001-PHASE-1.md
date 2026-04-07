@@ -1,8 +1,9 @@
-# PLAN-MT-001: Phase 1 — Account Data Model & Foundation (v2 — post-BHR)
+# PLAN-MT-001: Phase 1 — Multi-Tenant API Isolation (v3 — API-only track)
 
 **SPEC:** SPEC-MT-001 (Account Data Model & Storage)
-**ADR:** ADR-MT-001 (Account Model)
-**Date:** 2026-04-06 (v2: post-BHR review)
+**ADR:** ADR-MT-001 (Account Model), ADR-026 (Account Signature Policy)
+**Date:** 2026-04-07 (v3: separated from storage, focusing API infrastructure)
+**Scope:** API extractors, macros, guards, handler integration. Storage handled by separate team.
 
 ---
 
@@ -108,7 +109,7 @@ echo "Round 1 PASS"
 **⚠️ Cascade warning:** After this round, `cargo build --workspace` will FAIL.
 14 AgentEntry constructors across 4 other crates now need `account_id` field.
 Expected failures in: librefang-memory, librefang-kernel, librefang-cli.
-Rounds 2, 3, and 3.5 fix these in dependency order.
+Round 2 (CLI) fixes the 2 librefang-cli literals needed for workspace to compile.
 
 ```bash
 # Verify the full cascade list before proceeding:
@@ -116,134 +117,32 @@ grep -rn "AgentEntry {" crates/ --include="*.rs" | grep -v librefang-types | gre
 # Expected: 12 locations in memory (3), kernel (7), cli (2)
 ```
 
----
-
-### Round 2: Memory Crate — Migration v18 + AgentEntry Fix (librefang-memory)
-
-Depends on: Round 1 (types compile).
-
-| Change | File | Description | AC |
-|--------|------|-------------|-----|
-| Add migration v18 | `crates/librefang-memory/src/migration.rs` | Column-existence-guarded `ALTER TABLE` (see SQL below) | AC-4 |
-| Bump schema version | `crates/librefang-memory/src/migration.rs` | 17 → 18 | — |
-| Fix AgentEntry in load_agent | `crates/librefang-memory/src/structured.rs` (line ~285) | Read `account_id` from row: `account_id: row.get("account_id").ok()` | AC-4 |
-| Fix AgentEntry in list_agents | `crates/librefang-memory/src/structured.rs` (line ~523) | Same pattern | — |
-| Fix AgentEntry in test | `crates/librefang-memory/src/structured.rs` (line ~638) | Add `account_id: None` | — |
-
-**Migration SQL — with existence guard (learned from pre-existing duplicate-column bugs):**
-```sql
--- v18: Multi-tenant account isolation
--- Guard: only add column if it doesn't exist (prevents the duplicate-column
--- class of bug that already broke test_deactivate_kills_agent)
-SELECT CASE
-  WHEN COUNT(*) = 0 THEN 'ALTER TABLE agents ADD COLUMN account_id TEXT NOT NULL DEFAULT ''system'''
-  ELSE 'SELECT 1'
-END
-FROM pragma_table_info('agents') WHERE name = 'account_id';
-
--- Fallback if the above CTE approach doesn't work in rusqlite:
--- Use a try/catch pattern: attempt ALTER, ignore "duplicate column" error.
-
--- Index (always safe — CREATE INDEX IF NOT EXISTS):
-CREATE INDEX IF NOT EXISTS idx_agents_account_id ON agents(account_id);
-```
-
-**TDD micro-cycle:**
-1. **RED:** `test_migration_v18_adds_account_id` — fresh DB → migrate → `PRAGMA table_info(agents)` includes `account_id`
-2. **GREEN:** Implement migration with column-existence guard
-3. **RED:** `test_migration_v18_default_system` — existing agents get `account_id = 'system'`
-4. **GREEN:** DEFAULT clause handles this
-5. **RED:** `test_migration_v18_idempotent` — running migrate twice doesn't fail
-6. **GREEN:** Column-existence guard ensures idempotency
-
-**Rollback SQL (document, don't auto-run):**
-```sql
--- SQLite ≥ 3.35.0:
-ALTER TABLE agents DROP COLUMN account_id;
--- SQLite < 3.35.0:
--- CREATE TABLE agents_backup AS SELECT [all cols except account_id] FROM agents;
--- DROP TABLE agents; ALTER TABLE agents_backup RENAME TO agents;
--- Recreate indexes.
-```
-
-**Round 2 gate:**
-```bash
-cargo clippy -p librefang-memory --all-targets -- -D warnings && \
-cargo test -p librefang-memory && \
-echo "Round 2 PASS"
-```
+**Note:** Memory and Kernel AgentEntry fixes (10 locations) are handled by the storage team in a separate multi-tenant initiative.
+This Phase 1 focuses on API isolation only.
 
 ---
 
-### Round 3: Kernel Crate — AccountId Threading (librefang-kernel)
+### Round 2: CLI Crate — AgentEntry Constructor Fix (librefang-cli)
 
-Depends on: Round 1 (types) + Round 2 (memory compiles).
-
-| Change | File | Description | AC |
-|--------|------|-------------|-----|
-| Add AccountId to `spawn_agent_inner` | `kernel.rs` line ~2802 | Core funnel — all 5 public/private variants call this. Add `account_id: Option<String>` param, store in AgentEntry | AC-5 |
-| Thread through public spawn variants | `kernel.rs` lines ~2773–2795 | 3 public + 1 private wrapper: add `account_id` param, pass through to `spawn_agent_inner` | AC-5 |
-| Thread through KernelHandle trait | `kernel.rs` line ~9832 | `async fn spawn_agent()` trait impl: extract account from context or default None | AC-5 |
-| Add account filter to registry.list() | `registry.rs` | New method: `pub fn list_by_account(&self, account: &AccountId) -> Vec<AgentEntry>` | AC-6 |
-| Add account filter to registry.get() | `registry.rs` | New method: `pub fn get_scoped(&self, id: AgentId, account: &AccountId) -> Option<AgentEntry>` | AC-7 |
-| Update kernel list_agents | `kernel.rs` line ~9887 | Accept `AccountId`, delegate to `registry.list_by_account()` | AC-6 |
-| Fix AgentEntry in spawn_agent_inner | `kernel.rs` line ~2888 | Set `account_id` from param | — |
-| Fix AgentEntry in kernel tests | `kernel.rs` lines ~11928, ~11967, ~11992 | Add `account_id: None` to 3 test literals | — |
-| Fix AgentEntry in heartbeat tests | `heartbeat.rs` lines ~249, ~274 | Add `account_id: None` to 2 test literals | — |
-| Fix AgentEntry in registry test | `registry.rs` line ~433 | Add `account_id: None` to `test_entry()` helper | — |
-
-**Why NOT modify `get()` and `list()` directly:**
-Existing callers (background agents, heartbeat, internal kernel ops) need unfiltered access.
-Adding new `get_scoped()` / `list_by_account()` preserves backward compat.
-API layer calls the scoped versions; internal kernel calls the unscoped originals.
-
-**TDD micro-cycle:**
-1. **RED:** `test_spawn_agent_stores_account_id` — spawn with `AccountId(Some("t1"))` → entry has `account_id = Some("t1")`
-2. **GREEN:** Modify `spawn_agent_inner` to accept and store `account_id`
-3. **RED:** `test_list_by_account_filters` — spawn 2 agents (t1, t2) → `list_by_account(t1)` returns only t1's
-4. **GREEN:** Implement `registry.list_by_account()`
-5. **RED:** `test_list_by_account_none_returns_all` — `AccountId(None)` returns all (legacy mode)
-6. **GREEN:** Add None-means-all logic
-7. **RED:** `test_get_scoped_cross_tenant_returns_none` — `get_scoped(t1_agent, t2_account)` → None
-8. **GREEN:** Implement `registry.get_scoped()`
-
-**Round 3 gate:**
-```bash
-cargo clippy -p librefang-kernel --all-targets -- -D warnings && \
-cargo test -p librefang-kernel && \
-echo "Round 3 PASS"
-```
-
----
-
-### Round 3.5: CLI Crate — AgentEntry Constructor Fix (librefang-cli)
-
-Depends on: Round 1 (types). Can run in parallel with Rounds 2-3 if convenient.
+Depends on: Round 1 (types).
 
 | Change | File | Description | AC |
 |--------|------|-------------|-----|
 | Fix AgentEntry in tui/event.rs | `crates/librefang-cli/src/tui/event.rs` line ~1324 | Add `account_id: None` to JSON→AgentEntry mapping (memory agents) | — |
 | Fix AgentEntry in tui/event.rs | `crates/librefang-cli/src/tui/event.rs` line ~1340 | Add `account_id: None` to registry list mapping | — |
 
-**Round 3.5 gate:**
+**Round 2 gate:**
 ```bash
 cargo clippy -p librefang-cli --all-targets -- -D warnings && \
 cargo build -p librefang-cli && \
-echo "Round 3.5 PASS"
-```
-
-**Workspace compile check (MANDATORY after Round 3.5):**
-```bash
-# ALL AgentEntry cascade sites should now compile:
-cargo build --workspace 2>&1 | grep -c "error" | xargs -I{} test {} -eq 0
-echo "Workspace compiles clean"
+echo "Round 2 PASS"
 ```
 
 ---
 
-### Round 4: API Foundation — Extractors, Macros, Guard, HMAC (librefang-api)
+### Round 3: API Foundation — Extractors, Macros, Guard, HMAC (librefang-api)
 
-Depends on: Rounds 1-3.5 (full workspace compiles). Creates infrastructure BEFORE touching handlers.
+Depends on: Rounds 1-2 (types compile, CLI compiles). Creates infrastructure BEFORE touching handlers.
 
 | Change | File | Description | AC |
 |--------|------|-------------|-----|
@@ -286,20 +185,20 @@ Depends on: Rounds 1-3.5 (full workspace compiles). Creates infrastructure BEFOR
 
 **REFACTOR after each batch.** Not after all 18.
 
-**Round 4 gate:**
+**Round 3 gate:**
 ```bash
 cargo clippy -p librefang-api --all-targets -- -D warnings && \
 cargo test -p librefang-api && \
-echo "Round 4 PASS"
+echo "Round 3 PASS"
 ```
 
 **Critical: Do NOT touch any handler in this round.** Only infrastructure.
 
 ---
 
-### Round 5: API Handlers — Mechanical Sweep (librefang-api, 76 handlers)
+### Round 4: API Handlers — Mechanical Sweep (librefang-api, 76 handlers)
 
-Depends on: Round 4 (extractors, macros, guard all compile and pass).
+Depends on: Round 3 (extractors, macros, guard all compile and pass).
 
 Every handler gets the same pattern:
 
@@ -325,7 +224,7 @@ pub async fn handler_name(
 }
 ```
 
-#### Round 5a: agents.rs (50 handlers)
+#### Round 4a: agents.rs (50 handlers)
 
 | # | Handler Pattern | Macro/Guard | AC |
 |---|----------------|-------------|-----|
@@ -336,7 +235,7 @@ pub async fn handler_name(
 - POST/PUT: `validate_account!(account)` then `state.kernel.spawn_agent(manifest)` with account threaded
 - DELETE: fetch via `get_scoped()`, then delete — returns 404 if cross-tenant
 
-**Round 5a gate:**
+**Round 4a gate:**
 ```bash
 TOTAL=$(grep -c "pub async fn" crates/librefang-api/src/routes/agents.rs)
 SCOPED=$(grep -c "account: AccountId" crates/librefang-api/src/routes/agents.rs)
@@ -344,18 +243,18 @@ echo "agents.rs: $SCOPED/$TOTAL scoped"
 [ "$TOTAL" -eq "$SCOPED" ] || { echo "FAIL: $((TOTAL - SCOPED)) unscoped"; exit 1; }
 cargo clippy -p librefang-api --all-targets -- -D warnings && \
 cargo test -p librefang-api && \
-echo "Round 5a PASS"
+echo "Round 4a PASS"
 ```
 
-#### Round 5b: channels.rs (11 handlers)
+#### Round 4b: channels.rs (11 handlers)
 
 | # | Handler Pattern | Macro/Guard | AC |
 |---|----------------|-------------|-----|
-| 1-11 | All 11 `pub async fn` | `account: AccountId` extractor only; full channel scoping deferred to Phase 4 | AC-18 |
+| 1-11 | All 11 `pub async fn` | `account: AccountId` extractor only; full channel scoping deferred to Phase 2 | AC-18 |
 
-**Note:** Phase 1 adds the extractor param so the type signature is future-proof. The handler body does NOT enforce account scoping on channels yet — that requires channel-to-account routing (Phase 4).
+**Note:** Phase 1 adds the extractor param so the type signature is future-proof. The handler body does NOT enforce account scoping on channels yet — that requires channel-to-account routing (Phase 2).
 
-**Round 5b gate:**
+**Round 4b gate:**
 ```bash
 TOTAL=$(grep -c "pub async fn" crates/librefang-api/src/routes/channels.rs)
 SCOPED=$(grep -c "account: AccountId" crates/librefang-api/src/routes/channels.rs)
@@ -363,16 +262,16 @@ echo "channels.rs: $SCOPED/$TOTAL scoped"
 [ "$TOTAL" -eq "$SCOPED" ] || { echo "FAIL: $((TOTAL - SCOPED)) unscoped"; exit 1; }
 cargo clippy -p librefang-api --all-targets -- -D warnings && \
 cargo test -p librefang-api && \
-echo "Round 5b PASS"
+echo "Round 4b PASS"
 ```
 
-#### Round 5c: config.rs (15 handlers)
+#### Round 4c: config.rs (15 handlers)
 
 | # | Handler Pattern | Macro/Guard | AC |
 |---|----------------|-------------|-----|
 | 1-15 | All 15 `pub async fn` | `account_or_system!` for reads, `validate_account!` for writes | AC-19 |
 
-**Round 5c gate:**
+**Round 4c gate:**
 ```bash
 TOTAL=$(grep -c "pub async fn" crates/librefang-api/src/routes/config.rs)
 SCOPED=$(grep -c "account: AccountId" crates/librefang-api/src/routes/config.rs)
@@ -380,14 +279,14 @@ echo "config.rs: $SCOPED/$TOTAL scoped"
 [ "$TOTAL" -eq "$SCOPED" ] || { echo "FAIL: $((TOTAL - SCOPED)) unscoped"; exit 1; }
 cargo clippy -p librefang-api --all-targets -- -D warnings && \
 cargo test -p librefang-api && \
-echo "Round 5c PASS"
+echo "Round 4c PASS"
 ```
 
 ---
 
-### Round 6: Test Suite & Integration Wiring
+### Round 5: Test Suite & Integration Wiring
 
-Depends on: Rounds 1-5 (everything compiles and all round gates pass).
+Depends on: Rounds 1-4 (everything compiles and all round gates pass).
 
 | Change | File | Description | AC |
 |--------|------|-------------|-----|
@@ -408,13 +307,13 @@ Depends on: Rounds 1-5 (everything compiles and all round gates pass).
 
 **Batch C: Security (RED→GREEN×2)**
 7. RED: `test_error_body_never_leaks_account_id` → GREEN: 404 body = generic message
-8. RED: `test_migration_preserves_existing_agents` → GREEN: pre-existing → account_id="system"
+8. RED: `test_legacy_agent_roundtrip` → GREEN: legacy agents (no account_id) API-accessible with AccountId(None)
 
-**Round 6 gate:**
+**Round 5 gate:**
 ```bash
 cargo test -p librefang-api --test account_tests && \
 cargo test --workspace && \
-echo "Round 6 PASS"
+echo "Round 5 PASS"
 ```
 
 ---
@@ -468,16 +367,16 @@ PASS: workspace compiles clean
 
 ## Pre-BHR Checklist
 
-- [ ] Pattern coverage gate passes (0 unscoped handlers)
+- [ ] Pattern coverage gate passes (0 unscoped handlers: 50 agents + 11 channels + 15 config)
 - [ ] Workspace compiles clean (`cargo build --workspace`)
 - [ ] All 33 SPEC tests pass (`cargo test -p librefang-api --test account_tests`)
 - [ ] All SPEC claims have cited test names
 - [ ] Clippy clean: `cargo clippy --workspace --all-targets -- -D warnings`
 - [ ] No new warnings introduced
 - [ ] Full workspace tests pass: `cargo test --workspace` (expect same 2 pre-existing failures only)
-- [ ] Migration v18 is idempotent (test confirms — no duplicate-column errors)
-- [ ] AgentEntry backward compat: all 14 constructor sites compile with `account_id` field
-- [ ] librefang-cli tui/event.rs compiles (Round 3.5 verified)
+- [ ] AccountId extractor, macros, guard, HMAC all have RED-GREEN-REFACTOR test cycles
+- [ ] AgentEntry cascade (cli 2 sites + types 2 sites) all compile
+- [ ] API extractors infallible (Rejection = Infallible)
 
 ---
 
@@ -486,15 +385,15 @@ PASS: workspace compiles clean
 | Day | Round | Deliverable | Gate |
 |-----|-------|-------------|------|
 | 1 AM | Round 1 | AccountId type, AgentEntry field, 2 type-crate literals | `cargo test -p librefang-types` |
-| 1 PM | Round 2 | Migration v18 (with existence guard), 3 memory literals | `cargo test -p librefang-memory` |
-| 2 AM | Round 3 | 6 spawn variants + registry scoped methods + 7 kernel literals | `cargo test -p librefang-kernel` |
-| 2 mid | Round 3.5 | 2 CLI literals | `cargo build -p librefang-cli` + workspace compile |
-| 2 PM | Round 4 | Extractors (Batch A), macros (B), guard (C), HMAC (D) | `cargo test -p librefang-api` |
-| 3 | Round 5a | agents.rs 50 handlers | Pattern gate: 50/50 + clippy + test |
-| 4 AM | Round 5b | channels.rs 11 handlers | Pattern gate: 11/11 + clippy + test |
-| 4 mid | Round 5c | config.rs 15 handlers | Pattern gate: 15/15 + clippy + test |
-| 4 PM | Round 6 | 33 tests (3 batches), workspace green | Full gate pass |
-| 5 | BHR | Pre-BHR checklist → submit | Confirmation only |
+| 1 PM | Round 2 | 2 CLI literals (tui/event.rs) | `cargo build -p librefang-cli` |
+| 2 AM | Round 3 | Extractors (Batch A), macros (B), guard (C), HMAC (D) | `cargo test -p librefang-api` |
+| 2 PM | Round 4a | agents.rs 50 handlers | Pattern gate: 50/50 + clippy + test |
+| 3 AM | Round 4b | channels.rs 11 handlers | Pattern gate: 11/11 + clippy + test |
+| 3 mid | Round 4c | config.rs 15 handlers | Pattern gate: 15/15 + clippy + test |
+| 3 PM | Round 5 | 33 tests (3 batches), workspace green | Full gate pass |
+| 4 | BHR | Pre-BHR checklist → submit | Confirmation only |
+
+**Storage work (Memory migration v18, Kernel threading):** Handled by separate team. Not in Phase 1 scope.
 
 ---
 
@@ -504,24 +403,14 @@ PASS: workspace compiles clean
 # 1. Revert all Phase 1 commits
 git revert --no-commit HEAD~N  # N = Phase 1 commit count
 
-# 2. Rollback migration (SQLite ≥ 3.35.0)
-sqlite3 librefang.db "ALTER TABLE agents DROP COLUMN account_id;"
-sqlite3 librefang.db "DROP INDEX IF EXISTS idx_agents_account_id;"
+# 2. Restore original handler signatures (remove AccountId param)
+# Mechanical edit: find/replace "account: AccountId," with "" in all handlers
 
-# 3. Rollback migration (SQLite < 3.35.0 — table rebuild)
-sqlite3 librefang.db << 'SQL'
-CREATE TABLE agents_backup AS
-  SELECT id, name, manifest, state, mode /* enumerate ALL cols except account_id */
-  FROM agents;
-DROP TABLE agents;
-ALTER TABLE agents_backup RENAME TO agents;
-DROP INDEX IF EXISTS idx_agents_account_id;
--- Recreate original indexes from migration.rs
-SQL
-
-# 4. Verify
+# 3. Verify
 cargo test --workspace
 ```
+
+**Note:** Storage schema rollback (migration v18 reversal) is handled by separate team if needed.
 
 ---
 
@@ -533,15 +422,22 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo test -p librefang-api --test account_tests
 
-# Pattern coverage:
+# Pattern coverage: 76 handlers fully scoped
 for f in agents.rs channels.rs config.rs; do
   TOTAL=$(grep -c "pub async fn" "crates/librefang-api/src/routes/$f")
   SCOPED=$(grep -c "account: AccountId" "crates/librefang-api/src/routes/$f" || echo 0)
-  [ "$TOTAL" -eq "$SCOPED" ] || exit 1
+  [ "$TOTAL" -eq "$SCOPED" ] || { echo "$f: $SCOPED/$TOTAL (FAIL)"; exit 1; }
+  echo "$f: $SCOPED/$TOTAL (PASS)"
 done
 
-# AgentEntry cascade fully resolved:
-cargo build --workspace 2>&1 | grep -c "error\[" | xargs -I{} test {} -eq 0
+# API extractor tests all passing
+cargo test -p librefang-api --lib api::extractors -- --nocapture
+
+# HMAC middleware tests passing
+cargo test -p librefang-api --lib api::middleware -- --nocapture
+
+# AccountId type tests passing
+cargo test -p librefang-types --lib types::account -- --nocapture
 
 echo "ALL EXIT CRITERIA PASS"
 ```
@@ -551,33 +447,31 @@ echo "ALL EXIT CRITERIA PASS"
 ## Dependency Graph
 
 ```
-Round 1: librefang-types ─────────────────────────────────────┐
-         (AccountId, AgentEntry.account_id)                   │
-                │                                             │
-Round 2: librefang-memory ──────────────────────────┐         │
-         (migration v18, structured.rs 3 literals)  │         │
-                │                                   │         │
-Round 3: librefang-kernel ──────────────────┐       │         │
-         (6 spawn variants, registry scoped,│       │         │
-          7 literals in kernel/heartbeat/   │       │         │
-          registry)                         │       │         │
-                │                           │       │         │
-Round 3.5: librefang-cli ──────────────┐    │       │         │
-           (2 literals in tui/event.rs)│    │       │         │
-                │                      │    │       │         │
-         ┌──── WORKSPACE COMPILES ─────┘────┘───────┘─────────┘
+Round 1: librefang-types ──────────────────────┐
+         (AccountId, AgentEntry.account_id)    │
+                │                             │
+Round 2: librefang-cli ───────────────────┐   │
+         (2 literals in tui/event.rs)      │   │
+                │                         │   │
+         ┌──── WORKSPACE COMPILES ────────┘───┘
          │
-Round 4: librefang-api (foundation) ────┐
+Round 3: librefang-api (foundation) ────┐
          (extractors, macros, guard,    │
           HMAC, server wiring)          │
                 │                       │
-Round 5: librefang-api (76 handlers) ───┘
-         5a: agents.rs (50)
-         5b: channels.rs (11)
-         5c: config.rs (15)
+Round 4: librefang-api (76 handlers) ───┘
+         4a: agents.rs (50)
+         4b: channels.rs (11)
+         4c: config.rs (15)
                 │
-Round 6: test suite + integration
+Round 5: test suite + integration
          (33 tests, workspace green)
+
+SEPARATE TRACK (not in Phase 1 scope):
+Storage: librefang-memory + librefang-kernel
+         (migration v18, 6 spawn variants,
+          10 AgentEntry constructors)
+         → Handled by storage team
 ```
 
 ---
