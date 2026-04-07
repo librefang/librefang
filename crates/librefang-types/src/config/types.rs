@@ -1675,6 +1675,59 @@ impl Default for TriggersConfig {
     }
 }
 
+/// Loop guard configuration for tool-loop detection in the agent execution loop.
+///
+/// Controls how aggressively identical tool calls are detected and blocked
+/// to prevent infinite loops.
+///
+/// Configure in config.toml:
+/// ```toml
+/// [loop_guard]
+/// warn_threshold = 3
+/// block_threshold = 5
+/// global_circuit_breaker = 30
+/// poll_multiplier = 3
+/// outcome_warn_threshold = 2
+/// outcome_block_threshold = 3
+/// ping_pong_min_repeats = 3
+/// max_warnings_per_call = 3
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LoopGuardTomlConfig {
+    /// Number of identical calls before a warning is appended.
+    pub warn_threshold: u32,
+    /// Number of identical calls before the call is blocked.
+    pub block_threshold: u32,
+    /// Total tool calls across all tools before circuit-breaking.
+    pub global_circuit_breaker: u32,
+    /// Multiplier for poll tool thresholds (poll tools get thresholds * this).
+    pub poll_multiplier: u32,
+    /// Number of identical outcome pairs before a warning.
+    pub outcome_warn_threshold: u32,
+    /// Number of identical outcome pairs before the next call is auto-blocked.
+    pub outcome_block_threshold: u32,
+    /// Minimum repeats of a ping-pong pattern before blocking.
+    pub ping_pong_min_repeats: u32,
+    /// Max warnings per unique tool call hash before upgrading to Block.
+    pub max_warnings_per_call: u32,
+}
+
+impl Default for LoopGuardTomlConfig {
+    fn default() -> Self {
+        Self {
+            warn_threshold: 3,
+            block_threshold: 5,
+            global_circuit_breaker: 30,
+            poll_multiplier: 3,
+            outcome_warn_threshold: 2,
+            outcome_block_threshold: 3,
+            ping_pong_min_repeats: 3,
+            max_warnings_per_call: 3,
+        }
+    }
+}
+
 /// Top-level kernel configuration.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1974,6 +2027,9 @@ pub struct KernelConfig {
     /// Individual endpoints may enforce tighter limits.
     #[serde(default = "default_max_request_body_bytes")]
     pub max_request_body_bytes: usize,
+    /// Loop guard configuration (tool-loop detection thresholds).
+    #[serde(default)]
+    pub loop_guard: LoopGuardTomlConfig,
 }
 
 /// Input sanitization mode for channel messages.
@@ -2923,6 +2979,7 @@ impl Default for KernelConfig {
             max_concurrent_bg_llm: default_max_concurrent_bg_llm(),
             max_agent_call_depth: default_max_agent_call_depth(),
             max_request_body_bytes: default_max_request_body_bytes(),
+            loop_guard: LoopGuardTomlConfig::default(),
         }
     }
 }

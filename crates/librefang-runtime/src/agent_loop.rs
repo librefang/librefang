@@ -88,6 +88,80 @@ fn is_soft_error_content(content: &str) -> bool {
         || content.contains("arguments were truncated")
 }
 
+// ---------------------------------------------------------------------------
+// LoopGuard helpers — extracted from duplicated blocks in the non-streaming
+// and streaming agent loops.
+// ---------------------------------------------------------------------------
+
+/// Classification returned by [`classify_loop_guard_verdict`].
+/// The caller decides what to do for each variant (the CircuitBreak path
+/// needs async session-save / hook-fire, so it stays inline).
+enum LoopGuardAction {
+    /// Allow or Warn — proceed with normal tool execution.
+    Proceed,
+    /// Block this tool call; the caller should push an error ToolResult.
+    Block { message: String },
+    /// Circuit-break the entire agent loop.
+    CircuitBreak { message: String },
+}
+
+/// Inspect a [`LoopGuardVerdict`] and return a lightweight action enum.
+/// This is a pure function — no async I/O, no side-effects.
+fn classify_loop_guard_verdict(verdict: &LoopGuardVerdict) -> LoopGuardAction {
+    match verdict {
+        LoopGuardVerdict::CircuitBreak(msg) => LoopGuardAction::CircuitBreak {
+            message: msg.clone(),
+        },
+        LoopGuardVerdict::Block(msg) => LoopGuardAction::Block {
+            message: msg.clone(),
+        },
+        _ => LoopGuardAction::Proceed,
+    }
+}
+
+/// Build a `LoopGuard` with a circuit-breaker scaled for autonomous agents.
+/// If `max_iterations` exceeds the configured `global_circuit_breaker`,
+/// the breaker is bumped to `max_iterations * 3`.
+fn init_loop_guard(max_iterations: u32, loop_guard_config: Option<&LoopGuardConfig>) -> LoopGuard {
+    let mut cfg = loop_guard_config.cloned().unwrap_or_default();
+    if max_iterations > cfg.global_circuit_breaker {
+        cfg.global_circuit_breaker = max_iterations * 3;
+    }
+    LoopGuard::new(cfg)
+}
+
+/// Append loop-guard postfixes (warn message, outcome warning, poll-backoff
+/// hint) to a tool result `content` string.
+///
+/// Both the non-streaming and streaming paths apply the same three optional
+/// postfixes in the same order.  Extracting this into a helper avoids the
+/// ~10-line duplication.
+fn apply_loop_guard_postfixes(
+    content: String,
+    verdict: &LoopGuardVerdict,
+    outcome_warning: Option<&str>,
+    poll_backoff_hint: Option<u64>,
+) -> String {
+    let mut result = match verdict {
+        LoopGuardVerdict::Warn(warn_msg) => {
+            format!("{content}\n\n[LOOP GUARD] {warn_msg}")
+        }
+        _ => content,
+    };
+
+    if let Some(outcome) = outcome_warning {
+        result = format!("{result}\n\n[LOOP GUARD] {outcome}");
+    }
+
+    if let Some(backoff_ms) = poll_backoff_hint {
+        result = format!(
+            "{result}\n\n[LOOP GUARD: Consider waiting {backoff_ms}ms before polling again]"
+        );
+    }
+
+    result
+}
+
 /// Safely trim message history to `MAX_HISTORY_MESSAGES`, cutting at
 /// conversation-turn boundaries so ToolUse/ToolResult pairs are never split.
 ///
@@ -555,6 +629,7 @@ pub async fn run_agent_loop(
     proactive_memory: Option<Arc<librefang_memory::ProactiveMemoryStore>>,
     context_engine: Option<&dyn ContextEngine>,
     pending_messages: Option<&tokio::sync::Mutex<mpsc::Receiver<AgentLoopSignal>>>,
+    loop_guard_config: Option<&LoopGuardConfig>,
 ) -> LibreFangResult<AgentLoopResult> {
     info!(agent = %manifest.name, "Starting agent loop");
 
@@ -914,14 +989,7 @@ pub async fn run_agent_loop(
         .unwrap_or(MAX_ITERATIONS);
 
     // Initialize loop guard — scale circuit breaker for autonomous agents
-    let loop_guard_config = {
-        let mut cfg = LoopGuardConfig::default();
-        if max_iterations > cfg.global_circuit_breaker {
-            cfg.global_circuit_breaker = max_iterations * 3;
-        }
-        cfg
-    };
-    let mut loop_guard = LoopGuard::new(loop_guard_config);
+    let mut loop_guard = init_loop_guard(max_iterations, loop_guard_config);
     let mut consecutive_max_tokens: u32 = 0;
 
     // Build context budget from model's actual context window (or fallback to default)
@@ -1272,6 +1340,18 @@ pub async fn run_agent_loop(
                     "Agent loop completed"
                 );
 
+                // Log loop guard stats before returning
+                {
+                    let stats = loop_guard.stats();
+                    info!(
+                        total_calls = stats.total_calls,
+                        unique_calls = stats.unique_calls,
+                        blocked_calls = stats.blocked_calls,
+                        ping_pong = stats.ping_pong_detected,
+                        "Loop guard final stats"
+                    );
+                }
+
                 // Run auto_memorize directly (not via hook) for proper result handling.
                 // Relations are stored inside auto_memorize via store_relations().
                 // Only send new messages from this turn, not the full session history.
@@ -1372,14 +1452,12 @@ pub async fn run_agent_loop(
                 for tool_call in &response.tool_calls {
                     // Loop guard check
                     let verdict = loop_guard.check(&tool_call.name, &tool_call.input);
-                    match &verdict {
-                        LoopGuardVerdict::CircuitBreak(msg) => {
+                    match classify_loop_guard_verdict(&verdict) {
+                        LoopGuardAction::CircuitBreak { message } => {
                             warn!(tool = %tool_call.name, "Circuit breaker triggered");
-                            // Save session before bailing
                             if let Err(e) = memory.save_session_async(session).await {
                                 warn!("Failed to save session on circuit break: {e}");
                             }
-                            // Fire AgentLoopEnd hook on circuit break
                             if let Some(hook_reg) = hooks {
                                 let ctx = crate::hooks::HookContext {
                                     agent_name: &manifest.name,
@@ -1387,27 +1465,31 @@ pub async fn run_agent_loop(
                                     event: librefang_types::agent::HookEvent::AgentLoopEnd,
                                     data: serde_json::json!({
                                         "reason": "circuit_break",
-                                        "error": msg.as_str(),
+                                        "error": message.as_str(),
                                     }),
                                 };
                                 let _ = hook_reg.fire(&ctx);
                             }
-                            return Err(LibreFangError::Internal(msg.clone()));
+                            return Err(LibreFangError::Internal(message));
                         }
-                        LoopGuardVerdict::Block(msg) => {
+                        LoopGuardAction::Block { message } => {
                             warn!(tool = %tool_call.name, "Tool call blocked by loop guard");
                             tool_result_blocks.push(ContentBlock::ToolResult {
                                 tool_use_id: tool_call.id.clone(),
                                 tool_name: tool_call.name.clone(),
-                                content: msg.clone(),
+                                content: message,
                                 is_error: true,
                                 status: librefang_types::tool::ToolExecutionStatus::Error,
                                 approval_request_id: None,
                             });
                             continue;
                         }
-                        _ => {} // Allow or Warn — proceed with execution
+                        LoopGuardAction::Proceed => {}
                     }
+
+                    // Check poll backoff before execution
+                    let poll_backoff_hint =
+                        loop_guard.get_poll_backoff(&tool_call.name, &tool_call.input);
 
                     debug!(tool = %tool_call.name, id = %tool_call.id, "Executing tool");
 
@@ -1547,12 +1629,18 @@ pub async fn run_agent_loop(
                         ctx_window,
                     );
 
-                    // Append warning if verdict was Warn
-                    let final_content = if let LoopGuardVerdict::Warn(ref warn_msg) = verdict {
-                        format!("{content}\n\n[LOOP GUARD] {warn_msg}")
-                    } else {
-                        content
-                    };
+                    // Append loop-guard postfixes (warn, outcome, poll-backoff)
+                    let outcome_warning = loop_guard.record_outcome(
+                        &tool_call.name,
+                        &tool_call.input,
+                        &result.content,
+                    );
+                    let final_content = apply_loop_guard_postfixes(
+                        content,
+                        &verdict,
+                        outcome_warning.as_deref(),
+                        poll_backoff_hint,
+                    );
 
                     tool_result_blocks.push(ContentBlock::ToolResult {
                         tool_use_id: result.tool_use_id,
@@ -2129,6 +2217,7 @@ pub async fn run_agent_loop_streaming(
     proactive_memory: Option<Arc<librefang_memory::ProactiveMemoryStore>>,
     context_engine: Option<&dyn ContextEngine>,
     pending_messages: Option<&tokio::sync::Mutex<mpsc::Receiver<AgentLoopSignal>>>,
+    loop_guard_config: Option<&LoopGuardConfig>,
 ) -> LibreFangResult<AgentLoopResult> {
     info!(agent = %manifest.name, "Starting streaming agent loop");
 
@@ -2481,14 +2570,7 @@ pub async fn run_agent_loop_streaming(
         .unwrap_or(MAX_ITERATIONS);
 
     // Initialize loop guard — scale circuit breaker for autonomous agents
-    let loop_guard_config = {
-        let mut cfg = LoopGuardConfig::default();
-        if max_iterations > cfg.global_circuit_breaker {
-            cfg.global_circuit_breaker = max_iterations * 3;
-        }
-        cfg
-    };
-    let mut loop_guard = LoopGuard::new(loop_guard_config);
+    let mut loop_guard = init_loop_guard(max_iterations, loop_guard_config);
     let mut consecutive_max_tokens: u32 = 0;
 
     // Build context budget from model's actual context window (or fallback to default)
@@ -2894,6 +2976,18 @@ pub async fn run_agent_loop_streaming(
                     "Streaming agent loop completed"
                 );
 
+                // Log loop guard stats before returning
+                {
+                    let stats = loop_guard.stats();
+                    info!(
+                        total_calls = stats.total_calls,
+                        unique_calls = stats.unique_calls,
+                        blocked_calls = stats.blocked_calls,
+                        ping_pong = stats.ping_pong_detected,
+                        "Loop guard final stats"
+                    );
+                }
+
                 // Run auto_memorize directly for streaming path.
                 // Relations are stored inside auto_memorize via store_relations().
                 // Only send new messages from this turn, not the full session history.
@@ -2993,13 +3087,12 @@ pub async fn run_agent_loop_streaming(
                 for tool_call in &response.tool_calls {
                     // Loop guard check
                     let verdict = loop_guard.check(&tool_call.name, &tool_call.input);
-                    match &verdict {
-                        LoopGuardVerdict::CircuitBreak(msg) => {
+                    match classify_loop_guard_verdict(&verdict) {
+                        LoopGuardAction::CircuitBreak { message } => {
                             warn!(tool = %tool_call.name, "Circuit breaker triggered (streaming)");
                             if let Err(e) = memory.save_session_async(session).await {
                                 warn!("Failed to save session on circuit break: {e}");
                             }
-                            // Fire AgentLoopEnd hook on circuit break
                             if let Some(hook_reg) = hooks {
                                 let ctx = crate::hooks::HookContext {
                                     agent_name: &manifest.name,
@@ -3007,27 +3100,31 @@ pub async fn run_agent_loop_streaming(
                                     event: librefang_types::agent::HookEvent::AgentLoopEnd,
                                     data: serde_json::json!({
                                         "reason": "circuit_break",
-                                        "error": msg.as_str(),
+                                        "error": message.as_str(),
                                     }),
                                 };
                                 let _ = hook_reg.fire(&ctx);
                             }
-                            return Err(LibreFangError::Internal(msg.clone()));
+                            return Err(LibreFangError::Internal(message));
                         }
-                        LoopGuardVerdict::Block(msg) => {
+                        LoopGuardAction::Block { message } => {
                             warn!(tool = %tool_call.name, "Tool call blocked by loop guard (streaming)");
                             tool_result_blocks.push(ContentBlock::ToolResult {
                                 tool_use_id: tool_call.id.clone(),
                                 tool_name: tool_call.name.clone(),
-                                content: msg.clone(),
+                                content: message,
                                 is_error: true,
                                 status: librefang_types::tool::ToolExecutionStatus::Error,
                                 approval_request_id: None,
                             });
                             continue;
                         }
-                        _ => {} // Allow or Warn — proceed with execution
+                        LoopGuardAction::Proceed => {}
                     }
+
+                    // Check poll backoff before execution
+                    let poll_backoff_hint =
+                        loop_guard.get_poll_backoff(&tool_call.name, &tool_call.input);
 
                     debug!(tool = %tool_call.name, id = %tool_call.id, "Executing tool (streaming)");
 
@@ -3167,12 +3264,18 @@ pub async fn run_agent_loop_streaming(
                         ctx_window,
                     );
 
-                    // Append warning if verdict was Warn
-                    let final_content = if let LoopGuardVerdict::Warn(ref warn_msg) = verdict {
-                        format!("{content}\n\n[LOOP GUARD] {warn_msg}")
-                    } else {
-                        content
-                    };
+                    // Append loop-guard postfixes (warn, outcome, poll-backoff)
+                    let outcome_warning = loop_guard.record_outcome(
+                        &tool_call.name,
+                        &tool_call.input,
+                        &result.content,
+                    );
+                    let final_content = apply_loop_guard_postfixes(
+                        content,
+                        &verdict,
+                        outcome_warning.as_deref(),
+                        poll_backoff_hint,
+                    );
 
                     // Notify client of tool execution result (detect dead consumer)
                     let preview: String = final_content.chars().take(300).collect();
@@ -4653,6 +4756,7 @@ mod tests {
             None, // proactive_memory
             None, // context_engine
             None, // pending_messages
+            None, // loop_guard_config
         )
         .await
         .expect("Loop should complete without error");
@@ -4711,6 +4815,7 @@ mod tests {
             None, // proactive_memory
             None, // context_engine
             None, // pending_messages
+            None, // loop_guard_config
         )
         .await
         .expect("Loop should complete without error");
@@ -4768,6 +4873,7 @@ mod tests {
             None, // proactive_memory
             None, // context_engine
             None, // pending_messages
+            None, // loop_guard_config
         )
         .await
         .expect("Loop should complete without error");
@@ -4818,6 +4924,7 @@ mod tests {
             None, // proactive_memory
             None, // context_engine
             None, // pending_messages
+            None, // loop_guard_config
         )
         .await
         .expect("Streaming loop should complete without error");
@@ -4950,6 +5057,7 @@ mod tests {
             None, // proactive_memory
             None, // context_engine
             None, // pending_messages
+            None, // loop_guard_config
         )
         .await
         .expect("Loop should recover via retry");
@@ -5001,6 +5109,7 @@ mod tests {
             None, // proactive_memory
             None, // context_engine
             None, // pending_messages
+            None, // loop_guard_config
         )
         .await
         .expect("Loop should complete with fallback");
@@ -5060,6 +5169,7 @@ mod tests {
             None, // proactive_memory
             None, // context_engine
             None, // pending_messages
+            None, // loop_guard_config
         )
         .await
         .expect("Streaming loop should complete without error");
@@ -5841,6 +5951,7 @@ mod tests {
             None, // proactive_memory
             None, // context_engine
             None, // pending_messages
+            None, // loop_guard_config
         )
         .await
         .expect("Agent loop should complete");
@@ -5912,6 +6023,7 @@ mod tests {
             None, // proactive_memory
             None, // context_engine
             None, // pending_messages
+            None, // loop_guard_config
         )
         .await
         .expect("Normal loop should complete");
@@ -5979,6 +6091,7 @@ mod tests {
             None, // proactive_memory
             None, // context_engine
             None, // pending_messages
+            None, // loop_guard_config
         )
         .await
         .expect("Streaming loop should complete");
@@ -6276,6 +6389,7 @@ mod tests {
             None, // proactive_memory
             None, // context_engine
             None, // pending_messages
+            None, // loop_guard_config
         )
         .await
         .expect("Loop should complete after retry");
@@ -6332,6 +6446,7 @@ mod tests {
             None, // proactive_memory
             None, // context_engine
             None, // pending_messages
+            None, // loop_guard_config
         )
         .await
         .expect_err("Loop must exit with RepeatedToolFailures");
@@ -6389,6 +6504,7 @@ mod tests {
             None, // proactive_memory
             None, // context_engine
             None, // pending_messages
+            None, // loop_guard_config
         )
         .await
         .expect("Streaming loop should complete after retry");
@@ -6447,6 +6563,7 @@ mod tests {
             None, // proactive_memory
             None, // context_engine
             None, // pending_messages
+            None, // loop_guard_config
         )
         .await
         .expect_err("Streaming loop must exit with RepeatedToolFailures");

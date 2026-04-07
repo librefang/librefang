@@ -91,6 +91,7 @@ impl KernelConfig {
             "max_concurrent_bg_llm",
             "max_agent_call_depth",
             "max_request_body_bytes",
+            "loop_guard",
         ]
     }
 

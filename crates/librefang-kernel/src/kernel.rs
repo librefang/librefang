@@ -27,6 +27,7 @@ use librefang_runtime::kernel_handle::{self, KernelHandle};
 use librefang_runtime::llm_driver::{
     CompletionRequest, CompletionResponse, DriverConfig, LlmDriver, LlmError, StreamEvent,
 };
+use librefang_runtime::loop_guard::LoopGuardConfig;
 use librefang_runtime::python_runtime::{self, PythonConfig};
 use librefang_runtime::routing::ModelRouter;
 use librefang_runtime::sandbox::{SandboxConfig, WasmSandbox};
@@ -3230,6 +3231,7 @@ system_prompt = "You are a helpful assistant."
             None, // no proactive memory
             None, // no context engine
             None, // no pending messages
+            None, // no loop guard config
         )
         .await
         .map_err(KernelError::LibreFang)?;
@@ -3909,6 +3911,7 @@ system_prompt = "You are a helpful assistant."
             // Snapshot config for the duration of the agent loop call
             // (load_full returns Arc so the data stays alive across .await).
             let loop_cfg = kernel_clone.config.load_full();
+            let loop_guard_cfg: LoopGuardConfig = loop_cfg.loop_guard.clone().into();
             let result = run_agent_loop_streaming(
                 &manifest,
                 &message_owned,
@@ -3944,6 +3947,7 @@ system_prompt = "You are a helpful assistant."
                 kernel_clone.proactive_memory.get().cloned(),
                 kernel_clone.context_engine_for_agent(&manifest),
                 Some(&injection_rx),
+                Some(&loop_guard_cfg),
             )
             .await;
 
@@ -4939,6 +4943,7 @@ system_prompt = "You are a helpful assistant."
         let injection_rx = self.setup_injection_channel(agent_id);
 
         let start_time = std::time::Instant::now();
+        let loop_guard_cfg: LoopGuardConfig = cfg.loop_guard.clone().into();
         let result = run_agent_loop(
             &manifest,
             &message_with_links,
@@ -4973,6 +4978,7 @@ system_prompt = "You are a helpful assistant."
             proactive_memory,
             self.context_engine_for_agent(&manifest),
             Some(&injection_rx),
+            Some(&loop_guard_cfg),
         )
         .await;
 
