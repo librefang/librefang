@@ -481,7 +481,7 @@ PASS: workspace compiles clean
 
 ---
 
-## Day-by-Day Schedule
+## Day-by-Day Schedule — Sequential (Human-Driven)
 
 | Day | Round | Deliverable | Gate |
 |-----|-------|-------------|------|
@@ -495,6 +495,210 @@ PASS: workspace compiles clean
 | 4 mid | Round 5c | config.rs 15 handlers | Pattern gate: 15/15 + clippy + test |
 | 4 PM | Round 6 | 33 tests (3 batches), workspace green | Full gate pass |
 | 5 | BHR | Pre-BHR checklist → submit | Confirmation only |
+
+**Timeline:** 5-7 days (sequential human execution)
+
+---
+
+## Swarm Execution Model — Parallel (Agent-Driven) ⚡
+
+**For claude-flow multi-agent swarm execution (3x speedup):**
+
+### Parallelization Strategy
+
+Rounds 2-4 and Rounds 5a/5b/5c are **independent** and can execute concurrently with proper workspace coordination:
+
+```
+PHASE 1: Round 1 (agent-types)
+  └─ Agent-1: librefang-types (AccountId, AgentEntry.account_id)
+     └─ HANDOFF GATE: cargo test -p librefang-types ✅
+
+     ↓ (unblocks Phase 2)
+
+PHASE 2: Rounds 2+3+3.5 PARALLEL (consume types, no inter-crate dependencies)
+  ├─ Agent-2: librefang-memory (Round 2: v18 migration + 3 literals)
+  ├─ Agent-3: librefang-kernel (Round 3: 6 spawn variants + registry)
+  └─ Agent-4: librefang-cli (Round 3.5: 2 literals in tui/event.rs)
+     
+     Each agent runs independently: cargo test -p [crate]
+     ↓ COORDINATION GATE (Coordinator waits for all 3):
+     └─ Coordinator verifies: cargo build --workspace compiles clean
+        (catches any cross-crate breakage)
+
+     ↓ (unblocks Phase 3)
+
+PHASE 3: Round 4 (agent-api-foundation)
+  └─ Agent-5: librefang-api (extractors, macros, guard, HMAC)
+     └─ HANDOFF GATE: cargo test -p librefang-api ✅
+
+     ↓ (unblocks Phase 4)
+
+PHASE 4: Rounds 5a+5b+5c PARALLEL (independent route files, no dependencies)
+  ├─ Agent-6: agents.rs (50 handlers: add account:AccountId + check_account())
+  ├─ Agent-7: channels.rs (11 handlers: add account:AccountId extractor)
+  └─ Agent-8: config.rs (15 handlers: add account:AccountId + macros)
+     
+     Each agent works independently on separate file
+     ↓ COORDINATION GATE (Coordinator collects pattern counts):
+     └─ Coordinator verifies:
+        agents.rs: grep -c "account: AccountId" = 50
+        channels.rs: grep -c "account: AccountId" = 11
+        config.rs: grep -c "account: AccountId" = 15
+     └─ All three: cargo clippy -p librefang-api --all-targets
+     └─ All three: cargo test -p librefang-api
+
+     ↓ (unblocks Phase 5)
+
+PHASE 5: Round 6 (agent-tests)
+  └─ Agent-9: Write 33 tests + integration suite
+     └─ HANDOFF GATE: cargo test --workspace ✅
+
+PHASE 6: Pre-BHR (agent-validation)
+  └─ Agent-10: Run full checklist
+     └─ FINAL GATE: All exit criteria ✅
+```
+
+### Swarm Configuration (Ruflo)
+
+```yaml
+# mcp__claude-flow__swarm_init + agent_spawn
+topology: hierarchical              # Coordinator prevents drift
+maxAgents: 10                       # Peak: 3 agents in Phase 2 + 3 in Phase 4
+strategy: specialized              # Each agent specializes in one crate/file
+
+coordinator:
+  name: phase-coordinator
+  role: verify gates, unblock phases, enforce dependency order
+  
+agents:
+  - agent-types:
+      crate: librefang-types
+      rounds: [1]
+      gate: "cargo test -p librefang-types"
+      
+  - agent-memory:
+      crate: librefang-memory
+      rounds: [2]
+      gate: "cargo test -p librefang-memory"
+      parallel: true
+      unblock_on: [Phase 2 coordination gate]
+      
+  - agent-kernel:
+      crate: librefang-kernel
+      rounds: [3]
+      gate: "cargo test -p librefang-kernel"
+      parallel: true
+      unblock_on: [Phase 2 coordination gate]
+      
+  - agent-cli:
+      crate: librefang-cli
+      rounds: [3.5]
+      gate: "cargo build -p librefang-cli"
+      parallel: true
+      unblock_on: [Phase 2 coordination gate]
+      
+  - agent-api-foundation:
+      crate: librefang-api
+      rounds: [4]
+      gate: "cargo test -p librefang-api"
+      unblock_on: [Phase 2 coordination gate]
+      
+  - agent-handlers-agents:
+      file: crates/librefang-api/src/routes/agents.rs
+      rounds: [5a]
+      gate: "grep -c 'account: AccountId' = 50"
+      parallel: true
+      unblock_on: [Phase 4 coordination gate]
+      
+  - agent-handlers-channels:
+      file: crates/librefang-api/src/routes/channels.rs
+      rounds: [5b]
+      gate: "grep -c 'account: AccountId' = 11"
+      parallel: true
+      unblock_on: [Phase 4 coordination gate]
+      
+  - agent-handlers-config:
+      file: crates/librefang-api/src/routes/config.rs
+      rounds: [5c]
+      gate: "grep -c 'account: AccountId' = 15"
+      parallel: true
+      unblock_on: [Phase 4 coordination gate]
+      
+  - agent-tests:
+      crate: librefang-api
+      rounds: [6]
+      gate: "cargo test --workspace"
+      unblock_on: [Phase 4 coordination gate]
+      
+  - agent-validation:
+      role: pre-bhr-checklist
+      rounds: [final]
+      gate: all exit criteria
+      unblock_on: [Phase 5 gate]
+```
+
+### Coordination Handoff Gates
+
+Each phase waits for all agents in that phase to report:
+
+```bash
+# Phase 1 → Phase 2 handoff
+Phase 1 Coordinator Gate: agent-types report "✅ cargo test -p librefang-types"
+
+# Phase 2 → Phase 3 handoff (coordination point)
+Phase 2 Coordination Gate:
+  ✅ agent-memory report "✅ cargo test -p librefang-memory"
+  ✅ agent-kernel report "✅ cargo test -p librefang-kernel"
+  ✅ agent-cli report "✅ cargo build -p librefang-cli"
+  Coordinator verifies: "✅ cargo build --workspace" (cross-crate check)
+  → Unblock Phase 3
+
+# Phase 3 → Phase 4 handoff
+Phase 3 Coordinator Gate: agent-api-foundation report "✅ cargo test -p librefang-api"
+
+# Phase 4 → Phase 5 handoff (coordination point)
+Phase 4 Coordination Gate:
+  ✅ agent-handlers-agents report "✅ 50/50 handlers scoped"
+  ✅ agent-handlers-channels report "✅ 11/11 handlers scoped"
+  ✅ agent-handlers-config report "✅ 15/15 handlers scoped"
+  Coordinator verifies: "✅ cargo clippy -p librefang-api"
+  Coordinator verifies: "✅ cargo test -p librefang-api"
+  → Unblock Phase 5
+
+# Phase 5 → Phase 6 handoff
+Phase 5 Coordinator Gate: agent-tests report "✅ cargo test --workspace"
+  
+# Final gate
+Phase 6 Coordinator Gate: agent-validation report "✅ All pre-BHR criteria"
+```
+
+### Timeline — Swarm Execution
+
+| Phase | Rounds | Agents | Duration | Critical Path |
+|-------|--------|--------|----------|-------|
+| 1 | 1 | 1 | 1-2h | Sequential |
+| 2 | 2,3,3.5 | 3 parallel | 2-3h | Max(2h, 3h, 30m) = 3h |
+| Coordination | — | Coordinator | 15m | Verify workspace compile |
+| 3 | 4 | 1 | 3-4h | Sequential |
+| 4 | 5a,5b,5c | 3 parallel | 2-3h | Max(2-3h, 2-3h, 2-3h) = 2-3h |
+| Coordination | — | Coordinator | 15m | Pattern gates + clippy |
+| 5 | 6 | 1 | 2-3h | Sequential |
+| 6 | final | 1 | 1-2h | Sequential |
+| **TOTAL** | — | 10 max | **~14-19h** | **2 wall-clock days** |
+
+**Speedup:** 5-7 days → 1.5-2 days = **3.5x faster** ⚡
+
+### Swarm Readiness Checklist
+
+Before spawning swarm, ensure:
+- [ ] All 6 ADRs (MT-001 through RV-001) verified against BHR-AUDIT ✅
+- [ ] PLAN-MT-001 v2 (this file) with phase gates documented ✅
+- [ ] All handler counts verified (50+11+15=76) ✅
+- [ ] Migration v18 idempotency tested in isolation ✅
+- [ ] HMAC verification gates written + testable ✅
+- [ ] Pattern coverage script ready: `grep -c "account: AccountId"` ✅
+- [ ] Agents have clear, separate files to work on (no merge conflicts) ✅
+- [ ] Coordinator agent has handoff gate script ✅
 
 ---
 
