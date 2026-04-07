@@ -153,35 +153,38 @@ Depends on: Rounds 1-2 (types compile, CLI compiles). Creates infrastructure BEF
 | Add HMAC verification | `crates/librefang-api/src/middleware.rs` | `HMAC-SHA256(secret, account_id)` constant-time | AC-12 |
 | Wire into router | `crates/librefang-api/src/server.rs` | Add HMAC middleware layer to middleware stack | — |
 | Add Cargo deps | `crates/librefang-api/Cargo.toml` | `hmac = "0.12"`, `sha2 = "0.10"`, `hex = "0.4"` | — |
-| Register modules | `crates/librefang-api/src/lib.rs` | Add `pub mod extractors;` and `pub mod macros;` | — |
+| Register macros module | `crates/librefang-api/src/lib.rs` | Add `#[macro_use] mod macros;` (middleware.rs already exists with AccountId impl) | — |
 
 **TDD micro-cycles (4 batches, not 18-then-implement):**
 
 **Batch A: Extractor (RED→GREEN×6)**
-1. RED: `test_extract_account_id_from_header` → GREEN: implement `FromRequestParts` in middleware.rs
-2. RED: `test_extract_account_id_missing_header` → GREEN: return `AccountId(None)` via account.0
-3. RED: `test_extract_account_id_empty_header` → GREEN: treat empty as None
-4. RED: `test_extract_account_id_whitespace_trimmed` → GREEN: `.trim()` in header extraction
-5. RED: `test_extract_account_id_case_sensitive` → GREEN: no `.to_lowercase()`
-6. RED: `test_extract_is_infallible` → GREEN: `Rejection = Infallible` trait impl
+1. RED: `test_extract_account_id_from_header` → GREEN: implement `FromRequestParts` in middleware.rs; extract from X-Account-Id header
+2. RED: `test_extract_account_id_missing_header` → GREEN: return `AccountId(None)` when header absent
+3. RED: `test_extract_account_id_empty_header_filtered` → GREEN: filter out empty-only headers (use `.filter(|s| !s.trim().is_empty())`)
+4. RED: `test_extract_account_id_case_sensitive` → GREEN: preserve case; no `.to_lowercase()`
+5. RED: `test_extract_account_id_whitespace_preserved` → GREEN: return header value as-is (openfang-ai doesn't trim return, only filters empty)
+6. RED: `test_extract_is_infallible` → GREEN: `Rejection = Infallible` trait impl (never fails, always returns AccountId)
 
-**Batch B: Macros (RED→GREEN×4)**
-7. RED: `test_validate_account_rejects_none` → GREEN: implement `validate_account!`
-8. RED: `test_validate_account_accepts_some` → GREEN: pass-through on Some
-9. RED: `test_account_or_system_returns_system` → GREEN: implement `account_or_system!`
-10. RED: `test_account_or_system_returns_value` → GREEN: return inner value
+**Batch B: Macros (RED→GREEN×4) — Test via handler usage**
+7. RED: `test_validate_account_macro_requires_header` → GREEN: `validate_account!(account)` returns Err((400, JSON)) if account.0 is None
+8. RED: `test_validate_account_macro_passes_some` → GREEN: `validate_account!(account)` returns Ok when Some(string)
+9. RED: `test_account_or_system_macro_default_system` → GREEN: `account_or_system!(account)` returns "system" if None
+10. RED: `test_account_or_system_macro_returns_inner` → GREEN: `account_or_system!(account)` returns inner string if Some
 
-**Batch C: Guard (RED→GREEN×4)**
+**Batch C: Guard (RED→GREEN×5) — CRITICAL SECURITY TESTS**
 11. RED: `test_check_account_owner_passes` → GREEN: implement `check_account()`
 12. RED: `test_check_account_non_owner_gets_404` → GREEN: return 404 NOT_FOUND
 13. RED: `test_check_account_none_passes_all` → GREEN: None = legacy bypass
-14. RED: `test_error_body_is_generic` → GREEN: generic "Agent not found" message
+14. RED: `test_error_body_is_generic` → GREEN: generic "Agent not found" message (no account_id leak)
+14.5. RED: `test_check_account_scoped_request_vs_unowned_agent_returns_404` → GREEN: unowned agents (account_id: None in DB) MUST return 404 to scoped requests (prevents cross-tenant data access)
 
-**Batch D: HMAC (RED→GREEN×4)**
-15. RED: `test_hmac_valid_signature_passes` → GREEN: implement HMAC verify
-16. RED: `test_hmac_invalid_signature_rejected` → GREEN: return 401
-17. RED: `test_hmac_missing_signature_allowed` → GREEN: no secret = dev mode passthrough
-18. RED: `test_hmac_constant_time` → GREEN: use `verify_slice()` not `==`
+**Batch D: HMAC (RED→GREEN×6) — POLICY MATRIX COVERAGE**
+15. RED: `test_hmac_valid_signature_passes` → GREEN: verify_account_sig() returns true for valid HMAC-SHA256
+16. RED: `test_hmac_invalid_signature_rejected` → GREEN: verify returns false; account_sig_policy returns 401
+17. RED: `test_hmac_no_secret_config_allows_any` → GREEN: absent secret = dev mode, passes all (no enforcement)
+18. RED: `test_hmac_no_account_id_header_allows_all` → GREEN: X-Account-Id absent, passes (legacy)
+18.5. RED: `test_hmac_missing_signature_with_secret_rejected` → GREEN: secret configured but sig missing = 401
+19. RED: `test_hmac_constant_time` → GREEN: use `verify_slice()` not `==` (timing attack prevention)
 
 **REFACTOR after each batch.** Not after all 18.
 
@@ -231,16 +234,22 @@ pub async fn handler_name(
 | 1-50 | All 50 `pub async fn` in agents.rs | `check_account()` on reads after fetch, `validate_account!` on writes | AC-13–AC-17 |
 
 **Approach:**
-- GET/LIST: match on `account.0` to extract &str, then call `state.kernel.registry.list_by_account(oid)` for Some or `.list()` for None
-- Pattern:
+- GET/LIST: match on `account.0` to extract &str, then call `state.kernel.registry.list_by_account()` for Some or `.list()` for None
+- Pattern (list_by_account takes &str):
   ```rust
-  let raw_agents = match account.0 {
-      Some(ref oid) => state.kernel.registry.list_by_account(oid),
+  let raw_agents = match account.0.as_deref() {
+      Some(oid) => state.kernel.registry.list_by_account(oid),  // &str
       None => state.kernel.registry.list(),
   };
   ```
-- POST/PUT: `validate_account!(account)` then `state.kernel.spawn_agent(manifest)` with account threaded
-- DELETE: fetch via `get_scoped()`, then delete — returns 404 if cross-tenant
+- POST/PUT: `validate_account!(account)` then `state.kernel.spawn_agent(manifest)` with account. CRITICAL: immediately call `state.kernel.registry.set_account(agent_id, oid.clone())` to assign ownership.
+- DELETE: Use `check_account(entry, &account)` after fetch to verify ownership — returns 404 if cross-tenant or unowned
+
+**Registry methods (librefang-kernel):**
+- `list()` — all agents (legacy/admin only)
+- `list_by_account(&str)` — agents scoped to owner
+- `get(id)` — single agent by id (requires check_account guard)
+- `set_account(id, owner_string)` — assign agent to owner (call immediately after spawn)
 
 **Round 4a gate:**
 ```bash
@@ -289,7 +298,18 @@ cargo test -p librefang-api && \
 echo "Round 4c PASS"
 ```
 
-**Note on set_account():** References to `state.kernel.registry.set_account(agent_id, oid.clone())` appear in handler code but the actual implementation is deferred to the storage team's separate multi-tenant initiative. Phase 1 adds the account extraction infrastructure; storage-team adds the registry persistence. Handlers call set_account() but it will be implemented in v18 migration by the storage team.
+**CRITICAL: set_account() in Round 4a handlers:** When spawning an agent with a scoped account, handlers MUST call `state.kernel.registry.set_account(agent_id, oid.clone())` immediately after spawn succeeds. Without this, the agent has no owner and becomes visible to all tenants (SECURITY BUG). The registry method already exists in librefang-kernel; it's not deferred.
+
+```rust
+// In spawn/create handlers:
+if let Some(ref oid) = account.0 {
+    state.kernel.registry.set_account(agent_id, oid.clone())
+        .map_err(|e| (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "Failed to assign owner"}))
+        ))?;
+}
+```
 
 ---
 
