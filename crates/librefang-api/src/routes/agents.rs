@@ -1627,7 +1627,7 @@ pub async fn kill_agent(
         Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
         None => state.kernel.agent_registry().get(agent_id),
     };
-    let entry = match entry {
+    let _entry = match entry {
         Some(e) => e,
         None => {
             return (
@@ -1673,7 +1673,7 @@ pub async fn suspend_agent(
         Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
         None => state.kernel.agent_registry().get(agent_id),
     };
-    let entry = match entry {
+    let _entry = match entry {
         Some(e) => e,
         None => {
             return (
@@ -1715,7 +1715,7 @@ pub async fn resume_agent(
         Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
         None => state.kernel.agent_registry().get(agent_id),
     };
-    let entry = match entry {
+    let _entry = match entry {
         Some(e) => e,
         None => {
             return (
@@ -1770,7 +1770,7 @@ pub async fn set_agent_mode(
         Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
         None => state.kernel.agent_registry().get(agent_id),
     };
-    let entry = match entry {
+    let _entry = match entry {
         Some(e) => e,
         None => {
             return (
@@ -2049,7 +2049,7 @@ pub async fn list_agent_sessions(
         Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
         None => state.kernel.agent_registry().get(agent_id),
     };
-    let entry = match entry {
+    let _entry = match entry {
         Some(e) => e,
         None => {
             return (
@@ -2105,7 +2105,7 @@ pub async fn create_agent_session(
         Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
         None => state.kernel.agent_registry().get(agent_id),
     };
-    let entry = match entry {
+    let _entry = match entry {
         Some(e) => e,
         None => {
             return (
@@ -2160,7 +2160,7 @@ pub async fn switch_agent_session(
         Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
         None => state.kernel.agent_registry().get(agent_id),
     };
-    let entry = match entry {
+    let _entry = match entry {
         Some(e) => e,
         None => {
             return (
@@ -2228,7 +2228,7 @@ pub async fn export_session(
         Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
         None => state.kernel.agent_registry().get(agent_id),
     };
-    let entry = match entry {
+    let _entry = match entry {
         Some(e) => e,
         None => {
             return (
@@ -2293,7 +2293,7 @@ pub async fn import_session(
         Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
         None => state.kernel.agent_registry().get(agent_id),
     };
-    let entry = match entry {
+    let _entry = match entry {
         Some(e) => e,
         None => {
             return (
@@ -2362,7 +2362,7 @@ pub async fn reset_session(
         Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
         None => state.kernel.agent_registry().get(agent_id),
     };
-    let entry = match entry {
+    let _entry = match entry {
         Some(e) => e,
         None => {
             return (
@@ -2416,7 +2416,7 @@ pub async fn reboot_session(
         Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
         None => state.kernel.agent_registry().get(agent_id),
     };
-    let entry = match entry {
+    let _entry = match entry {
         Some(e) => e,
         None => {
             return (
@@ -2472,7 +2472,7 @@ pub async fn clear_agent_history(
         Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
         None => state.kernel.agent_registry().get(agent_id),
     };
-    let entry = match entry {
+    let _entry = match entry {
         Some(e) => e,
         None => {
             return (
@@ -2533,7 +2533,7 @@ pub async fn compact_session(
         Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
         None => state.kernel.agent_registry().get(agent_id),
     };
-    let entry = match entry {
+    let _entry = match entry {
         Some(e) => e,
         None => {
             return (
@@ -2590,7 +2590,7 @@ pub async fn stop_agent(
         Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
         None => state.kernel.agent_registry().get(agent_id),
     };
-    let entry = match entry {
+    let _entry = match entry {
         Some(e) => e,
         None => {
             return (
@@ -2982,7 +2982,7 @@ pub async fn set_agent_skills(
         Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
         None => state.kernel.agent_registry().get(agent_id),
     };
-    let entry = match entry {
+    let _entry = match entry {
         Some(e) => e,
         None => {
             return (
@@ -3121,7 +3121,7 @@ pub async fn set_agent_mcp_servers(
         Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
         None => state.kernel.agent_registry().get(agent_id),
     };
-    let entry = match entry {
+    let _entry = match entry {
         Some(e) => e,
         None => {
             return (
@@ -3397,7 +3397,7 @@ pub async fn update_agent_identity(
         Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
         None => state.kernel.agent_registry().get(agent_id),
     };
-    let entry = match entry {
+    let _entry = match entry {
         Some(e) => e,
         None => {
             return (
@@ -3526,7 +3526,7 @@ pub async fn patch_agent_config(
         Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
         None => state.kernel.agent_registry().get(agent_id),
     };
-    let entry = match entry {
+    let _entry = match entry {
         Some(e) => e,
         None => {
             return (
@@ -4007,7 +4007,7 @@ pub async fn reload_agent_manifest(
         Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
         None => state.kernel.agent_registry().get(agent_id),
     };
-    let entry = match entry {
+    let _entry = match entry {
         Some(e) => e,
         None => {
             return (
@@ -4576,7 +4576,7 @@ pub async fn upload_file(
         Some(ref owner) => state.kernel.agent_registry().get_scoped(_agent_id, owner),
         None => state.kernel.agent_registry().get(_agent_id),
     };
-    let entry = match entry {
+    let _entry = match entry {
         Some(e) => e,
         None => {
             return (
@@ -4795,7 +4795,7 @@ pub async fn get_agent_deliveries(
         Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
         None => state.kernel.agent_registry().get(agent_id),
     };
-    let entry = match entry {
+    let _entry = match entry {
         Some(e) => e,
         None => {
             return (
@@ -4863,7 +4863,7 @@ pub async fn inject_message(
         Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
         None => state.kernel.agent_registry().get(agent_id),
     };
-    let entry = match entry {
+    let _entry = match entry {
         Some(e) => e,
         None => {
             return ApiErrorResponse::not_found("Agent not found").into_response();
