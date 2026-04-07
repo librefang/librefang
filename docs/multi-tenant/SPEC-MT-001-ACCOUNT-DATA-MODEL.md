@@ -28,7 +28,7 @@ verified openfang-ai implementation (ADR-025, ADR-026, ADR-027).
 | validate_account! macro | `openfang-api/src/macros.rs` | Returns 400 if `AccountId(None)` | Port directly |
 | account_or_system! macro | `openfang-api/src/macros.rs` | Defaults to `"system"` | Port directly — keep `"system"` string |
 | HMAC sig verification | `openfang-api/src/middleware.rs` | `HMAC-SHA256(secret, account_id)` constant-time | Port directly |
-| Handler pattern | `openfang-api/src/routes/agents.rs` (30+ handlers) | `account: AccountId` 2nd param, `check_account()` before op | Same pattern, 297 handlers |
+| Handler pattern | `openfang-api/src/routes/agents.rs` (30+ handlers) | `account: AccountId` 2nd param, `check_account()` before op | Same pattern, 317 handlers |
 | 33 account tests | Multiple test files | Extraction, HMAC, ownership guard, info disclosure | Port all |
 
 ### openfang-ai Key Design Decisions (proven correct)

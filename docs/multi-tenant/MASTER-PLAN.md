@@ -109,10 +109,9 @@ None of these carry account context.
 1. **SaaS-mediated auth (primary path):** Qwntik's server actions compute an HMAC signature over the request using a shared secret (`ACCOUNT_HMAC_SECRET`). LibreFang validates:
    ```
    X-Account-Id: acc_abc123
-   X-Account-Signature: hmac-sha256(secret, account_id + timestamp)
-   X-Account-Timestamp: 1712419200
+   X-Account-Sig: hmac-sha256(secret, account_id)
    ```
-   This is the proven pattern from qwntik's `openfang-account-options.ts`.
+   This is the proven pattern from qwntik's `openfang-account-options.ts`. Note: the actual qwntik implementation uses only `X-Account-Id` and `X-Account-Sig` (no timestamp header).
 
 2. **Direct API key auth (backward compat):** When only a bearer token is provided (no `X-Account-Id` header), the request is assigned to the `system` account. Existing integrations work unchanged.
 
@@ -125,9 +124,8 @@ None of these carry account context.
 // New middleware: extract_account
 async fn extract_account(req: &mut Request) -> AccountContext {
     if let Some(account_id) = req.headers().get("X-Account-Id") {
-        let signature = req.headers().get("X-Account-Signature");
-        let timestamp = req.headers().get("X-Account-Timestamp");
-        validate_hmac(account_id, signature, timestamp, &hmac_secret)?;
+        let signature = req.headers().get("X-Account-Sig");
+        validate_hmac(account_id, signature, &hmac_secret)?;
         AccountContext { account_id, source: AccountSource::Header }
     } else {
         AccountContext { account_id: "system", source: AccountSource::Default }
@@ -135,10 +133,15 @@ async fn extract_account(req: &mut Request) -> AccountContext {
 }
 ```
 
+> **Note:** The openfang implementation uses a `FromRequestParts` extractor (returning
+> `AccountId(Option<String>)`) rather than a standalone middleware function. The actual
+> qwntik implementation sends only `X-Account-Id` and `X-Account-Sig` headers — there
+> is no `X-Account-Timestamp` header in the production implementation.
+
 ### Security Properties
 - **404 not 403**: Wrong account returns 404 (prevents enumeration) — proven in openfang ADR-027
 - **Timing-safe comparison**: HMAC validation uses constant-time compare
-- **Timestamp window**: ±5 minute tolerance on `X-Account-Timestamp` to prevent replay
+- **Replay protection**: If a timestamp component is added in future, ±5 minute tolerance (note: current qwntik implementation does NOT use `X-Account-Timestamp`)
 - **No credential leakage**: Account credentials never appear in API responses
 
 ### Affected Files
@@ -394,7 +397,7 @@ crates/librefang-api/src/routes/memory.rs        → Extract account from middle
 PROPOSED (adapted from openfang-ai ADR-033, status: ACCEPTED)
 
 ### Context
-The openfang-ai fork already ported 7 Rust crates from the ruvector upstream into its workspace. These crates compile into a PostgreSQL extension (`ruvector.so`) that provides 233+ SQL functions for vector operations, HNSW indexing, local embeddings, attention mechanisms, and learning systems.
+The openfang-ai fork already ported 7 Rust crates from the ruvector upstream into its workspace. These crates compile into a PostgreSQL extension (`ruvector.so`) that provides 197 SQL functions (161 verified live in pg_proc) for vector operations, HNSW indexing, local embeddings, attention mechanisms, and learning systems.
 
 LibreFang's memory system already has:
 - `VectorStore` trait in `librefang-types/src/memory.rs` — abstract interface with `insert()`, `search()`, `delete()`, `get_embeddings()`
@@ -411,7 +414,7 @@ The extension runs **inside Supabase's PostgreSQL** (self-hosted Docker). LibreF
 
 | Crate | Version | Purpose | Dependencies |
 |-------|---------|---------|-------------|
-| `ruvector-postgres` | 0.3.0 | PG extension hub — 233+ SQL functions via pgrx 0.12.6 | All below (optional) |
+| `ruvector-postgres` | 0.3.0 | PG extension hub — 197 SQL functions via pgrx 0.12.6 (161 live) | All below (optional) |
 | `ruvector-solver` | 2.0.4 | Sublinear sparse linear system solvers | None |
 | `ruvector-math` | 2.0.4 | Optimal transport, information geometry, manifolds | None |
 | `ruvector-attention` | 2.0.4 | 39 attention mechanisms | ruvector-math (optional) |
@@ -426,7 +429,7 @@ The extension runs **inside Supabase's PostgreSQL** (self-hosted Docker). LibreF
 │                         │              │  + ruvector extension v0.3   │
 │  HttpVectorStore ───────┤  /insert     │  + RLS policies              │
 │  (existing, unchanged)  │  /search     │  + HNSW indexes              │
-│                         │  /delete     │  + 233+ SQL functions        │
+│                         │  /delete     │  + 197 SQL functions         │
 │                         │  /embeddings │  + Local embeddings (384-dim)│
 └─────────────────────────┘              └──────────────────────────────┘
 ```
@@ -512,7 +515,7 @@ Adapted from openfang-ai SPEC-033. All 26 criteria were verified on 2026-04-06 i
 |---|-----------|-------------|
 | 3.1 | `docker build -f Dockerfile.supabase-ruvector .` succeeds | Build completes without error |
 | 3.2 | Extension loads on startup | `CREATE EXTENSION ruvector` succeeds |
-| 3.3 | 233+ SQL functions registered | `SELECT count(*) FROM pg_proc WHERE proname LIKE 'ruvector_%'` |
+| 3.3 | 161+ SQL functions registered (197 in SQL file) | `SELECT count(*) FROM pg_proc WHERE proname LIKE 'ruvector_%'` |
 | 3.4 | SIMD detected correctly | `SELECT ruvector_simd_info()` returns architecture |
 | 3.5 | Base image is supabase/postgres:17.x | `FROM` line in Dockerfile |
 
@@ -771,7 +774,7 @@ INSERT INTO migrations (name) VALUES ('001_add_account_isolation');
 | 0.3 | Add as workspace members (commented by default) | workspace | `Cargo.toml` | Workspace resolves with members uncommented |
 | 0.4 | Port Dockerfile.supabase-ruvector | docker | `docker/Dockerfile.supabase-ruvector` | `docker build` succeeds |
 | 0.5 | Add supabase-ruvector to docker-compose | docker | `docker/docker-compose.yml` | `docker compose up` starts PG with extension |
-| 0.6 | Verify extension: 233+ functions, SIMD, embeddings | — | — | SPEC-RV-001 Groups 3-5 pass |
+| 0.6 | Verify extension: 161+ functions (197 in file), SIMD, embeddings | — | — | SPEC-RV-001 Groups 3-5 pass |
 | 0.7 | Configure HttpVectorStore → Supabase endpoint | librefang-memory | `src/http_vector_store.rs` config example | Semantic search round-trip via HTTP |
 
 **Exit criteria:** `SELECT ruvector_embed('hello')` works in Supabase. LibreFang's `HttpVectorStore` retrieves results from it. SPEC-RV-001 all 26 criteria pass.
@@ -884,7 +887,7 @@ librefang restart
 - Skill installations (remain global)
 
 #### For Qwntik Integration
-Qwntik's `@kit/openfang` package sends `X-Account-Id` + `X-Account-Signature` headers on all requests via `getAccountOptions()`. Once multi-tenant is enabled on LibreFang, Qwntik's existing account isolation flows through end-to-end.
+Qwntik's `@kit/openfang` package sends `X-Account-Id` + `X-Account-Sig` headers on all requests via `getAccountOptions()`. Once multi-tenant is enabled on LibreFang, Qwntik's existing account isolation flows through end-to-end.
 
 Required Qwntik config:
 ```env

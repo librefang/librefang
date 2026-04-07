@@ -17,7 +17,7 @@ for free.
 
 | Source | What it proves |
 |--------|---------------|
-| librefang `VectorStore` trait | 5-method interface at `librefang-types/src/memory.rs:1183` |
+| librefang `VectorStore` trait | 5-method interface at `librefang-types/src/memory.rs:1228` |
 | librefang `HttpVectorStore` | Working HTTP impl pattern at `librefang-memory/src/http_vector_store.rs` |
 | librefang kernel init | Backend selection at `kernel.rs:1668-1685` |
 | librefang config | `vector_backend` + `vector_store_url` at `config/types.rs:3145` |
@@ -29,9 +29,9 @@ for free.
 
 | Component | File | Status |
 |-----------|------|--------|
-| `VectorStore` trait (5 methods) | `librefang-types/src/memory.rs:1183-1348` | ✅ Exists |
-| `VectorSearchResult` struct | `librefang-types/src/memory.rs:1185-1195` | ✅ Exists |
-| `HttpVectorStore` impl | `librefang-memory/src/http_vector_store.rs:1-232` | ✅ Exists |
+| `VectorStore` trait (5 methods) | `librefang-types/src/memory.rs:1228-1393` | ✅ Exists |
+| `VectorSearchResult` struct | `librefang-types/src/memory.rs:1230-1240` | ✅ Exists |
+| `HttpVectorStore` impl | `librefang-memory/src/http_vector_store.rs:1-259` | ✅ Exists |
 | `SqliteVectorStore` impl | `librefang-memory/src/semantic.rs:950-1514` | ✅ Exists |
 | `MemorySubstrate::set_vector_store()` | `librefang-memory/src/substrate.rs:110-114` | ✅ Exists |
 | Config: `vector_backend`, `vector_store_url` | `librefang-types/src/config/types.rs:3145-3157` | ✅ Exists |
