@@ -640,7 +640,13 @@ impl CircuitBreakerState {
             return false; // circuit closed
         }
         match self.opened_at {
-            None => false,
+            None => {
+                // Restored from persistent storage without a timestamp (opened_at was NULL).
+                // The failure count already meets the threshold, so latch the circuit now
+                // so that the full cooldown period is enforced from this moment.
+                self.opened_at = Some(std::time::Instant::now());
+                true
+            }
             Some(t) => {
                 if t.elapsed().as_secs() >= reset_secs {
                     // Cooldown elapsed → allow one half-open probe
@@ -829,7 +835,7 @@ pub struct ScriptableContextEngine {
     /// Persistent SQLite trace store (None if it could not be opened at construction time).
     trace_store: Option<std::sync::Arc<crate::trace_store::TraceStore>>,
     /// Tracks all spawned after_turn background tasks for graceful shutdown.
-    after_turn_tasks: std::sync::Arc<std::sync::Mutex<tokio::task::JoinSet<()>>>,
+    after_turn_tasks: std::sync::Arc<tokio::sync::Mutex<tokio::task::JoinSet<()>>>,
     /// Memory substrate for after_turn hook memory injection.
     memory_substrate: std::sync::Arc<librefang_memory::MemorySubstrate>,
     /// Overrides applied by the bootstrap hook at startup.
@@ -959,7 +965,7 @@ impl ScriptableContextEngine {
             otel_endpoint: hooks.otel_endpoint.clone(),
             plugin_name: String::new(), // filled in by with_plugin_name()
             trace_store: None,          // filled in by with_plugin_name()
-            after_turn_tasks: std::sync::Arc::new(std::sync::Mutex::new(tokio::task::JoinSet::new())),
+            after_turn_tasks: std::sync::Arc::new(tokio::sync::Mutex::new(tokio::task::JoinSet::new())),
             memory_substrate,
             bootstrap_applied_overrides: std::sync::Arc::new(std::sync::Mutex::new(BootstrapOverrides::default())),
             rate_limiters: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
@@ -1300,25 +1306,23 @@ impl ScriptableContextEngine {
     /// Call this during daemon shutdown after stopping the agent loop so that
     /// no after_turn work is silently dropped. Times out after `timeout_secs`.
     pub async fn wait_for_after_turn_tasks(&self, timeout_secs: u64) {
-        let tasks = match self.after_turn_tasks.lock() {
-            Ok(t) => t,
-            Err(_) => return,
-        };
-        // JoinSet doesn't expose a timed join_all directly, so we use a select.
-        // We drop the lock before awaiting to avoid holding it across an await point.
-        drop(tasks);
-
         let deadline = tokio::time::Instant::now()
             + std::time::Duration::from_secs(timeout_secs);
+        // Lock once and drain; this is called during shutdown so no new tasks will
+        // be spawned. Holding the async Mutex across join_next().await is safe here.
+        let mut tasks = self.after_turn_tasks.lock().await;
         loop {
-            let mut guard = match self.after_turn_tasks.lock() {
-                Ok(g) => g,
-                Err(_) => break,
-            };
-            if guard.is_empty() { break; }
-            drop(guard);
-            if tokio::time::Instant::now() >= deadline { break; }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            if tasks.is_empty() {
+                break;
+            }
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            tokio::select! {
+                _ = tasks.join_next() => {}
+                _ = tokio::time::sleep(remaining) => { break; }
+            }
         }
     }
 
@@ -1611,10 +1615,25 @@ impl ScriptableContextEngine {
                             let errs = Self::validate_schema(output_schema, &v, &format!("{hook_name}/output"));
                             if !errs.is_empty() {
                                 if output_schema_strict {
-                                    return Err(format!(
+                                    let err_msg = format!(
                                         "hook {hook_name} output failed schema validation: {}",
                                         errs.join("; ")
-                                    ));
+                                    );
+                                    // Record the failure trace before surfacing the error so
+                                    // the trace store is never missing an entry for this call.
+                                    Self::push_trace(traces, HookTrace {
+                                        trace_id: trace_id.clone(),
+                                        correlation_id: correlation_id.to_string(),
+                                        hook: hook_name.to_string(),
+                                        started_at: started_at.clone(),
+                                        elapsed_ms: t.elapsed().as_millis() as u64,
+                                        success: false,
+                                        error: Some(err_msg.clone()),
+                                        input_preview: input_preview.clone(),
+                                        output_preview: None,
+                                        annotations: None,
+                                    }, trace_store, plugin_name);
+                                    return Err(err_msg);
                                 }
                                 for e in &errs {
                                     warn!("{e}");
@@ -1678,7 +1697,14 @@ impl ScriptableContextEngine {
         let max_rpm = self.inner.config.max_hook_calls_per_minute;
         if max_rpm > 0 {
             let mut limiters = self.rate_limiters.lock().unwrap_or_else(|e| e.into_inner());
-            let limiter = limiters.entry(hook_name.to_string()).or_default();
+            // Key by "{agent_id}:{hook_name}" so one agent cannot exhaust the
+            // rate limit for all other agents sharing the same plugin.
+            let rl_key = format!(
+                "{}:{}",
+                agent_id.map(|id| id.0.as_str()).unwrap_or(""),
+                hook_name
+            );
+            let limiter = limiters.entry(rl_key).or_default();
             if !limiter.check_and_record(max_rpm) {
                 warn!(
                     hook = hook_name,
@@ -2561,7 +2587,8 @@ impl ContextEngine for ScriptableContextEngine {
         let output_schema_strict = self.inner.config.output_schema_strict;
         let after_turn_correlation_id = generate_trace_id();
         let event_bus_arc = self.event_bus.clone();
-        if let Ok(mut tasks) = self.after_turn_tasks.lock() {
+        {
+            let mut tasks = self.after_turn_tasks.lock().await;
             // Reap already-completed tasks to prevent unbounded growth.
             while tasks.try_join_next().is_some() {}
 
