@@ -66,5 +66,6 @@ result
 # Dev workflow tooling (local only)
 .claude-flow/
 .agentic-qe/
+.swarm/
 docs/adr/
 CLAUDE.md
