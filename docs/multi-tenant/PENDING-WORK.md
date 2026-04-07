@@ -75,9 +75,9 @@ Notes:
 
 ### 4. HIGH: Replace tests that currently bless the insecure bypass
 
-- [ ] Rewrite middleware tests so missing `X-Account-Id` fails when multi-tenant mode is enabled
-- [ ] Add regression tests proving no-header requests do not gain global visibility
-- [ ] Remove or invert assertions that encode legacy full-access behavior under multi-tenant mode
+- [x] Rewrite middleware tests so missing `X-Account-Id` fails when multi-tenant mode is enabled
+- [x] Add regression tests proving no-header requests do not gain global visibility
+- [x] Remove or invert assertions that encode legacy full-access behavior under multi-tenant mode
 
 Files to change:
 - `crates/librefang-api/src/middleware.rs`
@@ -146,8 +146,8 @@ Notes:
 
 ### 9. HIGH: Create the missing integration test file for Round 5
 
-- [ ] Create `crates/librefang-api/tests/account_tests.rs`
-- [ ] Cover secure multi-tenant mode end-to-end, not just unit/middleware helpers
+- [x] Create `crates/librefang-api/tests/account_tests.rs` — 13 integration tests
+- [x] Cover secure multi-tenant mode end-to-end, not just unit/middleware helpers
 - [ ] Include cross-tenant read/write denial tests across agents, config, uploads, channels, and remaining scoped modules as they land
 
 Files to change:
@@ -160,7 +160,7 @@ Files to change:
 - [x] P0: Scope the unprotected route modules: `budget`, `memory`, `system`, `workflows`, `prompts` — AccountId extractor on all handlers
 - [x] P1: Scope `channels.rs` — 11/11 handlers scoped
 - [ ] P1: Close the `/api/uploads/*` leak
-- [ ] P1: Replace insecure test expectations and add the missing integration suite
+- [x] P1: Replace insecure test expectations and add the missing integration suite — 13 tests in `account_tests.rs`
 - [ ] P2: Restrict global telemetry endpoints
 - [ ] P2: Add HMAC replay protection
 - [ ] P3: Refactor remaining handlers to use `get_scoped()`
