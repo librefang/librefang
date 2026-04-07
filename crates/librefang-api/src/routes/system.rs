@@ -1,6 +1,7 @@
 //! Audit, logging, tools, profiles, templates, memory, approvals,
 //! bindings, pairing, webhooks, and miscellaneous system handlers.
 
+use super::shared::check_account;
 use super::AppState;
 use crate::middleware::AccountId;
 
@@ -508,7 +509,7 @@ pub async fn delete_agent_kv_key(
 /// GET /api/agents/:id/memory/export — Export all KV memory for an agent as JSON.
 #[utoipa::path(get, path = "/api/agents/{id}/memory/export", tag = "memory", params(("id" = String, Path, description = "Agent ID")), responses((status = 200, description = "Exported memory", body = serde_json::Value)))]
 pub async fn export_agent_memory(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
@@ -522,9 +523,16 @@ pub async fn export_agent_memory(
         }
     };
 
-    // Verify agent exists
-    if state.kernel.agent_registry().get(agent_id).is_none() {
-        return ApiErrorResponse::not_found(t.t("api-error-agent-not-found")).into_json_tuple();
+    // Verify agent exists and belongs to requesting account
+    match state.kernel.agent_registry().get(agent_id) {
+        None => {
+            return ApiErrorResponse::not_found(t.t("api-error-agent-not-found")).into_json_tuple();
+        }
+        Some(entry) => {
+            if let Err((code, json)) = check_account(&entry, &account) {
+                return (code, json);
+            }
+        }
     }
 
     match state.kernel.memory_substrate().list_kv(agent_id) {
@@ -552,7 +560,7 @@ pub async fn export_agent_memory(
 /// Optionally accepts `clear_existing: true` to wipe existing memory before import.
 #[utoipa::path(post, path = "/api/agents/{id}/memory/import", tag = "memory", params(("id" = String, Path, description = "Agent ID")), request_body = serde_json::Value, responses((status = 200, description = "Memory imported", body = serde_json::Value)))]
 pub async fn import_agent_memory(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
@@ -567,9 +575,16 @@ pub async fn import_agent_memory(
         }
     };
 
-    // Verify agent exists
-    if state.kernel.agent_registry().get(agent_id).is_none() {
-        return ApiErrorResponse::not_found(t.t("api-error-agent-not-found")).into_json_tuple();
+    // Verify agent exists and belongs to requesting account
+    match state.kernel.agent_registry().get(agent_id) {
+        None => {
+            return ApiErrorResponse::not_found(t.t("api-error-agent-not-found")).into_json_tuple();
+        }
+        Some(entry) => {
+            if let Err((code, json)) = check_account(&entry, &account) {
+                return (code, json);
+            }
+        }
     }
 
     let kv = match body.get("kv").and_then(|v| v.as_object()) {
@@ -1253,13 +1268,16 @@ fn approval_to_json(
 /// `action_summary` → `action`, `agent_id` → `agent_name`, `requested_at` → `created_at`.
 #[utoipa::path(get, path = "/api/approvals", tag = "approvals", responses((status = 200, description = "List pending and recent approvals", body = Vec<serde_json::Value>)))]
 pub async fn list_approvals(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     let pending = state.kernel.approvals().list_pending();
     let recent = state.kernel.approvals().list_recent(50);
 
-    let registry_agents = state.kernel.agent_registry().list();
+    let registry_agents = match account.0 {
+        Some(ref owner) => state.kernel.agent_registry().list_by_account(owner),
+        None => state.kernel.agent_registry().list(),
+    };
     let agent_name_for = |agent_id: &str| {
         registry_agents
             .iter()
@@ -1319,7 +1337,7 @@ pub async fn list_approvals(
 /// GET /api/approvals/{id} — Get a single approval request by ID.
 #[utoipa::path(get, path = "/api/approvals/{id}", tag = "approvals", params(("id" = String, Path, description = "Approval ID")), responses((status = 200, description = "Single approval request", body = serde_json::Value), (status = 404, description = "Approval not found")))]
 pub async fn get_approval(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
@@ -1335,7 +1353,10 @@ pub async fn get_approval(
 
     match state.kernel.approvals().get_pending(uuid) {
         Some(a) => {
-            let registry_agents = state.kernel.agent_registry().list();
+            let registry_agents = match account.0 {
+                Some(ref owner) => state.kernel.agent_registry().list_by_account(owner),
+                None => state.kernel.agent_registry().list(),
+            };
             (StatusCode::OK, Json(approval_to_json(&a, &registry_agents)))
         }
         None => {
@@ -1735,7 +1756,7 @@ pub async fn webhook_wake(
 /// This enables external systems (CI/CD, Slack, etc.) to trigger agent work.
 #[utoipa::path(post, path = "/api/hooks/agent", tag = "webhooks", request_body = serde_json::Value, responses((status = 200, description = "Agent hook triggered", body = serde_json::Value)))]
 pub async fn webhook_agent(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
     lang: Option<axum::Extension<RequestLanguage>>,
@@ -1789,7 +1810,11 @@ pub async fn webhook_agent(
         },
         None => {
             // No agent specified — use the first available agent
-            match state.kernel.agent_registry().list().first() {
+            let agents = match account.0 {
+                Some(ref owner) => state.kernel.agent_registry().list_by_account(owner),
+                None => state.kernel.agent_registry().list(),
+            };
+            match agents.first() {
                 Some(entry) => entry.id,
                 None => {
                     return ApiErrorResponse::not_found(err_no_agents).into_json_tuple();
@@ -1841,12 +1866,15 @@ pub async fn list_bindings(
 /// POST /api/bindings — Add a new agent binding.
 #[utoipa::path(post, path = "/api/bindings", tag = "system", request_body = serde_json::Value, responses((status = 200, description = "Binding added", body = serde_json::Value)))]
 pub async fn add_binding(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(binding): Json<librefang_types::config::AgentBinding>,
 ) -> impl IntoResponse {
     // Validate agent exists
-    let agents = state.kernel.agent_registry().list();
+    let agents = match account.0 {
+        Some(ref owner) => state.kernel.agent_registry().list_by_account(owner),
+        None => state.kernel.agent_registry().list(),
+    };
     let agent_exists = agents.iter().any(|e| e.name == binding.agent)
         || binding.agent.parse::<uuid::Uuid>().is_ok();
     if !agent_exists {

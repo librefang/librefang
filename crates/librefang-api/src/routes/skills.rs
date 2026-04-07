@@ -154,6 +154,7 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
 
 use super::channels::FieldType;
 use super::config::json_to_toml_value;
+use super::shared::check_account;
 use super::AppState;
 use super::RequestLanguage;
 use crate::middleware::AccountId;
@@ -2478,7 +2479,7 @@ pub async fn hand_send_message(
 
 /// GET /api/hands/instances/:id/session — Get hand conversation history.
 pub async fn hand_get_session(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<uuid::Uuid>,
 ) -> impl IntoResponse {
@@ -2494,6 +2495,11 @@ pub async fn hand_get_session(
             return ApiErrorResponse::not_found("Linked agent not found").into_json_tuple();
         }
     };
+
+    // Multi-tenant isolation: verify the agent belongs to the requesting account
+    if let Err((code, json)) = check_account(&entry, &account) {
+        return (code, json);
+    }
 
     match state
         .kernel
@@ -2585,7 +2591,7 @@ pub async fn hand_get_session(
 /// Returns everything the dashboard needs in one call: hand metadata,
 /// activation state, agent runtime info, and model details.
 pub async fn hand_instance_status(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<uuid::Uuid>,
     headers: axum::http::HeaderMap,
@@ -2632,6 +2638,10 @@ pub async fn hand_instance_status(
     // Agent-level info (only when active)
     if let Some(agent_id) = instance.agent_id() {
         if let Some(entry) = state.kernel.agent_registry().get(agent_id) {
+            // Multi-tenant isolation: verify the agent belongs to the requesting account
+            if let Err((code, json)) = check_account(&entry, &account) {
+                return (code, json);
+            }
             resp["agent"] = serde_json::json!({
                 "id": agent_id.to_string(),
                 "name": entry.manifest.name,

@@ -63,6 +63,7 @@ use std::sync::Arc;
 
 use crate::middleware::AccountId;
 use crate::types::ApiErrorResponse;
+use super::shared::check_account;
 // ---------------------------------------------------------------------------
 // Peer endpoints
 // ---------------------------------------------------------------------------
@@ -77,7 +78,7 @@ use crate::types::ApiErrorResponse;
     )
 )]
 pub async fn list_peers(
-    _account: AccountId,
+    _account: AccountId, // TODO(multi-tenant): PeerRegistry needs tenant-scoped filtering
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     // Peers are tracked in the wire module's PeerRegistry.
@@ -120,7 +121,7 @@ pub async fn list_peers(
     )
 )]
 pub async fn get_peer(
-    _account: AccountId,
+    _account: AccountId, // TODO(multi-tenant): PeerRegistry needs tenant-scoped filtering
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
@@ -161,7 +162,7 @@ pub async fn get_peer(
     )
 )]
 pub async fn network_status(
-    _account: AccountId,
+    _account: AccountId, // TODO(multi-tenant): network status needs tenant-scoped peer counts
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     let cfg = state.kernel.config_ref();
@@ -199,10 +200,13 @@ pub async fn network_status(
     )
 )]
 pub async fn a2a_agent_card(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    let agents = state.kernel.agent_registry().list();
+    let agents = match account.0 {
+        Some(ref owner) => state.kernel.agent_registry().list_by_account(owner),
+        None => state.kernel.agent_registry().list(),
+    };
     let cfg = state.kernel.config_ref();
     let base_url = format!("http://{}", cfg.api_listen);
 
@@ -258,10 +262,13 @@ pub async fn a2a_agent_card(
     )
 )]
 pub async fn a2a_list_agents(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    let agents = state.kernel.agent_registry().list();
+    let agents = match account.0 {
+        Some(ref owner) => state.kernel.agent_registry().list_by_account(owner),
+        None => state.kernel.agent_registry().list(),
+    };
     let base_url = format!("http://{}", state.kernel.config_ref().api_listen);
 
     let cards: Vec<serde_json::Value> = agents
@@ -293,7 +300,7 @@ pub async fn a2a_list_agents(
     )
 )]
 pub async fn a2a_send_task(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(request): Json<serde_json::Value>,
 ) -> impl IntoResponse {
@@ -312,7 +319,10 @@ pub async fn a2a_send_task(
         .unwrap_or_else(|| "No message provided".to_string());
 
     // Find target agent (use first available or specified)
-    let agents = state.kernel.agent_registry().list();
+    let agents = match account.0 {
+        Some(ref owner) => state.kernel.agent_registry().list_by_account(owner),
+        None => state.kernel.agent_registry().list(),
+    };
     if agents.is_empty() {
         return ApiErrorResponse::not_found("No agents available").into_json_tuple();
     }
@@ -390,7 +400,7 @@ pub async fn a2a_send_task(
     )
 )]
 pub async fn a2a_get_task(
-    _account: AccountId,
+    _account: AccountId, // TODO(multi-tenant): A2A task store needs tenant-scoped access
     State(state): State<Arc<AppState>>,
     Path(task_id): Path<String>,
 ) -> impl IntoResponse {
@@ -418,7 +428,7 @@ pub async fn a2a_get_task(
     )
 )]
 pub async fn a2a_cancel_task(
-    _account: AccountId,
+    _account: AccountId, // TODO(multi-tenant): A2A task store needs tenant-scoped access
     State(state): State<Arc<AppState>>,
     Path(task_id): Path<String>,
 ) -> impl IntoResponse {
@@ -449,7 +459,7 @@ pub async fn a2a_cancel_task(
     )
 )]
 pub async fn a2a_list_external_agents(
-    _account: AccountId,
+    _account: AccountId, // TODO(multi-tenant): external A2A agent store needs tenant-scoped filtering
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     let agents = state
@@ -648,7 +658,7 @@ fn is_private_ip(ip: &IpAddr) -> bool {
     )
 )]
 pub async fn a2a_get_external_agent(
-    _account: AccountId,
+    _account: AccountId, // TODO(multi-tenant): external A2A agent store needs tenant-scoped filtering
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
@@ -699,7 +709,7 @@ pub async fn a2a_get_external_agent(
     )
 )]
 pub async fn a2a_discover_external(
-    _account: AccountId,
+    _account: AccountId, // TODO(multi-tenant): external A2A agent store needs tenant-scoped isolation
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
@@ -764,7 +774,7 @@ pub async fn a2a_discover_external(
     )
 )]
 pub async fn a2a_send_external(
-    _account: AccountId,
+    _account: AccountId, // TODO(multi-tenant): external A2A send needs tenant-scoped agent resolution
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
@@ -817,7 +827,7 @@ pub async fn a2a_send_external(
     )
 )]
 pub async fn a2a_external_task_status(
-    _account: AccountId,
+    _account: AccountId, // TODO(multi-tenant): external A2A task status needs tenant-scoped access
     State(state): State<Arc<AppState>>,
     Path(task_id): Path<String>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
@@ -870,7 +880,7 @@ pub async fn a2a_external_task_status(
     )
 )]
 pub async fn mcp_http(
-    _account: AccountId,
+    _account: AccountId, // TODO(multi-tenant): MCP HTTP needs tenant-scoped tool visibility
     State(state): State<Arc<AppState>>,
     Json(request): Json<serde_json::Value>,
 ) -> impl IntoResponse {
@@ -990,12 +1000,15 @@ pub async fn mcp_http(
     )
 )]
 pub async fn comms_topology(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     use librefang_types::comms::{EdgeKind, TopoEdge, TopoNode, Topology};
 
-    let agents = state.kernel.agent_registry().list();
+    let agents = match account.0 {
+        Some(ref owner) => state.kernel.agent_registry().list_by_account(owner),
+        None => state.kernel.agent_registry().list(),
+    };
 
     let nodes: Vec<TopoNode> = agents
         .iter()
@@ -1221,7 +1234,7 @@ fn audit_to_comms_event(
     )
 )]
 pub async fn comms_events(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
@@ -1231,7 +1244,10 @@ pub async fn comms_events(
         .unwrap_or(100)
         .min(500);
 
-    let agents = state.kernel.agent_registry().list();
+    let agents = match account.0 {
+        Some(ref owner) => state.kernel.agent_registry().list_by_account(owner),
+        None => state.kernel.agent_registry().list(),
+    };
 
     // Primary source: event bus (has full source/target context)
     let bus_events = state.kernel.event_bus_ref().history(500).await;
@@ -1272,7 +1288,7 @@ pub async fn comms_events(
     )
 )]
 pub async fn comms_events_stream(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
 ) -> axum::response::Response {
     use axum::response::sse::{Event, KeepAlive, Sse};
@@ -1290,7 +1306,10 @@ pub async fn comms_events_stream(
         loop {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-            let agents = state.kernel.agent_registry().list();
+            let agents = match account.0 {
+                Some(ref owner) => state.kernel.agent_registry().list_by_account(owner),
+                None => state.kernel.agent_registry().list(),
+            };
             let entries = state.kernel.audit().recent(50);
 
             for entry in &entries {
@@ -1332,26 +1351,36 @@ pub async fn comms_events_stream(
     )
 )]
 pub async fn comms_send(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(req): Json<librefang_types::comms::CommsSendRequest>,
 ) -> impl IntoResponse {
-    // Validate from agent exists
+    // Validate from agent exists and belongs to the requesting tenant
     let from_id: librefang_types::agent::AgentId = match req.from_agent_id.parse() {
         Ok(id) => id,
         Err(_) => return ApiErrorResponse::bad_request("Invalid from_agent_id").into_json_tuple(),
     };
-    if state.kernel.agent_registry().get(from_id).is_none() {
-        return ApiErrorResponse::not_found("Source agent not found").into_json_tuple();
+    match state.kernel.agent_registry().get(from_id) {
+        Some(entry) => {
+            if let Err(resp) = check_account(&entry, &account) {
+                return resp;
+            }
+        }
+        None => return ApiErrorResponse::not_found("Source agent not found").into_json_tuple(),
     }
 
-    // Validate to agent exists
+    // Validate to agent exists and belongs to the requesting tenant
     let to_id: librefang_types::agent::AgentId = match req.to_agent_id.parse() {
         Ok(id) => id,
         Err(_) => return ApiErrorResponse::bad_request("Invalid to_agent_id").into_json_tuple(),
     };
-    if state.kernel.agent_registry().get(to_id).is_none() {
-        return ApiErrorResponse::not_found("Target agent not found").into_json_tuple();
+    match state.kernel.agent_registry().get(to_id) {
+        Some(entry) => {
+            if let Err(resp) = check_account(&entry, &account) {
+                return resp;
+            }
+        }
+        None => return ApiErrorResponse::not_found("Target agent not found").into_json_tuple(),
     }
 
     // SECURITY: Limit message size
@@ -1414,7 +1443,7 @@ pub async fn comms_send(
     )
 )]
 pub async fn comms_task(
-    _account: AccountId,
+    _account: AccountId, // TODO(multi-tenant): task queue needs tenant-scoped posting and retrieval
     State(state): State<Arc<AppState>>,
     Json(req): Json<librefang_types::comms::CommsTaskRequest>,
 ) -> impl IntoResponse {

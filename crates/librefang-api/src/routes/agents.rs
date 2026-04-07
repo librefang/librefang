@@ -553,16 +553,18 @@ pub async fn bulk_delete_agents(
             }
         };
         // Check account ownership before deleting
-        if let Some(entry) = state.kernel.agent_registry().get(agent_id) {
-            if check_account(&entry, &account).is_err() {
-                results.push(BulkActionResult {
-                    agent_id: id_str.clone(),
-                    success: false,
-                    message: None,
-                    error: Some(t.t("api-error-agent-not-found")),
-                });
-                continue;
-            }
+        let entry = match account.0 {
+            Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
+            None => state.kernel.agent_registry().get(agent_id),
+        };
+        if entry.is_none() {
+            results.push(BulkActionResult {
+                agent_id: id_str.clone(),
+                success: false,
+                message: None,
+                error: Some(t.t("api-error-agent-not-found")),
+            });
+            continue;
         }
         match state.kernel.kill_agent(agent_id) {
             Ok(()) => {
@@ -639,16 +641,18 @@ pub async fn bulk_start_agents(
         };
 
         // Check account ownership before starting
-        if let Some(entry) = state.kernel.agent_registry().get(agent_id) {
-            if check_account(&entry, &account).is_err() {
-                results.push(BulkActionResult {
-                    agent_id: id_str.clone(),
-                    success: false,
-                    message: None,
-                    error: Some(t.t("api-error-agent-not-found")),
-                });
-                continue;
-            }
+        let entry = match account.0 {
+            Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
+            None => state.kernel.agent_registry().get(agent_id),
+        };
+        if entry.is_none() {
+            results.push(BulkActionResult {
+                agent_id: id_str.clone(),
+                success: false,
+                message: None,
+                error: Some(t.t("api-error-agent-not-found")),
+            });
+            continue;
         }
 
         match state
@@ -727,16 +731,18 @@ pub async fn bulk_stop_agents(
             }
         };
         // Check account ownership before stopping
-        if let Some(entry) = state.kernel.agent_registry().get(agent_id) {
-            if check_account(&entry, &account).is_err() {
-                results.push(BulkActionResult {
-                    agent_id: id_str.clone(),
-                    success: false,
-                    message: None,
-                    error: Some(t.t("api-error-agent-not-found")),
-                });
-                continue;
-            }
+        let entry = match account.0 {
+            Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
+            None => state.kernel.agent_registry().get(agent_id),
+        };
+        if entry.is_none() {
+            results.push(BulkActionResult {
+                agent_id: id_str.clone(),
+                success: false,
+                message: None,
+                error: Some(t.t("api-error-agent-not-found")),
+            });
+            continue;
         }
         match state.kernel.stop_agent_run(agent_id) {
             Ok(cancelled) => {
@@ -1196,22 +1202,19 @@ pub async fn send_message(
     }
 
     // Check agent exists and account ownership before processing
-    match state.kernel.agent_registry().get(agent_id) {
-        Some(entry) => {
-            if check_account(&entry, &account).is_err() {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(serde_json::json!({"error": err_not_found})),
-                );
-            }
-        }
+    let entry = match account.0 {
+        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
+        None => state.kernel.agent_registry().get(agent_id),
+    };
+    let _entry = match entry {
+        Some(entry) => entry,
         None => {
             return (
                 StatusCode::NOT_FOUND,
                 Json(serde_json::json!({"error": err_not_found})),
             );
         }
-    }
+    };
 
     // Reject messages when the agent's provider has no API key configured
     {
@@ -1400,7 +1403,11 @@ pub async fn get_agent_session(
         }
     };
 
-    let entry = match state.kernel.agent_registry().get(agent_id) {
+    let entry = match account.0 {
+        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
+        None => state.kernel.agent_registry().get(agent_id),
+    };
+    let entry = match entry {
         Some(e) => e,
         None => {
             return (
@@ -1409,12 +1416,6 @@ pub async fn get_agent_session(
             );
         }
     };
-    if check_account(&entry, &account).is_err() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
-        );
-    }
 
     match state
         .kernel
@@ -1622,7 +1623,11 @@ pub async fn kill_agent(
     };
 
     // Check account ownership before killing
-    let entry = match state.kernel.agent_registry().get(agent_id) {
+    let entry = match account.0 {
+        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
+        None => state.kernel.agent_registry().get(agent_id),
+    };
+    let entry = match entry {
         Some(e) => e,
         None => {
             return (
@@ -1631,12 +1636,6 @@ pub async fn kill_agent(
             );
         }
     };
-    if check_account(&entry, &account).is_err() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": t.t("api-error-agent-not-found-or-terminated")})),
-        );
-    }
 
     match state.kernel.kill_agent(agent_id) {
         Ok(()) => (
@@ -1670,7 +1669,11 @@ pub async fn suspend_agent(
         }
     };
     // Check account ownership before suspending
-    let entry = match state.kernel.agent_registry().get(agent_id) {
+    let entry = match account.0 {
+        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
+        None => state.kernel.agent_registry().get(agent_id),
+    };
+    let entry = match entry {
         Some(e) => e,
         None => {
             return (
@@ -1679,12 +1682,6 @@ pub async fn suspend_agent(
             )
         }
     };
-    if check_account(&entry, &account).is_err() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Agent not found"})),
-        );
-    }
     match state.kernel.suspend_agent(agent_id) {
         Ok(()) => (
             StatusCode::OK,
@@ -1714,7 +1711,11 @@ pub async fn resume_agent(
         }
     };
     // Check account ownership before resuming
-    let entry = match state.kernel.agent_registry().get(agent_id) {
+    let entry = match account.0 {
+        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
+        None => state.kernel.agent_registry().get(agent_id),
+    };
+    let entry = match entry {
         Some(e) => e,
         None => {
             return (
@@ -1723,12 +1724,6 @@ pub async fn resume_agent(
             )
         }
     };
-    if check_account(&entry, &account).is_err() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Agent not found"})),
-        );
-    }
     match state.kernel.resume_agent(agent_id) {
         Ok(()) => (
             StatusCode::OK,
@@ -1771,7 +1766,11 @@ pub async fn set_agent_mode(
     };
 
     // Check account ownership before changing mode
-    let entry = match state.kernel.agent_registry().get(agent_id) {
+    let entry = match account.0 {
+        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
+        None => state.kernel.agent_registry().get(agent_id),
+    };
+    let entry = match entry {
         Some(e) => e,
         None => {
             return (
@@ -1780,12 +1779,6 @@ pub async fn set_agent_mode(
             );
         }
     };
-    if check_account(&entry, &account).is_err() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
-        );
-    }
 
     match state.kernel.agent_registry().set_mode(agent_id, body.mode) {
         Ok(()) => (
@@ -1835,7 +1828,11 @@ pub async fn get_agent(
         }
     };
 
-    let entry = match state.kernel.agent_registry().get(agent_id) {
+    let entry = match account.0 {
+        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
+        None => state.kernel.agent_registry().get(agent_id),
+    };
+    let entry = match entry {
         Some(e) => e,
         None => {
             return (
@@ -1844,12 +1841,6 @@ pub async fn get_agent(
             );
         }
     };
-    if check_account(&entry, &account).is_err() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
-        );
-    }
 
     (
         StatusCode::OK,
@@ -1944,16 +1935,12 @@ pub async fn send_message_stream(
         }
     };
 
-    match state.kernel.agent_registry().get(agent_id) {
-        Some(entry) => {
-            if check_account(&entry, &account).is_err() {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(serde_json::json!({"error": err_not_found})),
-                )
-                    .into_response();
-            }
-        }
+    let entry = match account.0 {
+        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
+        None => state.kernel.agent_registry().get(agent_id),
+    };
+    let _entry = match entry {
+        Some(entry) => entry,
         None => {
             return (
                 StatusCode::NOT_FOUND,
@@ -1961,7 +1948,7 @@ pub async fn send_message_stream(
             )
                 .into_response();
         }
-    }
+    };
 
     // Resolve file attachments into image content blocks (same as non-streaming)
     if !req.attachments.is_empty() {
@@ -2058,7 +2045,11 @@ pub async fn list_agent_sessions(
         }
     };
     // Check account ownership
-    let entry = match state.kernel.agent_registry().get(agent_id) {
+    let entry = match account.0 {
+        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
+        None => state.kernel.agent_registry().get(agent_id),
+    };
+    let entry = match entry {
         Some(e) => e,
         None => {
             return (
@@ -2067,12 +2058,6 @@ pub async fn list_agent_sessions(
             )
         }
     };
-    if check_account(&entry, &account).is_err() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
-        );
-    }
     match state.kernel.list_agent_sessions(agent_id) {
         Ok(sessions) => (
             StatusCode::OK,
@@ -2116,7 +2101,11 @@ pub async fn create_agent_session(
         }
     };
     // Check account ownership
-    let entry = match state.kernel.agent_registry().get(agent_id) {
+    let entry = match account.0 {
+        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
+        None => state.kernel.agent_registry().get(agent_id),
+    };
+    let entry = match entry {
         Some(e) => e,
         None => {
             return (
@@ -2125,12 +2114,6 @@ pub async fn create_agent_session(
             )
         }
     };
-    if check_account(&entry, &account).is_err() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
-        );
-    }
     let label = req.get("label").and_then(|v| v.as_str());
     match state.kernel.create_agent_session(agent_id, label) {
         Ok(session) => (StatusCode::OK, Json(session)),
@@ -2173,7 +2156,11 @@ pub async fn switch_agent_session(
         }
     };
     // Check account ownership
-    let entry = match state.kernel.agent_registry().get(agent_id) {
+    let entry = match account.0 {
+        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
+        None => state.kernel.agent_registry().get(agent_id),
+    };
+    let entry = match entry {
         Some(e) => e,
         None => {
             return (
@@ -2182,12 +2169,6 @@ pub async fn switch_agent_session(
             )
         }
     };
-    if check_account(&entry, &account).is_err() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
-        );
-    }
     let session_id = match session_id_str.parse::<uuid::Uuid>() {
         Ok(uuid) => librefang_types::agent::SessionId(uuid),
         Err(_) => {
@@ -2243,7 +2224,11 @@ pub async fn export_session(
         }
     };
     // Check account ownership
-    let entry = match state.kernel.agent_registry().get(agent_id) {
+    let entry = match account.0 {
+        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
+        None => state.kernel.agent_registry().get(agent_id),
+    };
+    let entry = match entry {
         Some(e) => e,
         None => {
             return (
@@ -2252,12 +2237,6 @@ pub async fn export_session(
             )
         }
     };
-    if check_account(&entry, &account).is_err() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
-        );
-    }
     let session_id = match session_id_str.parse::<uuid::Uuid>() {
         Ok(uuid) => librefang_types::agent::SessionId(uuid),
         Err(_) => {
@@ -2310,7 +2289,11 @@ pub async fn import_session(
         }
     };
     // Check account ownership
-    let entry = match state.kernel.agent_registry().get(agent_id) {
+    let entry = match account.0 {
+        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
+        None => state.kernel.agent_registry().get(agent_id),
+    };
+    let entry = match entry {
         Some(e) => e,
         None => {
             return (
@@ -2319,12 +2302,6 @@ pub async fn import_session(
             )
         }
     };
-    if check_account(&entry, &account).is_err() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
-        );
-    }
     let export: librefang_memory::session::SessionExport = match serde_json::from_value(body) {
         Ok(e) => e,
         Err(e) => {
@@ -2381,7 +2358,11 @@ pub async fn reset_session(
         }
     };
     // Check account ownership
-    let entry = match state.kernel.agent_registry().get(agent_id) {
+    let entry = match account.0 {
+        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
+        None => state.kernel.agent_registry().get(agent_id),
+    };
+    let entry = match entry {
         Some(e) => e,
         None => {
             return (
@@ -2390,12 +2371,6 @@ pub async fn reset_session(
             )
         }
     };
-    if check_account(&entry, &account).is_err() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
-        );
-    }
     match state.kernel.reset_session(agent_id) {
         Ok(()) => (
             StatusCode::OK,
@@ -2437,7 +2412,11 @@ pub async fn reboot_session(
         }
     };
     // Check account ownership
-    let entry = match state.kernel.agent_registry().get(agent_id) {
+    let entry = match account.0 {
+        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
+        None => state.kernel.agent_registry().get(agent_id),
+    };
+    let entry = match entry {
         Some(e) => e,
         None => {
             return (
@@ -2446,12 +2425,6 @@ pub async fn reboot_session(
             )
         }
     };
-    if check_account(&entry, &account).is_err() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
-        );
-    }
     match state.kernel.reboot_session(agent_id) {
         Ok(()) => (
             StatusCode::OK,
@@ -2495,7 +2468,11 @@ pub async fn clear_agent_history(
         }
     };
     // Check account ownership
-    let entry = match state.kernel.agent_registry().get(agent_id) {
+    let entry = match account.0 {
+        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
+        None => state.kernel.agent_registry().get(agent_id),
+    };
+    let entry = match entry {
         Some(e) => e,
         None => {
             return (
@@ -2504,12 +2481,6 @@ pub async fn clear_agent_history(
             )
         }
     };
-    if check_account(&entry, &account).is_err() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
-        );
-    }
     match state.kernel.clear_agent_history(agent_id) {
         Ok(()) => (
             StatusCode::OK,
@@ -2558,7 +2529,11 @@ pub async fn compact_session(
         }
     };
     // Check account ownership
-    let entry = match state.kernel.agent_registry().get(agent_id) {
+    let entry = match account.0 {
+        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
+        None => state.kernel.agent_registry().get(agent_id),
+    };
+    let entry = match entry {
         Some(e) => e,
         None => {
             return (
@@ -2567,12 +2542,6 @@ pub async fn compact_session(
             )
         }
     };
-    if check_account(&entry, &account).is_err() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": err_not_found})),
-        );
-    }
     match state.kernel.compact_agent_session(agent_id).await {
         Ok(msg) => (
             StatusCode::OK,
@@ -2617,7 +2586,11 @@ pub async fn stop_agent(
         }
     };
     // Check account ownership
-    let entry = match state.kernel.agent_registry().get(agent_id) {
+    let entry = match account.0 {
+        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
+        None => state.kernel.agent_registry().get(agent_id),
+    };
+    let entry = match entry {
         Some(e) => e,
         None => {
             return (
@@ -2626,12 +2599,6 @@ pub async fn stop_agent(
             )
         }
     };
-    if check_account(&entry, &account).is_err() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
-        );
-    }
     match state.kernel.stop_agent_run(agent_id) {
         Ok(true) => (
             StatusCode::OK,
@@ -2688,22 +2655,19 @@ pub async fn set_model(
     };
     let explicit_provider = body["provider"].as_str();
     // Check agent exists and account ownership
-    match state.kernel.agent_registry().get(agent_id) {
-        Some(entry) => {
-            if check_account(&entry, &account).is_err() {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
-                );
-            }
-        }
+    let entry = match account.0 {
+        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
+        None => state.kernel.agent_registry().get(agent_id),
+    };
+    let _entry = match entry {
+        Some(entry) => entry,
         None => {
             return (
                 StatusCode::NOT_FOUND,
                 Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
             );
         }
-    }
+    };
     match state
         .kernel
         .set_agent_model(agent_id, model, explicit_provider)
@@ -2770,22 +2734,19 @@ pub async fn get_agent_traces(
     };
 
     // Check agent exists and account ownership
-    match state.kernel.agent_registry().get(agent_id) {
-        Some(entry) => {
-            if check_account(&entry, &account).is_err() {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
-                );
-            }
-        }
+    let entry = match account.0 {
+        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
+        None => state.kernel.agent_registry().get(agent_id),
+    };
+    let _entry = match entry {
+        Some(entry) => entry,
         None => {
             return (
                 StatusCode::NOT_FOUND,
                 Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
             );
         }
-    }
+    };
 
     let traces = state
         .kernel
@@ -2826,7 +2787,11 @@ pub async fn get_agent_tools(
             )
         }
     };
-    let entry = match state.kernel.agent_registry().get(agent_id) {
+    let entry = match account.0 {
+        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
+        None => state.kernel.agent_registry().get(agent_id),
+    };
+    let entry = match entry {
         Some(e) => e,
         None => {
             return (
@@ -2835,12 +2800,6 @@ pub async fn get_agent_tools(
             )
         }
     };
-    if check_account(&entry, &account).is_err() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
-        );
-    }
     (
         StatusCode::OK,
         Json(serde_json::json!({
@@ -2904,22 +2863,19 @@ pub async fn set_agent_tools(
     }
 
     // Check agent exists and account ownership
-    match state.kernel.agent_registry().get(agent_id) {
-        Some(entry) => {
-            if check_account(&entry, &account).is_err() {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
-                );
-            }
-        }
+    let entry = match account.0 {
+        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
+        None => state.kernel.agent_registry().get(agent_id),
+    };
+    let _entry = match entry {
+        Some(entry) => entry,
         None => {
             return (
                 StatusCode::NOT_FOUND,
                 Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
             );
         }
-    }
+    };
 
     match state
         .kernel
@@ -2963,7 +2919,11 @@ pub async fn get_agent_skills(
             )
         }
     };
-    let entry = match state.kernel.agent_registry().get(agent_id) {
+    let entry = match account.0 {
+        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
+        None => state.kernel.agent_registry().get(agent_id),
+    };
+    let entry = match entry {
         Some(e) => e,
         None => {
             return (
@@ -2972,12 +2932,6 @@ pub async fn get_agent_skills(
             )
         }
     };
-    if check_account(&entry, &account).is_err() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
-        );
-    }
     let available = state
         .kernel
         .skill_registry_ref()
@@ -3024,7 +2978,11 @@ pub async fn set_agent_skills(
         }
     };
     // Check account ownership
-    let entry = match state.kernel.agent_registry().get(agent_id) {
+    let entry = match account.0 {
+        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
+        None => state.kernel.agent_registry().get(agent_id),
+    };
+    let entry = match entry {
         Some(e) => e,
         None => {
             return (
@@ -3033,12 +2991,6 @@ pub async fn set_agent_skills(
             )
         }
     };
-    if check_account(&entry, &account).is_err() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
-        );
-    }
     let skills: Vec<String> = body["skills"]
         .as_array()
         .map(|arr| {
@@ -3087,7 +3039,11 @@ pub async fn get_agent_mcp_servers(
             )
         }
     };
-    let entry = match state.kernel.agent_registry().get(agent_id) {
+    let entry = match account.0 {
+        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
+        None => state.kernel.agent_registry().get(agent_id),
+    };
+    let entry = match entry {
         Some(e) => e,
         None => {
             return (
@@ -3096,12 +3052,6 @@ pub async fn get_agent_mcp_servers(
             )
         }
     };
-    if check_account(&entry, &account).is_err() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
-        );
-    }
     // Collect known MCP server names from connected tools
     let mut available: Vec<String> = Vec::new();
     if let Ok(mcp_tools) = state.kernel.mcp_tools_ref().lock() {
@@ -3167,7 +3117,11 @@ pub async fn set_agent_mcp_servers(
         }
     };
     // Check account ownership
-    let entry = match state.kernel.agent_registry().get(agent_id) {
+    let entry = match account.0 {
+        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
+        None => state.kernel.agent_registry().get(agent_id),
+    };
+    let entry = match entry {
         Some(e) => e,
         None => {
             return (
@@ -3176,12 +3130,6 @@ pub async fn set_agent_mcp_servers(
             )
         }
     };
-    if check_account(&entry, &account).is_err() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
-        );
-    }
     let servers: Vec<String> = body["mcp_servers"]
         .as_array()
         .map(|arr| {
@@ -3240,22 +3188,19 @@ pub async fn update_agent(
         }
     };
 
-    match state.kernel.agent_registry().get(agent_id) {
-        Some(entry) => {
-            if check_account(&entry, &account).is_err() {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
-                );
-            }
-        }
+    let entry = match account.0 {
+        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
+        None => state.kernel.agent_registry().get(agent_id),
+    };
+    let _entry = match entry {
+        Some(entry) => entry,
         None => {
             return (
                 StatusCode::NOT_FOUND,
                 Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
             );
         }
-    }
+    };
 
     // Parse the new manifest
     let _manifest: AgentManifest = match toml::from_str(&req.manifest_toml) {
@@ -3309,22 +3254,19 @@ pub async fn patch_agent(
         }
     };
 
-    match state.kernel.agent_registry().get(agent_id) {
-        Some(entry) => {
-            if check_account(&entry, &account).is_err() {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
-                );
-            }
-        }
+    let entry = match account.0 {
+        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
+        None => state.kernel.agent_registry().get(agent_id),
+    };
+    let _entry = match entry {
+        Some(entry) => entry,
         None => {
             return (
                 StatusCode::NOT_FOUND,
                 Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
             );
         }
-    }
+    };
 
     // Apply partial updates using dedicated registry methods
     if let Some(name) = body.get("name").and_then(|v| v.as_str()) {
@@ -3451,7 +3393,11 @@ pub async fn update_agent_identity(
     };
 
     // Check account ownership
-    let entry = match state.kernel.agent_registry().get(agent_id) {
+    let entry = match account.0 {
+        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
+        None => state.kernel.agent_registry().get(agent_id),
+    };
+    let entry = match entry {
         Some(e) => e,
         None => {
             return (
@@ -3460,12 +3406,6 @@ pub async fn update_agent_identity(
             );
         }
     };
-    if check_account(&entry, &account).is_err() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
-        );
-    }
 
     // Validate color format if provided
     if let Some(ref color) = req.color {
@@ -3582,7 +3522,11 @@ pub async fn patch_agent_config(
     };
 
     // Check account ownership
-    let entry = match state.kernel.agent_registry().get(agent_id) {
+    let entry = match account.0 {
+        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
+        None => state.kernel.agent_registry().get(agent_id),
+    };
+    let entry = match entry {
         Some(e) => e,
         None => {
             return (
@@ -3591,12 +3535,6 @@ pub async fn patch_agent_config(
             );
         }
     };
-    if check_account(&entry, &account).is_err() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
-        );
-    }
 
     // Input length limits
     const MAX_NAME_LEN: usize = 256;
@@ -3953,7 +3891,11 @@ pub async fn clone_agent(
         );
     }
 
-    let source = match state.kernel.agent_registry().get(agent_id) {
+    let source = match account.0 {
+        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
+        None => state.kernel.agent_registry().get(agent_id),
+    };
+    let source = match source {
         Some(e) => e,
         None => {
             return (
@@ -3962,12 +3904,6 @@ pub async fn clone_agent(
             );
         }
     };
-    if check_account(&source, &account).is_err() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
-        );
-    }
 
     // Deep-clone manifest with new name
     let mut cloned_manifest = source.manifest.clone();
@@ -4067,7 +4003,11 @@ pub async fn reload_agent_manifest(
         }
     };
     // Check account ownership
-    let entry = match state.kernel.agent_registry().get(agent_id) {
+    let entry = match account.0 {
+        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
+        None => state.kernel.agent_registry().get(agent_id),
+    };
+    let entry = match entry {
         Some(e) => e,
         None => {
             return (
@@ -4076,12 +4016,6 @@ pub async fn reload_agent_manifest(
             );
         }
     };
-    if check_account(&entry, &account).is_err() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
-        );
-    }
     match state.kernel.reload_agent_from_disk(agent_id) {
         Ok(()) => (
             StatusCode::OK,
@@ -4139,7 +4073,11 @@ pub async fn list_agent_files(
         }
     };
 
-    let entry = match state.kernel.agent_registry().get(agent_id) {
+    let entry = match account.0 {
+        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
+        None => state.kernel.agent_registry().get(agent_id),
+    };
+    let entry = match entry {
         Some(e) => e,
         None => {
             return (
@@ -4148,12 +4086,6 @@ pub async fn list_agent_files(
             );
         }
     };
-    if check_account(&entry, &account).is_err() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
-        );
-    }
 
     let workspace = match entry.manifest.workspace {
         Some(ref ws) => ws.clone(),
@@ -4222,7 +4154,11 @@ pub async fn get_agent_file(
         );
     }
 
-    let entry = match state.kernel.agent_registry().get(agent_id) {
+    let entry = match account.0 {
+        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
+        None => state.kernel.agent_registry().get(agent_id),
+    };
+    let entry = match entry {
         Some(e) => e,
         None => {
             return (
@@ -4231,12 +4167,6 @@ pub async fn get_agent_file(
             );
         }
     };
-    if check_account(&entry, &account).is_err() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
-        );
-    }
 
     let workspace = match entry.manifest.workspace {
         Some(ref ws) => ws.clone(),
@@ -4351,7 +4281,11 @@ pub async fn set_agent_file(
         );
     }
 
-    let entry = match state.kernel.agent_registry().get(agent_id) {
+    let entry = match account.0 {
+        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
+        None => state.kernel.agent_registry().get(agent_id),
+    };
+    let entry = match entry {
         Some(e) => e,
         None => {
             return (
@@ -4360,12 +4294,6 @@ pub async fn set_agent_file(
             );
         }
     };
-    if check_account(&entry, &account).is_err() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
-        );
-    }
 
     let workspace = match entry.manifest.workspace {
         Some(ref ws) => ws.clone(),
@@ -4481,24 +4409,20 @@ pub async fn delete_agent_file(
         );
     }
 
-    let workspace = match state.kernel.agent_registry().get(agent_id) {
-        Some(e) => {
-            if check_account(&e, &account).is_err() {
+    let entry = match account.0 {
+        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
+        None => state.kernel.agent_registry().get(agent_id),
+    };
+    let workspace = match entry {
+        Some(e) => match e.manifest.workspace {
+            Some(ref ws) => ws.clone(),
+            None => {
                 return (
                     StatusCode::NOT_FOUND,
-                    Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+                    Json(serde_json::json!({"error": t.t("api-error-agent-no-workspace")})),
                 );
             }
-            match e.manifest.workspace {
-                Some(ref ws) => ws.clone(),
-                None => {
-                    return (
-                        StatusCode::NOT_FOUND,
-                        Json(serde_json::json!({"error": t.t("api-error-agent-no-workspace")})),
-                    );
-                }
-            }
-        }
+        },
         None => {
             return (
                 StatusCode::NOT_FOUND,
@@ -4648,7 +4572,11 @@ pub async fn upload_file(
     };
 
     // Check account ownership
-    let entry = match state.kernel.agent_registry().get(_agent_id) {
+    let entry = match account.0 {
+        Some(ref owner) => state.kernel.agent_registry().get_scoped(_agent_id, owner),
+        None => state.kernel.agent_registry().get(_agent_id),
+    };
+    let entry = match entry {
         Some(e) => e,
         None => {
             return (
@@ -4657,12 +4585,6 @@ pub async fn upload_file(
             );
         }
     };
-    if check_account(&entry, &account).is_err() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": err_not_found})),
-        );
-    }
 
     // Extract content type
     let content_type = headers
@@ -4869,7 +4791,11 @@ pub async fn get_agent_deliveries(
     };
 
     // Check account ownership
-    let entry = match state.kernel.agent_registry().get(agent_id) {
+    let entry = match account.0 {
+        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
+        None => state.kernel.agent_registry().get(agent_id),
+    };
+    let entry = match entry {
         Some(e) => e,
         None => {
             return (
@@ -4878,12 +4804,6 @@ pub async fn get_agent_deliveries(
             );
         }
     };
-    if check_account(&entry, &account).is_err() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
-        );
-    }
 
     let limit = params
         .get("limit")
@@ -4939,15 +4859,16 @@ pub async fn inject_message(
     };
 
     // Check account ownership
-    let entry = match state.kernel.agent_registry().get(agent_id) {
+    let entry = match account.0 {
+        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
+        None => state.kernel.agent_registry().get(agent_id),
+    };
+    let entry = match entry {
         Some(e) => e,
         None => {
             return ApiErrorResponse::not_found("Agent not found").into_response();
         }
     };
-    if check_account(&entry, &account).is_err() {
-        return ApiErrorResponse::not_found("Agent not found").into_response();
-    }
 
     // Reject oversized injection messages
     const MAX_INJECT_SIZE: usize = 16 * 1024; // 16KB
@@ -5008,22 +4929,19 @@ pub async fn push_message(
     };
 
     // Validate agent exists and check account ownership
-    match state.kernel.agent_registry().get(agent_id) {
-        Some(entry) => {
-            if check_account(&entry, &account).is_err() {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(serde_json::json!({"error": err_not_found})),
-                );
-            }
-        }
+    let entry = match account.0 {
+        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
+        None => state.kernel.agent_registry().get(agent_id),
+    };
+    let _entry = match entry {
+        Some(entry) => entry,
         None => {
             return (
                 StatusCode::NOT_FOUND,
                 Json(serde_json::json!({"error": err_not_found})),
             );
         }
-    }
+    };
 
     // Validate request fields
     if req.channel.is_empty() || req.recipient.is_empty() || req.message.is_empty() {
@@ -5326,7 +5244,11 @@ pub async fn agent_metrics(
         }
     };
 
-    let entry = match state.kernel.agent_registry().get(agent_id) {
+    let entry = match account.0 {
+        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
+        None => state.kernel.agent_registry().get(agent_id),
+    };
+    let entry = match entry {
         Some(e) => e,
         None => {
             return (
@@ -5335,12 +5257,6 @@ pub async fn agent_metrics(
             );
         }
     };
-    if check_account(&entry, &account).is_err() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
-        );
-    }
 
     // Session-level token/tool stats from the scheduler (in-memory, windowed).
     let sched_snap = state
@@ -5452,22 +5368,19 @@ pub async fn agent_logs(
     };
 
     // Verify the agent exists and check account ownership.
-    match state.kernel.agent_registry().get(agent_id) {
-        Some(entry) => {
-            if check_account(&entry, &account).is_err() {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
-                );
-            }
-        }
+    let entry = match account.0 {
+        Some(ref owner) => state.kernel.agent_registry().get_scoped(agent_id, owner),
+        None => state.kernel.agent_registry().get(agent_id),
+    };
+    let _entry = match entry {
+        Some(entry) => entry,
         None => {
             return (
                 StatusCode::NOT_FOUND,
                 Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
             );
         }
-    }
+    };
 
     let max_entries: usize = params
         .get("n")

@@ -163,7 +163,10 @@ Files to change:
 - [x] P1: Replace insecure test expectations and add the missing integration suite — 13 tests in `account_tests.rs`
 - [x] P2: Restrict global telemetry endpoints — `/api/status` and `/api/health/detail` redacted for tenants
 - [x] P2: Add HMAC replay protection — timestamp+method+path binding, 10 tests
+- [x] P2: Wire HMAC replay protection into `account_sig_check` middleware (was dead code, now live)
+- [x] P2: Add data-layer tenant filtering — `check_account`/`list_by_account` enforcement in budget (5 handlers), network (8), system (6), skills (2), workflows (2), config (2 optimized)
 - [ ] P3: Refactor remaining handlers to use `get_scoped()` (45 call sites in agents.rs)
+- [ ] P3: Add kernel-level tenant filtering for memory, workflow, prompt, and channel stores (currently handlers accept `_account` but underlying stores have no per-tenant API)
 
 ## Verification
 

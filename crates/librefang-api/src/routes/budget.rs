@@ -1,8 +1,7 @@
 //! Budget and usage tracking handlers.
 
-// TODO(multi-tenant-phase2): Add AccountId parameter and tenant scoping
-
 use super::AppState;
+use super::shared::check_account;
 use crate::middleware::AccountId;
 use crate::types::ApiErrorResponse;
 
@@ -50,10 +49,11 @@ pub async fn usage_stats(
     account: AccountId,
 ) -> impl IntoResponse {
     let usage_store = state.kernel.memory_substrate().usage();
-    let agents: Vec<serde_json::Value> = state
-        .kernel
-        .agent_registry()
-        .list()
+    let agent_list = match account.0 {
+        Some(ref owner) => state.kernel.agent_registry().list_by_account(owner),
+        None => state.kernel.agent_registry().list(),
+    };
+    let agents: Vec<serde_json::Value> = agent_list
         .iter()
         .map(|e| {
             // Read from persistent SQLite store (survives restarts)
@@ -91,7 +91,35 @@ pub async fn usage_summary(
     State(state): State<Arc<AppState>>,
     account: AccountId,
 ) -> impl IntoResponse {
-    match state.kernel.memory_substrate().usage().query_summary(None) {
+    let usage_store = state.kernel.memory_substrate().usage();
+
+    // For scoped tenants, aggregate usage only for their agents.
+    if let Some(ref owner) = account.0 {
+        let agents = state.kernel.agent_registry().list_by_account(owner);
+        let mut total_input: u64 = 0;
+        let mut total_output: u64 = 0;
+        let mut total_cost: f64 = 0.0;
+        let mut calls: u64 = 0;
+        let mut tools: u64 = 0;
+        for a in &agents {
+            if let Ok(s) = usage_store.query_summary(Some(a.id)) {
+                total_input += s.total_input_tokens;
+                total_output += s.total_output_tokens;
+                total_cost += s.total_cost_usd;
+                calls += s.call_count;
+                tools += s.total_tool_calls;
+            }
+        }
+        return Json(serde_json::json!({
+            "total_input_tokens": total_input,
+            "total_output_tokens": total_output,
+            "total_cost_usd": total_cost,
+            "call_count": calls,
+            "total_tool_calls": tools,
+        }));
+    }
+
+    match usage_store.query_summary(None) {
         Ok(s) => Json(serde_json::json!({
             "total_input_tokens": s.total_input_tokens,
             "total_output_tokens": s.total_output_tokens,
@@ -118,7 +146,7 @@ pub async fn usage_summary(
 )]
 pub async fn usage_by_model(
     State(state): State<Arc<AppState>>,
-    account: AccountId,
+    _account: AccountId, // TODO(multi-tenant): UsageStore.query_by_model needs per-agent filtering to scope by tenant
 ) -> impl IntoResponse {
     match state.kernel.memory_substrate().usage().query_by_model() {
         Ok(models) => {
@@ -149,7 +177,7 @@ pub async fn usage_by_model(
 )]
 pub async fn usage_by_model_performance(
     State(state): State<Arc<AppState>>,
-    account: AccountId,
+    _account: AccountId, // TODO(multi-tenant): query_model_performance needs per-agent filtering
 ) -> impl IntoResponse {
     match state
         .kernel
@@ -190,7 +218,7 @@ pub async fn usage_by_model_performance(
 )]
 pub async fn usage_daily(
     State(state): State<Arc<AppState>>,
-    account: AccountId,
+    _account: AccountId, // TODO(multi-tenant): daily breakdown needs per-agent filtering
 ) -> impl IntoResponse {
     let days = state
         .kernel
@@ -241,7 +269,7 @@ pub async fn usage_daily(
 )]
 pub async fn budget_status(
     State(state): State<Arc<AppState>>,
-    account: AccountId,
+    _account: AccountId, // TODO(multi-tenant): global budget is admin-level; scoped tenants need per-tenant budget
 ) -> impl IntoResponse {
     let status = state
         .kernel
@@ -259,7 +287,7 @@ pub async fn budget_status(
 )]
 pub async fn update_budget(
     State(state): State<Arc<AppState>>,
-    account: AccountId,
+    _account: AccountId, // TODO(multi-tenant): global budget mutation should be admin-only
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     // Apply updates — accept both config field names (max_hourly_usd) and
@@ -325,6 +353,10 @@ pub async fn agent_budget_status(
         }
     };
 
+    if let Err((code, json)) = check_account(&entry, &account) {
+        return (code, json).into_response();
+    }
+
     let quota = &entry.manifest.resources;
     let usage_store =
         librefang_memory::usage::UsageStore::new(state.kernel.memory_substrate().usage_conn());
@@ -381,10 +413,11 @@ pub async fn agent_budget_ranking(
 ) -> impl IntoResponse {
     let usage_store =
         librefang_memory::usage::UsageStore::new(state.kernel.memory_substrate().usage_conn());
-    let agents: Vec<serde_json::Value> = state
-        .kernel
-        .agent_registry()
-        .list()
+    let agent_list = match account.0 {
+        Some(ref owner) => state.kernel.agent_registry().list_by_account(owner),
+        None => state.kernel.agent_registry().list(),
+    };
+    let agents: Vec<serde_json::Value> = agent_list
         .iter()
         .filter_map(|entry| {
             let daily = usage_store.query_daily(entry.id).unwrap_or(0.0);
@@ -438,6 +471,15 @@ pub async fn update_agent_budget(
             "Provide at least one of: max_cost_per_hour_usd, max_cost_per_day_usd, max_cost_per_month_usd, max_llm_tokens_per_hour",
         )
         .into_response();
+    }
+
+    // Verify the agent exists and belongs to the requesting tenant.
+    if let Some(entry) = state.kernel.agent_registry().get(agent_id) {
+        if let Err((code, json)) = check_account(&entry, &account) {
+            return (code, json).into_response();
+        }
+    } else {
+        return ApiErrorResponse::not_found("Agent not found").into_response();
     }
 
     match state

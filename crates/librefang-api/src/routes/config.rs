@@ -38,13 +38,10 @@ use std::sync::Arc;
     )
 )]
 pub async fn status(account: AccountId, State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let mut entries = state.kernel.agent_registry().list();
-
-    // H3 fix: scope agent list to the requesting account's tenant.
-    // AccountId(None) = system/admin mode — sees everything (backward compat).
-    if let Some(ref owner_id) = account.0 {
-        entries.retain(|e| e.account_id.as_deref() == Some(owner_id.as_str()));
-    }
+    let entries = match account.0 {
+        Some(ref owner_id) => state.kernel.agent_registry().list_by_account(owner_id),
+        None => state.kernel.agent_registry().list(),
+    };
 
     // Compute counts from the (already tenant-filtered) entries before consuming them.
     let agent_count = entries.len();
@@ -338,16 +335,9 @@ pub async fn health_detail(
 
     let status = if db_ok { "ok" } else { "degraded" };
 
-    // H3 fix: scope agent_count to the requesting tenant.
-    // AccountId(None) = system/admin mode — sees total count (backward compat).
-    let agent_count = if let Some(ref owner_id) = account.0 {
-        let entries = state.kernel.agent_registry().list();
-        entries
-            .iter()
-            .filter(|e| e.account_id.as_deref() == Some(owner_id.as_str()))
-            .count()
-    } else {
-        state.kernel.agent_registry().count()
+    let agent_count = match account.0 {
+        Some(ref owner_id) => state.kernel.agent_registry().list_by_account(owner_id).len(),
+        None => state.kernel.agent_registry().count(),
     };
 
     // H7 fix: scoped tenants get a restricted health view — no supervisor
