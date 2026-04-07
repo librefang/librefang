@@ -434,6 +434,19 @@ pub struct HookConfig {
     /// Per-hook timeout overrides (seconds).  Hook names listed here override
     /// `timeout_secs`.  Example: `{"bootstrap": 60, "ingest": 5}`.
     pub hook_timeouts: std::collections::HashMap<String, u64>,
+    /// Base delay between hook retries in milliseconds.
+    ///
+    /// This is the delay used for the first retry attempt (attempt 0).
+    /// Subsequent attempts are scaled by `retry_backoff_multiplier`, up to
+    /// `max_retry_delay_ms`. Defaults to `500` ms.
+    pub retry_delay_ms: u64,
+    /// Multiplier applied to the delay on each successive retry attempt.
+    /// `1.0` means fixed delay (no backoff).  `2.0` means delay doubles each
+    /// attempt.  Defaults to `2.0`.
+    pub retry_backoff_multiplier: f64,
+    /// Maximum delay between retries in milliseconds, regardless of
+    /// how many times the multiplier has been applied.  Defaults to 30 000 ms.
+    pub max_retry_delay_ms: u64,
 }
 
 impl Default for HookConfig {
@@ -448,6 +461,9 @@ impl Default for HookConfig {
             allow_filesystem: true,
             state_file: None,
             hook_timeouts: std::collections::HashMap::new(),
+            retry_delay_ms: 500,
+            retry_backoff_multiplier: 2.0,
+            max_retry_delay_ms: 30_000,
         }
     }
 }
@@ -460,6 +476,20 @@ impl HookConfig {
             .get(hook_name)
             .copied()
             .unwrap_or(self.timeout_secs)
+    }
+
+    /// Compute the retry delay for a given attempt number (0-indexed).
+    ///
+    /// `attempt 0` → `retry_delay_ms` (base)
+    /// `attempt 1` → `retry_delay_ms * multiplier`
+    /// `attempt n` → capped at `max_retry_delay_ms`
+    pub fn delay_for_attempt(&self, attempt: u32) -> u64 {
+        if attempt == 0 {
+            return self.retry_delay_ms;
+        }
+        let delay = self.retry_delay_ms as f64
+            * self.retry_backoff_multiplier.powi(attempt as i32);
+        delay.min(self.max_retry_delay_ms as f64) as u64
     }
 }
 

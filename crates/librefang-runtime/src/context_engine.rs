@@ -72,6 +72,29 @@ fn generate_trace_id() -> String {
     format!("{:016x}", h.finish())
 }
 
+/// Health snapshot for one engine layer in a StackedContextEngine.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EngineLayerHealth {
+    /// Plugin name for this layer (empty string if unnamed).
+    pub plugin_name: String,
+    /// Per-hook circuit breaker state: `hook_name → open`.
+    pub circuit_open: std::collections::HashMap<String, bool>,
+    /// Number of hooks with at least one registered hook script.
+    pub active_hooks: usize,
+    /// Approximate count of recent errors across all hooks (from trace ring buffer).
+    pub recent_errors: usize,
+    /// Approximate count of recent calls across all hooks (from trace ring buffer).
+    pub recent_calls: usize,
+}
+
+/// Aggregated health across all layers of a StackedContextEngine.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct StackHealth {
+    pub layers: Vec<EngineLayerHealth>,
+    pub total_layers: usize,
+    pub layers_with_open_circuit: usize,
+}
+
 /// Configuration for the context engine.
 #[derive(Debug, Clone)]
 pub struct ContextEngineConfig {
@@ -1315,6 +1338,7 @@ impl ScriptableContextEngine {
             max_memory_mb,
             allow_network,
             state_file: shared_state_path.map(|p| p.to_path_buf()),
+            retry_delay_ms,
             ..Default::default()
         };
 
@@ -1331,7 +1355,7 @@ impl ScriptableContextEngine {
         let mut last_err = String::new();
         for attempt in 0..=max_retries {
             if attempt > 0 {
-                tokio::time::sleep(std::time::Duration::from_millis(retry_delay_ms)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(config.delay_for_attempt(attempt))).await;
                 debug!(
                     script = resolved.as_str(),
                     attempt,
@@ -1549,6 +1573,57 @@ impl ScriptableContextEngine {
             HookFailurePolicy::Abort => Err(LibreFangError::Internal(
                 format!("Hook '{hook}' failed (abort policy): {err}"),
             )),
+        }
+    }
+
+    /// Compute a health snapshot for this engine layer.
+    pub async fn layer_health(&self) -> EngineLayerHealth {
+        // Circuit breaker: snapshot current open/closed state for each tracked key.
+        // Keys are stored as "{agent_id}:{hook}" or bare "{hook}".
+        // We report bare hook names; agent-scoped keys use the portion after the last ':'.
+        let circuit_open: std::collections::HashMap<String, bool> = {
+            let guard = self.circuit_breakers.lock().unwrap_or_else(|p| p.into_inner());
+            guard
+                .iter()
+                .map(|(key, state)| {
+                    // Extract hook name: last segment after ':' (or whole key if no ':').
+                    let hook = match key.rfind(':') {
+                        Some(pos) => key[pos + 1..].to_string(),
+                        None => key.clone(),
+                    };
+                    (hook, state.opened_at.is_some())
+                })
+                .collect()
+        };
+
+        // Recent traces from the in-memory ring buffer (sync Mutex).
+        let (recent_calls, recent_errors) = {
+            let buf = self.traces.lock().unwrap_or_else(|p| p.into_inner());
+            let calls = buf.len();
+            let errors = buf.iter().filter(|t| t.error.is_some()).count();
+            (calls, errors)
+        };
+
+        // Active hooks: count how many lifecycle script slots are populated.
+        let active_hooks = [
+            &self.ingest_script,
+            &self.after_turn_script,
+            &self.bootstrap_script,
+            &self.assemble_script,
+            &self.compact_script,
+            &self.prepare_subagent_script,
+            &self.merge_subagent_script,
+        ]
+        .iter()
+        .filter(|opt| opt.is_some())
+        .count();
+
+        EngineLayerHealth {
+            plugin_name: self.plugin_name.clone(),
+            circuit_open,
+            active_hooks,
+            recent_errors,
+            recent_calls,
         }
     }
 }
@@ -2515,6 +2590,72 @@ impl StackedContextEngine {
             "StackedContextEngine requires at least one engine"
         );
         Self { engines }
+    }
+
+    /// Return a health snapshot for the entire engine stack.
+    ///
+    /// Uses the trait-level `hook_traces()` and `hook_metrics()` methods to
+    /// gather per-layer data without requiring a concrete type downcast.
+    pub async fn health_summary(&self) -> StackHealth {
+        let mut layers = Vec::with_capacity(self.engines.len());
+        for engine in &self.engines {
+            let traces = engine.hook_traces();
+            let recent_calls = traces.len();
+            let recent_errors = traces.iter().filter(|t| t.error.is_some()).count();
+
+            // Derive circuit-open map from metrics: a hook slot where all recorded
+            // calls have failed (failures > 0, successes == 0) is reported as open.
+            let metrics_opt = engine.hook_metrics();
+            let circuit_open: std::collections::HashMap<String, bool> =
+                if let Some(ref m) = metrics_opt {
+                    [
+                        ("ingest", m.ingest.failures > 0 && m.ingest.successes == 0),
+                        ("after_turn", m.after_turn.failures > 0 && m.after_turn.successes == 0),
+                        ("bootstrap", m.bootstrap.failures > 0 && m.bootstrap.successes == 0),
+                        ("assemble", m.assemble.failures > 0 && m.assemble.successes == 0),
+                        ("compact", m.compact.failures > 0 && m.compact.successes == 0),
+                        ("prepare_subagent", m.prepare_subagent.failures > 0 && m.prepare_subagent.successes == 0),
+                        ("merge_subagent", m.merge_subagent.failures > 0 && m.merge_subagent.successes == 0),
+                    ]
+                    .into_iter()
+                    .map(|(k, v)| (k.to_string(), v))
+                    .collect()
+                } else {
+                    std::collections::HashMap::new()
+                };
+
+            // active_hooks: number of hook slots with at least one recorded call.
+            let active_hooks = if let Some(ref m) = metrics_opt {
+                [
+                    m.ingest.calls,
+                    m.after_turn.calls,
+                    m.bootstrap.calls,
+                    m.assemble.calls,
+                    m.compact.calls,
+                    m.prepare_subagent.calls,
+                    m.merge_subagent.calls,
+                ]
+                .iter()
+                .filter(|&&c| c > 0)
+                .count()
+            } else {
+                0
+            };
+
+            layers.push(EngineLayerHealth {
+                plugin_name: String::new(),
+                circuit_open,
+                active_hooks,
+                recent_errors,
+                recent_calls,
+            });
+        }
+        let layers_with_open_circuit = layers
+            .iter()
+            .filter(|l| l.circuit_open.values().any(|&open| open))
+            .count();
+        let total_layers = layers.len();
+        StackHealth { layers, total_layers, layers_with_open_circuit }
     }
 }
 

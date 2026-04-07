@@ -2855,6 +2855,89 @@ pub fn sign_plugin(name: &str) -> Result<std::collections::HashMap<String, Strin
     Ok(hashes)
 }
 
+/// A parsed dependency specifier: `name` with an optional version constraint.
+///
+/// Syntax: `"plugin_name"` or `"plugin_name>=1.2.0"` etc.
+/// Supported operators: `>=`, `>`, `<=`, `<`, `=`.
+#[derive(Debug, Clone)]
+struct DepSpec {
+    name: String,
+    op: Option<VersionOp>,
+    version: Option<(u32, u32, u32)>, // (major, minor, patch)
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum VersionOp {
+    Gte,
+    Gt,
+    Lte,
+    Lt,
+    Eq,
+}
+
+impl DepSpec {
+    /// Parse a dependency specifier string.
+    fn parse(s: &str) -> Self {
+        // Try each operator in order (longer ones first to avoid prefix clash)
+        let ops: &[(&str, VersionOp)] = &[
+            (">=", VersionOp::Gte),
+            (">", VersionOp::Gt),
+            ("<=", VersionOp::Lte),
+            ("<", VersionOp::Lt),
+            ("=", VersionOp::Eq),
+        ];
+        for (sym, op) in ops {
+            if let Some(idx) = s.find(sym) {
+                let name = s[..idx].trim().to_string();
+                let ver_str = s[idx + sym.len()..].trim();
+                let version = Self::parse_version(ver_str);
+                return Self {
+                    name,
+                    op: Some(op.clone()),
+                    version,
+                };
+            }
+        }
+        // No operator — plain name
+        Self {
+            name: s.trim().to_string(),
+            op: None,
+            version: None,
+        }
+    }
+
+    fn parse_version(s: &str) -> Option<(u32, u32, u32)> {
+        let parts: Vec<&str> = s.split('.').collect();
+        if parts.len() < 2 {
+            return None;
+        }
+        let major = parts[0].parse().ok()?;
+        let minor = parts[1].parse().ok()?;
+        let patch = parts.get(2).and_then(|p| p.parse().ok()).unwrap_or(0);
+        Some((major, minor, patch))
+    }
+
+    /// Check whether an installed version satisfies this constraint.
+    /// `installed` is a `"major.minor.patch"` string.
+    fn satisfied_by(&self, installed: &str) -> bool {
+        let (op, req) = match (self.op.as_ref(), self.version) {
+            (Some(op), Some(v)) => (op, v),
+            _ => return true, // no constraint → always satisfied
+        };
+        let inst = match Self::parse_version(installed) {
+            Some(v) => v,
+            None => return false,
+        };
+        match op {
+            VersionOp::Gte => inst >= req,
+            VersionOp::Gt => inst > req,
+            VersionOp::Lte => inst <= req,
+            VersionOp::Lt => inst < req,
+            VersionOp::Eq => inst == req,
+        }
+    }
+}
+
 /// Extract the `needs` capability array from raw plugin.toml content.
 ///
 /// Returns only the string values from `needs = ["network", "filesystem", ...]`.
@@ -2869,33 +2952,40 @@ fn extract_needs(raw_toml: &str) -> Vec<String> {
         .collect()
 }
 
-/// Check whether all plugins listed in `needs` are already installed.
+/// Check whether all plugins listed in `needs` are already installed and
+/// satisfy any declared version constraints.
 ///
-/// Returns `Ok(())` if all dependencies are present, or an error listing
-/// which dependencies are missing.
+/// Returns `Ok(())` if all dependencies are present and their versions satisfy
+/// any constraints, or an error describing the first failure.
 pub fn check_plugin_needs(needs: &[String]) -> Result<(), String> {
     if needs.is_empty() {
         return Ok(());
     }
-    let installed: std::collections::HashSet<String> = list_plugins()
+    let installed: std::collections::HashMap<String, String> = list_plugins()
         .into_iter()
-        .map(|p| p.manifest.name.clone())
+        .map(|p| (p.manifest.name.clone(), p.manifest.version.clone()))
         .collect();
 
-    let missing: Vec<&str> = needs
-        .iter()
-        .filter(|dep| !installed.contains(*dep))
-        .map(String::as_str)
-        .collect();
-
-    if missing.is_empty() {
-        Ok(())
-    } else {
-        Err(format!(
-            "Unmet plugin dependencies: [{}]. Install them first or use install_plugin for each.",
-            missing.join(", ")
-        ))
+    for entry in needs {
+        let spec = DepSpec::parse(entry);
+        match installed.get(&spec.name) {
+            None => {
+                return Err(format!(
+                    "required dependency '{}' is not installed",
+                    spec.name
+                ));
+            }
+            Some(ver) => {
+                if !spec.satisfied_by(ver) {
+                    return Err(format!(
+                        "dependency '{}' requires version constraint '{}' but {} is installed",
+                        spec.name, entry, ver
+                    ));
+                }
+            }
+        }
     }
+    Ok(())
 }
 
 /// Resolve installation order for a plugin and all its transitive dependencies.
@@ -2943,7 +3033,8 @@ pub fn resolve_install_order(
             .unwrap_or_default();
 
         for dep in &needs {
-            dfs(dep, registry, order, visited, in_stack)?;
+            let dep_name = DepSpec::parse(dep).name;
+            dfs(&dep_name, registry, order, visited, in_stack)?;
         }
 
         in_stack.remove(name);
