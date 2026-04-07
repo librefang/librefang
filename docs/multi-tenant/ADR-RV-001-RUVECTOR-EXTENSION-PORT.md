@@ -1,6 +1,6 @@
 # ADR-RV-001: RuVector PostgreSQL Extension Port
 
-**Status:** Proposed
+**Status:** Accepted — Phase 0 tasks 0.1–0.6 verified 2026-04-07 (161 live functions, NEON SIMD, 384-dim embeddings, HNSW search confirmed)
 **Date:** 2026-04-06
 **Author:** Engineering
 **Related:** MASTER-PLAN.md, SPEC-RV-001 (Acceptance Criteria), SPEC-RV-002 (Supabase Vector Store), PLAN-RV-001 (Phase 0 Tasks)
