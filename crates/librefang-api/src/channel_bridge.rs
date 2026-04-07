@@ -1221,8 +1221,10 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                                 Some(s) => s,
                                 None => return "TOTP not configured. Set up TOTP first.".into(),
                             };
-                            match librefang_kernel::approval::ApprovalManager::verify_totp_code(
-                                &secret, code,
+                            let totp_issuer =
+                                self.kernel.approvals().policy().totp_issuer.clone();
+                            match librefang_kernel::approval::ApprovalManager::verify_totp_code_with_issuer(
+                                &secret, code, &totp_issuer,
                             ) {
                                 Ok(true) => true,
                                 Ok(false) => {
