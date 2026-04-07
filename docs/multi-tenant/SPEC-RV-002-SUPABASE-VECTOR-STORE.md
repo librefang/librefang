@@ -19,7 +19,7 @@ for free.
 |--------|---------------|
 | librefang `VectorStore` trait | 5-method interface at `librefang-types/src/memory.rs:1183` |
 | librefang `HttpVectorStore` | Working HTTP impl pattern at `librefang-memory/src/http_vector_store.rs` |
-| librefang kernel init | Backend selection at `kernel.rs:1665-1684` |
+| librefang kernel init | Backend selection at `kernel.rs:1668-1685` |
 | librefang config | `vector_backend` + `vector_store_url` at `config/types.rs:3145` |
 | qwntik ruvector-integration.md | RPC functions deployed and verified |
 | qwntik ADR-004 | Feature adoption roadmap (4 phases) |
@@ -35,7 +35,7 @@ for free.
 | `SqliteVectorStore` impl | `librefang-memory/src/semantic.rs:950-1514` | ✅ Exists |
 | `MemorySubstrate::set_vector_store()` | `librefang-memory/src/substrate.rs:110-114` | ✅ Exists |
 | Config: `vector_backend`, `vector_store_url` | `librefang-types/src/config/types.rs:3145-3157` | ✅ Exists |
-| Kernel backend match | `librefang-kernel/src/kernel.rs:1665-1684` | ✅ Exists |
+| Kernel backend match | `librefang-kernel/src/kernel.rs:1668-1685` | ✅ Exists |
 | `reqwest` dependency | `librefang-memory/Cargo.toml` | ✅ Already present |
 | `pub mod http_vector_store` | `librefang-memory/src/lib.rs` | ✅ Exists |
 | Re-export `HttpVectorStore` | `librefang-memory/src/lib.rs` | ✅ Exists |
@@ -94,7 +94,7 @@ inside PostgreSQL. Sending a JSON array will fail with a type mismatch.
 |------|--------|-------------|
 | `crates/librefang-memory/src/lib.rs` | Add `pub mod supabase_vector_store;` + re-export | ~3 |
 | `crates/librefang-types/src/config/types.rs` | Add `supabase_url`, `supabase_anon_key` to `MemoryConfig` | ~10 |
-| `crates/librefang-kernel/src/kernel.rs` | Add `"supabase"` match arm in backend init (lines 1665-1684) | ~15 |
+| `crates/librefang-kernel/src/kernel.rs` | Add `"supabase"` match arm in backend init (lines 1668-1685) | ~15 |
 
 **Total: 1 new file + 3 modified files, ~228 new lines, 0 new Cargo dependencies**
 
