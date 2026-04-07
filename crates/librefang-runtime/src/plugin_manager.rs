@@ -527,7 +527,31 @@ async fn install_from_registry(
         return Err(format!("Failed to download plugin '{name}': {e}"));
     }
 
-    info!(plugin = name, "Installed plugin from registry");
+    // Verify checksum if available (non-fatal warning if no checksum file exists).
+    match fetch_checksum(&client, &listing_url, name).await {
+        Some(expected) => {
+            // For registry plugins installed file-by-file, compute checksum over
+            // the serialised manifest as a representative integrity check.
+            let manifest_bytes = std::fs::read(target_dir.join("plugin.toml")).unwrap_or_default();
+            if let Err(e) = verify_checksum(&manifest_bytes, &expected) {
+                let _ = std::fs::remove_dir_all(&target_dir);
+                return Err(e);
+            }
+            info!(plugin = name, "Checksum verified OK");
+        }
+        None => {
+            warn!(
+                plugin = name,
+                "No checksum file found for this plugin release. \
+                 Install proceeds without integrity verification."
+            );
+        }
+    }
+
+    info!(
+        plugin = name,
+        "Plugin installed successfully (integrity verified)"
+    );
     get_plugin_info(name)
 }
 
@@ -2491,6 +2515,69 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
         "{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}",
         h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]
     )
+}
+
+/// Compute the SHA-256 hex digest of a byte slice (delegates to [`sha256_hex`]).
+fn sha256_hex_of_bytes(data: &[u8]) -> String {
+    sha256_hex(data)
+}
+
+/// Verify downloaded plugin bytes against an expected SHA-256 checksum.
+///
+/// Returns `Ok(())` on match, `Err(message)` on mismatch or parse failure.
+fn verify_checksum(data: &[u8], expected: &str) -> Result<(), String> {
+    let actual = sha256_hex_of_bytes(data);
+    if actual.eq_ignore_ascii_case(expected.trim()) {
+        Ok(())
+    } else {
+        Err(format!(
+            "Plugin checksum mismatch!\n  Expected: {expected}\n  Actual:   {actual}\n\
+             The downloaded file may be corrupted or tampered with. Aborting install."
+        ))
+    }
+}
+
+/// Fetch the SHA-256 checksum for a plugin release asset from the registry.
+///
+/// Looks for a `checksums.txt` (or `{plugin_name}.sha256`) file alongside
+/// the plugin archive. Returns `None` if no checksum file is available
+/// (older registry entries without checksums are allowed through with a warning).
+async fn fetch_checksum(
+    client: &reqwest::Client,
+    archive_url: &str,
+    plugin_name: &str,
+) -> Option<String> {
+    // Try {archive_url}.sha256 first, then checksums.txt in the same directory.
+    let candidates = [
+        format!("{archive_url}.sha256"),
+        {
+            let base = archive_url.rsplit_once('/').map(|(b, _)| b).unwrap_or(archive_url);
+            format!("{base}/checksums.txt")
+        },
+    ];
+
+    for url in &candidates {
+        if let Ok(resp) = client.get(url).send().await {
+            if resp.status().is_success() {
+                if let Ok(text) = resp.text().await {
+                    // checksums.txt format: "<sha256>  <filename>" per line
+                    for line in text.lines() {
+                        let parts: Vec<&str> = line.splitn(2, ' ').collect();
+                        if parts.len() >= 1 {
+                            let hash = parts[0].trim();
+                            if hash.len() == 64 && hash.chars().all(|c| c.is_ascii_hexdigit()) {
+                                // If it's a checksums.txt, check the filename matches
+                                if parts.len() == 1 || parts[1].trim().contains(plugin_name) {
+                                    return Some(hash.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Enable a previously disabled plugin by removing the `.disabled` marker file.

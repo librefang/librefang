@@ -1276,6 +1276,28 @@ pub async fn context_engine_metrics_prometheus(
         }
     }
 
+    // Summary metrics (avg latency)
+    output.push_str("# HELP librefang_hook_duration_ms Hook invocation duration\n");
+    output.push_str("# TYPE librefang_hook_duration_ms summary\n");
+    for (hook_name, stats) in &hook_pairs {
+        let avg = if stats.calls > 0 {
+            stats.total_ms as f64 / stats.calls as f64
+        } else {
+            0.0
+        };
+        output.push_str(&format!(
+            "librefang_hook_duration_ms{{plugin=\"{plugin_label}\",hook=\"{hook_name}\",quantile=\"avg\"}} {avg:.3}\n"
+        ));
+        output.push_str(&format!(
+            "librefang_hook_duration_ms_sum{{plugin=\"{plugin_label}\",hook=\"{hook_name}\"}} {}\n",
+            stats.total_ms
+        ));
+        output.push_str(&format!(
+            "librefang_hook_duration_ms_count{{plugin=\"{plugin_label}\",hook=\"{hook_name}\"}} {}\n",
+            stats.calls
+        ));
+    }
+
     (
         StatusCode::OK,
         [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4")],

@@ -46,10 +46,17 @@ static STATE_FILE_LOCKS: once_cell::sync::Lazy<
     std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
 > = once_cell::sync::Lazy::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
-/// Acquire the in-process advisory lock for a state file path.
+/// Acquire the in-process advisory lock for a shared state file path.
 ///
-/// Returns a guard that must be held for the duration of any read-modify-write
-/// operation on the file. Dropping the guard releases the lock.
+/// Must be held for the full duration of any hook subprocess call that
+/// may read or write the file (i.e. when `config.state_file.is_some()`).
+/// This prevents concurrent ingest + after_turn scripts from racing on
+/// the same JSON file within a single daemon process.
+///
+/// # Cross-process safety
+/// This lock is in-process only. Running two LibreFang daemons pointing
+/// at the same plugin directory will bypass this protection. Ensure only
+/// one daemon owns a plugin's state file at a time.
 pub async fn lock_state_file(path: &std::path::Path) -> tokio::sync::OwnedMutexGuard<()> {
     let arc = {
         let mut map = STATE_FILE_LOCKS.lock().unwrap();
@@ -663,6 +670,13 @@ pub async fn run_hook_json(
         return Err(PluginRuntimeError::ScriptNotFound(script_path.to_string()));
     }
 
+    // Serialize state-file access across concurrent hook calls for the same plugin.
+    let _state_lock = if let Some(ref path) = config.state_file {
+        Some(lock_state_file(path).await)
+    } else {
+        None
+    };
+
     let input_line =
         serde_json::to_string(input).map_err(|e| PluginRuntimeError::Io(e.to_string()))?;
     let (base_launcher, base_args) = build_command(runtime, script_path)?;
@@ -1039,6 +1053,14 @@ impl HookProcessPool {
         };
 
         let mut guard = slot.lock().await;
+
+        // Hold the per-file advisory lock for the duration of the subprocess call
+        // to prevent concurrent hook scripts from racing on the shared state file.
+        let _state_lock = if let Some(ref path) = config.state_file {
+            Some(lock_state_file(path).await)
+        } else {
+            None
+        };
 
         // Ensure process is running.
         if guard.is_none() {

@@ -261,6 +261,11 @@ impl DefaultContextEngine {
     pub fn compaction_config(&self) -> &CompactionConfig {
         &self.compaction_config
     }
+
+    /// Get a reference to the memory substrate.
+    pub fn memory_substrate(&self) -> &Arc<MemorySubstrate> {
+        &self.memory
+    }
 }
 
 #[async_trait]
@@ -645,6 +650,8 @@ pub struct ScriptableContextEngine {
     trace_store: Option<std::sync::Arc<crate::trace_store::TraceStore>>,
     /// Tracks all spawned after_turn background tasks for graceful shutdown.
     after_turn_tasks: std::sync::Arc<std::sync::Mutex<tokio::task::JoinSet<()>>>,
+    /// Memory substrate for after_turn hook memory injection.
+    memory_substrate: std::sync::Arc<librefang_memory::MemorySubstrate>,
 }
 
 impl ScriptableContextEngine {
@@ -692,6 +699,7 @@ impl ScriptableContextEngine {
             );
         }
 
+        let memory_substrate = std::sync::Arc::clone(inner.memory_substrate());
         Self {
             inner,
             ingest_script: hooks.ingest.clone(),
@@ -762,6 +770,7 @@ impl ScriptableContextEngine {
             plugin_name: String::new(), // filled in by with_plugin_name()
             trace_store: None,          // filled in by with_plugin_name()
             after_turn_tasks: std::sync::Arc::new(std::sync::Mutex::new(tokio::task::JoinSet::new())),
+            memory_substrate,
         }
     }
 
@@ -946,18 +955,26 @@ impl ScriptableContextEngine {
         }
     }
 
-    fn circuit_is_open(&self, hook: &str) -> bool {
+    fn circuit_is_open(&self, hook: &str, agent_id: Option<&AgentId>) -> bool {
         let Some(ref cfg) = self.circuit_breaker_cfg else { return false; };
+        let key = match agent_id {
+            Some(id) => format!("{}:{}", id.0, hook),
+            None => hook.to_string(),
+        };
         let mut guard = self.circuit_breakers.lock().unwrap();
-        guard.entry(hook.to_string())
+        guard.entry(key)
              .or_insert_with(CircuitBreakerState::new)
              .is_open(cfg.max_failures, cfg.reset_secs)
     }
 
-    fn circuit_record(&self, hook: &str, success: bool) {
+    fn circuit_record(&self, hook: &str, agent_id: Option<&AgentId>, success: bool) {
         let Some(ref cfg) = self.circuit_breaker_cfg else { return; };
+        let key = match agent_id {
+            Some(id) => format!("{}:{}", id.0, hook),
+            None => hook.to_string(),
+        };
         let mut guard = self.circuit_breakers.lock().unwrap();
-        let state = guard.entry(hook.to_string()).or_insert_with(CircuitBreakerState::new);
+        let state = guard.entry(key).or_insert_with(CircuitBreakerState::new);
         if success {
             state.record_success();
         } else {
@@ -1293,16 +1310,17 @@ impl ScriptableContextEngine {
         script_path: &str,
         input: serde_json::Value,
         timeout_secs: u64,
+        agent_id: Option<&AgentId>,
     ) -> Result<(serde_json::Value, u64), String> {
         // Circuit breaker: reject immediately when open
-        if self.circuit_is_open(hook_name) {
+        if self.circuit_is_open(hook_name, agent_id) {
             return Err(format!("circuit-open: '{hook_name}' suspended after repeated failures"));
         }
         let result = self.call_hook_dispatch_raw(hook_name, script_path, input, timeout_secs).await;
         // Update circuit breaker
         match &result {
-            Ok(_) => self.circuit_record(hook_name, true),
-            Err(_) => self.circuit_record(hook_name, false),
+            Ok(_) => self.circuit_record(hook_name, agent_id, true),
+            Err(_) => self.circuit_record(hook_name, agent_id, false),
         }
         // Validate output schema if declared
         if let Ok((ref output, _)) = result {
@@ -1478,7 +1496,7 @@ impl ContextEngine for ScriptableContextEngine {
                 "stable_prefix_mode": config.stable_prefix_mode,
                 "max_recall_results": config.max_recall_results,
             });
-            match self.call_hook_dispatch("bootstrap", script, input, bootstrap_timeout).await {
+            match self.call_hook_dispatch("bootstrap", script, input, bootstrap_timeout, None).await {
                 Ok((_, ms)) => {
                     Self::record_hook(&self.metrics, "bootstrap", ms, true);
                     debug!("Bootstrap hook completed (timeout={bootstrap_timeout}s, {ms}ms)");
@@ -1586,7 +1604,7 @@ impl ContextEngine for ScriptableContextEngine {
             // Cache miss — run hook and store result below
             let cache_key_owned = cache_key;
             let cache_arc = self.ingest_cache.clone();
-            match self.call_hook_dispatch("ingest", script, input.clone(), self.hook_timeout_secs).await {
+            match self.call_hook_dispatch("ingest", script, input.clone(), self.hook_timeout_secs, Some(&agent_id)).await {
                 Ok((output, ms)) => {
                     Self::record_hook(&self.metrics, "ingest", ms, true);
                     // Store in cache
@@ -1631,7 +1649,7 @@ impl ContextEngine for ScriptableContextEngine {
             }
         }
 
-        match self.call_hook_dispatch("ingest", script, input, self.hook_timeout_secs).await {
+        match self.call_hook_dispatch("ingest", script, input, self.hook_timeout_secs, Some(&agent_id)).await {
             Ok((output, ms)) => {
                 Self::record_hook(&self.metrics, "ingest", ms, true);
                 self.record_per_agent(&agent_id, ms, true);
@@ -1736,7 +1754,7 @@ impl ContextEngine for ScriptableContextEngine {
             }
             // Cache miss — run hook and store result.
             let cache_arc = self.assemble_cache.clone();
-            let result = self.call_hook_dispatch("assemble", script, input, self.hook_timeout_secs).await;
+            let result = self.call_hook_dispatch("assemble", script, input, self.hook_timeout_secs, Some(&agent_id)).await;
             match result {
                 Ok((output, ms)) => {
                     {
@@ -1770,7 +1788,7 @@ impl ContextEngine for ScriptableContextEngine {
             }
         }
 
-        match self.call_hook_dispatch("assemble", script, input, self.hook_timeout_secs).await {
+        match self.call_hook_dispatch("assemble", script, input, self.hook_timeout_secs, Some(&agent_id)).await {
             Ok((output, ms)) => {
                 if let Some(new_msgs) = output.get("messages").and_then(|v| v.as_array()) {
                     let assembled: Vec<Message> = new_msgs
@@ -1869,7 +1887,7 @@ impl ContextEngine for ScriptableContextEngine {
             }
             // Cache miss — run hook and store result.
             let cache_arc = self.compact_cache.clone();
-            let result = self.call_hook_dispatch("compact", script, input, self.hook_timeout_secs).await;
+            let result = self.call_hook_dispatch("compact", script, input, self.hook_timeout_secs, Some(&agent_id)).await;
             match result {
                 Ok((output, ms)) => {
                     {
@@ -1907,7 +1925,7 @@ impl ContextEngine for ScriptableContextEngine {
             }
         }
 
-        match self.call_hook_dispatch("compact", script, input, self.hook_timeout_secs).await {
+        match self.call_hook_dispatch("compact", script, input, self.hook_timeout_secs, Some(&agent_id)).await {
             Ok((output, ms)) => {
                 if let Some(new_msgs) = output.get("messages").and_then(|v| v.as_array()) {
                     let compacted: Vec<Message> = new_msgs
@@ -1997,6 +2015,7 @@ impl ContextEngine for ScriptableContextEngine {
         let trace_store = self.trace_store.clone();
         let plugin_name = self.plugin_name.clone();
         let agent_id_str = agent_id.0.to_string();
+        let memory_substrate = std::sync::Arc::clone(&self.memory_substrate);
         if let Ok(mut tasks) = self.after_turn_tasks.lock() {
             // Reap already-completed tasks to prevent unbounded growth.
             while tasks.try_join_next().is_some() {}
@@ -2073,7 +2092,7 @@ impl ContextEngine for ScriptableContextEngine {
                         Self::record_hook(&metrics, "after_turn", ms, true);
                         debug!("After-turn hook completed ({ms}ms)");
                         // Inspect hook output for memories, logs, and annotations.
-                        Self::process_after_turn_output(&output, &agent_id_str, None);
+                        Self::process_after_turn_output(&output, &agent_id_str, Some(&memory_substrate));
                     }
                     Err(e) => {
                         Self::record_hook(&metrics, "after_turn", 0, false);
@@ -2101,7 +2120,7 @@ impl ContextEngine for ScriptableContextEngine {
                 "parent_id": parent_id.0.to_string(),
                 "child_id": child_id.0.to_string(),
             });
-            match self.call_hook_dispatch("prepare_subagent", script, input, self.hook_timeout_secs).await {
+            match self.call_hook_dispatch("prepare_subagent", script, input, self.hook_timeout_secs, None).await {
                 Ok((_, ms)) => {
                     Self::record_hook(&self.metrics, "prepare_subagent", ms, true);
                     debug!("Prepare-subagent hook completed ({ms}ms)");
@@ -2131,7 +2150,7 @@ impl ContextEngine for ScriptableContextEngine {
                 "parent_id": parent_id.0.to_string(),
                 "child_id": child_id.0.to_string(),
             });
-            match self.call_hook_dispatch("merge_subagent", script, input, self.hook_timeout_secs).await {
+            match self.call_hook_dispatch("merge_subagent", script, input, self.hook_timeout_secs, None).await {
                 Ok((_, ms)) => {
                     Self::record_hook(&self.metrics, "merge_subagent", ms, true);
                     debug!("Merge-subagent hook completed ({ms}ms)");
