@@ -88,14 +88,66 @@ impl ApprovalManager {
 
     /// Create an approval manager with persistent audit logging.
     pub fn new_with_db(policy: ApprovalPolicy, conn: Arc<StdMutex<Connection>>) -> Self {
+        let failures = Self::load_totp_lockout(&conn);
         Self {
             pending: DashMap::new(),
             recent: std::sync::Mutex::new(VecDeque::new()),
             policy: std::sync::RwLock::new(policy),
             audit_db: Some(conn),
             totp_grace: StdMutex::new(HashMap::new()),
-            totp_failures: StdMutex::new(HashMap::new()),
+            totp_failures: StdMutex::new(failures),
         }
+    }
+
+    /// Load persisted TOTP lockout state from the database.
+    ///
+    /// Entries whose lockout window has already expired are discarded at load
+    /// time so a daemon restart does not extend the lockout beyond the original
+    /// 5-minute window.
+    fn load_totp_lockout(conn: &Arc<StdMutex<Connection>>) -> HashMap<String, (u32, Option<Instant>)> {
+        let Ok(guard) = conn.lock() else { return HashMap::new() };
+        let Ok(mut stmt) = guard.prepare(
+            "SELECT sender_id, failures, locked_at FROM totp_lockout",
+        ) else { return HashMap::new() };
+
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)? as u32,
+                    row.get::<_, Option<i64>>(2)?,
+                ))
+            })
+            .ok();
+
+        let Some(rows) = rows else { return HashMap::new() };
+        let mut map = HashMap::new();
+        for row in rows.filter_map(|r| r.ok()) {
+            let (sender_id, failures, locked_at_unix) = row;
+            let lockout_start = locked_at_unix.and_then(|ts| {
+                let ts = ts as u64;
+                let elapsed = now_unix.saturating_sub(ts);
+                if elapsed >= TOTP_LOCKOUT_SECS {
+                    None // Lockout has expired — don't restore
+                } else {
+                    // Reconstruct an Instant that is `elapsed` seconds in the past
+                    Some(Instant::now() - std::time::Duration::from_secs(elapsed))
+                }
+            });
+            // If lockout_start is None but failures >= threshold, the lockout
+            // expired during the downtime — reset the counter.
+            if failures >= TOTP_MAX_FAILURES && lockout_start.is_none() {
+                // Expired — omit entry entirely (effective reset)
+                continue;
+            }
+            map.insert(sender_id, (failures, lockout_start));
+        }
+        map
     }
 
     /// Check if a tool requires approval based on current policy.
@@ -631,7 +683,19 @@ impl ApprovalManager {
     /// Verify a TOTP code against a base32-encoded secret.
     ///
     /// Uses RFC 6238 with SHA-1, 6 digits, 30-second step, and +-1 window tolerance.
+    /// `issuer` should match the value used during enrollment (from `totp_issuer` in
+    /// the approval policy); it is included in the TOTP struct for consistency but
+    /// does not affect the HMAC computation.
     pub fn verify_totp_code(secret_base32: &str, code: &str) -> Result<bool, String> {
+        Self::verify_totp_code_with_issuer(secret_base32, code, "LibreFang")
+    }
+
+    /// Like `verify_totp_code` but uses the provided issuer label.
+    pub fn verify_totp_code_with_issuer(
+        secret_base32: &str,
+        code: &str,
+        issuer: &str,
+    ) -> Result<bool, String> {
         let secret = Secret::Encoded(secret_base32.to_string());
         let raw = secret
             .to_bytes()
@@ -642,7 +706,7 @@ impl ApprovalManager {
             1,
             30,
             raw,
-            Some("LibreFang".to_string()),
+            Some(issuer.to_string()),
             String::new(),
         )
         .map_err(|e| format!("TOTP init error: {e}"))?;
@@ -736,6 +800,8 @@ impl ApprovalManager {
         // Clear failure counter on success
         let mut failures = self.totp_failures.lock().unwrap_or_else(|e| e.into_inner());
         failures.remove(sender_id);
+        drop(failures);
+        self.persist_totp_lockout_clear(sender_id);
     }
 
     /// Check if a sender is locked out due to too many TOTP failures.
@@ -775,6 +841,40 @@ impl ApprovalManager {
                 "TOTP locked out: {} consecutive failures", entry.0
             );
         }
+        let (count, locked_at_instant) = *entry;
+        drop(failures);
+        // Persist lockout state so it survives a daemon restart
+        let locked_at_unix = locked_at_instant.map(|t| {
+            let elapsed = t.elapsed().as_secs();
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+                .saturating_sub(elapsed) as i64
+        });
+        self.persist_totp_lockout_save(sender_id, count, locked_at_unix);
+    }
+
+    fn persist_totp_lockout_save(&self, sender_id: &str, failures: u32, locked_at: Option<i64>) {
+        let Some(db) = &self.audit_db else { return };
+        let Ok(conn) = db.lock() else { return };
+        let _ = conn.execute(
+            "INSERT INTO totp_lockout (sender_id, failures, locked_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(sender_id) DO UPDATE SET
+                 failures  = excluded.failures,
+                 locked_at = excluded.locked_at",
+            rusqlite::params![sender_id, failures as i64, locked_at],
+        );
+    }
+
+    fn persist_totp_lockout_clear(&self, sender_id: &str) {
+        let Some(db) = &self.audit_db else { return };
+        let Ok(conn) = db.lock() else { return };
+        let _ = conn.execute(
+            "DELETE FROM totp_lockout WHERE sender_id = ?1",
+            rusqlite::params![sender_id],
+        );
     }
 
     /// Write an audit entry to the persistent database.

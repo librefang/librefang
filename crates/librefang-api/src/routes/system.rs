@@ -72,8 +72,8 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             axum::routing::get(totp_status),
         )
         .route(
-            "/approvals/totp",
-            axum::routing::delete(totp_revoke),
+            "/approvals/totp/revoke",
+            axum::routing::post(totp_revoke),
         )
         .route("/approvals/{id}", axum::routing::get(get_approval))
         .route(
@@ -1417,6 +1417,7 @@ pub async fn approve_request(
     };
 
     // Verify TOTP code or recovery code if second factor is enabled
+    let totp_issuer = state.kernel.approvals().policy().totp_issuer.clone();
     let totp_verified = if state.kernel.approvals().requires_totp() {
         if state.kernel.approvals().is_totp_locked_out("api_admin") {
             return ApiErrorResponse::bad_request(
@@ -1467,8 +1468,8 @@ pub async fn approve_request(
                             .into_response();
                         }
                     };
-                    match librefang_kernel::approval::ApprovalManager::verify_totp_code(
-                        &secret, code,
+                    match librefang_kernel::approval::ApprovalManager::verify_totp_code_with_issuer(
+                        &secret, code, &totp_issuer,
                     ) {
                         Ok(true) => true,
                         Ok(false) => {
@@ -1763,6 +1764,7 @@ pub async fn totp_setup(
     State(state): State<Arc<AppState>>,
     Json(body): Json<TotpSetupBody>,
 ) -> impl IntoResponse {
+    let totp_issuer = state.kernel.approvals().policy().totp_issuer.clone();
     // If TOTP is already confirmed, require verification of the old code
     let already_confirmed = state.kernel.vault_get("totp_confirmed").as_deref() == Some("true");
 
@@ -1801,8 +1803,8 @@ pub async fn totp_setup(
                     // TOTP code
                     match state.kernel.vault_get("totp_secret") {
                         Some(secret) => {
-                            librefang_kernel::approval::ApprovalManager::verify_totp_code(
-                                &secret, code,
+                            librefang_kernel::approval::ApprovalManager::verify_totp_code_with_issuer(
+                                &secret, code, &totp_issuer,
                             )
                             .unwrap_or(false)
                         }
@@ -1820,13 +1822,8 @@ pub async fn totp_setup(
         }
     }
 
-    let issuer = {
-        let policy = state.kernel.approvals().policy();
-        policy.totp_issuer.clone()
-    };
-
     let (secret_base32, otpauth_uri, qr_base64) =
-        match librefang_kernel::approval::ApprovalManager::generate_totp_secret(&issuer, "admin") {
+        match librefang_kernel::approval::ApprovalManager::generate_totp_secret(&totp_issuer, "admin") {
             Ok(v) => v,
             Err(e) => {
                 return ApiErrorResponse::internal(e).into_json_tuple();
@@ -1874,6 +1871,7 @@ pub async fn totp_confirm(
     State(state): State<Arc<AppState>>,
     Json(body): Json<TotpConfirmBody>,
 ) -> impl IntoResponse {
+    let totp_issuer = state.kernel.approvals().policy().totp_issuer.clone();
     if state.kernel.approvals().is_totp_locked_out("api_admin") {
         return ApiErrorResponse::bad_request("Too many failed TOTP attempts. Try again later.")
             .into_json_tuple();
@@ -1889,7 +1887,9 @@ pub async fn totp_confirm(
         }
     };
 
-    match librefang_kernel::approval::ApprovalManager::verify_totp_code(&secret, &body.code) {
+    match librefang_kernel::approval::ApprovalManager::verify_totp_code_with_issuer(
+        &secret, &body.code, &totp_issuer,
+    ) {
         Ok(true) => {
             if let Err(e) = state.kernel.vault_set("totp_confirmed", "true") {
                 return ApiErrorResponse::internal(e).into_json_tuple();
@@ -1949,6 +1949,7 @@ pub async fn totp_revoke(
     State(state): State<Arc<AppState>>,
     Json(body): Json<TotpRevokeBody>,
 ) -> impl IntoResponse {
+    let totp_issuer = state.kernel.approvals().policy().totp_issuer.clone();
     if state.kernel.approvals().is_totp_locked_out("api_admin") {
         return ApiErrorResponse::bad_request("Too many failed TOTP attempts. Try again later.")
             .into_json_tuple();
@@ -1979,8 +1980,10 @@ pub async fn totp_revoke(
     } else {
         match state.kernel.vault_get("totp_secret") {
             Some(secret) => {
-                librefang_kernel::approval::ApprovalManager::verify_totp_code(&secret, &body.code)
-                    .unwrap_or(false)
+                librefang_kernel::approval::ApprovalManager::verify_totp_code_with_issuer(
+                    &secret, &body.code, &totp_issuer,
+                )
+                .unwrap_or(false)
             }
             None => false,
         }

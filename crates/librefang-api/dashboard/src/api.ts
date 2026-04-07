@@ -1514,8 +1514,8 @@ export async function totpStatus(): Promise<TotpStatusResponse> {
 }
 
 export async function totpRevoke(code: string): Promise<ApiActionResponse> {
-  const response = await fetch("/api/approvals/totp", {
-    method: "DELETE",
+  const response = await fetch("/api/approvals/totp/revoke", {
+    method: "POST",
     headers: buildHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({ code }),
   });
