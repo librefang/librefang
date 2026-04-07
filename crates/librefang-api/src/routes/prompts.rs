@@ -13,6 +13,7 @@ use super::AppState;
 use librefang_runtime::kernel_handle::KernelHandle;
 use std::sync::Arc;
 
+use crate::middleware::AccountId;
 use crate::types::ApiErrorResponse;
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
@@ -53,6 +54,7 @@ pub fn routes() -> Router<Arc<AppState>> {
 
 async fn list_prompt_versions(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(agent_id): Path<String>,
 ) -> impl IntoResponse {
     let agent_id: librefang_types::agent::AgentId = match agent_id.parse() {
@@ -73,6 +75,7 @@ async fn list_prompt_versions(
 
 async fn create_prompt_version(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(agent_id): Path<String>,
     Json(mut version): Json<PromptVersion>,
 ) -> impl IntoResponse {
@@ -101,6 +104,7 @@ async fn create_prompt_version(
 
 async fn get_prompt_version(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     match state.kernel.get_prompt_version(&id) {
@@ -113,6 +117,7 @@ async fn get_prompt_version(
 
 async fn delete_prompt_version(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     match state.kernel.delete_prompt_version(&id) {
@@ -125,6 +130,7 @@ async fn delete_prompt_version(
 
 async fn activate_prompt_version(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
@@ -146,6 +152,7 @@ async fn activate_prompt_version(
 
 async fn list_experiments(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(agent_id): Path<String>,
 ) -> impl IntoResponse {
     let agent_id: librefang_types::agent::AgentId = match agent_id.parse() {
@@ -166,6 +173,7 @@ async fn list_experiments(
 
 async fn create_experiment(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(agent_id): Path<String>,
     Json(mut experiment): Json<PromptExperiment>,
 ) -> impl IntoResponse {
@@ -194,6 +202,7 @@ async fn create_experiment(
 
 async fn get_experiment(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     match state.kernel.get_experiment(&id) {
@@ -206,6 +215,7 @@ async fn get_experiment(
 
 async fn start_experiment(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     match state
@@ -221,6 +231,7 @@ async fn start_experiment(
 
 async fn pause_experiment(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     match state
@@ -236,6 +247,7 @@ async fn pause_experiment(
 
 async fn complete_experiment(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     match state
@@ -251,6 +263,7 @@ async fn complete_experiment(
 
 async fn get_experiment_metrics(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     match state.kernel.get_experiment_metrics(&id) {

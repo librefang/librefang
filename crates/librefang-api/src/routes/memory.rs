@@ -5,6 +5,7 @@
 use std::sync::Arc;
 
 use super::AppState;
+use crate::middleware::AccountId;
 
 /// Build routes for the memory/KV domain.
 pub fn router() -> axum::Router<Arc<AppState>> {
@@ -168,6 +169,7 @@ fn internal_error(e: impl std::fmt::Display) -> (StatusCode, Json<serde_json::Va
 )]
 pub async fn memory_search(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Query(params): Query<MemorySearchQuery>,
 ) -> impl IntoResponse {
     let store = match get_pm_store(&state) {
@@ -204,6 +206,7 @@ pub async fn memory_search(
 )]
 pub async fn memory_list(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Query(params): Query<MemoryListQuery>,
 ) -> impl IntoResponse {
     let store = match get_pm_store(&state) {
@@ -247,6 +250,7 @@ pub async fn memory_list(
 )]
 pub async fn memory_get_user(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(user_id): Path<String>,
 ) -> impl IntoResponse {
     let store = match get_pm_store(&state) {
@@ -277,6 +281,7 @@ pub async fn memory_get_user(
 )]
 pub async fn memory_add(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Json(body): Json<MemoryAddBody>,
 ) -> impl IntoResponse {
     let store = match get_pm_store(&state) {
@@ -315,6 +320,7 @@ pub async fn memory_add(
 )]
 pub async fn memory_update(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(memory_id): Path<String>,
     Json(body): Json<MemoryUpdateBody>,
 ) -> impl IntoResponse {
@@ -365,6 +371,7 @@ pub async fn memory_update(
 )]
 pub async fn memory_delete(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(memory_id): Path<String>,
 ) -> impl IntoResponse {
     let store = match get_pm_store(&state) {
@@ -407,6 +414,7 @@ pub async fn memory_delete(
 )]
 pub async fn memory_bulk_delete(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let store = match get_pm_store(&state) {
@@ -461,7 +469,10 @@ pub async fn memory_bulk_delete(
     tag = "proactive-memory",
     responses((status = 200, description = "Memory statistics", body = serde_json::Value))
 )]
-pub async fn memory_stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn memory_stats(
+    State(state): State<Arc<AppState>>,
+    account: AccountId,
+) -> impl IntoResponse {
     let store = match get_pm_store(&state) {
         Ok(s) => s,
         Err(e) => return e,
@@ -488,6 +499,7 @@ pub async fn memory_stats(State(state): State<Arc<AppState>>) -> impl IntoRespon
 )]
 pub async fn memory_reset_agent(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(agent_id): Path<String>,
 ) -> impl IntoResponse {
     let store = match get_pm_store(&state) {
@@ -521,6 +533,7 @@ pub async fn memory_reset_agent(
 )]
 pub async fn memory_clear_level(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path((agent_id, level_str)): Path<(String, String)>,
 ) -> impl IntoResponse {
     let store = match get_pm_store(&state) {
@@ -579,6 +592,7 @@ pub async fn memory_clear_level(
 )]
 pub async fn memory_list_agent(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(agent_id): Path<String>,
     Query(params): Query<MemoryListQuery>,
 ) -> impl IntoResponse {
@@ -626,6 +640,7 @@ pub async fn memory_list_agent(
 )]
 pub async fn memory_search_agent(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(agent_id): Path<String>,
     Query(params): Query<MemorySearchQuery>,
 ) -> impl IntoResponse {
@@ -658,6 +673,7 @@ pub async fn memory_search_agent(
 )]
 pub async fn memory_stats_agent(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(agent_id): Path<String>,
 ) -> impl IntoResponse {
     let store = match get_pm_store(&state) {
@@ -685,6 +701,7 @@ pub async fn memory_stats_agent(
 )]
 pub async fn memory_duplicates(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(agent_id): Path<String>,
 ) -> impl IntoResponse {
     let store = match get_pm_store(&state) {
@@ -718,6 +735,7 @@ pub async fn memory_duplicates(
 )]
 pub async fn memory_history(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(memory_id): Path<String>,
 ) -> impl IntoResponse {
     let store = match get_pm_store(&state) {
@@ -755,6 +773,7 @@ pub async fn memory_history(
 )]
 pub async fn memory_consolidate(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(agent_id): Path<String>,
 ) -> impl IntoResponse {
     let store = match get_pm_store(&state) {
@@ -788,7 +807,10 @@ pub async fn memory_consolidate(
     tag = "proactive-memory",
     responses((status = 200, description = "Cleanup result", body = serde_json::Value))
 )]
-pub async fn memory_cleanup(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn memory_cleanup(
+    State(state): State<Arc<AppState>>,
+    account: AccountId,
+) -> impl IntoResponse {
     let store = match get_pm_store(&state) {
         Ok(s) => s,
         Err(e) => return e,
@@ -821,6 +843,7 @@ pub async fn memory_cleanup(State(state): State<Arc<AppState>>) -> impl IntoResp
 )]
 pub async fn memory_export_agent(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(agent_id): Path<String>,
 ) -> impl IntoResponse {
     let store = match get_pm_store(&state) {
@@ -856,6 +879,7 @@ pub async fn memory_export_agent(
 )]
 pub async fn memory_import_agent(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(agent_id): Path<String>,
     Json(body): Json<Vec<librefang_memory::MemoryExportItem>>,
 ) -> impl IntoResponse {
@@ -892,7 +916,10 @@ pub async fn memory_import_agent(
     tag = "proactive-memory",
     responses((status = 200, description = "Decay result", body = serde_json::Value))
 )]
-pub async fn memory_decay(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn memory_decay(
+    State(state): State<Arc<AppState>>,
+    account: AccountId,
+) -> impl IntoResponse {
     let store = match get_pm_store(&state) {
         Ok(s) => s,
         Err(e) => return e,
@@ -932,6 +959,7 @@ pub struct MemoryCountQuery {
 )]
 pub async fn memory_count_agent(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(agent_id): Path<String>,
     Query(params): Query<MemoryCountQuery>,
 ) -> impl IntoResponse {
@@ -978,6 +1006,7 @@ pub async fn memory_count_agent(
 )]
 pub async fn memory_store_relations(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(agent_id): Path<String>,
     Json(triples): Json<Vec<librefang_types::memory::RelationTriple>>,
 ) -> impl IntoResponse {
@@ -1027,6 +1056,7 @@ pub struct RelationQueryParams {
 )]
 pub async fn memory_query_relations(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(_agent_id): Path<String>,
     Query(params): Query<RelationQueryParams>,
 ) -> impl IntoResponse {
@@ -1087,7 +1117,10 @@ pub async fn memory_query_relations(
 // ---------------------------------------------------------------------------
 
 #[utoipa::path(get, path = "/api/memory/config", tag = "memory", responses((status = 200, description = "Memory configuration", body = serde_json::Value)))]
-pub async fn memory_config_get(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn memory_config_get(
+    State(state): State<Arc<AppState>>,
+    account: AccountId,
+) -> impl IntoResponse {
     let config = state.kernel.config_ref();
     Json(serde_json::json!({
         "embedding_provider": config.memory.embedding_provider,
@@ -1111,6 +1144,7 @@ pub async fn memory_config_get(State(state): State<Arc<AppState>>) -> impl IntoR
 #[utoipa::path(patch, path = "/api/memory/config", tag = "memory", request_body = serde_json::Value, responses((status = 200, description = "Memory configuration updated", body = serde_json::Value)))]
 pub async fn memory_config_patch(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Json(req): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let config_path = state.kernel.home_dir().join("config.toml");

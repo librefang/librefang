@@ -3,6 +3,7 @@
 // TODO(multi-tenant-phase2): Add AccountId parameter and tenant scoping
 
 use super::AppState;
+use crate::middleware::AccountId;
 
 /// Build routes for the workflow/trigger/schedule/cron domain.
 pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
@@ -287,6 +288,7 @@ fn parse_error_mode(val: &serde_json::Value, step: &serde_json::Value) -> ErrorM
 )]
 pub async fn create_workflow(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Json(req): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let name = req["name"].as_str().unwrap_or("unnamed").to_string();
@@ -368,7 +370,10 @@ pub async fn create_workflow(
         (status = 200, description = "List workflows", body = Vec<serde_json::Value>)
     )
 )]
-pub async fn list_workflows(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn list_workflows(
+    State(state): State<Arc<AppState>>,
+    account: AccountId,
+) -> impl IntoResponse {
     let engine = state.kernel.workflow_engine();
     let workflows = engine.list_workflows().await;
     let all_runs = engine.list_runs(None).await;
@@ -428,6 +433,7 @@ pub async fn list_workflows(State(state): State<Arc<AppState>>) -> impl IntoResp
 )]
 pub async fn get_workflow(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     let workflow_id = WorkflowId(match id.parse() {
@@ -489,6 +495,7 @@ pub async fn get_workflow(
 )]
 pub async fn update_workflow(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
     Json(req): Json<serde_json::Value>,
 ) -> impl IntoResponse {
@@ -617,6 +624,7 @@ pub async fn update_workflow(
 )]
 pub async fn delete_workflow(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     let workflow_id = WorkflowId(match id.parse() {
@@ -645,6 +653,7 @@ pub async fn delete_workflow(
 #[utoipa::path(post, path = "/api/workflows/{id}/run", tag = "workflows", params(("id" = String, Path, description = "Workflow ID")), responses((status = 200, description = "Workflow run started", body = serde_json::Value)))]
 pub async fn run_workflow(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
     Json(req): Json<serde_json::Value>,
 ) -> impl IntoResponse {
@@ -716,6 +725,7 @@ pub async fn run_workflow(
 )]
 pub async fn dry_run_workflow(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
     Json(req): Json<serde_json::Value>,
 ) -> impl IntoResponse {
@@ -766,6 +776,7 @@ pub async fn dry_run_workflow(
 )]
 pub async fn get_workflow_run(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(run_id): Path<String>,
 ) -> impl IntoResponse {
     let run_id = WorkflowRunId(match run_id.parse() {
@@ -808,6 +819,7 @@ pub async fn get_workflow_run(
 #[utoipa::path(get, path = "/api/workflows/{id}/runs", tag = "workflows", params(("id" = String, Path, description = "Workflow ID")), responses((status = 200, description = "List workflow runs", body = Vec<serde_json::Value>)))]
 pub async fn list_workflow_runs(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(_id): Path<String>,
 ) -> impl IntoResponse {
     let runs = state.kernel.workflow_engine().list_runs(None).await;
@@ -844,6 +856,7 @@ pub async fn list_workflow_runs(
 )]
 pub async fn save_workflow_as_template(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     use librefang_kernel::workflow::WorkflowEngine;
@@ -920,6 +933,7 @@ pub async fn save_workflow_as_template(
 )]
 pub async fn create_trigger(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Json(req): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let agent_id_str = match req["agent_id"].as_str() {
@@ -1008,6 +1022,7 @@ pub async fn create_trigger(
 )]
 pub async fn list_triggers(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
     let agent_filter = params
@@ -1042,6 +1057,7 @@ pub async fn list_triggers(
 #[utoipa::path(delete, path = "/api/triggers/{id}", tag = "workflows", params(("id" = String, Path, description = "Trigger ID")), responses((status = 200, description = "Trigger deleted")))]
 pub async fn delete_trigger(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     let trigger_id = TriggerId(match id.parse() {
@@ -1069,6 +1085,7 @@ pub async fn delete_trigger(
 #[utoipa::path(put, path = "/api/triggers/{id}", tag = "workflows", params(("id" = String, Path, description = "Trigger ID")), request_body = serde_json::Value, responses((status = 200, description = "Trigger updated", body = serde_json::Value)))]
 pub async fn update_trigger(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
     Json(req): Json<serde_json::Value>,
 ) -> impl IntoResponse {
@@ -1161,7 +1178,10 @@ fn cron_job_to_schedule_json(job: &librefang_types::scheduler::CronJob) -> serde
         (status = 200, description = "List schedules", body = Vec<serde_json::Value>)
     )
 )]
-pub async fn list_schedules(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn list_schedules(
+    State(state): State<Arc<AppState>>,
+    account: AccountId,
+) -> impl IntoResponse {
     let jobs = state.kernel.cron().list_all_jobs();
     let schedules: Vec<serde_json::Value> = jobs.iter().map(cron_job_to_schedule_json).collect();
     let total = schedules.len();
@@ -1172,6 +1192,7 @@ pub async fn list_schedules(State(state): State<Arc<AppState>>) -> impl IntoResp
 #[utoipa::path(get, path = "/api/schedules/{id}", tag = "workflows", params(("id" = String, Path, description = "Schedule ID")), responses((status = 200, description = "Schedule details", body = serde_json::Value)))]
 pub async fn get_schedule(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     let job_id = match parse_cron_job_id(&id) {
@@ -1197,6 +1218,7 @@ pub async fn get_schedule(
 )]
 pub async fn create_schedule(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Json(req): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let name = match req["name"].as_str() {
@@ -1341,6 +1363,7 @@ pub async fn create_schedule(
 #[utoipa::path(put, path = "/api/schedules/{id}", tag = "workflows", params(("id" = String, Path, description = "Schedule ID")), request_body = serde_json::Value, responses((status = 200, description = "Schedule updated", body = serde_json::Value)))]
 pub async fn update_schedule(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
     Json(req): Json<serde_json::Value>,
 ) -> impl IntoResponse {
@@ -1393,6 +1416,7 @@ pub async fn update_schedule(
 #[utoipa::path(delete, path = "/api/schedules/{id}", tag = "workflows", params(("id" = String, Path, description = "Schedule ID")), responses((status = 200, description = "Schedule deleted")))]
 pub async fn delete_schedule(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     let job_id = match parse_cron_job_id(&id) {
@@ -1418,6 +1442,7 @@ pub async fn delete_schedule(
 #[utoipa::path(post, path = "/api/schedules/{id}/run", tag = "workflows", params(("id" = String, Path, description = "Schedule ID")), responses((status = 200, description = "Schedule triggered", body = serde_json::Value)))]
 pub async fn run_schedule(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     let job_id = match parse_cron_job_id(&id) {
@@ -1524,6 +1549,7 @@ pub async fn run_schedule(
 #[utoipa::path(get, path = "/api/cron/jobs", tag = "workflows", responses((status = 200, description = "List cron jobs", body = Vec<serde_json::Value>)))]
 pub async fn list_cron_jobs(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
     let jobs = if let Some(agent_id_str) = params.get("agent_id") {
@@ -1554,6 +1580,7 @@ pub async fn list_cron_jobs(
 #[utoipa::path(post, path = "/api/cron/jobs", tag = "workflows", request_body = serde_json::Value, responses((status = 200, description = "Cron job created", body = serde_json::Value)))]
 pub async fn create_cron_job(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let agent_id = body["agent_id"].as_str().unwrap_or("");
@@ -1573,6 +1600,7 @@ pub async fn create_cron_job(
 #[utoipa::path(delete, path = "/api/cron/jobs/{id}", tag = "workflows", params(("id" = String, Path, description = "Cron job ID")), responses((status = 200, description = "Cron job deleted")))]
 pub async fn delete_cron_job(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     match uuid::Uuid::parse_str(&id) {
@@ -1599,6 +1627,7 @@ pub async fn delete_cron_job(
 #[utoipa::path(put, path = "/api/cron/jobs/{id}", tag = "workflows", params(("id" = String, Path, description = "Cron job ID")), request_body = serde_json::Value, responses((status = 200, description = "Cron job updated", body = serde_json::Value)))]
 pub async fn update_cron_job(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
@@ -1624,6 +1653,7 @@ pub async fn update_cron_job(
 #[utoipa::path(put, path = "/api/cron/jobs/{id}/enable", tag = "workflows", params(("id" = String, Path, description = "Cron job ID")), request_body = serde_json::Value, responses((status = 200, description = "Cron job toggled", body = serde_json::Value)))]
 pub async fn toggle_cron_job(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
@@ -1652,6 +1682,7 @@ pub async fn toggle_cron_job(
 #[utoipa::path(get, path = "/api/cron/jobs/{id}", tag = "workflows", params(("id" = String, Path, description = "Cron job ID")), responses((status = 200, description = "Cron job details", body = serde_json::Value), (status = 404, description = "Job not found")))]
 pub async fn get_cron_job(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     match uuid::Uuid::parse_str(&id) {
@@ -1673,6 +1704,7 @@ pub async fn get_cron_job(
 #[utoipa::path(get, path = "/api/cron/jobs/{id}/status", tag = "workflows", params(("id" = String, Path, description = "Cron job ID")), responses((status = 200, description = "Cron job status", body = serde_json::Value)))]
 pub async fn cron_job_status(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     match uuid::Uuid::parse_str(&id) {
@@ -1718,6 +1750,7 @@ pub struct TemplateListParams {
 )]
 pub async fn list_workflow_templates(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Query(params): Query<TemplateListParams>,
 ) -> impl IntoResponse {
     let all = state.kernel.templates().list().await;
@@ -1770,6 +1803,7 @@ pub async fn list_workflow_templates(
 )]
 pub async fn get_workflow_template(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     match state.kernel.templates().get(&id).await {
@@ -1798,6 +1832,7 @@ pub async fn get_workflow_template(
 )]
 pub async fn instantiate_template(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
     Json(params): Json<HashMap<String, serde_json::Value>>,
 ) -> impl IntoResponse {

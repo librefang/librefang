@@ -3,6 +3,7 @@
 // TODO(multi-tenant-phase2): Add AccountId parameter and tenant scoping
 
 use super::AppState;
+use crate::middleware::AccountId;
 use crate::types::ApiErrorResponse;
 
 /// Build routes for the budget and usage domain.
@@ -44,7 +45,10 @@ use std::sync::Arc;
     tag = "budget",
     responses((status = 200, description = "Per-agent usage statistics", body = serde_json::Value))
 )]
-pub async fn usage_stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn usage_stats(
+    State(state): State<Arc<AppState>>,
+    account: AccountId,
+) -> impl IntoResponse {
     let usage_store = state.kernel.memory_substrate().usage();
     let agents: Vec<serde_json::Value> = state
         .kernel
@@ -83,7 +87,10 @@ pub async fn usage_stats(State(state): State<Arc<AppState>>) -> impl IntoRespons
     tag = "budget",
     responses((status = 200, description = "Overall usage summary", body = serde_json::Value))
 )]
-pub async fn usage_summary(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn usage_summary(
+    State(state): State<Arc<AppState>>,
+    account: AccountId,
+) -> impl IntoResponse {
     match state.kernel.memory_substrate().usage().query_summary(None) {
         Ok(s) => Json(serde_json::json!({
             "total_input_tokens": s.total_input_tokens,
@@ -109,7 +116,10 @@ pub async fn usage_summary(State(state): State<Arc<AppState>>) -> impl IntoRespo
     tag = "budget",
     responses((status = 200, description = "Usage grouped by model", body = serde_json::Value))
 )]
-pub async fn usage_by_model(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn usage_by_model(
+    State(state): State<Arc<AppState>>,
+    account: AccountId,
+) -> impl IntoResponse {
     match state.kernel.memory_substrate().usage().query_by_model() {
         Ok(models) => {
             let list: Vec<serde_json::Value> = models
@@ -137,7 +147,10 @@ pub async fn usage_by_model(State(state): State<Arc<AppState>>) -> impl IntoResp
     tag = "budget",
     responses((status = 200, description = "Model performance metrics", body = serde_json::Value))
 )]
-pub async fn usage_by_model_performance(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn usage_by_model_performance(
+    State(state): State<Arc<AppState>>,
+    account: AccountId,
+) -> impl IntoResponse {
     match state
         .kernel
         .memory_substrate()
@@ -175,7 +188,10 @@ pub async fn usage_by_model_performance(State(state): State<Arc<AppState>>) -> i
     tag = "budget",
     responses((status = 200, description = "Daily usage breakdown", body = serde_json::Value))
 )]
-pub async fn usage_daily(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn usage_daily(
+    State(state): State<Arc<AppState>>,
+    account: AccountId,
+) -> impl IntoResponse {
     let days = state
         .kernel
         .memory_substrate()
@@ -223,7 +239,10 @@ pub async fn usage_daily(State(state): State<Arc<AppState>>) -> impl IntoRespons
         (status = 200, description = "Global budget status", body = serde_json::Value)
     )
 )]
-pub async fn budget_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn budget_status(
+    State(state): State<Arc<AppState>>,
+    account: AccountId,
+) -> impl IntoResponse {
     let status = state
         .kernel
         .metering_ref()
@@ -240,6 +259,7 @@ pub async fn budget_status(State(state): State<Arc<AppState>>) -> impl IntoRespo
 )]
 pub async fn update_budget(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     // Apply updates — accept both config field names (max_hourly_usd) and
@@ -288,6 +308,7 @@ pub async fn update_budget(
 )]
 pub async fn agent_budget_status(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     let agent_id: AgentId = match id.parse() {
@@ -354,7 +375,10 @@ pub async fn agent_budget_status(
         (status = 200, description = "Per-agent cost ranking", body = Vec<serde_json::Value>)
     )
 )]
-pub async fn agent_budget_ranking(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn agent_budget_ranking(
+    State(state): State<Arc<AppState>>,
+    account: AccountId,
+) -> impl IntoResponse {
     let usage_store =
         librefang_memory::usage::UsageStore::new(state.kernel.memory_substrate().usage_conn());
     let agents: Vec<serde_json::Value> = state
@@ -393,6 +417,7 @@ pub async fn agent_budget_ranking(State(state): State<Arc<AppState>>) -> impl In
 )]
 pub async fn update_agent_budget(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(id): Path<String>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {

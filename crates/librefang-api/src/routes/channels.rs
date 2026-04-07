@@ -38,6 +38,7 @@ use super::skills::{
     write_secret_env,
 };
 use super::AppState;
+use crate::middleware::AccountId;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -1150,7 +1151,10 @@ fn channel_config_values(
         (status = 200, description = "List configured channels", body = Vec<serde_json::Value>)
     )
 )]
-pub async fn list_channels(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn list_channels(
+    State(state): State<Arc<AppState>>,
+    account: AccountId,
+) -> impl IntoResponse {
     // Read the live channels config (updated on every hot-reload) instead of the
     // stale boot-time kernel.config, so newly configured channels show correctly.
     let live_channels = state.channels_config.read().await;
@@ -1226,6 +1230,7 @@ pub async fn list_channels(State(state): State<Arc<AppState>>) -> impl IntoRespo
 )]
 pub async fn get_channel(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
     let meta = match find_channel_meta(&name) {
@@ -1297,6 +1302,7 @@ pub async fn get_channel(
 /// POST /api/channels/{name}/configure — Save channel secrets + config fields.
 pub async fn configure_channel(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(name): Path<String>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
@@ -1408,6 +1414,7 @@ pub async fn configure_channel(
 /// DELETE /api/channels/{name}/configure — Remove channel secrets + config section.
 pub async fn remove_channel(
     State(state): State<Arc<AppState>>,
+    account: AccountId,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
     let meta = match find_channel_meta(&name) {
@@ -1481,6 +1488,7 @@ pub async fn remove_channel(
 /// (for Telegram). When provided, sends a real test message to verify the bot can
 /// post to that channel.
 pub async fn test_channel(
+    account: AccountId,
     Path(name): Path<String>,
     raw_body: axum::body::Bytes,
 ) -> impl IntoResponse {
@@ -1631,7 +1639,10 @@ async fn send_channel_test_message(channel_name: &str, target_id: &str) -> Resul
     )
 )]
 /// POST /api/channels/reload — Manually trigger a channel hot-reload from disk config.
-pub async fn reload_channels(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn reload_channels(
+    State(state): State<Arc<AppState>>,
+    account: AccountId,
+) -> impl IntoResponse {
     match crate::channel_bridge::reload_channels_from_disk(&state).await {
         Ok(started) => (
             StatusCode::OK,
@@ -1666,7 +1677,7 @@ pub async fn reload_channels(State(state): State<Arc<AppState>>) -> impl IntoRes
 /// If a WhatsApp Web gateway is available (e.g. a Baileys-based bridge process),
 /// this proxies the request and returns a base64 QR code data URL. If no gateway
 /// is running, it returns instructions to set one up.
-pub async fn whatsapp_qr_start() -> impl IntoResponse {
+pub async fn whatsapp_qr_start(account: AccountId) -> impl IntoResponse {
     // Check for WhatsApp Web gateway URL in config or env
     let gateway_url = std::env::var("WHATSAPP_WEB_GATEWAY_URL").unwrap_or_default();
 
@@ -1730,6 +1741,7 @@ pub async fn whatsapp_qr_start() -> impl IntoResponse {
 /// After calling `/qr/start`, the frontend polls this to check if the user
 /// has scanned the QR code and the WhatsApp Web session is connected.
 pub async fn whatsapp_qr_status(
+    account: AccountId,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     let gateway_url = std::env::var("WHATSAPP_WEB_GATEWAY_URL").unwrap_or_default();
@@ -1880,7 +1892,7 @@ const WECHAT_ILINK_BASE: &str = "https://ilinkai.weixin.qq.com";
     )
 )]
 /// POST /api/channels/wechat/qr/start — Request a QR code from iLink for WeChat login.
-pub async fn wechat_qr_start() -> impl IntoResponse {
+pub async fn wechat_qr_start(account: AccountId) -> impl IntoResponse {
     let client = match librefang_runtime::http_client::client_builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
@@ -1946,6 +1958,7 @@ pub async fn wechat_qr_start() -> impl IntoResponse {
 )]
 /// GET /api/channels/wechat/qr/status — Poll iLink for QR scan confirmation.
 pub async fn wechat_qr_status(
+    account: AccountId,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     let qr_code = params.get("qr_code").cloned().unwrap_or_default();
@@ -2033,7 +2046,10 @@ pub async fn wechat_qr_status(
         (status = 200, description = "Channel metadata from registry", body = Vec<serde_json::Value>)
     )
 )]
-pub async fn list_channel_registry(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn list_channel_registry(
+    State(state): State<Arc<AppState>>,
+    account: AccountId,
+) -> impl IntoResponse {
     let channels_dir = state.kernel.home_dir().join("channels");
     let metadata = librefang_runtime::channel_registry::load_channel_metadata(&channels_dir);
     Json(serde_json::to_value(&metadata).unwrap_or_default())

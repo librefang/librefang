@@ -38,13 +38,13 @@ Notes:
 
 ### 2. CRITICAL: Scope the remaining route modules
 
-- [ ] Scope `budget.rs`
-- [ ] Scope `memory.rs`
-- [ ] Scope `system.rs`
-- [ ] Scope `workflows.rs`
-- [ ] Scope `prompts.rs`
+- [x] Scope `budget.rs` — 10/10 handlers
+- [x] Scope `memory.rs` — 25/25 handlers
+- [x] Scope `system.rs` — 67/67 handlers (+ 3 closure wrappers)
+- [x] Scope `workflows.rs` — 30/30 handlers
+- [x] Scope `prompts.rs` — 12/12 handlers
 - [ ] Ensure both read and mutation paths are tenant-filtered
-- [ ] Use `account: AccountId` consistently on handlers and tenant-aware kernel/query calls underneath
+- [x] Use `account: AccountId` consistently on handlers and tenant-aware kernel/query calls underneath
 
 Files to change:
 - `crates/librefang-api/src/routes/budget.rs`
@@ -89,7 +89,7 @@ Notes:
 
 ### 5. HIGH: Round 4b is still open for channels
 
-- [ ] Scope all `11` handlers in `channels.rs`
+- [x] Scope all `11` handlers in `channels.rs` — AccountId extractor added
 - [ ] Ensure channel reads, mutations, QR/session flows, and reload paths do not cross tenant boundaries
 - [ ] Confirm channel-driven agent spawning and channel metadata reads stay within account scope
 
@@ -156,9 +156,9 @@ Files to change:
 
 ## Recommended Priority Order
 
-- [ ] P0: Fix feature gating so multi-tenant mode is driven by config and missing `X-Account-Id` cannot degrade to `AccountId(None)`
-- [ ] P0: Scope the unprotected route modules: `budget`, `memory`, `system`, `workflows`, `prompts`
-- [ ] P1: Scope `channels.rs`
+- [x] P0: Fix feature gating so multi-tenant mode is driven by config and missing `X-Account-Id` cannot degrade to `AccountId(None)` — done in `14e00fef`
+- [x] P0: Scope the unprotected route modules: `budget`, `memory`, `system`, `workflows`, `prompts` — AccountId extractor on all handlers
+- [x] P1: Scope `channels.rs` — 11/11 handlers scoped
 - [ ] P1: Close the `/api/uploads/*` leak
 - [ ] P1: Replace insecure test expectations and add the missing integration suite
 - [ ] P2: Restrict global telemetry endpoints
