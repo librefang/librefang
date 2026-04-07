@@ -29,6 +29,8 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 /// from search results should read `metadata[LIBREFANG_ID_KEY]`.
 pub const LIBREFANG_ID_KEY: &str = "librefang_id";
 
+type BatchInsertItem = (String, Vec<f32>, String, HashMap<String, serde_json::Value>);
+
 /// A [`VectorStore`] that talks to Supabase PostgREST RPC endpoints.
 ///
 /// # ID semantics
@@ -240,10 +242,7 @@ impl SupabaseVectorStore {
     /// `user_id` and `account_id` are extracted from the **first** item's
     /// metadata and applied uniformly to all rows (the RPC uses scalar
     /// params, not per-document).  Returns the Supabase row IDs.
-    pub async fn insert_batch(
-        &self,
-        items: &[(String, Vec<f32>, String, HashMap<String, serde_json::Value>)],
-    ) -> LibreFangResult<Vec<i64>> {
+    pub async fn insert_batch(&self, items: &[BatchInsertItem]) -> LibreFangResult<Vec<i64>> {
         if items.is_empty() {
             return Ok(vec![]);
         }
@@ -1073,7 +1072,7 @@ mod tests {
         meta0.insert("user_id".to_string(), serde_json::json!("user-A"));
         let mut meta1 = HashMap::new();
         meta1.insert("user_id".to_string(), serde_json::json!("user-B"));
-        let items: Vec<(String, Vec<f32>, String, HashMap<String, serde_json::Value>)> = vec![
+        let items: Vec<BatchInsertItem> = vec![
             ("a".to_string(), vec![0.1_f32], "d1".to_string(), meta0),
             ("b".to_string(), vec![0.2_f32], "d2".to_string(), meta1),
         ];
