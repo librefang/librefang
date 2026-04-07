@@ -1040,10 +1040,97 @@ impl ScriptableContextEngine {
 
     /// Attach a shared event bus to this engine.
     ///
-    /// When set, events extracted from `after_turn` hook output are published
-    /// to the bus so other engines can subscribe and dispatch their `on_event` hooks.
+    /// Attach an event bus so this engine both emits events (from `after_turn` output)
+    /// and receives events for its `on_event` hook.
+    ///
+    /// Starts a background subscription task on the bus: when any plugin on the same
+    /// bus emits an event, this engine's `on_event` script (if configured) is invoked.
     pub fn with_event_bus(mut self, bus: std::sync::Arc<PluginEventBus>) -> Self {
-        self.event_bus = Some(bus);
+        self.event_bus = Some(bus.clone());
+
+        // Start listener only when there is an on_event script to invoke.
+        if self.on_event_script.is_some() {
+            // Build a lightweight clone of the fields needed inside the task.
+            // Using Arc clones keeps it cheap; the spawned task holds them for its lifetime.
+            let plugin_name = self.plugin_name.clone();
+            let on_event_script = self.on_event_script.clone().unwrap();
+            let runtime = self.runtime;
+            let hook_timeout_secs = self.hook_timeout_secs;
+            let plugin_env = self.plugin_env.clone();
+            let bootstrap_overrides = self.bootstrap_applied_overrides.clone();
+            let traces = self.traces.clone();
+            let hook_schemas = self.hook_schemas.clone();
+            let shared_state_path = self.shared_state_path.clone();
+            let trace_store = self.trace_store.clone();
+            let max_memory_mb = self.max_memory_mb;
+            let allow_network = self.allow_network;
+            let output_schema_strict = self.inner.config.output_schema_strict;
+
+            let mut rx = bus.subscribe();
+            tokio::spawn(async move {
+                loop {
+                    match rx.recv().await {
+                        Ok(event) => {
+                            // Skip events emitted by this same plugin to avoid infinite loops.
+                            if event.source_plugin == plugin_name { continue; }
+
+                            let effective_env = {
+                                let guard = bootstrap_overrides
+                                    .lock()
+                                    .unwrap_or_else(|p| p.into_inner());
+                                let mut env = plugin_env.clone();
+                                for (k, v) in &guard.env_overrides {
+                                    if !env.iter().any(|(ek, _)| ek == k) {
+                                        env.push((k.clone(), v.clone()));
+                                    }
+                                }
+                                env
+                            };
+                            let effective_allow_network = {
+                                let guard = bootstrap_overrides
+                                    .lock()
+                                    .unwrap_or_else(|p| p.into_inner());
+                                guard.allow_network.unwrap_or(allow_network)
+                            };
+                            let input = serde_json::json!({"event": event});
+                            let plugin_name_c = plugin_name.clone();
+                            let script = on_event_script.clone();
+                            let traces_c = traces.clone();
+                            let schemas_c = hook_schemas.clone();
+                            let state_c = shared_state_path.clone();
+                            let store_c = trace_store.clone();
+                            tokio::spawn(async move {
+                                let _ = ScriptableContextEngine::run_hook(
+                                    "on_event",
+                                    &script,
+                                    runtime,
+                                    input,
+                                    hook_timeout_secs,
+                                    &effective_env,
+                                    0, // on_event is best-effort, no retries
+                                    0,
+                                    max_memory_mb,
+                                    effective_allow_network,
+                                    &traces_c,
+                                    &schemas_c,
+                                    state_c.as_deref(),
+                                    store_c.as_ref(),
+                                    &plugin_name_c,
+                                    &generate_trace_id(),
+                                    output_schema_strict,
+                                )
+                                .await;
+                            });
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            warn!(plugin = %plugin_name, skipped = n, "on_event: broadcast lagged, some events skipped");
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            });
+        }
+
         self
     }
 
@@ -3009,11 +3096,22 @@ impl StackedContextEngine {
     ///
     /// Panics if `engines` is empty.
     pub fn new(engines: Vec<Box<dyn ContextEngine>>) -> Self {
+        let bus = std::sync::Arc::new(PluginEventBus::new(256));
+        Self::new_with_bus(engines, bus)
+    }
+
+    /// Like [`new`] but uses the provided shared event bus instead of creating
+    /// a fresh one.  Use this when you want all constituent engines to share
+    /// the same bus (so events emitted by one plugin reach the `on_event` hook
+    /// of every other plugin in the stack).
+    pub fn new_with_bus(
+        engines: Vec<Box<dyn ContextEngine>>,
+        bus: std::sync::Arc<PluginEventBus>,
+    ) -> Self {
         assert!(
             !engines.is_empty(),
             "StackedContextEngine requires at least one engine"
         );
-        let bus = std::sync::Arc::new(PluginEventBus::new(256));
         let layer_weights = vec![1.0f32; engines.len()];
         Self { engines, layer_weights, event_bus: bus }
     }
@@ -3437,6 +3535,11 @@ pub fn build_context_engine(
     // Plugin stack: 2+ plugins → StackedContextEngine
     if let Some(ref stack) = toml_config.plugin_stack {
         if stack.len() >= 2 {
+            // Create the shared event bus up-front so every engine in the stack
+            // can both emit events (via after_turn output) and receive events
+            // (via their on_event hook).  All engines share the same bus.
+            let shared_bus = std::sync::Arc::new(PluginEventBus::new(256));
+
             let mut engines: Vec<Box<dyn ContextEngine>> = Vec::with_capacity(stack.len());
             for plugin_name in stack {
                 let eng_memory = memory.clone();
@@ -3458,7 +3561,11 @@ pub fn build_context_engine(
                             engines.push(Box::new(
                                 ScriptableContextEngine::new(inner, &hooks)
                                     .with_plugin_name(plugin_name)
-                                    .with_plugin_env(env),
+                                    .with_plugin_env(env)
+                                    // Wire the shared bus: this engine will emit events to it
+                                    // AND subscribe its on_event hook to receive events from
+                                    // all other plugins in the stack.
+                                    .with_event_bus(shared_bus.clone()),
                             ));
                         } else {
                             warn!(
@@ -3478,7 +3585,11 @@ pub fn build_context_engine(
                     }
                 }
             }
-            return Box::new(StackedContextEngine::new(engines));
+            let mut stacked = StackedContextEngine::new_with_bus(engines, shared_bus);
+            if !toml_config.plugin_stack_weights.is_empty() {
+                stacked = stacked.with_weights(toml_config.plugin_stack_weights.clone());
+            }
+            return Box::new(stacked);
         }
     }
 
