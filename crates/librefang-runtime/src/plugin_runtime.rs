@@ -382,6 +382,14 @@ pub struct HookConfig {
     /// binary is available; on all platforms, injects `no_proxy=*`/`NO_PROXY=*`
     /// into the subprocess env. Defaults to `true`.
     pub allow_network: bool,
+    /// Allow the hook subprocess general filesystem access.
+    ///
+    /// When `false`, injects advisory env vars (`LIBREFANG_READONLY_FS=1`,
+    /// `HOME=/dev/null`) and redirects `TMPDIR` to a per-call temp directory
+    /// that is cleaned up after the hook exits. On Linux, additionally attempts
+    /// to wrap with `unshare --mount` for kernel-level mount isolation (best-effort;
+    /// falls back silently when `unshare` is unavailable). Defaults to `true`.
+    pub allow_filesystem: bool,
     /// Path to the per-plugin shared state JSON file.
     ///
     /// When `Some`, the path is injected as `LIBREFANG_STATE_FILE` into the
@@ -400,6 +408,7 @@ impl Default for HookConfig {
             plugin_env: Vec::new(),
             max_memory_mb: None,
             allow_network: true,
+            allow_filesystem: true,
             state_file: None,
         }
     }
@@ -537,6 +546,39 @@ fn try_wrap_with_unshare(launcher: &str, args: &[String]) -> (String, Vec<String
     (launcher.to_string(), args.to_vec())
 }
 
+/// On Linux, attempt to wrap a command with `unshare --mount` for mount namespace
+/// isolation when `allow_filesystem == false`.
+///
+/// Returns `(launcher, args)` unchanged if `unshare` is not available or if
+/// we are not on Linux. Best-effort: falls back silently.
+#[cfg(target_os = "linux")]
+fn try_wrap_with_unshare_mount(launcher: &str, args: &[String]) -> (String, Vec<String>) {
+    let available = std::process::Command::new("unshare")
+        .arg("--help")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    if available {
+        let mut new_args = vec![
+            "--mount".to_string(),
+            "--".to_string(),
+            launcher.to_string(),
+        ];
+        new_args.extend_from_slice(args);
+        return ("unshare".to_string(), new_args);
+    }
+    (launcher.to_string(), args.to_vec())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn try_wrap_with_unshare_mount(launcher: &str, args: &[String]) -> (String, Vec<String>) {
+    (launcher.to_string(), args.to_vec())
+}
+
 /// Run a hook script and parse the last JSON line of stdout.
 ///
 /// This is the main entry point — picks the right launcher based on
@@ -559,12 +601,22 @@ pub async fn run_hook_json(
 
     // On Linux, attempt true network namespace isolation via `unshare --net`.
     // On other platforms, proxy-blocking env vars (set below) are the only mechanism.
-    let sandboxing_active = !config.allow_network;
-    let (launcher, args) = if sandboxing_active {
-        let string_args: Vec<String> = base_args.iter().map(|s| s.to_string()).collect();
-        try_wrap_with_unshare(&base_launcher, &string_args)
-    } else {
-        (base_launcher, base_args)
+    // Additionally, when allow_filesystem=false on Linux, also attempt `unshare --mount`
+    // for mount namespace isolation (best-effort; falls back if unshare unavailable).
+    let (launcher, args) = {
+        let mut l = base_launcher.clone();
+        let mut a = base_args.clone();
+        if !config.allow_network {
+            let wrapped = try_wrap_with_unshare(&l, &a);
+            l = wrapped.0;
+            a = wrapped.1;
+        }
+        if !config.allow_filesystem {
+            let wrapped = try_wrap_with_unshare_mount(&l, &a);
+            l = wrapped.0;
+            a = wrapped.1;
+        }
+        (l, a)
     };
 
     let agent_id = input.get("agent_id").and_then(|v| v.as_str()).unwrap_or("");
@@ -652,6 +704,24 @@ pub async fn run_hook_json(
         cmd.env("HTTPS_PROXY", "");
         cmd.env("LIBREFANG_SANDBOX", "1");
     }
+
+    // Filesystem isolation: advisory env vars + per-call tmpdir cleanup.
+    // On Linux, unshare --mount wrapping is done above when building launcher/args.
+    let _hook_tmpdir: Option<std::path::PathBuf> = if !config.allow_filesystem {
+        cmd.env("LIBREFANG_READONLY_FS", "1");
+        cmd.env("HOME", "/dev/null");
+        let tmp = std::env::temp_dir()
+            .join(format!("librefang_hook_{}", uuid_v4_hex()));
+        let _ = std::fs::create_dir_all(&tmp);
+        cmd.env("TMPDIR", tmp.display().to_string());
+        debug!(
+            tmpdir = %tmp.display(),
+            "Filesystem isolation: LIBREFANG_READONLY_FS=1, HOME=/dev/null, scoped TMPDIR"
+        );
+        Some(tmp)
+    } else {
+        None
+    };
 
     // Memory limit: expose to hook scripts via env var so well-behaved scripts
     // can self-limit (Python: `resource.setrlimit`, Node: `--max-old-space-size`).
@@ -752,25 +822,33 @@ pub async fn run_hook_json(
     })
     .await;
 
-    match result {
+    let out = match result {
         Ok(Ok((stdout_lines, stderr_text, exit_code))) => {
             if exit_code != Some(0) {
-                return Err(PluginRuntimeError::ScriptError {
+                Err(PluginRuntimeError::ScriptError {
                     code: exit_code,
                     stderr: stderr_text.trim().to_string(),
-                });
+                })
+            } else {
+                if !stderr_text.trim().is_empty() {
+                    debug!("hook stderr: {}", stderr_text.trim());
+                }
+                parse_output(&stdout_lines)
             }
-            if !stderr_text.trim().is_empty() {
-                debug!("hook stderr: {}", stderr_text.trim());
-            }
-            parse_output(&stdout_lines)
         }
         Ok(Err(e)) => Err(e),
         Err(_) => {
             let _ = child.kill().await;
             Err(PluginRuntimeError::Timeout(config.timeout_secs))
         }
+    };
+
+    // Clean up per-call tmpdir created for filesystem isolation.
+    if let Some(ref tmp) = _hook_tmpdir {
+        let _ = std::fs::remove_dir_all(tmp);
     }
+
+    out
 }
 
 /// Scan stdout lines in reverse, returning the last one that parses as JSON.
@@ -794,6 +872,22 @@ fn parse_output(lines: &[String]) -> Result<serde_json::Value, PluginRuntimeErro
     Ok(serde_json::json!({ "text": joined }))
 }
 
+/// Generate a short random hex string suitable for unique temp directory names.
+///
+/// Uses the current time (nanoseconds) XOR'd with a monotonic counter as entropy —
+/// collision-resistant enough for per-call tmpdir naming without pulling in a UUID crate.
+fn uuid_v4_hex() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0) as u64;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mixed = nanos ^ (seq.wrapping_mul(0x9e3779b97f4a7c15));
+    format!("{mixed:016x}")
+}
+
 /// Expand a plugin env value: `${VAR_NAME}` → parent env lookup, otherwise literal.
 fn expand_env_value(val: &str) -> String {
     if let Some(inner) = val.strip_prefix("${").and_then(|s| s.strip_suffix('}')) {
@@ -808,7 +902,8 @@ struct PersistentProcess {
     stdin: tokio::process::ChildStdin,
     stdout: BufReader<tokio::process::ChildStdout>,
     /// Kept alive so `kill_on_drop` fires when this struct is dropped.
-    _child: tokio::process::Child,
+    /// Also used by `health_check` to probe liveness via `try_wait`.
+    child: tokio::process::Child,
 }
 
 /// Pool of persistent hook subprocesses, keyed by script path.
@@ -913,7 +1008,7 @@ impl HookProcessPool {
         Ok(PersistentProcess {
             stdin,
             stdout: BufReader::new(stdout),
-            _child: child,
+            child,
         })
     }
 
@@ -948,6 +1043,76 @@ impl HookProcessPool {
 
         serde_json::from_str(response.trim())
             .map_err(|e| PluginRuntimeError::InvalidOutput(format!("JSON parse: {e}")))
+    }
+
+    /// Check which persistent subprocesses are still alive.
+    ///
+    /// For each slot in the pool:
+    /// - If the slot mutex is locked (process is in use), the process is assumed alive.
+    /// - If the slot mutex can be acquired and `child.try_wait()` returns `Ok(None)`,
+    ///   the process is still running — add to the alive list.
+    /// - If `try_wait` returns an exit status or an error, the slot is evicted
+    ///   (set to `None`) so the next `call()` will restart it.
+    ///
+    /// Returns the list of script-path keys for alive processes.
+    pub async fn health_check(&self) -> Vec<String> {
+        let mut alive = Vec::new();
+        let entries: Vec<(String, std::sync::Arc<tokio::sync::Mutex<Option<PersistentProcess>>>)> = {
+            let procs = self.procs.lock().unwrap();
+            procs.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+        };
+        for (key, slot_arc) in entries {
+            match slot_arc.try_lock() {
+                Ok(mut guard) => {
+                    if let Some(ref mut proc) = *guard {
+                        match proc.child.try_wait() {
+                            Ok(None) => alive.push(key), // still running
+                            _ => {
+                                // Exited or error — evict so next call restarts it.
+                                *guard = None;
+                            }
+                        }
+                    }
+                    // If guard is None, slot is already evicted — not alive.
+                }
+                Err(_) => {
+                    // Locked means in-use; assume alive.
+                    alive.push(key);
+                }
+            }
+        }
+        alive
+    }
+
+    /// Pre-warm a specific hook script by spawning its subprocess now.
+    ///
+    /// The process will be held in the pool and reused on the first `call()`.
+    /// If a process for this script is already running, this is a no-op.
+    /// Returns `Ok(())` if the process started successfully.
+    pub async fn prewarm(
+        &self,
+        script_path: &str,
+        runtime: PluginRuntime,
+        plugin_env: &[(String, String)],
+    ) -> Result<(), PluginRuntimeError> {
+        let key = format!("{:?}::{}", runtime, script_path);
+        let slot_arc = {
+            let mut procs = self.procs.lock().unwrap();
+            procs
+                .entry(key.clone())
+                .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(None)))
+                .clone()
+        };
+        let mut guard = slot_arc.lock().await;
+        if guard.is_none() {
+            let config = HookConfig {
+                plugin_env: plugin_env.to_vec(),
+                ..Default::default()
+            };
+            *guard = Some(Self::spawn(script_path, runtime, &config).await?);
+            tracing::info!(script = script_path, "Pre-warmed hook subprocess");
+        }
+        Ok(())
     }
 }
 

@@ -2418,7 +2418,47 @@ pub struct ContextEngineHooks {
     /// ```
     #[serde(default)]
     pub enable_shared_state: bool,
+    /// Circuit-breaker configuration for hook failures.
+    ///
+    /// After `max_failures` consecutive failures the hook is suspended for
+    /// `reset_secs` seconds before being retried in half-open state.
+    ///
+    /// ```toml
+    /// [hooks.circuit_breaker]
+    /// max_failures = 5
+    /// reset_secs   = 60
+    /// ```
+    #[serde(default)]
+    pub circuit_breaker: Option<CircuitBreakerConfig>,
+    /// Maximum concurrent `after_turn` background tasks (default 16).
+    #[serde(default = "default_after_turn_queue_depth")]
+    pub after_turn_queue_depth: u32,
+    /// Pre-warm persistent subprocesses at engine init (requires `persistent_subprocess = true`).
+    #[serde(default)]
+    pub prewarm_subprocesses: bool,
+    /// Restrict hook filesystem access: sets `HOME=/dev/null`, per-call `TMPDIR`,
+    /// and `LIBREFANG_READONLY_FS=1`. Defaults to `true` (no restriction).
+    #[serde(default = "default_true_bool")]
+    pub allow_filesystem: bool,
+    /// OTel OTLP gRPC endpoint for hook span export (overrides global setting).
+    #[serde(default)]
+    pub otel_endpoint: Option<String>,
 }
+
+/// Circuit-breaker settings for a hook.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CircuitBreakerConfig {
+    /// Consecutive failures before the circuit opens.
+    #[serde(default = "default_cb_max_failures")]
+    pub max_failures: u32,
+    /// Cooldown in seconds before half-open retry.
+    #[serde(default = "default_cb_reset_secs")]
+    pub reset_secs: u64,
+}
+
+fn default_cb_max_failures() -> u32 { 5 }
+fn default_cb_reset_secs() -> u64 { 60 }
+fn default_after_turn_queue_depth() -> u32 { 16 }
 
 fn default_true_bool() -> bool {
     true

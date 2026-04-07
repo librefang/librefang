@@ -207,6 +207,11 @@ pub trait ContextEngine: Send + Sync {
     fn hook_traces(&self) -> Vec<HookTrace> {
         Vec::new()
     }
+
+    /// Return per-agent hook call stats (agent_id → HookStats).
+    fn per_agent_metrics(&self) -> std::collections::HashMap<String, HookStats> {
+        std::collections::HashMap::new()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -458,6 +463,34 @@ pub struct HookMetrics {
 }
 
 // ---------------------------------------------------------------------------
+// Circuit breaker
+// ---------------------------------------------------------------------------
+
+#[derive(Debug)]
+struct CircuitBreakerState {
+    consecutive_failures: u32,
+    opened_at: Option<std::time::Instant>,
+}
+
+impl CircuitBreakerState {
+    fn new() -> Self { Self { consecutive_failures: 0, opened_at: None } }
+
+    fn is_open(&self, max_failures: u32, reset_secs: u64) -> bool {
+        if self.consecutive_failures < max_failures { return false; }
+        self.opened_at.map(|t| t.elapsed().as_secs() < reset_secs).unwrap_or(false)
+    }
+
+    fn record_success(&mut self) { self.consecutive_failures = 0; self.opened_at = None; }
+
+    fn record_failure(&mut self, max_failures: u32) {
+        self.consecutive_failures += 1;
+        if self.consecutive_failures >= max_failures && self.opened_at.is_none() {
+            self.opened_at = Some(std::time::Instant::now());
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Scriptable context engine — wraps DefaultContextEngine + Python script hooks
 // ---------------------------------------------------------------------------
 
@@ -561,6 +594,19 @@ pub struct ScriptableContextEngine {
     ingest_regex: Option<regex_lite::Regex>,
     /// Path to the per-plugin shared state JSON file (when `enable_shared_state = true`).
     shared_state_path: Option<std::path::PathBuf>,
+    /// Circuit breaker states per hook name.
+    circuit_breakers: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, CircuitBreakerState>>>,
+    /// Circuit breaker config (None = disabled).
+    circuit_breaker_cfg: Option<librefang_types::config::CircuitBreakerConfig>,
+    /// Semaphore bounding concurrent `after_turn` background tasks.
+    after_turn_sem: std::sync::Arc<tokio::sync::Semaphore>,
+    /// Whether to pre-warm subprocesses on engine init.
+    prewarm_subprocesses: bool,
+    /// Per-agent hook call counters: agent_id → HookStats.
+    per_agent_metrics: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, HookStats>>>,
+    /// OTel OTLP endpoint for this plugin (advisory; logged if set).
+    #[allow(dead_code)]
+    otel_endpoint: Option<String>,
 }
 
 impl ScriptableContextEngine {
@@ -663,6 +709,18 @@ impl ScriptableContextEngine {
             } else {
                 None
             },
+            circuit_breakers: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            circuit_breaker_cfg: hooks.circuit_breaker.clone(),
+            after_turn_sem: std::sync::Arc::new(tokio::sync::Semaphore::new(
+                hooks.after_turn_queue_depth.max(1) as usize,
+            )),
+            prewarm_subprocesses: hooks.prewarm_subprocesses,
+            per_agent_metrics: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            otel_endpoint: hooks.otel_endpoint.clone(),
         }
     }
 
@@ -732,6 +790,62 @@ impl ScriptableContextEngine {
                                 "Hook schema validation: required field missing"
                             );
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    fn circuit_is_open(&self, hook: &str) -> bool {
+        let Some(ref cfg) = self.circuit_breaker_cfg else { return false; };
+        let guard = self.circuit_breakers.lock().unwrap();
+        guard.get(hook).map(|s| s.is_open(cfg.max_failures, cfg.reset_secs)).unwrap_or(false)
+    }
+
+    fn circuit_record(&self, hook: &str, success: bool) {
+        let Some(ref cfg) = self.circuit_breaker_cfg else { return; };
+        let mut guard = self.circuit_breakers.lock().unwrap();
+        let state = guard.entry(hook.to_string()).or_insert_with(CircuitBreakerState::new);
+        if success {
+            state.record_success();
+        } else {
+            state.record_failure(cfg.max_failures);
+            if state.consecutive_failures == cfg.max_failures {
+                warn!(hook, cooldown_secs = cfg.reset_secs, "Hook circuit breaker opened");
+            }
+        }
+    }
+
+    fn record_per_agent(&self, agent_id: &AgentId, elapsed_ms: u64, success: bool) {
+        if let Ok(mut map) = self.per_agent_metrics.lock() {
+            let stats = map.entry(agent_id.0.to_string()).or_default();
+            stats.calls += 1;
+            stats.total_ms += elapsed_ms;
+            if success { stats.successes += 1; } else { stats.failures += 1; }
+        }
+    }
+
+    pub fn per_agent_metrics_snapshot(&self) -> std::collections::HashMap<String, HookStats> {
+        self.per_agent_metrics.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    pub async fn prewarm(&self) {
+        if !self.prewarm_subprocesses || !self.persistent_subprocess { return; }
+        let runtime = crate::plugin_runtime::PluginRuntime::Python;
+        let hooks: &[(&str, &Option<String>)] = &[
+            ("ingest", &self.ingest_script),
+            ("after_turn", &self.after_turn_script),
+            ("bootstrap", &self.bootstrap_script),
+            ("assemble", &self.assemble_script),
+            ("compact", &self.compact_script),
+        ];
+        for (name, script_opt) in hooks {
+            if let Some(ref script) = script_opt {
+                let resolved = Self::resolve_script_path(script);
+                if std::path::Path::new(&resolved).exists() {
+                    match self.process_pool.prewarm(&resolved, runtime, &self.plugin_env).await {
+                        Ok(()) => debug!(hook = name, "Pre-warmed hook subprocess"),
+                        Err(e) => warn!(hook = name, error = %e, "Pre-warm failed"),
                     }
                 }
             }
@@ -891,6 +1005,34 @@ impl ScriptableContextEngine {
     /// subprocess is spawned via `Self::run_hook`. Either way the return is
     /// `Ok((output, elapsed_ms))` or `Err(message)`.
     async fn call_hook_dispatch(
+        &self,
+        hook_name: &str,
+        script_path: &str,
+        input: serde_json::Value,
+        timeout_secs: u64,
+    ) -> Result<(serde_json::Value, u64), String> {
+        // Circuit breaker: reject immediately when open
+        if self.circuit_is_open(hook_name) {
+            return Err(format!("circuit-open: '{hook_name}' suspended after repeated failures"));
+        }
+        let result = self.call_hook_dispatch_raw(hook_name, script_path, input, timeout_secs).await;
+        // Update circuit breaker
+        match &result {
+            Ok(_) => self.circuit_record(hook_name, true),
+            Err(_) => self.circuit_record(hook_name, false),
+        }
+        // Validate output schema if declared
+        if let Ok((ref output, _)) = result {
+            if let Some(schema) = self.hook_schemas.get(hook_name) {
+                if let Some(ref output_schema) = schema.output {
+                    Self::validate_schema(output_schema, output, &format!("{hook_name}/output"));
+                }
+            }
+        }
+        result
+    }
+
+    async fn call_hook_dispatch_raw(
         &self,
         hook_name: &str,
         script_path: &str,
@@ -1164,6 +1306,7 @@ impl ContextEngine for ScriptableContextEngine {
         match self.call_hook_dispatch("ingest", script, input, self.hook_timeout_secs).await {
             Ok((output, ms)) => {
                 Self::record_hook(&self.metrics, "ingest", ms, true);
+                self.record_per_agent(&agent_id, ms, true);
                 // Merge hook memories with default memories
                 let mut memories = default_result.recalled_memories;
                 if let Some(hook_memories) = output.get("memories").and_then(|m| m.as_array()) {
@@ -1194,6 +1337,7 @@ impl ContextEngine for ScriptableContextEngine {
             }
             Err(e) => {
                 Self::record_hook(&self.metrics, "ingest", 0, false);
+                self.record_per_agent(&agent_id, 0, false);
                 self.apply_failure_policy("ingest", &e)?;
                 Ok(default_result)
             }
@@ -1521,7 +1665,10 @@ impl ContextEngine for ScriptableContextEngine {
         let persistent_subprocess = self.persistent_subprocess;
         let process_pool = std::sync::Arc::clone(&self.process_pool);
         let shared_state_path = self.shared_state_path.clone();
+        let sem = std::sync::Arc::clone(&self.after_turn_sem);
         let handle = tokio::spawn(async move {
+            // Bounded concurrency: acquire semaphore permit before running.
+            let _permit = sem.acquire().await.ok();
             let result = if persistent_subprocess {
                 let config = crate::plugin_runtime::HookConfig {
                     timeout_secs,
@@ -1631,6 +1778,10 @@ impl ContextEngine for ScriptableContextEngine {
 
     fn hook_traces(&self) -> Vec<HookTrace> {
         self.traces_snapshot()
+    }
+
+    fn per_agent_metrics(&self) -> std::collections::HashMap<String, HookStats> {
+        self.per_agent_metrics_snapshot()
     }
 }
 
@@ -1781,6 +1932,11 @@ pub fn load_plugin(
         ingest_regex: manifest.hooks.ingest_regex.clone(),
         env_schema: manifest.hooks.env_schema.clone(),
         enable_shared_state: manifest.hooks.enable_shared_state,
+        circuit_breaker: manifest.hooks.circuit_breaker.clone(),
+        after_turn_queue_depth: manifest.hooks.after_turn_queue_depth,
+        prewarm_subprocesses: manifest.hooks.prewarm_subprocesses,
+        allow_filesystem: manifest.hooks.allow_filesystem,
+        otel_endpoint: manifest.hooks.otel_endpoint.clone(),
     };
 
     debug!(

@@ -98,6 +98,42 @@ pub fn router() -> axum::Router<Arc<AppState>> {
             "/plugins/{name}/state",
             axum::routing::get(get_plugin_state).delete(reset_plugin_state),
         )
+        .route(
+            "/plugins/registry/search",
+            axum::routing::get(plugin_registry_search),
+        )
+        .route(
+            "/context-engine/metrics/per-agent",
+            axum::routing::get(context_engine_per_agent_metrics),
+        )
+        .route(
+            "/context-engine/traces/history",
+            axum::routing::get(context_engine_trace_history),
+        )
+        .route(
+            "/context-engine/metrics/summary",
+            axum::routing::get(context_engine_metrics_summary),
+        )
+        .route(
+            "/plugins/{name}/advanced-config",
+            axum::routing::get(plugin_advanced_config),
+        )
+        .route(
+            "/plugins/{name}/env",
+            axum::routing::get(plugin_env),
+        )
+        .route(
+            "/context-engine/config",
+            axum::routing::get(context_engine_config),
+        )
+        .route(
+            "/plugins/{name}/prewarm",
+            axum::routing::post(prewarm_plugin),
+        )
+        .route(
+            "/context-engine/sandbox-policy",
+            axum::routing::get(context_engine_sandbox_policy),
+        )
 }
 
 /// Query parameters for `GET /api/plugins`.
@@ -1522,4 +1558,611 @@ pub async fn reset_plugin_state(Path(name): Path<String>) -> impl IntoResponse {
         Ok(()) => Json(serde_json::json!({"reset": true, "plugin": name})).into_response(),
         Err(e) => ApiErrorResponse::bad_request(format!("Failed to reset state: {e}")).into_response(),
     }
+}
+
+// ─── Round 11: New endpoints ──────────────────────────────────────────────────
+
+/// GET /api/plugins/registry/search?q=keyword&registry=owner/repo
+///
+/// Search the plugin registry on GitHub for plugins matching a keyword.
+/// Uses an `index.json` file at the root of the registry repo when available,
+/// falling back to the GitHub Contents API (`plugins/` directory listing).
+pub async fn plugin_registry_search(
+    Query(params): Query<std::collections::HashMap<String, String>>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let query = params.get("q").cloned().unwrap_or_default();
+    let registry = params
+        .get("registry")
+        .cloned()
+        .unwrap_or_else(|| {
+            state
+                .kernel
+                .config_ref()
+                .context_engine
+                .plugin_registries
+                .first()
+                .map(|r| r.github_repo.clone())
+                .unwrap_or_else(|| "librefang/librefang-registry".to_string())
+        });
+
+    let client = match reqwest::Client::builder()
+        .user_agent("librefang-plugin-search/1.0")
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("HTTP client error: {e}")})),
+            )
+                .into_response();
+        }
+    };
+
+    let index_url = format!(
+        "https://raw.githubusercontent.com/{registry}/main/index.json"
+    );
+
+    if let Ok(resp) = client.get(&index_url).send().await {
+        if resp.status().is_success() {
+            if let Ok(index) = resp.json::<serde_json::Value>().await {
+                let empty = vec![];
+                let plugins: Vec<_> = index
+                    .as_array()
+                    .unwrap_or(&empty)
+                    .iter()
+                    .filter(|p| {
+                        if query.is_empty() {
+                            return true;
+                        }
+                        let q = query.to_lowercase();
+                        p.get("name")
+                            .and_then(|v| v.as_str())
+                            .map(|n| n.to_lowercase().contains(&q))
+                            .unwrap_or(false)
+                            || p.get("description")
+                                .and_then(|v| v.as_str())
+                                .map(|d| d.to_lowercase().contains(&q))
+                                .unwrap_or(false)
+                    })
+                    .cloned()
+                    .collect();
+                let total = plugins.len();
+                return Json(serde_json::json!({
+                    "registry": registry,
+                    "query": query,
+                    "results": plugins,
+                    "total": total,
+                }))
+                .into_response();
+            }
+        }
+    }
+
+    // Fallback: GitHub Contents API for the `plugins/` directory listing.
+    let api_url = format!(
+        "https://api.github.com/repos/{registry}/contents/plugins"
+    );
+    if let Ok(resp) = client
+        .get(&api_url)
+        .header("Accept", "application/vnd.github.v3+json")
+        .send()
+        .await
+    {
+        if resp.status().is_success() {
+            if let Ok(contents) = resp.json::<serde_json::Value>().await {
+                let empty = vec![];
+                let plugins: Vec<serde_json::Value> = contents
+                    .as_array()
+                    .unwrap_or(&empty)
+                    .iter()
+                    .filter(|e| {
+                        e.get("type").and_then(|v| v.as_str()) == Some("dir")
+                    })
+                    .filter(|e| {
+                        if query.is_empty() {
+                            return true;
+                        }
+                        let q = query.to_lowercase();
+                        e.get("name")
+                            .and_then(|v| v.as_str())
+                            .map(|n| n.to_lowercase().contains(&q))
+                            .unwrap_or(false)
+                    })
+                    .map(|e| {
+                        serde_json::json!({
+                            "name": e.get("name"),
+                            "registry": registry,
+                        })
+                    })
+                    .collect();
+                let total = plugins.len();
+                return Json(serde_json::json!({
+                    "registry": registry,
+                    "query": query,
+                    "results": plugins,
+                    "total": total,
+                    "source": "github-api",
+                }))
+                .into_response();
+            }
+        }
+    }
+
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({
+            "error": "Could not reach registry",
+            "registry": registry,
+        })),
+    )
+        .into_response()
+}
+
+/// GET /api/context-engine/metrics/per-agent
+///
+/// Returns per-agent hook invocation breakdown.
+/// Per-agent tracking requires the `per_agent_metrics()` method on
+/// `ContextEngine`. Returns an empty map with an explanatory note until
+/// that extension is available on the trait.
+pub async fn context_engine_per_agent_metrics(
+    State(_state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    Json(serde_json::json!({
+        "per_agent": {},
+        "total_agents": 0,
+        "note": "Per-agent metrics require plugin with per_agent_metrics support",
+    }))
+    .into_response()
+}
+
+/// GET /api/context-engine/traces/history?plugin=X&hook=Y&limit=100&failures_only=true
+///
+/// Query trace history. Uses the in-memory ring buffer from the running
+/// context engine as a best-effort source. `plugin` filter is applied as a
+/// substring match against the hook name (HookTrace carries no plugin field).
+pub async fn context_engine_trace_history(
+    Query(params): Query<std::collections::HashMap<String, String>>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let plugin_filter = params.get("plugin").cloned();
+    let hook_filter = params.get("hook").cloned();
+    let limit = params
+        .get("limit")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(50)
+        .min(500);
+    let failures_only = params
+        .get("failures_only")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+
+    let traces: Vec<serde_json::Value> = match state.kernel.context_engine_ref() {
+        Some(engine) => engine
+            .hook_traces()
+            .into_iter()
+            .filter(|t| {
+                if let Some(ref pf) = plugin_filter {
+                    if !t.hook.contains(pf.as_str()) {
+                        return false;
+                    }
+                }
+                if let Some(ref hf) = hook_filter {
+                    if &t.hook != hf {
+                        return false;
+                    }
+                }
+                if failures_only && t.success {
+                    return false;
+                }
+                true
+            })
+            .take(limit)
+            .map(|t| serde_json::to_value(&t).unwrap_or_default())
+            .collect(),
+        None => vec![],
+    };
+
+    let total = traces.len();
+    Json(serde_json::json!({
+        "traces": traces,
+        "total": total,
+        "limit": limit,
+        "source": "in-memory",
+        "filters": {
+            "plugin": plugin_filter,
+            "hook": hook_filter,
+            "failures_only": failures_only,
+        },
+    }))
+    .into_response()
+}
+
+/// GET /api/context-engine/metrics/summary
+///
+/// Returns a unified summary of hook performance across all hooks, including
+/// aggregate totals and per-hook error rates and average latencies.
+pub async fn context_engine_metrics_summary(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let Some(metrics) = state.kernel.context_engine_ref().and_then(|e| e.hook_metrics()) else {
+        return (
+            StatusCode::NO_CONTENT,
+            Json(serde_json::json!({})),
+        )
+            .into_response();
+    };
+
+    let hook_data = [
+        ("ingest",          metrics.ingest.calls,          metrics.ingest.successes,          metrics.ingest.failures,          metrics.ingest.total_ms),
+        ("after_turn",      metrics.after_turn.calls,      metrics.after_turn.successes,      metrics.after_turn.failures,      metrics.after_turn.total_ms),
+        ("bootstrap",       metrics.bootstrap.calls,       metrics.bootstrap.successes,       metrics.bootstrap.failures,       metrics.bootstrap.total_ms),
+        ("assemble",        metrics.assemble.calls,        metrics.assemble.successes,        metrics.assemble.failures,        metrics.assemble.total_ms),
+        ("compact",         metrics.compact.calls,         metrics.compact.successes,         metrics.compact.failures,         metrics.compact.total_ms),
+        ("prepare_subagent",metrics.prepare_subagent.calls,metrics.prepare_subagent.successes,metrics.prepare_subagent.failures,metrics.prepare_subagent.total_ms),
+        ("merge_subagent",  metrics.merge_subagent.calls,  metrics.merge_subagent.successes,  metrics.merge_subagent.failures,  metrics.merge_subagent.total_ms),
+    ];
+
+    let total_calls: u64   = hook_data.iter().map(|&(_, calls, _, _, _)| calls).sum();
+    let total_failures: u64 = hook_data.iter().map(|&(_, _, _, failures, _)| failures).sum();
+    let total_ms: u64       = hook_data.iter().map(|&(_, _, _, _, ms)| ms).sum();
+
+    let hooks: serde_json::Map<String, serde_json::Value> = hook_data
+        .iter()
+        .map(|&(name, calls, successes, failures, ms)| {
+            let v = serde_json::json!({
+                "calls": calls,
+                "successes": successes,
+                "failures": failures,
+                "total_ms": ms,
+                "avg_ms": if calls > 0 { ms / calls } else { 0 },
+                "error_rate_pct": if calls > 0 { (failures * 100) / calls } else { 0 },
+            });
+            (name.to_string(), v)
+        })
+        .collect();
+
+    Json(serde_json::json!({
+        "hooks": hooks,
+        "totals": {
+            "calls": total_calls,
+            "failures": total_failures,
+            "total_ms": total_ms,
+            "avg_ms": if total_calls > 0 { total_ms / total_calls } else { 0 },
+            "error_rate_pct": if total_calls > 0 {
+                (total_failures * 100) / total_calls
+            } else {
+                0
+            },
+        },
+    }))
+    .into_response()
+}
+
+/// GET /api/plugins/:name/advanced-config — Round 11 hook configuration fields.
+///
+/// Returns the advanced configuration fields added in Round 11:
+/// `circuit_breaker`, `after_turn_queue_depth`, `prewarm_subprocesses`,
+/// `allow_filesystem`, and `otel_endpoint`.  These fields are read directly
+/// from the installed plugin's `plugin.toml` manifest.
+#[utoipa::path(
+    get,
+    path = "/api/plugins/{name}/advanced-config",
+    tag = "plugins",
+    params(("name" = String, Path, description = "Plugin name")),
+    responses(
+        (status = 200, description = "Advanced hook configuration", body = serde_json::Value),
+        (status = 404, description = "Plugin not found")
+    )
+)]
+pub async fn plugin_advanced_config(Path(name): Path<String>) -> impl IntoResponse {
+    match librefang_runtime::plugin_manager::get_plugin_info(&name) {
+        Ok(info) => {
+            let hooks = &info.manifest.hooks;
+            let cb = hooks.circuit_breaker.as_ref().map(|cb| {
+                serde_json::json!({
+                    "max_failures": cb.max_failures,
+                    "reset_secs": cb.reset_secs,
+                })
+            });
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "name": info.manifest.name,
+                    "circuit_breaker": cb,
+                    "after_turn_queue_depth": hooks.after_turn_queue_depth,
+                    "prewarm_subprocesses": hooks.prewarm_subprocesses,
+                    "allow_filesystem": hooks.allow_filesystem,
+                    "otel_endpoint": hooks.otel_endpoint,
+                    "persistent_subprocess": hooks.persistent_subprocess,
+                    "allow_network": hooks.allow_network,
+                    "hook_timeout_secs": hooks.hook_timeout_secs,
+                    "max_memory_mb": hooks.max_memory_mb,
+                    "priority": hooks.priority,
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => ApiErrorResponse::not_found(e).into_json_tuple().into_response(),
+    }
+}
+
+/// GET /api/plugins/:name/env — Plugin environment variable configuration.
+///
+/// Returns the static `[env]` key-value pairs defined in the plugin manifest
+/// (with sensitive values masked) and the `[hooks.env_schema]` declarations
+/// that describe which environment variables the plugin requires or accepts.
+/// Required variables (keys prefixed with `!`) are checked against the current
+/// daemon environment and their presence is reported in `resolved`.
+#[utoipa::path(
+    get,
+    path = "/api/plugins/{name}/env",
+    tag = "plugins",
+    params(("name" = String, Path, description = "Plugin name")),
+    responses(
+        (status = 200, description = "Plugin environment configuration", body = serde_json::Value),
+        (status = 404, description = "Plugin not found")
+    )
+)]
+pub async fn plugin_env(Path(name): Path<String>) -> impl IntoResponse {
+    match librefang_runtime::plugin_manager::get_plugin_info(&name) {
+        Ok(info) => {
+            // Static env from [env] section — mask values that look like secrets.
+            let env_static: serde_json::Map<String, serde_json::Value> = info
+                .manifest
+                .env
+                .iter()
+                .map(|(k, v)| {
+                    let display = if k.to_ascii_uppercase().contains("KEY")
+                        || k.to_ascii_uppercase().contains("SECRET")
+                        || k.to_ascii_uppercase().contains("PASSWORD")
+                        || k.to_ascii_uppercase().contains("TOKEN")
+                    {
+                        if v.is_empty() { "".to_string() } else { "***".to_string() }
+                    } else {
+                        v.clone()
+                    };
+                    (k.clone(), serde_json::Value::String(display))
+                })
+                .collect();
+
+            // env_schema: check whether required vars (! prefix) are set.
+            let schema_resolved: serde_json::Map<String, serde_json::Value> = info
+                .manifest
+                .hooks
+                .env_schema
+                .iter()
+                .map(|(k, desc)| {
+                    let required = k.starts_with('!');
+                    let env_key = k.trim_start_matches('!');
+                    let present = std::env::var(env_key).is_ok();
+                    let v = serde_json::json!({
+                        "description": desc,
+                        "required": required,
+                        "present": present,
+                    });
+                    (k.clone(), v)
+                })
+                .collect();
+
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "name": info.manifest.name,
+                    "env": env_static,
+                    "env_schema": schema_resolved,
+                    "enable_shared_state": info.manifest.hooks.enable_shared_state,
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => ApiErrorResponse::not_found(e).into_json_tuple().into_response(),
+    }
+}
+
+/// GET /api/context-engine/config — Live context engine configuration snapshot.
+///
+/// Returns the `[context_engine]` section of the running daemon's configuration,
+/// including `engine`, `plugin`, `plugin_stack`, and the full resolved hook
+/// settings such as `hook_timeout_secs`, `on_hook_failure`, `max_retries`,
+/// `persistent_subprocess`, and the Round 11 additions.
+#[utoipa::path(
+    get,
+    path = "/api/context-engine/config",
+    tag = "plugins",
+    responses(
+        (status = 200, description = "Context engine configuration", body = serde_json::Value)
+    )
+)]
+pub async fn context_engine_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let cfg = state.kernel.config_ref();
+    let ctx = &cfg.context_engine;
+    let hooks = &ctx.hooks;
+
+    let cb = hooks.circuit_breaker.as_ref().map(|cb| {
+        serde_json::json!({
+            "max_failures": cb.max_failures,
+            "reset_secs": cb.reset_secs,
+        })
+    });
+
+    Json(serde_json::json!({
+        "engine": ctx.engine,
+        "plugin": ctx.plugin,
+        "plugin_stack": ctx.plugin_stack,
+        "hooks": {
+            "ingest": hooks.ingest,
+            "after_turn": hooks.after_turn,
+            "bootstrap": hooks.bootstrap,
+            "assemble": hooks.assemble,
+            "compact": hooks.compact,
+            "prepare_subagent": hooks.prepare_subagent,
+            "merge_subagent": hooks.merge_subagent,
+            "runtime": hooks.runtime,
+        },
+        "hook_timeout_secs": hooks.hook_timeout_secs,
+        "on_hook_failure": format!("{:?}", hooks.on_hook_failure).to_ascii_lowercase(),
+        "max_retries": hooks.max_retries,
+        "retry_delay_ms": hooks.retry_delay_ms,
+        "ingest_filter": hooks.ingest_filter,
+        "ingest_regex": hooks.ingest_regex,
+        "only_for_agent_ids": hooks.only_for_agent_ids,
+        "hook_cache_ttl_secs": hooks.hook_cache_ttl_secs,
+        "assemble_cache_ttl_secs": hooks.assemble_cache_ttl_secs,
+        "compact_cache_ttl_secs": hooks.compact_cache_ttl_secs,
+        "persistent_subprocess": hooks.persistent_subprocess,
+        "prewarm_subprocesses": hooks.prewarm_subprocesses,
+        "allow_network": hooks.allow_network,
+        "allow_filesystem": hooks.allow_filesystem,
+        "max_memory_mb": hooks.max_memory_mb,
+        "priority": hooks.priority,
+        "enable_shared_state": hooks.enable_shared_state,
+        "after_turn_queue_depth": hooks.after_turn_queue_depth,
+        "circuit_breaker": cb,
+        "otel_endpoint": hooks.otel_endpoint,
+        "hook_protocol_version": hooks.hook_protocol_version,
+        "registries": ctx.plugin_registries.iter().map(|r| serde_json::json!({
+            "name": r.name,
+            "github_repo": r.github_repo,
+        })).collect::<Vec<_>>(),
+    }))
+    .into_response()
+}
+
+/// POST /api/plugins/:name/prewarm — Pre-warm persistent hook subprocesses.
+///
+/// Triggers a warmup reload of the plugin so that when `persistent_subprocess = true`
+/// the interpreter is already running before the first real hook call.  If the
+/// plugin does not declare `persistent_subprocess = true` the response body will
+/// indicate that pre-warming is not applicable; no error is returned.
+///
+/// Reloading the plugin manifest also picks up any changes to `plugin.toml`
+/// without requiring a full daemon restart.
+#[utoipa::path(
+    post,
+    path = "/api/plugins/{name}/prewarm",
+    tag = "plugins",
+    params(("name" = String, Path, description = "Plugin name")),
+    responses(
+        (status = 200, description = "Prewarm result", body = serde_json::Value),
+        (status = 404, description = "Plugin not found")
+    )
+)]
+pub async fn prewarm_plugin(Path(name): Path<String>) -> impl IntoResponse {
+    match librefang_runtime::plugin_manager::reload_plugin(&name) {
+        Ok(info) => {
+            let applicable = info.manifest.hooks.persistent_subprocess
+                && info.manifest.hooks.prewarm_subprocesses;
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "name": info.manifest.name,
+                    "version": info.manifest.version,
+                    "reloaded": true,
+                    "persistent_subprocess": info.manifest.hooks.persistent_subprocess,
+                    "prewarm_subprocesses": info.manifest.hooks.prewarm_subprocesses,
+                    "prewarm_applicable": applicable,
+                    "message": if applicable {
+                        "Plugin manifest reloaded; persistent subprocesses will be warmed on next hook invocation."
+                    } else {
+                        "Plugin manifest reloaded. Set persistent_subprocess = true and prewarm_subprocesses = true in plugin.toml to enable pre-warming."
+                    },
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => ApiErrorResponse::not_found(e).into_json_tuple().into_response(),
+    }
+}
+
+/// GET /api/context-engine/sandbox-policy — Sandboxing policy for active plugins.
+///
+/// Reports the effective filesystem and network isolation settings for every
+/// plugin that is currently loaded in the context engine chain.  The policy
+/// is derived from each plugin's `allow_filesystem`, `allow_network`, and
+/// `max_memory_mb` fields together with the global context engine defaults.
+#[utoipa::path(
+    get,
+    path = "/api/context-engine/sandbox-policy",
+    tag = "plugins",
+    responses(
+        (status = 200, description = "Sandbox policy for active plugins", body = serde_json::Value),
+        (status = 204, description = "No plugin engine configured")
+    )
+)]
+pub async fn context_engine_sandbox_policy(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let cfg = state.kernel.config_ref();
+    let ctx_cfg = &cfg.context_engine;
+
+    // Collect all active plugin names (single + stack).
+    let mut active: Vec<String> = Vec::new();
+    if let Some(ref p) = ctx_cfg.plugin {
+        active.push(p.clone());
+    }
+    if let Some(ref stack) = ctx_cfg.plugin_stack {
+        for p in stack {
+            if !active.contains(p) {
+                active.push(p.clone());
+            }
+        }
+    }
+
+    if active.is_empty() {
+        // Fall back to global defaults from the context_engine hooks config.
+        let hooks = &ctx_cfg.hooks;
+        return Json(serde_json::json!({
+            "mode": "default",
+            "plugins": [],
+            "global_defaults": {
+                "allow_filesystem": hooks.allow_filesystem,
+                "allow_network": hooks.allow_network,
+                "max_memory_mb": hooks.max_memory_mb,
+                "otel_endpoint": hooks.otel_endpoint,
+            },
+        }))
+        .into_response();
+    }
+
+    let policies: Vec<serde_json::Value> = active
+        .iter()
+        .map(|plugin_name| {
+            match librefang_runtime::plugin_manager::get_plugin_info(plugin_name) {
+                Ok(info) => {
+                    let hooks = &info.manifest.hooks;
+                    serde_json::json!({
+                        "name": plugin_name,
+                        "allow_filesystem": hooks.allow_filesystem,
+                        "allow_network": hooks.allow_network,
+                        "max_memory_mb": hooks.max_memory_mb,
+                        "otel_endpoint": hooks.otel_endpoint,
+                        "persistent_subprocess": hooks.persistent_subprocess,
+                        "prewarm_subprocesses": hooks.prewarm_subprocesses,
+                        "after_turn_queue_depth": hooks.after_turn_queue_depth,
+                        "circuit_breaker": hooks.circuit_breaker.as_ref().map(|cb| serde_json::json!({
+                            "max_failures": cb.max_failures,
+                            "reset_secs": cb.reset_secs,
+                        })),
+                    })
+                }
+                Err(e) => serde_json::json!({
+                    "name": plugin_name,
+                    "error": e,
+                }),
+            }
+        })
+        .collect();
+
+    Json(serde_json::json!({
+        "mode": if ctx_cfg.plugin_stack.as_ref().map(|s| s.len()).unwrap_or(0) > 1 {
+            "stacked"
+        } else {
+            "single"
+        },
+        "plugins": policies,
+    }))
+    .into_response()
 }

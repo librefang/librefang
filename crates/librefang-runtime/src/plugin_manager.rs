@@ -80,6 +80,8 @@ pub struct PluginInfo {
     pub size_bytes: u64,
     /// Whether the plugin is enabled (not disabled via marker file).
     pub enabled: bool,
+    /// Declared capabilities from the `needs` array in plugin.toml.
+    pub needs: Vec<String>,
 }
 
 /// Result of a plugin lint check.
@@ -246,12 +248,22 @@ pub fn get_plugin_info(plugin_name: &str) -> Result<PluginInfo, String> {
     // Enabled unless a .disabled marker file exists
     let enabled = !plugin_dir.join(".disabled").exists();
 
+    // Extract declared capabilities from raw TOML needs array
+    let needs = {
+        let manifest_path = plugin_dir.join("plugin.toml");
+        std::fs::read_to_string(&manifest_path)
+            .ok()
+            .map(|raw| extract_needs(&raw))
+            .unwrap_or_default()
+    };
+
     Ok(PluginInfo {
         manifest,
         path: plugin_dir,
         hooks_valid,
         size_bytes,
         enabled,
+        needs,
     })
 }
 
@@ -2612,6 +2624,20 @@ pub fn sign_plugin(name: &str) -> Result<std::collections::HashMap<String, Strin
     Ok(hashes)
 }
 
+/// Extract the `needs` capability array from raw plugin.toml content.
+///
+/// Returns only the string values from `needs = ["network", "filesystem", ...]`.
+/// Non-string values and missing keys are silently ignored.
+fn extract_needs(raw_toml: &str) -> Vec<String> {
+    toml::from_str::<toml::Value>(raw_toml)
+        .ok()
+        .and_then(|v| v.get("needs").and_then(|n| n.as_array()).cloned())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect()
+}
+
 /// Load a plugin manifest from disk without running integrity/dependency checks.
 ///
 /// Used internally for operations that need to read and then re-write the
@@ -2763,6 +2789,23 @@ pub fn lint_plugin(name: &str) -> Result<PluginLintReport, String> {
         warnings.push("Plugin is currently disabled (.disabled marker present)".to_string());
     }
 
+    // 7. Validate needs array for unknown capabilities
+    let manifest_path = plugin_dir.join("plugin.toml");
+    if let Ok(raw) = std::fs::read_to_string(&manifest_path) {
+        let needs = extract_needs(&raw);
+        const KNOWN_CAPABILITIES: &[&str] =
+            &["network", "filesystem", "env", "subprocess", "gpu"];
+        for cap in &needs {
+            if !KNOWN_CAPABILITIES.contains(&cap.as_str()) {
+                warnings.push(format!(
+                    "Unknown capability '{}' in needs array (known: {})",
+                    cap,
+                    KNOWN_CAPABILITIES.join(", ")
+                ));
+            }
+        }
+    }
+
     let ok = errors.is_empty();
     Ok(PluginLintReport {
         plugin: name.to_string(),
@@ -2841,6 +2884,136 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Install runtime dependencies for a plugin based on its declared runtime and
+/// any package manifest files found in its directory.
+///
+/// Returns a list of log lines describing what was (or was not) done.
+///
+/// # Errors
+/// Returns an error if the plugin does not exist or if the dependency install
+/// command exits with a non-zero status code.
+pub async fn install_plugin_deps(name: &str) -> Result<Vec<String>, String> {
+    validate_plugin_name(name)?;
+    let plugin_dir = plugins_dir().join(name);
+    if !plugin_dir.exists() {
+        return Err(format!("Plugin '{name}' is not installed"));
+    }
+
+    let manifest = load_plugin_manifest_raw(&plugin_dir)?;
+    let runtime = manifest
+        .hooks
+        .runtime
+        .as_deref()
+        .unwrap_or("python")
+        .to_string();
+
+    let mut log: Vec<String> = Vec::new();
+
+    // Determine the install command based on runtime and package manifest presence.
+    // Returns `(executable, args, package_manifest_filename)`.
+    let cmd_info: Option<(&'static str, Vec<&'static str>, &'static str)> = match runtime.as_str()
+    {
+        "python" | "py" => {
+            if plugin_dir.join("requirements.txt").exists() {
+                Some(("pip", vec!["install", "-r", "requirements.txt"], "requirements.txt"))
+            } else {
+                None
+            }
+        }
+        "node" | "nodejs" => {
+            if plugin_dir.join("package.json").exists() {
+                Some(("npm", vec!["install"], "package.json"))
+            } else {
+                None
+            }
+        }
+        "bun" => {
+            if plugin_dir.join("package.json").exists() {
+                Some(("bun", vec!["install"], "package.json"))
+            } else {
+                None
+            }
+        }
+        "go" | "golang" => {
+            if plugin_dir.join("go.mod").exists() {
+                Some(("go", vec!["mod", "download"], "go.mod"))
+            } else {
+                None
+            }
+        }
+        "ruby" | "rb" => {
+            if plugin_dir.join("Gemfile").exists() {
+                Some(("bundle", vec!["install"], "Gemfile"))
+            } else {
+                None
+            }
+        }
+        "php" => {
+            if plugin_dir.join("composer.json").exists() {
+                Some(("composer", vec!["install"], "composer.json"))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
+
+    match cmd_info {
+        None => {
+            log.push(format!(
+                "No package manifest found for runtime '{}' — nothing to install",
+                runtime
+            ));
+        }
+        Some((cmd, args, manifest_file)) => {
+            log.push(format!(
+                "Running: {} {} (manifest: {})",
+                cmd,
+                args.join(" "),
+                manifest_file
+            ));
+            let output = tokio::process::Command::new(cmd)
+                .args(&args)
+                .current_dir(&plugin_dir)
+                .output()
+                .await
+                .map_err(|e| format!("Failed to launch '{cmd}': {e}"))?;
+
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            if !stdout.trim().is_empty() {
+                log.push(stdout);
+            }
+            if !stderr.trim().is_empty() {
+                log.push(stderr);
+            }
+
+            if !output.status.success() {
+                return Err(format!(
+                    "Dependency install failed for plugin '{name}' (exit {})",
+                    output.status
+                ));
+            }
+            log.push("Dependencies installed successfully.".to_string());
+        }
+    }
+
+    Ok(log)
+}
+
+/// Open (or create) the persistent hook trace store at the default location.
+///
+/// The database is stored at `~/.librefang/hook_traces.db` and retains the
+/// last 10,000 hook execution records across daemon restarts.
+pub fn open_trace_store() -> Result<crate::trace_store::TraceStore, String> {
+    let path = plugins_dir()
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(plugins_dir)
+        .join("hook_traces.db");
+    crate::trace_store::TraceStore::open(&path).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
