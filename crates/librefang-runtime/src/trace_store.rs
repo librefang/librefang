@@ -96,25 +96,26 @@ impl TraceStore {
             return vec![];
         };
 
-        // Build WHERE clause from optional filters.
-        // Using string interpolation with escaping because rusqlite's positional
-        // params cannot be used in a dynamically-built WHERE clause without
-        // additional machinery.
-        let mut where_parts: Vec<String> = Vec::new();
+        // Build parameterized WHERE clause — never interpolate user values directly.
+        let mut conditions: Vec<&str> = Vec::new();
+        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
         if let Some(p) = plugin {
-            where_parts.push(format!("plugin = '{}'", p.replace('\'', "''")));
+            conditions.push("plugin = ?");
+            params.push(Box::new(p.to_string()));
         }
         if let Some(h) = hook {
-            where_parts.push(format!("hook = '{}'", h.replace('\'', "''")));
+            conditions.push("hook = ?");
+            params.push(Box::new(h.to_string()));
         }
         if only_failures {
-            where_parts.push("success = 0".to_string());
+            conditions.push("success = 0");
         }
 
-        let where_clause = if where_parts.is_empty() {
+        let where_clause = if conditions.is_empty() {
             String::new()
         } else {
-            format!("WHERE {}", where_parts.join(" AND "))
+            format!("WHERE {}", conditions.join(" AND "))
         };
 
         let sql = format!(
@@ -127,7 +128,10 @@ impl TraceStore {
             return vec![];
         };
 
-        stmt.query_map([], |row| {
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params.iter().map(|p| p.as_ref()).collect();
+
+        stmt.query_map(param_refs.as_slice(), |row| {
             Ok(serde_json::json!({
                 "plugin":          row.get::<_, String>(0)?,
                 "hook":            row.get::<_, String>(1)?,
@@ -150,22 +154,30 @@ impl TraceStore {
             return 0;
         };
 
-        let mut parts: Vec<String> = Vec::new();
+        // Build parameterized WHERE clause — never interpolate user values directly.
+        let mut conditions: Vec<&str> = Vec::new();
+        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
         if let Some(p) = plugin {
-            parts.push(format!("plugin = '{}'", p.replace('\'', "''")));
+            conditions.push("plugin = ?");
+            params.push(Box::new(p.to_string()));
         }
         if only_failures {
-            parts.push("success = 0".to_string());
+            conditions.push("success = 0");
         }
 
-        let where_clause = if parts.is_empty() {
+        let where_clause = if conditions.is_empty() {
             String::new()
         } else {
-            format!("WHERE {}", parts.join(" AND "))
+            format!("WHERE {}", conditions.join(" AND "))
         };
 
         let sql = format!("SELECT COUNT(*) FROM hook_traces {where_clause}");
-        conn.query_row(&sql, [], |r| r.get(0)).unwrap_or(0)
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params.iter().map(|p| p.as_ref()).collect();
+
+        conn.query_row(&sql, param_refs.as_slice(), |r| r.get(0))
+            .unwrap_or(0)
     }
 }
 

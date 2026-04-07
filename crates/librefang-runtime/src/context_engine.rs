@@ -469,22 +469,50 @@ pub struct HookMetrics {
 #[derive(Debug)]
 struct CircuitBreakerState {
     consecutive_failures: u32,
+    /// When the circuit tripped (entered open state). `None` = closed.
     opened_at: Option<std::time::Instant>,
+    /// Set to `true` when cooldown has elapsed and one probe call is allowed.
+    half_open: bool,
 }
 
 impl CircuitBreakerState {
-    fn new() -> Self { Self { consecutive_failures: 0, opened_at: None } }
-
-    fn is_open(&self, max_failures: u32, reset_secs: u64) -> bool {
-        if self.consecutive_failures < max_failures { return false; }
-        self.opened_at.map(|t| t.elapsed().as_secs() < reset_secs).unwrap_or(false)
+    fn new() -> Self {
+        Self { consecutive_failures: 0, opened_at: None, half_open: false }
     }
 
-    fn record_success(&mut self) { self.consecutive_failures = 0; self.opened_at = None; }
+    /// Returns `true` when the hook should be skipped (circuit open + not half-open).
+    fn is_open(&mut self, max_failures: u32, reset_secs: u64) -> bool {
+        if self.consecutive_failures < max_failures {
+            return false; // circuit closed
+        }
+        match self.opened_at {
+            None => false,
+            Some(t) => {
+                if t.elapsed().as_secs() >= reset_secs {
+                    // Cooldown elapsed → allow one half-open probe
+                    if !self.half_open {
+                        self.half_open = true;
+                        self.opened_at = None; // reset timer so next trip re-latches
+                    }
+                    false // allow the probe call through
+                } else {
+                    true // still in cooldown
+                }
+            }
+        }
+    }
+
+    fn record_success(&mut self) {
+        self.consecutive_failures = 0;
+        self.opened_at = None;
+        self.half_open = false;
+    }
 
     fn record_failure(&mut self, max_failures: u32) {
         self.consecutive_failures += 1;
-        if self.consecutive_failures >= max_failures && self.opened_at.is_none() {
+        self.half_open = false; // probe failed → close half-open window
+        // (Re-)latch the circuit when threshold is reached
+        if self.consecutive_failures >= max_failures {
             self.opened_at = Some(std::time::Instant::now());
         }
     }
@@ -607,6 +635,10 @@ pub struct ScriptableContextEngine {
     /// OTel OTLP endpoint for this plugin (advisory; logged if set).
     #[allow(dead_code)]
     otel_endpoint: Option<String>,
+    /// Canonical plugin name — used as the `plugin` column when writing to trace_store.
+    plugin_name: String,
+    /// Persistent SQLite trace store (None if it could not be opened at construction time).
+    trace_store: Option<std::sync::Arc<crate::trace_store::TraceStore>>,
 }
 
 impl ScriptableContextEngine {
@@ -721,6 +753,8 @@ impl ScriptableContextEngine {
                 std::collections::HashMap::new(),
             )),
             otel_endpoint: hooks.otel_endpoint.clone(),
+            plugin_name: String::new(), // filled in by with_plugin_name()
+            trace_store: None,          // filled in by with_plugin_name()
         }
     }
 
@@ -729,6 +763,8 @@ impl ScriptableContextEngine {
     /// Call after `new()` when the plugin name is known. If `enable_shared_state`
     /// was `false`, `shared_state_path` is `None` and this is a no-op.
     pub fn with_plugin_name(mut self, name: &str) -> Self {
+        self.plugin_name = name.to_string();
+
         if self.shared_state_path.is_some() {
             // Replace the placeholder with the actual plugin-scoped path.
             self.shared_state_path = Some(
@@ -737,6 +773,16 @@ impl ScriptableContextEngine {
                     .join(".state.json"),
             );
         }
+
+        // Open the persistent trace store. Failure is non-fatal — traces will
+        // still land in the in-memory ring buffer even if SQLite is unavailable.
+        self.trace_store = crate::plugin_manager::open_trace_store()
+            .map(std::sync::Arc::new)
+            .map_err(|e| {
+                warn!(plugin = name, error = %e, "Could not open hook trace store; SQLite persistence disabled");
+            })
+            .ok();
+
         self
     }
 
@@ -761,11 +807,23 @@ impl ScriptableContextEngine {
             .collect()
     }
 
-    /// Push a trace record into the ring buffer, evicting the oldest if full.
+    /// Push a trace record into the in-memory ring buffer and the SQLite store.
+    ///
+    /// The ring buffer provides fast in-process access; the SQLite store persists
+    /// traces across daemon restarts for post-mortem analysis.  Both writes are
+    /// best-effort — errors are silently swallowed so a telemetry failure never
+    /// propagates to the caller.
     fn push_trace(
         traces: &std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<HookTrace>>>,
         trace: HookTrace,
+        trace_store: Option<&std::sync::Arc<crate::trace_store::TraceStore>>,
+        plugin_name: &str,
     ) {
+        // Persist to SQLite first (borrows trace by ref).
+        if let Some(store) = trace_store {
+            store.insert(plugin_name, &trace);
+        }
+        // Then push into the bounded in-memory ring buffer.
         if let Ok(mut buf) = traces.lock() {
             if buf.len() >= TRACE_BUFFER_CAPACITY {
                 buf.pop_front();
@@ -798,8 +856,10 @@ impl ScriptableContextEngine {
 
     fn circuit_is_open(&self, hook: &str) -> bool {
         let Some(ref cfg) = self.circuit_breaker_cfg else { return false; };
-        let guard = self.circuit_breakers.lock().unwrap();
-        guard.get(hook).map(|s| s.is_open(cfg.max_failures, cfg.reset_secs)).unwrap_or(false)
+        let mut guard = self.circuit_breakers.lock().unwrap();
+        guard.entry(hook.to_string())
+             .or_insert_with(CircuitBreakerState::new)
+             .is_open(cfg.max_failures, cfg.reset_secs)
     }
 
     fn circuit_record(&self, hook: &str, success: bool) {
@@ -831,7 +891,7 @@ impl ScriptableContextEngine {
 
     pub async fn prewarm(&self) {
         if !self.prewarm_subprocesses || !self.persistent_subprocess { return; }
-        let runtime = crate::plugin_runtime::PluginRuntime::Python;
+        let runtime = self.runtime;
         let hooks: &[(&str, &Option<String>)] = &[
             ("ingest", &self.ingest_script),
             ("after_turn", &self.after_turn_script),
@@ -918,6 +978,8 @@ impl ScriptableContextEngine {
         traces: &std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<HookTrace>>>,
         hook_schemas: &std::collections::HashMap<String, librefang_types::config::HookSchema>,
         shared_state_path: Option<&std::path::Path>,
+        trace_store: Option<&std::sync::Arc<crate::trace_store::TraceStore>>,
+        plugin_name: &str,
     ) -> Result<(serde_json::Value, u64), String> {
         let resolved = Self::resolve_script_path(script_path);
 
@@ -978,7 +1040,7 @@ impl ScriptableContextEngine {
                         error: None,
                         input_preview: input_preview.clone(),
                         output_preview: Some(v.clone()),
-                    });
+                    }, trace_store, plugin_name);
                     return Ok((v, elapsed_ms));
                 }
                 Err(e) => last_err = e.to_string(),
@@ -994,7 +1056,7 @@ impl ScriptableContextEngine {
             error: Some(err_msg.clone()),
             input_preview,
             output_preview: None,
-        });
+        }, trace_store, plugin_name);
         Err(err_msg)
     }
 
@@ -1071,6 +1133,8 @@ impl ScriptableContextEngine {
                 &self.traces,
                 &self.hook_schemas,
                 self.shared_state_path.as_deref(),
+                self.trace_store.as_ref(),
+                &self.plugin_name,
             )
             .await
         }
@@ -1224,8 +1288,8 @@ impl ContextEngine for ScriptableContextEngine {
             };
             let cached = {
                 let guard = self.ingest_cache.lock().unwrap();
-                guard.get(&cache_key).and_then(|(val, exp)| {
-                    if exp.elapsed().as_secs() < ttl_secs { Some(val.clone()) } else { None }
+                guard.get(&cache_key).and_then(|(val, inserted_at)| {
+                    if inserted_at.elapsed().as_secs() < ttl_secs { Some(val.clone()) } else { None }
                 })
             };
             if let Some(cached_output) = cached {
@@ -1267,7 +1331,7 @@ impl ContextEngine for ScriptableContextEngine {
                         guard.insert(cache_key_owned, (output.clone(), std::time::Instant::now()));
                         // Evict expired entries when cache grows large
                         if guard.len() > 512 {
-                            guard.retain(|_, (_, exp)| exp.elapsed().as_secs() < ttl_secs);
+                            guard.retain(|_, (_, inserted_at)| inserted_at.elapsed().as_secs() < ttl_secs);
                         }
                     }
                     let mut memories = default_result.recalled_memories;
@@ -1385,8 +1449,8 @@ impl ContextEngine for ScriptableContextEngine {
             );
             let cached = {
                 let guard = self.assemble_cache.lock().unwrap();
-                guard.get(&cache_key).and_then(|(val, exp)| {
-                    if exp.elapsed().as_secs() < ttl_secs { Some(val.clone()) } else { None }
+                guard.get(&cache_key).and_then(|(val, inserted_at)| {
+                    if inserted_at.elapsed().as_secs() < ttl_secs { Some(val.clone()) } else { None }
                 })
             };
             if let Some(cached_output) = cached {
@@ -1415,7 +1479,7 @@ impl ContextEngine for ScriptableContextEngine {
                         let mut guard = cache_arc.lock().unwrap();
                         guard.insert(cache_key, (output.clone(), std::time::Instant::now()));
                         if guard.len() > 256 {
-                            guard.retain(|_, (_, exp)| exp.elapsed().as_secs() < ttl_secs);
+                            guard.retain(|_, (_, inserted_at)| inserted_at.elapsed().as_secs() < ttl_secs);
                         }
                     }
                     if let Some(new_msgs) = output.get("messages").and_then(|v| v.as_array()) {
@@ -1514,8 +1578,8 @@ impl ContextEngine for ScriptableContextEngine {
             );
             let cached = {
                 let guard = self.compact_cache.lock().unwrap();
-                guard.get(&cache_key).and_then(|(val, exp)| {
-                    if exp.elapsed().as_secs() < ttl_secs { Some(val.clone()) } else { None }
+                guard.get(&cache_key).and_then(|(val, inserted_at)| {
+                    if inserted_at.elapsed().as_secs() < ttl_secs { Some(val.clone()) } else { None }
                 })
             };
             if let Some(cached_output) = cached {
@@ -1548,7 +1612,7 @@ impl ContextEngine for ScriptableContextEngine {
                         let mut guard = cache_arc.lock().unwrap();
                         guard.insert(cache_key, (output.clone(), std::time::Instant::now()));
                         if guard.len() > 256 {
-                            guard.retain(|_, (_, exp)| exp.elapsed().as_secs() < ttl_secs);
+                            guard.retain(|_, (_, inserted_at)| inserted_at.elapsed().as_secs() < ttl_secs);
                         }
                     }
                     if let Some(new_msgs) = output.get("messages").and_then(|v| v.as_array()) {
@@ -1666,8 +1730,14 @@ impl ContextEngine for ScriptableContextEngine {
         let process_pool = std::sync::Arc::clone(&self.process_pool);
         let shared_state_path = self.shared_state_path.clone();
         let sem = std::sync::Arc::clone(&self.after_turn_sem);
+        let trace_store = self.trace_store.clone();
+        let plugin_name = self.plugin_name.clone();
         let handle = tokio::spawn(async move {
-            // Bounded concurrency: acquire semaphore permit before running.
+            // Bounded concurrency: acquire a semaphore permit before running the hook.
+            // `.ok()` is intentional: if the semaphore is closed (daemon shutting down),
+            // `acquire()` returns `Err(AcquireError)`. Ignoring it with `.ok()` lets the
+            // task complete its current hook call cleanly instead of panicking.  The permit
+            // is held for the lifetime of this spawned task via the `_permit` binding.
             let _permit = sem.acquire().await.ok();
             let result = if persistent_subprocess {
                 let config = crate::plugin_runtime::HookConfig {
@@ -1685,7 +1755,7 @@ impl ContextEngine for ScriptableContextEngine {
                     .map(|v| (v, t.elapsed().as_millis() as u64))
                     .map_err(|e| e.to_string())
             } else {
-                Self::run_hook("after_turn", &script, runtime, input, timeout_secs, &plugin_env, max_retries, retry_delay_ms, max_memory_mb, allow_network, &traces, &hook_schemas, shared_state_path.as_deref()).await
+                Self::run_hook("after_turn", &script, runtime, input, timeout_secs, &plugin_env, max_retries, retry_delay_ms, max_memory_mb, allow_network, &traces, &hook_schemas, shared_state_path.as_deref(), trace_store.as_ref(), &plugin_name).await
             };
             match result {
                 Ok((_, ms)) => {
@@ -2513,7 +2583,12 @@ print(json.dumps({"type": payload.get("type"), "message": payload.get("message")
         )
         .unwrap();
 
+        let traces = std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::VecDeque::new(),
+        ));
+        let hook_schemas = std::collections::HashMap::new();
         let output = ScriptableContextEngine::run_hook(
+            "ingest",
             script_path.to_str().unwrap(),
             crate::plugin_runtime::PluginRuntime::Python,
             serde_json::json!({
@@ -2521,6 +2596,17 @@ print(json.dumps({"type": payload.get("type"), "message": payload.get("message")
                 "agent_id": "agent-123",
                 "message": "hello",
             }),
+            30,
+            &[],
+            0,
+            0,
+            None,
+            true,
+            &traces,
+            &hook_schemas,
+            None,
+            None,
+            "",
         )
         .await
         .unwrap();

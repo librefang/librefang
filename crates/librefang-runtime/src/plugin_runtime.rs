@@ -948,10 +948,13 @@ impl HookProcessPool {
             *guard = Some(Self::spawn(script_path, runtime, config).await?);
         }
 
-        // Try to call; on failure, restart and retry once.
+        // Try to call; on failure, evict the dead slot then restart and retry once.
         let result = Self::do_call(guard.as_mut().unwrap(), input).await;
         if result.is_err() {
             warn!(script = script_path, "Persistent hook process crashed; restarting");
+            // Evict before spawn so that a subsequent call never sees a dead process
+            // even if the spawn below fails (returns Err and drops the guard).
+            *guard = None;
             *guard = Some(Self::spawn(script_path, runtime, config).await?);
             return Self::do_call(guard.as_mut().unwrap(), input).await;
         }

@@ -9,6 +9,34 @@ use std::sync::Arc;
 use super::AppState;
 
 use crate::types::ApiErrorResponse;
+
+/// Validate a GitHub registry identifier supplied by a caller.
+///
+/// Accepts the form `owner/repo` where each component is alphanumeric plus
+/// hyphens, underscores, and dots (matching GitHub's naming rules).  Rejects
+/// anything that could be used to manipulate the URL constructed later:
+/// empty strings, extra slashes, `..`, or non-ASCII characters.
+fn validate_registry_param(registry: &str) -> Result<(), String> {
+    // Must be exactly `owner/repo` — one slash, no leading/trailing slash.
+    let parts: Vec<&str> = registry.splitn(2, '/').collect();
+    if parts.len() != 2 {
+        return Err(format!("Invalid registry '{registry}': expected 'owner/repo' format"));
+    }
+    let is_safe_component = |s: &str| -> bool {
+        !s.is_empty()
+            && s.len() <= 100
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+    };
+    if !is_safe_component(parts[0]) || !is_safe_component(parts[1]) {
+        return Err(format!(
+            "Invalid registry '{registry}': components must be non-empty ASCII \
+             alphanumeric/hyphen/underscore/dot, max 100 chars each"
+        ));
+    }
+    Ok(())
+}
+
 /// Build routes for the context engine plugin domain.
 pub fn router() -> axum::Router<Arc<AppState>> {
     axum::Router::new()
@@ -775,6 +803,12 @@ pub async fn upgrade_plugin(
                 .get("registry")
                 .and_then(|r| r.as_str())
                 .map(String::from);
+            // Validate the registry if explicitly provided (None = use configured default).
+            if let Some(ref repo) = github_repo {
+                if let Err(e) = validate_registry_param(repo) {
+                    return ApiErrorResponse::bad_request(e).into_response();
+                }
+            }
             librefang_runtime::plugin_manager::PluginSource::Registry {
                 name: plugin_name,
                 github_repo,
@@ -1300,13 +1334,19 @@ pub async fn export_plugin(Path(name): Path<String>) -> impl IntoResponse {
         Err(e) => return ApiErrorResponse::not_found(e).into_response(),
     };
 
+    // Use the validated route parameter `name` as the tar directory prefix, NOT
+    // `info.manifest.name` (which comes from an untrusted file on disk and could
+    // contain path traversal sequences).  `name` was already validated by
+    // `get_plugin_info` → `validate_plugin_name` before we reach this point.
+    let safe_prefix = name.clone();
+
     // Build tar in memory
     let tar_bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
         let mut buf = Vec::new();
         {
             let enc = flate2::write::GzEncoder::new(&mut buf, flate2::Compression::default());
             let mut tar = tar::Builder::new(enc);
-            tar.append_dir_all(&info.manifest.name, &info.path)
+            tar.append_dir_all(&safe_prefix, &info.path)
                 .map_err(|e| format!("Failed to create tar: {e}"))?;
             tar.finish().map_err(|e| format!("Failed to finalize tar: {e}"))?;
         }
@@ -1585,6 +1625,14 @@ pub async fn plugin_registry_search(
                 .map(|r| r.github_repo.clone())
                 .unwrap_or_else(|| "librefang/librefang-registry".to_string())
         });
+
+    if let Err(e) = validate_registry_param(&registry) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response();
+    }
 
     let client = match reqwest::Client::builder()
         .user_agent("librefang-plugin-search/1.0")
