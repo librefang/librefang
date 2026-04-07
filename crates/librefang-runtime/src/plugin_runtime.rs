@@ -1151,30 +1151,39 @@ pub async fn run_hook_json(
         let mut stdout_reader = BufReader::new(stdout);
         let mut stderr_reader = BufReader::new(stderr);
 
-        let mut stdout_lines: Vec<String> = Vec::new();
-        let mut stderr_text = String::new();
-
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match stdout_reader.read_line(&mut line).await {
-                Ok(0) => break,
-                Ok(_) => stdout_lines.push(line.trim_end().to_string()),
-                Err(e) => {
-                    warn!("hook stdout read error: {e}");
-                    break;
+        // Read stdout and stderr concurrently to prevent deadlock:
+        // a hook that writes >64KB to stderr before closing stdout would otherwise
+        // block the daemon waiting on stdout while the hook is blocked on stderr.
+        let stdout_fut = async {
+            let mut lines: Vec<String> = Vec::new();
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match stdout_reader.read_line(&mut line).await {
+                    Ok(0) => break,
+                    Ok(_) => lines.push(line.trim_end().to_string()),
+                    Err(e) => {
+                        warn!("hook stdout read error: {e}");
+                        break;
+                    }
                 }
             }
-        }
-        let mut err_line = String::new();
-        loop {
-            err_line.clear();
-            match stderr_reader.read_line(&mut err_line).await {
-                Ok(0) => break,
-                Ok(_) => stderr_text.push_str(&err_line),
-                Err(_) => break,
+            lines
+        };
+        let stderr_fut = async {
+            let mut text = String::new();
+            let mut err_line = String::new();
+            loop {
+                err_line.clear();
+                match stderr_reader.read_line(&mut err_line).await {
+                    Ok(0) => break,
+                    Ok(_) => text.push_str(&err_line),
+                    Err(_) => break,
+                }
             }
-        }
+            text
+        };
+        let (stdout_lines, stderr_text) = tokio::join!(stdout_fut, stderr_fut);
 
         // Read peak RSS before wait() reaps the process and removes /proc/{pid}.
         if let Some(pid) = child_pid {
