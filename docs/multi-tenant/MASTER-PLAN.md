@@ -14,7 +14,7 @@ LibreFang ships with **user-level RBAC** (Viewer/User/Admin/Owner) and **peer_id
 
 Qwntik needs **account-level isolation** — each customer organization gets its own agents, credentials, memory, and configuration, running on a shared LibreFang daemon.
 
-This plan defines **5 ADRs**, **4 SPECs**, **1 implementation PLAN** (5 phases), and **1 migration guide** — 11 documents total.
+This plan defines **6 ADRs**, **6 SPECs**, **3 implementation PLANs** (5 phases across 3 plans), **1 migration guide**, **1 testing strategy**, and **1 quality audit** — 19 documents total.
 
 The memory backend (Supabase + RuVector PostgreSQL extension via HTTP) was previously treated as out-of-scope, but the 7 ruvector Rust crates are already ported and proven in the openfang-ai workspace (ADR-033, SPEC-033, PLAN-033). Since LibreFang already has the `VectorStore` trait + `HttpVectorStore` implementation, the crate port is mechanical and the runtime wiring is plug-and-play.
 
@@ -26,15 +26,22 @@ The memory backend (Supabase + RuVector PostgreSQL extension via HTTP) was previ
 |---|------|------|---------|------------|
 | 1 | ADR | ADR-MT-001: Account Model | Defines the Account concept, isolation boundaries, backward compat | — |
 | 2 | ADR | ADR-MT-002: API Authentication & Account Resolution | How requests carry account context, HMAC signing, middleware | ADR-MT-001 |
-| 3 | ADR | ADR-MT-003: Resource Isolation Strategy | How agents, channels, skills, integrations, events are scoped | ADR-MT-001 |
+| 3 | ADR | ADR-MT-003: Resource Isolation Strategy | How agents, channels, skills, integrations are scoped | ADR-MT-001 |
 | 4 | ADR | ADR-MT-004: Data & Memory Isolation | Schema changes, memory namespacing, session scoping | ADR-MT-001 |
-| 5 | SPEC | SPEC-MT-001: Account Data Model & Storage | Exact Rust types, filesystem layout, config format, DB schema | ADR-MT-001 |
-| 6 | SPEC | SPEC-MT-002: API Route Changes | Every affected route, request/response changes, new endpoints | ADR-MT-002, ADR-MT-003 |
-| 7 | SPEC | SPEC-MT-003: Database Migration | SQLite schema migration, rollback strategy | ADR-MT-004 |
-| 8 | ADR | ADR-RV-001: RuVector PostgreSQL Extension Port | Port 7 ruvector crates into librefang workspace, Docker image, feature flags | — |
-| 9 | SPEC | SPEC-RV-001: Extension Port Acceptance Criteria | 26 acceptance criteria across 6 groups (adapted from openfang SPEC-033) | ADR-RV-001 |
-| 10 | PLAN | PLAN-MT-001: Implementation Plan | 5 phases, task breakdown, test strategy, milestones | All ADRs, All SPECs |
-| 11 | GUIDE | MIGRATION-GUIDE: Single → Multi-Tenant | Operator guide for upgrading existing installations | PLAN-MT-001 |
+| 5 | ADR | ADR-MT-005: Event Bus Tenant Isolation | Dispatch-side filtering, subscribe_account(), history_for_account() | ADR-MT-001, ADR-MT-003 |
+| 6 | ADR | ADR-RV-001: RuVector PostgreSQL Extension Port | Port 7 ruvector crates into librefang workspace, Docker image, feature flags | — |
+| 7 | SPEC | SPEC-MT-001: Account Data Model & Storage | Exact Rust types, extractors, guards, macros, v18 migration, 33 tests | ADR-MT-001 |
+| 8 | SPEC | SPEC-MT-002: API Route Changes | 4-tier scoping for all 317 handlers with code examples | ADR-MT-002, ADR-MT-003 |
+| 9 | SPEC | SPEC-MT-003: Database Migration | v19 migration for 14 remaining tables, FTS5 rebuild, rollback strategy | ADR-MT-004 |
+| 10 | SPEC | SPEC-MT-004: Supabase RLS Policies | Copy-pasteable SQL for RLS policies on qwntik Supabase tables | SPEC-MT-001, ADR-RV-001 |
+| 11 | SPEC | SPEC-RV-001: Extension Port Acceptance Criteria | 26 acceptance criteria across 6 groups (adapted from openfang SPEC-033) | ADR-RV-001 |
+| 12 | SPEC | SPEC-RV-002: Supabase Vector Store Integration | PostgresVectorStore impl, RPC functions, kernel integration | ADR-RV-001, SPEC-MT-004 |
+| 13 | PLAN | PLAN-MT-001: Phase 1 Implementation | Foundation: types, middleware, extractors, guards, v18 migration, 76 handlers | All MT ADRs, SPEC-MT-001 |
+| 14 | PLAN | PLAN-MT-002: Phases 2–4 Implementation | Resource isolation, data isolation, hardening — 241 remaining handlers | PLAN-MT-001 |
+| 15 | PLAN | PLAN-RV-001: Phase 0 RuVector Port | 7-crate port, Docker image, Supabase integration, acceptance tests | ADR-RV-001, SPEC-RV-001 |
+| 16 | GUIDE | MIGRATION-GUIDE: Single → Multi-Tenant | Operator guide for upgrading existing installations | PLAN-MT-001 |
+| 17 | TEST | TESTING-STRATEGY: Multi-Tenant Test Plan | 128 planned tests across 7 categories, CI gates | All SPECs |
+| 18 | AUDIT | BHR-AUDIT-2026-04-07: Quality Audit | Post-hoc verification of all docs against source code | All docs |
 
 ---
 
@@ -56,9 +63,11 @@ Qwntik wraps LibreFang as a multi-tenant SaaS. Each Qwntik customer ("account") 
 
 2. **Isolation model: shared daemon, isolated namespaces.** One LibreFang process serves all accounts. Resources are tagged with `account_id` and filtered at query time. This is the same model as openfang's proven implementation.
 
-3. **Default account: `system`.** When no account is specified (desktop mode, legacy API calls, CLI), resources belong to the implicit `system` account. This preserves 100% backward compatibility.
+3. **Default account: `AccountId(None)` / `"system"`.** When no account is specified (desktop mode, legacy API calls, CLI), the extractor returns `AccountId(None)`. Storage uses `DEFAULT 'system'` for backward compatibility. `AccountId(None)` sees all data (admin/legacy mode).
 
 4. **Account is NOT a user.** Users belong to accounts. A user's `UserIdentity` gains an `account_id` field. The existing `UserRole` applies within the account context.
+
+5. **MakerKit personal account alignment.** In Qwntik (MakerKit), `account_id = user_id` is auto-created on signup. LibreFang's `AccountId(None)` / `"system"` concept has no equivalent in MakerKit. Resolution: Qwntik ALWAYS sends `X-Account-Id: <user_uuid>` — the `system` string only appears in LibreFang's SQLite for legacy/desktop/CLI mode and is never sent from Qwntik.
 
 ### Consequences
 - Every resource type gains an `account_id` field (agents, sessions, memories, skills, integrations, channels, workflows, goals)
@@ -71,7 +80,7 @@ Qwntik wraps LibreFang as a multi-tenant SaaS. Each Qwntik customer ("account") 
 | Crate | Change |
 |-------|--------|
 | `librefang-types` | Add `AccountId` type alias, add `account_id` to config types |
-| `librefang-kernel` | `AccountManager` struct, account-scoped agent registry |
+| `librefang-kernel` | Account-scoped agent registry, `bind_agent_account()` in event bus |
 | `librefang-api` | Middleware extraction, all route handlers |
 | `librefang-memory` | Schema migration, query filters |
 | `librefang-runtime` | Context engine account propagation |
@@ -83,7 +92,7 @@ Qwntik wraps LibreFang as a multi-tenant SaaS. Each Qwntik customer ("account") 
 ```
 crates/librefang-types/src/config/types.rs    → Add AccountId, account_id fields
 crates/librefang-kernel/src/auth.rs           → UserIdentity gains account_id
-crates/librefang-kernel/src/kernel.rs         → Add AccountManager
+crates/librefang-kernel/src/kernel.rs         → Thread AccountId through spawn_agent(), list_agents()
 crates/librefang-kernel/src/registry.rs       → Account-filtered agent queries
 ```
 
@@ -121,14 +130,20 @@ None of these carry account context.
 
 ### Middleware Design
 ```rust
-// New middleware: extract_account
-async fn extract_account(req: &mut Request) -> AccountContext {
-    if let Some(account_id) = req.headers().get("X-Account-Id") {
-        let signature = req.headers().get("X-Account-Sig");
-        validate_hmac(account_id, signature, &hmac_secret)?;
-        AccountContext { account_id, source: AccountSource::Header }
-    } else {
-        AccountContext { account_id: "system", source: AccountSource::Default }
+// AccountId extractor (Axum FromRequestParts — infallible)
+// See SPEC-MT-001 for the exact implementation.
+impl<S: Send + Sync> FromRequestParts<S> for AccountId {
+    type Rejection = std::convert::Infallible;
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        if let Some(header) = parts.headers.get("x-account-id") {
+            if let Ok(s) = header.to_str() {
+                let trimmed = s.trim();
+                if !trimmed.is_empty() {
+                    return Ok(AccountId(Some(trimmed.to_owned())));
+                }
+            }
+        }
+        Ok(AccountId(None)) // Legacy/desktop — sees all data
     }
 }
 ```
@@ -140,15 +155,15 @@ async fn extract_account(req: &mut Request) -> AccountContext {
 
 ### Security Properties
 - **404 not 403**: Wrong account returns 404 (prevents enumeration) — proven in openfang ADR-027
-- **Timing-safe comparison**: HMAC validation uses constant-time compare
-- **Replay protection**: If a timestamp component is added in future, ±5 minute tolerance (note: current qwntik implementation does NOT use `X-Account-Timestamp`)
+- **Timing-safe comparison**: HMAC validation uses `verify_slice()` (constant-time compare)
+- **⚠️ No replay protection (Phase 1)**: HMAC is over `account_id` alone — static signature. Accepted risk for server-to-server auth. Phase 2 adds timestamp + nonce. See ADR-MT-002 Known Risk section.
 - **No credential leakage**: Account credentials never appear in API responses
 
 ### Affected Files
 ```
-crates/librefang-api/src/middleware.rs         → extract_account middleware
-crates/librefang-api/src/routes/mod.rs         → AccountContext in AppState extensions
-crates/librefang-api/src/server.rs             → Wire middleware into router
+crates/librefang-api/src/middleware.rs         → HMAC sig verification (verify_account_sig)
+crates/librefang-api/src/extractors.rs         → AccountId FromRequestParts (infallible)
+crates/librefang-api/src/server.rs             → Wire HMAC middleware into router
 crates/librefang-types/src/config/types.rs     → hmac_secret config field
 ```
 
@@ -397,7 +412,7 @@ crates/librefang-api/src/routes/memory.rs        → Extract account from middle
 PROPOSED (adapted from openfang-ai ADR-033, status: ACCEPTED)
 
 ### Context
-The openfang-ai fork already ported 7 Rust crates from the ruvector upstream into its workspace. These crates compile into a PostgreSQL extension (`ruvector.so`) that provides 197 SQL functions (161 verified live in pg_proc) for vector operations, HNSW indexing, local embeddings, attention mechanisms, and learning systems.
+The openfang-ai fork already ported 7 Rust crates from the ruvector upstream into its workspace. These crates compile into a PostgreSQL extension (`ruvector.so`) that provides 225 `#[pg_extern]` functions in source — of which 57 are behind optional feature flags (graph, learning, attention, gnn, routing, solver, gated_transformer), yielding 168 in the default build. The SQL extension file lists 197 `CREATE FUNCTION` statements; 161 are verified live in `pg_proc` (the delta accounts for overloaded signatures and upgrade-path stubs).
 
 LibreFang's memory system already has:
 - `VectorStore` trait in `librefang-types/src/memory.rs` — abstract interface with `insert()`, `search()`, `delete()`, `get_embeddings()`
@@ -414,7 +429,7 @@ The extension runs **inside Supabase's PostgreSQL** (self-hosted Docker). LibreF
 
 | Crate | Version | Purpose | Dependencies |
 |-------|---------|---------|-------------|
-| `ruvector-postgres` | 0.3.0 | PG extension hub — 197 SQL functions via pgrx 0.12.6 (161 live) | All below (optional) |
+| `ruvector-postgres` | 0.3.0 | PG extension hub — 225 `#[pg_extern]` in source (57 feature-gated), 197 in SQL, 161 live via pgrx 0.12.6 | All below (optional) |
 | `ruvector-solver` | 2.0.4 | Sublinear sparse linear system solvers | None |
 | `ruvector-math` | 2.0.4 | Optimal transport, information geometry, manifolds | None |
 | `ruvector-attention` | 2.0.4 | 39 attention mechanisms | ruvector-math (optional) |
@@ -429,7 +444,7 @@ The extension runs **inside Supabase's PostgreSQL** (self-hosted Docker). LibreF
 │                         │              │  + ruvector extension v0.3   │
 │  HttpVectorStore ───────┤  /insert     │  + RLS policies              │
 │  (existing, unchanged)  │  /search     │  + HNSW indexes              │
-│                         │  /delete     │  + 197 SQL functions         │
+│                         │  /delete     │  + 161 live SQL functions     │
 │                         │  /embeddings │  + Local embeddings (384-dim)│
 └─────────────────────────┘              └──────────────────────────────┘
 ```
@@ -552,28 +567,63 @@ Adapted from openfang-ai SPEC-033. All 26 criteria were verified on 2026-04-06 i
 ```rust
 // crates/librefang-types/src/account.rs (NEW FILE)
 
-/// Opaque account identifier. Provided by upstream SaaS (Qwntik/Supabase).
-/// LibreFang does not manage account lifecycle.
-pub type AccountId = String;
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
-/// The implicit account for desktop/CLI/legacy API usage.
-pub const SYSTEM_ACCOUNT: &str = "system";
+/// Tenant isolation boundary. Every resource belongs to exactly one account.
+///
+/// Uses `Option<String>` — NOT `Option<Uuid>` — matching openfang-ai's proven pattern.
+/// This keeps a single representation across extractor, storage, migration, and comparison.
+///
+/// - `AccountId(Some("uuid-string"))` = multi-tenant request (SaaS, team isolation)
+/// - `AccountId(None)` = legacy/desktop mode (admin, sees everything)
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct AccountId(pub Option<String>);
 
-/// Account context extracted from request middleware.
-#[derive(Debug, Clone)]
-pub struct AccountContext {
-    pub account_id: AccountId,
-    pub source: AccountSource,
+impl AccountId {
+    /// The implicit account string for single-tenant / backward-compatible storage.
+    /// Matches the SQLite migration DEFAULT 'system' exactly.
+    pub const SYSTEM: &'static str = "system";
+
+    /// Create a new random account ID (UUID v4).
+    pub fn new() -> Self {
+        Self(Some(Uuid::new_v4().to_string()))
+    }
+
+    /// Returns true if this is a scoped (non-None) request.
+    pub fn is_scoped(&self) -> bool {
+        self.0.is_some()
+    }
+
+    /// Returns the inner string, or "system" for legacy/desktop.
+    pub fn as_str_or_system(&self) -> &str {
+        match &self.0 {
+            Some(s) => s.as_str(),
+            None => Self::SYSTEM,
+        }
+    }
 }
 
-#[derive(Debug, Clone)]
-pub enum AccountSource {
-    /// Extracted from X-Account-Id header with valid HMAC
-    Header,
-    /// Resolved from channel binding configuration
-    ChannelBinding,
-    /// No account specified — defaulted to system
-    Default,
+impl Default for AccountId {
+    fn default() -> Self {
+        Self(None) // Legacy/desktop mode
+    }
+}
+
+/// Account metadata. Minimal for Phase 1.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Account {
+    pub id: String,
+    pub name: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub status: AccountStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AccountStatus {
+    Active,
+    Suspended,
+    Deleted,
 }
 
 /// Per-account configuration (overrides global config).
@@ -592,6 +642,10 @@ pub struct AccountConfig {
 }
 ```
 
+> **Type alignment note:** The `AccountId(pub Option<String>)` type is the canonical
+> representation across ALL documents. See SPEC-MT-001 for the full type definition,
+> extractor, guards, and macros. ADR-MT-001 contains the decision rationale.
+
 ### Config Changes
 
 ```toml
@@ -609,12 +663,19 @@ See ADR-MT-003 filesystem layout. Key constraint: `accounts/` directory is creat
 
 ### Kernel Integration
 
+Account resolution is handled at the middleware layer via Axum's `FromRequestParts` extractor
+(see SPEC-MT-001 for the exact implementation). The kernel does NOT manage account lifecycle
+— it receives `AccountId` from the API layer and threads it through all operations.
+
+For filesystem-based deployments with per-account config overrides:
+
 ```rust
-// crates/librefang-kernel/src/account_manager.rs (NEW FILE)
+// crates/librefang-kernel/src/account_manager.rs (OPTIONAL — filesystem deployments only)
+// Qwntik/Supabase deployments use Supabase for account config, not this file.
 
 pub struct AccountManager {
     accounts_dir: PathBuf,
-    configs: DashMap<AccountId, AccountConfig>,
+    configs: DashMap<String, AccountConfig>,
     hmac_secret: Vec<u8>,
 }
 
@@ -622,21 +683,24 @@ impl AccountManager {
     /// Load account config from disk, or return defaults
     pub fn get_config(&self, account_id: &str) -> AccountConfig;
     
-    /// Validate HMAC signature for request
+    /// Validate HMAC signature for request.
+    /// Note: Phase 1 HMAC has no timestamp/nonce — see ADR-MT-002 Risk section.
     pub fn validate_signature(
         &self,
         account_id: &str,
         signature: &str,
-        timestamp: u64,
     ) -> Result<(), AuthError>;
     
     /// Ensure account directory structure exists
     pub fn ensure_account_dir(&self, account_id: &str) -> Result<PathBuf>;
     
     /// List all known accounts
-    pub fn list_accounts(&self) -> Vec<AccountId>;
+    pub fn list_accounts(&self) -> Vec<String>;
 }
 ```
+
+> **Note:** For Qwntik deployments, account config lives in Supabase (`account_features` table).
+> AccountManager is only needed for standalone daemon deployments with filesystem-based config.
 
 ---
 
@@ -650,9 +714,9 @@ Request → bearer_auth → extract_account → rate_limit(account) → route_ha
 
 `extract_account` runs after bearer auth. It:
 1. Checks for `X-Account-Id` header
-2. If present: validates HMAC signature, returns `AccountContext`
-3. If absent: returns `AccountContext { account_id: "system", source: Default }`
-4. Injects `AccountContext` into request extensions
+2. If present + non-empty: returns `AccountId(Some(value))`, HMAC verified if secret configured
+3. If absent/empty: returns `AccountId(None)` — legacy/desktop mode (sees all data)
+4. `AccountId` injected via Axum `FromRequestParts` extractor (infallible — never rejects)
 
 ### Route-by-Route Changes
 
@@ -719,10 +783,9 @@ CREATE INDEX IF NOT EXISTS idx_sessions_account_agent ON sessions(account_id, ag
 ALTER TABLE kv_store ADD COLUMN account_id TEXT NOT NULL DEFAULT 'system';
 CREATE INDEX IF NOT EXISTS idx_kv_account_id ON kv_store(account_id);
 
--- 4. proactive_memories (if table exists)
--- Wrapped in try/catch equivalent for SQLite
-ALTER TABLE proactive_memories ADD COLUMN account_id TEXT NOT NULL DEFAULT 'system';
-CREATE INDEX IF NOT EXISTS idx_proactive_account_id ON proactive_memories(account_id);
+-- Note: proactive_memories table does not exist in librefang's migration.rs.
+-- The proactive memory system uses the `memories` table with scope/level filtering.
+-- No separate proactive_memories table migration is needed.
 
 PRAGMA foreign_keys = ON;
 ```
@@ -740,12 +803,9 @@ DROP INDEX IF EXISTS idx_memories_account_agent;
 DROP INDEX IF EXISTS idx_sessions_account_id;
 DROP INDEX IF EXISTS idx_sessions_account_agent;
 DROP INDEX IF EXISTS idx_kv_account_id;
-DROP INDEX IF EXISTS idx_proactive_account_id;
-
 ALTER TABLE memories DROP COLUMN account_id;
 ALTER TABLE sessions DROP COLUMN account_id;
 ALTER TABLE kv_store DROP COLUMN account_id;
-ALTER TABLE proactive_memories DROP COLUMN account_id;
 ```
 
 ### Version Tracking
@@ -784,12 +844,13 @@ INSERT INTO migrations (name) VALUES ('001_add_account_isolation');
 
 | # | Task | Crate | Files | Tests |
 |---|------|-------|-------|-------|
-| 1.1 | Create `AccountId` type, `AccountContext`, `AccountSource` | librefang-types | `src/account.rs` (new) | Unit: type construction |
+| 1.1 | Create `AccountId(Option<String>)` type, `Account`, `AccountStatus` | librefang-types | `src/account.rs` (new) | Unit: type construction, as_str_or_system() |
 | 1.2 | Add `[multi_tenant]` config section | librefang-types | `src/config/types.rs` | Unit: deserialization with/without section |
-| 1.3 | Create `AccountManager` | librefang-kernel | `src/account_manager.rs` (new) | Unit: config loading, HMAC validation, dir creation |
-| 1.4 | Add `extract_account` middleware | librefang-api | `src/middleware.rs` | Integration: header extraction, HMAC validation, default fallback |
-| 1.5 | Wire middleware into router | librefang-api | `src/server.rs`, `src/routes/mod.rs` | Integration: all routes receive AccountContext |
-| 1.6 | Add `account_id` to `UserIdentity` | librefang-kernel | `src/auth.rs` | Unit: identity construction |
+| 1.3 | Create `AccountId` Axum extractor (infallible `FromRequestParts`) | librefang-api | `src/extractors.rs` (new) | Unit: 6 extraction tests (header, empty, whitespace, UUID, absent, infallible) |
+| 1.4 | Add HMAC sig verification + policy matrix | librefang-api | `src/middleware.rs` | Unit: 5 policy matrix tests |
+| 1.5 | Create guards: `check_account()`, `validate_account!`, `account_or_system!` | librefang-api | `src/routes/shared.rs`, `src/macros.rs` (new) | Unit: 6 guard tests |
+| 1.6 | Wire HMAC middleware + extractor into router | librefang-api | `src/server.rs` | Integration: all routes receive AccountId |
+| 1.7 | Add `account_id` to `UserIdentity` + `AgentEntry` | librefang-kernel | `src/auth.rs`, `src/registry.rs` | Unit: identity construction, filtered queries |
 | 1.7 | Run full existing test suite | all | — | Regression: 100% pass with `multi_tenant.enabled = false` |
 
 **Exit criteria:** All existing tests pass. `curl` without `X-Account-Id` header behaves identically to pre-change.

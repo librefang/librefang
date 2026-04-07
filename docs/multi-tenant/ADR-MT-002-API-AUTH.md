@@ -168,8 +168,60 @@ control over account requirements.
 **Rejected.** Would require changing the existing auth system. Stacking a new
 header is additive — zero changes to existing auth flow.
 
+## ⚠️ Known Risk: HMAC Replay Vulnerability (Accepted — Phase 1)
+
+**Risk:** The Phase 1 HMAC signature is computed over `account_id` alone:
+```
+HMAC-SHA256(secret, account_id)
+```
+This signature is **static** — the same account always produces the same signature.
+An attacker who captures one valid `X-Account-Id` + `X-Account-Sig` pair can replay
+it indefinitely.
+
+**Why accepted for Phase 1:**
+1. The HMAC secret is shared between Qwntik server and LibreFang daemon — both are
+   server-side, never exposed to browsers or clients
+2. Qwntik's server actions compute the signature on every request — it never leaves
+   the server-to-server boundary
+3. An attacker who can intercept server-to-server traffic already has deeper access
+   than HMAC replay provides
+4. Phase 1 scope is internal deployment only — not customer-facing
+
+**Phase 2 remediation plan:**
+```
+X-Account-Id: acc_abc123
+X-Account-Timestamp: 1712444400          # Unix seconds
+X-Account-Nonce: a1b2c3d4e5f6            # Random hex, 12+ bytes
+X-Account-Sig: hmac-sha256(secret, account_id + "|" + timestamp + "|" + nonce)
+```
+- Timestamp tolerance: ±5 minutes (reject stale requests)
+- Nonce: deduplicate within the tolerance window (in-memory LRU cache, ~10K entries)
+- This eliminates replay without requiring JWT infrastructure
+
+| Risk | Impact | Likelihood | Phase 1 Mitigation | Phase 2 Fix |
+|------|--------|------------|--------------------|-----------|
+| HMAC replay | Medium — attacker impersonates account | Low — requires server-to-server interception | Server-side only, not client-facing | Timestamp + nonce in signature |
+
+---
+
 ## Consequences
 
-- **Positive:** Desktop/CLI mode unchanged. Qwntik gets verified account identity. HMAC is simple to implement and test.
-- **Negative:** HMAC secret must be shared between Qwntik and librefang (acceptable for internal services).
-- **Phase 4 debt:** JWT for external API keys, token rotation, key management. HMAC is an internal implementation detail that Phase 4 wraps in a proper auth service.
+### Positive
+- Desktop/CLI mode unchanged — no `X-Account-Id` header = `AccountId(None)` = legacy behavior
+- Qwntik gets verified account identity with minimal implementation complexity
+- HMAC is simple to implement (3 lines of code) and test (5 policy matrix tests)
+- Infallible extractor prevents middleware ordering bugs
+
+### Negative
+- HMAC secret must be shared between Qwntik and librefang (acceptable for internal services)
+- Phase 1 HMAC has no replay protection (accepted risk — see Known Risk section above)
+- `AccountId(None)` sees all data by default (system-sees-all — toggle added in Phase 2)
+
+### Phase 2 Remediation
+- Add timestamp + nonce to HMAC signature (eliminates replay)
+- Add `require_account_header` config toggle (closes system-sees-all bypass)
+
+### Phase 4 Debt
+- JWT for external API keys, token rotation, key management
+- HMAC is an internal implementation detail that Phase 4 wraps in a proper auth service
+- Per-account API key management for direct daemon access without Qwntik

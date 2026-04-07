@@ -13,6 +13,10 @@
 $ grep -c "CREATE OR REPLACE FUNCTION" crates/ruvector-postgres/sql/ruvector--0.3.0.sql
 197
 
+# Source-level count (includes feature-gated functions)
+$ grep -rc '#\[pg_extern\]' crates/ --include='*.rs'
+225   # 57 behind optional feature flags; 168 in default (pg17-only) build
+
 $ grep -c "CREATE OPERATOR" crates/ruvector-postgres/sql/ruvector--0.3.0.sql
 11
 
@@ -170,7 +174,7 @@ cargo check -p ruvector-postgres --features all-features-v3
 | Copy migration SQL | `qwntik/apps/web/supabase/migrations/20260405_ruvector_setup.sql` | `docker/sql/ruvector_setup.sql` | AC-5.1 |
 | Build Docker image | — | `supabase-ruvector:latest` | AC-3.1 |
 | Verify extension loads | `CREATE EXTENSION ruvector` | — | AC-3.2 |
-| Verify function count | `pg_proc` count | ≥ 197 | AC-3.3 |
+| Verify function count | `pg_proc` count | ≥ 161 (live; 197 in SQL file) | AC-3.3 |
 | Verify SIMD detection | `ruvector_simd_info()` | Returns arch string | AC-3.4 |
 
 **Dockerfile adaptation notes:**
@@ -397,7 +401,7 @@ echo "=== Pattern Coverage: ALL PASSED ==="
 |-----|------|--------|-------------|
 | 1 | AM | Pre-work + Round 1 | Commit unstaged files in openfang-ai; copy 7 crates; `cargo check` passes |
 | 1 | PM | Round 2 | Zero openfang references; compilation still clean |
-| 2 | AM | Round 3 | Docker image builds; extension loads; ≥197 functions; SIMD detected |
+| 2 | AM | Round 3 | Docker image builds; extension loads; ≥161 live functions (197 in SQL); SIMD detected |
 | 2 | PM | Round 4 | 384-dim embeddings; embed_batch works; HNSW search returns correct ranking |
 | 3 | AM | Round 5 | REST endpoints respond; RLS isolates accounts |
 | 3 | PM | Exit gate | Full exit gate passes; pattern coverage gate passes; commit all changes |

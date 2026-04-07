@@ -104,7 +104,7 @@ sqlite3 ~/.librefang/data/librefang.db \
 
 | Step | Action | Reversible |
 |------|--------|------------|
-| 1 | Database migration runs — adds `account_id TEXT NOT NULL DEFAULT 'system'` to `memories`, `sessions`, `kv_store`, `proactive_memories` | Yes (see Rollback) |
+| 1 | Database migration v18 runs — adds `account_id TEXT NOT NULL DEFAULT 'system'` to `agents`, `sessions`, `usage_events` (Phase 1). Later v19 adds to remaining 11 tables (Phase 3). | Yes (see Rollback) |
 | 2 | Indexes created: `idx_memories_account_id`, `idx_sessions_account_id`, etc. | Yes |
 | 3 | `accounts/system/` directory created | Yes |
 | 4 | Existing agent manifests moved to `accounts/system/agents/` | Yes |
@@ -260,19 +260,44 @@ database but are ignored when multi-tenant is disabled.
 
 ```sql
 -- Rollback: 001_add_account_isolation
-DROP INDEX IF EXISTS idx_memories_account_id;
-DROP INDEX IF EXISTS idx_memories_account_agent;
-DROP INDEX IF EXISTS idx_sessions_account_id;
+-- Phase 1 rollback (v18):
+DROP INDEX IF EXISTS idx_agents_account;
+DROP INDEX IF EXISTS idx_agents_account_id;
+DROP INDEX IF EXISTS idx_sessions_account;
 DROP INDEX IF EXISTS idx_sessions_account_agent;
-DROP INDEX IF EXISTS idx_kv_account_id;
-DROP INDEX IF EXISTS idx_proactive_account_id;
+DROP INDEX IF EXISTS idx_usage_account;
 
-ALTER TABLE memories DROP COLUMN account_id;
+ALTER TABLE agents DROP COLUMN account_id;
 ALTER TABLE sessions DROP COLUMN account_id;
-ALTER TABLE kv_store DROP COLUMN account_id;
-ALTER TABLE proactive_memories DROP COLUMN account_id;
+ALTER TABLE usage_events DROP COLUMN account_id;
 
-DELETE FROM migrations WHERE name = '001_add_account_isolation';
+-- Phase 3 rollback (v19) — run ONLY if v19 was applied:
+DROP INDEX IF EXISTS idx_events_account;
+DROP INDEX IF EXISTS idx_kv_store_account;
+DROP INDEX IF EXISTS idx_memories_account;
+DROP INDEX IF EXISTS idx_usage_events_account;
+
+ALTER TABLE events DROP COLUMN account_id;
+ALTER TABLE kv_store DROP COLUMN account_id;
+ALTER TABLE memories DROP COLUMN account_id;
+ALTER TABLE entities DROP COLUMN account_id;
+ALTER TABLE relations DROP COLUMN account_id;
+ALTER TABLE task_queue DROP COLUMN account_id;
+ALTER TABLE canonical_sessions DROP COLUMN account_id;
+ALTER TABLE paired_devices DROP COLUMN account_id;
+ALTER TABLE audit_entries DROP COLUMN account_id;
+ALTER TABLE prompt_versions DROP COLUMN account_id;
+ALTER TABLE prompt_experiments DROP COLUMN account_id;
+ALTER TABLE approval_audit DROP COLUMN account_id;
+
+-- FTS5 rebuild without account_id:
+DROP TABLE IF EXISTS sessions_fts;
+CREATE VIRTUAL TABLE sessions_fts USING fts5(
+  session_id, content,
+  content='sessions', content_rowid='rowid'
+);
+
+DELETE FROM migrations WHERE name IN ('v18_account_phase1', 'v19_account_phase3');
 ```
 
 ---

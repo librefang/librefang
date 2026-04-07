@@ -156,9 +156,169 @@ fi
 echo "=== ALL ROUTE FILES SCOPED ==="
 ```
 
+---
+
+## Code Examples Per Tier
+
+### Tier 1: Full Ownership Example (skills.rs)
+
+```rust
+// BEFORE:
+pub async fn get_skill(
+    State(state): State<Arc<AppState>>,
+    Path(skill_id): Path<String>,
+) -> impl IntoResponse {
+    let skill = state.kernel.get_skill(&skill_id)?;
+    Json(skill)
+}
+
+// AFTER:
+pub async fn get_skill(
+    State(state): State<Arc<AppState>>,
+    account: AccountId,
+    Path(skill_id): Path<String>,
+) -> impl IntoResponse {
+    let skill = state.kernel.get_skill(&skill_id)?;
+    check_account_resource(&skill.account_id, &account)?; // 404 if wrong account
+    Json(skill)
+}
+
+// Guard function (from SPEC-MT-001 shared.rs):
+pub fn check_account_resource(
+    resource_account: &Option<String>,
+    request_account: &AccountId,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    if let Some(ref req_acct) = request_account.0 {
+        let owns = resource_account
+            .as_deref()
+            .map(|a| a == req_acct.as_str())
+            .unwrap_or(false);
+        if !owns {
+            return Err((StatusCode::NOT_FOUND, Json(json!({"error": "Not found"}))));
+        }
+    }
+    Ok(()) // AccountId(None) = admin sees all
+}
+```
+
+### Tier 2: Account-Filtered Example (providers.rs)
+
+```rust
+// READ: system providers + own account overrides
+pub async fn list_providers(
+    State(state): State<Arc<AppState>>,
+    account: AccountId,
+) -> impl IntoResponse {
+    let account_str = account_or_system!(account);
+    let providers = state.kernel.list_providers_for_account(account_str)?;
+    // Returns: system defaults + account-specific overrides
+    Json(providers)
+}
+
+// WRITE: requires concrete account
+pub async fn create_provider_override(
+    State(state): State<Arc<AppState>>,
+    account: AccountId,
+    Json(body): Json<ProviderConfig>,
+) -> impl IntoResponse {
+    let account_str = validate_account!(account); // 400 if None
+    state.kernel.create_provider_override(account_str, body)?;
+    StatusCode::CREATED
+}
+```
+
+### Tier 3: Shared + Overlay Example (memory.rs)
+
+```rust
+// Memory recall: account-scoped + system memories visible
+pub async fn search_memory(
+    State(state): State<Arc<AppState>>,
+    account: AccountId,
+    Json(body): Json<MemorySearchRequest>,
+) -> impl IntoResponse {
+    let account_str = account_or_system!(account);
+    // SQL: WHERE (account_id = ?1 OR account_id = 'system')
+    let results = state.kernel.memory().search(
+        account_str, &body.query, body.limit,
+    )?;
+    Json(results)
+}
+```
+
+### Tier 4: Public Example (system.rs)
+
+```rust
+// PUBLIC: no guard, no account extraction needed
+pub async fn health_check(
+    State(state): State<Arc<AppState>>,
+    // No account: AccountId parameter — this is public
+) -> impl IntoResponse {
+    let health = state.kernel.health_check()?;
+    Json(health)
+}
+```
+
+---
+
+## Qwntik Route Alignment
+
+Qwntik has 123 API routes. 80 of these proxy to the LibreFang daemon via
+`/api/openfang/*` with `X-Account-Id` header injection. The remaining 43 are
+qwntik-native routes that query Supabase directly with RLS.
+
+### Qwntik Daemon Proxy Routes (80 routes — all send X-Account-Id)
+
+All routes under `/api/openfang/*` in qwntik pass `x-account-id` and `x-user-id`
+headers to the daemon:
+
+```typescript
+// qwntik pattern (every openfang proxy route):
+const daemonResponse = await fetch(`${OPENFANG_API_BASE}/${path}`, {
+  headers: {
+    'x-account-id': accountId,   // Always set from session
+    'x-user-id': user.id,
+    'content-type': 'application/json',
+    ...(process.env.OPENFANG_API_KEY && {
+      authorization: `Bearer ${process.env.OPENFANG_API_KEY}`,
+    }),
+  },
+});
+```
+
+### Qwntik Native Routes (43 routes — Supabase RLS)
+
+These query Supabase directly and use RLS policies for isolation:
+- `/api/agents/*` (18 routes) — `.eq('account_id', accountId)` filter
+- `/api/knowledge/*` (4 routes) — RLS via `user_agents` join
+- `/api/models/*` (3 routes) — RLS via `user_agents` join
+- `/api/skills/*` (4 routes) — RLS via `user_agents` join
+- `/api/chat/*` (2 routes) — session-scoped, account from agent ownership
+- Other (12 routes) — health, billing webhook, vector ops, version
+
+### Qwntik Routes Needing Account Header Verification
+
+These 9 qwntik routes interact with the daemon but need verification that
+`X-Account-Id` is correctly injected:
+
+| # | Route | Issue | Fix |
+|---|-------|-------|-----|
+| 1 | `/api/openfang/chat/stream` | SSE proxy — verify header on initial request | Confirm header set before SSE handoff |
+| 2 | `/api/openfang/channels/whatsapp/qr` | QR generation — scoped to account? | Add account check before QR display |
+| 3 | `/api/openfang/comms/events` | Event history — uses history_for_account? | Depends on ADR-MT-005 landing |
+| 4 | `/api/openfang/comms/events/stream` | SSE events — account-filtered? | Depends on ADR-MT-005 landing |
+| 5 | `/api/openfang/uploads/[fileId]` | File access — scoped to account? | Verify file ownership check |
+| 6 | `/api/openfang/logs/stream` | Log streaming — account-filtered? | Add account filter to log entries |
+| 7 | `/api/openfang/metrics` | Prometheus metrics — per-account? | Phase 4 — metrics are system-wide |
+| 8 | `/api/openfang/health` | Health check | No change needed (Tier 4 public) |
+| 9 | `/api/openfang/health/detail` | Detailed health | No change needed (Tier 4 public) |
+
+---
+
 ## Out of Scope
 
-- Phase 1 handlers (agents.rs, config.rs) — already scoped
+- Phase 1 handlers (agents.rs, config.rs) — already scoped per SPEC-MT-001
 - Database schema changes — see SPEC-MT-003
 - Vector store account namespacing — see ADR-MT-004 Phase 3
 - WebSocket channel scoping — Phase 4
+- Event bus isolation — see ADR-MT-005
+- Qwntik native route changes — handled by Supabase RLS (SPEC-MT-004)

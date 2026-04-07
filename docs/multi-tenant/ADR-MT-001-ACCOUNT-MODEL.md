@@ -120,33 +120,55 @@ deployments continue working without configuration changes.
 ```rust
 // librefang-types/src/account.rs (NEW FILE)
 
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
 /// Tenant isolation boundary. Every resource belongs to exactly one account.
+///
+/// Uses `Option<String>` — NOT `Uuid` — matching openfang-ai's proven pattern.
+/// Single representation across extractor, storage, migration, and comparison.
+///
+/// - `AccountId(Some("uuid-string"))` = multi-tenant request (SaaS)
+/// - `AccountId(None)` = legacy/desktop mode (admin, sees everything)
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct AccountId(pub Uuid);
+pub struct AccountId(pub Option<String>);
 
 impl AccountId {
-    /// The implicit account for single-tenant / backward-compatible deployments.
-    pub const SYSTEM: AccountId = AccountId(Uuid::from_u128(0));
+    /// String used in SQLite DEFAULT. Matches migration exactly.
+    pub const SYSTEM: &'static str = "system";
 
     pub fn new() -> Self {
-        Self(Uuid::new_v4())
+        Self(Some(Uuid::new_v4().to_string()))
+    }
+
+    pub fn is_scoped(&self) -> bool {
+        self.0.is_some()
+    }
+
+    pub fn as_str_or_system(&self) -> &str {
+        match &self.0 {
+            Some(s) => s.as_str(),
+            None => Self::SYSTEM,
+        }
     }
 }
 
 impl Default for AccountId {
     fn default() -> Self {
-        Self::SYSTEM
+        Self(None) // Legacy/desktop mode
     }
 }
 
 /// Account metadata. Minimal for Phase 1 — extended in Phase 2+.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Account {
-    pub id: AccountId,
+    pub id: String,
     pub name: String,
     pub created_at: DateTime<Utc>,
-    pub status: AccountStatus,  // Active, Suspended, Deleted
+    pub status: AccountStatus,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AccountStatus {
     Active,
     Suspended,
@@ -154,27 +176,58 @@ pub enum AccountStatus {
 }
 ```
 
+> **Why `Option<String>` not `Uuid`:** See SPEC-MT-001 for full rationale. Short version:
+> openfang-ai proved that a single `Option<String>` eliminates type-conversion bugs at
+> the extractor→storage boundary. SQLite stores TEXT, Axum extracts from header string,
+> comparison is `&str == &str` — zero parsing on the hot path.
+
 ### Backward Compatibility Contract
 
-1. If no account context is provided in a request, `AccountId::SYSTEM` is used
-2. Existing API keys map to `AccountId::SYSTEM`
-3. Existing SQLite data migrated with `account_id = 'system'` default
+1. If no account context is provided in a request, `AccountId(None)` is used (admin/legacy mode, sees all data)
+2. Existing API keys result in `AccountId(None)` — backward-compatible admin access
+3. Existing SQLite data migrated with `account_id = 'system'` DEFAULT (string matches `AccountId::SYSTEM` constant)
 4. Single-tenant deployments never see account_id in API responses unless opted in
-5. Channel bridges default to `AccountId::SYSTEM` when no tenant routing configured
+5. Channel bridges default to `AccountId(None)` when no tenant routing configured
+6. Qwntik ALWAYS sends `X-Account-Id: <user_uuid>` — the `"system"` string only exists in SQLite for legacy data
 
 ### Account Resolution Chain
 
 ```
-Request → middleware.rs
-  1. Check Authorization header for JWT → extract account_id claim
-  2. Check X-API-Key → lookup account from api_keys table
-  3. Check session token → lookup account from active_sessions
-  4. Fallback → AccountId::SYSTEM
-  → Insert AccountId into axum request Extensions
+Request → AccountId FromRequestParts extractor (infallible)
+  1. Check X-Account-Id header → AccountId(Some(value)) if non-empty
+  2. (Phase 2) Check JWT claim → extract account_id
+  3. (Phase 2) Check X-API-Key → lookup account from api_keys table
+  4. Fallback → AccountId(None) [legacy/desktop/admin mode]
+  → AccountId injected via Axum FromRequestParts (never rejects)
 ```
 
-Every handler extracts `AccountId` from Extensions (via a custom Axum extractor),
-never from query params or path segments.
+Every handler extracts `AccountId` from the Axum extractor (via `FromRequestParts`),
+never from query params or path segments. The extractor is **infallible** — it never
+rejects a request.
+
+### MakerKit Personal Account Compatibility
+
+**Issue:** MakerKit (Qwntik's base) auto-creates a personal account on signup where
+`account_id = user_id`. There is no separate "system" account concept in MakerKit.
+
+**Resolution:**
+- Qwntik's `getAccountOptions()` ALWAYS sends `X-Account-Id: <user_uuid>` (personal
+  account) or `X-Account-Id: <team_uuid>` (team account)
+- LibreFang's `AccountId(None)` / `"system"` only appears in desktop/CLI/legacy mode
+- The `has_role_on_account()` RLS function in MakerKit handles team membership;
+  LibreFang's `check_account()` guard handles daemon-side isolation
+
+### System-Sees-All Configuration
+
+**Behavior:** When `AccountId(None)` (no header), the caller sees ALL data across
+all accounts. This is the backward-compatible admin/desktop mode.
+
+**Config toggle (Phase 2):**
+```toml
+[multi_tenant]
+enabled = true
+require_account_header = false  # When true, AccountId(None) → 401
+```
 
 ---
 

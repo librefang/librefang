@@ -30,7 +30,7 @@ awareness.
 | # | Table | Key Columns (from migration.rs) | Phase 3 Change |
 |---|-------|---------------------------------|----------------|
 | 1 | agents | id, name, manifest, state, mode | ✅ Done (v18) |
-| 2 | sessions | id, agent_id, messages (BLOB), context_window_tokens, created_at, updated_at (+peer_id v16, +label v6) | ADD COLUMN + INDEX |
+| 2 | sessions | id, agent_id, messages (BLOB), context_window_tokens, created_at, updated_at (+peer_id v16, +label v6) | ✅ Done (v18) — see SPEC-MT-001 |
 | 3 | events | id, agent_id, event_type, payload, created_at | ADD COLUMN + INDEX |
 | 4 | kv_store | agent_id, key, value, updated_at | ADD COLUMN + INDEX |
 | 5 | memories | id, agent_id, content, embedding, level, source, created_at (+image_url v15, +modality v15) | ADD COLUMN + INDEX |
@@ -38,7 +38,7 @@ awareness.
 | 7 | relations | id, subject_id, predicate, object_id, weight | ADD COLUMN |
 | 8 | task_queue | id, agent_id, payload, status, created_at | ADD COLUMN |
 | 9 | migrations | version, applied_at | — (system table) |
-| 10 | usage_events | id, agent_id, event_type, tokens_in, tokens_out, cost | ADD COLUMN + INDEX |
+| 10 | usage_events | id, agent_id, event_type, tokens_in, tokens_out, cost | ✅ Done (v18) — see SPEC-MT-001 |
 | 11 | canonical_sessions | id, agent_id, created_at | ADD COLUMN |
 | 12 | paired_devices | id, device_name, peer_id, created_at | ADD COLUMN |
 | 13 | audit_entries | id, hash, prev_hash, agent_id, action, payload | ADD COLUMN + INDEX |
@@ -49,7 +49,12 @@ awareness.
 | 18 | experiment_metrics | id, variant_id, metric_name, value | — (FK-scoped) |
 | 19 | approval_audit | id, agent_id, action, decision | ADD COLUMN |
 
-**Summary: 14 tables get account_id, 1 FTS5 rebuilt, 2 FK-scoped, 2 unchanged**
+**Summary: 11 tables get account_id in v19 (3 already done in v18: agents, sessions, usage_events), 1 FTS5 rebuilt, 2 FK-scoped, 2 unchanged**
+
+> **Migration version clarification:**
+> - **v18 (Phase 1 — SPEC-MT-001):** `agents`, `sessions`, `usage_events` get `account_id` column
+> - **v19 (Phase 3 — this SPEC):** Remaining 11 tables get `account_id` column + FTS5 rebuild
+> - There is NO overlap — v19 skips tables already handled by v18
 
 ### Memory Store Methods to Modify (verified counts)
 
