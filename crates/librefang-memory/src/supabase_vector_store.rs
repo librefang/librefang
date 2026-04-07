@@ -8,9 +8,10 @@
 //!
 //! | RPC function       | Parameters                                              | Response                          |
 //! |--------------------|---------------------------------------------------------|-----------------------------------|
-//! | `vector_insert`    | `doc_content, doc_embedding, doc_metadata, doc_user_id` | `BIGINT` (new row ID)             |
-//! | `vector_search`    | `query_embedding, match_count, match_threshold, caller_user_id` | `[{ id, content, metadata, distance }]` |
-//! | `vector_delete`    | `doc_id`                                                | `BOOLEAN` (`true` if deleted)     |
+//! | `vector_insert`       | `doc_content, doc_embedding, doc_metadata, doc_user_id, doc_account_id` | `BIGINT` (new row ID)             |
+//! | `vector_insert_batch` | `doc_contents[], doc_embeddings[], doc_metadatas[], doc_user_id, doc_account_id` | `BIGINT[]` (new row IDs)          |
+//! | `vector_search`       | `query_embedding, match_count, match_threshold, caller_user_id, caller_account_id` | `[{ id, content, metadata, distance }]` |
+//! | `vector_delete`       | `doc_id`                                                | `BOOLEAN` (`true` if deleted)     |
 
 use async_trait::async_trait;
 use librefang_types::error::{LibreFangError, LibreFangResult};
@@ -58,8 +59,10 @@ pub struct SupabaseVectorStore {
     client: Client,
     base_url: String,
     api_key: String,
-    /// Cosine distance threshold for search (lower = stricter).
-    /// Default 0.5 means results with similarity ≥ 0.5 are returned.
+    /// Cosine **distance** threshold for search (lower = stricter).
+    /// The RPC filters with `WHERE distance < match_threshold`.
+    /// Default 0.5 means only results with cosine distance < 0.5
+    /// (i.e. similarity > 0.5) are returned.
     match_threshold: f32,
 }
 
@@ -92,10 +95,11 @@ impl SupabaseVectorStore {
         }
     }
 
-    /// Set the cosine distance threshold for search results.
+    /// Set the cosine **distance** threshold for search results.
     ///
-    /// Lower values are stricter (closer matches only).
-    /// `0.3` = similarity ≥ 0.7, `0.5` = similarity ≥ 0.5, `1.0` = return everything.
+    /// The RPC uses `WHERE distance < threshold` — lower values are stricter.
+    /// `0.3` → distance < 0.3 (similarity > 0.7), `0.5` → distance < 0.5,
+    /// `2.0` → return everything (max cosine distance is 2.0).
     pub fn with_match_threshold(mut self, threshold: f32) -> Self {
         assert!(
             threshold.is_finite() && threshold >= 0.0,
@@ -177,8 +181,107 @@ struct SupabaseSearchResponseItem {
 }
 
 #[derive(Serialize)]
+struct SupabaseBatchInsertRequest {
+    doc_contents: Vec<String>,
+    doc_embeddings: Vec<String>,
+    doc_metadatas: Vec<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    doc_user_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    doc_account_id: Option<String>,
+}
+
+#[derive(Serialize)]
 struct SupabaseDeleteRequest {
     doc_id: i64,
+}
+
+// ── Batch operations (not part of the VectorStore trait) ─────────────────
+
+impl SupabaseVectorStore {
+    /// Batch-insert multiple documents in a single RPC call.
+    ///
+    /// Uses the `vector_insert_batch` RPC — one HTTP round-trip instead of N.
+    ///
+    /// `user_id` and `account_id` are extracted from the **first** item's
+    /// metadata and applied uniformly to all rows (the RPC uses scalar
+    /// params, not per-document).  Returns the Supabase row IDs.
+    pub async fn insert_batch(
+        &self,
+        items: &[(String, Vec<f32>, String, HashMap<String, serde_json::Value>)],
+    ) -> LibreFangResult<Vec<i64>> {
+        if items.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // Extract tenant context from the first item's metadata.
+        let doc_user_id = items[0]
+            .3
+            .get("user_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let doc_account_id = items[0]
+            .3
+            .get("account_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let mut doc_contents = Vec::with_capacity(items.len());
+        let mut doc_embeddings = Vec::with_capacity(items.len());
+        let mut doc_metadatas = Vec::with_capacity(items.len());
+
+        for (id, embedding, payload, metadata) in items {
+            doc_contents.push(payload.clone());
+            doc_embeddings.push(embedding_to_text(embedding));
+
+            let mut meta = metadata.clone();
+            meta.insert(
+                LIBREFANG_ID_KEY.to_string(),
+                serde_json::Value::String(id.clone()),
+            );
+            let meta_val = serde_json::to_value(&meta).map_err(|e| {
+                LibreFangError::Internal(format!("Supabase metadata serialize: {e}"))
+            })?;
+            doc_metadatas.push(meta_val);
+        }
+
+        let body = SupabaseBatchInsertRequest {
+            doc_contents,
+            doc_embeddings,
+            doc_metadatas,
+            doc_user_id,
+            doc_account_id,
+        };
+
+        let resp = self
+            .authed_post("vector_insert_batch")
+            .header("Prefer", "return=representation")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| LibreFangError::Internal(format!("Supabase vector insert_batch: {e}")))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp
+                .text()
+                .await
+                .unwrap_or_else(|e| format!("<body unreadable: {e}>"));
+            return Err(LibreFangError::Internal(format!(
+                "Supabase vector insert_batch returned {status}: {text}"
+            )));
+        }
+
+        let ids: Vec<i64> = resp.json().await.map_err(|e| {
+            LibreFangError::Internal(format!("Supabase vector insert_batch parse: {e}"))
+        })?;
+
+        tracing::info!(
+            "Batch-inserted {} documents via vector_insert_batch",
+            ids.len()
+        );
+        Ok(ids)
+    }
 }
 
 // ── VectorStore implementation ───────────────────────────────────────────
@@ -813,6 +916,125 @@ mod tests {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
         assert_eq!(doc_user_id, None);
+    }
+
+    // ── Batch insert tests ───────────────────────────────────────────
+
+    #[test]
+    fn test_batch_insert_request_serialization() {
+        let req = SupabaseBatchInsertRequest {
+            doc_contents: vec!["doc one".into(), "doc two".into()],
+            doc_embeddings: vec!["[0.1,0.2]".into(), "[0.3,0.4]".into()],
+            doc_metadatas: vec![
+                serde_json::json!({"librefang_id": "a"}),
+                serde_json::json!({"librefang_id": "b"}),
+            ],
+            doc_user_id: Some("user-uuid".to_string()),
+            doc_account_id: Some("acct-uuid".to_string()),
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        let contents = json["doc_contents"].as_array().unwrap();
+        assert_eq!(contents.len(), 2);
+        assert_eq!(contents[0], "doc one");
+        assert_eq!(contents[1], "doc two");
+        let embeddings = json["doc_embeddings"].as_array().unwrap();
+        assert_eq!(embeddings.len(), 2);
+        let metadatas = json["doc_metadatas"].as_array().unwrap();
+        assert_eq!(metadatas[0]["librefang_id"], "a");
+        assert_eq!(json["doc_user_id"], "user-uuid");
+        assert_eq!(json["doc_account_id"], "acct-uuid");
+    }
+
+    #[test]
+    fn test_batch_insert_request_skips_null_ids() {
+        let req = SupabaseBatchInsertRequest {
+            doc_contents: vec!["x".into()],
+            doc_embeddings: vec!["[0.1]".into()],
+            doc_metadatas: vec![serde_json::json!({})],
+            doc_user_id: None,
+            doc_account_id: None,
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        let obj = json.as_object().unwrap();
+        assert!(
+            !obj.contains_key("doc_user_id"),
+            "None user_id must be omitted"
+        );
+        assert!(
+            !obj.contains_key("doc_account_id"),
+            "None account_id must be omitted"
+        );
+    }
+
+    #[test]
+    fn test_batch_insert_request_empty_arrays() {
+        let req = SupabaseBatchInsertRequest {
+            doc_contents: vec![],
+            doc_embeddings: vec![],
+            doc_metadatas: vec![],
+            doc_user_id: None,
+            doc_account_id: None,
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["doc_contents"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_insert_batch_empty_returns_ok() {
+        let store = SupabaseVectorStore::new("https://abc.supabase.co/rest/v1", "key");
+        let result = store.insert_batch(&[]).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_batch_metadata_stashes_librefang_ids() {
+        // Simulate what insert_batch does to metadata
+        let items = vec![
+            (
+                "app-id-1".to_string(),
+                vec![0.1_f32],
+                "doc1".to_string(),
+                HashMap::new(),
+            ),
+            (
+                "app-id-2".to_string(),
+                vec![0.2_f32],
+                "doc2".to_string(),
+                HashMap::new(),
+            ),
+        ];
+        let mut metadatas = Vec::new();
+        for (id, _, _, metadata) in &items {
+            let mut meta = metadata.clone();
+            meta.insert(
+                LIBREFANG_ID_KEY.to_string(),
+                serde_json::Value::String(id.clone()),
+            );
+            metadatas.push(serde_json::to_value(&meta).unwrap());
+        }
+        assert_eq!(metadatas[0][LIBREFANG_ID_KEY], "app-id-1");
+        assert_eq!(metadatas[1][LIBREFANG_ID_KEY], "app-id-2");
+    }
+
+    #[test]
+    fn test_batch_user_id_from_first_item() {
+        // insert_batch extracts user_id from first item only
+        let mut meta0 = HashMap::new();
+        meta0.insert("user_id".to_string(), serde_json::json!("user-A"));
+        let mut meta1 = HashMap::new();
+        meta1.insert("user_id".to_string(), serde_json::json!("user-B"));
+        let items: Vec<(String, Vec<f32>, String, HashMap<String, serde_json::Value>)> = vec![
+            ("a".to_string(), vec![0.1_f32], "d1".to_string(), meta0),
+            ("b".to_string(), vec![0.2_f32], "d2".to_string(), meta1),
+        ];
+        let doc_user_id = items[0]
+            .3
+            .get("user_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        // First item wins — RPC applies uniformly
+        assert_eq!(doc_user_id.as_deref(), Some("user-A"));
     }
 
     // ── Real-world dimension test ────────────────────────────────────
