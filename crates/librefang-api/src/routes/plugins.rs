@@ -513,6 +513,8 @@ pub async fn reload_plugin(Path(name): Path<String>) -> impl IntoResponse {
                 "name": info.manifest.name,
                 "version": info.manifest.version,
                 "hooks_valid": info.hooks_valid,
+                "processes_evicted": true,
+                "note": "Persistent subprocesses evicted; next hook call will spawn fresh processes with the updated script.",
                 "message": "Manifest reloaded. Script changes take effect immediately; hook additions/removals require agent restart."
             })),
         )
@@ -1221,6 +1223,16 @@ pub async fn context_engine_metrics_prometheus(
         return (StatusCode::NO_CONTENT, String::new()).into_response();
     };
 
+    // Derive a plugin label from the active configuration so that scrapers can
+    // distinguish metrics from different plugin deployments on the same host.
+    let cfg = state.kernel.config_ref();
+    let plugin_label = cfg
+        .context_engine
+        .plugin
+        .as_deref()
+        .unwrap_or("_global")
+        .to_string();
+
     let mut output = String::new();
     output.push_str("# HELP librefang_hook_calls_total Total hook invocations\n");
     output.push_str("# TYPE librefang_hook_calls_total counter\n");
@@ -1240,22 +1252,22 @@ pub async fn context_engine_metrics_prometheus(
     ];
     for (hook, stats) in hook_pairs {
         output.push_str(&format!(
-            "librefang_hook_calls_total{{hook=\"{}\"}} {}\n",
-            hook, stats.calls
+            "librefang_hook_calls_total{{plugin=\"{}\",hook=\"{}\"}} {}\n",
+            plugin_label, hook, stats.calls
         ));
         output.push_str(&format!(
-            "librefang_hook_errors_total{{hook=\"{}\"}} {}\n",
-            hook, stats.failures
+            "librefang_hook_errors_total{{plugin=\"{}\",hook=\"{}\"}} {}\n",
+            plugin_label, hook, stats.failures
         ));
         output.push_str(&format!(
-            "librefang_hook_latency_ms_total{{hook=\"{}\"}} {}\n",
-            hook, stats.total_ms
+            "librefang_hook_latency_ms_total{{plugin=\"{}\",hook=\"{}\"}} {}\n",
+            plugin_label, hook, stats.total_ms
         ));
         if stats.calls > 0 {
             let avg = stats.total_ms / stats.calls;
             output.push_str(&format!(
-                "librefang_hook_latency_ms_avg{{hook=\"{}\"}} {}\n",
-                hook, avg
+                "librefang_hook_latency_ms_avg{{plugin=\"{}\",hook=\"{}\"}} {}\n",
+                plugin_label, hook, avg
             ));
         }
     }

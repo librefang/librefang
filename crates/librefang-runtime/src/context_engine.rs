@@ -832,11 +832,81 @@ impl ScriptableContextEngine {
         }
     }
 
-    /// Check whether a schema validation warning should be logged.
+    /// Validate a JSON value against a subset of JSON Schema.
     ///
-    /// Only validates that the output is an object (basic sanity).
-    /// Full JSON Schema validation is deferred — this is a structural check only.
+    /// Checks:
+    /// - `required`: all listed keys are present (objects only)
+    /// - `type`: value matches the declared JSON type
+    /// - `enum`: value is one of the listed options
+    /// - `minimum` / `maximum`: numeric range (numbers only)
+    /// - `minLength` / `maxLength`: string length (strings only)
+    /// - `properties`: recursively validate each declared property
+    ///
+    /// All violations are logged as warnings — validation is non-fatal so a
+    /// schema mismatch never takes a hook offline.
     fn validate_schema(schema: &serde_json::Value, value: &serde_json::Value, context: &str) {
+        // --- type check ---
+        if let Some(expected_type) = schema.get("type").and_then(|t| t.as_str()) {
+            let actual_matches = match expected_type {
+                "object"  => value.is_object(),
+                "array"   => value.is_array(),
+                "string"  => value.is_string(),
+                "number"  => value.is_number(),
+                "integer" => value.is_i64() || value.is_u64(),
+                "boolean" => value.is_boolean(),
+                "null"    => value.is_null(),
+                _         => true, // unknown type — don't reject
+            };
+            if !actual_matches {
+                warn!(
+                    context,
+                    expected = expected_type,
+                    actual = value.to_string().chars().take(80).collect::<String>(),
+                    "Hook schema validation: type mismatch"
+                );
+            }
+        }
+
+        // --- enum check ---
+        if let Some(variants) = schema.get("enum").and_then(|e| e.as_array()) {
+            if !variants.contains(value) {
+                warn!(
+                    context,
+                    value = value.to_string().chars().take(80).collect::<String>(),
+                    "Hook schema validation: value not in enum"
+                );
+            }
+        }
+
+        // --- numeric range ---
+        if let Some(n) = value.as_f64() {
+            if let Some(min) = schema.get("minimum").and_then(|v| v.as_f64()) {
+                if n < min {
+                    warn!(context, value = n, minimum = min, "Hook schema validation: below minimum");
+                }
+            }
+            if let Some(max) = schema.get("maximum").and_then(|v| v.as_f64()) {
+                if n > max {
+                    warn!(context, value = n, maximum = max, "Hook schema validation: above maximum");
+                }
+            }
+        }
+
+        // --- string length ---
+        if let Some(s) = value.as_str() {
+            if let Some(min_len) = schema.get("minLength").and_then(|v| v.as_u64()) {
+                if (s.len() as u64) < min_len {
+                    warn!(context, len = s.len(), min_len, "Hook schema validation: string too short");
+                }
+            }
+            if let Some(max_len) = schema.get("maxLength").and_then(|v| v.as_u64()) {
+                if (s.len() as u64) > max_len {
+                    warn!(context, len = s.len(), max_len, "Hook schema validation: string too long");
+                }
+            }
+        }
+
+        // --- required fields ---
         if let Some(required) = schema.get("required").and_then(|r| r.as_array()) {
             if let Some(obj) = value.as_object() {
                 for field in required {
@@ -848,6 +918,21 @@ impl ScriptableContextEngine {
                                 "Hook schema validation: required field missing"
                             );
                         }
+                    }
+                }
+            }
+        }
+
+        // --- properties: recursive per-property validation ---
+        if let Some(props) = schema.get("properties").and_then(|p| p.as_object()) {
+            if let Some(obj) = value.as_object() {
+                for (key, prop_schema) in props {
+                    if let Some(prop_value) = obj.get(key) {
+                        Self::validate_schema(
+                            prop_schema,
+                            prop_value,
+                            &format!("{context}.{key}"),
+                        );
                     }
                 }
             }
@@ -908,6 +993,28 @@ impl ScriptableContextEngine {
                         Err(e) => warn!(hook = name, error = %e, "Pre-warm failed"),
                     }
                 }
+            }
+        }
+    }
+
+    /// Evict all persistent hook subprocesses for this plugin.
+    ///
+    /// Forces fresh subprocess spawns on the next hook call — useful after
+    /// a plugin hot-reload so the new script version is picked up immediately
+    /// rather than waiting for the old process to die naturally.
+    pub async fn evict_hook_processes(&self) {
+        if !self.persistent_subprocess { return; }
+        let hooks: &[&Option<String>] = &[
+            &self.ingest_script,
+            &self.after_turn_script,
+            &self.bootstrap_script,
+            &self.assemble_script,
+            &self.compact_script,
+        ];
+        for script_opt in hooks {
+            if let Some(ref script) = script_opt {
+                let resolved = Self::resolve_script_path(script);
+                self.process_pool.evict(&resolved).await;
             }
         }
     }
@@ -1110,14 +1217,55 @@ impl ScriptableContextEngine {
                 state_file: self.shared_state_path.clone(),
                 ..Default::default()
             };
+            let input_preview = if input.to_string().len() > 2048 {
+                serde_json::json!({"_truncated": true, "type": input.get("type")})
+            } else {
+                input.clone()
+            };
+            let started_at = chrono::Utc::now().to_rfc3339();
             let t = std::time::Instant::now();
-            let result = self
+            let call_result = self
                 .process_pool
                 .call(script_path, self.runtime, &input, &config)
-                .await
-                .map_err(|e| e.to_string())?;
+                .await;
             let elapsed_ms = t.elapsed().as_millis() as u64;
-            Ok((result, elapsed_ms))
+            match call_result {
+                Ok(output) => {
+                    Self::push_trace(
+                        &self.traces,
+                        HookTrace {
+                            hook: hook_name.to_string(),
+                            started_at,
+                            elapsed_ms,
+                            success: true,
+                            error: None,
+                            input_preview,
+                            output_preview: Some(output.clone()),
+                        },
+                        self.trace_store.as_ref(),
+                        &self.plugin_name,
+                    );
+                    Ok((output, elapsed_ms))
+                }
+                Err(e) => {
+                    let err_msg = e.to_string();
+                    Self::push_trace(
+                        &self.traces,
+                        HookTrace {
+                            hook: hook_name.to_string(),
+                            started_at,
+                            elapsed_ms,
+                            success: false,
+                            error: Some(err_msg.clone()),
+                            input_preview,
+                            output_preview: None,
+                        },
+                        self.trace_store.as_ref(),
+                        &self.plugin_name,
+                    );
+                    Err(err_msg)
+                }
+            }
         } else {
             Self::run_hook(
                 hook_name,
@@ -1748,12 +1896,52 @@ impl ContextEngine for ScriptableContextEngine {
                     state_file: shared_state_path.clone(),
                     ..Default::default()
                 };
+                let input_preview = if input.to_string().len() > 2048 {
+                    serde_json::json!({"_truncated": true, "type": input.get("type")})
+                } else {
+                    input.clone()
+                };
+                let started_at = chrono::Utc::now().to_rfc3339();
                 let t = std::time::Instant::now();
-                process_pool
-                    .call(&script, runtime, &input, &config)
-                    .await
-                    .map(|v| (v, t.elapsed().as_millis() as u64))
-                    .map_err(|e| e.to_string())
+                let call_result = process_pool.call(&script, runtime, &input, &config).await;
+                let elapsed_ms = t.elapsed().as_millis() as u64;
+                match call_result {
+                    Ok(output) => {
+                        Self::push_trace(
+                            &traces,
+                            HookTrace {
+                                hook: "after_turn".to_string(),
+                                started_at,
+                                elapsed_ms,
+                                success: true,
+                                error: None,
+                                input_preview,
+                                output_preview: Some(output.clone()),
+                            },
+                            trace_store.as_ref(),
+                            &plugin_name,
+                        );
+                        Ok((output, elapsed_ms))
+                    }
+                    Err(e) => {
+                        let err_msg = e.to_string();
+                        Self::push_trace(
+                            &traces,
+                            HookTrace {
+                                hook: "after_turn".to_string(),
+                                started_at,
+                                elapsed_ms,
+                                success: false,
+                                error: Some(err_msg.clone()),
+                                input_preview,
+                                output_preview: None,
+                            },
+                            trace_store.as_ref(),
+                            &plugin_name,
+                        );
+                        Err(err_msg)
+                    }
+                }
             } else {
                 Self::run_hook("after_turn", &script, runtime, input, timeout_secs, &plugin_env, max_retries, retry_delay_ms, max_memory_mb, allow_network, &traces, &hook_schemas, shared_state_path.as_deref(), trace_store.as_ref(), &plugin_name).await
             };

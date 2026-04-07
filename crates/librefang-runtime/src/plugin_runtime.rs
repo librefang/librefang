@@ -1087,6 +1087,37 @@ impl HookProcessPool {
         alive
     }
 
+    /// Evict a specific subprocess by script path, forcing a fresh spawn on next call.
+    ///
+    /// If the slot is currently locked (a call is in progress), this is a no-op —
+    /// the process will be restarted naturally when the call finishes and the next
+    /// caller re-enters `call()`.
+    pub async fn evict(&self, script_path: &str) {
+        let slot = {
+            let guard = self.procs.lock().unwrap();
+            guard.get(script_path).cloned()
+        };
+        if let Some(arc) = slot {
+            // `try_lock` is intentional: if a call is in progress we don't
+            // want to block waiting for it to finish.  The next completed call
+            // will see the process is dead and restart it anyway.
+            if let Ok(mut guard) = arc.try_lock() {
+                *guard = None;
+            }
+        }
+    }
+
+    /// Evict all subprocesses in the pool, forcing fresh spawns on the next calls.
+    pub async fn evict_all(&self) {
+        let keys: Vec<String> = {
+            let guard = self.procs.lock().unwrap();
+            guard.keys().cloned().collect()
+        };
+        for key in keys {
+            self.evict(&key).await;
+        }
+    }
+
     /// Pre-warm a specific hook script by spawning its subprocess now.
     ///
     /// The process will be held in the pool and reused on the first `call()`.
