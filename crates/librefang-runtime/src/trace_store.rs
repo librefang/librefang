@@ -166,7 +166,9 @@ impl TraceStore {
 
     /// Look up a single trace by its trace_id. Returns None if not found.
     pub fn query_by_trace_id(&self, trace_id: &str) -> Option<serde_json::Value> {
-        let Ok(conn) = self.conn.lock() else { return None };
+        let Ok(conn) = self.conn.lock() else {
+            return None;
+        };
         conn.query_row(
             "SELECT trace_id, correlation_id, plugin, hook, started_at, elapsed_ms, success, error, \
              input_preview, output_preview FROM hook_traces WHERE trace_id = ?1",
@@ -249,16 +251,13 @@ impl TraceStore {
     /// Load all persisted circuit breaker states.
     ///
     /// Returns a map of `key → (failures, opened_at)`.
-    pub fn load_circuit_states(
-        &self,
-    ) -> rusqlite::Result<HashMap<String, (u32, Option<String>)>> {
+    pub fn load_circuit_states(&self) -> rusqlite::Result<HashMap<String, (u32, Option<String>)>> {
         let conn = self
             .conn
             .lock()
             .map_err(|_| rusqlite::Error::InvalidParameterName("mutex poisoned".to_string()))?;
-        let mut stmt = conn.prepare(
-            "SELECT key, failures, opened_at FROM circuit_breaker_states",
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT key, failures, opened_at FROM circuit_breaker_states")?;
         let rows = stmt.query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
