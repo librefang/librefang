@@ -300,6 +300,7 @@ impl StructuredStore {
                 let is_hand = manifest.is_hand;
                 Ok(Some(AgentEntry {
                     id: agent_id,
+                    account_id,
                     name,
                     manifest,
                     state,
@@ -315,7 +316,6 @@ impl StructuredStore {
                     onboarding_completed: false,
                     onboarding_completed_at: None,
                     is_hand,
-                    account_id,
                 }))
             }
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -549,6 +549,7 @@ impl StructuredStore {
             let is_hand = manifest.is_hand;
             agents.push(AgentEntry {
                 id: agent_id,
+                account_id,
                 name,
                 manifest,
                 state,
@@ -564,7 +565,6 @@ impl StructuredStore {
                 onboarding_completed: false,
                 onboarding_completed_at: None,
                 is_hand,
-                account_id,
             });
         }
 

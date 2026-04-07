@@ -362,7 +362,7 @@ pub async fn spawn_agent(
             // agent in a scoped session is a security invariant violation.
             if let Err(e) = finalize_spawned_agent_in_registry(&state, id, &account) {
                 // Best-effort cleanup: stop the agent so it does not linger unowned.
-                let _ = state.kernel.stop_agent(id);
+                let _ = state.kernel.kill_agent(id);
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(serde_json::json!({"error": e})),
@@ -465,7 +465,7 @@ pub async fn bulk_create_agents(
                     Ok(id) => {
                         // Attach tenant ownership — hard failure per spawn contract.
                         if let Err(e) = finalize_spawned_agent_in_registry(&state, id, &account) {
-                            let _ = state.kernel.stop_agent(id);
+                            let _ = state.kernel.kill_agent(id);
                             results.push(BulkCreateResult {
                                 index,
                                 success: false,
@@ -3992,12 +3992,11 @@ pub async fn clone_agent(
 
     // Attach tenant ownership to the cloned agent — hard failure per spawn contract.
     if let Err(e) = finalize_spawned_agent_in_registry(&state, new_id, &account) {
-        let _ = state.kernel.stop_agent(new_id);
+        let _ = state.kernel.kill_agent(new_id);
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": e})),
-        )
-            .into_response();
+        );
     }
 
     // Copy workspace files from source to destination

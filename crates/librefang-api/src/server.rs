@@ -649,12 +649,12 @@ pub async fn build_router(
         retry_after_secs: rl_cfg.retry_after_secs,
     };
 
-    // When an HMAC signing secret is configured, multi-tenant mode is active.
-    // In that case, require every non-exempt request to carry `X-Account-Id`.
-    let require_account_layer = state
-        .account_sig_secret
-        .is_some()
-        .then(|| axum::middleware::from_fn(middleware::require_account_id));
+    // Multi-tenant enforcement is active when explicitly enabled OR when an
+    // HMAC signing secret is configured (backward compat: existing deployments
+    // with account_sig_secret must not silently lose tenant-header enforcement).
+    let mt_enabled = state.kernel.config_ref().multi_tenant || state.account_sig_secret.is_some();
+    let require_account_layer =
+        mt_enabled.then(|| axum::middleware::from_fn(middleware::require_account_id));
 
     // Build the versioned API routes. All /api/* endpoints are defined once
     // in api_v1_routes() and mounted at both /api and /api/v1 for backward

@@ -612,11 +612,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             .collect())
     }
 
-    async fn spawn_agent_by_name(
-        &self,
-        manifest_name: &str,
-        account_id: Option<&str>,
-    ) -> Result<AgentId, String> {
+    async fn spawn_agent_by_name(&self, manifest_name: &str) -> Result<AgentId, String> {
         // Look for manifest at ~/.librefang/workspaces/agents/{name}/agent.toml
         let manifest_path = self
             .kernel
@@ -636,22 +632,9 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         let manifest: librefang_types::agent::AgentManifest =
             toml::from_str(&contents).map_err(|e| format!("Invalid manifest TOML: {e}"))?;
 
-        let agent_id = self
-            .kernel
+        self.kernel
             .spawn_agent(manifest)
-            .map_err(|e| format!("Failed to spawn agent: {e}"))?;
-
-        // Attach tenant ownership so the spawned agent is visible only to the
-        // owning account. Failure is a hard error — an unowned agent in a
-        // multi-tenant deployment is a security invariant violation.
-        if let Some(owner) = account_id {
-            self.kernel
-                .agent_registry()
-                .set_account_id(agent_id, Some(owner.to_string()))
-                .map_err(|e| format!("Failed to attach account_id to spawned agent: {e}"))?;
-        }
-
-        Ok(agent_id)
+            .map_err(|e| format!("Failed to spawn agent: {e}"))
     }
 
     async fn uptime_info(&self) -> String {
@@ -1559,6 +1542,30 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         self.kernel
             .send_channel_message(channel_type, recipient, message, thread_id)
             .await
+    }
+}
+
+impl KernelBridgeAdapter {
+    /// Spawn a named agent and attach tenant ownership atomically.
+    ///
+    /// Not part of `ChannelBridgeHandle` so it doesn't break test mocks.
+    /// Called directly from the adapter-setup loop where `handle` is the
+    /// concrete `KernelBridgeAdapter`, not a trait object.
+    async fn spawn_agent_by_name_owned(
+        &self,
+        manifest_name: &str,
+        account_id: Option<&str>,
+    ) -> Result<AgentId, String> {
+        let agent_id = self.spawn_agent_by_name(manifest_name).await?;
+
+        if let Some(owner) = account_id {
+            self.kernel
+                .agent_registry()
+                .set_account_id(agent_id, Some(owner.to_string()))
+                .map_err(|e| format!("Failed to attach account_id to spawned agent: {e}"))?;
+        }
+
+        Ok(agent_id)
     }
 }
 
@@ -2706,7 +2713,7 @@ pub async fn start_channel_bridge_with_config(
             let agent_id = match handle.find_agent_by_name(name).await {
                 Ok(Some(id)) => Some(id),
                 _ => match handle
-                    .spawn_agent_by_name(name, account_id.as_deref())
+                    .spawn_agent_by_name_owned(name, account_id.as_deref())
                     .await
                 {
                     Ok(id) => Some(id),

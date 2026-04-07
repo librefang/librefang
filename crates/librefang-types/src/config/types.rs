@@ -1974,6 +1974,13 @@ pub struct KernelConfig {
     /// Individual endpoints may enforce tighter limits.
     #[serde(default = "default_max_request_body_bytes")]
     pub max_request_body_bytes: usize,
+    /// Enable config-driven API multi-tenant enforcement.
+    ///
+    /// When `true`, the API requires `X-Account-Id` on all non-exempt
+    /// requests so tenant-scoped handlers cannot fall back to the legacy
+    /// `AccountId(None)` bypass.
+    #[serde(default)]
+    pub multi_tenant: bool,
     /// HMAC-SHA256 secret for verifying `X-Account-Sig` headers on
     /// multi-tenant requests.  When set (non-empty), any request carrying
     /// `X-Account-Id` must also include a valid `X-Account-Sig` computed as
@@ -2932,6 +2939,7 @@ impl Default for KernelConfig {
             max_concurrent_bg_llm: default_max_concurrent_bg_llm(),
             max_agent_call_depth: default_max_agent_call_depth(),
             max_request_body_bytes: default_max_request_body_bytes(),
+            multi_tenant: false,
             account_sig_secret: None,
         }
     }

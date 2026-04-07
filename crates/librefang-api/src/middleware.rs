@@ -906,7 +906,7 @@ mod account_tests {
     // ─── require_account_id middleware (multi-tenant gate) ───
 
     #[tokio::test]
-    async fn test_require_account_id_rejects_missing_header() {
+    async fn test_require_account_id_rejects_when_multi_tenant_enabled() {
         use axum::routing::get;
         use axum::Router;
         use tower::ServiceExt;
@@ -926,6 +926,27 @@ mod account_tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_require_account_id_allows_when_multi_tenant_disabled() {
+        use axum::routing::get;
+        use axum::Router;
+        use tower::ServiceExt;
+
+        let app = Router::new().route("/api/agents", get(|| async { "ok" }));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/agents")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]
