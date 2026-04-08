@@ -371,6 +371,23 @@ impl OpenAIDriver {
                                     },
                                 });
                             }
+                            ContentBlock::ImageFile { media_type, path } => {
+                                match std::fs::read(path) {
+                                    Ok(bytes) => {
+                                        use base64::Engine;
+                                        let data = base64::engine::general_purpose::STANDARD
+                                            .encode(&bytes);
+                                        parts.push(OaiContentPart::ImageUrl {
+                                            image_url: OaiImageUrl {
+                                                url: format!("data:{media_type};base64,{data}"),
+                                            },
+                                        });
+                                    }
+                                    Err(e) => {
+                                        warn!(path = %path, error = %e, "ImageFile missing, skipping");
+                                    }
+                                }
+                            }
                             ContentBlock::Thinking { .. } => {}
                             _ => {}
                         }

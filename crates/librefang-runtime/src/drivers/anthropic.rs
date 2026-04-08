@@ -738,6 +738,23 @@ fn convert_message(msg: &Message) -> ApiMessage {
                         is_error: *is_error,
                     }),
                     ContentBlock::Thinking { .. } => None,
+                    ContentBlock::ImageFile { media_type, path } => match std::fs::read(path) {
+                        Ok(bytes) => {
+                            use base64::Engine;
+                            let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                            Some(ApiContentBlock::Image {
+                                source: ApiImageSource {
+                                    source_type: "base64".to_string(),
+                                    media_type: media_type.clone(),
+                                    data,
+                                },
+                            })
+                        }
+                        Err(e) => {
+                            warn!(path = %path, error = %e, "ImageFile missing, skipping");
+                            None
+                        }
+                    },
                     ContentBlock::Unknown => None,
                 })
                 .collect();

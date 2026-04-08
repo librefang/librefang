@@ -7677,6 +7677,39 @@ system_prompt = "You are a helpful assistant."
             }
         }
 
+        // Periodic cleanup of expired image uploads (24h TTL)
+        {
+            let kernel = Arc::clone(self);
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600)); // every hour
+                interval.tick().await; // skip first immediate tick
+                loop {
+                    interval.tick().await;
+                    if kernel.supervisor.is_shutting_down() {
+                        break;
+                    }
+                    let upload_dir = std::env::temp_dir().join("librefang_uploads");
+                    if let Ok(mut entries) = tokio::fs::read_dir(&upload_dir).await {
+                        let cutoff = std::time::SystemTime::now()
+                            - std::time::Duration::from_secs(24 * 3600);
+                        let mut removed = 0u64;
+                        while let Ok(Some(entry)) = entries.next_entry().await {
+                            if let Ok(meta) = entry.metadata().await {
+                                let expired = meta.modified().map(|t| t < cutoff).unwrap_or(false);
+                                if expired && tokio::fs::remove_file(entry.path()).await.is_ok() {
+                                    removed += 1;
+                                }
+                            }
+                        }
+                        if removed > 0 {
+                            info!("Image upload cleanup: removed {removed} expired file(s)");
+                        }
+                    }
+                }
+            });
+            info!("Image upload cleanup scheduled every 1 hour (TTL=24h)");
+        }
+
         // Periodic memory consolidation (decays stale memory confidence)
         {
             let interval_hours = cfg.memory.consolidation_interval_hours;

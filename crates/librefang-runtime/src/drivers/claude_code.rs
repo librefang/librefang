@@ -204,6 +204,16 @@ impl ClaudeCodeDriver {
                                     }
                                 }
                             }
+                            ContentBlock::ImageFile { path, .. } => {
+                                // ImageFile already on disk — reference directly,
+                                // no temp copy needed (per DRVR-01).
+                                let file_path = std::path::Path::new(path);
+                                if file_path.exists() {
+                                    msg_parts.push(format!("@{}", file_path.display()));
+                                } else {
+                                    warn!(path = %path, "ImageFile path missing, skipping");
+                                }
+                            }
                             _ => {}
                         }
                     }

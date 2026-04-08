@@ -204,6 +204,12 @@ fn estimate_message_tokens(msg: &Message) -> usize {
                     let data_tokens = data.len() / 4;
                     data_tokens + 85 // 85 token fixed overhead per image
                 }
+                // File-referenced images: the session stores only the path, but the
+                // driver reads the full file and sends it to the LLM at call time.
+                // We use the fixed overhead only since the actual token cost depends
+                // on the image size (unknown until read). This underestimates; a
+                // more precise approach would stat the file, but that adds I/O.
+                ContentBlock::ImageFile { .. } => 85,
                 ContentBlock::Unknown => 0,
             })
             .sum(),
@@ -492,7 +498,8 @@ fn build_conversation_text(messages: &[Message], config: &CompactionConfig) -> S
                             conversation_text
                                 .push_str(&format!("[Tool result ({status}): {preview}]\n\n"));
                         }
-                        ContentBlock::Image { media_type, .. } => {
+                        ContentBlock::Image { media_type, .. }
+                        | ContentBlock::ImageFile { media_type, .. } => {
                             conversation_text.push_str(&format!("[Image: {media_type}]\n\n"));
                         }
                         ContentBlock::Thinking { .. } => {}

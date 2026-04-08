@@ -912,7 +912,8 @@ impl SessionStore {
                                     "is_error": is_error,
                                 }));
                             }
-                            ContentBlock::Image { media_type, .. } => {
+                            ContentBlock::Image { media_type, .. }
+                            | ContentBlock::ImageFile { media_type, .. } => {
                                 text_parts.push(format!("[image: {media_type}]"));
                             }
                             ContentBlock::Thinking { thinking, .. } => {
