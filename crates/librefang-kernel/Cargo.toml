@@ -34,6 +34,7 @@ dirs = { workspace = true }
 futures = { workspace = true }
 subtle = { workspace = true }
 rand = { workspace = true }
+totp-rs = { workspace = true }
 hex = { workspace = true }
 reqwest = { workspace = true }
 regex-lite = { workspace = true }

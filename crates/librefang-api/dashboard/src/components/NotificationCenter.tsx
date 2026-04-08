@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Bell, Check, X, ExternalLink } from "lucide-react";
-import { fetchApprovalCount, listApprovals, approveApproval, rejectApproval } from "../api";
+import { fetchApprovalCount, listApprovals, approveApproval, rejectApproval, totpStatus } from "../api";
 import { useTranslation } from "react-i18next";
 import { useUIStore } from "../lib/store";
 import { useNavigate } from "@tanstack/react-router";
@@ -26,12 +26,25 @@ export function NotificationCenter() {
     refetchInterval: open ? 5000 : false,
   });
 
+  const totpQuery = useQuery({
+    queryKey: ["totp", "status"],
+    queryFn: totpStatus,
+    staleTime: 60_000,
+  });
+  const totpEnforced = totpQuery.data?.enforced ?? false;
+
   const pendingCount = countQuery.data ?? 0;
   const pendingItems = (listQuery.data ?? []).filter(
     (a) => !a.status || a.status === "pending"
   );
 
   const handleAction = async (id: string, action: "approve" | "reject") => {
+    if (action === "approve" && totpEnforced) {
+      setOpen(false);
+      navigate({ to: "/approvals" });
+      addToast(t("approvals.totpRequired", "TOTP code required. Use the Approvals page."), "info");
+      return;
+    }
     try {
       if (action === "approve") await approveApproval(id);
       else await rejectApproval(id);

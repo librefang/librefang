@@ -4,13 +4,15 @@ use chrono::Utc;
 use dashmap::DashMap;
 use librefang_types::approval::{
     ApprovalAuditEntry, ApprovalDecision, ApprovalPolicy, ApprovalRequest, ApprovalResponse,
-    RiskLevel, TimeoutFallback,
+    RiskLevel, SecondFactor, TimeoutFallback,
 };
 use librefang_types::capability::glob_matches;
 use rusqlite::Connection;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
+use std::time::Instant;
+use totp_rs::{Algorithm, Secret, TOTP};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -20,6 +22,8 @@ const MAX_PENDING_PER_AGENT: usize = 5;
 const MAX_RECENT_APPROVALS: usize = 100;
 /// Max escalation rounds before falling back to TimedOut.
 const MAX_ESCALATIONS: u8 = 3;
+const TOTP_MAX_FAILURES: u32 = 5;
+const TOTP_LOCKOUT_SECS: u64 = 300;
 
 /// Re-export from librefang-types so approval.rs consumers don't need two imports.
 pub use librefang_types::tool::DeferredToolExecution;
@@ -30,6 +34,9 @@ pub struct ApprovalManager {
     recent: std::sync::Mutex<VecDeque<ApprovalRecord>>,
     policy: std::sync::RwLock<ApprovalPolicy>,
     audit_db: Option<Arc<StdMutex<Connection>>>,
+    #[allow(dead_code)]
+    totp_grace: StdMutex<HashMap<String, Instant>>,
+    totp_failures: StdMutex<HashMap<String, (u32, Option<Instant>)>>,
 }
 
 struct PendingRequest {
@@ -67,6 +74,8 @@ impl ApprovalManager {
             recent: std::sync::Mutex::new(VecDeque::new()),
             policy: std::sync::RwLock::new(policy),
             audit_db: None,
+            totp_grace: StdMutex::new(HashMap::new()),
+            totp_failures: StdMutex::new(HashMap::new()),
         }
     }
 
@@ -77,6 +86,8 @@ impl ApprovalManager {
             recent: std::sync::Mutex::new(VecDeque::new()),
             policy: std::sync::RwLock::new(policy),
             audit_db: Some(conn),
+            totp_grace: StdMutex::new(HashMap::new()),
+            totp_failures: StdMutex::new(HashMap::new()),
         }
     }
 
@@ -235,7 +246,7 @@ impl ApprovalManager {
                             .remove(&id)
                             .map(|(_, p)| p.request)
                             .unwrap_or(req_for_timeout);
-                        self.push_recent(request, decision.clone(), None, Utc::now());
+                        self.push_recent(request, decision.clone(), None, Utc::now(), false);
                         warn!(request_id = %id, decision = %decision.as_str(), "Approval timed out");
                         return decision;
                     }
@@ -338,7 +349,13 @@ impl ApprovalManager {
                         });
                     }
                     ExpiryOutcome::Resolve(decision) => {
-                        self.push_recent(pending.request.clone(), decision.clone(), None, now);
+                        self.push_recent(
+                            pending.request.clone(),
+                            decision.clone(),
+                            None,
+                            now,
+                            false,
+                        );
                         if let Some(sender) = pending.sender {
                             let _ = sender.send(decision.clone());
                         }
@@ -376,6 +393,7 @@ impl ApprovalManager {
                     response.decision.clone(),
                     response.decided_by.clone(),
                     response.decided_at,
+                    false,
                 );
                 // Send decision to waiting agent via oneshot if present (blocking path)
                 info!(request_id = %request_id, decision = ?response.decision, "Approval request resolved");
@@ -493,6 +511,7 @@ impl ApprovalManager {
                 decided_at: row.get(9)?,
                 requested_at: row.get(10)?,
                 feedback: row.get(11)?,
+                second_factor_used: false,
             })
         });
         match rows {
@@ -552,6 +571,127 @@ impl ApprovalManager {
         }
     }
 
+    pub fn requires_totp(&self) -> bool {
+        let policy = self.policy.read().unwrap_or_else(|e| e.into_inner());
+        policy.second_factor == SecondFactor::Totp
+    }
+
+    pub fn verify_totp_code_with_issuer(
+        secret_base32: &str,
+        code: &str,
+        issuer: &str,
+    ) -> Result<bool, String> {
+        let secret = Secret::Encoded(secret_base32.to_string());
+        let raw = secret
+            .to_bytes()
+            .map_err(|e| format!("Invalid TOTP secret: {e}"))?;
+        let totp = TOTP::new(
+            Algorithm::SHA1,
+            6,
+            1,
+            30,
+            raw,
+            Some(issuer.to_string()),
+            String::new(),
+        )
+        .map_err(|e| format!("TOTP init error: {e}"))?;
+        Ok(totp.check_current(code).unwrap_or(false))
+    }
+
+    pub fn generate_totp_secret(
+        issuer: &str,
+        account: &str,
+    ) -> Result<(String, String, String), String> {
+        let secret = Secret::generate_secret();
+        let base32 = secret.to_encoded().to_string();
+        let raw = secret
+            .to_bytes()
+            .map_err(|e| format!("Secret encoding error: {e}"))?;
+        let totp = TOTP::new(
+            Algorithm::SHA1,
+            6,
+            1,
+            30,
+            raw,
+            Some(issuer.to_string()),
+            account.to_string(),
+        )
+        .map_err(|e| format!("TOTP init error: {e}"))?;
+        let uri = totp.get_url();
+        let qr_b64 = totp
+            .get_qr_base64()
+            .map_err(|e| format!("QR generation error: {e}"))?;
+        Ok((base32, uri, qr_b64))
+    }
+
+    pub fn generate_recovery_codes() -> Vec<String> {
+        use rand::RngExt;
+        let mut rng = rand::rng();
+        (0..8)
+            .map(|_| {
+                let a: u32 = rng.random_range(0..10000);
+                let b: u32 = rng.random_range(0..10000);
+                format!("{a:04}-{b:04}")
+            })
+            .collect()
+    }
+
+    pub fn is_recovery_code_format(code: &str) -> bool {
+        let trimmed = code.trim();
+        trimmed.len() == 9
+            && trimmed.as_bytes()[4] == b'-'
+            && trimmed[..4].chars().all(|c| c.is_ascii_digit())
+            && trimmed[5..].chars().all(|c| c.is_ascii_digit())
+    }
+
+    pub fn verify_recovery_code(stored_json: &str, code: &str) -> Result<(bool, String), String> {
+        let mut codes: Vec<String> = serde_json::from_str(stored_json)
+            .map_err(|e| format!("Invalid recovery codes JSON: {e}"))?;
+        let normalized = code.trim().to_lowercase();
+        if let Some(pos) = codes.iter().position(|c| c == &normalized) {
+            codes.remove(pos);
+            let updated = serde_json::to_string(&codes)
+                .map_err(|e| format!("Failed to serialize codes: {e}"))?;
+            Ok((true, updated))
+        } else {
+            let unchanged = serde_json::to_string(&codes)
+                .map_err(|e| format!("Failed to serialize codes: {e}"))?;
+            Ok((false, unchanged))
+        }
+    }
+
+    pub fn is_totp_locked_out(&self, sender_id: &str) -> bool {
+        let failures = self.totp_failures.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((count, lockout_start)) = failures.get(sender_id) {
+            if *count >= TOTP_MAX_FAILURES {
+                return lockout_start
+                    .map(|t| t.elapsed().as_secs() < TOTP_LOCKOUT_SECS)
+                    .unwrap_or(false);
+            }
+        }
+        false
+    }
+
+    pub fn record_totp_failure(&self, sender_id: &str) {
+        let mut failures = self.totp_failures.lock().unwrap_or_else(|e| e.into_inner());
+        let entry = failures.entry(sender_id.to_string()).or_insert((0, None));
+        if entry
+            .1
+            .map(|t| t.elapsed().as_secs() >= TOTP_LOCKOUT_SECS)
+            .unwrap_or(false)
+        {
+            *entry = (0, None);
+        }
+        entry.0 += 1;
+        if entry.0 >= TOTP_MAX_FAILURES && entry.1.is_none() {
+            entry.1 = Some(Instant::now());
+            warn!(
+                sender_id,
+                "TOTP locked out: {} consecutive failures", entry.0
+            );
+        }
+    }
+
     /// Write an audit entry to the persistent database.
     fn audit_log_write(&self, entry: &ApprovalAuditEntry) {
         let Some(db) = &self.audit_db else { return };
@@ -584,6 +724,7 @@ impl ApprovalManager {
         decision: ApprovalDecision,
         decided_by: Option<String>,
         decided_at: chrono::DateTime<Utc>,
+        second_factor_used: bool,
     ) {
         let feedback = match &decision {
             ApprovalDecision::ModifyAndRetry { feedback } => Some(feedback.clone()),
@@ -605,6 +746,7 @@ impl ApprovalManager {
             decided_at: decided_at.to_rfc3339(),
             requested_at: request.requested_at.to_rfc3339(),
             feedback,
+            second_factor_used,
         };
         self.audit_log_write(&entry);
 

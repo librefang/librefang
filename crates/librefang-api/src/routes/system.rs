@@ -11,6 +11,7 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
         .route("/profiles/{name}", axum::routing::get(get_profile))
         .route("/templates", axum::routing::get(list_agent_templates))
         .route("/templates/{name}", axum::routing::get(get_agent_template))
+        .route("/templates/{name}/toml", axum::routing::get(get_agent_template_toml))
         // Agent KV storage
         .route(
             "/memory/agents/{id}/kv",
@@ -62,14 +63,28 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
         .route("/approvals/batch", axum::routing::post(batch_resolve))
         .route("/approvals/audit", axum::routing::get(audit_log))
         .route("/approvals/count", axum::routing::get(approval_count))
+        .route("/approvals/totp/setup", axum::routing::post(totp_setup))
+        .route(
+            "/approvals/totp/confirm",
+            axum::routing::post(totp_confirm),
+        )
+        .route(
+            "/approvals/totp/status",
+            axum::routing::get(totp_status),
+        )
+        .route(
+            "/approvals/totp/revoke",
+            axum::routing::post(totp_revoke),
+        )
         .route("/approvals/{id}", axum::routing::get(get_approval))
         .route(
             "/approvals/{id}/approve",
             axum::routing::post(
                 |state: State<Arc<AppState>>,
                  id: Path<String>,
-                 lang: Option<axum::Extension<RequestLanguage>>| async move {
-                    approve_request(state, id, lang).await
+                 lang: Option<axum::Extension<RequestLanguage>>,
+                 body: Json<ApproveRequestBody>| async move {
+                    approve_request(state, id, lang, body).await
                 },
             ),
         )
@@ -185,6 +200,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
+use librefang_kernel::approval::ApprovalManager;
 use librefang_runtime::kernel_handle::KernelHandle;
 use librefang_runtime::tool_runner::builtin_tool_definitions;
 use librefang_types::agent::AgentId;
@@ -358,6 +374,49 @@ pub async fn get_agent_template(
         Err(e) => {
             tracing::warn!("Failed to read template '{name}': {e}");
             ApiErrorResponse::internal(t.t("api-error-template-read-failed")).into_json_tuple()
+        }
+    }
+}
+
+/// GET /api/templates/:name/toml — Get the raw TOML content of a template.
+#[utoipa::path(get, path = "/api/templates/{name}/toml", tag = "system", operation_id = "get_agent_template_toml", params(("name" = String, Path, description = "Template name")), responses((status = 200, description = "Template TOML content as plain text", body = String)))]
+pub async fn get_agent_template_toml(
+    Path(name): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    let agents_dir = librefang_kernel::config::librefang_home()
+        .join("workspaces")
+        .join("agents");
+    let manifest_path = agents_dir.join(&name).join("agent.toml");
+
+    if !manifest_path.exists() {
+        return (
+            StatusCode::NOT_FOUND,
+            [(axum::http::header::CONTENT_TYPE, "text/plain")],
+            t.t("api-error-template-not-found"),
+        )
+            .into_response();
+    }
+
+    match std::fs::read_to_string(&manifest_path) {
+        Ok(content) => (
+            StatusCode::OK,
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "text/plain; charset=utf-8",
+            )],
+            content,
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::warn!("Failed to read template '{name}': {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [(axum::http::header::CONTENT_TYPE, "text/plain")],
+                t.t("api-error-template-read-failed"),
+            )
+                .into_response()
         }
     }
 }
@@ -1370,12 +1429,20 @@ pub async fn create_approval(
     )
 }
 
+#[derive(serde::Deserialize, Default)]
+pub struct ApproveRequestBody {
+    #[serde(default)]
+    #[allow(dead_code)]
+    totp_code: Option<String>,
+}
+
 /// POST /api/approvals/{id}/approve — Approve a pending request.
-#[utoipa::path(post, path = "/api/approvals/{id}/approve", tag = "approvals", params(("id" = String, Path, description = "Approval ID")), responses((status = 200, description = "Request approved", body = serde_json::Value)))]
+#[utoipa::path(post, path = "/api/approvals/{id}/approve", tag = "approvals", params(("id" = String, Path, description = "Approval ID")), request_body = serde_json::Value, responses((status = 200, description = "Request approved", body = serde_json::Value)))]
 pub async fn approve_request(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
+    Json(_body): Json<ApproveRequestBody>,
 ) -> axum::response::Response {
     let uuid = match uuid::Uuid::parse_str(&id) {
         Ok(u) => u,
@@ -1614,6 +1681,79 @@ pub async fn audit_log(
 pub async fn approval_count(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let pending = state.kernel.approvals().pending_count();
     Json(serde_json::json!({"pending": pending}))
+}
+
+#[derive(serde::Deserialize, Default)]
+pub struct TotpSetupBody {
+    #[serde(default)]
+    #[allow(dead_code)]
+    current_code: Option<String>,
+}
+
+pub async fn totp_setup(
+    State(state): State<Arc<AppState>>,
+    Json(_body): Json<TotpSetupBody>,
+) -> impl IntoResponse {
+    let totp_issuer = state.kernel.approvals().policy().totp_issuer.clone();
+
+    let (secret_base32, otpauth_uri, qr_base64) =
+        match ApprovalManager::generate_totp_secret(&totp_issuer, "admin") {
+            Ok(v) => v,
+            Err(e) => return ApiErrorResponse::internal(e).into_json_tuple(),
+        };
+    let qr_data_uri = format!("data:image/png;base64,{qr_base64}");
+    let recovery_codes = ApprovalManager::generate_recovery_codes();
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "otpauth_uri": otpauth_uri,
+            "secret": secret_base32,
+            "qr_code": qr_data_uri,
+            "recovery_codes": recovery_codes,
+            "message": "Scan the QR code or enter the secret in your authenticator app, then confirm with a valid code."
+        })),
+    )
+}
+
+#[derive(serde::Deserialize)]
+pub struct TotpConfirmBody {
+    #[allow(dead_code)]
+    code: String,
+}
+
+pub async fn totp_confirm(
+    State(_state): State<Arc<AppState>>,
+    Json(_body): Json<TotpConfirmBody>,
+) -> impl IntoResponse {
+    ApiErrorResponse::bad_request("TOTP enrollment storage is not available on this branch yet.")
+        .into_json_tuple()
+}
+
+pub async fn totp_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let policy = state.kernel.approvals().policy();
+    let enforced = policy.second_factor == librefang_types::approval::SecondFactor::Totp;
+
+    Json(serde_json::json!({
+        "enrolled": false,
+        "confirmed": false,
+        "enforced": enforced,
+        "remaining_recovery_codes": 0,
+    }))
+}
+
+#[derive(serde::Deserialize)]
+pub struct TotpRevokeBody {
+    #[allow(dead_code)]
+    code: String,
+}
+
+pub async fn totp_revoke(
+    State(_state): State<Arc<AppState>>,
+    Json(_body): Json<TotpRevokeBody>,
+) -> impl IntoResponse {
+    ApiErrorResponse::bad_request("TOTP enrollment storage is not available on this branch yet.")
+        .into_json_tuple()
 }
 
 // ---------------------------------------------------------------------------

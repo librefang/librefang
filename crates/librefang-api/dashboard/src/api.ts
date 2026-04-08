@@ -782,6 +782,10 @@ export async function listAgentTemplates(): Promise<AgentTemplate[]> {
   return data.templates ?? [];
 }
 
+export async function getAgentTemplateToml(name: string): Promise<string> {
+  return getText(`/api/templates/${encodeURIComponent(name)}/toml`);
+}
+
 export async function deleteAgent(agentId: string): Promise<ApiActionResponse> {
   return del<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}`);
 }
@@ -1253,6 +1257,7 @@ export async function listSchedules(): Promise<ScheduleItem[]> {
 export async function createSchedule(payload: {
   name: string;
   cron: string;
+  tz?: string;
   agent_id?: string;
   workflow_id?: string;
   message?: string;
@@ -1267,6 +1272,7 @@ export async function updateSchedule(
     enabled?: boolean;
     name?: string;
     cron?: string;
+    tz?: string;
     agent_id?: string;
     message?: string;
   }
@@ -1478,8 +1484,41 @@ export async function listApprovals(): Promise<ApprovalItem[]> {
   return data.approvals ?? [];
 }
 
-export async function approveApproval(id: string): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>(`/api/approvals/${encodeURIComponent(id)}/approve`, {});
+export async function approveApproval(id: string, totpCode?: string): Promise<ApiActionResponse> {
+  const body = totpCode ? { totp_code: totpCode } : {};
+  return post<ApiActionResponse>(`/api/approvals/${encodeURIComponent(id)}/approve`, body);
+}
+
+export interface TotpSetupResponse {
+  otpauth_uri: string;
+  secret: string;
+  qr_code: string | null;
+  recovery_codes: string[];
+  message: string;
+}
+
+export interface TotpStatusResponse {
+  enrolled: boolean;
+  confirmed: boolean;
+  enforced: boolean;
+  remaining_recovery_codes: number;
+}
+
+export async function totpSetup(currentCode?: string): Promise<TotpSetupResponse> {
+  const body = currentCode ? { current_code: currentCode } : {};
+  return post<TotpSetupResponse>("/api/approvals/totp/setup", body);
+}
+
+export async function totpConfirm(code: string): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>("/api/approvals/totp/confirm", { code });
+}
+
+export async function totpStatus(): Promise<TotpStatusResponse> {
+  return get<TotpStatusResponse>("/api/approvals/totp/status");
+}
+
+export async function totpRevoke(code: string): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>("/api/approvals/totp/revoke", { code });
 }
 
 export async function rejectApproval(id: string): Promise<ApiActionResponse> {

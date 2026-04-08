@@ -91,6 +91,16 @@ pub trait KernelHandle: Send + Sync {
     /// Retry a task by resetting it to pending. Returns true if reset.
     async fn task_retry(&self, task_id: &str) -> Result<bool, String>;
 
+    /// Run a workflow by ID with string input. Returns (run_id, output).
+    async fn run_workflow(
+        &self,
+        workflow_id: &str,
+        input: &str,
+    ) -> Result<(String, String), String> {
+        let _ = (workflow_id, input);
+        Err("Workflow engine not available".to_string())
+    }
+
     /// Publish a custom event that can trigger proactive agents.
     async fn publish_event(
         &self,

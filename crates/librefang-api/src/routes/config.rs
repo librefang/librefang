@@ -11,6 +11,7 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
         .route("/status", axum::routing::get(status))
         .route("/version", axum::routing::get(version))
         .route("/config", axum::routing::get(get_config))
+        .route("/config/export", axum::routing::get(export_config))
         .route("/config/schema", axum::routing::get(config_schema))
         .route("/config/set", axum::routing::post(config_set))
         .route("/config/reload", axum::routing::post(config_reload))
@@ -1118,6 +1119,66 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
     }
 
     Json(serde_json::Value::Object(out))
+}
+
+/// GET /api/config/export — Download config.toml as a file attachment.
+#[utoipa::path(
+    get,
+    path = "/api/config/export",
+    tag = "system",
+    responses(
+        (status = 200, description = "config.toml file download", content_type = "application/toml")
+    )
+)]
+pub async fn export_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    use axum::body::Body;
+
+    let config_path = state.kernel.home_dir().join("config.toml");
+
+    let toml_content = if config_path.exists() {
+        match std::fs::read_to_string(&config_path) {
+            Ok(content) => content,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    [(axum::http::header::CONTENT_TYPE, "application/json")],
+                    Body::from(
+                        serde_json::json!({"status": "error", "error": format!("failed to read config: {e}")})
+                            .to_string(),
+                    ),
+                )
+                    .into_response();
+            }
+        }
+    } else {
+        match toml::to_string_pretty(&**state.kernel.config_ref()) {
+            Ok(s) => s,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    [(axum::http::header::CONTENT_TYPE, "application/json")],
+                    Body::from(
+                        serde_json::json!({"status": "error", "error": format!("failed to serialize config: {e}")})
+                            .to_string(),
+                    ),
+                )
+                    .into_response();
+            }
+        }
+    };
+
+    (
+        StatusCode::OK,
+        [
+            (axum::http::header::CONTENT_TYPE, "application/toml"),
+            (
+                axum::http::header::CONTENT_DISPOSITION,
+                "attachment; filename=\"librefang-config.toml\"",
+            ),
+        ],
+        Body::from(toml_content),
+    )
+        .into_response()
 }
 
 // ---------------------------------------------------------------------------
