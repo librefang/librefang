@@ -724,7 +724,7 @@ fn flush_debounced(
                 ct_str,
                 thread_id,
                 output_format,
-                overrides.as_deref(),
+                overrides.as_ref(),
                 journal.as_ref(),
             )
             .await;
@@ -1836,7 +1836,7 @@ async fn dispatch_message(
                 ct_str,
                 thread_id,
                 output_format,
-                overrides.as_deref(),
+                overrides.as_ref(),
                 journal,
             )
             .await;
@@ -2137,7 +2137,7 @@ async fn dispatch_message(
     send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Thinking).await;
 
     // Build sender context to propagate identity to the agent
-    let sender_ctx = build_sender_context(message, overrides.as_deref());
+    let sender_ctx = build_sender_context(message, overrides.as_ref());
 
     // Streaming path: if the adapter supports progressive output, pipe text
     // deltas directly to it instead of waiting for the full response.
