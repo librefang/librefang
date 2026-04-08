@@ -244,6 +244,61 @@ let cachedAgentId = null;
 let ownJid = null;
 
 // ---------------------------------------------------------------------------
+// Message store for Baileys retry mechanism
+// ---------------------------------------------------------------------------
+// Baileys needs getMessage() to re-decrypt messages on retry.  We keep a
+// bounded in-memory store of recently received raw messages.
+const MESSAGE_STORE_MAX = 500;
+const MESSAGE_STORE_TTL_MS = 10 * 60 * 1000; // 10 min
+const messageStore = new Map(); // key: msgId → { message, ts }
+
+function messageStoreSet(msgId, message) {
+  if (!msgId || !message) return;
+  messageStore.set(msgId, { message, ts: Date.now() });
+  // Evict oldest entries if over limit
+  if (messageStore.size > MESSAGE_STORE_MAX) {
+    const oldest = messageStore.keys().next().value;
+    messageStore.delete(oldest);
+  }
+}
+
+function messageStoreGet(msgId) {
+  const entry = messageStore.get(msgId);
+  if (!entry) return undefined;
+  if (Date.now() - entry.ts > MESSAGE_STORE_TTL_MS) {
+    messageStore.delete(msgId);
+    return undefined;
+  }
+  return entry.message;
+}
+
+// ---------------------------------------------------------------------------
+// Decryption retry tracking & fallback notification
+// ---------------------------------------------------------------------------
+const DECRYPT_RETRY_MAX = 3;
+const DECRYPT_RETRY_EXPIRE_MS = 5 * 60 * 1000; // 5 min
+const decryptRetryMap = new Map(); // key: "jid:msgId" → { count, expireTimer, firstSeen }
+
+function getDecryptRetryKey(jid, msgId) { return `${jid}:${msgId}`; }
+
+function cleanupDecryptRetry(key) {
+  const entry = decryptRetryMap.get(key);
+  if (entry?.expireTimer) clearTimeout(entry.expireTimer);
+  decryptRetryMap.delete(key);
+}
+
+// Single periodic cleanup for both stores
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, entry] of messageStore) {
+    if (now - entry.ts > MESSAGE_STORE_TTL_MS) messageStore.delete(id);
+  }
+  for (const [key, entry] of decryptRetryMap) {
+    if (now - entry.firstSeen > DECRYPT_RETRY_EXPIRE_MS) cleanupDecryptRetry(key);
+  }
+}, 60_000).unref();
+
+// ---------------------------------------------------------------------------
 // Markdown → WhatsApp formatting conversion
 // ---------------------------------------------------------------------------
 // LLM responses use standard Markdown but WhatsApp has its own formatting
@@ -677,8 +732,11 @@ async function startConnection() {
     version,
     auth: state,
     logger,
-    // printQRInTerminal removed (deprecated in Baileys v6+)
     browser: ['LibreFang', 'Desktop', '1.0.0'],
+    // getMessage enables Baileys' built-in retry mechanism for decryption failures.
+    // When a message cannot be decrypted, Baileys sends a retry receipt to the sender
+    // and needs getMessage() to return the raw message for re-decryption.
+    getMessage: async (key) => messageStoreGet(key.id),
   });
 
   // Save credentials whenever they update
@@ -775,6 +833,17 @@ async function startConnection() {
     if (type !== 'notify') return;
 
     for (const msg of messages) {
+      // Store raw message for Baileys retry mechanism and resolve successful retries
+      if (msg.key?.id && msg.message) {
+        messageStoreSet(msg.key.id, msg.message);
+        const retryKey = getDecryptRetryKey(msg.key.remoteJid || '', msg.key.id);
+        if (decryptRetryMap.has(retryKey)) {
+          console.log(`[gateway][retry] Decryption retry succeeded for ${msg.key.id}`);
+          cleanupDecryptRetry(retryKey);
+          try { stmtMarkProcessed.run(1, msg.key.id); } catch (_) { /* best-effort */ }
+        }
+      }
+
       // Skip status broadcasts
       if (msg.key.remoteJid === 'status@broadcast') continue;
 
@@ -1149,29 +1218,72 @@ async function startConnection() {
   // -------------------------------------------------------------------------
   sock.ev.on('messages.update', (updates) => {
     for (const update of updates) {
-      // Baileys emits update.message with error info for decryption failures
       const key = update.key;
       const updateData = update.update || {};
 
-      // Check for message retry / decryption error signals
-      if (updateData.messageStubType || updateData.status === 'ERROR' || updateData.status === 5) {
+      // stub 39 = CIPHERTEXT in Baileys' numeric enum (failed to decrypt)
+      const stub = updateData.messageStubType;
+      const isDecryptionError = stub === 39
+        || updateData.status === 'ERROR' || updateData.status === 5;
+
+      if (isDecryptionError) {
         const jid = key?.remoteJid || 'unknown';
         const msgId = key?.id || 'unknown';
-        console.warn(`[gateway][session-error] Possible decryption failure detected — jid: ${jid}, msgId: ${msgId}, stub: ${updateData.messageStubType || 'none'}, status: ${updateData.status || 'none'}`);
+        const retryKey = getDecryptRetryKey(jid, msgId);
 
-        // Save a placeholder in DB so the catch-up sweep can attempt recovery
-        dbSaveMessage({
-          id: msgId,
-          jid,
-          senderJid: key?.participant || null,
-          pushName: null,
-          phone: null,
-          text: '[DECRYPTION_FAILED — message could not be read]',
-          direction: 'inbound',
-          timestamp: Date.now(),
-          processed: 0,
-          rawType: 'decryption_error',
-        });
+        let entry = decryptRetryMap.get(retryKey);
+        if (!entry) {
+          entry = { count: 0, expireTimer: null, firstSeen: Date.now() };
+          decryptRetryMap.set(retryKey, entry);
+
+          // Save placeholder in DB on first occurrence
+          dbSaveMessage({
+            id: msgId,
+            jid,
+            senderJid: key?.participant || null,
+            pushName: null,
+            phone: null,
+            text: '[DECRYPTION_FAILED — message could not be read]',
+            direction: 'inbound',
+            timestamp: Date.now(),
+            processed: 0,
+            rawType: 'decryption_error',
+          });
+        }
+
+        entry.count += 1;
+        console.warn(`[gateway][decrypt-retry] Decryption failure #${entry.count}/${DECRYPT_RETRY_MAX} — jid: ${jid}, msgId: ${msgId}, stub: ${stub || 'none'}`);
+
+        if (entry.count >= DECRYPT_RETRY_MAX) {
+          console.error(`[gateway][decrypt-retry] All ${DECRYPT_RETRY_MAX} retries exhausted for ${msgId} from ${jid}`);
+          dbIncrRetryOrFail(msgId, DECRYPT_RETRY_MAX);
+
+          const contactName = jid.replace(/@.*/, '');
+          const timestamp = new Date().toLocaleString('it-IT', { timeZone: 'Europe/Rome' });
+          const notifyText = [
+            `⚠️ Messaggio non leggibile da ${contactName}`,
+            `Orario: ${timestamp}`,
+            `ID: ${msgId}`,
+            ``,
+            `Il messaggio non è stato decrittato dopo ${DECRYPT_RETRY_MAX} tentativi.`,
+            `Suggerimento: chiedi al contatto di reinviare il messaggio.`,
+          ].join('\n');
+
+          forwardToLibreFang(
+            notifyText,
+            '[SYSTEM:decryption_failure]',
+            contactName,
+            'System',
+            true,
+            [],
+          ).catch(err => console.error(`[gateway][decrypt-retry] Failed to send fallback notification:`, err.message));
+
+          cleanupDecryptRetry(retryKey);
+        } else {
+          // Reset expire timer — clean up if no further updates arrive
+          if (entry.expireTimer) clearTimeout(entry.expireTimer);
+          entry.expireTimer = setTimeout(() => cleanupDecryptRetry(retryKey), DECRYPT_RETRY_EXPIRE_MS);
+        }
       }
     }
   });
