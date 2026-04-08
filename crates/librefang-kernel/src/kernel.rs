@@ -2560,10 +2560,17 @@ impl LibreFangKernel {
                     if toml_path.exists() {
                         match std::fs::read_to_string(&toml_path) {
                             Ok(toml_str) => {
-                                match toml::from_str::<librefang_types::agent::AgentManifest>(
+                                // Try parsing as AgentManifest first; fall back to
+                                // extracting from a hand.toml (HandDefinition format).
+                                let parsed = toml::from_str::<librefang_types::agent::AgentManifest>(
                                     &toml_str,
-                                ) {
-                                    Ok(mut disk_manifest) => {
+                                )
+                                .ok()
+                                .or_else(|| {
+                                    extract_manifest_from_hand_toml(&toml_str, &name)
+                                });
+                                match parsed {
+                                    Some(mut disk_manifest) => {
                                         // Compare key fields to detect changes
                                         let changed = serde_json::to_value(&disk_manifest).ok()
                                             != serde_json::to_value(&entry.manifest).ok();
@@ -2591,11 +2598,11 @@ impl LibreFangKernel {
                                             }
                                         }
                                     }
-                                    Err(e) => {
+                                    None => {
                                         warn!(
                                             agent = %name,
                                             path = %toml_path.display(),
-                                            "Invalid agent TOML on disk, using DB version: {e}"
+                                            "Cannot parse TOML on disk as agent manifest, using DB version"
                                         );
                                     }
                                 }
@@ -5863,13 +5870,17 @@ system_prompt = "You are a helpful assistant."
             )))
         })?;
 
-        let mut disk_manifest: librefang_types::agent::AgentManifest = toml::from_str(&toml_str)
-            .map_err(|e| {
-                KernelError::LibreFang(LibreFangError::Internal(format!(
-                    "Invalid TOML in {}: {e}",
-                    toml_path.display()
-                )))
-            })?;
+        // Parse as AgentManifest; if that fails, try extracting from a hand.toml.
+        let mut disk_manifest: librefang_types::agent::AgentManifest =
+            toml::from_str::<librefang_types::agent::AgentManifest>(&toml_str)
+                .ok()
+                .or_else(|| extract_manifest_from_hand_toml(&toml_str, &entry.name))
+                .ok_or_else(|| {
+                    KernelError::LibreFang(LibreFangError::Internal(format!(
+                        "Invalid TOML in {}: not an agent manifest or hand definition",
+                        toml_path.display()
+                    )))
+                })?;
 
         // Preserve workspace if TOML leaves it unset — workspace is
         // populated at spawn time with the real directory path.
@@ -9755,6 +9766,32 @@ fn infer_provider_from_model(model: &str) -> Option<String> {
 /// A well-known agent ID used for shared memory operations across agents.
 /// This is a fixed UUID so all agents read/write to the same namespace.
 /// Parse an agent.toml string and return true if `enabled` is explicitly set
+/// Try to extract an `AgentManifest` from a `hand.toml` file (HandDefinition format).
+///
+/// When `source_toml_path` points to a hand.toml rather than an agent.toml, the file
+/// contains a `HandDefinition` with multiple agent manifests keyed by role name.
+/// This function parses the file as a `HandDefinition` and returns the manifest whose
+/// `name` field (or role key) matches `agent_name`.
+fn extract_manifest_from_hand_toml(
+    toml_str: &str,
+    agent_name: &str,
+) -> Option<librefang_types::agent::AgentManifest> {
+    let def: librefang_hands::HandDefinition = toml::from_str(toml_str).ok()?;
+    for (role, hand_agent) in &def.agents {
+        if hand_agent.manifest.name == agent_name || role == agent_name {
+            return Some(hand_agent.manifest.clone());
+        }
+    }
+    // Also try matching by the "{hand_id}-{role}" convention used for spawned agents.
+    for (role, hand_agent) in &def.agents {
+        let qualified = format!("{}-{}", def.id, role);
+        if qualified == agent_name {
+            return Some(hand_agent.manifest.clone());
+        }
+    }
+    None
+}
+
 /// to `false`. Uses proper TOML parsing to handle all valid whitespace variants
 /// and avoid false positives from commented-out lines.
 fn toml_enabled_false(content: &str) -> bool {
