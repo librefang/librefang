@@ -6,7 +6,8 @@
 //! as JSON POST requests to the configured webhook port.
 
 use crate::types::{
-    split_message, ChannelAdapter, ChannelContent, ChannelMessage, ChannelType, ChannelUser,
+    split_message, ChannelAdapter, ChannelAdapterMultiplicity, ChannelContent, ChannelMessage,
+    ChannelType, ChannelUser,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -213,6 +214,12 @@ impl ChannelAdapter for PumbleAdapter {
 
     fn channel_type(&self) -> ChannelType {
         ChannelType::Custom("pumble".to_string())
+    }
+
+    fn multiplicity(&self) -> ChannelAdapterMultiplicity {
+        ChannelAdapterMultiplicity::SingleInstancePerDaemon {
+            reason: "pumble uses a fixed shared webhook route on the main API server",
+        }
     }
 
     async fn create_webhook_routes(

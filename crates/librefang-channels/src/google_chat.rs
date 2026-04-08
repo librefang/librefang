@@ -5,7 +5,8 @@
 //! spaces.
 
 use crate::types::{
-    split_message, ChannelAdapter, ChannelContent, ChannelMessage, ChannelType, ChannelUser,
+    split_message, ChannelAdapter, ChannelAdapterMultiplicity, ChannelContent, ChannelMessage,
+    ChannelType, ChannelUser,
 };
 use async_trait::async_trait;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
@@ -318,6 +319,12 @@ impl ChannelAdapter for GoogleChatAdapter {
 
     fn channel_type(&self) -> ChannelType {
         ChannelType::Custom("google_chat".to_string())
+    }
+
+    fn multiplicity(&self) -> ChannelAdapterMultiplicity {
+        ChannelAdapterMultiplicity::SingleInstancePerDaemon {
+            reason: "google_chat uses a fixed shared webhook route on the main API server",
+        }
     }
 
     async fn create_webhook_routes(

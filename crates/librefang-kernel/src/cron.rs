@@ -152,15 +152,23 @@ impl CronScheduler {
             )));
         }
 
-        // Per-agent count
-        let agent_count = self
-            .jobs
-            .iter()
-            .filter(|r| r.value().job.agent_id == job.agent_id)
-            .count();
+        // Per-owner count. Multi-tenant jobs are capped by account; legacy jobs
+        // without an account remain capped by agent.
+        let existing_count = match job.account_id.as_deref() {
+            Some(account_id) => self
+                .jobs
+                .iter()
+                .filter(|entry| entry.value().job.account_id.as_deref() == Some(account_id))
+                .count(),
+            None => self
+                .jobs
+                .iter()
+                .filter(|r| r.value().job.agent_id == job.agent_id)
+                .count(),
+        };
 
         // CronJob.validate returns Result<(), String>
-        job.validate(agent_count)
+        job.validate(existing_count)
             .map_err(LibreFangError::InvalidInput)?;
 
         // Compute initial next_run
@@ -290,6 +298,74 @@ impl CronScheduler {
     /// List all jobs across all agents.
     pub fn list_all_jobs(&self) -> Vec<CronJob> {
         self.jobs.iter().map(|r| r.value().job.clone()).collect()
+    }
+
+    /// List all jobs for a specific tenant account.
+    pub fn list_jobs_by_account(&self, account_id: &str) -> Vec<CronJob> {
+        self.jobs
+            .iter()
+            .filter(|entry| entry.value().job.account_id.as_deref() == Some(account_id))
+            .map(|entry| entry.value().job.clone())
+            .collect()
+    }
+
+    /// Get a job only if it belongs to the provided account.
+    pub fn get_job_scoped(&self, id: CronJobId, account_id: &str) -> Option<CronJob> {
+        self.jobs
+            .get(&id)
+            .filter(|entry| entry.job.account_id.as_deref() == Some(account_id))
+            .map(|entry| entry.job.clone())
+    }
+
+    /// Get job metadata only if it belongs to the provided account.
+    pub fn get_meta_scoped(&self, id: CronJobId, account_id: &str) -> Option<JobMeta> {
+        self.jobs
+            .get(&id)
+            .filter(|entry| entry.job.account_id.as_deref() == Some(account_id))
+            .map(|entry| entry.clone())
+    }
+
+    /// Remove a job only if it belongs to the provided account.
+    pub fn remove_job_scoped(&self, id: CronJobId, account_id: &str) -> LibreFangResult<CronJob> {
+        match self.jobs.get(&id) {
+            Some(entry) if entry.job.account_id.as_deref() == Some(account_id) => {
+                drop(entry);
+                self.remove_job(id)
+            }
+            _ => Err(LibreFangError::Internal(format!("Cron job {id} not found"))),
+        }
+    }
+
+    /// Update a job only if it belongs to the provided account.
+    pub fn update_job_scoped(
+        &self,
+        id: CronJobId,
+        account_id: &str,
+        updates: &serde_json::Value,
+    ) -> LibreFangResult<CronJob> {
+        match self.jobs.get(&id) {
+            Some(entry) if entry.job.account_id.as_deref() == Some(account_id) => {
+                drop(entry);
+                self.update_job(id, updates)
+            }
+            _ => Err(LibreFangError::Internal(format!("Cron job {id} not found"))),
+        }
+    }
+
+    /// Enable or disable a job only if it belongs to the provided account.
+    pub fn set_enabled_scoped(
+        &self,
+        id: CronJobId,
+        account_id: &str,
+        enabled: bool,
+    ) -> LibreFangResult<()> {
+        match self.jobs.get(&id) {
+            Some(entry) if entry.job.account_id.as_deref() == Some(account_id) => {
+                drop(entry);
+                self.set_enabled(id, enabled)
+            }
+            _ => Err(LibreFangError::Internal(format!("Cron job {id} not found"))),
+        }
     }
 
     /// Reassign all cron jobs from `old_agent_id` to `new_agent_id`.
@@ -540,6 +616,7 @@ mod tests {
         CronJob {
             id: CronJobId::new(),
             agent_id,
+            account_id: None,
             name: "test-job".into(),
             enabled: true,
             schedule: CronSchedule::Every { every_secs: 3600 },
@@ -629,11 +706,10 @@ mod tests {
         );
     }
 
-    // -- test_add_job_per_agent_limit ---------------------------------------
+    // -- test_add_job_per_owner_limit ---------------------------------------
 
     #[test]
-    fn test_add_job_per_agent_limit() {
-        // MAX_JOBS_PER_AGENT = 50 in librefang-types
+    fn test_add_job_per_owner_limit_for_legacy_agent_jobs() {
         let (sched, _tmp) = make_scheduler(1000);
         let agent = AgentId::new();
 
@@ -650,7 +726,36 @@ mod tests {
         let msg = err.to_string();
         assert!(
             msg.contains("50"),
-            "Expected per-agent limit error, got: {msg}"
+            "Expected per-owner limit error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_add_job_per_owner_limit_applies_across_agents_in_same_account() {
+        let (sched, _tmp) = make_scheduler(1000);
+        let agent_a = AgentId::new();
+        let agent_b = AgentId::new();
+
+        for i in 0..25 {
+            let mut job_a = make_job(agent_a);
+            job_a.name = format!("tenant-a-{i}");
+            job_a.account_id = Some("tenant-a".to_string());
+            sched.add_job(job_a, false).unwrap();
+
+            let mut job_b = make_job(agent_b);
+            job_b.name = format!("tenant-b-{i}");
+            job_b.account_id = Some("tenant-a".to_string());
+            sched.add_job(job_b, false).unwrap();
+        }
+
+        let mut overflow = make_job(agent_b);
+        overflow.name = "overflow".into();
+        overflow.account_id = Some("tenant-a".to_string());
+        let err = sched.add_job(overflow, false).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("account already has 50 jobs"),
+            "Expected per-account limit error, got: {msg}"
         );
     }
 
@@ -840,6 +945,35 @@ mod tests {
             let b_id = jobs.iter().find(|j| j.name == "persist-b").unwrap().id;
             let meta = sched.get_meta(b_id).unwrap();
             assert!(meta.one_shot);
+        }
+    }
+
+    #[test]
+    fn test_persist_and_load_preserves_account_scoping() {
+        let tmp = tempfile::tempdir().unwrap();
+        let agent = AgentId::new();
+        let mut job = make_job(agent);
+        job.name = "tenant-owned-job".into();
+        job.account_id = Some("tenant-a".to_string());
+
+        {
+            let sched = CronScheduler::new(tmp.path(), 100);
+            let id = sched.add_job(job, false).unwrap();
+            sched.persist().unwrap();
+            assert!(sched.get_job_scoped(id, "tenant-a").is_some());
+            assert!(sched.get_job_scoped(id, "tenant-b").is_none());
+        }
+
+        {
+            let sched = CronScheduler::new(tmp.path(), 100);
+            let count = sched.load().unwrap();
+            assert_eq!(count, 1);
+            let jobs = sched.list_jobs_by_account("tenant-a");
+            assert_eq!(jobs.len(), 1);
+            assert_eq!(jobs[0].account_id.as_deref(), Some("tenant-a"));
+            assert!(sched.list_jobs_by_account("tenant-b").is_empty());
+            assert!(sched.get_job_scoped(jobs[0].id, "tenant-a").is_some());
+            assert!(sched.get_job_scoped(jobs[0].id, "tenant-b").is_none());
         }
     }
 

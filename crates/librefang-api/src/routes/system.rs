@@ -278,7 +278,13 @@ pub async fn get_profile(
 
 /// GET /api/templates — List available agent templates.
 #[utoipa::path(get, path = "/api/templates", tag = "system", operation_id = "list_agent_templates", responses((status = 200, description = "List templates", body = Vec<serde_json::Value>)))]
-pub async fn list_agent_templates(_account: AccountId) -> impl IntoResponse {
+pub async fn list_agent_templates(
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let agents_dir = librefang_kernel::config::librefang_home()
         .join("workspaces")
         .join("agents");
@@ -315,15 +321,20 @@ pub async fn list_agent_templates(_account: AccountId) -> impl IntoResponse {
         "templates": templates,
         "total": templates.len(),
     }))
+    .into_response()
 }
 
 /// GET /api/templates/:name — Get template details.
 #[utoipa::path(get, path = "/api/templates/{name}", tag = "system", operation_id = "get_agent_template", params(("name" = String, Path, description = "Template name")), responses((status = 200, description = "Template details", body = serde_json::Value)))]
 pub async fn get_agent_template(
-    _account: AccountId,
+    account: AccountId,
+    State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agents_dir = librefang_kernel::config::librefang_home()
         .join("workspaces")
@@ -331,7 +342,9 @@ pub async fn get_agent_template(
     let manifest_path = agents_dir.join(&name).join("agent.toml");
 
     if !manifest_path.exists() {
-        return ApiErrorResponse::not_found(t.t("api-error-template-not-found")).into_json_tuple();
+        return ApiErrorResponse::not_found(t.t("api-error-template-not-found"))
+            .into_json_tuple()
+            .into_response();
     }
 
     match std::fs::read_to_string(&manifest_path) {
@@ -356,16 +369,20 @@ pub async fn get_agent_template(
                     },
                     "manifest_toml": content,
                 })),
-            ),
+            )
+                .into_response(),
             Err(e) => {
                 tracing::warn!("Invalid template manifest for '{name}': {e}");
                 ApiErrorResponse::internal(t.t("api-error-template-invalid-manifest"))
                     .into_json_tuple()
+                    .into_response()
             }
         },
         Err(e) => {
             tracing::warn!("Failed to read template '{name}': {e}");
-            ApiErrorResponse::internal(t.t("api-error-template-read-failed")).into_json_tuple()
+            ApiErrorResponse::internal(t.t("api-error-template-read-failed"))
+                .into_json_tuple()
+                .into_response()
         }
     }
 }

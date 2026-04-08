@@ -2347,7 +2347,7 @@ fn init_git_if_missing(librefang_dir: &std::path::Path) {
         .current_dir(librefang_dir)
         .status();
     let _ = std::process::Command::new("git")
-        .args(["commit", "-q", "-m", "chore: initial librefang config"])
+        .args(["commit", "-q", "-m", "chore(cli): initial librefang config"])
         .current_dir(librefang_dir)
         .status();
 }

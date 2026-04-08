@@ -716,6 +716,9 @@ pub struct HandInstance {
     pub instance_id: Uuid,
     /// Which hand definition this is an instance of.
     pub hand_id: String,
+    /// Owning tenant account for tenant-facing hand operations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
     /// Current status.
     pub status: HandStatus,
     /// Spawned agents keyed by role name → AgentId.
@@ -749,6 +752,7 @@ impl HandInstance {
         Self {
             instance_id: instance_id.unwrap_or_else(Uuid::new_v4),
             hand_id: hand_id.to_string(),
+            account_id: None,
             status: HandStatus::Active,
             agent_ids: BTreeMap::new(),
             coordinator_role: None,

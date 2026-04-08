@@ -30,7 +30,8 @@
 //! **Server -> Client (binary):** Synthesized audio response data.
 
 use crate::types::{
-    ChannelAdapter, ChannelContent, ChannelMessage, ChannelStatus, ChannelType, ChannelUser,
+    ChannelAdapter, ChannelAdapterMultiplicity, ChannelContent, ChannelMessage, ChannelStatus,
+    ChannelType, ChannelUser,
 };
 use async_trait::async_trait;
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
@@ -593,6 +594,12 @@ impl ChannelAdapter for VoiceAdapter {
 
     fn channel_type(&self) -> ChannelType {
         ChannelType::Custom("voice".to_string())
+    }
+
+    fn multiplicity(&self) -> ChannelAdapterMultiplicity {
+        ChannelAdapterMultiplicity::SingleInstancePerDaemon {
+            reason: "voice uses a fixed shared WebSocket route and singleton session namespace",
+        }
     }
 
     async fn create_webhook_routes(

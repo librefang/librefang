@@ -6,7 +6,8 @@
 //! to the configured webhook port.
 
 use crate::types::{
-    split_message, ChannelAdapter, ChannelContent, ChannelMessage, ChannelType, ChannelUser,
+    split_message, ChannelAdapter, ChannelAdapterMultiplicity, ChannelContent, ChannelMessage,
+    ChannelType, ChannelUser,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -181,6 +182,12 @@ impl ChannelAdapter for ThreemaAdapter {
 
     fn channel_type(&self) -> ChannelType {
         ChannelType::Custom("threema".to_string())
+    }
+
+    fn multiplicity(&self) -> ChannelAdapterMultiplicity {
+        ChannelAdapterMultiplicity::SingleInstancePerDaemon {
+            reason: "threema uses a fixed shared webhook route on the main API server",
+        }
     }
 
     async fn create_webhook_routes(

@@ -152,7 +152,6 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
         .route("/extensions/{name}", axum::routing::get(get_extension))
 }
 
-use super::channels::FieldType;
 use super::config::json_to_toml_value;
 use super::shared::check_account;
 use super::shared::require_admin;
@@ -1391,10 +1390,19 @@ pub async fn list_hands(
     )
 )]
 pub async fn list_active_hands(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
 ) -> axum::response::Response {
-    let instances = state.kernel.hands().list_instances();
+    if let Err((code, json)) = require_tenant_hand_account(&account) {
+        return (code, json).into_response();
+    }
+    let instances = state
+        .kernel
+        .hands()
+        .list_instances()
+        .into_iter()
+        .filter(|instance| hand_instance_belongs_to_account(&state, instance, &account))
+        .collect::<Vec<_>>();
     let items: Vec<serde_json::Value> = instances
         .iter()
         .map(|i| {
@@ -1632,10 +1640,13 @@ pub async fn check_hand_deps(
     )
 )]
 pub async fn install_hand_deps(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(hand_id): Path<String>,
 ) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let def = match state.kernel.hands().get_definition(&hand_id) {
         Some(d) => d.clone(),
         None => {
@@ -1878,10 +1889,13 @@ pub async fn install_hand_deps(
     )
 )]
 pub async fn install_hand(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let toml_content = body["toml_content"].as_str().unwrap_or("");
     let skill_content = body["skill_content"].as_str().unwrap_or("");
 
@@ -1927,15 +1941,22 @@ pub async fn install_hand(
     )
 )]
 pub async fn activate_hand(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(hand_id): Path<String>,
     body: Option<Json<librefang_hands::ActivateHandRequest>>,
 ) -> axum::response::Response {
+    if let Err((code, json)) = require_tenant_hand_account(&account) {
+        return (code, json).into_response();
+    }
     let config = body.map(|b| b.0.config).unwrap_or_default();
 
     match state.kernel.activate_hand(&hand_id, config) {
         Ok(instance) => {
+            if let Err(e) = bind_hand_instance_to_account(&state, &instance, &account) {
+                let _ = state.kernel.deactivate_hand(instance.instance_id);
+                return ApiErrorResponse::internal(e).into_json_tuple().into_response();
+            }
             // If the hand agent has a non-reactive schedule (autonomous hands),
             // start its background loop so it begins running immediately.
             if let Some(agent_id) = instance.agent_id() {
@@ -1987,10 +2008,16 @@ pub async fn activate_hand(
     )
 )]
 pub async fn pause_hand(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<uuid::Uuid>,
 ) -> axum::response::Response {
+    if let Err((code, json)) = require_tenant_hand_account(&account) {
+        return (code, json).into_response();
+    }
+    if let Err((code, json)) = resolve_owned_hand_instance(&state, id, &account) {
+        return (code, json).into_response();
+    }
     match state.kernel.pause_hand(id) {
         Ok(()) => (
             StatusCode::OK,
@@ -2014,10 +2041,16 @@ pub async fn pause_hand(
     )
 )]
 pub async fn resume_hand(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<uuid::Uuid>,
 ) -> axum::response::Response {
+    if let Err((code, json)) = require_tenant_hand_account(&account) {
+        return (code, json).into_response();
+    }
+    if let Err((code, json)) = resolve_owned_hand_instance(&state, id, &account) {
+        return (code, json).into_response();
+    }
     match state.kernel.resume_hand(id) {
         Ok(()) => (
             StatusCode::OK,
@@ -2041,10 +2074,16 @@ pub async fn resume_hand(
     )
 )]
 pub async fn deactivate_hand(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<uuid::Uuid>,
 ) -> axum::response::Response {
+    if let Err((code, json)) = require_tenant_hand_account(&account) {
+        return (code, json).into_response();
+    }
+    if let Err((code, json)) = resolve_owned_hand_instance(&state, id, &account) {
+        return (code, json).into_response();
+    }
     match state.kernel.deactivate_hand(id) {
         Ok(()) => (
             StatusCode::OK,
@@ -2065,11 +2104,14 @@ pub async fn deactivate_hand(
     responses((status = 200, description = "Secret saved", body = serde_json::Value))
 )]
 pub async fn set_hand_secret(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(hand_id): Path<String>,
     Json(body): Json<serde_json::Value>,
 ) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let env_key = match body["key"].as_str() {
         Some(k) if !k.trim().is_empty() => k.trim().to_string(),
         _ => {
@@ -2143,11 +2185,14 @@ pub async fn set_hand_secret(
     )
 )]
 pub async fn get_hand_settings(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
     Path(hand_id): Path<String>,
 ) -> axum::response::Response {
+    if let Err((code, json)) = require_tenant_hand_account(&account) {
+        return (code, json).into_response();
+    }
     let lang = headers
         .get("accept-language")
         .and_then(|v| v.to_str().ok())
@@ -2172,7 +2217,7 @@ pub async fn get_hand_settings(
         .hands()
         .list_instances()
         .iter()
-        .find(|i| i.hand_id == hand_id)
+        .find(|i| i.hand_id == hand_id && hand_instance_belongs_to_account(&state, i, &account))
         .map(|i| i.config.clone())
         .unwrap_or_default();
 
@@ -2201,18 +2246,21 @@ pub async fn get_hand_settings(
     )
 )]
 pub async fn update_hand_settings(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(hand_id): Path<String>,
     Json(config): Json<std::collections::HashMap<String, serde_json::Value>>,
 ) -> axum::response::Response {
+    if let Err((code, json)) = require_tenant_hand_account(&account) {
+        return (code, json).into_response();
+    }
     // Find active instance for this hand
     let instance_id = state
         .kernel
         .hands()
         .list_instances()
         .iter()
-        .find(|i| i.hand_id == hand_id)
+        .find(|i| i.hand_id == hand_id && hand_instance_belongs_to_account(&state, i, &account))
         .map(|i| i.instance_id);
 
     match instance_id {
@@ -2282,17 +2330,16 @@ pub async fn reload_hands(
     )
 )]
 pub async fn hand_stats(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<uuid::Uuid>,
 ) -> axum::response::Response {
-    let instance = match state.kernel.hands().get_instance(id) {
-        Some(i) => i,
-        None => {
-            return ApiErrorResponse::not_found("Instance not found")
-                .into_json_tuple()
-                .into_response();
-        }
+    if let Err((code, json)) = require_tenant_hand_account(&account) {
+        return (code, json).into_response();
+    }
+    let instance = match resolve_owned_hand_instance(&state, id, &account) {
+        Ok(i) => i,
+        Err(e) => return e.into_response(),
     };
 
     let def = match state.kernel.hands().get_definition(&instance.hand_id) {
@@ -2364,18 +2411,17 @@ pub async fn hand_stats(
     )
 )]
 pub async fn hand_instance_browser(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<uuid::Uuid>,
 ) -> axum::response::Response {
+    if let Err((code, json)) = require_tenant_hand_account(&account) {
+        return (code, json).into_response();
+    }
     // 1. Look up instance
-    let instance = match state.kernel.hands().get_instance(id) {
-        Some(i) => i,
-        None => {
-            return ApiErrorResponse::not_found("Instance not found")
-                .into_json_tuple()
-                .into_response();
-        }
+    let instance = match resolve_owned_hand_instance(&state, id, &account) {
+        Ok(i) => i,
+        Err(e) => return e.into_response(),
     };
 
     // 2. Get agent_id
@@ -2466,9 +2512,28 @@ pub async fn hand_instance_browser(
 
 /// Helper: resolve a hand instance UUID → its linked AgentId.
 /// Returns an error response tuple if the instance is missing or has no agent.
+fn resolve_owned_hand_instance(
+    state: &AppState,
+    instance_id: uuid::Uuid,
+    account: &AccountId,
+) -> Result<librefang_hands::HandInstance, (StatusCode, Json<serde_json::Value>)> {
+    let instance = state
+        .kernel
+        .hands()
+        .get_instance(instance_id)
+        .ok_or_else(|| ApiErrorResponse::not_found("Hand instance not found").into_json_tuple())?;
+
+    if !hand_instance_belongs_to_account(state, &instance, account) {
+        return Err(ApiErrorResponse::not_found("Hand instance not found").into_json_tuple());
+    }
+
+    Ok(instance)
+}
+
 fn resolve_hand_agent(
     state: &AppState,
     instance_id: uuid::Uuid,
+    account: &AccountId,
 ) -> Result<
     (
         librefang_hands::HandInstance,
@@ -2476,11 +2541,7 @@ fn resolve_hand_agent(
     ),
     (StatusCode, Json<serde_json::Value>),
 > {
-    let instance = state
-        .kernel
-        .hands()
-        .get_instance(instance_id)
-        .ok_or_else(|| ApiErrorResponse::not_found("Hand instance not found").into_json_tuple())?;
+    let instance = resolve_owned_hand_instance(state, instance_id, account)?;
     let agent_id = instance.agent_id().ok_or_else(|| {
         (
             StatusCode::OK,
@@ -2495,12 +2556,15 @@ fn resolve_hand_agent(
 /// This is the primary user-facing chat endpoint.  Internally it proxies to
 /// the underlying agent, but users never need to know the agent ID.
 pub async fn hand_send_message(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<uuid::Uuid>,
     Json(req): Json<MessageRequest>,
 ) -> axum::response::Response {
-    let (_instance, agent_id) = match resolve_hand_agent(&state, id) {
+    if let Err((code, json)) = require_tenant_hand_account(&account) {
+        return (code, json).into_response();
+    }
+    let (_instance, agent_id) = match resolve_hand_agent(&state, id, &account) {
         Ok(v) => v,
         Err(e) => return e.into_response(),
     };
@@ -2517,7 +2581,8 @@ pub async fn hand_send_message(
 
     // Resolve file attachments
     if !req.attachments.is_empty() {
-        let image_blocks = super::agents::resolve_attachments(&req.attachments);
+        let image_blocks =
+            super::agents::resolve_attachments(&req.attachments, account.0.as_deref());
         if !image_blocks.is_empty() {
             super::agents::inject_attachments_into_session(&state.kernel, agent_id, image_blocks);
         }
@@ -2588,7 +2653,10 @@ pub async fn hand_get_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<uuid::Uuid>,
 ) -> impl IntoResponse {
-    let (_instance, agent_id) = match resolve_hand_agent(&state, id) {
+    if let Err((code, json)) = require_tenant_hand_account(&account) {
+        return (code, json);
+    }
+    let (_instance, agent_id) = match resolve_hand_agent(&state, id, &account) {
         Ok(v) => v,
         Err(e) => return e,
     };
@@ -2701,17 +2769,18 @@ pub async fn hand_instance_status(
     Path(id): Path<uuid::Uuid>,
     headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
+    if let Err((code, json)) = require_tenant_hand_account(&account) {
+        return (code, json);
+    }
     let lang = headers
         .get("accept-language")
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.split(&[',', ';', '-'][..]).next())
         .unwrap_or("en");
 
-    let instance = match state.kernel.hands().get_instance(id) {
-        Some(i) => i,
-        None => {
-            return ApiErrorResponse::not_found("Hand instance not found").into_json_tuple();
-        }
+    let instance = match resolve_owned_hand_instance(&state, id, &account) {
+        Ok(i) => i,
+        Err(e) => return e,
     };
 
     // Hand-level info (always available)
@@ -2762,6 +2831,58 @@ pub async fn hand_instance_status(
     }
 
     (StatusCode::OK, Json(resp))
+}
+
+fn hand_instance_belongs_to_account(
+    _state: &AppState,
+    instance: &librefang_hands::HandInstance,
+    account: &AccountId,
+) -> bool {
+    if let (Some(owner), Some(requester)) = (instance.account_id.as_deref(), account.0.as_deref()) {
+        return owner == requester;
+    }
+
+    false
+}
+
+fn bind_hand_instance_to_account(
+    state: &AppState,
+    instance: &librefang_hands::HandInstance,
+    account: &AccountId,
+) -> Result<(), String> {
+    let Some(owner) = account.0.as_ref() else {
+        return Err("Tenant-facing hand operations require X-Account-Id".to_string());
+    };
+
+    state
+        .kernel
+        .hands()
+        .set_account_id(instance.instance_id, Some(owner.clone()))
+        .map_err(|e| {
+            format!(
+                "Failed to attach account_id to hand instance {}: {e}",
+                instance.instance_id
+            )
+        })?;
+
+    for agent_id in instance.agent_ids.values() {
+        state
+            .kernel
+            .agent_registry()
+            .set_account_id(*agent_id, Some(owner.clone()))
+            .map_err(|e| format!("Failed to attach account_id to hand agent {agent_id}: {e}"))?;
+    }
+
+    Ok(())
+}
+
+fn require_tenant_hand_account(
+    account: &AccountId,
+) -> Result<&str, (StatusCode, Json<serde_json::Value>)> {
+    account.0.as_deref().ok_or_else(|| {
+        ApiErrorResponse::bad_request("X-Account-Id is required for tenant-facing hand operations")
+            .into_json_tuple()
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -3579,110 +3700,6 @@ pub(crate) fn remove_secret_env(path: &std::path::Path, key: &str) -> Result<(),
 
     std::fs::write(path, lines.join("\n") + "\n")?;
 
-    Ok(())
-}
-
-// ── Config.toml channel management helpers ──────────────────────────
-
-/// Upsert a `[channels.<name>]` section in config.toml with the given non-secret fields.
-pub(crate) fn upsert_channel_config(
-    config_path: &std::path::Path,
-    channel_name: &str,
-    fields: &HashMap<String, (String, FieldType)>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    validate_static_file_path(config_path, "config.toml")
-        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-    let content = if config_path.exists() {
-        std::fs::read_to_string(config_path)?
-    } else {
-        String::new()
-    };
-
-    let mut doc: toml::Value = if content.trim().is_empty() {
-        toml::Value::Table(toml::map::Map::new())
-    } else {
-        toml::from_str(&content)?
-    };
-
-    let root = doc.as_table_mut().ok_or("Config is not a TOML table")?;
-
-    // Ensure [channels] table exists
-    if !root.contains_key("channels") {
-        root.insert(
-            "channels".to_string(),
-            toml::Value::Table(toml::map::Map::new()),
-        );
-    }
-    let channels_table = root
-        .get_mut("channels")
-        .and_then(|v| v.as_table_mut())
-        .ok_or("channels is not a table")?;
-
-    // Build channel sub-table with correct TOML types
-    let mut ch_table = toml::map::Map::new();
-    for (k, (v, ft)) in fields {
-        let toml_val = match ft {
-            FieldType::Number => {
-                if let Ok(n) = v.parse::<i64>() {
-                    toml::Value::Integer(n)
-                } else {
-                    toml::Value::String(v.clone())
-                }
-            }
-            FieldType::List => {
-                // Always store list items as strings so that numeric IDs
-                // (e.g. Discord guild snowflakes, Telegram user IDs) are
-                // deserialized correctly into Vec<String> config fields.
-                let items: Vec<toml::Value> = v
-                    .split(',')
-                    .map(|s| s.trim())
-                    .filter(|s| !s.is_empty())
-                    .map(|s| toml::Value::String(s.to_string()))
-                    .collect();
-                toml::Value::Array(items)
-            }
-            _ => toml::Value::String(v.clone()),
-        };
-        ch_table.insert(k.clone(), toml_val);
-    }
-    channels_table.insert(channel_name.to_string(), toml::Value::Table(ch_table));
-
-    // Ensure parent directory exists
-    if let Some(parent) = config_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    std::fs::write(config_path, toml::to_string_pretty(&doc)?)?;
-    Ok(())
-}
-
-/// Remove a `[channels.<name>]` section from config.toml.
-pub(crate) fn remove_channel_config(
-    config_path: &std::path::Path,
-    channel_name: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    validate_static_file_path(config_path, "config.toml")
-        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-    if !config_path.exists() {
-        return Ok(());
-    }
-
-    let content = std::fs::read_to_string(config_path)?;
-    if content.trim().is_empty() {
-        return Ok(());
-    }
-
-    let mut doc: toml::Value = toml::from_str(&content)?;
-
-    if let Some(channels) = doc
-        .as_table_mut()
-        .and_then(|r| r.get_mut("channels"))
-        .and_then(|c| c.as_table_mut())
-    {
-        channels.remove(channel_name);
-    }
-
-    std::fs::write(config_path, toml::to_string_pretty(&doc)?)?;
     Ok(())
 }
 

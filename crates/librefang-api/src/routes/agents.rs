@@ -989,6 +989,7 @@ pub async fn list_agents(
 /// returns image content blocks ready to insert into a session message.
 pub fn resolve_attachments(
     attachments: &[AttachmentRef],
+    account_id: Option<&str>,
 ) -> Vec<librefang_types::message::ContentBlock> {
     use base64::Engine;
 
@@ -998,12 +999,35 @@ pub fn resolve_attachments(
     for att in attachments {
         // Look up metadata from the upload registry
         let meta = UPLOAD_REGISTRY.get(&att.file_id);
-        let content_type = if let Some(ref m) = meta {
-            m.content_type.clone()
-        } else if !att.content_type.is_empty() {
-            att.content_type.clone()
-        } else {
-            continue; // Skip unknown attachments
+        let content_type = match meta.as_ref() {
+            Some(m) => {
+                if let Some(caller) = account_id {
+                    if m.account_id.as_deref() != Some(caller) {
+                        tracing::warn!(
+                            file_id = %att.file_id,
+                            caller_account_id = caller,
+                            upload_account_id = ?m.account_id.as_deref(),
+                            "Skipping attachment not owned by caller"
+                        );
+                        continue;
+                    }
+                }
+                m.content_type.clone()
+            }
+            None => {
+                if account_id.is_some() {
+                    tracing::warn!(
+                        file_id = %att.file_id,
+                        "Skipping unregistered attachment for scoped caller"
+                    );
+                    continue;
+                }
+                if !att.content_type.is_empty() {
+                    att.content_type.clone()
+                } else {
+                    continue;
+                }
+            }
         };
 
         // Only process image types
@@ -1254,7 +1278,7 @@ pub async fn send_message(
 
     // Resolve file attachments into image content blocks
     if !req.attachments.is_empty() {
-        let image_blocks = resolve_attachments(&req.attachments);
+        let image_blocks = resolve_attachments(&req.attachments, account.0.as_deref());
         if !image_blocks.is_empty() {
             inject_attachments_into_session(&state.kernel, agent_id, image_blocks);
         }
@@ -1952,7 +1976,7 @@ pub async fn send_message_stream(
 
     // Resolve file attachments into image content blocks (same as non-streaming)
     if !req.attachments.is_empty() {
-        let image_blocks = resolve_attachments(&req.attachments);
+        let image_blocks = resolve_attachments(&req.attachments, account.0.as_deref());
         if !image_blocks.is_empty() {
             inject_attachments_into_session(&state.kernel, agent_id, image_blocks);
         }
@@ -5613,5 +5637,55 @@ mod monitoring_tests {
         let logs = body["logs"].as_array().unwrap();
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0]["outcome"], "custom_error");
+    }
+
+    #[test]
+    fn test_resolve_attachments_rejects_cross_tenant_uploads() {
+        let file_id = uuid::Uuid::new_v4().to_string();
+        let upload_dir = std::env::temp_dir().join("librefang_uploads");
+        std::fs::create_dir_all(&upload_dir).unwrap();
+        std::fs::write(upload_dir.join(&file_id), b"image-bytes").unwrap();
+        UPLOAD_REGISTRY.insert(
+            file_id.clone(),
+            UploadMeta {
+                filename: "proof.png".to_string(),
+                content_type: "image/png".to_string(),
+                account_id: Some("tenant-a".to_string()),
+            },
+        );
+
+        let attachments = vec![AttachmentRef {
+            file_id: file_id.clone(),
+            filename: "proof.png".to_string(),
+            content_type: "image/png".to_string(),
+        }];
+
+        let blocks = resolve_attachments(&attachments, Some("tenant-b"));
+        assert!(blocks.is_empty(), "wrong tenant must not resolve uploads");
+
+        UPLOAD_REGISTRY.remove(&file_id);
+        let _ = std::fs::remove_file(upload_dir.join(file_id));
+    }
+
+    #[test]
+    fn test_resolve_attachments_rejects_unregistered_uploads_for_scoped_callers() {
+        let file_id = uuid::Uuid::new_v4().to_string();
+        let upload_dir = std::env::temp_dir().join("librefang_uploads");
+        std::fs::create_dir_all(&upload_dir).unwrap();
+        std::fs::write(upload_dir.join(&file_id), b"image-bytes").unwrap();
+
+        let attachments = vec![AttachmentRef {
+            file_id: file_id.clone(),
+            filename: "fallback.png".to_string(),
+            content_type: "image/png".to_string(),
+        }];
+
+        let blocks = resolve_attachments(&attachments, Some("tenant-a"));
+        assert!(
+            blocks.is_empty(),
+            "scoped callers must not resolve unregistered uploads"
+        );
+
+        let _ = std::fs::remove_file(upload_dir.join(file_id));
     }
 }

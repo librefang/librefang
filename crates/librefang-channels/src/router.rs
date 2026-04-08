@@ -147,6 +147,17 @@ impl AgentRouter {
             .insert(channel_key.to_string(), agent_id);
     }
 
+    fn account_scoped_user_key(account_id: &str, user_key: &str) -> String {
+        format!("{account_id}:{user_key}")
+    }
+
+    fn account_scoped_channel_key(channel_key: &str, account_id: Option<&str>) -> String {
+        match account_id {
+            Some(account_id) if !account_id.is_empty() => format!("{channel_key}:{account_id}"),
+            _ => channel_key.to_string(),
+        }
+    }
+
     /// Resolve which agent should handle a message.
     ///
     /// Priority: bindings > direct route > user default > system default.
@@ -210,8 +221,33 @@ impl AgentRouter {
         if let Some(agent_id) = self.resolve_binding(ctx) {
             return Some(agent_id);
         }
-        // Fall back to standard resolution
         let channel_key = format!("{channel_type:?}");
+        if let Some(account_id) = ctx.account_id.as_deref() {
+            let scoped_channel_key =
+                Self::account_scoped_channel_key(&channel_key, Some(account_id));
+            let scoped_user_key = Self::account_scoped_user_key(account_id, platform_user_id);
+            if let Some(agent) = self
+                .direct_routes
+                .get(&(scoped_channel_key.clone(), scoped_user_key.clone()))
+            {
+                return Some(*agent);
+            }
+            if let Some(key) = user_key {
+                let scoped_key = Self::account_scoped_user_key(account_id, key);
+                if let Some(agent) = self.user_defaults.get(&scoped_key) {
+                    return Some(*agent);
+                }
+            }
+            if let Some(agent) = self.user_defaults.get(&scoped_user_key) {
+                return Some(*agent);
+            }
+            if let Some(agent) = self.channel_defaults.get(&scoped_channel_key) {
+                return Some(*agent);
+            }
+            return None;
+        }
+
+        // Legacy/non-account-aware resolution path.
         if let Some(agent) = self
             .direct_routes
             .get(&(channel_key.clone(), platform_user_id.to_string()))
@@ -624,6 +660,59 @@ mod tests {
         // WhatsApp has no channel default — falls to system default
         let resolved = router.resolve(&ChannelType::WhatsApp, "user1", None);
         assert_eq!(resolved, Some(system_default));
+    }
+
+    #[test]
+    fn test_account_scoped_channel_defaults_are_isolated() {
+        let router = AgentRouter::new();
+        let tenant_a = AgentId::new();
+        let tenant_b = AgentId::new();
+        router.set_channel_default("Telegram:tenant-a".to_string(), tenant_a);
+        router.set_channel_default("Telegram:tenant-b".to_string(), tenant_b);
+
+        let tenant_a_ctx = BindingContext {
+            channel: Cow::Borrowed("telegram"),
+            account_id: Some(Cow::Borrowed("tenant-a")),
+            peer_id: Cow::Borrowed("shared-user"),
+            guild_id: None,
+            roles: SmallVec::new(),
+        };
+        let tenant_b_ctx = BindingContext {
+            channel: Cow::Borrowed("telegram"),
+            account_id: Some(Cow::Borrowed("tenant-b")),
+            peer_id: Cow::Borrowed("shared-user"),
+            guild_id: None,
+            roles: SmallVec::new(),
+        };
+
+        assert_eq!(
+            router.resolve_with_context(&ChannelType::Telegram, "shared-user", None, &tenant_a_ctx),
+            Some(tenant_a)
+        );
+        assert_eq!(
+            router.resolve_with_context(&ChannelType::Telegram, "shared-user", None, &tenant_b_ctx),
+            Some(tenant_b)
+        );
+    }
+
+    #[test]
+    fn test_account_bound_resolution_does_not_fall_back_to_system_default() {
+        let mut router = AgentRouter::new();
+        let system_default = AgentId::new();
+        router.set_default(system_default);
+
+        let tenant_ctx = BindingContext {
+            channel: Cow::Borrowed("telegram"),
+            account_id: Some(Cow::Borrowed("tenant-a")),
+            peer_id: Cow::Borrowed("shared-user"),
+            guild_id: None,
+            roles: SmallVec::new(),
+        };
+
+        assert_eq!(
+            router.resolve_with_context(&ChannelType::Telegram, "shared-user", None, &tenant_ctx),
+            None
+        );
     }
 
     #[test]

@@ -57,11 +57,12 @@ use axum::response::IntoResponse;
 use axum::Json;
 use librefang_runtime::kernel_handle::KernelHandle;
 use librefang_runtime::tool_runner::builtin_tool_definitions;
+use librefang_types::agent::AgentEntry;
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
 
-use super::shared::{check_account, require_admin};
+use super::shared::{check_account, require_admin_account, require_concrete_account};
 use crate::middleware::AccountId;
 use crate::types::ApiErrorResponse;
 // ---------------------------------------------------------------------------
@@ -82,7 +83,9 @@ pub async fn list_peers(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     // Peer registry is network-level, not tenant-scoped. Admin-only.
-    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+    if let Err((code, json)) =
+        require_admin_account(&account, &state.kernel.config_ref().admin_accounts)
+    {
         return (code, json).into_response();
     }
     // Peers are tracked in the wire module's PeerRegistry.
@@ -129,7 +132,9 @@ pub async fn get_peer(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+    if let Err((code, json)) =
+        require_admin_account(&account, &state.kernel.config_ref().admin_accounts)
+    {
         return (code, json).into_response();
     }
     let registry = match state.peer_registry {
@@ -173,7 +178,9 @@ pub async fn network_status(
     account: AccountId,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+    if let Err((code, json)) =
+        require_admin_account(&account, &state.kernel.config_ref().admin_accounts)
+    {
         return (code, json).into_response();
     }
     let cfg = state.kernel.config_ref();
@@ -215,10 +222,12 @@ pub async fn a2a_agent_card(
     account: AccountId,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    let agents = match account.0 {
-        Some(ref owner) => state.kernel.agent_registry().list_by_account(owner),
-        None => state.kernel.agent_registry().list(),
-    };
+    if let Err((code, json)) =
+        require_admin_account(&account, &state.kernel.config_ref().admin_accounts)
+    {
+        return (code, json).into_response();
+    }
+    let agents = state.kernel.agent_registry().list();
     let cfg = state.kernel.config_ref();
     let base_url = format!("http://{}", cfg.api_listen);
 
@@ -262,6 +271,7 @@ pub async fn a2a_agent_card(
         StatusCode::OK,
         Json(serde_json::to_value(&card).unwrap_or_default()),
     )
+        .into_response()
 }
 
 /// GET /a2a/agents — List all A2A agent cards.
@@ -277,10 +287,12 @@ pub async fn a2a_list_agents(
     account: AccountId,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    let agents = match account.0 {
-        Some(ref owner) => state.kernel.agent_registry().list_by_account(owner),
-        None => state.kernel.agent_registry().list(),
-    };
+    if let Err((code, json)) =
+        require_admin_account(&account, &state.kernel.config_ref().admin_accounts)
+    {
+        return (code, json).into_response();
+    }
+    let agents = state.kernel.agent_registry().list();
     let base_url = format!("http://{}", state.kernel.config_ref().api_listen);
 
     let cards: Vec<serde_json::Value> = agents
@@ -299,6 +311,7 @@ pub async fn a2a_list_agents(
             "total": total,
         })),
     )
+        .into_response()
 }
 
 /// POST /a2a/tasks/send — Submit a task to an agent via A2A.
@@ -316,6 +329,11 @@ pub async fn a2a_send_task(
     State(state): State<Arc<AppState>>,
     Json(request): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    if let Err((code, json)) =
+        require_admin_account(&account, &state.kernel.config_ref().admin_accounts)
+    {
+        return (code, json).into_response();
+    }
     // Extract message text from A2A format
     let message_text = request["params"]["message"]["parts"]
         .as_array()
@@ -331,12 +349,11 @@ pub async fn a2a_send_task(
         .unwrap_or_else(|| "No message provided".to_string());
 
     // Find target agent (use first available or specified)
-    let agents = match account.0 {
-        Some(ref owner) => state.kernel.agent_registry().list_by_account(owner),
-        None => state.kernel.agent_registry().list(),
-    };
+    let agents = state.kernel.agent_registry().list();
     if agents.is_empty() {
-        return ApiErrorResponse::not_found("No agents available").into_json_tuple();
+        return ApiErrorResponse::not_found("No agents available")
+            .into_json_tuple()
+            .into_response();
     }
 
     let agent = &agents[0];
@@ -375,9 +392,11 @@ pub async fn a2a_send_task(
                 Some(completed_task) => (
                     StatusCode::OK,
                     Json(serde_json::to_value(&completed_task).unwrap_or_default()),
-                ),
+                )
+                    .into_response(),
                 None => ApiErrorResponse::internal("Task disappeared after completion")
-                    .into_json_tuple(),
+                    .into_json_tuple()
+                    .into_response(),
             }
         }
         Err(e) => {
@@ -392,8 +411,11 @@ pub async fn a2a_send_task(
                 Some(failed_task) => (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(serde_json::to_value(&failed_task).unwrap_or_default()),
-                ),
-                None => ApiErrorResponse::internal(format!("Agent error: {e}")).into_json_tuple(),
+                )
+                    .into_response(),
+                None => ApiErrorResponse::internal(format!("Agent error: {e}"))
+                    .into_json_tuple()
+                    .into_response(),
             }
         }
     }
@@ -415,19 +437,22 @@ pub async fn a2a_get_task(
     account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(task_id): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     // A2A task store has no tenant scoping yet. Admin-only until task ownership is added.
-    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
-        return (code, json);
+    if let Err((code, json)) =
+        require_admin_account(&account, &state.kernel.config_ref().admin_accounts)
+    {
+        return (code, json).into_response();
     }
     match state.kernel.a2a_tasks().get(&task_id) {
         Some(task) => (
             StatusCode::OK,
             Json(serde_json::to_value(&task).unwrap_or_default()),
-        ),
-        None => {
-            ApiErrorResponse::not_found(format!("Task '{}' not found", task_id)).into_json_tuple()
-        }
+        )
+            .into_response(),
+        None => ApiErrorResponse::not_found(format!("Task '{}' not found", task_id))
+            .into_json_tuple()
+            .into_response(),
     }
 }
 
@@ -447,22 +472,27 @@ pub async fn a2a_cancel_task(
     account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(task_id): Path<String>,
-) -> impl IntoResponse {
-    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
-        return (code, json);
+) -> axum::response::Response {
+    if let Err((code, json)) =
+        require_admin_account(&account, &state.kernel.config_ref().admin_accounts)
+    {
+        return (code, json).into_response();
     }
     if state.kernel.a2a_tasks().cancel(&task_id) {
         match state.kernel.a2a_tasks().get(&task_id) {
             Some(task) => (
                 StatusCode::OK,
                 Json(serde_json::to_value(&task).unwrap_or_default()),
-            ),
-            None => {
-                ApiErrorResponse::internal("Task disappeared after cancellation").into_json_tuple()
-            }
+            )
+                .into_response(),
+            None => ApiErrorResponse::internal("Task disappeared after cancellation")
+                .into_json_tuple()
+                .into_response(),
         }
     } else {
-        ApiErrorResponse::not_found(format!("Task '{}' not found", task_id)).into_json_tuple()
+        ApiErrorResponse::not_found(format!("Task '{}' not found", task_id))
+            .into_json_tuple()
+            .into_response()
     }
 }
 
@@ -482,7 +512,9 @@ pub async fn a2a_list_external_agents(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     // External agent discovery is system-level. Admin-only.
-    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+    if let Err((code, json)) =
+        require_admin_account(&account, &state.kernel.config_ref().admin_accounts)
+    {
         return (code, json).into_response();
     }
     let agents = state
@@ -684,9 +716,11 @@ pub async fn a2a_get_external_agent(
     account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> impl IntoResponse {
-    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
-        return (code, json);
+) -> axum::response::Response {
+    if let Err((code, json)) =
+        require_admin_account(&account, &state.kernel.config_ref().admin_accounts)
+    {
+        return (code, json).into_response();
     }
     let agents = state
         .kernel
@@ -707,21 +741,23 @@ pub async fn a2a_get_external_agent(
     // Try by index first
     if let Ok(idx) = id.parse::<usize>() {
         if let Some(entry) = agents.get(idx) {
-            return (StatusCode::OK, Json(make_response(entry)));
+            return (StatusCode::OK, Json(make_response(entry))).into_response();
         }
     }
 
     // Try by URL match
     if let Some(entry) = agents.iter().find(|(_, c)| c.url == id) {
-        return (StatusCode::OK, Json(make_response(entry)));
+        return (StatusCode::OK, Json(make_response(entry))).into_response();
     }
 
     // Try by agent name
     if let Some(entry) = agents.iter().find(|(_, c)| c.name == id) {
-        return (StatusCode::OK, Json(make_response(entry)));
+        return (StatusCode::OK, Json(make_response(entry))).into_response();
     }
 
-    ApiErrorResponse::not_found(format!("A2A agent '{}' not found", id)).into_json_tuple()
+    ApiErrorResponse::not_found(format!("A2A agent '{}' not found", id))
+        .into_json_tuple()
+        .into_response()
 }
 
 /// POST /api/a2a/discover — Discover a new external A2A agent by URL.
@@ -738,13 +774,19 @@ pub async fn a2a_discover_external(
     account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
-) -> impl IntoResponse {
-    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
-        return (code, json);
+) -> axum::response::Response {
+    if let Err((code, json)) =
+        require_admin_account(&account, &state.kernel.config_ref().admin_accounts)
+    {
+        return (code, json).into_response();
     }
     let url = match body["url"].as_str() {
         Some(u) => u.to_string(),
-        None => return ApiErrorResponse::bad_request("Missing 'url' field").into_json_tuple(),
+        None => {
+            return ApiErrorResponse::bad_request("Missing 'url' field")
+                .into_json_tuple()
+                .into_response()
+        }
     };
 
     // SSRF protection: validate URL before making any outbound request
@@ -756,7 +798,9 @@ pub async fn a2a_discover_external(
         .ssrf_allowed_hosts
         .clone();
     if let Err(reason) = is_url_safe_for_ssrf(&url, &ssrf_allowed) {
-        return ApiErrorResponse::bad_request(reason).into_json_tuple();
+        return ApiErrorResponse::bad_request(reason)
+            .into_json_tuple()
+            .into_response();
     }
 
     let client = librefang_runtime::a2a::A2aClient::new();
@@ -784,11 +828,13 @@ pub async fn a2a_discover_external(
                     "agent": card_json,
                 })),
             )
+                .into_response()
         }
         Err(e) => (
             StatusCode::BAD_GATEWAY,
             Json(serde_json::json!({"error": e})),
-        ),
+        )
+            .into_response(),
     }
 }
 
@@ -806,17 +852,27 @@ pub async fn a2a_send_external(
     account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
-) -> impl IntoResponse {
-    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
-        return (code, json);
+) -> axum::response::Response {
+    if let Err((code, json)) =
+        require_admin_account(&account, &state.kernel.config_ref().admin_accounts)
+    {
+        return (code, json).into_response();
     }
     let url = match body["url"].as_str() {
         Some(u) => u.to_string(),
-        None => return ApiErrorResponse::bad_request("Missing 'url' field").into_json_tuple(),
+        None => {
+            return ApiErrorResponse::bad_request("Missing 'url' field")
+                .into_json_tuple()
+                .into_response()
+        }
     };
     let message = match body["message"].as_str() {
         Some(m) => m.to_string(),
-        None => return ApiErrorResponse::bad_request("Missing 'message' field").into_json_tuple(),
+        None => {
+            return ApiErrorResponse::bad_request("Missing 'message' field")
+                .into_json_tuple()
+                .into_response()
+        }
     };
     let session_id = body["session_id"].as_str();
 
@@ -829,7 +885,9 @@ pub async fn a2a_send_external(
         .ssrf_allowed_hosts
         .clone();
     if let Err(reason) = is_url_safe_for_ssrf(&url, &ssrf_allowed) {
-        return ApiErrorResponse::bad_request(reason).into_json_tuple();
+        return ApiErrorResponse::bad_request(reason)
+            .into_json_tuple()
+            .into_response();
     }
 
     let client = librefang_runtime::a2a::A2aClient::new();
@@ -837,11 +895,13 @@ pub async fn a2a_send_external(
         Ok(task) => (
             StatusCode::OK,
             Json(serde_json::to_value(&task).unwrap_or_default()),
-        ),
+        )
+            .into_response(),
         Err(e) => (
             StatusCode::BAD_GATEWAY,
             Json(serde_json::json!({"error": e})),
-        ),
+        )
+            .into_response(),
     }
 }
 
@@ -863,14 +923,18 @@ pub async fn a2a_external_task_status(
     State(state): State<Arc<AppState>>,
     Path(task_id): Path<String>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
-) -> impl IntoResponse {
-    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
-        return (code, json);
+) -> axum::response::Response {
+    if let Err((code, json)) =
+        require_admin_account(&account, &state.kernel.config_ref().admin_accounts)
+    {
+        return (code, json).into_response();
     }
     let url = match params.get("url") {
         Some(u) => u.clone(),
         None => {
-            return ApiErrorResponse::bad_request("Missing 'url' query parameter").into_json_tuple()
+            return ApiErrorResponse::bad_request("Missing 'url' query parameter")
+                .into_json_tuple()
+                .into_response()
         }
     };
 
@@ -883,7 +947,9 @@ pub async fn a2a_external_task_status(
         .ssrf_allowed_hosts
         .clone();
     if let Err(reason) = is_url_safe_for_ssrf(&url, &ssrf_allowed) {
-        return ApiErrorResponse::bad_request(reason).into_json_tuple();
+        return ApiErrorResponse::bad_request(reason)
+            .into_json_tuple()
+            .into_response();
     }
 
     let client = librefang_runtime::a2a::A2aClient::new();
@@ -891,11 +957,13 @@ pub async fn a2a_external_task_status(
         Ok(task) => (
             StatusCode::OK,
             Json(serde_json::to_value(&task).unwrap_or_default()),
-        ),
+        )
+            .into_response(),
         Err(e) => (
             StatusCode::BAD_GATEWAY,
             Json(serde_json::json!({"error": e})),
-        ),
+        )
+            .into_response(),
     }
 }
 
@@ -920,7 +988,9 @@ pub async fn mcp_http(
     Json(request): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     // MCP tool visibility needs tenant scoping. Admin-only until MCP session has account context.
-    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+    if let Err((code, json)) =
+        require_admin_account(&account, &state.kernel.config_ref().admin_accounts)
+    {
         return (code, json).into_response();
     }
     // Gather all available tools (builtin + skills + MCP)
@@ -1046,10 +1116,12 @@ pub async fn comms_topology(
 ) -> impl IntoResponse {
     use librefang_types::comms::{EdgeKind, TopoEdge, TopoNode, Topology};
 
-    let agents = match account.0 {
-        Some(ref owner) => state.kernel.agent_registry().list_by_account(owner),
-        None => state.kernel.agent_registry().list(),
+    let owner = match require_concrete_account(&account) {
+        Ok(owner) => owner,
+        Err((code, json)) => return (code, json).into_response(),
     };
+    let agents = state.kernel.agent_registry().list_by_account(owner);
+    let owned_ids = owned_agent_ids(&agents);
 
     let nodes: Vec<TopoNode> = agents
         .iter()
@@ -1066,6 +1138,9 @@ pub async fn comms_topology(
     // Parent-child edges from registry
     for agent in &agents {
         for child_id in &agent.children {
+            if !owned_ids.contains(&child_id.to_string()) {
+                continue;
+            }
             edges.push(TopoEdge {
                 from: agent.id.to_string(),
                 to: child_id.to_string(),
@@ -1082,6 +1157,9 @@ pub async fn comms_topology(
             if let librefang_types::event::EventTarget::Agent(target_id) = &event.target {
                 let from = event.source.to_string();
                 let to = target_id.to_string();
+                if !owned_ids.contains(&from) || !owned_ids.contains(&to) {
+                    continue;
+                }
                 // Deduplicate: only one edge per pair, skip self-loops
                 if from != to {
                     let key = if from < to {
@@ -1101,7 +1179,7 @@ pub async fn comms_topology(
         }
     }
 
-    Json(serde_json::to_value(Topology { nodes, edges }).unwrap_or_default())
+    Json(serde_json::to_value(Topology { nodes, edges }).unwrap_or_default()).into_response()
 }
 
 /// Filter a kernel event into a CommsEvent, if it represents inter-agent communication.
@@ -1259,6 +1337,25 @@ fn audit_to_comms_event(
     })
 }
 
+fn owned_agent_ids(agents: &[AgentEntry]) -> std::collections::HashSet<String> {
+    agents.iter().map(|agent| agent.id.to_string()).collect()
+}
+
+fn comms_event_within_owned_agents(
+    event: &librefang_types::comms::CommsEvent,
+    owned_ids: &std::collections::HashSet<String>,
+) -> bool {
+    let source_ok = event.source_id.is_empty()
+        || event.source_id == "system"
+        || event.source_id == "user"
+        || owned_ids.contains(&event.source_id);
+    let target_ok = event.target_id.is_empty()
+        || event.target_id == "system"
+        || event.target_id == "user"
+        || owned_ids.contains(&event.target_id);
+    source_ok && target_ok
+}
+
 /// GET /api/comms/events — Return recent inter-agent communication events.
 ///
 /// Sources from both the event bus (for lifecycle events with full context)
@@ -1285,16 +1382,19 @@ pub async fn comms_events(
         .unwrap_or(100)
         .min(500);
 
-    let agents = match account.0 {
-        Some(ref owner) => state.kernel.agent_registry().list_by_account(owner),
-        None => state.kernel.agent_registry().list(),
+    let owner = match require_concrete_account(&account) {
+        Ok(owner) => owner,
+        Err((code, json)) => return (code, json).into_response(),
     };
+    let agents = state.kernel.agent_registry().list_by_account(owner);
+    let owned_ids = owned_agent_ids(&agents);
 
     // Primary source: event bus (has full source/target context)
     let bus_events = state.kernel.event_bus_ref().history(500).await;
     let mut comms_events: Vec<librefang_types::comms::CommsEvent> = bus_events
         .iter()
         .filter_map(|e| filter_to_comms_event(e, &agents))
+        .filter(|event| comms_event_within_owned_agents(event, &owned_ids))
         .collect();
 
     // Secondary source: audit log (always populated, wider coverage)
@@ -1304,7 +1404,7 @@ pub async fn comms_events(
 
     for entry in audit_entries.iter().rev() {
         if let Some(ev) = audit_to_comms_event(entry, &agents) {
-            if !seen_ids.contains(&ev.id) {
+            if comms_event_within_owned_agents(&ev, &owned_ids) && !seen_ids.contains(&ev.id) {
                 comms_events.push(ev);
             }
         }
@@ -1314,7 +1414,7 @@ pub async fn comms_events(
     comms_events.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
     comms_events.truncate(limit);
 
-    Json(comms_events)
+    Json(comms_events).into_response()
 }
 
 /// GET /api/comms/events/stream — SSE stream of inter-agent communication events.
@@ -1334,6 +1434,11 @@ pub async fn comms_events_stream(
 ) -> axum::response::Response {
     use axum::response::sse::{Event, KeepAlive, Sse};
 
+    let owner = match require_concrete_account(&account) {
+        Ok(owner) => owner.to_string(),
+        Err((code, json)) => return (code, json).into_response(),
+    };
+
     let (tx, rx) = tokio::sync::mpsc::channel::<
         Result<axum::response::sse::Event, std::convert::Infallible>,
     >(256);
@@ -1347,10 +1452,8 @@ pub async fn comms_events_stream(
         loop {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-            let agents = match account.0 {
-                Some(ref owner) => state.kernel.agent_registry().list_by_account(owner),
-                None => state.kernel.agent_registry().list(),
-            };
+            let agents = state.kernel.agent_registry().list_by_account(&owner);
+            let owned_ids = owned_agent_ids(&agents);
             let entries = state.kernel.audit().recent(50);
 
             for entry in &entries {
@@ -1358,6 +1461,9 @@ pub async fn comms_events_stream(
                     continue;
                 }
                 if let Some(comms_event) = audit_to_comms_event(entry, &agents) {
+                    if !comms_event_within_owned_agents(&comms_event, &owned_ids) {
+                        continue;
+                    }
                     let data = serde_json::to_string(&comms_event).unwrap_or_default();
                     if tx.send(Ok(Event::default().data(data))).await.is_err() {
                         return; // Client disconnected
@@ -1395,33 +1501,52 @@ pub async fn comms_send(
     account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(req): Json<librefang_types::comms::CommsSendRequest>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_concrete_account(&account) {
+        return (code, json).into_response();
+    }
     // Validate from agent exists and belongs to the requesting tenant
     let from_id: librefang_types::agent::AgentId = match req.from_agent_id.parse() {
         Ok(id) => id,
-        Err(_) => return ApiErrorResponse::bad_request("Invalid from_agent_id").into_json_tuple(),
+        Err(_) => {
+            return ApiErrorResponse::bad_request("Invalid from_agent_id")
+                .into_json_tuple()
+                .into_response()
+        }
     };
     match state.kernel.agent_registry().get(from_id) {
         Some(entry) => {
             if let Err(resp) = check_account(&entry, &account) {
-                return resp;
+                return resp.into_response();
             }
         }
-        None => return ApiErrorResponse::not_found("Source agent not found").into_json_tuple(),
+        None => {
+            return ApiErrorResponse::not_found("Source agent not found")
+                .into_json_tuple()
+                .into_response()
+        }
     }
 
     // Validate to agent exists and belongs to the requesting tenant
     let to_id: librefang_types::agent::AgentId = match req.to_agent_id.parse() {
         Ok(id) => id,
-        Err(_) => return ApiErrorResponse::bad_request("Invalid to_agent_id").into_json_tuple(),
+        Err(_) => {
+            return ApiErrorResponse::bad_request("Invalid to_agent_id")
+                .into_json_tuple()
+                .into_response()
+        }
     };
     match state.kernel.agent_registry().get(to_id) {
         Some(entry) => {
             if let Err(resp) = check_account(&entry, &account) {
-                return resp;
+                return resp.into_response();
             }
         }
-        None => return ApiErrorResponse::not_found("Target agent not found").into_json_tuple(),
+        None => {
+            return ApiErrorResponse::not_found("Target agent not found")
+                .into_json_tuple()
+                .into_response()
+        }
     }
 
     // SECURITY: Limit message size
@@ -1429,7 +1554,8 @@ pub async fn comms_send(
         return (
             StatusCode::PAYLOAD_TOO_LARGE,
             Json(serde_json::json!({"error": "Message too large (max 64KB)"})),
-        );
+        )
+            .into_response();
     }
 
     // Resolve URL-based attachments into image content blocks
@@ -1465,11 +1591,11 @@ pub async fn comms_send(
             if let Some(tid) = &req.thread_id {
                 resp["thread_id"] = serde_json::json!(tid);
             }
-            (StatusCode::OK, Json(resp))
+            (StatusCode::OK, Json(resp)).into_response()
         }
-        Err(e) => {
-            ApiErrorResponse::internal(format!("Message delivery failed: {e}")).into_json_tuple()
-        }
+        Err(e) => ApiErrorResponse::internal(format!("Message delivery failed: {e}"))
+            .into_json_tuple()
+            .into_response(),
     }
 }
 
@@ -1487,13 +1613,17 @@ pub async fn comms_task(
     account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(req): Json<librefang_types::comms::CommsTaskRequest>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     // Task queue posting needs tenant-scoped isolation. Admin-only until task store has account_id.
-    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
-        return (code, json);
+    if let Err((code, json)) =
+        require_admin_account(&account, &state.kernel.config_ref().admin_accounts)
+    {
+        return (code, json).into_response();
     }
     if req.title.is_empty() {
-        return ApiErrorResponse::bad_request("Title is required").into_json_tuple();
+        return ApiErrorResponse::bad_request("Title is required")
+            .into_json_tuple()
+            .into_response();
     }
 
     match state
@@ -1513,8 +1643,11 @@ pub async fn comms_task(
                 "ok": true,
                 "task_id": task_id,
             })),
-        ),
-        Err(e) => ApiErrorResponse::internal(format!("Failed to post task: {e}")).into_json_tuple(),
+        )
+            .into_response(),
+        Err(e) => ApiErrorResponse::internal(format!("Failed to post task: {e}"))
+            .into_json_tuple()
+            .into_response(),
     }
 }
 

@@ -525,7 +525,8 @@ async fn handle_text_message(
                     .filter_map(|a| serde_json::from_value(a.clone()).ok())
                     .collect();
                 if !refs.is_empty() {
-                    let image_blocks = crate::routes::resolve_attachments(&refs);
+                    let image_blocks =
+                        crate::routes::resolve_attachments(&refs, account_id.as_deref());
                     if !image_blocks.is_empty() {
                         has_images = true;
                         crate::routes::inject_attachments_into_session(

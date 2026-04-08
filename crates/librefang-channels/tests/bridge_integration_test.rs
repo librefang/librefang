@@ -15,10 +15,13 @@ use librefang_channels::types::{
     ChannelAdapter, ChannelContent, ChannelMessage, ChannelType, ChannelUser,
 };
 use librefang_types::agent::AgentId;
+use serde_json::Value;
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, watch};
+
+const TEST_ACCOUNT_ID: &str = "tenant-a";
 
 // ---------------------------------------------------------------------------
 // Mock Adapter — injects test messages, captures sent responses
@@ -151,6 +154,11 @@ impl ChannelBridgeHandle for MockHandle {
 // ---------------------------------------------------------------------------
 
 fn make_text_msg(channel: ChannelType, user_id: &str, text: &str) -> ChannelMessage {
+    let mut metadata = HashMap::new();
+    metadata.insert(
+        "account_id".to_string(),
+        Value::String(TEST_ACCOUNT_ID.to_string()),
+    );
     ChannelMessage {
         channel,
         platform_message_id: "msg1".to_string(),
@@ -164,7 +172,7 @@ fn make_text_msg(channel: ChannelType, user_id: &str, text: &str) -> ChannelMess
         timestamp: chrono::Utc::now(),
         is_group: false,
         thread_id: None,
-        metadata: HashMap::new(),
+        metadata,
     }
 }
 
@@ -174,6 +182,11 @@ fn make_command_msg(
     cmd: &str,
     args: Vec<&str>,
 ) -> ChannelMessage {
+    let mut metadata = HashMap::new();
+    metadata.insert(
+        "account_id".to_string(),
+        Value::String(TEST_ACCOUNT_ID.to_string()),
+    );
     ChannelMessage {
         channel,
         platform_message_id: "msg1".to_string(),
@@ -190,7 +203,7 @@ fn make_command_msg(
         timestamp: chrono::Utc::now(),
         is_group: false,
         thread_id: None,
-        metadata: HashMap::new(),
+        metadata,
     }
 }
 
@@ -207,7 +220,7 @@ async fn test_bridge_dispatch_text_message() {
     let router = Arc::new(AgentRouter::new());
 
     // Pre-route the user to the agent
-    router.set_user_default("user1".to_string(), agent_id);
+    router.set_user_default(format!("{TEST_ACCOUNT_ID}:user1"), agent_id);
 
     let (adapter, tx) = MockAdapter::new("test-adapter", ChannelType::Telegram);
     let adapter_ref = adapter.clone();
@@ -353,7 +366,18 @@ async fn test_bridge_dispatch_agent_select_command() {
     );
 
     // Verify router was updated — user42 should now route to agent_id
-    let resolved = router.resolve(&ChannelType::Telegram, "user42", None);
+    let resolved = router.resolve_with_context(
+        &ChannelType::Telegram,
+        "user42",
+        None,
+        &librefang_channels::router::BindingContext {
+            channel: std::borrow::Cow::Borrowed("telegram"),
+            account_id: Some(std::borrow::Cow::Borrowed(TEST_ACCOUNT_ID)),
+            peer_id: std::borrow::Cow::Borrowed("user42"),
+            guild_id: None,
+            roles: smallvec::SmallVec::new(),
+        },
+    );
     assert_eq!(resolved, Some(agent_id));
 
     manager.stop().await;
@@ -381,8 +405,10 @@ async fn test_bridge_dispatch_no_agent_assigned() {
     let sent = adapter_ref.get_sent();
     assert_eq!(sent.len(), 1);
     assert!(
-        sent[0].1.contains("No agents available"),
-        "Expected 'No agents available' message, got: {}",
+        sent[0]
+            .1
+            .contains("No agent is bound for this tenant channel integration"),
+        "Expected tenant-scoped no-agent message, got: {}",
         sent[0].1
     );
 
@@ -463,7 +489,7 @@ async fn test_bridge_manager_lifecycle() {
     let agent_id = AgentId::new();
     let handle = Arc::new(MockHandle::new(vec![(agent_id, "bot".to_string())]));
     let router = Arc::new(AgentRouter::new());
-    router.set_user_default("user1".to_string(), agent_id);
+    router.set_user_default(format!("{TEST_ACCOUNT_ID}:user1"), agent_id);
 
     let (adapter, tx) = MockAdapter::new("lifecycle-adapter", ChannelType::WebChat);
     let adapter_ref = adapter.clone();
@@ -501,8 +527,8 @@ async fn test_bridge_multiple_adapters() {
     let agent_id = AgentId::new();
     let handle = Arc::new(MockHandle::new(vec![(agent_id, "multi".to_string())]));
     let router = Arc::new(AgentRouter::new());
-    router.set_user_default("tg_user".to_string(), agent_id);
-    router.set_user_default("dc_user".to_string(), agent_id);
+    router.set_user_default(format!("{TEST_ACCOUNT_ID}:tg_user"), agent_id);
+    router.set_user_default(format!("{TEST_ACCOUNT_ID}:dc_user"), agent_id);
 
     let (tg_adapter, tg_tx) = MockAdapter::new("telegram", ChannelType::Telegram);
     let (dc_adapter, dc_tx) = MockAdapter::new("discord", ChannelType::Discord);
@@ -736,7 +762,7 @@ async fn test_bridge_streaming_adapter_uses_send_streaming() {
         "streamer".to_string(),
     )]));
     let router = Arc::new(AgentRouter::new());
-    router.set_user_default("user1".to_string(), agent_id);
+    router.set_user_default(format!("{TEST_ACCOUNT_ID}:user1"), agent_id);
 
     let (adapter, tx) = MockStreamingAdapter::new("stream-adapter", ChannelType::Telegram);
     let adapter_ref = adapter.clone();
@@ -791,7 +817,7 @@ async fn test_bridge_non_streaming_adapter_falls_back_to_send() {
         "basic".to_string(),
     )]));
     let router = Arc::new(AgentRouter::new());
-    router.set_user_default("user1".to_string(), agent_id);
+    router.set_user_default(format!("{TEST_ACCOUNT_ID}:user1"), agent_id);
 
     // Use the plain MockAdapter which does NOT support streaming
     let (adapter, tx) = MockAdapter::new("basic-adapter", ChannelType::Discord);

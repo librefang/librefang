@@ -132,9 +132,9 @@ pub trait KernelHandle: Send + Sync {
         Err("Cron scheduler not available".to_string())
     }
 
-    /// Cancel a cron job by ID.
-    async fn cron_cancel(&self, job_id: &str) -> Result<(), String> {
-        let _ = job_id;
+    /// Cancel a cron job owned by the calling agent.
+    async fn cron_cancel(&self, agent_id: &str, job_id: &str) -> Result<(), String> {
+        let _ = (agent_id, job_id);
         Err("Cron scheduler not available".to_string())
     }
 
@@ -451,13 +451,18 @@ pub trait KernelHandle: Send + Sync {
 
     /// List active goals (pending or in_progress), optionally filtered by agent ID.
     /// Returns a JSON array of goal objects.
-    fn goal_list_active(&self, _agent_id: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
+    fn goal_list_active(
+        &self,
+        _caller_agent_id: &str,
+        _agent_id: Option<&str>,
+    ) -> Result<Vec<serde_json::Value>, String> {
         Ok(Vec::new())
     }
 
     /// Update a goal's status and/or progress. Returns the updated goal JSON.
     fn goal_update(
         &self,
+        _caller_agent_id: &str,
         _goal_id: &str,
         _status: Option<&str>,
         _progress: Option<u8>,

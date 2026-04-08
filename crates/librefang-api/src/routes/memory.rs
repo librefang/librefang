@@ -1,12 +1,10 @@
 //! Proactive memory (mem0-style) API routes.
 
-// TODO(multi-tenant-phase2): Add AccountId parameter and tenant scoping
-
 use std::sync::Arc;
 
 use super::AppState;
 use crate::middleware::AccountId;
-use crate::routes::shared::check_account;
+use crate::routes::shared::{check_account, require_admin_account};
 
 /// Build routes for the memory/KV domain.
 pub fn router() -> axum::Router<Arc<AppState>> {
@@ -154,11 +152,19 @@ fn internal_error(e: impl std::fmt::Display) -> (StatusCode, Json<serde_json::Va
     ApiErrorResponse::internal("Internal server error").into_json_tuple()
 }
 
+fn scoped_account_id(account: &AccountId) -> Result<&str, (StatusCode, Json<serde_json::Value>)> {
+    account
+        .0
+        .as_deref()
+        .ok_or_else(|| ApiErrorResponse::bad_request("X-Account-Id required").into_json_tuple())
+}
+
 fn require_agent_access(
     state: &AppState,
     account: &AccountId,
     agent_id: &str,
 ) -> Result<librefang_types::agent::AgentId, (StatusCode, Json<serde_json::Value>)> {
+    let _ = scoped_account_id(account)?;
     let parsed = agent_id
         .parse::<librefang_types::agent::AgentId>()
         .map_err(|_| ApiErrorResponse::bad_request("Invalid agent ID").into_json_tuple())?;
@@ -177,6 +183,7 @@ fn require_memory_access(
     account: &AccountId,
     memory_id: &str,
 ) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
+    let _ = scoped_account_id(account)?;
     let owner_agent_id = store
         .find_agent_id_for_memory(memory_id)
         .map_err(internal_error)?
@@ -214,16 +221,15 @@ pub async fn memory_search(
         Ok(s) => s,
         Err(e) => return e,
     };
+    let owner = match scoped_account_id(&account) {
+        Ok(owner) => owner,
+        Err(e) => return e,
+    };
 
     let limit = params.limit.min(100);
-    let result = match account.0.as_deref() {
-        Some(owner) => {
-            store
-                .search_scoped(&params.q, MemoryScope::tenant(owner), limit)
-                .await
-        }
-        None => store.search_all(&params.q, limit).await,
-    };
+    let result = store
+        .search_scoped(&params.q, MemoryScope::tenant(owner), limit)
+        .await;
 
     match result {
         Ok(items) => (
@@ -259,44 +265,28 @@ pub async fn memory_list(
         Ok(s) => s,
         Err(e) => return e,
     };
+    let owner = match scoped_account_id(&account) {
+        Ok(owner) => owner,
+        Err(e) => return e,
+    };
 
     let limit = params.limit.min(100);
     let offset = params.offset;
 
-    match account.0.as_deref() {
-        Some(owner) => {
-            match store
-                .list_by_account(owner, params.category.as_deref(), limit, offset)
-                .await
-            {
-                Ok((page, total)) => (
-                    StatusCode::OK,
-                    Json(serde_json::json!({
-                        "memories": page,
-                        "total": total,
-                        "offset": offset,
-                        "limit": limit,
-                    })),
-                ),
-                Err(e) => internal_error(e),
-            }
-        }
-        None => match store.list_all(params.category.as_deref()).await {
-            Ok(items) => {
-                let total = items.len();
-                let page: Vec<_> = items.into_iter().skip(offset).take(limit).collect();
-                (
-                    StatusCode::OK,
-                    Json(serde_json::json!({
-                        "memories": page,
-                        "total": total,
-                        "offset": offset,
-                        "limit": limit,
-                    })),
-                )
-            }
-            Err(e) => internal_error(e),
-        },
+    match store
+        .list_by_account(owner, params.category.as_deref(), limit, offset)
+        .await
+    {
+        Ok((page, total)) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "memories": page,
+                "total": total,
+                "offset": offset,
+                "limit": limit,
+            })),
+        ),
+        Err(e) => internal_error(e),
     }
 }
 
@@ -317,10 +307,13 @@ pub async fn memory_get_user(
     account: AccountId,
     Path(user_id): Path<String>,
 ) -> impl IntoResponse {
+    let owner = match scoped_account_id(&account) {
+        Ok(owner) => owner,
+        Err(e) => return e,
+    };
     // user_id is an arbitrary namespace key, not necessarily an agent UUID.
     // If it parses as an AgentId AND the agent is registered, verify ownership.
-    // Otherwise (non-UUID or unregistered UUID) restrict to admin-only since we
-    // cannot verify tenant ownership without a registered agent entry.
+    // Otherwise reject because tenant-facing memory lookups require concrete ownership.
     let ownership_verified =
         if let Ok(agent_id) = user_id.parse::<librefang_types::agent::AgentId>() {
             if let Some(entry) = state.kernel.agent_registry().get(agent_id) {
@@ -334,7 +327,7 @@ pub async fn memory_get_user(
         } else {
             false
         };
-    if !ownership_verified && account.0.is_some() {
+    if !ownership_verified {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({
@@ -347,10 +340,7 @@ pub async fn memory_get_user(
         Err(e) => return e,
     };
 
-    let result = match account.0.as_deref() {
-        Some(owner) => store.get_scoped(&user_id, MemoryScope::tenant(owner)).await,
-        None => store.get(&user_id).await,
-    };
+    let result = store.get_scoped(&user_id, MemoryScope::tenant(owner)).await;
 
     match result {
         Ok(items) => (
@@ -382,6 +372,10 @@ pub async fn memory_add(
         Ok(s) => s,
         Err(e) => return e,
     };
+    let owner = match scoped_account_id(&account) {
+        Ok(owner) => owner,
+        Err(e) => return e,
+    };
 
     // In the proactive memory system, user_id maps to agent_id internally.
     // If agent_id is provided, prefer it; otherwise use user_id.
@@ -391,8 +385,8 @@ pub async fn memory_add(
         .unwrap_or_else(default_user_id);
 
     // effective_id can be an agent UUID or a user-provided string.
-    // If it's a registered agent, verify ownership. Otherwise (non-UUID or
-    // unregistered UUID) restrict to admin since we can't verify tenant ownership.
+    // If it's a registered agent, verify ownership. Otherwise reject because
+    // tenant-facing memory writes must resolve to a concrete tenant-owned agent.
     let ownership_verified =
         if let Ok(agent_id) = effective_id.parse::<librefang_types::agent::AgentId>() {
             if let Some(entry) = state.kernel.agent_registry().get(agent_id) {
@@ -406,7 +400,7 @@ pub async fn memory_add(
         } else {
             false
         };
-    if !ownership_verified && account.0.is_some() {
+    if !ownership_verified {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({
@@ -415,14 +409,9 @@ pub async fn memory_add(
         );
     }
 
-    let result = match account.0.as_deref() {
-        Some(owner) => {
-            store
-                .add_scoped(&body.messages, &effective_id, MemoryScope::tenant(owner))
-                .await
-        }
-        None => store.add(&body.messages, &effective_id).await,
-    };
+    let result = store
+        .add_scoped(&body.messages, &effective_id, MemoryScope::tenant(owner))
+        .await;
 
     match result {
         Ok(items) => (
@@ -508,28 +497,24 @@ pub async fn memory_delete(
         Err(e) => return e,
     };
 
-    match account.0.as_deref() {
-        Some(owner) => match store
-            .delete_scoped(&memory_id, MemoryScope::tenant(owner))
-            .await
-        {
-            Ok(()) => (
-                StatusCode::OK,
-                Json(serde_json::json!({"deleted": true, "memory_id": memory_id})),
-            ),
-            Err(librefang_types::error::LibreFangError::NotFound(_)) => {
-                ApiErrorResponse::not_found("Memory not found").into_json_tuple()
-            }
-            Err(e) => internal_error(e),
-        },
-        None => match store.delete(&memory_id, &real_agent_id).await {
-            Ok(true) => (
-                StatusCode::OK,
-                Json(serde_json::json!({"deleted": true, "memory_id": memory_id})),
-            ),
-            Ok(false) => ApiErrorResponse::not_found("Memory not found").into_json_tuple(),
-            Err(e) => internal_error(e),
-        },
+    let owner = match scoped_account_id(&account) {
+        Ok(owner) => owner,
+        Err(e) => return e,
+    };
+    let _ = real_agent_id;
+
+    match store
+        .delete_scoped(&memory_id, MemoryScope::tenant(owner))
+        .await
+    {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"deleted": true, "memory_id": memory_id})),
+        ),
+        Err(librefang_types::error::LibreFangError::NotFound(_)) => {
+            ApiErrorResponse::not_found("Memory not found").into_json_tuple()
+        }
+        Err(e) => internal_error(e),
     }
 }
 
@@ -554,6 +539,10 @@ pub async fn memory_bulk_delete(
         Ok(s) => s,
         Err(e) => return e,
     };
+    let owner = match scoped_account_id(&account) {
+        Ok(owner) => owner,
+        Err(e) => return e,
+    };
 
     let ids: Vec<String> = match body.get("ids").and_then(|v| v.as_array()) {
         Some(arr) => arr
@@ -575,13 +564,11 @@ pub async fn memory_bulk_delete(
                 continue;
             }
         };
-        let result = match account.0.as_deref() {
-            Some(owner) => store
-                .delete_scoped(id, MemoryScope::tenant(owner))
-                .await
-                .map(|_| true),
-            None => store.delete(id, &agent_id).await,
-        };
+        let _ = agent_id;
+        let result = store
+            .delete_scoped(id, MemoryScope::tenant(owner))
+            .await
+            .map(|_| true);
         match result {
             Ok(true) => deleted += 1,
             _ => failed += 1,
@@ -617,11 +604,11 @@ pub async fn memory_stats(
         Ok(s) => s,
         Err(e) => return e,
     };
-
-    let scope = match account.0.as_deref() {
-        Some(owner) => MemoryScope::tenant(owner),
-        None => MemoryScope::global(),
+    let owner = match scoped_account_id(&account) {
+        Ok(owner) => owner,
+        Err(e) => return e,
     };
+    let scope = MemoryScope::tenant(owner);
     let result = store.stats_scoped(scope).await;
 
     match result {
@@ -996,13 +983,10 @@ pub async fn memory_cleanup(
     State(state): State<Arc<AppState>>,
     account: AccountId,
 ) -> impl IntoResponse {
-    if account.0.is_some() {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({
-                "error": "This memory endpoint is only available to global admins"
-            })),
-        );
+    if let Err((code, json)) =
+        require_admin_account(&account, &state.kernel.config_ref().admin_accounts)
+    {
+        return (code, json);
     }
     let store = match get_pm_store(&state) {
         Ok(s) => s,
@@ -1123,13 +1107,10 @@ pub async fn memory_decay(
     State(state): State<Arc<AppState>>,
     account: AccountId,
 ) -> impl IntoResponse {
-    if account.0.is_some() {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({
-                "error": "This memory endpoint is only available to global admins"
-            })),
-        );
+    if let Err((code, json)) =
+        require_admin_account(&account, &state.kernel.config_ref().admin_accounts)
+    {
+        return (code, json);
     }
     let store = match get_pm_store(&state) {
         Ok(s) => s,
@@ -1341,12 +1322,10 @@ pub async fn memory_config_get(
     State(state): State<Arc<AppState>>,
     account: AccountId,
 ) -> impl IntoResponse {
-    if account.0.is_some() {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"error": "Memory configuration is admin-only"})),
-        )
-            .into_response();
+    if let Err((code, json)) =
+        require_admin_account(&account, &state.kernel.config_ref().admin_accounts)
+    {
+        return (code, json).into_response();
     }
     let config = state.kernel.config_ref();
     Json(serde_json::json!({
@@ -1375,11 +1354,10 @@ pub async fn memory_config_patch(
     account: AccountId,
     Json(req): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    if account.0.is_some() {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"error": "Memory configuration is admin-only"})),
-        );
+    if let Err((code, json)) =
+        require_admin_account(&account, &state.kernel.config_ref().admin_accounts)
+    {
+        return (code, json);
     }
     let config_path = state.kernel.home_dir().join("config.toml");
 

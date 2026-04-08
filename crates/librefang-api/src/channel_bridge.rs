@@ -7,6 +7,7 @@ use librefang_channels::bridge::{BridgeManager, ChannelBridgeHandle};
 use librefang_channels::router::AgentRouter;
 use librefang_channels::sidecar::SidecarAdapter;
 use librefang_channels::types::{ChannelAdapter, SenderContext};
+use std::collections::HashMap;
 
 /// Sanitize LLM/driver errors into user-friendly messages for channel delivery.
 ///
@@ -116,6 +117,222 @@ fn looks_like_named_json_tool_call(text: &str) -> bool {
 fn looks_like_tool_name(name: &str) -> bool {
     name.chars()
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | ':' | '/'))
+}
+
+fn channel_adapter_key(channel_name: &str, account_id: Option<&str>) -> String {
+    match account_id {
+        Some(account_id) if !account_id.is_empty() => format!("{channel_name}:{account_id}"),
+        _ => channel_name.to_string(),
+    }
+}
+
+fn validate_config_multiplicity(
+    config: &librefang_types::config::ChannelsConfig,
+) -> Result<(), String> {
+    let mut conflicts: Vec<String> = Vec::new();
+
+    let mut check_single_instance = |family: &str, count: usize, reason: &str| {
+        if count > 1 {
+            conflicts.push(format!(
+                "channel adapter family '{family}' does not support multiple daemon instances ({count} configured): {reason}"
+            ));
+        }
+    };
+
+    #[cfg(feature = "channel-google-chat")]
+    check_single_instance(
+        "google_chat",
+        config.google_chat.iter().count(),
+        "fixed shared webhook route",
+    );
+    #[cfg(feature = "channel-teams")]
+    check_single_instance(
+        "teams",
+        config.teams.iter().count(),
+        "fixed shared webhook route",
+    );
+    #[cfg(feature = "channel-line")]
+    check_single_instance(
+        "line",
+        config.line.iter().count(),
+        "fixed shared webhook route",
+    );
+    #[cfg(feature = "channel-viber")]
+    check_single_instance(
+        "viber",
+        config.viber.iter().count(),
+        "fixed shared webhook route",
+    );
+    #[cfg(feature = "channel-messenger")]
+    check_single_instance(
+        "messenger",
+        config.messenger.iter().count(),
+        "fixed shared webhook route",
+    );
+    #[cfg(feature = "channel-threema")]
+    check_single_instance(
+        "threema",
+        config.threema.iter().count(),
+        "fixed shared webhook route",
+    );
+    #[cfg(feature = "channel-pumble")]
+    check_single_instance(
+        "pumble",
+        config.pumble.iter().count(),
+        "fixed shared webhook route",
+    );
+    #[cfg(feature = "channel-flock")]
+    check_single_instance(
+        "flock",
+        config.flock.iter().count(),
+        "fixed shared webhook route",
+    );
+    #[cfg(feature = "channel-webhook")]
+    check_single_instance(
+        "webhook",
+        config.webhook.iter().count(),
+        "fixed shared callback route",
+    );
+    #[cfg(feature = "channel-voice")]
+    check_single_instance(
+        "voice",
+        config.voice.iter().count(),
+        "fixed shared WebSocket route and singleton session namespace",
+    );
+    #[cfg(feature = "channel-dingtalk")]
+    check_single_instance(
+        "dingtalk",
+        config
+            .dingtalk
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry.receive_mode,
+                    librefang_types::config::DingTalkReceiveMode::Webhook
+                )
+            })
+            .count(),
+        "webhook mode uses a fixed shared callback route",
+    );
+    #[cfg(feature = "channel-feishu")]
+    {
+        let feishu_count = config
+            .feishu
+            .iter()
+            .filter(|entry| entry.receive_mode.eq_ignore_ascii_case("webhook"))
+            .filter(|entry| !entry.region.eq_ignore_ascii_case("intl"))
+            .count();
+        let lark_count = config
+            .feishu
+            .iter()
+            .filter(|entry| entry.receive_mode.eq_ignore_ascii_case("webhook"))
+            .filter(|entry| entry.region.eq_ignore_ascii_case("intl"))
+            .count();
+        check_single_instance("feishu", feishu_count, "fixed shared callback route");
+        check_single_instance("lark", lark_count, "fixed shared callback route");
+    }
+    #[cfg(feature = "channel-wecom")]
+    check_single_instance(
+        "wecom",
+        config
+            .wecom
+            .iter()
+            .filter(|entry| matches!(entry.mode, librefang_types::config::WeComMode::Callback))
+            .count(),
+        "callback mode uses a fixed shared callback route",
+    );
+
+    if conflicts.is_empty() {
+        Ok(())
+    } else {
+        Err(conflicts.join("; "))
+    }
+}
+
+fn has_any_configured_channels(config: &librefang_types::config::ChannelsConfig) -> bool {
+    config.telegram.iter().next().is_some()
+        || config.discord.iter().next().is_some()
+        || config.slack.iter().next().is_some()
+        || config.whatsapp.iter().next().is_some()
+        || config.signal.iter().next().is_some()
+        || config.matrix.iter().next().is_some()
+        || config.email.iter().next().is_some()
+        || config.teams.iter().next().is_some()
+        || config.mattermost.iter().next().is_some()
+        || config.irc.iter().next().is_some()
+        || config.google_chat.iter().next().is_some()
+        || config.twitch.iter().next().is_some()
+        || config.rocketchat.iter().next().is_some()
+        || config.zulip.iter().next().is_some()
+        || config.xmpp.iter().next().is_some()
+        || config.line.iter().next().is_some()
+        || config.viber.iter().next().is_some()
+        || config.messenger.iter().next().is_some()
+        || config.reddit.iter().next().is_some()
+        || config.mastodon.iter().next().is_some()
+        || config.bluesky.iter().next().is_some()
+        || config.feishu.iter().next().is_some()
+        || config.revolt.iter().next().is_some()
+        || config.nextcloud.iter().next().is_some()
+        || config.guilded.iter().next().is_some()
+        || config.keybase.iter().next().is_some()
+        || config.threema.iter().next().is_some()
+        || config.nostr.iter().next().is_some()
+        || config.webex.iter().next().is_some()
+        || config.pumble.iter().next().is_some()
+        || config.flock.iter().next().is_some()
+        || config.twist.iter().next().is_some()
+        || config.mumble.iter().next().is_some()
+        || config.dingtalk.iter().next().is_some()
+        || config.qq.iter().next().is_some()
+        || config.discourse.iter().next().is_some()
+        || config.gitter.iter().next().is_some()
+        || config.ntfy.iter().next().is_some()
+        || config.gotify.iter().next().is_some()
+        || config.webhook.iter().next().is_some()
+        || config.voice.iter().next().is_some()
+        || config.linkedin.iter().next().is_some()
+        || config.wechat.iter().next().is_some()
+        || config.wecom.iter().next().is_some()
+}
+
+fn validate_runtime_multiplicity(
+    adapters: &[(Arc<dyn ChannelAdapter>, Option<String>, Option<String>)],
+) -> Result<(), String> {
+    let mut by_family: HashMap<String, (usize, String, Vec<String>)> = HashMap::new();
+
+    for (adapter, _, account_id) in adapters {
+        let multiplicity = adapter.multiplicity();
+        let Some(reason) = multiplicity.rejection_reason() else {
+            continue;
+        };
+
+        let entry = by_family
+            .entry(adapter.name().to_string())
+            .or_insert_with(|| (0usize, reason.to_string(), Vec::new()));
+        entry.0 += 1;
+        entry.2.push(
+            account_id
+                .clone()
+                .unwrap_or_else(|| "<unscoped>".to_string()),
+        );
+    }
+
+    let conflicts: Vec<String> = by_family
+        .into_iter()
+        .filter(|(_, (count, _, _))| *count > 1)
+        .map(|(family, (count, reason, owners))| {
+            format!(
+                "channel adapter family '{family}' does not support multiple daemon instances ({count} configured for {owners:?}): {reason}"
+            )
+        })
+        .collect();
+
+    if conflicts.is_empty() {
+        Ok(())
+    } else {
+        Err(conflicts.join("; "))
+    }
 }
 
 fn contains_bare_json_tool_call(text: &str) -> bool {
@@ -448,6 +665,24 @@ fn start_stream_text_bridge(
 pub struct KernelBridgeAdapter {
     kernel: Arc<LibreFangKernel>,
     started_at: Instant,
+}
+
+impl KernelBridgeAdapter {
+    fn find_agent_entry_by_name_scoped(
+        &self,
+        account_id: Option<&str>,
+        agent_name: &str,
+    ) -> Option<librefang_types::agent::AgentEntry> {
+        match account_id {
+            Some(account_id) => self
+                .kernel
+                .agent_registry()
+                .list_by_account(account_id)
+                .into_iter()
+                .find(|entry| entry.name == agent_name),
+            None => self.kernel.agent_registry().find_by_name(agent_name),
+        }
+    }
 }
 
 #[async_trait]
@@ -807,6 +1042,32 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         msg
     }
 
+    async fn list_workflows_text_scoped(&self, account_id: Option<&str>) -> String {
+        let workflows = match account_id {
+            Some(account_id) => {
+                self.kernel
+                    .workflow_engine()
+                    .list_workflows_by_account(account_id)
+                    .await
+            }
+            None => self.kernel.workflow_engine().list_workflows().await,
+        };
+        if workflows.is_empty() {
+            return "No workflows defined.".to_string();
+        }
+        let mut msg = format!("Workflows ({}):\n", workflows.len());
+        for wf in &workflows {
+            let steps = wf.steps.len();
+            let desc = if wf.description.is_empty() {
+                String::new()
+            } else {
+                format!(" — {}", wf.description)
+            };
+            msg.push_str(&format!("  {} ({} step(s)){}\n", wf.name, steps, desc));
+        }
+        msg
+    }
+
     async fn run_workflow_text(&self, name: &str, input: &str) -> String {
         let workflows = self.kernel.workflow_engine().list_workflows().await;
         let wf = match workflows.iter().find(|w| w.name.eq_ignore_ascii_case(name)) {
@@ -867,8 +1128,65 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         }
     }
 
+    async fn run_workflow_text_scoped(
+        &self,
+        account_id: Option<&str>,
+        name: &str,
+        input: &str,
+    ) -> String {
+        let wf_id = match self
+            .kernel
+            .resolve_workflow_reference_scoped(name, account_id)
+            .await
+        {
+            Some(wf_id) => wf_id,
+            None => return format!("Workflow '{name}' not found. Use /workflows to list."),
+        };
+
+        match self
+            .kernel
+            .run_workflow_scoped(wf_id, input.to_string(), account_id)
+            .await
+        {
+            Ok((_run_id, output)) => format!("Workflow '{}' completed:\n{}", name, output),
+            Err(e) => format!("Workflow '{}' failed: {}", name, e),
+        }
+    }
+
     async fn list_triggers_text(&self) -> String {
         let triggers = self.kernel.trigger_engine().list_all();
+        if triggers.is_empty() {
+            return "No triggers configured.".to_string();
+        }
+        let mut msg = format!("Triggers ({}):\n", triggers.len());
+        for t in &triggers {
+            let agent_name = self
+                .kernel
+                .agent_registry()
+                .get(t.agent_id)
+                .map(|e| e.name.clone())
+                .unwrap_or_else(|| t.agent_id.to_string());
+            let status = if t.enabled { "on" } else { "off" };
+            let id_str = t.id.0.to_string();
+            let id_short = safe_truncate_str(&id_str, 8);
+            msg.push_str(&format!(
+                "  [{}] {} -> {} ({:?}) fires:{} [{}]\n",
+                id_short,
+                agent_name,
+                t.prompt_template.chars().take(40).collect::<String>(),
+                t.pattern,
+                t.fire_count,
+                status,
+            ));
+        }
+        msg
+    }
+
+    async fn list_triggers_text_scoped(&self, account_id: Option<&str>) -> String {
+        let triggers = match account_id {
+            Some(account_id) => self.kernel.list_triggers_scoped(account_id, None),
+            None => self.kernel.trigger_engine().list_all(),
+        };
         if triggers.is_empty() {
             return "No triggers configured.".to_string();
         }
@@ -917,13 +1235,54 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             }
         };
 
-        let trigger_id =
-            self.kernel
-                .trigger_engine()
-                .register(agent.id, pattern, prompt.to_string(), 0);
+        let trigger_id = self.kernel.trigger_engine().register(
+            agent.account_id.clone(),
+            agent.id,
+            pattern,
+            prompt.to_string(),
+            0,
+        );
         let id_str = trigger_id.0.to_string();
         let id_short = safe_truncate_str(&id_str, 8);
         format!("Trigger created [{id_short}] for agent '{agent_name}'.")
+    }
+
+    async fn create_trigger_text_scoped(
+        &self,
+        account_id: Option<&str>,
+        agent_name: &str,
+        pattern_str: &str,
+        prompt: &str,
+    ) -> String {
+        let agent = match self.find_agent_entry_by_name_scoped(account_id, agent_name) {
+            Some(e) => e,
+            None => return format!("Agent '{agent_name}' not found."),
+        };
+
+        let pattern = match parse_trigger_pattern(pattern_str) {
+            Some(p) => p,
+            None => {
+                return format!(
+                "Unknown pattern '{pattern_str}'. Valid: lifecycle, spawned:<name>, terminated, \
+                     system, system:<keyword>, memory, memory:<key>, match:<text>, all"
+            )
+            }
+        };
+
+        match self.kernel.register_trigger(
+            account_id.map(str::to_string),
+            agent.id,
+            pattern,
+            prompt.to_string(),
+            0,
+        ) {
+            Ok(trigger_id) => {
+                let id_str = trigger_id.0.to_string();
+                let id_short = safe_truncate_str(&id_str, 8);
+                format!("Trigger created [{id_short}] for agent '{agent_name}'.")
+            }
+            Err(e) => format!("Failed to create trigger: {e}"),
+        }
     }
 
     async fn delete_trigger_text(&self, id_prefix: &str) -> String {
@@ -947,8 +1306,82 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         }
     }
 
+    async fn delete_trigger_text_scoped(
+        &self,
+        account_id: Option<&str>,
+        id_prefix: &str,
+    ) -> String {
+        let triggers = match account_id {
+            Some(account_id) => self.kernel.list_triggers_scoped(account_id, None),
+            None => self.kernel.trigger_engine().list_all(),
+        };
+        let matched: Vec<_> = triggers
+            .iter()
+            .filter(|t| t.id.0.to_string().starts_with(id_prefix))
+            .collect();
+        match matched.len() {
+            0 => format!("No trigger found matching '{id_prefix}'."),
+            1 => {
+                let t = matched[0];
+                let removed = match account_id {
+                    Some(account_id) => {
+                        self.kernel.trigger_engine().remove_scoped(t.id, account_id)
+                    }
+                    None => self.kernel.trigger_engine().remove(t.id),
+                };
+                if removed {
+                    let id_str = t.id.0.to_string();
+                    format!("Trigger [{}] removed.", safe_truncate_str(&id_str, 8))
+                } else {
+                    "Failed to remove trigger.".to_string()
+                }
+            }
+            n => format!("{n} triggers match '{id_prefix}'. Be more specific."),
+        }
+    }
+
     async fn list_schedules_text(&self) -> String {
         let jobs = self.kernel.cron().list_all_jobs();
+        if jobs.is_empty() {
+            return "No scheduled jobs.".to_string();
+        }
+        let mut msg = format!("Cron jobs ({}):\n", jobs.len());
+        for job in &jobs {
+            let agent_name = self
+                .kernel
+                .agent_registry()
+                .get(job.agent_id)
+                .map(|e| e.name.clone())
+                .unwrap_or_else(|| job.agent_id.to_string());
+            let status = if job.enabled { "on" } else { "off" };
+            let id_str = job.id.0.to_string();
+            let id_short = safe_truncate_str(&id_str, 8);
+            let sched = match &job.schedule {
+                librefang_types::scheduler::CronSchedule::Cron { expr, .. } => expr.clone(),
+                librefang_types::scheduler::CronSchedule::Every { every_secs } => {
+                    format!("every {every_secs}s")
+                }
+                librefang_types::scheduler::CronSchedule::At { at } => {
+                    format!("at {}", at.format("%Y-%m-%d %H:%M"))
+                }
+            };
+            let last = job
+                .last_run
+                .map(|t| t.format("%m-%d %H:%M").to_string())
+                .unwrap_or_else(|| "never".to_string());
+            msg.push_str(&format!(
+                "  [{}] {} — {} ({}) last:{} [{}]\n",
+                id_short, job.name, sched, agent_name, last, status,
+            ));
+        }
+        msg
+    }
+
+    async fn list_schedules_text_scoped(&self, account_id: Option<&str>) -> String {
+        let jobs = match account_id {
+            Some(account_id) => self.kernel.cron().list_jobs_by_account(account_id),
+            None => self.kernel.cron().list_all_jobs(),
+        };
         if jobs.is_empty() {
             return "No scheduled jobs.".to_string();
         }
@@ -1003,6 +1436,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                 let job = librefang_types::scheduler::CronJob {
                     id: librefang_types::scheduler::CronJobId::new(),
                     agent_id: agent.id,
+                    account_id: agent.account_id.clone(),
                     name: format!("chat-{}", &agent.name),
                     enabled: true,
                     schedule: librefang_types::scheduler::CronSchedule::Cron {
@@ -1112,6 +1546,177 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                                     Some(wf_id) => {
                                         let input_text = input.clone().unwrap_or_default();
                                         match self.kernel.run_workflow(wf_id, input_text).await {
+                                            Ok((_run_id, output)) => {
+                                                format!(
+                                                    "Job [{id_short}] workflow ran:\n{}",
+                                                    output
+                                                )
+                                            }
+                                            Err(e) => format!("Failed to run workflow: {e}"),
+                                        }
+                                    }
+                                    None => format!("Workflow not found: {workflow_id}"),
+                                }
+                            }
+                        }
+                    }
+                    n => format!("{n} jobs match '{prefix}'. Be more specific."),
+                }
+            }
+            _ => "Unknown schedule action. Use: add, del, run".to_string(),
+        }
+    }
+
+    async fn manage_schedule_text_scoped(
+        &self,
+        account_id: Option<&str>,
+        action: &str,
+        args: &[String],
+    ) -> String {
+        match action {
+            "add" => {
+                if args.len() < 7 {
+                    return "Usage: /schedule add <agent> <min> <hour> <dom> <month> <dow> <message>"
+                        .to_string();
+                }
+                let agent_name = &args[0];
+                let agent = match self.find_agent_entry_by_name_scoped(account_id, agent_name) {
+                    Some(e) => e,
+                    None => return format!("Agent '{agent_name}' not found."),
+                };
+                let cron_expr = args[1..6].join(" ");
+                let message = args[6..].join(" ");
+
+                let job = librefang_types::scheduler::CronJob {
+                    id: librefang_types::scheduler::CronJobId::new(),
+                    agent_id: agent.id,
+                    account_id: account_id
+                        .map(str::to_string)
+                        .or_else(|| agent.account_id.clone()),
+                    name: format!("chat-{}", &agent.name),
+                    enabled: true,
+                    schedule: librefang_types::scheduler::CronSchedule::Cron {
+                        expr: cron_expr.clone(),
+                        tz: None,
+                    },
+                    action: librefang_types::scheduler::CronAction::AgentTurn {
+                        message: message.clone(),
+                        model_override: None,
+                        timeout_secs: None,
+                    },
+                    delivery: librefang_types::scheduler::CronDelivery::None,
+                    created_at: chrono::Utc::now(),
+                    last_run: None,
+                    next_run: None,
+                };
+
+                match self.kernel.cron().add_job(job, false) {
+                    Ok(id) => {
+                        let id_str = id.0.to_string();
+                        let id_short = safe_truncate_str(&id_str, 8);
+                        format!(
+                            "Job [{id_short}] created: '{cron_expr}' -> {agent_name}: \"{message}\""
+                        )
+                    }
+                    Err(e) => format!("Failed to create job: {e}"),
+                }
+            }
+            "del" => {
+                if args.is_empty() {
+                    return "Usage: /schedule del <id-prefix>".to_string();
+                }
+                let prefix = &args[0];
+                let jobs = match account_id {
+                    Some(account_id) => self.kernel.cron().list_jobs_by_account(account_id),
+                    None => self.kernel.cron().list_all_jobs(),
+                };
+                let matched: Vec<_> = jobs
+                    .iter()
+                    .filter(|j| j.id.0.to_string().starts_with(prefix.as_str()))
+                    .collect();
+                match matched.len() {
+                    0 => format!("No job found matching '{prefix}'."),
+                    1 => {
+                        let j = matched[0];
+                        let removed = match account_id {
+                            Some(account_id) => {
+                                self.kernel.cron().remove_job_scoped(j.id, account_id)
+                            }
+                            None => self.kernel.cron().remove_job(j.id),
+                        };
+                        match removed {
+                            Ok(_) => {
+                                let id_str = j.id.0.to_string();
+                                format!(
+                                    "Job [{}] '{}' removed.",
+                                    safe_truncate_str(&id_str, 8),
+                                    j.name
+                                )
+                            }
+                            Err(e) => format!("Failed to remove job: {e}"),
+                        }
+                    }
+                    n => format!("{n} jobs match '{prefix}'. Be more specific."),
+                }
+            }
+            "run" => {
+                if args.is_empty() {
+                    return "Usage: /schedule run <id-prefix>".to_string();
+                }
+                let prefix = &args[0];
+                let jobs = match account_id {
+                    Some(account_id) => self.kernel.cron().list_jobs_by_account(account_id),
+                    None => self.kernel.cron().list_all_jobs(),
+                };
+                let matched: Vec<_> = jobs
+                    .iter()
+                    .filter(|j| j.id.0.to_string().starts_with(prefix.as_str()))
+                    .collect();
+                match matched.len() {
+                    0 => format!("No job found matching '{prefix}'."),
+                    1 => {
+                        let j = matched[0];
+                        let id_str = j.id.0.to_string();
+                        let id_short = safe_truncate_str(&id_str, 8);
+                        match &j.action {
+                            librefang_types::scheduler::CronAction::AgentTurn {
+                                message, ..
+                            } => match self.kernel.send_message(j.agent_id, message).await {
+                                Ok(result) => format!("Job [{id_short}] ran:\n{}", result.response),
+                                Err(e) => format!("Failed to run job: {e}"),
+                            },
+                            librefang_types::scheduler::CronAction::SystemEvent { text } => {
+                                match self.kernel.send_message(j.agent_id, text).await {
+                                    Ok(result) => {
+                                        format!("Job [{id_short}] ran:\n{}", result.response)
+                                    }
+                                    Err(e) => format!("Failed to run job: {e}"),
+                                }
+                            }
+                            librefang_types::scheduler::CronAction::Workflow {
+                                workflow_id,
+                                input,
+                                ..
+                            } => {
+                                let resolved = self
+                                    .kernel
+                                    .resolve_workflow_reference_scoped(
+                                        workflow_id,
+                                        j.account_id.as_deref().or(account_id),
+                                    )
+                                    .await;
+                                match resolved {
+                                    Some(wf_id) => {
+                                        let input_text = input.clone().unwrap_or_default();
+                                        match self
+                                            .kernel
+                                            .run_workflow_scoped(
+                                                wf_id,
+                                                input_text,
+                                                j.account_id.as_deref().or(account_id),
+                                            )
+                                            .await
+                                        {
                                             Ok((_run_id, output)) => {
                                                 format!(
                                                     "Job [{id_short}] workflow ran:\n{}",
@@ -2704,6 +3309,11 @@ pub async fn start_channel_bridge_with_config(
         return (None, Vec::new(), axum::Router::new());
     }
 
+    if let Err(error) = validate_runtime_multiplicity(&adapters) {
+        error!(%error, "Channel bridge activation rejected due to adapter multiplicity conflict");
+        return (None, Vec::new(), axum::Router::new());
+    }
+
     // Resolve per-channel default agents AND set the first one as system-wide fallback
     let mut router = AgentRouter::new();
     let mut system_default_set = false;
@@ -2795,6 +3405,10 @@ pub async fn start_channel_bridge_with_config(
                 let age_secs = (chrono::Utc::now() - entry.received_at).num_seconds();
                 let was_in_flight =
                     entry.status == librefang_channels::message_journal::JournalStatus::Processing;
+                let recovery_account_id = entry
+                    .metadata
+                    .get("account_id")
+                    .and_then(|value| value.as_str());
                 info!(
                     id = %entry.message_id,
                     channel = %entry.channel,
@@ -2804,23 +3418,48 @@ pub async fn start_channel_bridge_with_config(
                     "Re-dispatching recovered message"
                 );
                 let agent_id = if let Some(ref name) = entry.agent_name {
-                    handle.find_agent_by_name(name).await.ok().flatten()
+                    match recovery_account_id {
+                        Some(account_id) => kernel_for_recovery
+                            .agent_registry()
+                            .list_by_account(account_id)
+                            .into_iter()
+                            .find(|agent| agent.name == *name)
+                            .map(|agent| agent.id),
+                        None => handle.find_agent_by_name(name).await.ok().flatten(),
+                    }
                 } else {
                     None
                 };
                 let agent_id = match agent_id {
                     Some(id) => id,
-                    None => match kernel_for_recovery
-                        .agent_registry()
-                        .list()
-                        .first()
-                        .map(|e| e.id)
-                    {
-                        Some(id) => id,
-                        None => {
-                            warn!(id = %entry.message_id, "No agents available for recovery");
+                    None => match recovery_account_id {
+                        Some(account_id) => {
+                            let error = format!(
+                                "No scoped recovery agent found for account '{account_id}'"
+                            );
+                            warn!(id = %entry.message_id, error = %error, "Recovery re-dispatch failed");
+                            if let Some(ref j) = recovery_journal {
+                                j.update_status(
+                                    &entry.message_id,
+                                    librefang_channels::message_journal::JournalStatus::Failed,
+                                    Some(error),
+                                )
+                                .await;
+                            }
                             continue;
                         }
+                        None => match kernel_for_recovery
+                            .agent_registry()
+                            .list()
+                            .first()
+                            .map(|e| e.id)
+                        {
+                            Some(id) => id,
+                            None => {
+                                warn!(id = %entry.message_id, "No agents available for recovery");
+                                continue;
+                            }
+                        },
                     },
                 };
                 // Differentiate prefix: if the task was already in-flight, the
@@ -2846,9 +3485,16 @@ pub async fn start_channel_bridge_with_config(
                             // Retry delivery with backoff if adapter isn't ready yet
                             let mut delivered = false;
                             for delay in RECOVERY_DELAYS {
-                                if let Some(adapter) = kernel_for_recovery
-                                    .channel_adapters_ref()
-                                    .get(&entry.channel)
+                                let adapter_key = entry
+                                    .metadata
+                                    .get("account_id")
+                                    .and_then(|v| v.as_str())
+                                    .map(|account_id| {
+                                        channel_adapter_key(&entry.channel, Some(account_id))
+                                    })
+                                    .unwrap_or_else(|| entry.channel.clone());
+                                if let Some(adapter) =
+                                    kernel_for_recovery.channel_adapters_ref().get(&adapter_key)
                                 {
                                     let user = librefang_channels::types::ChannelUser {
                                         platform_id: entry.sender_id.clone(),
@@ -2912,21 +3558,37 @@ pub async fn start_channel_bridge_with_config(
         });
     }
 
+    let mut adapter_name_counts: HashMap<String, usize> = HashMap::new();
+    for (adapter, _, _) in &adapters {
+        *adapter_name_counts
+            .entry(adapter.name().to_string())
+            .or_default() += 1;
+    }
+
     let mut started_names = Vec::new();
-    for (adapter, _, _account_id) in adapters {
+    for (adapter, _, account_id) in adapters {
         let name = adapter.name().to_string();
+        let key = channel_adapter_key(&name, account_id.as_deref());
         // Register adapter in kernel so agents can use `channel_send` tool
         kernel
             .channel_adapters_ref()
-            .insert(name.clone(), adapter.clone());
+            .insert(key.clone(), adapter.clone());
+        if adapter_name_counts.get(&name).copied().unwrap_or_default() == 1 {
+            kernel
+                .channel_adapters_ref()
+                .insert(name.clone(), adapter.clone());
+        }
         match manager.start_adapter(adapter).await {
             Ok(()) => {
                 info!("{name} channel bridge started");
-                started_names.push(name);
+                started_names.push(key);
             }
             Err(e) => {
                 // Remove from kernel map if start failed
-                kernel.channel_adapters_ref().remove(&name);
+                kernel.channel_adapters_ref().remove(&key);
+                if adapter_name_counts.get(&name).copied().unwrap_or_default() == 1 {
+                    kernel.channel_adapters_ref().remove(&name);
+                }
                 error!("Failed to start {name} bridge: {e}");
             }
         }
@@ -2948,6 +3610,14 @@ pub async fn start_channel_bridge_with_config(
 pub async fn reload_channels_from_disk(
     state: &crate::routes::AppState,
 ) -> Result<Vec<String>, String> {
+    let previous_channels_config = state.channels_config.read().await.clone();
+
+    // Re-read config from disk first so we can validate before touching the live bridge.
+    let config_path = state.kernel.home_dir().join("config.toml");
+    let fresh_config = librefang_kernel::config::load_config(Some(&config_path));
+
+    validate_config_multiplicity(&fresh_config.channels)?;
+
     // Stop existing bridge
     {
         let mut guard = state.bridge_manager.lock().await;
@@ -2956,6 +3626,7 @@ pub async fn reload_channels_from_disk(
         }
         *guard = None;
     }
+    state.kernel.channel_adapters_ref().clear();
 
     // Re-read secrets.env so new API tokens are available in std::env
     let secrets_path = state.kernel.home_dir().join("secrets.env");
@@ -2986,16 +3657,34 @@ pub async fn reload_channels_from_disk(
         }
     }
 
-    // Re-read config from disk
-    let config_path = state.kernel.home_dir().join("config.toml");
-    let fresh_config = librefang_kernel::config::load_config(Some(&config_path));
-
     // Update the live channels config so list_channels() reflects reality
     *state.channels_config.write().await = fresh_config.channels.clone();
 
     // Start new bridge with fresh channel config
     let (new_bridge, started, webhook_router) =
         start_channel_bridge_with_config(state.kernel.clone(), &fresh_config.channels).await;
+
+    if has_any_configured_channels(&fresh_config.channels)
+        && has_any_configured_channels(&previous_channels_config)
+        && new_bridge.is_none()
+    {
+        tracing::warn!(
+            "Channel reload produced no active bridge; restoring previous channel runtime config"
+        );
+        let (restored_bridge, restored_started, restored_webhook_router) =
+            start_channel_bridge_with_config(state.kernel.clone(), &previous_channels_config).await;
+        *state.channels_config.write().await = previous_channels_config;
+        *state.bridge_manager.lock().await = restored_bridge;
+        *state.webhook_router.write().await = Arc::new(restored_webhook_router);
+
+        if restored_started.is_empty() {
+            return Err(
+                "channel reload failed and previous bridge could not be restored".to_string(),
+            );
+        }
+
+        return Err("channel runtime activation failed; restored previous bridge".to_string());
+    }
 
     // Store the new bridge
     *state.bridge_manager.lock().await = new_bridge;
@@ -3015,6 +3704,13 @@ pub async fn reload_channels_from_disk(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use futures::Stream;
+    use librefang_channels::types::{
+        ChannelAdapterMultiplicity, ChannelContent, ChannelType, ChannelUser,
+    };
+    use librefang_types::config::{ChannelsConfig, NtfyConfig, OneOrMany, WebhookConfig};
+    use std::pin::Pin;
 
     #[test]
     fn test_looks_like_tool_call_detects_markdown_tool_call_with_preamble() {
@@ -3172,5 +3868,119 @@ mod tests {
             msg.contains("ref:"),
             "expected ref in generic msg, got: {msg}"
         );
+    }
+
+    struct MultiplicityTestAdapter {
+        name: &'static str,
+        multiplicity: ChannelAdapterMultiplicity,
+    }
+
+    #[async_trait]
+    impl ChannelAdapter for MultiplicityTestAdapter {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn channel_type(&self) -> ChannelType {
+            ChannelType::Custom(self.name.to_string())
+        }
+
+        fn multiplicity(&self) -> ChannelAdapterMultiplicity {
+            self.multiplicity.clone()
+        }
+
+        async fn start(
+            &self,
+        ) -> Result<
+            Pin<Box<dyn Stream<Item = librefang_channels::types::ChannelMessage> + Send>>,
+            Box<dyn std::error::Error + Send + Sync>,
+        > {
+            let (_tx, rx) = tokio::sync::mpsc::channel(1);
+            Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
+        }
+
+        async fn send(
+            &self,
+            _user: &ChannelUser,
+            _content: ChannelContent,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            Ok(())
+        }
+
+        async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_validate_config_multiplicity_rejects_duplicate_webhook_adapters() {
+        let mut config = ChannelsConfig::default();
+        config.webhook = OneOrMany(vec![
+            WebhookConfig {
+                account_id: Some("tenant-a".to_string()),
+                ..WebhookConfig::default()
+            },
+            WebhookConfig {
+                account_id: Some("tenant-b".to_string()),
+                ..WebhookConfig::default()
+            },
+        ]);
+
+        let error =
+            validate_config_multiplicity(&config).expect_err("duplicate webhook configs must fail");
+        assert!(error.contains("webhook"));
+        assert!(error.contains("does not support multiple daemon instances"));
+    }
+
+    #[test]
+    fn test_validate_config_multiplicity_allows_multi_instance_safe_adapters() {
+        let mut config = ChannelsConfig::default();
+        config.ntfy = OneOrMany(vec![
+            NtfyConfig {
+                account_id: Some("tenant-a".to_string()),
+                topic: "tenant-a-topic".to_string(),
+                ..NtfyConfig::default()
+            },
+            NtfyConfig {
+                account_id: Some("tenant-b".to_string()),
+                topic: "tenant-b-topic".to_string(),
+                ..NtfyConfig::default()
+            },
+        ]);
+
+        validate_config_multiplicity(&config)
+            .expect("multi-instance-safe adapters should be allowed");
+    }
+
+    #[test]
+    fn test_validate_runtime_multiplicity_rejects_duplicate_single_instance_family() {
+        let adapters: Vec<(Arc<dyn ChannelAdapter>, Option<String>, Option<String>)> = vec![
+            (
+                Arc::new(MultiplicityTestAdapter {
+                    name: "webhook",
+                    multiplicity: ChannelAdapterMultiplicity::SingleInstancePerDaemon {
+                        reason: "fixed shared callback route",
+                    },
+                }),
+                None,
+                Some("tenant-a".to_string()),
+            ),
+            (
+                Arc::new(MultiplicityTestAdapter {
+                    name: "webhook",
+                    multiplicity: ChannelAdapterMultiplicity::SingleInstancePerDaemon {
+                        reason: "fixed shared callback route",
+                    },
+                }),
+                None,
+                Some("tenant-b".to_string()),
+            ),
+        ];
+
+        let error = validate_runtime_multiplicity(&adapters)
+            .expect_err("duplicate single-instance family must fail");
+        assert!(error.contains("webhook"));
+        assert!(error.contains("tenant-a"));
+        assert!(error.contains("tenant-b"));
     }
 }

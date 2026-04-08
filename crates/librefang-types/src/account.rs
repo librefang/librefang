@@ -8,7 +8,8 @@ use uuid::Uuid;
 /// This keeps a single representation across extractor, storage, migration, and comparison.
 ///
 /// - `AccountId(Some("uuid-string"))` = multi-tenant request (SaaS, team isolation)
-/// - `AccountId(None)` = legacy/desktop mode (admin, sees everything)
+/// - `AccountId(None)` = compatibility/migration state, not a valid Qwntik
+///   tenant-facing runtime identity
 ///
 /// The string is opaque to the type system. Callers may use UUIDs, slugs, or any
 /// format — the only invariant is: trimmed, non-empty, case-sensitive equality.
@@ -16,8 +17,8 @@ use uuid::Uuid;
 pub struct AccountId(pub Option<String>);
 
 impl AccountId {
-    /// The implicit account for single-tenant / backward-compatible deployments.
-    /// Matches the migration DEFAULT 'system' exactly.
+    /// Compatibility sentinel for legacy storage defaults.
+    /// This is migration debt, not a target runtime identity.
     pub const SYSTEM: &'static str = "system";
 
     /// Create a new random account ID (UUID v4).
@@ -30,7 +31,8 @@ impl AccountId {
         self.0.is_some()
     }
 
-    /// Returns the inner string, or "system" for legacy/desktop.
+    /// Returns the inner string, or the legacy `"system"` sentinel for
+    /// compatibility layers that still need to round-trip old storage.
     pub fn as_str_or_system(&self) -> &str {
         match &self.0 {
             Some(s) => s.as_str(),

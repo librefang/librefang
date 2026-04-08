@@ -28,6 +28,27 @@ pub enum ChannelType {
     Custom(String),
 }
 
+/// Runtime multiplicity stance for a channel adapter family.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChannelAdapterMultiplicity {
+    /// The adapter can safely run multiple tenant-qualified instances on one daemon.
+    MultiInstanceSafe,
+    /// Only one instance of this adapter family may run on a daemon.
+    SingleInstancePerDaemon { reason: &'static str },
+    /// The adapter is not yet classified as safe for multi-instance operation.
+    UnsupportedPendingExplicitSupport { reason: &'static str },
+}
+
+impl ChannelAdapterMultiplicity {
+    pub fn rejection_reason(&self) -> Option<&'static str> {
+        match self {
+            Self::MultiInstanceSafe => None,
+            Self::SingleInstancePerDaemon { reason }
+            | Self::UnsupportedPendingExplicitSupport { reason } => Some(reason),
+        }
+    }
+}
+
 /// A user on a messaging platform.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelUser {
@@ -386,6 +407,14 @@ pub trait ChannelAdapter: Send + Sync {
     /// (e.g. Mastodon) should return `true` to avoid leaking internal errors.
     fn suppress_error_responses(&self) -> bool {
         false
+    }
+
+    /// Declare whether this adapter family can safely run multiple instances on one daemon.
+    ///
+    /// The bridge uses this to reject unsupported duplicate configurations
+    /// before runtime registration, route mounting, or adapter startup.
+    fn multiplicity(&self) -> ChannelAdapterMultiplicity {
+        ChannelAdapterMultiplicity::MultiInstanceSafe
     }
 
     /// Build webhook routes for mounting on the shared HTTP server.

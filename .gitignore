@@ -57,6 +57,9 @@ result
 .idea/
 .vscode/
 .claude/
+.cursor/
+.agents/
+.caliber/
 .qwen/
 *.swp
 *.swo
@@ -69,3 +72,15 @@ result
 .swarm/
 docs/adr/
 CLAUDE.md
+
+# Codex local configuration
+.codex/
+
+# Claude Flow runtime data
+.claude-flow/data/
+.claude-flow/logs/
+
+# Environment variables
+.env
+.env.local
+.env.*.local

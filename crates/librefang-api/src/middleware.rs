@@ -44,6 +44,16 @@ pub const REQUEST_ID_HEADER: &str = "x-request-id";
 #[derive(Clone, Debug)]
 pub struct RequestLanguage(pub &'static str);
 
+fn is_public_system_route(path: &str, method: &axum::http::Method) -> bool {
+    let is_get = *method == axum::http::Method::GET;
+    is_get
+        && (path == "/api/versions"
+            || path == "/api/profiles"
+            || path.starts_with("/api/profiles/")
+            || path == "/api/commands"
+            || path.starts_with("/api/commands/"))
+}
+
 /// Middleware: parse `Accept-Language` header and store the resolved language
 /// in request extensions for downstream handlers.
 ///
@@ -237,13 +247,11 @@ pub async fn auth(
         || (path.starts_with("/dashboard/") && is_get)
         || (path == "/.well-known/agent.json" && is_get)
         || (path.starts_with("/a2a/") && is_get)
-        || path == "/api/versions"
         || path == "/api/health"
         || path == "/api/health/detail"
         || path == "/api/status"
         || path == "/api/version"
         || (path == "/api/agents" && is_get)
-        || (path == "/api/profiles" && is_get)
         || (path == "/api/config" && is_get)
         || (path == "/api/config/schema" && is_get)
         // SECURITY: /api/uploads/* removed from public endpoints — uploads
@@ -258,21 +266,18 @@ pub async fn auth(
         || (path.starts_with("/api/budget/agents/") && is_get)
         || (path == "/api/network/status" && is_get)
         || (path == "/api/a2a/agents" && is_get)
-        || (path == "/api/approvals" && is_get)
-        || (path.starts_with("/api/approvals/") && is_get)
         || (path == "/api/channels" && is_get)
         || (path == "/api/hands" && is_get)
         || (path == "/api/hands/active" && is_get)
         || (path.starts_with("/api/hands/") && is_get)
         || (path == "/api/skills" && is_get)
-        || (path == "/api/sessions" && is_get)
         || (path == "/api/integrations" && is_get)
         || (path == "/api/integrations/available" && is_get)
         || (path == "/api/integrations/health" && is_get)
         || (path == "/api/workflows" && is_get)
-        || path == "/api/logs/stream"  // SSE stream, read-only
         || (path.starts_with("/api/cron/") && is_get)
         || path.starts_with("/api/providers/github-copilot/oauth/")
+        || is_public_system_route(path, &method)
         // OAuth/OIDC auth flow endpoints must be accessible without API key
         // (they are the authentication entry points themselves).
         || (path == "/api/auth/providers" && is_get)
@@ -882,7 +887,8 @@ type HmacSha256 = Hmac<Sha256>;
 /// `From` impls below to convert between them at crate boundaries.
 ///
 /// - `AccountId(Some(...))` = scoped multi-tenant request
-/// - `AccountId(None)` = legacy / admin / system mode
+/// - `AccountId(None)` = missing-header compatibility state, not a valid
+///   tenant-facing runtime identity for the Qwntik fork
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AccountId(pub Option<String>);
 
@@ -1042,14 +1048,14 @@ pub async fn require_account_id(request: Request<Body>, next: Next) -> Response<
     let is_exempt = path == "/api/health"
         || path == "/api/health/detail"
         || path == "/api/version"
-        || path == "/api/versions"
         || path == "/api/openapi.json"
         || path == "/api/v1/health"
         || path == "/api/v1/health/detail"
         || path == "/api/v1/version"
         || path.starts_with("/api/auth/")
         || path.starts_with("/api/v1/auth/")
-        || path == "/openapi.json";
+        || path == "/openapi.json"
+        || is_public_system_route(path, request.method());
 
     if !is_exempt {
         let has_account = request

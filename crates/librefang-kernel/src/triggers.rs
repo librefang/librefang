@@ -84,6 +84,10 @@ pub struct Trigger {
     pub enabled: bool,
     /// When this trigger was created.
     pub created_at: DateTime<Utc>,
+    /// Owning tenant account. `None` is legacy/global data and is not part of
+    /// the Qwntik target model.
+    #[serde(default)]
+    pub account_id: Option<String>,
     /// How many times this trigger has fired.
     pub fire_count: u64,
     /// Maximum number of times this trigger can fire (0 = unlimited).
@@ -151,12 +155,20 @@ impl TriggerEngine {
     /// Register a new trigger.
     pub fn register(
         &self,
+        account_id: Option<String>,
         agent_id: AgentId,
         pattern: TriggerPattern,
         prompt_template: String,
         max_fires: u64,
     ) -> TriggerId {
-        self.register_with_target(agent_id, pattern, prompt_template, max_fires, None)
+        self.register_with_target(
+            account_id,
+            agent_id,
+            pattern,
+            prompt_template,
+            max_fires,
+            None,
+        )
     }
 
     /// Register a trigger with an optional target agent for cross-session wake.
@@ -166,6 +178,7 @@ impl TriggerEngine {
     /// trigger for management purposes (list, remove, etc.).
     pub fn register_with_target(
         &self,
+        account_id: Option<String>,
         agent_id: AgentId,
         pattern: TriggerPattern,
         prompt_template: String,
@@ -179,6 +192,7 @@ impl TriggerEngine {
             prompt_template,
             enabled: true,
             created_at: Utc::now(),
+            account_id,
             fire_count: 0,
             max_fires,
             target_agent,
@@ -196,12 +210,13 @@ impl TriggerEngine {
     /// wakes a different target agent.
     pub fn register_cross_agent_trigger(
         &self,
+        account_id: Option<String>,
         owner: AgentId,
         target: AgentId,
         pattern: TriggerPattern,
         prompt_template: String,
     ) -> TriggerId {
-        self.register_with_target(owner, pattern, prompt_template, 0, Some(target))
+        self.register_with_target(account_id, owner, pattern, prompt_template, 0, Some(target))
     }
 
     /// Remove a trigger.
@@ -274,6 +289,7 @@ impl TriggerEngine {
                 prompt_template: old.prompt_template,
                 enabled: old.enabled,
                 created_at: old.created_at,
+                account_id: old.account_id,
                 fire_count: old.fire_count,
                 max_fires: old.max_fires,
                 target_agent: old.target_agent,
@@ -354,6 +370,50 @@ impl TriggerEngine {
     /// List all registered triggers.
     pub fn list_all(&self) -> Vec<Trigger> {
         self.triggers.iter().map(|e| e.value().clone()).collect()
+    }
+
+    /// List all triggers for a tenant account.
+    pub fn list_by_account(&self, account_id: &str) -> Vec<Trigger> {
+        self.triggers
+            .iter()
+            .filter(|entry| entry.value().account_id.as_deref() == Some(account_id))
+            .map(|entry| entry.value().clone())
+            .collect()
+    }
+
+    /// Get a trigger only if it belongs to the provided account.
+    pub fn get_scoped(&self, trigger_id: TriggerId, account_id: &str) -> Option<Trigger> {
+        self.triggers
+            .get(&trigger_id)
+            .filter(|entry| entry.account_id.as_deref() == Some(account_id))
+            .map(|entry| entry.clone())
+    }
+
+    /// Remove a trigger only if it belongs to the provided account.
+    pub fn remove_scoped(&self, trigger_id: TriggerId, account_id: &str) -> bool {
+        match self.triggers.get(&trigger_id) {
+            Some(trigger) if trigger.account_id.as_deref() == Some(account_id) => {
+                drop(trigger);
+                self.remove(trigger_id)
+            }
+            _ => false,
+        }
+    }
+
+    /// Enable or disable a trigger only if it belongs to the provided account.
+    pub fn set_enabled_scoped(
+        &self,
+        trigger_id: TriggerId,
+        account_id: &str,
+        enabled: bool,
+    ) -> bool {
+        match self.triggers.get(&trigger_id) {
+            Some(trigger) if trigger.account_id.as_deref() == Some(account_id) => {
+                drop(trigger);
+                self.set_enabled(trigger_id, enabled)
+            }
+            _ => false,
+        }
     }
 
     /// Evaluate an event against all triggers. Returns a list of
@@ -618,6 +678,7 @@ mod tests {
         let engine = TriggerEngine::new();
         let agent_id = AgentId::new();
         let id = engine.register(
+            None,
             agent_id,
             TriggerPattern::All,
             "Event occurred: {{event}}".to_string(),
@@ -631,6 +692,7 @@ mod tests {
         let engine = TriggerEngine::new();
         let watcher = AgentId::new();
         engine.register(
+            None,
             watcher,
             TriggerPattern::Lifecycle,
             "Lifecycle: {{event}}".to_string(),
@@ -657,6 +719,7 @@ mod tests {
         let engine = TriggerEngine::new();
         let watcher = AgentId::new();
         engine.register(
+            None,
             watcher,
             TriggerPattern::AgentSpawned {
                 name_pattern: "coder".to_string(),
@@ -693,6 +756,7 @@ mod tests {
         let engine = TriggerEngine::new();
         let agent_id = AgentId::new();
         let tid = engine.register(
+            None,
             agent_id,
             TriggerPattern::All,
             "Event: {{event}}".to_string(),
@@ -720,7 +784,7 @@ mod tests {
     fn test_remove_trigger() {
         let engine = TriggerEngine::new();
         let agent_id = AgentId::new();
-        let id = engine.register(agent_id, TriggerPattern::All, "msg".to_string(), 0);
+        let id = engine.register(None, agent_id, TriggerPattern::All, "msg".to_string(), 0);
         assert!(engine.remove(id));
         assert!(engine.get(id).is_none());
     }
@@ -729,8 +793,8 @@ mod tests {
     fn test_remove_agent_triggers() {
         let engine = TriggerEngine::new();
         let agent_id = AgentId::new();
-        engine.register(agent_id, TriggerPattern::All, "a".to_string(), 0);
-        engine.register(agent_id, TriggerPattern::System, "b".to_string(), 0);
+        engine.register(None, agent_id, TriggerPattern::All, "a".to_string(), 0);
+        engine.register(None, agent_id, TriggerPattern::System, "b".to_string(), 0);
         assert_eq!(engine.list_agent_triggers(agent_id).len(), 2);
 
         engine.remove_agent_triggers(agent_id);
@@ -742,6 +806,7 @@ mod tests {
         let engine = TriggerEngine::new();
         let agent_id = AgentId::new();
         engine.register(
+            None,
             agent_id,
             TriggerPattern::ContentMatch {
                 substring: "quota".to_string(),
@@ -769,8 +834,8 @@ mod tests {
         let engine = TriggerEngine::new();
         let old_agent = AgentId::new();
         let new_agent = AgentId::new();
-        engine.register(old_agent, TriggerPattern::All, "a".to_string(), 0);
-        engine.register(old_agent, TriggerPattern::System, "b".to_string(), 0);
+        engine.register(None, old_agent, TriggerPattern::All, "a".to_string(), 0);
+        engine.register(None, old_agent, TriggerPattern::System, "b".to_string(), 0);
 
         let count = engine.reassign_agent_triggers(old_agent, new_agent);
         assert_eq!(count, 2);
@@ -794,7 +859,7 @@ mod tests {
     fn test_reassign_agent_triggers_no_match_returns_zero() {
         let engine = TriggerEngine::new();
         let agent_a = AgentId::new();
-        engine.register(agent_a, TriggerPattern::All, "a".to_string(), 0);
+        engine.register(None, agent_a, TriggerPattern::All, "a".to_string(), 0);
 
         let count = engine.reassign_agent_triggers(AgentId::new(), AgentId::new());
         assert_eq!(count, 0);
@@ -808,8 +873,8 @@ mod tests {
         let agent_a = AgentId::new();
         let agent_b = AgentId::new();
         let agent_c = AgentId::new();
-        engine.register(agent_a, TriggerPattern::All, "a".to_string(), 0);
-        engine.register(agent_b, TriggerPattern::System, "b".to_string(), 0);
+        engine.register(None, agent_a, TriggerPattern::All, "a".to_string(), 0);
+        engine.register(None, agent_b, TriggerPattern::System, "b".to_string(), 0);
 
         let count = engine.reassign_agent_triggers(agent_a, agent_c);
         assert_eq!(count, 1);
@@ -826,6 +891,7 @@ mod tests {
         let old_agent = AgentId::new();
         let new_agent = AgentId::new();
         engine.register(
+            None,
             old_agent,
             TriggerPattern::ContentMatch {
                 substring: "deploy".to_string(),
@@ -833,7 +899,13 @@ mod tests {
             "Deploy alert: {{event}}".to_string(),
             5,
         );
-        engine.register(old_agent, TriggerPattern::Lifecycle, "lc".to_string(), 0);
+        engine.register(
+            None,
+            old_agent,
+            TriggerPattern::Lifecycle,
+            "lc".to_string(),
+            0,
+        );
 
         // Take triggers — engine should be empty for old agent
         let taken = engine.take_agent_triggers(old_agent);
@@ -870,7 +942,7 @@ mod tests {
         let engine = TriggerEngine::new();
         let old_agent = AgentId::new();
         let new_agent = AgentId::new();
-        let tid = engine.register(old_agent, TriggerPattern::All, "a".to_string(), 0);
+        let tid = engine.register(None, old_agent, TriggerPattern::All, "a".to_string(), 0);
         engine.set_enabled(tid, false);
 
         let taken = engine.take_agent_triggers(old_agent);
@@ -893,6 +965,7 @@ mod tests {
         let engine = TriggerEngine::new();
         let owner = AgentId::new();
         engine.register(
+            None,
             owner,
             TriggerPattern::All,
             "Event: {{event}}".to_string(),
@@ -920,6 +993,7 @@ mod tests {
         let owner = AgentId::new();
         let target = AgentId::new();
         engine.register_with_target(
+            None,
             owner,
             TriggerPattern::All,
             "Cross-wake: {{event}}".to_string(),
@@ -949,6 +1023,7 @@ mod tests {
         let owner = AgentId::new();
         let target = AgentId::new();
         let tid = engine.register_cross_agent_trigger(
+            None,
             owner,
             target,
             TriggerPattern::AgentSpawned {
@@ -984,6 +1059,7 @@ mod tests {
         let new_owner = AgentId::new();
 
         engine.register_with_target(
+            None,
             old_owner,
             TriggerPattern::System,
             "sys: {{event}}".to_string(),
@@ -1013,6 +1089,7 @@ mod tests {
         let agent_id = AgentId::new();
         // Register trigger with default cooldown (5s)
         engine.register(
+            None,
             agent_id,
             TriggerPattern::All,
             "Event: {{event}}".to_string(),
@@ -1038,6 +1115,7 @@ mod tests {
         let engine = TriggerEngine::new();
         let agent_id = AgentId::new();
         let tid = engine.register(
+            None,
             agent_id,
             TriggerPattern::All,
             "Event: {{event}}".to_string(),
@@ -1068,6 +1146,7 @@ mod tests {
         // Register 5 triggers — all match All pattern
         for agent_id in &agents {
             let tid = engine.register(
+                None,
                 *agent_id,
                 TriggerPattern::All,
                 "Event: {{event}}".to_string(),
@@ -1095,6 +1174,7 @@ mod tests {
         let engine = TriggerEngine::new();
         let agent_id = AgentId::new();
         let tid = engine.register(
+            None,
             agent_id,
             TriggerPattern::All,
             "Event: {{event}}".to_string(),
@@ -1123,7 +1203,7 @@ mod tests {
         let engine = TriggerEngine::new();
         let old_agent = AgentId::new();
         let new_agent = AgentId::new();
-        let tid = engine.register(old_agent, TriggerPattern::All, "a".to_string(), 0);
+        let tid = engine.register(None, old_agent, TriggerPattern::All, "a".to_string(), 0);
         engine.triggers.get_mut(&tid).unwrap().cooldown_secs = Some(30);
 
         let taken = engine.take_agent_triggers(old_agent);

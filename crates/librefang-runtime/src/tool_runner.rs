@@ -304,7 +304,7 @@ pub async fn execute_tool_raw(
         // Scheduling tools (delegate to CronScheduler via kernel handle)
         "schedule_create" => tool_schedule_create(input, *kernel, *caller_agent_id).await,
         "schedule_list" => tool_schedule_list(*kernel, *caller_agent_id).await,
-        "schedule_delete" => tool_schedule_delete(input, *kernel).await,
+        "schedule_delete" => tool_schedule_delete(input, *kernel, *caller_agent_id).await,
 
         // Knowledge graph tools
         "knowledge_add_entity" => tool_knowledge_add_entity(input, *kernel).await,
@@ -367,7 +367,7 @@ pub async fn execute_tool_raw(
         "a2a_send" => tool_a2a_send(input, *kernel).await,
 
         // Goal tracking tool
-        "goal_update" => tool_goal_update(input, *kernel),
+        "goal_update" => tool_goal_update(input, *kernel, *caller_agent_id),
 
         // Browser automation tools
         "browser_navigate" => {
@@ -2240,6 +2240,7 @@ async fn tool_event_publish(
 fn tool_goal_update(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
 ) -> Result<String, String> {
     // Validate input before touching the kernel
     let goal_id = input["goal_id"]
@@ -2261,8 +2262,9 @@ fn tool_goal_update(
         }
     }
 
+    let caller_agent_id = caller_agent_id.ok_or("Agent ID required for goal_update".to_string())?;
     let kh = require_kernel(kernel)?;
-    let updated = kh.goal_update(goal_id, status, progress)?;
+    let updated = kh.goal_update(caller_agent_id, goal_id, status, progress)?;
     Ok(serde_json::to_string_pretty(&updated).unwrap_or_else(|_| updated.to_string()))
 }
 
@@ -2618,14 +2620,16 @@ async fn tool_schedule_list(
 async fn tool_schedule_delete(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
+    let agent_id = caller_agent_id.ok_or("Agent ID required for schedule_delete")?;
     // Accept either "id" or "job_id" for backward compatibility
     let id = input["id"]
         .as_str()
         .or_else(|| input["job_id"].as_str())
         .ok_or("Missing 'id' parameter")?;
-    kh.cron_cancel(id).await?;
+    kh.cron_cancel(agent_id, id).await?;
     Ok(format!("Schedule '{id}' deleted."))
 }
 
@@ -2663,22 +2667,7 @@ async fn tool_cron_cancel(
         .as_str()
         .ok_or("Missing 'job_id' parameter")?;
     let agent_id = caller_agent_id.ok_or("Agent ID required for cron_cancel")?;
-    // Authorize: the caller may only cancel jobs that belong to them.
-    // Otherwise an agent with the cron_cancel tool could delete any other
-    // agent's jobs as long as it learns their UUID (via side-channel or
-    // social engineering).
-    let owned = kh.cron_list(agent_id).await?;
-    let owns_job = owned.iter().any(|job| {
-        job.get("id")
-            .and_then(|v| v.as_str())
-            .is_some_and(|id| id == job_id)
-    });
-    if !owns_job {
-        return Err(format!(
-            "Cron job '{job_id}' not found or not owned by this agent"
-        ));
-    }
-    kh.cron_cancel(job_id).await?;
+    kh.cron_cancel(agent_id, job_id).await?;
     Ok(format!("Cron job '{job_id}' cancelled."))
 }
 
@@ -5359,6 +5348,7 @@ mod tests {
         // Parent only has file_read, but child requests shell_exec.
         let kernel: Arc<dyn KernelHandle> = Arc::new(SpawnCheckKernel {
             should_fail_escalation: true,
+            expected_goal_update_caller: None,
         });
         let parent_allowed = vec!["file_read".to_string(), "agent_spawn".to_string()];
         let result = execute_tool(
@@ -5405,6 +5395,7 @@ mod tests {
         // Sub-agent requests only capabilities the parent has — should succeed.
         let kernel: Arc<dyn KernelHandle> = Arc::new(SpawnCheckKernel {
             should_fail_escalation: false,
+            expected_goal_update_caller: None,
         });
         let parent_allowed = vec![
             "file_read".to_string(),
@@ -5785,7 +5776,7 @@ mod tests {
             "status": "in_progress",
             "progress": 50
         });
-        let result = tool_goal_update(&input, None);
+        let result = tool_goal_update(&input, None, Some("agent-1"));
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Kernel handle"));
     }
@@ -5795,7 +5786,7 @@ mod tests {
         let input = serde_json::json!({
             "status": "in_progress"
         });
-        let result = tool_goal_update(&input, None);
+        let result = tool_goal_update(&input, None, Some("agent-1"));
         assert!(result.is_err());
     }
 
@@ -5804,7 +5795,7 @@ mod tests {
         let input = serde_json::json!({
             "goal_id": "some-uuid"
         });
-        let result = tool_goal_update(&input, None);
+        let result = tool_goal_update(&input, None, Some("agent-1"));
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("At least one"));
     }
@@ -5815,14 +5806,26 @@ mod tests {
             "goal_id": "some-uuid",
             "status": "done"
         });
-        let result = tool_goal_update(&input, None);
+        let result = tool_goal_update(&input, None, Some("agent-1"));
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Invalid status"));
+    }
+
+    #[test]
+    fn test_goal_update_requires_calling_agent_context() {
+        let input = serde_json::json!({
+            "goal_id": "some-uuid",
+            "status": "in_progress"
+        });
+        let result = tool_goal_update(&input, None, None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Agent ID required"));
     }
 
     /// Mock kernel that validates capability inheritance in spawn_agent_checked.
     struct SpawnCheckKernel {
         should_fail_escalation: bool,
+        expected_goal_update_caller: Option<String>,
     }
 
     #[async_trait]
@@ -5954,5 +5957,43 @@ mod tests {
         ) -> Result<Vec<librefang_types::memory::GraphMatch>, String> {
             Err("not used".to_string())
         }
+
+        fn goal_update(
+            &self,
+            caller_agent_id: &str,
+            goal_id: &str,
+            status: Option<&str>,
+            progress: Option<u8>,
+        ) -> Result<serde_json::Value, String> {
+            if let Some(expected) = &self.expected_goal_update_caller {
+                assert_eq!(caller_agent_id, expected);
+                assert_eq!(goal_id, "goal-123");
+                assert_eq!(status, Some("in_progress"));
+                assert_eq!(progress, Some(25));
+                Ok(serde_json::json!({
+                    "goal_id": goal_id,
+                    "status": status,
+                    "progress": progress,
+                }))
+            } else {
+                Err("goal_update not expected".to_string())
+            }
+        }
+    }
+
+    #[test]
+    fn test_goal_update_passes_caller_agent_context() {
+        let input = serde_json::json!({
+            "goal_id": "goal-123",
+            "status": "in_progress",
+            "progress": 25
+        });
+        let kernel: Arc<dyn KernelHandle> = Arc::new(SpawnCheckKernel {
+            should_fail_escalation: false,
+            expected_goal_update_caller: Some("agent-123".to_string()),
+        });
+        let result = tool_goal_update(&input, Some(&kernel), Some("agent-123"));
+        assert!(result.is_ok());
+        assert!(result.unwrap().contains("\"goal_id\": \"goal-123\""));
     }
 }

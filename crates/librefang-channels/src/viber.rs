@@ -6,7 +6,8 @@
 //! `POST https://chatapi.viber.com/pa/set_webhook`.
 
 use crate::types::{
-    split_message, ChannelAdapter, ChannelContent, ChannelMessage, ChannelType, ChannelUser,
+    split_message, ChannelAdapter, ChannelAdapterMultiplicity, ChannelContent, ChannelMessage,
+    ChannelType, ChannelUser,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -304,6 +305,12 @@ impl ChannelAdapter for ViberAdapter {
 
     fn channel_type(&self) -> ChannelType {
         ChannelType::Custom("viber".to_string())
+    }
+
+    fn multiplicity(&self) -> ChannelAdapterMultiplicity {
+        ChannelAdapterMultiplicity::SingleInstancePerDaemon {
+            reason: "viber uses a fixed shared webhook route on the main API server",
+        }
     }
 
     async fn create_webhook_routes(

@@ -16,7 +16,8 @@
 //! refreshed automatically (2-hour expiry).
 
 use crate::types::{
-    split_message, ChannelAdapter, ChannelContent, ChannelMessage, ChannelType, ChannelUser,
+    split_message, ChannelAdapter, ChannelAdapterMultiplicity, ChannelContent, ChannelMessage,
+    ChannelType, ChannelUser,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -1367,6 +1368,16 @@ impl ChannelAdapter for FeishuAdapter {
 
     fn channel_type(&self) -> ChannelType {
         ChannelType::Custom(self.name().to_string())
+    }
+
+    fn multiplicity(&self) -> ChannelAdapterMultiplicity {
+        if matches!(self.receive_mode, FeishuReceiveMode::Webhook) {
+            ChannelAdapterMultiplicity::SingleInstancePerDaemon {
+                reason: "feishu/lark webhook mode uses a fixed shared callback route on the main API server",
+            }
+        } else {
+            ChannelAdapterMultiplicity::MultiInstanceSafe
+        }
     }
 
     async fn create_webhook_routes(

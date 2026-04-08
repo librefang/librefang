@@ -10,7 +10,8 @@
 //! DingTalk Open API reply endpoint (stream mode).
 
 use crate::types::{
-    split_message, ChannelAdapter, ChannelContent, ChannelMessage, ChannelType, ChannelUser,
+    split_message, ChannelAdapter, ChannelAdapterMultiplicity, ChannelContent, ChannelMessage,
+    ChannelType, ChannelUser,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -578,6 +579,16 @@ impl ChannelAdapter for DingTalkAdapter {
 
     fn channel_type(&self) -> ChannelType {
         ChannelType::Custom("dingtalk".to_string())
+    }
+
+    fn multiplicity(&self) -> ChannelAdapterMultiplicity {
+        if self.mode == DingTalkMode::Webhook {
+            ChannelAdapterMultiplicity::SingleInstancePerDaemon {
+                reason: "dingtalk webhook mode uses a fixed shared callback route on the main API server",
+            }
+        } else {
+            ChannelAdapterMultiplicity::MultiInstanceSafe
+        }
     }
 
     async fn create_webhook_routes(

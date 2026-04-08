@@ -1,18 +1,26 @@
 //! Shared route helpers: account validation and ownership guards.
-//!
-//! Provides multi-tenant isolation via the `check_account()` function, which validates
-//! that an agent belongs to the requesting owner based on the `X-Account-Id` header.
 
 use crate::middleware::AccountId;
 use axum::http::StatusCode;
 use axum::Json;
 use librefang_types::agent::AgentEntry;
 
+/// Require a concrete account identity on tenant-facing or admin-only routes.
+pub fn require_concrete_account<'a>(
+    account: &'a AccountId,
+) -> Result<&'a str, (StatusCode, Json<serde_json::Value>)> {
+    account.0.as_deref().ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "X-Account-Id required"})),
+        )
+    })
+}
+
 /// Check that an agent belongs to the requesting owner.
 ///
-/// When `AccountId(Some(owner))` is present, the agent's `account_id` must match.
-/// Returns 404 (not 403) to avoid confirming agent existence to wrong owner.
-/// When `AccountId(None)`, all agents are visible (admin/legacy behavior).
+/// Callers should require a concrete account first with `require_concrete_account()`.
+/// Returns 404 (not 403) to avoid confirming agent existence to the wrong tenant.
 ///
 /// # Security Note
 ///
@@ -34,10 +42,27 @@ pub fn check_account(
     Ok(())
 }
 
+/// Reject non-admin callers from admin-only endpoints after requiring a
+/// concrete account identity.
+pub fn require_admin_account(
+    account: &AccountId,
+    admin_accounts: &[String],
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    let account_id = require_concrete_account(account)?;
+    if admin_accounts.iter().any(|id| id == account_id) {
+        Ok(())
+    } else {
+        Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "This endpoint requires admin access"})),
+        ))
+    }
+}
+
 /// Reject non-admin callers from admin-only endpoints.
 ///
 /// Passes through when:
-/// - `AccountId(None)` — single-tenant / desktop mode (no X-Account-Id header)
+/// - `AccountId(None)` — legacy compatibility path outside normal Qwntik traffic
 /// - `AccountId(Some(id))` where `id` is in `admin_accounts` — elevated tenant
 ///
 /// Returns 403 Forbidden for all other scoped tenants.
@@ -51,7 +76,7 @@ pub fn require_admin(
     admin_accounts: &[String],
 ) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
     match &account.0 {
-        None => Ok(()),                                    // single-tenant / desktop mode
+        None => Ok(()),                                    // legacy compatibility/admin path
         Some(id) if admin_accounts.contains(id) => Ok(()), // elevated admin tenant
         Some(_) => Err((
             StatusCode::FORBIDDEN,
@@ -66,8 +91,9 @@ pub fn require_admin(
 /// contexts. It sets the `account_id` field on the agent entry to enforce
 /// ownership boundaries for subsequent access checks.
 ///
-/// When `AccountId(None)` (system/admin mode), the agent remains unowned (legacy
-/// behavior). When `AccountId(Some(id))`, the agent is assigned to that tenant.
+/// When `AccountId(None)` reaches this helper, the agent remains unowned as a
+/// compatibility fallback. Tenant-facing runtime flows should supply a concrete
+/// account and persist ownership.
 #[allow(dead_code)] // Available for channels/config route scoping in Phase 2
 pub fn finalize_spawned_agent(entry: &mut AgentEntry, account: &AccountId) {
     if let Some(ref account_id) = account.0 {
@@ -122,10 +148,17 @@ mod tests {
     }
 
     #[test]
-    fn test_check_account_allows_system_to_see_all() {
-        let entry = make_agent_entry(Some("tenant-a".to_string()));
-        let account = AccountId(None); // system/legacy mode
-        assert!(check_account(&entry, &account).is_ok());
+    fn test_require_concrete_account_accepts_present_header() {
+        let account = AccountId(Some("tenant-a".to_string()));
+        assert_eq!(require_concrete_account(&account).unwrap(), "tenant-a");
+    }
+
+    #[test]
+    fn test_require_concrete_account_rejects_missing_header() {
+        let account = AccountId(None);
+        let (code, json) = require_concrete_account(&account).unwrap_err();
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert_eq!(json["error"], "X-Account-Id required");
     }
 
     #[test]
@@ -159,11 +192,25 @@ mod tests {
     }
 
     #[test]
-    fn test_finalize_spawned_agent_leaves_legacy_unowned() {
-        let mut entry = make_agent_entry(None);
-        let account = AccountId(None); // system/legacy mode
-        finalize_spawned_agent(&mut entry, &account);
-        assert_eq!(entry.account_id, None);
+    fn test_require_admin_account_accepts_admin_tenant() {
+        let account = AccountId(Some("admin".to_string()));
+        assert!(require_admin_account(&account, &[String::from("admin")]).is_ok());
+    }
+
+    #[test]
+    fn test_require_admin_account_rejects_non_admin_tenant() {
+        let account = AccountId(Some("tenant-a".to_string()));
+        let (code, json) = require_admin_account(&account, &[String::from("admin")]).unwrap_err();
+        assert_eq!(code, StatusCode::FORBIDDEN);
+        assert_eq!(json["error"], "This endpoint requires admin access");
+    }
+
+    #[test]
+    fn test_require_admin_account_rejects_missing_header() {
+        let account = AccountId(None);
+        let (code, json) = require_admin_account(&account, &[String::from("admin")]).unwrap_err();
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert_eq!(json["error"], "X-Account-Id required");
     }
 
     #[test]

@@ -34,10 +34,7 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
 }
 
 use super::shared::require_admin;
-use super::skills::{
-    remove_channel_config, remove_secret_env, upsert_channel_config, validate_env_var,
-    write_secret_env,
-};
+use super::skills::{remove_secret_env, validate_env_var, write_secret_env};
 use super::AppState;
 use crate::middleware::AccountId;
 use axum::extract::{Path, State};
@@ -796,54 +793,453 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
 ];
 
 /// Check if a channel is configured (has a `[channels.xxx]` section in config).
-fn is_channel_configured(config: &librefang_types::config::ChannelsConfig, name: &str) -> bool {
+fn is_channel_configured(
+    config: &librefang_types::config::ChannelsConfig,
+    name: &str,
+    account_id: &str,
+) -> bool {
     match name {
-        "telegram" => config.telegram.is_some(),
-        "discord" => config.discord.is_some(),
-        "slack" => config.slack.is_some(),
-        "whatsapp" => config.whatsapp.is_some(),
-        "signal" => config.signal.is_some(),
-        "matrix" => config.matrix.is_some(),
-        "email" => config.email.is_some(),
-        "line" => config.line.is_some(),
-        "viber" => config.viber.is_some(),
-        "messenger" => config.messenger.is_some(),
-        "threema" => config.threema.is_some(),
-        "keybase" => config.keybase.is_some(),
-        "reddit" => config.reddit.is_some(),
-        "mastodon" => config.mastodon.is_some(),
-        "bluesky" => config.bluesky.is_some(),
-        "linkedin" => config.linkedin.is_some(),
-        "nostr" => config.nostr.is_some(),
-        "teams" => config.teams.is_some(),
-        "mattermost" => config.mattermost.is_some(),
-        "google_chat" => config.google_chat.is_some(),
-        "webex" => config.webex.is_some(),
-        "feishu" => config.feishu.is_some(),
-        "dingtalk" => config.dingtalk.is_some(),
-        "pumble" => config.pumble.is_some(),
-        "flock" => config.flock.is_some(),
-        "twist" => config.twist.is_some(),
-        "zulip" => config.zulip.is_some(),
-        "irc" => config.irc.is_some(),
-        "xmpp" => config.xmpp.is_some(),
-        "gitter" => config.gitter.is_some(),
-        "discourse" => config.discourse.is_some(),
-        "revolt" => config.revolt.is_some(),
-        "guilded" => config.guilded.is_some(),
-        "nextcloud" => config.nextcloud.is_some(),
-        "rocketchat" => config.rocketchat.is_some(),
-        "twitch" => config.twitch.is_some(),
-        "ntfy" => config.ntfy.is_some(),
-        "gotify" => config.gotify.is_some(),
-        "webhook" => config.webhook.is_some(),
-        "voice" => config.voice.is_some(),
-        "mumble" => config.mumble.is_some(),
-        "wechat" => config.wechat.is_some(),
-        "wecom" => config.wecom.is_some(),
-        "qq" => config.qq.is_some(),
+        "telegram" => config
+            .telegram
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "discord" => config
+            .discord
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "slack" => config
+            .slack
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "whatsapp" => config
+            .whatsapp
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "signal" => config
+            .signal
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "matrix" => config
+            .matrix
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "email" => config
+            .email
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "line" => config
+            .line
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "viber" => config
+            .viber
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "messenger" => config
+            .messenger
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "threema" => config
+            .threema
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "keybase" => config
+            .keybase
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "reddit" => config
+            .reddit
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "mastodon" => config
+            .mastodon
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "bluesky" => config
+            .bluesky
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "linkedin" => config
+            .linkedin
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "nostr" => config
+            .nostr
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "teams" => config
+            .teams
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "mattermost" => config
+            .mattermost
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "google_chat" => config
+            .google_chat
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "webex" => config
+            .webex
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "feishu" => config
+            .feishu
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "dingtalk" => config
+            .dingtalk
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "pumble" => config
+            .pumble
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "flock" => config
+            .flock
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "twist" => config
+            .twist
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "zulip" => config
+            .zulip
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "irc" => config
+            .irc
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "xmpp" => config
+            .xmpp
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "gitter" => config
+            .gitter
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "discourse" => config
+            .discourse
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "revolt" => config
+            .revolt
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "guilded" => config
+            .guilded
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "nextcloud" => config
+            .nextcloud
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "rocketchat" => config
+            .rocketchat
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "twitch" => config
+            .twitch
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "ntfy" => config
+            .ntfy
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "gotify" => config
+            .gotify
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "webhook" => config
+            .webhook
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "voice" => config
+            .voice
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "mumble" => config
+            .mumble
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "wechat" => config
+            .wechat
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "wecom" => config
+            .wecom
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
+        "qq" => config
+            .qq
+            .iter()
+            .any(|c| c.account_id.as_deref() == Some(account_id)),
         _ => false,
     }
+}
+
+fn require_tenant_account_id(account: &AccountId) -> Result<&str, axum::response::Response> {
+    account.0.as_deref().ok_or_else(|| {
+        ApiErrorResponse::bad_request("X-Account-Id header required for channel operations")
+            .with_status(StatusCode::UNAUTHORIZED)
+            .into_json_tuple()
+            .into_response()
+    })
+}
+
+fn encode_account_component(account_id: &str) -> String {
+    if account_id.is_empty() {
+        return "ACCOUNT_00".to_string();
+    }
+
+    let mut out = String::with_capacity(account_id.len() * 3);
+    for byte in account_id.as_bytes() {
+        out.push('_');
+        out.push_str(&format!("{byte:02X}"));
+    }
+    format!("ACCOUNT{out}")
+}
+
+fn scoped_secret_env_var(base: &str, account_id: &str) -> String {
+    format!("{base}__{}", encode_account_component(account_id))
+}
+
+fn account_id_from_toml_table(table: &toml::map::Map<String, toml::Value>) -> Option<&str> {
+    table.get("account_id").and_then(|v| v.as_str())
+}
+
+fn build_channel_toml_table(
+    fields: &HashMap<String, (String, FieldType)>,
+    account_id: &str,
+) -> toml::map::Map<String, toml::Value> {
+    let mut ch_table = toml::map::Map::new();
+    ch_table.insert(
+        "account_id".to_string(),
+        toml::Value::String(account_id.to_string()),
+    );
+    for (k, (v, ft)) in fields {
+        let toml_val = match ft {
+            FieldType::Number => {
+                if let Ok(n) = v.parse::<i64>() {
+                    toml::Value::Integer(n)
+                } else {
+                    toml::Value::String(v.clone())
+                }
+            }
+            FieldType::List => toml::Value::Array(
+                v.split(',')
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| toml::Value::String(s.to_string()))
+                    .collect(),
+            ),
+            _ => toml::Value::String(v.clone()),
+        };
+        ch_table.insert(k.clone(), toml_val);
+    }
+    ch_table
+}
+
+fn upsert_account_channel_config(
+    config_path: &std::path::Path,
+    channel_name: &str,
+    account_id: &str,
+    fields: &HashMap<String, (String, FieldType)>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let content = if config_path.exists() {
+        std::fs::read_to_string(config_path)?
+    } else {
+        String::new()
+    };
+
+    let mut doc: toml::Value = if content.trim().is_empty() {
+        toml::Value::Table(toml::map::Map::new())
+    } else {
+        toml::from_str(&content)?
+    };
+    let root = doc.as_table_mut().ok_or("Config is not a TOML table")?;
+
+    if !root.contains_key("channels") {
+        root.insert(
+            "channels".to_string(),
+            toml::Value::Table(toml::map::Map::new()),
+        );
+    }
+    let channels_table = root
+        .get_mut("channels")
+        .and_then(|v| v.as_table_mut())
+        .ok_or("channels is not a table")?;
+
+    let new_entry = toml::Value::Table(build_channel_toml_table(fields, account_id));
+    match channels_table.get_mut(channel_name) {
+        Some(existing) if existing.is_table() => {
+            let table = existing
+                .as_table()
+                .ok_or("channel config entry is not a TOML table")?;
+            if account_id_from_toml_table(table) == Some(account_id) {
+                *existing = new_entry;
+            } else {
+                let legacy = existing.clone();
+                *existing = toml::Value::Array(vec![legacy, new_entry]);
+            }
+        }
+        Some(toml::Value::Array(entries)) => {
+            for entry in entries.iter_mut() {
+                if let Some(table) = entry.as_table() {
+                    if account_id_from_toml_table(table) == Some(account_id) {
+                        *entry = new_entry.clone();
+                        if let Some(parent) = config_path.parent() {
+                            std::fs::create_dir_all(parent)?;
+                        }
+                        std::fs::write(config_path, toml::to_string_pretty(&doc)?)?;
+                        return Ok(());
+                    }
+                }
+            }
+            entries.push(new_entry);
+        }
+        Some(_) => return Err("channel config entry is not a TOML table or array".into()),
+        None => {
+            channels_table.insert(channel_name.to_string(), new_entry);
+        }
+    }
+
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(config_path, toml::to_string_pretty(&doc)?)?;
+    Ok(())
+}
+
+fn remove_account_channel_config(
+    config_path: &std::path::Path,
+    channel_name: &str,
+    account_id: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !config_path.exists() {
+        return Ok(());
+    }
+    let content = std::fs::read_to_string(config_path)?;
+    if content.trim().is_empty() {
+        return Ok(());
+    }
+
+    let mut doc: toml::Value = toml::from_str(&content)?;
+    if let Some(channels) = doc
+        .as_table_mut()
+        .and_then(|r| r.get_mut("channels"))
+        .and_then(|c| c.as_table_mut())
+    {
+        let mut remove_key = false;
+        if let Some(value) = channels.get_mut(channel_name) {
+            match value {
+                toml::Value::Table(table) => {
+                    if account_id_from_toml_table(table) == Some(account_id) {
+                        remove_key = true;
+                    }
+                }
+                toml::Value::Array(entries) => {
+                    entries.retain(|entry| {
+                        entry
+                            .as_table()
+                            .map(|table| account_id_from_toml_table(table) != Some(account_id))
+                            .unwrap_or(true)
+                    });
+                    match entries.len() {
+                        0 => remove_key = true,
+                        1 => *value = entries[0].clone(),
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+        }
+        if remove_key {
+            channels.remove(channel_name);
+        }
+    }
+
+    std::fs::write(config_path, toml::to_string_pretty(&doc)?)?;
+    Ok(())
+}
+
+fn stored_secret_env_name_for_field(
+    config_values: Option<&serde_json::Value>,
+    field: &ChannelField,
+) -> Option<String> {
+    config_values
+        .and_then(|v| v.as_object())
+        .and_then(|obj| obj.get(field.key))
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn configured_secret_env_names(
+    meta: &ChannelMeta,
+    config_values: Option<&serde_json::Value>,
+) -> Vec<String> {
+    meta.fields
+        .iter()
+        .filter_map(|field| stored_secret_env_name_for_field(config_values, field))
+        .collect()
+}
+
+fn existing_field_value_as_string(
+    config_values: &serde_json::Value,
+    field: &ChannelField,
+) -> Option<String> {
+    let value = config_values.as_object()?.get(field.key)?;
+    match field.field_type {
+        FieldType::List => value.as_array().map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    item.as_str()
+                        .map(ToOwned::to_owned)
+                        .or_else(|| Some(item.to_string()))
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        }),
+        FieldType::Number => value
+            .as_i64()
+            .map(|v| v.to_string())
+            .or_else(|| value.as_u64().map(|v| v.to_string()))
+            .or_else(|| value.as_f64().map(|v| v.to_string()))
+            .or_else(|| value.as_str().map(ToOwned::to_owned)),
+        _ => value.as_str().map(ToOwned::to_owned),
+    }
+}
+
+fn merged_channel_config_fields(
+    meta: &ChannelMeta,
+    existing_config: Option<&serde_json::Value>,
+    request_fields: &serde_json::Map<String, serde_json::Value>,
+) -> HashMap<String, (String, FieldType)> {
+    let mut merged = HashMap::new();
+
+    if let Some(existing_config) = existing_config {
+        for field in meta.fields {
+            if let Some(value) = existing_field_value_as_string(existing_config, field) {
+                merged.insert(field.key.to_string(), (value, field.field_type));
+            }
+        }
+    }
+
+    for field in meta.fields {
+        let value = request_fields
+            .get(field.key)
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if value.is_empty() {
+            continue;
+        }
+        merged.insert(field.key.to_string(), (value.to_string(), field.field_type));
+    }
+
+    merged
 }
 
 /// Build a JSON field descriptor, checking env var presence but never exposing secrets.
@@ -852,9 +1248,8 @@ fn build_field_json(
     f: &ChannelField,
     config_values: Option<&serde_json::Value>,
 ) -> serde_json::Value {
-    let has_value = f
-        .env_var
-        .map(|ev| std::env::var(ev).map(|v| !v.is_empty()).unwrap_or(false))
+    let has_value = stored_secret_env_name_for_field(config_values, f)
+        .map(|ev| std::env::var(&ev).map(|v| !v.is_empty()).unwrap_or(false))
         .unwrap_or(false);
     let mut field = serde_json::json!({
         "key": f.key,
@@ -961,183 +1356,228 @@ fn find_channel_meta(name: &str) -> Option<&'static ChannelMeta> {
 fn channel_config_values(
     config: &librefang_types::config::ChannelsConfig,
     name: &str,
+    account_id: &str,
 ) -> Option<serde_json::Value> {
     match name {
         "telegram" => config
             .telegram
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "discord" => config
             .discord
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "slack" => config
             .slack
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "whatsapp" => config
             .whatsapp
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "signal" => config
             .signal
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "matrix" => config
             .matrix
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "email" => config
             .email
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "teams" => config
             .teams
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "mattermost" => config
             .mattermost
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "irc" => config
             .irc
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "google_chat" => config
             .google_chat
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "twitch" => config
             .twitch
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "rocketchat" => config
             .rocketchat
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "zulip" => config
             .zulip
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "xmpp" => config
             .xmpp
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "line" => config
             .line
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "viber" => config
             .viber
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "messenger" => config
             .messenger
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "reddit" => config
             .reddit
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "mastodon" => config
             .mastodon
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "bluesky" => config
             .bluesky
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "feishu" => config
             .feishu
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "revolt" => config
             .revolt
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "nextcloud" => config
             .nextcloud
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "guilded" => config
             .guilded
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "keybase" => config
             .keybase
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "threema" => config
             .threema
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "nostr" => config
             .nostr
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "webex" => config
             .webex
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "pumble" => config
             .pumble
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "flock" => config
             .flock
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "twist" => config
             .twist
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "mumble" => config
             .mumble
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "dingtalk" => config
             .dingtalk
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "discourse" => config
             .discourse
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "gitter" => config
             .gitter
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "ntfy" => config
             .ntfy
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "gotify" => config
             .gotify
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "webhook" => config
             .webhook
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "voice" => config
             .voice
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "linkedin" => config
             .linkedin
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "wechat" => config
             .wechat
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "wecom" => config
             .wecom
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         "qq" => config
             .qq
-            .as_ref()
+            .iter()
+            .find(|c| c.account_id.as_deref() == Some(account_id))
             .and_then(|c| serde_json::to_value(c).ok()),
         _ => None,
     }
@@ -1156,9 +1596,10 @@ pub async fn list_channels(
     State(state): State<Arc<AppState>>,
     account: AccountId,
 ) -> axum::response::Response {
-    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
-        return (code, json).into_response();
-    }
+    let account_id = match require_tenant_account_id(&account) {
+        Ok(account_id) => account_id,
+        Err(response) => return response,
+    };
     // Read the live channels config (updated on every hot-reload) instead of the
     // stale boot-time kernel.config, so newly configured channels show correctly.
     let live_channels = state.channels_config.read().await;
@@ -1166,7 +1607,8 @@ pub async fn list_channels(
     let mut configured_count = 0u32;
 
     for meta in CHANNEL_REGISTRY {
-        let configured = is_channel_configured(&live_channels, meta.name);
+        let config_vals = channel_config_values(&live_channels, meta.name, account_id);
+        let configured = is_channel_configured(&live_channels, meta.name, account_id);
         if configured {
             configured_count += 1;
         }
@@ -1177,12 +1619,11 @@ pub async fn list_channels(
             .iter()
             .filter(|f| f.required && f.env_var.is_some())
             .all(|f| {
-                f.env_var
+                stored_secret_env_name_for_field(config_vals.as_ref(), f)
                     .map(|ev| std::env::var(ev).map(|v| !v.is_empty()).unwrap_or(false))
-                    .unwrap_or(true)
+                    .unwrap_or(false)
             });
 
-        let config_vals = channel_config_values(&live_channels, meta.name);
         let mut fields: Vec<serde_json::Value> = meta
             .fields
             .iter()
@@ -1238,9 +1679,10 @@ pub async fn get_channel(
     account: AccountId,
     Path(name): Path<String>,
 ) -> axum::response::Response {
-    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
-        return (code, json).into_response();
-    }
+    let account_id = match require_tenant_account_id(&account) {
+        Ok(account_id) => account_id,
+        Err(response) => return response,
+    };
     let meta = match find_channel_meta(&name) {
         Some(m) => m,
         None => {
@@ -1251,19 +1693,19 @@ pub async fn get_channel(
     };
 
     let live_channels = state.channels_config.read().await;
-    let configured = is_channel_configured(&live_channels, meta.name);
+    let config_vals = channel_config_values(&live_channels, meta.name, account_id);
+    let configured = is_channel_configured(&live_channels, meta.name, account_id);
 
     let has_token = meta
         .fields
         .iter()
         .filter(|f| f.required && f.env_var.is_some())
         .all(|f| {
-            f.env_var
+            stored_secret_env_name_for_field(config_vals.as_ref(), f)
                 .map(|ev| std::env::var(ev).map(|v| !v.is_empty()).unwrap_or(false))
-                .unwrap_or(true)
+                .unwrap_or(false)
         });
 
-    let config_vals = channel_config_values(&live_channels, meta.name);
     let mut fields: Vec<serde_json::Value> = meta
         .fields
         .iter()
@@ -1315,9 +1757,10 @@ pub async fn configure_channel(
     Path(name): Path<String>,
     Json(body): Json<serde_json::Value>,
 ) -> axum::response::Response {
-    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
-        return (code, json).into_response();
-    }
+    let account_id = match require_tenant_account_id(&account) {
+        Ok(account_id) => account_id,
+        Err(response) => return response,
+    };
     let meta = match find_channel_meta(&name) {
         Some(m) => m,
         None => {
@@ -1336,10 +1779,13 @@ pub async fn configure_channel(
         }
     };
 
-    let home = librefang_kernel::config::librefang_home();
+    let home = state.kernel.home_dir().to_path_buf();
     let secrets_path = home.join("secrets.env");
     let config_path = home.join("config.toml");
-    let mut config_fields: HashMap<String, (String, FieldType)> = HashMap::new();
+    let live_channels = state.channels_config.read().await;
+    let existing_config = channel_config_values(&live_channels, meta.name, account_id);
+    drop(live_channels);
+    let mut config_fields = merged_channel_config_fields(meta, existing_config.as_ref(), fields);
 
     for field_def in meta.fields {
         let value = fields
@@ -1351,39 +1797,33 @@ pub async fn configure_channel(
         }
 
         if let Some(env_var) = field_def.env_var {
+            let scoped_env_var = scoped_secret_env_var(env_var, account_id);
             // Validate env var name and value before writing
-            if let Err(msg) = validate_env_var(env_var, value) {
+            if let Err(msg) = validate_env_var(&scoped_env_var, value) {
                 return ApiErrorResponse::bad_request(msg)
                     .into_json_tuple()
                     .into_response();
             }
             // Secret field — write to secrets.env and set in process
-            if let Err(e) = write_secret_env(&secrets_path, env_var, value) {
+            if let Err(e) = write_secret_env(&secrets_path, &scoped_env_var, value) {
                 return ApiErrorResponse::internal(format!("Failed to write secret: {e}"))
                     .into_json_tuple()
                     .into_response();
             }
             // SAFETY: We are the only writer; this is a single-threaded config operation
             unsafe {
-                std::env::set_var(env_var, value);
+                std::env::set_var(&scoped_env_var, value);
             }
             // Also write the env var NAME to config.toml so the channel section
             // is not empty and the kernel knows which env var to read.
-            config_fields.insert(
-                field_def.key.to_string(),
-                (env_var.to_string(), FieldType::Text),
-            );
+            config_fields.insert(field_def.key.to_string(), (scoped_env_var, FieldType::Text));
         } else {
-            // Config field — collect for TOML write with type info
-            config_fields.insert(
-                field_def.key.to_string(),
-                (value.to_string(), field_def.field_type),
-            );
+            // Non-secret fields are already merged from existing config above.
         }
     }
 
     // Write config.toml section
-    if let Err(e) = upsert_channel_config(&config_path, &name, &config_fields) {
+    if let Err(e) = upsert_account_channel_config(&config_path, &name, account_id, &config_fields) {
         return ApiErrorResponse::internal(format!("Failed to write config: {e}"))
             .into_json_tuple()
             .into_response();
@@ -1392,7 +1832,10 @@ pub async fn configure_channel(
     // Hot-reload: activate the channel immediately
     match crate::channel_bridge::reload_channels_from_disk(&state).await {
         Ok(started) => {
-            let activated = started.iter().any(|s| s.eq_ignore_ascii_case(&name));
+            let expected_started_key = format!("{name}:{account_id}");
+            let activated = started
+                .iter()
+                .any(|started_name| started_name.eq_ignore_ascii_case(&expected_started_key));
             (
                 StatusCode::OK,
                 Json(serde_json::json!({
@@ -1442,9 +1885,10 @@ pub async fn remove_channel(
     account: AccountId,
     Path(name): Path<String>,
 ) -> axum::response::Response {
-    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
-        return (code, json).into_response();
-    }
+    let account_id = match require_tenant_account_id(&account) {
+        Ok(account_id) => account_id,
+        Err(response) => return response,
+    };
     let meta = match find_channel_meta(&name) {
         Some(m) => m,
         None => {
@@ -1454,25 +1898,26 @@ pub async fn remove_channel(
         }
     };
 
-    let home = librefang_kernel::config::librefang_home();
+    let home = state.kernel.home_dir().to_path_buf();
     let secrets_path = home.join("secrets.env");
     let config_path = home.join("config.toml");
+    let live_channels = state.channels_config.read().await;
+    let config_vals = channel_config_values(&live_channels, meta.name, account_id);
 
-    // Remove all secret env vars for this channel
-    for field_def in meta.fields {
-        if let Some(env_var) = field_def.env_var {
-            if let Err(e) = remove_secret_env(&secrets_path, env_var) {
-                tracing::warn!("Failed to remove secret env var: {e}");
-            }
-            // SAFETY: Single-threaded config operation
-            unsafe {
-                std::env::remove_var(env_var);
-            }
+    // Remove only this account's secret env vars for this channel.
+    for env_var in configured_secret_env_names(meta, config_vals.as_ref()) {
+        if let Err(e) = remove_secret_env(&secrets_path, &env_var) {
+            tracing::warn!("Failed to remove secret env var: {e}");
+        }
+        // SAFETY: Single-threaded config operation
+        unsafe {
+            std::env::remove_var(&env_var);
         }
     }
+    drop(live_channels);
 
-    // Remove config section
-    if let Err(e) = remove_channel_config(&config_path, &name) {
+    // Remove only this account's config entry.
+    if let Err(e) = remove_account_channel_config(&config_path, &name, account_id) {
         return ApiErrorResponse::internal(format!("Failed to remove config: {e}"))
             .into_json_tuple()
             .into_response();
@@ -1527,9 +1972,10 @@ pub async fn test_channel(
     Path(name): Path<String>,
     raw_body: axum::body::Bytes,
 ) -> axum::response::Response {
-    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
-        return (code, json).into_response();
-    }
+    let account_id = match require_tenant_account_id(&account) {
+        Ok(account_id) => account_id,
+        Err(response) => return response,
+    };
     let meta = match find_channel_meta(&name) {
         Some(m) => m,
         None => {
@@ -1540,15 +1986,25 @@ pub async fn test_channel(
                 .into_response()
         }
     };
+    let live_channels = state.channels_config.read().await;
+    let config_vals = channel_config_values(&live_channels, meta.name, account_id);
+    drop(live_channels);
 
     // Check all required env vars are set
     let mut missing = Vec::new();
     for field_def in meta.fields {
         if field_def.required {
-            if let Some(env_var) = field_def.env_var {
-                if std::env::var(env_var).map(|v| v.is_empty()).unwrap_or(true) {
-                    missing.push(env_var);
+            match stored_secret_env_name_for_field(config_vals.as_ref(), field_def) {
+                Some(env_var) => {
+                    if std::env::var(&env_var)
+                        .map(|v| v.is_empty())
+                        .unwrap_or(true)
+                    {
+                        missing.push(env_var);
+                    }
                 }
+                None if field_def.env_var.is_some() => missing.push(field_def.key.to_string()),
+                None => {}
             }
         }
     }
@@ -1577,7 +2033,7 @@ pub async fn test_channel(
         .map(|s| s.to_string());
 
     if let Some(target_id) = target {
-        match send_channel_test_message(&name, &target_id).await {
+        match send_channel_test_message(&name, &target_id, config_vals.as_ref()).await {
             Ok(()) => {
                 return (
                     StatusCode::OK,
@@ -1610,14 +2066,21 @@ pub async fn test_channel(
 }
 
 /// Send a real test message to a specific channel/chat on the given platform.
-async fn send_channel_test_message(channel_name: &str, target_id: &str) -> Result<(), String> {
+async fn send_channel_test_message(
+    channel_name: &str,
+    target_id: &str,
+    config_values: Option<&serde_json::Value>,
+) -> Result<(), String> {
     let client = librefang_runtime::http_client::proxied_client();
     let test_msg = "LibreFang test message — your channel is connected!";
 
     match channel_name {
         "discord" => {
-            let token = std::env::var("DISCORD_BOT_TOKEN")
-                .map_err(|_| "DISCORD_BOT_TOKEN not set".to_string())?;
+            let token_env = config_values
+                .and_then(|v| v.get("bot_token_env"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("DISCORD_BOT_TOKEN");
+            let token = std::env::var(token_env).map_err(|_| format!("{token_env} not set"))?;
             let url = format!("https://discord.com/api/v10/channels/{target_id}/messages");
             let resp = client
                 .post(&url)
@@ -1632,8 +2095,11 @@ async fn send_channel_test_message(channel_name: &str, target_id: &str) -> Resul
             }
         }
         "telegram" => {
-            let token = std::env::var("TELEGRAM_BOT_TOKEN")
-                .map_err(|_| "TELEGRAM_BOT_TOKEN not set".to_string())?;
+            let token_env = config_values
+                .and_then(|v| v.get("bot_token_env"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("TELEGRAM_BOT_TOKEN");
+            let token = std::env::var(token_env).map_err(|_| format!("{token_env} not set"))?;
             let url = format!("https://api.telegram.org/bot{token}/sendMessage");
             let resp = client
                 .post(&url)
@@ -1647,8 +2113,11 @@ async fn send_channel_test_message(channel_name: &str, target_id: &str) -> Resul
             }
         }
         "slack" => {
-            let token = std::env::var("SLACK_BOT_TOKEN")
-                .map_err(|_| "SLACK_BOT_TOKEN not set".to_string())?;
+            let token_env = config_values
+                .and_then(|v| v.get("bot_token_env"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("SLACK_BOT_TOKEN");
+            let token = std::env::var(token_env).map_err(|_| format!("{token_env} not set"))?;
             let url = "https://slack.com/api/chat.postMessage";
             let resp = client
                 .post(url)
@@ -1669,6 +2138,134 @@ async fn send_channel_test_message(channel_name: &str, target_id: &str) -> Resul
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        merged_channel_config_fields, remove_account_channel_config, scoped_secret_env_var,
+        stored_secret_env_name_for_field, upsert_account_channel_config, ChannelField, FieldType,
+    };
+    use std::collections::HashMap;
+
+    #[test]
+    fn scoped_secret_env_var_encodes_account_id_without_collisions() {
+        assert_eq!(
+            scoped_secret_env_var("TELEGRAM_BOT_TOKEN", "acct-prod/us-east-1"),
+            "TELEGRAM_BOT_TOKEN__ACCOUNT_61_63_63_74_2D_70_72_6F_64_2F_75_73_2D_65_61_73_74_2D_31"
+        );
+        assert_ne!(
+            scoped_secret_env_var("TELEGRAM_BOT_TOKEN", "acct-prod/us-east-1"),
+            scoped_secret_env_var("TELEGRAM_BOT_TOKEN", "acct_prod_us-east-1")
+        );
+    }
+
+    #[test]
+    fn upsert_account_channel_config_preserves_other_accounts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        let mut acct_a = HashMap::new();
+        acct_a.insert(
+            "bot_token_env".to_string(),
+            ("TELEGRAM_BOT_TOKEN__A".to_string(), FieldType::Text),
+        );
+        acct_a.insert(
+            "default_agent".to_string(),
+            ("assistant-a".to_string(), FieldType::Text),
+        );
+        upsert_account_channel_config(&path, "telegram", "acct_a", &acct_a).unwrap();
+
+        let mut acct_b = HashMap::new();
+        acct_b.insert(
+            "bot_token_env".to_string(),
+            ("TELEGRAM_BOT_TOKEN__B".to_string(), FieldType::Text),
+        );
+        acct_b.insert(
+            "default_agent".to_string(),
+            ("assistant-b".to_string(), FieldType::Text),
+        );
+        upsert_account_channel_config(&path, "telegram", "acct_b", &acct_b).unwrap();
+
+        let parsed: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let entries = parsed["channels"]["telegram"].as_array().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["account_id"].as_str(), Some("acct_a"));
+        assert_eq!(entries[1]["account_id"].as_str(), Some("acct_b"));
+    }
+
+    #[test]
+    fn remove_account_channel_config_only_removes_target_account() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        let mut acct_a = HashMap::new();
+        acct_a.insert(
+            "bot_token_env".to_string(),
+            ("TELEGRAM_BOT_TOKEN__A".to_string(), FieldType::Text),
+        );
+        upsert_account_channel_config(&path, "telegram", "acct_a", &acct_a).unwrap();
+
+        let mut acct_b = HashMap::new();
+        acct_b.insert(
+            "bot_token_env".to_string(),
+            ("TELEGRAM_BOT_TOKEN__B".to_string(), FieldType::Text),
+        );
+        upsert_account_channel_config(&path, "telegram", "acct_b", &acct_b).unwrap();
+
+        remove_account_channel_config(&path, "telegram", "acct_a").unwrap();
+
+        let parsed: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let entry = &parsed["channels"]["telegram"];
+        assert_eq!(entry["account_id"].as_str(), Some("acct_b"));
+        assert_eq!(
+            entry["bot_token_env"].as_str(),
+            Some("TELEGRAM_BOT_TOKEN__B")
+        );
+    }
+
+    #[test]
+    fn stored_secret_env_name_requires_persisted_mapping() {
+        let field = ChannelField {
+            key: "bot_token_env",
+            label: "Bot Token",
+            field_type: FieldType::Secret,
+            env_var: Some("TELEGRAM_BOT_TOKEN"),
+            required: true,
+            placeholder: "",
+            advanced: false,
+            options: None,
+            show_when: None,
+            readonly: false,
+        };
+
+        assert_eq!(stored_secret_env_name_for_field(None, &field), None);
+    }
+
+    #[test]
+    fn partial_update_preserves_existing_scoped_secret_mapping() {
+        let meta = super::find_channel_meta("telegram").unwrap();
+        let existing = serde_json::json!({
+            "account_id": "acct_a",
+            "bot_token_env": "TELEGRAM_BOT_TOKEN__ACCT_A",
+            "default_agent": "support"
+        });
+        let request = serde_json::json!({
+            "default_agent": "ops"
+        });
+
+        let merged =
+            merged_channel_config_fields(meta, Some(&existing), request.as_object().unwrap());
+
+        assert_eq!(
+            merged.get("bot_token_env").map(|v| v.0.as_str()),
+            Some("TELEGRAM_BOT_TOKEN__ACCT_A")
+        );
+        assert_eq!(
+            merged.get("default_agent").map(|v| v.0.as_str()),
+            Some("ops")
+        );
+    }
 }
 #[utoipa::path(
     post,
