@@ -17,8 +17,8 @@ impl PtySession {
     pub fn spawn() -> std::io::Result<(Self, mpsc::Receiver<Vec<u8>>)> {
         let pty_system = native_pty_system();
 
-        let (shell, flag) = shell_for_current_os();
-        info!(shell = %shell, flag = %flag, "spawning PTY shell");
+        let (shell, _flag) = shell_for_current_os();
+        info!(shell = %shell, "spawning PTY shell");
 
         let pair = pty_system
             .openpty(PtySize {
@@ -29,8 +29,8 @@ impl PtySession {
             })
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
 
-        let mut cmd = CommandBuilder::new(shell.clone());
-        cmd.args([flag, "exec 0"]);
+        let cmd = CommandBuilder::new(shell.clone());
+        // No args — spawn an interactive shell
 
         let child = pair
             .slave

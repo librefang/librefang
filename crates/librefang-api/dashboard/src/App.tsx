@@ -440,10 +440,10 @@ export function App() {
       label: t("nav.advanced"),
       items: [
         { to: "/comms", label: t("nav.comms"), icon: Activity },
+        { to: "/terminal", label: t("nav.terminal"), icon: Terminal },
         { to: "/network", label: t("nav.network"), icon: Share2 },
         { to: "/a2a", label: t("nav.a2a"), icon: Globe },
         { to: "/telemetry", label: t("nav.telemetry"), icon: Gauge },
-        { to: "/terminal", label: t("nav.terminal"), icon: Terminal },
       ],
     },
   ], [t]);

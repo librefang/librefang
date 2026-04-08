@@ -227,18 +227,22 @@ async fn handle_terminal_ws(
     let shell_path = pty.shell.clone();
     let pid = pty.pid;
 
+    let cwd = std::env::current_dir()
+        .ok()
+        .map(|p| p.display().to_string());
     let _ = send_json(
         &sender,
         &serde_json::json!({
             "type": "started",
             "shell": shell_path,
-            "pid": pid
+            "pid": pid,
+            "cwd": cwd
         }),
     )
     .await;
 
     let sender_clone = Arc::clone(&sender);
-    let pty_read_handle = tokio::spawn(async move {
+    let mut pty_read_handle = tokio::spawn(async move {
         while let Some(data) = pty_rx.recv().await {
             let output_msg = match String::from_utf8(data.clone()) {
                 Ok(s) => serde_json::json!({
@@ -374,6 +378,15 @@ async fn handle_terminal_ws(
                 let _ = send_json(&sender, &serde_json::json!({
                     "type": "exit",
                     "code": 124,
+                    "signal": null
+                })).await;
+                break;
+            }
+            _ = &mut pty_read_handle => {
+                // PTY reader ended = child process exited
+                let _ = send_json(&sender, &serde_json::json!({
+                    "type": "exit",
+                    "code": 0,
                     "signal": null
                 })).await;
                 break;

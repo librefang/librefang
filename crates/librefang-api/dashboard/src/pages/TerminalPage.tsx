@@ -30,6 +30,8 @@ export function TerminalPage() {
   const fitAddonRef = useRef<FitAddon | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const intentionalDisconnectRef = useRef(false);
+  const connectRef = useRef<() => void>(() => {});
 
   const [isConnected, setIsConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -47,6 +49,10 @@ export function TerminalPage() {
     ws.onopen = () => {
       setIsConnected(true);
       setError(null);
+      if (terminalRef.current && fitAddonRef.current) {
+        const { cols, rows } = terminalRef.current;
+        ws.send(JSON.stringify({ type: "resize", cols, rows }));
+      }
     };
 
     ws.onmessage = (event) => {
@@ -66,8 +72,10 @@ export function TerminalPage() {
         case "output":
           if (msg.binary && msg.data) {
             try {
-              const decoded = atob(msg.data);
-              terminalRef.current?.write(decoded);
+              const binary = atob(msg.data);
+              const bytes = new Uint8Array(binary.length);
+              for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+              terminalRef.current?.write(bytes);
             } catch {
               terminalRef.current?.write(msg.data);
             }
@@ -94,6 +102,10 @@ export function TerminalPage() {
 
     ws.onclose = () => {
       setIsConnected(false);
+      if (intentionalDisconnectRef.current) {
+        intentionalDisconnectRef.current = false;
+        return;
+      }
       reconnectTimeoutRef.current = setTimeout(() => {
         if (
           wsRef.current === null ||
@@ -105,6 +117,8 @@ export function TerminalPage() {
     };
   }, [t]);
 
+  connectRef.current = connect;
+
   const disconnect = useCallback(() => {
     if (reconnectTimeoutRef.current) {
       clearTimeout(reconnectTimeoutRef.current);
@@ -112,6 +126,7 @@ export function TerminalPage() {
     }
 
     if (wsRef.current) {
+      intentionalDisconnectRef.current = true;
       wsRef.current.send(JSON.stringify({ type: "close" }));
       wsRef.current.close();
       wsRef.current = null;
@@ -153,7 +168,7 @@ export function TerminalPage() {
       }
     });
 
-    connect();
+    connectRef.current?.();
 
     const handleResize = () => fitAddon.fit();
     window.addEventListener("resize", handleResize);
@@ -163,10 +178,16 @@ export function TerminalPage() {
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current);
       }
-      disconnect();
+      if (wsRef.current) {
+        intentionalDisconnectRef.current = true;
+        wsRef.current.send(JSON.stringify({ type: "close" }));
+        wsRef.current.close();
+        wsRef.current = null;
+      }
+      setIsConnected(false);
       term.dispose();
     };
-  }, [connect, disconnect]);
+  }, []);
 
   return (
     <div className="flex flex-col h-full">
@@ -201,8 +222,7 @@ export function TerminalPage() {
           <div className="h-full min-h-[400px] flex flex-col">
             <div
               ref={containerRef}
-              className="flex-1 bg-[#1a1a2e] rounded-b-lg p-2 overflow-hidden"
-              style={{ height: "100%" }}
+              className="flex-1 bg-[#1a1a2e] rounded-b-lg p-2 overflow-hidden h-full min-[1001px]:h-[70%]"
             />
           </div>
         </Card>
