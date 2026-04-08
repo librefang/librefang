@@ -116,8 +116,11 @@ struct OaiRequest {
     /// Structured output: `response_format` field (json_object or json_schema).
     #[serde(skip_serializing_if = "Option::is_none")]
     response_format: Option<serde_json::Value>,
-    /// Provider-specific extension parameters, flattened to the request top-level.
-    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    /// Provider-specific extension parameters.  Skipped during normal serde
+    /// serialization — merged into the top-level JSON request body manually in
+    /// `complete()` and `stream()` so that extra_body values **override** any
+    /// standard field with the same name.
+    #[serde(skip_serializing)]
     extra_body: Option<HashMap<String, serde_json::Value>>,
 }
 
@@ -554,11 +557,21 @@ impl LlmDriver for OpenAIDriver {
             };
             debug!(url = %url, attempt, "Sending OpenAI API request");
 
+            // Serialize to Value, then merge extra_body so extra params
+            // override any standard field with the same name.
+            let mut body =
+                serde_json::to_value(&oai_request).map_err(|e| LlmError::Http(e.to_string()))?;
+            if let (Some(extra), Some(obj)) = (&oai_request.extra_body, body.as_object_mut()) {
+                for (k, v) in extra {
+                    obj.insert(k.clone(), v.clone());
+                }
+            }
+
             let mut req_builder = self
                 .client
                 .post(&url)
                 .header("content-type", "application/json")
-                .json(&oai_request);
+                .json(&body);
 
             if !self.api_key.as_str().is_empty() {
                 if self.use_api_key_header {
@@ -883,11 +896,21 @@ impl LlmDriver for OpenAIDriver {
             };
             debug!(url = %url, attempt, "Sending OpenAI streaming request");
 
+            // Serialize to Value, then merge extra_body so extra params
+            // override any standard field with the same name.
+            let mut body =
+                serde_json::to_value(&oai_request).map_err(|e| LlmError::Http(e.to_string()))?;
+            if let (Some(extra), Some(obj)) = (&oai_request.extra_body, body.as_object_mut()) {
+                for (k, v) in extra {
+                    obj.insert(k.clone(), v.clone());
+                }
+            }
+
             let mut req_builder = self
                 .client
                 .post(&url)
                 .header("content-type", "application/json")
-                .json(&oai_request);
+                .json(&body);
 
             if !self.api_key.as_str().is_empty() {
                 if self.use_api_key_header {
@@ -1985,8 +2008,14 @@ mod tests {
     }
 
     #[test]
-    fn test_oai_request_extra_body_flattening() {
+    fn test_oai_request_extra_body_merged_overrides_standard_field() {
+        // extra_body is #[serde(skip_serializing)] — it does NOT appear in
+        // the raw serde output.  In complete() / stream() we serialize to
+        // Value first, then merge extra_body on top so it overrides any
+        // standard field with the same name.  This test verifies the merge
+        // logic directly.
         let mut extra = HashMap::new();
+        extra.insert("temperature".to_string(), serde_json::json!(1.0));
         extra.insert("enable_memory".to_string(), serde_json::json!(true));
 
         let req = OaiRequest {
@@ -2010,17 +2039,24 @@ mod tests {
             extra_body: Some(extra),
         };
 
-        let json = serde_json::to_string(&req).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        // Simulate the merge logic used in complete() / stream()
+        let mut body = serde_json::to_value(&req).unwrap();
+        if let (Some(extra), Some(obj)) = (&req.extra_body, body.as_object_mut()) {
+            for (k, v) in extra {
+                obj.insert(k.clone(), v.clone());
+            }
+        }
 
-        // extra_body keys should be at top level (flattened)
+        // extra_body values should override standard fields
+        assert_eq!(body.get("temperature").unwrap(), &serde_json::json!(1.0));
+        assert_eq!(body.get("enable_memory").unwrap(), &serde_json::json!(true));
+        // No duplicate keys — only ONE temperature
+        let raw = body.to_string();
         assert_eq!(
-            parsed.get("enable_memory").unwrap(),
-            &serde_json::json!(true)
+            raw.matches("temperature").count(),
+            1,
+            "There should be exactly ONE temperature key after merge. Raw: {raw}"
         );
-        assert_eq!(parsed.get("model").unwrap(), "qwen3.6");
-        // There should be no nested "extra_body" key
-        assert!(parsed.get("extra_body").is_none());
     }
 
     #[test]
