@@ -283,6 +283,7 @@ export interface ScheduleItem {
   id: string;
   name?: string;
   cron?: string;
+  tz?: string | null;
   description?: string;
   message?: string;
   enabled?: boolean;
@@ -1253,6 +1254,7 @@ export async function listSchedules(): Promise<ScheduleItem[]> {
 export async function createSchedule(payload: {
   name: string;
   cron: string;
+  tz?: string;
   agent_id?: string;
   workflow_id?: string;
   message?: string;
@@ -1267,6 +1269,7 @@ export async function updateSchedule(
     enabled?: boolean;
     name?: string;
     cron?: string;
+    tz?: string;
     agent_id?: string;
     message?: string;
   }

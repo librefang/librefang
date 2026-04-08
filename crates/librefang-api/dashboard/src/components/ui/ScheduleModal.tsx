@@ -8,9 +8,31 @@ interface ScheduleModalProps {
   title: string;
   subtitle?: string;
   initialCron?: string;
-  onSave: (cron: string) => void;
+  initialTz?: string;
+  onSave: (cron: string, tz?: string) => void;
   onClose: () => void;
 }
+
+/** Common IANA timezones for the picker. */
+const COMMON_TIMEZONES = [
+  "UTC",
+  "America/New_York",
+  "America/Chicago",
+  "America/Denver",
+  "America/Los_Angeles",
+  "America/Sao_Paulo",
+  "Europe/London",
+  "Europe/Berlin",
+  "Europe/Paris",
+  "Europe/Rome",
+  "Europe/Moscow",
+  "Asia/Dubai",
+  "Asia/Kolkata",
+  "Asia/Shanghai",
+  "Asia/Tokyo",
+  "Australia/Sydney",
+  "Pacific/Auckland",
+];
 
 const HOURS = Array.from({ length: 24 }, (_, i) => i);
 const MINUTES = [0, 5, 10, 15, 20, 30, 45];
@@ -28,10 +50,28 @@ function parseCronType(cron: string): { type: ScheduleType; min?: number; hour?:
   return { type: "custom" };
 }
 
-export function ScheduleModal({ title, subtitle, initialCron, onSave, onClose }: ScheduleModalProps) {
-  const { t } = useTranslation();
+/** Try to detect the browser's IANA timezone. */
+function detectBrowserTimezone(): string {
+  try {
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    return tz || "UTC";
+  } catch {
+    return "UTC";
+  }
+}
+
+export function ScheduleModal({ title, subtitle, initialCron, initialTz, onSave, onClose }: ScheduleModalProps) {
+  const { t, i18n } = useTranslation();
+  const isZh = i18n.language?.startsWith("zh");
 
   const parsed = parseCronType(initialCron || "0 9 * * *");
+  const detectedTz = initialTz || detectBrowserTimezone();
+  const [timezone, setTimezone] = useState(detectedTz);
+
+  // If the detected/initial timezone isn't in the common list, include it
+  const timezoneOptions = COMMON_TIMEZONES.includes(detectedTz)
+    ? COMMON_TIMEZONES
+    : [detectedTz, ...COMMON_TIMEZONES];
   const [scheduleType, setScheduleType] = useState<ScheduleType>(parsed.type);
   const [intervalMin, setIntervalMin] = useState(parsed.type === "interval_min" ? (parsed.interval ?? 5) : 5);
   const [intervalHour, setIntervalHour] = useState(parsed.type === "interval_hour" ? (parsed.interval ?? 1) : 1);
@@ -225,9 +265,20 @@ export function ScheduleModal({ title, subtitle, initialCron, onSave, onClose }:
           })()}
         </div>
 
+        {/* Timezone picker */}
+        <div className="mx-5 mt-1 mb-2 flex items-center gap-2">
+          <label className="text-[10px] font-bold text-text-dim/50 uppercase shrink-0">{t("scheduler.timezone", { defaultValue: "Timezone" })}</label>
+          <select value={timezone} onChange={e => setTimezone(e.target.value)}
+            className="flex-1 h-8 rounded-lg border border-border-subtle bg-main px-2 text-xs outline-none focus:border-brand transition-colors">
+            {timezoneOptions.map(tz => <option key={tz} value={tz}>{tz.replace(/_/g, " ")}</option>)}
+          </select>
+        </div>
+
         {/* Result bar */}
         <div className="mx-5 mt-1 mb-4 flex items-center justify-between rounded-xl bg-main px-4 py-2.5">
-          <span className={`text-xs font-medium ${cronValid ? "text-text-dim" : "text-error"}`}>{describeCron(previewCron)}</span>
+          <span className={`text-xs font-medium ${cronValid ? "text-text-dim" : "text-error"}`}>
+            {describeCron(previewCron)}{timezone !== "UTC" ? ` (${timezone.split("/").pop()?.replace(/_/g, " ")})` : " (UTC)"}
+          </span>
           <code className={`text-[11px] font-mono font-bold px-2 py-0.5 rounded-md ${
             cronValid ? "bg-brand/10 text-brand" : "bg-error/10 text-error"
           }`}>{previewCron}</code>
@@ -235,7 +286,7 @@ export function ScheduleModal({ title, subtitle, initialCron, onSave, onClose }:
 
         {/* Actions */}
         <div className="flex gap-2 px-5 pb-5">
-          <Button variant="primary" className="flex-1" onClick={() => onSave(previewCron)} disabled={!cronValid}>{t("common.save")}</Button>
+          <Button variant="primary" className="flex-1" onClick={() => onSave(previewCron, timezone)} disabled={!cronValid}>{t("common.save")}</Button>
           <Button variant="secondary" className="flex-1" onClick={onClose}>{t("common.cancel")}</Button>
         </div>
       </div>
