@@ -185,11 +185,18 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
       .then(session => {
         if (session.messages?.length) {
           const historical: ChatMessage[] = session.messages.flatMap((msg, idx) => {
-            const content = typeof msg.content === "string"
-              ? msg.content
-              : msg.content == null
-                ? ""
-                : JSON.stringify(msg.content);
+            let content: string;
+            if (typeof msg.content === "string") {
+              content = msg.content;
+            } else if (Array.isArray(msg.content)) {
+              // Extract only text blocks — skip tool_use/tool_result
+              content = (msg.content as Array<Record<string, unknown>>)
+                .filter((b) => b.type === "text" && typeof b.text === "string")
+                .map((b) => b.text as string)
+                .join("\n");
+            } else {
+              content = msg.content == null ? "" : String(msg.content);
+            }
 
             const hasTools = msg.tools && msg.tools.length > 0;
             if (!content.trim() && !hasTools) return [];
