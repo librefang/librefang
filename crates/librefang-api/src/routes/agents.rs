@@ -156,7 +156,6 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
         )
 }
 use crate::middleware::{AccountId, RequestLanguage};
-use crate::routes::shared::check_account;
 use crate::types::*;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;

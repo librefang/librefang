@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use super::AppState;
 use crate::middleware::AccountId;
+use crate::routes::shared::check_account;
 
 /// Build routes for the memory/KV domain.
 pub fn router() -> axum::Router<Arc<AppState>> {
@@ -85,6 +86,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
+use librefang_memory::MemoryScope;
 use librefang_types::memory::ProactiveMemory;
 
 use crate::types::ApiErrorResponse;
@@ -152,6 +154,42 @@ fn internal_error(e: impl std::fmt::Display) -> (StatusCode, Json<serde_json::Va
     ApiErrorResponse::internal("Internal server error").into_json_tuple()
 }
 
+fn require_agent_access(
+    state: &AppState,
+    account: &AccountId,
+    agent_id: &str,
+) -> Result<librefang_types::agent::AgentId, (StatusCode, Json<serde_json::Value>)> {
+    let parsed = agent_id
+        .parse::<librefang_types::agent::AgentId>()
+        .map_err(|_| ApiErrorResponse::bad_request("Invalid agent ID").into_json_tuple())?;
+    let entry = state
+        .kernel
+        .agent_registry()
+        .get(parsed)
+        .ok_or_else(|| ApiErrorResponse::not_found("Agent not found").into_json_tuple())?;
+    check_account(&entry, account)?;
+    Ok(parsed)
+}
+
+fn require_memory_access(
+    state: &AppState,
+    store: &librefang_memory::ProactiveMemoryStore,
+    account: &AccountId,
+    memory_id: &str,
+) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
+    let owner_agent_id = store
+        .find_agent_id_for_memory(memory_id)
+        .map_err(internal_error)?
+        .ok_or_else(|| ApiErrorResponse::not_found("Memory not found").into_json_tuple())?;
+    let entry = state
+        .kernel
+        .agent_registry()
+        .get(owner_agent_id)
+        .ok_or_else(|| ApiErrorResponse::not_found("Agent not found").into_json_tuple())?;
+    check_account(&entry, account)?;
+    Ok(owner_agent_id.to_string())
+}
+
 // ---------------------------------------------------------------------------
 // GET /api/memory/search?q=...&limit=10
 // ---------------------------------------------------------------------------
@@ -169,7 +207,7 @@ fn internal_error(e: impl std::fmt::Display) -> (StatusCode, Json<serde_json::Va
 )]
 pub async fn memory_search(
     State(state): State<Arc<AppState>>,
-    _account: AccountId,
+    account: AccountId,
     Query(params): Query<MemorySearchQuery>,
 ) -> impl IntoResponse {
     let store = match get_pm_store(&state) {
@@ -178,8 +216,16 @@ pub async fn memory_search(
     };
 
     let limit = params.limit.min(100);
-    // Search across ALL agents so the dashboard shows all memories
-    match store.search_all(&params.q, limit).await {
+    let result = match account.0.as_deref() {
+        Some(owner) => {
+            store
+                .search_scoped(&params.q, MemoryScope::tenant(owner), limit)
+                .await
+        }
+        None => store.search_all(&params.q, limit).await,
+    };
+
+    match result {
         Ok(items) => (
             StatusCode::OK,
             Json(serde_json::json!({ "memories": items })),
@@ -206,7 +252,7 @@ pub async fn memory_search(
 )]
 pub async fn memory_list(
     State(state): State<Arc<AppState>>,
-    _account: AccountId,
+    account: AccountId,
     Query(params): Query<MemoryListQuery>,
 ) -> impl IntoResponse {
     let store = match get_pm_store(&state) {
@@ -217,22 +263,40 @@ pub async fn memory_list(
     let limit = params.limit.min(100);
     let offset = params.offset;
 
-    // List across ALL agents so the dashboard shows all memories
-    match store.list_all(params.category.as_deref()).await {
-        Ok(items) => {
-            let total = items.len();
-            let page: Vec<_> = items.into_iter().skip(offset).take(limit).collect();
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "memories": page,
-                    "total": total,
-                    "offset": offset,
-                    "limit": limit,
-                })),
-            )
+    match account.0.as_deref() {
+        Some(owner) => {
+            match store
+                .list_by_account(owner, params.category.as_deref(), limit, offset)
+                .await
+            {
+                Ok((page, total)) => (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "memories": page,
+                        "total": total,
+                        "offset": offset,
+                        "limit": limit,
+                    })),
+                ),
+                Err(e) => internal_error(e),
+            }
         }
-        Err(e) => internal_error(e),
+        None => match store.list_all(params.category.as_deref()).await {
+            Ok(items) => {
+                let total = items.len();
+                let page: Vec<_> = items.into_iter().skip(offset).take(limit).collect();
+                (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "memories": page,
+                        "total": total,
+                        "offset": offset,
+                        "limit": limit,
+                    })),
+                )
+            }
+            Err(e) => internal_error(e),
+        },
     }
 }
 
@@ -250,15 +314,45 @@ pub async fn memory_list(
 )]
 pub async fn memory_get_user(
     State(state): State<Arc<AppState>>,
-    _account: AccountId,
+    account: AccountId,
     Path(user_id): Path<String>,
 ) -> impl IntoResponse {
+    // user_id is an arbitrary namespace key, not necessarily an agent UUID.
+    // If it parses as an AgentId AND the agent is registered, verify ownership.
+    // Otherwise (non-UUID or unregistered UUID) restrict to admin-only since we
+    // cannot verify tenant ownership without a registered agent entry.
+    let ownership_verified =
+        if let Ok(agent_id) = user_id.parse::<librefang_types::agent::AgentId>() {
+            if let Some(entry) = state.kernel.agent_registry().get(agent_id) {
+                if let Err(e) = check_account(&entry, &account) {
+                    return e;
+                }
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+    };
+    if !ownership_verified && account.0.is_some() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "Tenant-scoped memory access requires a registered agent"
+            })),
+        );
+    }
     let store = match get_pm_store(&state) {
         Ok(s) => s,
         Err(e) => return e,
     };
 
-    match store.get(&user_id).await {
+    let result = match account.0.as_deref() {
+        Some(owner) => store.get_scoped(&user_id, MemoryScope::tenant(owner)).await,
+        None => store.get(&user_id).await,
+    };
+
+    match result {
         Ok(items) => (
             StatusCode::OK,
             Json(serde_json::json!({ "memories": items })),
@@ -281,7 +375,7 @@ pub async fn memory_get_user(
 )]
 pub async fn memory_add(
     State(state): State<Arc<AppState>>,
-    _account: AccountId,
+    account: AccountId,
     Json(body): Json<MemoryAddBody>,
 ) -> impl IntoResponse {
     let store = match get_pm_store(&state) {
@@ -296,7 +390,41 @@ pub async fn memory_add(
         .or(body.user_id)
         .unwrap_or_else(default_user_id);
 
-    match store.add(&body.messages, &effective_id).await {
+    // effective_id can be an agent UUID or a user-provided string.
+    // If it's a registered agent, verify ownership. Otherwise (non-UUID or
+    // unregistered UUID) restrict to admin since we can't verify tenant ownership.
+    let ownership_verified =
+        if let Ok(agent_id) = effective_id.parse::<librefang_types::agent::AgentId>() {
+            if let Some(entry) = state.kernel.agent_registry().get(agent_id) {
+                if let Err(e) = check_account(&entry, &account) {
+                    return e;
+                }
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+    };
+    if !ownership_verified && account.0.is_some() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "Tenant-scoped memory writes require a registered agent"
+            })),
+        );
+    }
+
+    let result = match account.0.as_deref() {
+        Some(owner) => {
+            store
+                .add_scoped(&body.messages, &effective_id, MemoryScope::tenant(owner))
+                .await
+        }
+        None => store.add(&body.messages, &effective_id).await,
+    };
+
+    match result {
         Ok(items) => (
             StatusCode::CREATED,
             Json(serde_json::json!({ "added": items.len(), "memories": items })),
@@ -320,7 +448,7 @@ pub async fn memory_add(
 )]
 pub async fn memory_update(
     State(state): State<Arc<AppState>>,
-    _account: AccountId,
+    account: AccountId,
     Path(memory_id): Path<String>,
     Json(body): Json<MemoryUpdateBody>,
 ) -> impl IntoResponse {
@@ -334,14 +462,9 @@ pub async fn memory_update(
     }
 
     // Look up the real agent_id that owns this memory so KV cleanup works correctly
-    let real_agent_id = match store.find_agent_id_for_memory(&memory_id) {
-        Ok(Some(aid)) => aid.0.to_string(),
-        Ok(None) => {
-            return ApiErrorResponse::not_found("Memory not found").into_json_tuple();
-        }
-        Err(e) => {
-            return internal_error(e);
-        }
+    let real_agent_id = match require_memory_access(&state, &store, &account, &memory_id) {
+        Ok(id) => id,
+        Err(e) => return e,
     };
 
     match store
@@ -371,7 +494,7 @@ pub async fn memory_update(
 )]
 pub async fn memory_delete(
     State(state): State<Arc<AppState>>,
-    _account: AccountId,
+    account: AccountId,
     Path(memory_id): Path<String>,
 ) -> impl IntoResponse {
     let store = match get_pm_store(&state) {
@@ -380,23 +503,33 @@ pub async fn memory_delete(
     };
 
     // Look up the real agent_id that owns this memory so KV cleanup works correctly
-    let real_agent_id = match store.find_agent_id_for_memory(&memory_id) {
-        Ok(Some(aid)) => aid.0.to_string(),
-        Ok(None) => {
-            return ApiErrorResponse::not_found("Memory not found").into_json_tuple();
-        }
-        Err(e) => {
-            return internal_error(e);
-        }
+    let real_agent_id = match require_memory_access(&state, &store, &account, &memory_id) {
+        Ok(id) => id,
+        Err(e) => return e,
     };
 
-    match store.delete(&memory_id, &real_agent_id).await {
-        Ok(true) => (
-            StatusCode::OK,
-            Json(serde_json::json!({"deleted": true, "memory_id": memory_id})),
-        ),
-        Ok(false) => ApiErrorResponse::not_found("Memory not found").into_json_tuple(),
-        Err(e) => internal_error(e),
+    match account.0.as_deref() {
+        Some(owner) => match store
+            .delete_scoped(&memory_id, MemoryScope::tenant(owner))
+            .await
+        {
+            Ok(()) => (
+                StatusCode::OK,
+                Json(serde_json::json!({"deleted": true, "memory_id": memory_id})),
+            ),
+            Err(librefang_types::error::LibreFangError::NotFound(_)) => {
+                ApiErrorResponse::not_found("Memory not found").into_json_tuple()
+            }
+            Err(e) => internal_error(e),
+        },
+        None => match store.delete(&memory_id, &real_agent_id).await {
+            Ok(true) => (
+                StatusCode::OK,
+                Json(serde_json::json!({"deleted": true, "memory_id": memory_id})),
+            ),
+            Ok(false) => ApiErrorResponse::not_found("Memory not found").into_json_tuple(),
+            Err(e) => internal_error(e),
+        },
     }
 }
 
@@ -414,7 +547,7 @@ pub async fn memory_delete(
 )]
 pub async fn memory_bulk_delete(
     State(state): State<Arc<AppState>>,
-    _account: AccountId,
+    account: AccountId,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let store = match get_pm_store(&state) {
@@ -435,14 +568,18 @@ pub async fn memory_bulk_delete(
     let mut deleted = 0usize;
     let mut failed = 0usize;
     for id in &ids {
-        let agent_id = match store.find_agent_id_for_memory(id) {
-            Ok(Some(aid)) => aid.0.to_string(),
-            _ => {
+        let agent_id = match require_memory_access(&state, &store, &account, id) {
+            Ok(id) => id,
+            Err(_) => {
                 failed += 1;
                 continue;
             }
         };
-        match store.delete(id, &agent_id).await {
+        let result = match account.0.as_deref() {
+            Some(owner) => store.delete_scoped(id, MemoryScope::tenant(owner)).await.map(|_| true),
+            None => store.delete(id, &agent_id).await,
+        };
+        match result {
             Ok(true) => deleted += 1,
             _ => failed += 1,
         }
@@ -471,15 +608,20 @@ pub async fn memory_bulk_delete(
 )]
 pub async fn memory_stats(
     State(state): State<Arc<AppState>>,
-    _account: AccountId,
+    account: AccountId,
 ) -> impl IntoResponse {
     let store = match get_pm_store(&state) {
         Ok(s) => s,
         Err(e) => return e,
     };
 
-    // Aggregate stats across ALL agents so the dashboard shows global totals
-    match store.stats_all().await {
+    let scope = match account.0.as_deref() {
+        Some(owner) => MemoryScope::tenant(owner),
+        None => MemoryScope::global(),
+    };
+    let result = store.stats_scoped(scope).await;
+
+    match result {
         Ok(stats) => (StatusCode::OK, Json(serde_json::json!(stats))),
         Err(e) => internal_error(e),
     }
@@ -499,9 +641,12 @@ pub async fn memory_stats(
 )]
 pub async fn memory_reset_agent(
     State(state): State<Arc<AppState>>,
-    _account: AccountId,
+    account: AccountId,
     Path(agent_id): Path<String>,
 ) -> impl IntoResponse {
+    if let Err(e) = require_agent_access(&state, &account, &agent_id) {
+        return e;
+    }
     let store = match get_pm_store(&state) {
         Ok(s) => s,
         Err(e) => return e,
@@ -533,9 +678,12 @@ pub async fn memory_reset_agent(
 )]
 pub async fn memory_clear_level(
     State(state): State<Arc<AppState>>,
-    _account: AccountId,
+    account: AccountId,
     Path((agent_id, level_str)): Path<(String, String)>,
 ) -> impl IntoResponse {
+    if let Err(e) = require_agent_access(&state, &account, &agent_id) {
+        return e;
+    }
     let store = match get_pm_store(&state) {
         Ok(s) => s,
         Err(e) => return e,
@@ -592,10 +740,13 @@ pub async fn memory_clear_level(
 )]
 pub async fn memory_list_agent(
     State(state): State<Arc<AppState>>,
-    _account: AccountId,
+    account: AccountId,
     Path(agent_id): Path<String>,
     Query(params): Query<MemoryListQuery>,
 ) -> impl IntoResponse {
+    if let Err(e) = require_agent_access(&state, &account, &agent_id) {
+        return e;
+    }
     let store = match get_pm_store(&state) {
         Ok(s) => s,
         Err(e) => return e,
@@ -640,10 +791,13 @@ pub async fn memory_list_agent(
 )]
 pub async fn memory_search_agent(
     State(state): State<Arc<AppState>>,
-    _account: AccountId,
+    account: AccountId,
     Path(agent_id): Path<String>,
     Query(params): Query<MemorySearchQuery>,
 ) -> impl IntoResponse {
+    if let Err(e) = require_agent_access(&state, &account, &agent_id) {
+        return e;
+    }
     let store = match get_pm_store(&state) {
         Ok(s) => s,
         Err(e) => return e,
@@ -673,15 +827,24 @@ pub async fn memory_search_agent(
 )]
 pub async fn memory_stats_agent(
     State(state): State<Arc<AppState>>,
-    _account: AccountId,
+    account: AccountId,
     Path(agent_id): Path<String>,
 ) -> impl IntoResponse {
+    if let Err(e) = require_agent_access(&state, &account, &agent_id) {
+        return e;
+    }
     let store = match get_pm_store(&state) {
         Ok(s) => s,
         Err(e) => return e,
     };
 
-    match store.stats(&agent_id).await {
+    let scope = match account.0.as_deref() {
+        Some(owner) => MemoryScope::tenant(owner),
+        None => MemoryScope::global(),
+    };
+    let result = store.stats_agent_scoped(&agent_id, scope).await;
+
+    match result {
         Ok(stats) => (StatusCode::OK, Json(serde_json::json!(stats))),
         Err(e) => internal_error(e),
     }
@@ -701,9 +864,12 @@ pub async fn memory_stats_agent(
 )]
 pub async fn memory_duplicates(
     State(state): State<Arc<AppState>>,
-    _account: AccountId,
+    account: AccountId,
     Path(agent_id): Path<String>,
 ) -> impl IntoResponse {
+    if let Err(e) = require_agent_access(&state, &account, &agent_id) {
+        return e;
+    }
     let store = match get_pm_store(&state) {
         Ok(s) => s,
         Err(e) => return e,
@@ -735,13 +901,17 @@ pub async fn memory_duplicates(
 )]
 pub async fn memory_history(
     State(state): State<Arc<AppState>>,
-    _account: AccountId,
+    account: AccountId,
     Path(memory_id): Path<String>,
 ) -> impl IntoResponse {
     let store = match get_pm_store(&state) {
         Ok(s) => s,
         Err(e) => return e,
     };
+
+    if let Err(e) = require_memory_access(&state, &store, &account, &memory_id) {
+        return e;
+    }
 
     match store.history(&memory_id) {
         Ok(history) => {
@@ -773,15 +943,27 @@ pub async fn memory_history(
 )]
 pub async fn memory_consolidate(
     State(state): State<Arc<AppState>>,
-    _account: AccountId,
+    account: AccountId,
     Path(agent_id): Path<String>,
 ) -> impl IntoResponse {
+    if let Err(e) = require_agent_access(&state, &account, &agent_id) {
+        return e;
+    }
     let store = match get_pm_store(&state) {
         Ok(s) => s,
         Err(e) => return e,
     };
 
-    match store.consolidate(&agent_id).await {
+    let result = match account.0.as_deref() {
+        Some(owner) => {
+            store
+                .consolidate_scoped(&agent_id, MemoryScope::tenant(owner))
+                .await
+        }
+        None => store.consolidate(&agent_id).await,
+    };
+
+    match result {
         Ok(merged) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -809,8 +991,16 @@ pub async fn memory_consolidate(
 )]
 pub async fn memory_cleanup(
     State(state): State<Arc<AppState>>,
-    _account: AccountId,
+    account: AccountId,
 ) -> impl IntoResponse {
+    if account.0.is_some() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "This memory endpoint is only available to global admins"
+            })),
+        );
+    }
     let store = match get_pm_store(&state) {
         Ok(s) => s,
         Err(e) => return e,
@@ -843,9 +1033,12 @@ pub async fn memory_cleanup(
 )]
 pub async fn memory_export_agent(
     State(state): State<Arc<AppState>>,
-    _account: AccountId,
+    account: AccountId,
     Path(agent_id): Path<String>,
 ) -> impl IntoResponse {
+    if let Err(e) = require_agent_access(&state, &account, &agent_id) {
+        return e;
+    }
     let store = match get_pm_store(&state) {
         Ok(s) => s,
         Err(e) => return e,
@@ -879,16 +1072,23 @@ pub async fn memory_export_agent(
 )]
 pub async fn memory_import_agent(
     State(state): State<Arc<AppState>>,
-    _account: AccountId,
+    account: AccountId,
     Path(agent_id): Path<String>,
     Json(body): Json<Vec<librefang_memory::MemoryExportItem>>,
 ) -> impl IntoResponse {
+    if let Err(e) = require_agent_access(&state, &account, &agent_id) {
+        return e;
+    }
     let store = match get_pm_store(&state) {
         Ok(s) => s,
         Err(e) => return e,
     };
 
-    match store.import_memories(&agent_id, body).await {
+    let scope = match account.0.as_deref() {
+        Some(owner) => MemoryScope::tenant(owner),
+        None => MemoryScope::global(),
+    };
+    match store.import_memories_scoped(&agent_id, body, scope).await {
         Ok(count) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -918,8 +1118,16 @@ pub async fn memory_import_agent(
 )]
 pub async fn memory_decay(
     State(state): State<Arc<AppState>>,
-    _account: AccountId,
+    account: AccountId,
 ) -> impl IntoResponse {
+    if account.0.is_some() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "This memory endpoint is only available to global admins"
+            })),
+        );
+    }
     let store = match get_pm_store(&state) {
         Ok(s) => s,
         Err(e) => return e,
@@ -959,10 +1167,13 @@ pub struct MemoryCountQuery {
 )]
 pub async fn memory_count_agent(
     State(state): State<Arc<AppState>>,
-    _account: AccountId,
+    account: AccountId,
     Path(agent_id): Path<String>,
     Query(params): Query<MemoryCountQuery>,
 ) -> impl IntoResponse {
+    if let Err(e) = require_agent_access(&state, &account, &agent_id) {
+        return e;
+    }
     let store = match get_pm_store(&state) {
         Ok(s) => s,
         Err(e) => return e,
@@ -1006,10 +1217,13 @@ pub async fn memory_count_agent(
 )]
 pub async fn memory_store_relations(
     State(state): State<Arc<AppState>>,
-    _account: AccountId,
+    account: AccountId,
     Path(agent_id): Path<String>,
     Json(triples): Json<Vec<librefang_types::memory::RelationTriple>>,
 ) -> impl IntoResponse {
+    if let Err(e) = require_agent_access(&state, &account, &agent_id) {
+        return e;
+    }
     let store = match get_pm_store(&state) {
         Ok(s) => s,
         Err(e) => return e,
@@ -1056,10 +1270,13 @@ pub struct RelationQueryParams {
 )]
 pub async fn memory_query_relations(
     State(state): State<Arc<AppState>>,
-    _account: AccountId,
-    Path(_agent_id): Path<String>,
+    account: AccountId,
+    Path(agent_id): Path<String>,
     Query(params): Query<RelationQueryParams>,
 ) -> impl IntoResponse {
+    if let Err(e) = require_agent_access(&state, &account, &agent_id) {
+        return e;
+    }
     let store = match get_pm_store(&state) {
         Ok(s) => s,
         Err(e) => return e,
@@ -1119,8 +1336,15 @@ pub async fn memory_query_relations(
 #[utoipa::path(get, path = "/api/memory/config", tag = "memory", responses((status = 200, description = "Memory configuration", body = serde_json::Value)))]
 pub async fn memory_config_get(
     State(state): State<Arc<AppState>>,
-    _account: AccountId,
+    account: AccountId,
 ) -> impl IntoResponse {
+    if account.0.is_some() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "Memory configuration is admin-only"})),
+        )
+            .into_response();
+    }
     let config = state.kernel.config_ref();
     Json(serde_json::json!({
         "embedding_provider": config.memory.embedding_provider,
@@ -1135,6 +1359,7 @@ pub async fn memory_config_get(
             "max_retrieve": config.proactive_memory.max_retrieve,
         },
     }))
+    .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -1144,9 +1369,15 @@ pub async fn memory_config_get(
 #[utoipa::path(patch, path = "/api/memory/config", tag = "memory", request_body = serde_json::Value, responses((status = 200, description = "Memory configuration updated", body = serde_json::Value)))]
 pub async fn memory_config_patch(
     State(state): State<Arc<AppState>>,
-    _account: AccountId,
+    account: AccountId,
     Json(req): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    if account.0.is_some() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "Memory configuration is admin-only"})),
+        );
+    }
     let config_path = state.kernel.home_dir().join("config.toml");
 
     let content = match std::fs::read_to_string(&config_path) {

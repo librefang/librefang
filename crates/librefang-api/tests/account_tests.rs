@@ -329,13 +329,13 @@ async fn mt_cross_tenant_agent_access_returns_404() {
         onboarding_completed_at: None,
         is_hand: false,
     };
-    h.state.kernel.agent_registry().register(entry);
+    let _ = h.state.kernel.agent_registry().register(entry);
 
     // tenant-b tries to access tenant-a's agent
     let resp = h
         .send(
             Request::builder()
-                .uri(&format!("/api/agents/{agent_id}"))
+                .uri(format!("/api/agents/{agent_id}"))
                 .header("x-account-id", "tenant-b")
                 .body(Body::empty())
                 .unwrap(),
@@ -380,12 +380,12 @@ async fn mt_owner_can_access_own_agent() {
         onboarding_completed_at: None,
         is_hand: false,
     };
-    h.state.kernel.agent_registry().register(entry);
+    let _ = h.state.kernel.agent_registry().register(entry);
 
     let resp = h
         .send(
             Request::builder()
-                .uri(&format!("/api/agents/{agent_id}"))
+                .uri(format!("/api/agents/{agent_id}"))
                 .header("x-account-id", "tenant-a")
                 .body(Body::empty())
                 .unwrap(),
@@ -433,7 +433,7 @@ async fn mt_agent_list_filtered_by_tenant() {
         onboarding_completed_at: None,
         is_hand: false,
     };
-    h.state.kernel.agent_registry().register(entry_a);
+    let _ = h.state.kernel.agent_registry().register(entry_a);
 
     // Register agent for tenant-b
     let entry_b = AgentEntry {
@@ -455,7 +455,7 @@ async fn mt_agent_list_filtered_by_tenant() {
         onboarding_completed_at: None,
         is_hand: false,
     };
-    h.state.kernel.agent_registry().register(entry_b);
+    let _ = h.state.kernel.agent_registry().register(entry_b);
 
     // tenant-a lists agents — should see only their own
     let resp = h
@@ -533,5 +533,645 @@ async fn mt_whitespace_account_header_rejected() {
         resp.status(),
         StatusCode::BAD_REQUEST,
         "Whitespace-only X-Account-Id must be rejected in multi-tenant mode"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Memory isolation: cross-tenant denial — search
+// ---------------------------------------------------------------------------
+
+/// Register an agent owned by the given tenant in the kernel registry.
+///
+/// Returns the agent ID string so callers can reference it.
+fn register_tenant_agent(h: &MtHarness, tenant: &str, agent_name: &str) -> String {
+    use librefang_types::agent::{
+        AgentEntry, AgentId, AgentIdentity, AgentManifest, AgentMode, AgentState,
+    };
+
+    let agent_id = AgentId::new();
+    let entry = AgentEntry {
+        id: agent_id,
+        account_id: Some(tenant.to_string()),
+        name: agent_name.to_string(),
+        manifest: AgentManifest::default(),
+        state: AgentState::Created,
+        mode: AgentMode::default(),
+        created_at: chrono::Utc::now(),
+        last_active: chrono::Utc::now(),
+        parent: None,
+        children: vec![],
+        session_id: Default::default(),
+        source_toml_path: None,
+        tags: vec![],
+        identity: AgentIdentity::default(),
+        onboarding_completed: false,
+        onboarding_completed_at: None,
+        is_hand: false,
+    };
+    let _ = h.state.kernel.agent_registry().register(entry);
+    agent_id.to_string()
+}
+
+/// Insert a test memory directly into the semantic store for a given agent/tenant.
+///
+/// Bypasses LLM extraction by writing straight to SQLite via MemorySubstrate.
+/// The metadata contains `account_id` so scoped queries can filter on it.
+/// Returns the memory ID as a string.
+fn insert_test_memory(h: &MtHarness, agent_id_str: &str, tenant: &str, content: &str) -> String {
+    use librefang_types::memory::MemorySource;
+    use std::collections::HashMap;
+
+    let agent_id: librefang_types::agent::AgentId = agent_id_str
+        .parse()
+        .expect("agent_id_str should be a valid UUID");
+
+    let mut metadata = HashMap::new();
+    metadata.insert(
+        "account_id".to_string(),
+        serde_json::Value::String(tenant.to_string()),
+    );
+
+    let mem_id = h
+        .state
+        .kernel
+        .memory_substrate()
+        .remember_with_embedding(
+            agent_id,
+            content,
+            MemorySource::UserProvided,
+            "user",
+            metadata,
+            None, // no embedding — uses LIKE fallback
+        )
+        .expect("insert_test_memory should succeed");
+
+    mem_id.to_string()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_memory_search_scoped_by_tenant() {
+    let h = start_mt_router().await;
+
+    let agent_a = register_tenant_agent(&h, "tenant-a", "agent-alpha");
+    let _agent_b = register_tenant_agent(&h, "tenant-b", "agent-beta");
+
+    // Seed a real memory for tenant-a so the store is NOT empty.
+    insert_test_memory(&h, &agent_a, "tenant-a", "alpha secret knowledge");
+
+    // tenant-b searches — should NOT see tenant-a's memory.
+    let resp = h
+        .send(
+            Request::builder()
+                .uri("/api/memory/search?q=alpha+secret&limit=10")
+                .header("x-account-id", "tenant-b")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "search_scoped should return 200, got: {}",
+        resp.status()
+    );
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let items = json
+        .get("memories")
+        .and_then(|v| v.as_array())
+        .expect("Expected memories array");
+    assert!(
+        items.is_empty(),
+        "tenant-b must not see tenant-a's memories via search, got: {items:?}"
+    );
+
+    // tenant-a searches — SHOULD see its own memory.
+    let resp_a = h
+        .send(
+            Request::builder()
+                .uri("/api/memory/search?q=alpha+secret&limit=10")
+                .header("x-account-id", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+
+    assert_eq!(resp_a.status(), StatusCode::OK);
+    let body_a = axum::body::to_bytes(resp_a.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json_a: serde_json::Value = serde_json::from_slice(&body_a).unwrap();
+    let items_a = json_a
+        .get("memories")
+        .and_then(|v| v.as_array())
+        .expect("Expected memories array");
+    assert!(
+        !items_a.is_empty(),
+        "tenant-a should see its own memory via search, got empty results"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Memory isolation: cross-tenant denial — list
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_memory_list_scoped_by_tenant() {
+    let h = start_mt_router().await;
+
+    let agent_a = register_tenant_agent(&h, "tenant-a", "agent-alpha");
+    let _agent_b = register_tenant_agent(&h, "tenant-b", "agent-beta");
+
+    // Seed a real memory for tenant-a so the store is NOT empty.
+    insert_test_memory(&h, &agent_a, "tenant-a", "tenant-a private note");
+
+    // tenant-b lists — should NOT see tenant-a's memory.
+    let resp = h
+        .send(
+            Request::builder()
+                .uri("/api/memory")
+                .header("x-account-id", "tenant-b")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "list_by_account should return 200, got: {}",
+        resp.status()
+    );
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let items = json
+        .get("memories")
+        .and_then(|v| v.as_array())
+        .expect("Expected memories array");
+    // tenant-b should see zero memories — the only memory belongs to tenant-a
+    assert!(
+        items.is_empty(),
+        "tenant-b must not see tenant-a's memories in list, got {} items: {items:?}",
+        items.len()
+    );
+
+    // tenant-a lists — SHOULD see its own memory.
+    let resp_a = h
+        .send(
+            Request::builder()
+                .uri("/api/memory")
+                .header("x-account-id", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+
+    assert_eq!(resp_a.status(), StatusCode::OK);
+    let body_a = axum::body::to_bytes(resp_a.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json_a: serde_json::Value = serde_json::from_slice(&body_a).unwrap();
+    let items_a = json_a
+        .get("memories")
+        .and_then(|v| v.as_array())
+        .expect("Expected memories array");
+    assert!(
+        !items_a.is_empty(),
+        "tenant-a should see its own memory via list, got empty results"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Memory isolation: cross-tenant denial — delete
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_memory_delete_cross_tenant_denied() {
+    let h = start_mt_router().await;
+
+    let agent_a = register_tenant_agent(&h, "tenant-a", "agent-alpha");
+
+    // Insert a REAL memory owned by tenant-a's agent.
+    let mem_id = insert_test_memory(&h, &agent_a, "tenant-a", "do not delete me");
+
+    // tenant-b tries to delete tenant-a's memory.
+    // The handler calls require_memory_access() which finds the owning agent,
+    // then check_account() rejects because tenant-b != tenant-a → 404.
+    let resp = h
+        .send(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/memory/items/{mem_id}"))
+                .header("x-account-id", "tenant-b")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "Cross-tenant delete must return 404 (ownership denied), got: {}",
+        resp.status()
+    );
+
+    // Verify the memory still exists by having tenant-a search for it.
+    let resp_check = h
+        .send(
+            Request::builder()
+                .uri("/api/memory/search?q=do+not+delete&limit=10")
+                .header("x-account-id", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+
+    assert_eq!(resp_check.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp_check.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let items = json
+        .get("memories")
+        .and_then(|v| v.as_array())
+        .expect("Expected memories array");
+    assert!(
+        !items.is_empty(),
+        "Memory should still exist after cross-tenant delete attempt"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Memory isolation: cross-tenant denial — update
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_memory_update_cross_tenant_denied() {
+    let h = start_mt_router().await;
+
+    let agent_a = register_tenant_agent(&h, "tenant-a", "agent-alpha");
+
+    // Insert a REAL memory owned by tenant-a's agent.
+    let mem_id = insert_test_memory(&h, &agent_a, "tenant-a", "original content");
+
+    // tenant-b tries to update tenant-a's memory.
+    // The handler calls require_memory_access() → check_account() → 404.
+    let resp = h
+        .send(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/api/memory/items/{mem_id}"))
+                .header("x-account-id", "tenant-b")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"content": "hijacked"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "Cross-tenant memory update must return 404 (ownership denied), got: {}",
+        resp.status()
+    );
+
+    // Verify the content was NOT changed by having tenant-a search for the original.
+    let resp_check = h
+        .send(
+            Request::builder()
+                .uri("/api/memory/search?q=original+content&limit=10")
+                .header("x-account-id", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+
+    assert_eq!(resp_check.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp_check.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let items = json
+        .get("memories")
+        .and_then(|v| v.as_array())
+        .expect("Expected memories array");
+    assert!(
+        !items.is_empty(),
+        "Original memory should still exist after cross-tenant update attempt"
+    );
+    // Verify none of the results contain the hijacked content
+    for item in items {
+        let content = item
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert!(
+            !content.contains("hijacked"),
+            "Memory content must not be modified by cross-tenant update, got: {content}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Admin fallback: admin (no account header) sees all memories
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_memory_search_admin_sees_all() {
+    // Use single-tenant router so admin requests (no X-Account-Id) are not
+    // blocked by the require_account_id middleware.
+    let h = start_st_router().await;
+
+    let agent_a = register_tenant_agent(&h, "tenant-a", "agent-alpha");
+    let agent_b = register_tenant_agent(&h, "tenant-b", "agent-beta");
+
+    // Seed memories for BOTH tenants so the store is non-empty.
+    insert_test_memory(&h, &agent_a, "tenant-a", "alpha admin searchable");
+    insert_test_memory(&h, &agent_b, "tenant-b", "beta admin searchable");
+
+    // Admin request — no X-Account-Id header.
+    // In single-tenant mode, the handler gets AccountId(None) and dispatches
+    // to search_all() (unscoped). This verifies the admin code path works.
+    let resp = h
+        .send(
+            Request::builder()
+                .uri("/api/memory/search?q=admin+searchable&limit=50")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "Admin search should succeed (200), got: {}",
+        resp.status()
+    );
+
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let items = json
+        .get("memories")
+        .and_then(|v| v.as_array())
+        .expect("Expected memories array");
+    // Admin should see memories from BOTH tenants (at least 2).
+    assert!(
+        items.len() >= 2,
+        "Admin search should return memories from both tenants, got {} items: {items:?}",
+        items.len()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_memory_list_admin_sees_all() {
+    let h = start_st_router().await;
+
+    let agent_a = register_tenant_agent(&h, "tenant-a", "agent-alpha");
+    let agent_b = register_tenant_agent(&h, "tenant-b", "agent-beta");
+
+    // Seed memories for BOTH tenants so the store is non-empty.
+    insert_test_memory(&h, &agent_a, "tenant-a", "alpha listed memory");
+    insert_test_memory(&h, &agent_b, "tenant-b", "beta listed memory");
+
+    // Admin request — no X-Account-Id header.
+    // In single-tenant mode, the handler gets AccountId(None) and dispatches
+    // to list_all() (unscoped).
+    let resp = h
+        .send(
+            Request::builder()
+                .uri("/api/memory")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "Admin list should succeed (200), got: {}",
+        resp.status()
+    );
+
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    // Admin uses list_all() — verify response structure is valid
+    assert!(
+        json.get("total").is_some(),
+        "Admin list response should contain 'total' field, got: {json}"
+    );
+
+    let total = json["total"].as_u64().unwrap_or(0);
+    assert!(
+        total >= 2,
+        "Admin list should see memories from both tenants, got total={total}"
+    );
+
+    let items = json
+        .get("memories")
+        .and_then(|v| v.as_array())
+        .expect("Expected memories array");
+    assert!(
+        items.len() >= 2,
+        "Admin list should return memories from both tenants, got {} items",
+        items.len()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Agent ownership: agent-scoped endpoints verify ownership
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_memory_agent_endpoints_require_ownership() {
+    let h = start_mt_router().await;
+
+    use librefang_types::agent::{
+        AgentEntry, AgentId, AgentIdentity, AgentManifest, AgentMode, AgentState,
+    };
+
+    // Register agent owned by tenant-a
+    let agent_id = AgentId::new();
+    let entry = AgentEntry {
+        id: agent_id,
+        account_id: Some("tenant-a".to_string()),
+        name: "owned-agent".to_string(),
+        manifest: AgentManifest::default(),
+        state: AgentState::Created,
+        mode: AgentMode::default(),
+        created_at: chrono::Utc::now(),
+        last_active: chrono::Utc::now(),
+        parent: None,
+        children: vec![],
+        session_id: Default::default(),
+        source_toml_path: None,
+        tags: vec![],
+        identity: AgentIdentity::default(),
+        onboarding_completed: false,
+        onboarding_completed_at: None,
+        is_hand: false,
+    };
+    let _ = h.state.kernel.agent_registry().register(entry);
+
+    // tenant-b tries agent-scoped memory list
+    let resp_list = h
+        .send(
+            Request::builder()
+                .uri(format!("/api/memory/agents/{agent_id}"))
+                .header("x-account-id", "tenant-b")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(
+        resp_list.status(),
+        StatusCode::NOT_FOUND,
+        "Agent list must return 404 for non-owner tenant"
+    );
+
+    // tenant-b tries agent-scoped memory search
+    let resp_search = h
+        .send(
+            Request::builder()
+                .uri(format!("/api/memory/agents/{agent_id}/search?q=test&limit=5"))
+                .header("x-account-id", "tenant-b")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(
+        resp_search.status(),
+        StatusCode::NOT_FOUND,
+        "Agent search must return 404 for non-owner tenant"
+    );
+
+    // tenant-b tries agent-scoped memory stats
+    let resp_stats = h
+        .send(
+            Request::builder()
+                .uri(format!("/api/memory/agents/{agent_id}/stats"))
+                .header("x-account-id", "tenant-b")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(
+        resp_stats.status(),
+        StatusCode::NOT_FOUND,
+        "Agent stats must return 404 for non-owner tenant"
+    );
+
+    // tenant-a (owner) should NOT get 404
+    let resp_owner = h
+        .send(
+            Request::builder()
+                .uri(format!("/api/memory/agents/{agent_id}"))
+                .header("x-account-id", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_ne!(
+        resp_owner.status(),
+        StatusCode::NOT_FOUND,
+        "Owner should be able to access their agent's memories"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Admin-only endpoints: tenants get 403
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_memory_cleanup_admin_only() {
+    let h = start_mt_router().await;
+
+    let resp = h
+        .send(
+            Request::builder()
+                .method("POST")
+                .uri("/api/memory/cleanup")
+                .header("x-account-id", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "POST /api/memory/cleanup must return 403 for tenants, got: {}",
+        resp.status()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_memory_decay_admin_only() {
+    let h = start_mt_router().await;
+
+    let resp = h
+        .send(
+            Request::builder()
+                .method("POST")
+                .uri("/api/memory/decay")
+                .header("x-account-id", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "POST /api/memory/decay must return 403 for tenants, got: {}",
+        resp.status()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Config endpoint: accessible by admin
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_memory_config_accessible() {
+    let h = start_st_router().await;
+
+    // GET /api/memory/config — admin (no account header in ST mode)
+    let resp = h
+        .send(
+            Request::builder()
+                .uri("/api/memory/config")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "GET /api/memory/config should return 200 for admin, got: {}",
+        resp.status()
+    );
+
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    // Should contain proactive_memory config keys
+    assert!(
+        json.get("proactive_memory").is_some(),
+        "Config response should contain proactive_memory section, got: {json}"
     );
 }

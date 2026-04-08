@@ -1,7 +1,7 @@
 # ADR-MT-001: Account Model
 
-**Status:** Proposed
-**Date:** 2026-04-06
+**Status:** Implemented (Phase 1 — AccountId type, extractor, registry scoping, agent ownership)
+**Date:** 2026-04-06 (updated 2026-04-07)
 **Author:** Engineering
 **Related:** MASTER-PLAN.md, ADR-MT-002 (Auth), ADR-MT-003 (Resource Isolation), ADR-MT-004 (Data Isolation)
 **Epic:** Multi-Tenant Architecture

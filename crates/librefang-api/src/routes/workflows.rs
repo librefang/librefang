@@ -1,7 +1,7 @@
 //! Workflow, trigger, schedule, and cron job handlers.
 
-use super::AppState;
 use super::shared::check_account;
+use super::AppState;
 use crate::middleware::AccountId;
 
 /// Build routes for the workflow/trigger/schedule/cron domain.
@@ -1266,10 +1266,8 @@ pub async fn create_schedule(
                     aid
                 }
                 None => {
-                    return ApiErrorResponse::not_found(format!(
-                        "Agent not found: {agent_id_str}"
-                    ))
-                    .into_json_tuple();
+                    return ApiErrorResponse::not_found(format!("Agent not found: {agent_id_str}"))
+                        .into_json_tuple();
                 }
             }
         } else {

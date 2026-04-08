@@ -49,7 +49,7 @@ The memory backend (Supabase + RuVector PostgreSQL extension via HTTP) was previ
 ## ADR-MT-001: Account Model
 
 ### Status
-PROPOSED
+IMPLEMENTED (AccountId type, extractor, registry scoping, agent ownership — all shipped in Phase 1)
 
 ### Context
 LibreFang operates as a single-tenant daemon. All resources (agents, skills, channels, integrations, memory, workflows) exist in one flat namespace under `~/.librefang/`. The existing `UserRole` RBAC controls what a user can do, but not what they can see — every authenticated user sees every agent.
@@ -102,7 +102,7 @@ crates/librefang-kernel/src/registry.rs       → Account-filtered agent queries
 ## ADR-MT-002: API Authentication & Account Resolution
 
 ### Status
-PROPOSED
+PARTIALLY IMPLEMENTED (Phase 1 shipped, Phase 2 in progress)
 
 ### Context
 LibreFang's current auth model:
@@ -157,8 +157,11 @@ impl<S: Send + Sync> FromRequestParts<S> for AccountId {
 ### Security Properties
 - **404 not 403**: Wrong account returns 404 (prevents enumeration) — proven in openfang ADR-027
 - **Timing-safe comparison**: HMAC validation uses `verify_slice()` (constant-time compare)
-- **⚠️ No replay protection (Phase 1)**: HMAC is over `account_id` alone — static signature. Accepted risk for server-to-server auth. Phase 2 adds timestamp + nonce. See ADR-MT-002 Known Risk section.
+- **Replay-protected HMAC (shipped 2026-04-07)**: Signature binds `account_id + method + path + timestamp` with ±5-min window. Cross-endpoint replay eliminated. Remaining: nonce cache pending, `ValidLegacy` fallback sunset by Phase 2 end.
+- **`require_account_id` middleware (shipped)**: Rejects missing `X-Account-Id` when multi-tenant mode is enabled.
 - **No credential leakage**: Account credentials never appear in API responses
+- **⚠️ ~190 handlers accept `_account: AccountId` but do not filter**: 139 of 330 handlers (42%) are tenant-isolated — 108 data-filtered + 28 admin-guarded + 3 Tier 4 Public. Cross-tenant data access remains possible on the ~190 unfiltered endpoints (system.rs, skills.rs, workflows.rs, channels.rs, providers.rs, plugins.rs, goals.rs, media.rs, inbox.rs). Config, budget, and network are now fully guarded. See ADR-MT-003 and PENDING-WORK.md for per-file breakdown.
+- **⚠️ Upload cross-tenant read**: `UploadMeta` lacks `account_id` field; `serve_upload` does not check ownership. See PENDING-WORK.md item #3.
 
 ### Affected Files
 ```
@@ -173,7 +176,7 @@ crates/librefang-types/src/config/types.rs     → hmac_secret config field
 ## ADR-MT-003: Resource Isolation Strategy
 
 ### Status
-PROPOSED
+IN PROGRESS — 6 of 15 route files fully tenant-isolated (agents, memory, prompts data-filtered; config, budget, network admin-guarded via `require_admin`); 3 partially filtered; 6 extractor-only with zero filtering. 139 of 330 handlers (42%) genuinely isolated. See PENDING-WORK.md for per-file breakdown.
 
 ### Context
 LibreFang manages 8 resource types that need account isolation:

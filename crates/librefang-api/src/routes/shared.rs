@@ -34,6 +34,23 @@ pub fn check_account(
     Ok(())
 }
 
+/// Reject scoped tenants from admin-only endpoints.
+///
+/// Returns 403 Forbidden when `AccountId(Some(_))` — these endpoints are
+/// restricted to admin/system callers (desktop mode or no X-Account-Id header).
+/// Single-tenant mode (`AccountId(None)`) passes through unchanged.
+pub fn require_admin(
+    account: &AccountId,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    if account.0.is_some() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "This endpoint requires admin access"})),
+        ));
+    }
+    Ok(())
+}
+
 /// Finalize a newly spawned agent by attaching the account ID.
 ///
 /// This function is called after successfully spawning an agent in multi-tenant

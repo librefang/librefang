@@ -1,7 +1,7 @@
 //! Budget and usage tracking handlers.
 
+use super::shared::{check_account, require_admin};
 use super::AppState;
-use super::shared::check_account;
 use crate::middleware::AccountId;
 use crate::types::ApiErrorResponse;
 
@@ -146,8 +146,13 @@ pub async fn usage_summary(
 )]
 pub async fn usage_by_model(
     State(state): State<Arc<AppState>>,
-    _account: AccountId, // TODO(multi-tenant): UsageStore.query_by_model needs per-agent filtering to scope by tenant
+    account: AccountId,
 ) -> impl IntoResponse {
+    // Model-grouped usage cannot be scoped per-tenant without kernel changes.
+    // Admin-only until UsageStore supports per-agent model aggregation.
+    if let Err((code, json)) = require_admin(&account) {
+        return (code, json).into_response();
+    }
     match state.kernel.memory_substrate().usage().query_by_model() {
         Ok(models) => {
             let list: Vec<serde_json::Value> = models
@@ -165,7 +170,7 @@ pub async fn usage_by_model(
             Json(serde_json::json!({"models": list}))
         }
         Err(_) => Json(serde_json::json!({"models": []})),
-    }
+    }.into_response()
 }
 
 /// GET /api/usage/by-model/performance — Get model performance metrics including latency statistics.
@@ -177,8 +182,11 @@ pub async fn usage_by_model(
 )]
 pub async fn usage_by_model_performance(
     State(state): State<Arc<AppState>>,
-    _account: AccountId, // TODO(multi-tenant): query_model_performance needs per-agent filtering
+    account: AccountId,
 ) -> impl IntoResponse {
+    if let Err((code, json)) = require_admin(&account) {
+        return (code, json).into_response();
+    }
     match state
         .kernel
         .memory_substrate()
@@ -206,7 +214,7 @@ pub async fn usage_by_model_performance(
             Json(serde_json::json!({"models": list}))
         }
         Err(_) => Json(serde_json::json!({"models": []})),
-    }
+    }.into_response()
 }
 
 /// GET /api/usage/daily — Get daily usage breakdown for the last 7 days.
@@ -218,8 +226,11 @@ pub async fn usage_by_model_performance(
 )]
 pub async fn usage_daily(
     State(state): State<Arc<AppState>>,
-    _account: AccountId, // TODO(multi-tenant): daily breakdown needs per-agent filtering
+    account: AccountId,
 ) -> impl IntoResponse {
+    if let Err((code, json)) = require_admin(&account) {
+        return (code, json).into_response();
+    }
     let days = state
         .kernel
         .memory_substrate()
@@ -251,7 +262,7 @@ pub async fn usage_daily(
         "days": days_list,
         "today_cost_usd": today_cost.unwrap_or(0.0),
         "first_event_date": first_event.unwrap_or(None),
-    }))
+    })).into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -269,13 +280,17 @@ pub async fn usage_daily(
 )]
 pub async fn budget_status(
     State(state): State<Arc<AppState>>,
-    _account: AccountId, // TODO(multi-tenant): global budget is admin-level; scoped tenants need per-tenant budget
+    account: AccountId,
 ) -> impl IntoResponse {
+    // Global budget status is admin-only. Per-tenant budgets require ADR-MT-004.
+    if let Err((code, json)) = require_admin(&account) {
+        return (code, json).into_response();
+    }
     let status = state
         .kernel
         .metering_ref()
         .budget_status(&state.kernel.budget_config());
-    Json(serde_json::to_value(&status).unwrap_or_default())
+    Json(serde_json::to_value(&status).unwrap_or_default()).into_response()
 }
 
 /// PUT /api/budget — Update global budget limits (in-memory only, not persisted to config.toml).
@@ -287,9 +302,13 @@ pub async fn budget_status(
 )]
 pub async fn update_budget(
     State(state): State<Arc<AppState>>,
-    _account: AccountId, // TODO(multi-tenant): global budget mutation should be admin-only
+    account: AccountId,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    // Global budget mutation is admin-only.
+    if let Err((code, json)) = require_admin(&account) {
+        return (code, json).into_response();
+    }
     // Apply updates — accept both config field names (max_hourly_usd) and
     // GET response field names (hourly_limit) so read-modify-write works.
     state.kernel.update_budget_config(|budget| {
@@ -323,7 +342,7 @@ pub async fn update_budget(
         .kernel
         .metering_ref()
         .budget_status(&state.kernel.budget_config());
-    Json(serde_json::to_value(&status).unwrap_or_default())
+    Json(serde_json::to_value(&status).unwrap_or_default()).into_response()
 }
 
 /// GET /api/budget/agents/{id} — Per-agent budget/quota status.

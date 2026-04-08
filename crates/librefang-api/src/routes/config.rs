@@ -23,6 +23,7 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
 }
 use crate::middleware::AccountId;
 use crate::types::*;
+use super::shared::require_admin;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -159,7 +160,10 @@ pub async fn status(account: AccountId, State(state): State<Arc<AppState>>) -> i
         (status = 200, description = "Quick init result", body = serde_json::Value)
     )
 )]
-pub async fn quick_init(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn quick_init(account: AccountId, State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    if let Err((code, json)) = require_admin(&account) {
+        return (code, json).into_response();
+    }
     let home = state.kernel.home_dir();
     let config_path = home.join("config.toml");
 
@@ -167,7 +171,7 @@ pub async fn quick_init(State(state): State<Arc<AppState>>) -> impl IntoResponse
         return Json(serde_json::json!({
             "status": "already_initialized",
             "message": "config.toml already exists"
-        }));
+        })).into_response();
     }
 
     // Ensure directories exist
@@ -207,7 +211,7 @@ api_key_env = "{api_key_env}"
         return Json(serde_json::json!({
             "status": "error",
             "message": format!("Failed to write config: {e}")
-        }));
+        })).into_response();
     }
 
     // Reload config so kernel picks up new settings
@@ -217,7 +221,7 @@ api_key_env = "{api_key_env}"
         "status": "initialized",
         "provider": provider,
         "model": model,
-    }))
+    })).into_response()
 }
 
 /// POST /api/shutdown — Graceful shutdown.
@@ -229,7 +233,10 @@ api_key_env = "{api_key_env}"
         (status = 200, description = "Graceful daemon shutdown", body = serde_json::Value)
     )
 )]
-pub async fn shutdown(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn shutdown(account: AccountId, State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    if let Err((code, json)) = require_admin(&account) {
+        return (code, json).into_response();
+    }
     tracing::info!("Shutdown requested via API");
     // SECURITY: Record shutdown in audit trail
     state.kernel.audit().record(
@@ -241,7 +248,7 @@ pub async fn shutdown(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     state.kernel.shutdown();
     // Signal the HTTP server to initiate graceful shutdown so the process exits.
     state.shutdown_notify.notify_one();
-    Json(serde_json::json!({"status": "shutting_down"}))
+    Json(serde_json::json!({"status": "shutting_down"})).into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -257,7 +264,7 @@ pub async fn shutdown(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         (status = 200, description = "Version information", body = serde_json::Value)
     )
 )]
-pub async fn version() -> impl IntoResponse {
+pub async fn version(_account: AccountId) -> impl IntoResponse {
     Json(serde_json::json!({
         "name": "librefang",
         "version": env!("CARGO_PKG_VERSION"),
@@ -286,7 +293,7 @@ pub async fn version() -> impl IntoResponse {
         (status = 200, description = "Health check", body = serde_json::Value)
     )
 )]
-pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn health(_account: AccountId, State(state): State<Arc<AppState>>) -> impl IntoResponse {
     // Check database connectivity
     let shared_id = librefang_types::agent::AgentId(uuid::Uuid::from_bytes([
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
@@ -336,7 +343,11 @@ pub async fn health_detail(
     let status = if db_ok { "ok" } else { "degraded" };
 
     let agent_count = match account.0 {
-        Some(ref owner_id) => state.kernel.agent_registry().list_by_account(owner_id).len(),
+        Some(ref owner_id) => state
+            .kernel
+            .agent_registry()
+            .list_by_account(owner_id)
+            .len(),
         None => state.kernel.agent_registry().count(),
     };
 
@@ -406,7 +417,10 @@ pub async fn health_detail(
 // returns global counters/gauges across all tenants. Filtering Prometheus
 // text-format output by account_id requires label injection and per-tenant
 // aggregation, which is too complex for a quick fix. Tracked for Phase 2.
-pub async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn prometheus_metrics(account: AccountId, State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    if let Err((code, json)) = require_admin(&account) {
+        return (code, json).into_response();
+    }
     let mut out = String::with_capacity(4096);
 
     // Uptime
@@ -523,7 +537,7 @@ pub async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> impl Into
             "text/plain; version=0.0.4; charset=utf-8",
         )],
         out,
-    )
+    ).into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -539,7 +553,10 @@ pub async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> impl Into
         (status = 200, description = "Get kernel configuration (secrets redacted)", body = serde_json::Value)
     )
 )]
-pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn get_config(account: AccountId, State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    if let Err((code, json)) = require_admin(&account) {
+        return (code, json).into_response();
+    }
     // Return a redacted view of the kernel config
     let config = state.kernel.config_ref();
 
@@ -1147,7 +1164,7 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
         );
     }
 
-    Json(serde_json::Value::Object(out))
+    Json(serde_json::Value::Object(out)).into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -1167,7 +1184,10 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
         (status = 200, description = "Security feature status", body = serde_json::Value)
     )
 )]
-pub async fn security_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn security_status(account: AccountId, State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    if let Err((code, json)) = require_admin(&account) {
+        return (code, json).into_response();
+    }
     let scfg = state.kernel.config_ref();
     let api_key_empty = scfg.api_key.is_empty();
     drop(scfg);
@@ -1236,7 +1256,7 @@ pub async fn security_status(State(state): State<Arc<AppState>>) -> impl IntoRes
         },
         "secret_zeroization": true,
         "total_features": 15
-    }))
+    })).into_response()
 }
 
 #[utoipa::path(
@@ -1247,7 +1267,10 @@ pub async fn security_status(State(state): State<Arc<AppState>>) -> impl IntoRes
         (status = 200, description = "Detect migratable framework installation", body = serde_json::Value)
     )
 )]
-pub async fn migrate_detect() -> impl IntoResponse {
+pub async fn migrate_detect(account: AccountId) -> impl IntoResponse {
+    if let Err((code, json)) = require_admin(&account) {
+        return (code, json);
+    }
     // Check OpenClaw first
     if let Some(path) = librefang_migrate::openclaw::detect_openclaw_home() {
         let scan = librefang_migrate::openclaw::scan_openclaw_workspace(&path);
@@ -1298,7 +1321,10 @@ pub async fn migrate_detect() -> impl IntoResponse {
         (status = 200, description = "Scan directory for migratable workspace", body = serde_json::Value)
     )
 )]
-pub async fn migrate_scan(Json(req): Json<MigrateScanRequest>) -> impl IntoResponse {
+pub async fn migrate_scan(account: AccountId, Json(req): Json<MigrateScanRequest>) -> impl IntoResponse {
+    if let Err((code, json)) = require_admin(&account) {
+        return (code, json);
+    }
     let path = std::path::PathBuf::from(&req.path);
     if !path.exists() {
         return ApiErrorResponse::bad_request("Directory not found").into_json_tuple();
@@ -1317,9 +1343,13 @@ pub async fn migrate_scan(Json(req): Json<MigrateScanRequest>) -> impl IntoRespo
     )
 )]
 pub async fn run_migrate(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(req): Json<MigrateRequest>,
 ) -> impl IntoResponse {
+    if let Err((code, json)) = require_admin(&account) {
+        return (code, json);
+    }
     let source = match req.source.as_str() {
         "openclaw" => librefang_migrate::MigrateSource::OpenClaw,
         "langchain" => librefang_migrate::MigrateSource::LangChain,
@@ -1417,7 +1447,10 @@ pub async fn run_migrate(
         (status = 200, description = "Reload configuration from disk", body = serde_json::Value)
     )
 )]
-pub async fn config_reload(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn config_reload(account: AccountId, State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    if let Err((code, json)) = require_admin(&account) {
+        return (code, json);
+    }
     // SECURITY: Record config reload in audit trail
     state.kernel.audit().record(
         "system",
@@ -1487,7 +1520,7 @@ pub async fn config_reload(State(state): State<Arc<AppState>>) -> impl IntoRespo
         (status = 200, description = "Get config structure schema", body = serde_json::Value)
     )
 )]
-pub async fn config_schema(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn config_schema(_account: AccountId, State(state): State<Arc<AppState>>) -> impl IntoResponse {
     // Build provider/model options from model catalog for dropdowns
     let catalog = state
         .kernel
@@ -1676,9 +1709,13 @@ pub async fn config_schema(State(state): State<Arc<AppState>>) -> impl IntoRespo
     )
 )]
 pub async fn config_set(
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    if let Err((code, json)) = require_admin(&account) {
+        return (code, json);
+    }
     let path = match body.get("path").and_then(|v| v.as_str()) {
         Some(p) => p.to_string(),
         None => {

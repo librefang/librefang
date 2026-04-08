@@ -61,9 +61,9 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
 
+use super::shared::{check_account, require_admin};
 use crate::middleware::AccountId;
 use crate::types::ApiErrorResponse;
-use super::shared::check_account;
 // ---------------------------------------------------------------------------
 // Peer endpoints
 // ---------------------------------------------------------------------------
@@ -78,9 +78,13 @@ use super::shared::check_account;
     )
 )]
 pub async fn list_peers(
-    _account: AccountId, // TODO(multi-tenant): PeerRegistry needs tenant-scoped filtering
+    account: AccountId,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
+    // Peer registry is network-level, not tenant-scoped. Admin-only.
+    if let Err((code, json)) = require_admin(&account) {
+        return (code, json).into_response();
+    }
     // Peers are tracked in the wire module's PeerRegistry.
     // The kernel doesn't directly hold a PeerRegistry, so we return an empty list
     // unless one is available. The API server can be extended to inject a registry.
@@ -103,9 +107,9 @@ pub async fn list_peers(
                 })
             })
             .collect();
-        Json(serde_json::json!({"peers": peers, "total": peers.len()}))
+        Json(serde_json::json!({"peers": peers, "total": peers.len()})).into_response()
     } else {
-        Json(serde_json::json!({"peers": [], "total": 0}))
+        Json(serde_json::json!({"peers": [], "total": 0})).into_response()
     }
 }
 
@@ -121,14 +125,17 @@ pub async fn list_peers(
     )
 )]
 pub async fn get_peer(
-    _account: AccountId, // TODO(multi-tenant): PeerRegistry needs tenant-scoped filtering
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    if let Err((code, json)) = require_admin(&account) {
+        return (code, json).into_response();
+    }
     let registry = match state.peer_registry {
         Some(ref r) => r,
         None => {
-            return ApiErrorResponse::not_found("Peer networking is not enabled").into_json_tuple();
+            return ApiErrorResponse::not_found("Peer networking is not enabled").into_response();
         }
     };
 
@@ -147,8 +154,8 @@ pub async fn get_peer(
                 "connected_at": p.connected_at.to_rfc3339(),
                 "protocol_version": p.protocol_version,
             })),
-        ),
-        None => ApiErrorResponse::not_found("Peer not found").into_json_tuple(),
+        ).into_response(),
+        None => ApiErrorResponse::not_found("Peer not found").into_response(),
     }
 }
 
@@ -162,9 +169,12 @@ pub async fn get_peer(
     )
 )]
 pub async fn network_status(
-    _account: AccountId, // TODO(multi-tenant): network status needs tenant-scoped peer counts
+    account: AccountId,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
+    if let Err((code, json)) = require_admin(&account) {
+        return (code, json).into_response();
+    }
     let cfg = state.kernel.config_ref();
     let enabled = cfg.network_enabled && !cfg.network.shared_secret.is_empty();
     drop(cfg);
@@ -188,7 +198,7 @@ pub async fn network_status(
         "listen_address": listen_address,
         "connected_peers": connected_peers,
         "total_peers": total_peers,
-    }))
+    })).into_response()
 }
 
 #[utoipa::path(
@@ -400,10 +410,14 @@ pub async fn a2a_send_task(
     )
 )]
 pub async fn a2a_get_task(
-    _account: AccountId, // TODO(multi-tenant): A2A task store needs tenant-scoped access
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(task_id): Path<String>,
 ) -> impl IntoResponse {
+    // A2A task store has no tenant scoping yet. Admin-only until task ownership is added.
+    if let Err((code, json)) = require_admin(&account) {
+        return (code, json);
+    }
     match state.kernel.a2a_tasks().get(&task_id) {
         Some(task) => (
             StatusCode::OK,
@@ -428,10 +442,13 @@ pub async fn a2a_get_task(
     )
 )]
 pub async fn a2a_cancel_task(
-    _account: AccountId, // TODO(multi-tenant): A2A task store needs tenant-scoped access
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(task_id): Path<String>,
 ) -> impl IntoResponse {
+    if let Err((code, json)) = require_admin(&account) {
+        return (code, json);
+    }
     if state.kernel.a2a_tasks().cancel(&task_id) {
         match state.kernel.a2a_tasks().get(&task_id) {
             Some(task) => (
@@ -459,9 +476,13 @@ pub async fn a2a_cancel_task(
     )
 )]
 pub async fn a2a_list_external_agents(
-    _account: AccountId, // TODO(multi-tenant): external A2A agent store needs tenant-scoped filtering
+    account: AccountId,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
+    // External agent discovery is system-level. Admin-only.
+    if let Err((code, json)) = require_admin(&account) {
+        return (code, json).into_response();
+    }
     let agents = state
         .kernel
         .a2a_agents()
@@ -479,7 +500,7 @@ pub async fn a2a_list_external_agents(
             })
         })
         .collect();
-    Json(serde_json::json!({"agents": items, "total": items.len()}))
+    Json(serde_json::json!({"agents": items, "total": items.len()})).into_response()
 }
 
 /// Check whether a URL is safe to fetch (not targeting internal/private networks).
@@ -658,10 +679,13 @@ fn is_private_ip(ip: &IpAddr) -> bool {
     )
 )]
 pub async fn a2a_get_external_agent(
-    _account: AccountId, // TODO(multi-tenant): external A2A agent store needs tenant-scoped filtering
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    if let Err((code, json)) = require_admin(&account) {
+        return (code, json);
+    }
     let agents = state
         .kernel
         .a2a_agents()
@@ -709,10 +733,13 @@ pub async fn a2a_get_external_agent(
     )
 )]
 pub async fn a2a_discover_external(
-    _account: AccountId, // TODO(multi-tenant): external A2A agent store needs tenant-scoped isolation
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    if let Err((code, json)) = require_admin(&account) {
+        return (code, json);
+    }
     let url = match body["url"].as_str() {
         Some(u) => u.to_string(),
         None => return ApiErrorResponse::bad_request("Missing 'url' field").into_json_tuple(),
@@ -774,10 +801,13 @@ pub async fn a2a_discover_external(
     )
 )]
 pub async fn a2a_send_external(
-    _account: AccountId, // TODO(multi-tenant): external A2A send needs tenant-scoped agent resolution
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    if let Err((code, json)) = require_admin(&account) {
+        return (code, json);
+    }
     let url = match body["url"].as_str() {
         Some(u) => u.to_string(),
         None => return ApiErrorResponse::bad_request("Missing 'url' field").into_json_tuple(),
@@ -827,11 +857,14 @@ pub async fn a2a_send_external(
     )
 )]
 pub async fn a2a_external_task_status(
-    _account: AccountId, // TODO(multi-tenant): external A2A task status needs tenant-scoped access
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Path(task_id): Path<String>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
+    if let Err((code, json)) = require_admin(&account) {
+        return (code, json);
+    }
     let url = match params.get("url") {
         Some(u) => u.clone(),
         None => {
@@ -880,10 +913,14 @@ pub async fn a2a_external_task_status(
     )
 )]
 pub async fn mcp_http(
-    _account: AccountId, // TODO(multi-tenant): MCP HTTP needs tenant-scoped tool visibility
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(request): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    // MCP tool visibility needs tenant scoping. Admin-only until MCP session has account context.
+    if let Err((code, json)) = require_admin(&account) {
+        return (code, json).into_response();
+    }
     // Gather all available tools (builtin + skills + MCP)
     let mut tools = builtin_tool_definitions();
     {
@@ -919,7 +956,7 @@ pub async fn mcp_http(
                 "jsonrpc": "2.0",
                 "id": request.get("id").cloned(),
                 "error": {"code": -32602, "message": format!("Unknown tool: {tool_name}")}
-            }));
+            })).into_response();
         }
 
         // Snapshot skill registry before async call (RwLockReadGuard is !Send)
@@ -976,12 +1013,12 @@ pub async fn mcp_http(
                 "content": [{"type": "text", "text": result.content}],
                 "isError": result.is_error,
             }
-        }));
+        })).into_response();
     }
 
     // For non-tools/call methods (initialize, tools/list, etc.), delegate to the handler
     let response = librefang_runtime::mcp_server::handle_mcp_request(&request, &tools).await;
-    Json(response)
+    Json(response).into_response()
 }
 
 // ── Multi-Session Endpoints ─────────────────────────────────────────────
@@ -1443,10 +1480,14 @@ pub async fn comms_send(
     )
 )]
 pub async fn comms_task(
-    _account: AccountId, // TODO(multi-tenant): task queue needs tenant-scoped posting and retrieval
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(req): Json<librefang_types::comms::CommsTaskRequest>,
 ) -> impl IntoResponse {
+    // Task queue posting needs tenant-scoped isolation. Admin-only until task store has account_id.
+    if let Err((code, json)) = require_admin(&account) {
+        return (code, json);
+    }
     if req.title.is_empty() {
         return ApiErrorResponse::bad_request("Title is required").into_json_tuple();
     }

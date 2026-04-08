@@ -1,7 +1,7 @@
 # ADR-MT-002: API Authentication & Account Resolution
 
-**Status:** Proposed
-**Date:** 2026-04-06
+**Status:** Partially Implemented (Phase 1 shipped, Phase 2 in progress)
+**Date:** 2026-04-06 (updated 2026-04-07)
 **Author:** Engineering
 **Related:** ADR-MT-001 (Account Model), SPEC-MT-001 (Account Data Model)
 **Epic:** Multi-Tenant Architecture
@@ -168,39 +168,59 @@ control over account requirements.
 **Rejected.** Would require changing the existing auth system. Stacking a new
 header is additive — zero changes to existing auth flow.
 
-## ⚠️ Known Risk: HMAC Replay Vulnerability (Accepted — Phase 1)
+## ⚠️ HMAC Replay Protection — Status Update (2026-04-07)
 
-**Risk:** The Phase 1 HMAC signature is computed over `account_id` alone:
-```
-HMAC-SHA256(secret, account_id)
-```
-This signature is **static** — the same account always produces the same signature.
-An attacker who captures one valid `X-Account-Id` + `X-Account-Sig` pair can replay
-it indefinitely.
+### What shipped (Phase 1, commit `7637f863`)
 
-**Why accepted for Phase 1:**
-1. The HMAC secret is shared between Qwntik server and LibreFang daemon — both are
-   server-side, never exposed to browsers or clients
-2. Qwntik's server actions compute the signature on every request — it never leaves
-   the server-to-server boundary
-3. An attacker who can intercept server-to-server traffic already has deeper access
-   than HMAC replay provides
-4. Phase 1 scope is internal deployment only — not customer-facing
+The replay-protected HMAC is **live** in `account_sig_check` middleware. The
+signature now binds to request context:
 
-**Phase 2 remediation plan:**
 ```
 X-Account-Id: acc_abc123
 X-Account-Timestamp: 1712444400          # Unix seconds
-X-Account-Nonce: a1b2c3d4e5f6            # Random hex, 12+ bytes
-X-Account-Sig: hmac-sha256(secret, account_id + "|" + timestamp + "|" + nonce)
+X-Account-Sig: hmac-sha256(secret, account_id + "|" + method + "|" + path + "|" + timestamp)
 ```
-- Timestamp tolerance: ±5 minutes (reject stale requests)
-- Nonce: deduplicate within the tolerance window (in-memory LRU cache, ~10K entries)
-- This eliminates replay without requiring JWT infrastructure
 
-| Risk | Impact | Likelihood | Phase 1 Mitigation | Phase 2 Fix |
-|------|--------|------------|--------------------|-----------|
-| HMAC replay | Medium — attacker impersonates account | Low — requires server-to-server interception | Server-side only, not client-facing | Timestamp + nonce in signature |
+- Timestamp tolerance: ±5 minutes (configurable via `replay_window_secs`)
+- Method + path binding prevents cross-endpoint replay
+- This is materially stronger than openfang-ai's simple `HMAC(secret, account_id)`
+
+### What is still pending
+
+1. **Nonce / replay cache:** No server-side deduplication within the time window.
+   A captured request can still be replayed within the ±5-minute window to the
+   same endpoint. Add an in-memory LRU nonce cache (~10K entries) to close this.
+
+2. **Legacy HMAC fallback (`ValidLegacy`):** The `account_sig_check` middleware
+   still accepts the simple `HMAC(secret, account_id)` format (no timestamp) for
+   backward compatibility with existing Qwntik deployments. This path is
+   indefinitely replayable.
+
+   **Sunset deadline: Phase 2 completion (before customer-facing deployment).**
+   - Add `X-Deprecation-Warning` response header when legacy sig is accepted
+   - Log legacy sig usage at WARN level with request metadata
+   - Remove `ValidLegacy` acceptance path by end of Phase 2
+
+3. **Header contract documentation:** Update client examples and Qwntik
+   integration guide to use the new 3-header format (Id + Timestamp + Sig).
+
+### Original Phase 1 risk assessment (preserved for context)
+
+**Original risk:** The Phase 1 HMAC signature was computed over `account_id` alone —
+static and trivially replayable. This was accepted for Phase 1 because:
+1. Server-to-server only (never exposed to browsers)
+2. Qwntik computes signatures on every request
+3. Intercepting server-to-server traffic implies deeper access
+4. Internal deployment only
+
+**Current status:** Partially mitigated by timestamp+method+path binding. Full
+mitigation requires nonce cache and legacy fallback removal.
+
+| Risk | Impact | Likelihood | Current Status | Remaining Work |
+|------|--------|------------|----------------|----------------|
+| HMAC replay (same endpoint, within window) | Low — 5-min window, same method+path | Low | Timestamp binding shipped | Add nonce cache |
+| HMAC replay (cross-endpoint) | Medium | N/A | **Eliminated** — method+path in sig | Done |
+| Legacy HMAC replay (indefinite) | Medium | Low (server-to-server) | `ValidLegacy` still accepted | Sunset by Phase 2 end |
 
 ---
 
@@ -214,12 +234,14 @@ X-Account-Sig: hmac-sha256(secret, account_id + "|" + timestamp + "|" + nonce)
 
 ### Negative
 - HMAC secret must be shared between Qwntik and librefang (acceptable for internal services)
-- Phase 1 HMAC has no replay protection (accepted risk — see Known Risk section above)
-- `AccountId(None)` sees all data by default (system-sees-all — toggle added in Phase 2)
+- Legacy HMAC fallback (`ValidLegacy`) still accepted — sunset by Phase 2 end
+- `AccountId(None)` sees all data by default (mitigated: `require_account_id` middleware now rejects missing header in multi-tenant mode)
 
-### Phase 2 Remediation
-- Add timestamp + nonce to HMAC signature (eliminates replay)
-- Add `require_account_header` config toggle (closes system-sees-all bypass)
+### Phase 2 Remaining Remediation
+- ~~Add timestamp + nonce to HMAC signature (eliminates replay)~~ → **Timestamp+method+path shipped.** Nonce cache still pending.
+- ~~Add `require_account_header` config toggle (closes system-sees-all bypass)~~ → **Shipped** in `require_account_id` middleware (`14e00fef`)
+- Sunset `ValidLegacy` HMAC acceptance path (new — see Known Risk section)
+- Document the 3-header contract (`X-Account-Id`, `X-Account-Timestamp`, `X-Account-Sig`)
 
 ### Phase 4 Debt
 - JWT for external API keys, token rotation, key management

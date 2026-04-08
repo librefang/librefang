@@ -33,6 +33,9 @@ const RETRY_DELAY: Duration = Duration::from_millis(500);
 /// from search results should read `metadata[LIBREFANG_ID_KEY]`.
 pub const LIBREFANG_ID_KEY: &str = "librefang_id";
 
+/// Type alias for batch insert items: (doc_id, embedding, payload, metadata)
+type BatchItem = (String, Vec<f32>, String, HashMap<String, serde_json::Value>);
+
 /// A [`VectorStore`] that talks to Supabase PostgREST RPC endpoints.
 ///
 /// # ID semantics
@@ -301,10 +304,7 @@ impl SupabaseVectorStore {
     /// `user_id` and `account_id` are extracted from the **first** item's
     /// metadata and applied uniformly to all rows (the RPC uses scalar
     /// params, not per-document).  Returns the Supabase row IDs.
-    pub async fn insert_batch(
-        &self,
-        items: &[(String, Vec<f32>, String, HashMap<String, serde_json::Value>)],
-    ) -> LibreFangResult<Vec<i64>> {
+    pub async fn insert_batch(&self, items: &[BatchItem]) -> LibreFangResult<Vec<i64>> {
         if items.is_empty() {
             return Ok(vec![]);
         }

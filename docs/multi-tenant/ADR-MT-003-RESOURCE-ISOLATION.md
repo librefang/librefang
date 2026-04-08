@@ -1,7 +1,7 @@
 # ADR-MT-003: Resource Isolation Strategy
 
-**Status:** Proposed
-**Date:** 2026-04-06
+**Status:** In Progress — 6 of 15 route files fully isolated (3 data-filtered + 3 admin-guarded); 3 partially filtered; 6 extractor-only
+**Date:** 2026-04-06 (updated 2026-04-07 — corrected after code audit)
 **Author:** Engineering
 **Related:** ADR-MT-001 (Account Model), ADR-MT-002 (API Auth)
 **Epic:** Multi-Tenant Architecture — Phase 2
@@ -121,6 +121,32 @@ SCOPED=$(grep -c "account: AccountId" "crates/librefang-api/src/routes/system.rs
 echo "system.rs: $SCOPED/$TOTAL scoped, $PUBLIC public (expected: $((TOTAL - PUBLIC)) scoped)"
 ```
 
+## ⚠️ Known Gap: Upload Cross-Tenant Read (Discovered 2026-04-07)
+
+**Gap:** `serve_upload` in `agents.rs` accepts `AccountId` but never checks it.
+`UploadMeta` has no `account_id` field, so a tenant who knows a `file_id` can
+fetch another tenant's uploaded file. The `require_account_id` middleware ensures
+the header is present, but without ownership metadata on the upload record itself,
+enforcement is impossible at the handler level.
+
+**Root cause:** Uploads were exempted from account enforcement in early Phase 1 and
+the metadata struct was never extended.
+
+**Fix required:**
+1. Add `account_id: Option<String>` to `UploadMeta` (or equivalent registration struct)
+2. Populate `account_id` at upload time from the request's `AccountId`
+3. Check ownership in `serve_upload` before returning the file
+4. Add integration test: tenant A uploads file, tenant B attempts fetch → 404
+
+**Files:**
+- `crates/librefang-api/src/routes/agents.rs` (serve_upload handler)
+- `crates/librefang-api/src/routes/media.rs` (UploadMeta struct)
+- `crates/librefang-api/tests/account_tests.rs` (cross-tenant upload test)
+
+**Tracked in:** PENDING-WORK.md item #3
+
+---
+
 ## Alternatives Considered
 
 ### Alt 1: Separate router per account
@@ -133,20 +159,51 @@ the handler level is simpler and proven in openfang-ai.
 desktop mode and public health endpoints. Handler-level guards with tiered
 policies are more flexible.
 
+## Implementation Progress (verified 2026-04-07)
+
+> **Important:** "AccountId extractor in signature" ≠ "tenant-filtered." A handler
+> with `_account: AccountId` provides zero isolation. Only handlers that use the
+> value in a query or guard (`check_account`, `list_by_account`, `get_scoped`,
+> `require_agent_access`, `require_admin`, or direct `account.0` checks) are genuinely scoped.
+
+| Tier | File | Handlers | Data-filtered | Admin-guarded | Tier 4 Public | `_account` (unused) | No `AccountId` | Status |
+|------|------|----------|--------------|--------------|--------------|--------------------|--------------------|--------|
+| 1 | `agents.rs` | 50 | 48 | 0 | 0 | 1 | 1 (helper) | **Done** |
+| 1 | `memory.rs` | 25 | 25 | 0 | 0 | 0 | 0 | **Done** |
+| 1 | `prompts.rs` | 12 | 12 | 0 | 0 | 0 | 0 | **Done** |
+| 2 | `config.rs` | 15 | 2 | 10 | 3 | 0 | 0 | **Done** |
+| 2 | `budget.rs` | 10 | 5 | 5 | 0 | 0 | 0 | **Done** |
+| 2 | `network.rs` | 20 | 7 | 13 | 0 | 0 | 0 | **Done** |
+| 2 | `system.rs` | 63 | 6 | 0 | 0 | 57 | 0 | Partial — tier decision pending |
+| 2 | `skills.rs` | 53 | 2 | 0 | 0 | 51 | 0 | Barely started |
+| 2 | `workflows.rs` | 30 | 1 | 0 | 0 | 29 | 0 | Barely started |
+| — | `channels.rs` | 11 | 0 | 0 | 0 | 11 | 0 | Extractor only |
+| — | `providers.rs` | 19 | 0 | 0 | 0 | 19 | 0 | Extractor only |
+| — | `plugins.rs` | 8 | 0 | 0 | 0 | 8 | 0 | Extractor only |
+| — | `goals.rs` | 7 | 0 | 0 | 0 | 7 | 0 | Extractor only |
+| — | `media.rs` | 6 | 0 | 0 | 0 | 6 | 0 | Extractor only |
+| — | `inbox.rs` | 1 | 0 | 0 | 0 | 1 | 0 | Extractor only |
+| | **Total** | **330** | **108** | **28** | **3** | **190** | **1** | **42% isolated** |
+
 ## Consequences
 
 ### Positive
-- Every tenant-visible endpoint is scoped. Cross-tenant access returns 404.
-- Tiered guard system (check_account / validate_account! / account_or_system!) provides
-  per-route policy granularity
-- System defaults (providers, plugins) remain visible to all accounts
+- 6 of 15 route files are fully tenant-isolated: agents, memory, prompts (data-filtered), config, budget, network (admin-guarded). Cross-tenant access returns 404 or 403 on these endpoints.
+- `require_admin()` guard added to `shared.rs` — blocks scoped tenants from system-level operations (shutdown, config mutation, global budget, peer registry, A2A management, MCP HTTP).
+- Registry-backed scoping primitives (`get_scoped`, `list_by_account`) proven and reusable.
+- `require_account_id` middleware enforces header presence in multi-tenant mode.
+- All 15 config.rs handlers now have `AccountId` — no handlers without account context remain.
 
 ### Negative
-- ~252 handler signatures change. Mechanical but high-volume.
-- Skills allowlist adds config complexity per account
+- ~190 handlers accept `_account: AccountId` but ignore it. Cross-tenant access is possible on those endpoints.
+- 1 handler (helper in agents.rs) has no `AccountId` parameter.
+- Admin-guarded handlers return 403 to tenants rather than providing per-tenant views. Global budget/usage/metrics will need per-tenant kernel APIs in Phase 3.
+- Store-level filtering not yet wired — handlers that do filter mostly rely on registry (agents) or in-handler match arms (memory). Other stores have no `account_id` parameter.
+- Skills allowlist adds config complexity per account.
 
-### Phase 3 Debt
-- Memory recall filtering (account_id on memories table) — see ADR-MT-004
-- Session scoping (account_id on sessions table) — see SPEC-MT-003
-- Event bus isolation (dispatch-side filtering) — see ADR-MT-005
-- Channel bridge per-adapter account routing (50+ adapters) — Phase 4
+### Remaining Work
+- Wire filtering in remaining 9 partially-scoped + unscoped route files — see PENDING-WORK.md items #1–#2
+- Upload cross-tenant fix — see §Known Gap above and PENDING-WORK.md item #3
+- Kernel/store migration (ADR-MT-004, v19) — ~76 store methods need `account_id`
+- Event bus isolation — see ADR-MT-005
+- Channel bridge per-adapter account routing — Phase 4

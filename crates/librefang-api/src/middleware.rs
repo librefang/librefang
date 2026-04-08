@@ -522,6 +522,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 /// Reads `X-Account-Id`, `X-Account-Timestamp` (optional), and `X-Account-Sig`.
 /// Returns `Ok(Some(account_id))` if valid, `Ok(None)` if no account headers,
 /// or `Err(Response)` with 401 error.
+#[allow(clippy::result_large_err)]
 pub fn extract_verified_account(
     headers: &axum::http::HeaderMap,
     method: &str,
@@ -1022,11 +1023,30 @@ pub(crate) fn account_sig_policy(
 pub async fn require_account_id(request: Request<Body>, next: Next) -> Response<Body> {
     let path = request.uri().path();
 
+    // Only enforce tenant headers on API/protocol surfaces that can expose or
+    // mutate tenant data. Static assets and dashboard boot resources must stay
+    // reachable without X-Account-Id.
+    let is_tenant_scoped_surface = path.starts_with("/api/")
+        || path.starts_with("/api/v1/")
+        || path == "/mcp"
+        || path == "/v1/chat/completions"
+        || path == "/v1/models";
+
+    if !is_tenant_scoped_surface {
+        return next.run(request).await;
+    }
+
     // Allow health/version/public/auth endpoints without account ID.
     // Auth endpoints are exempt because the user is in the process of
     // authenticating and cannot yet carry an X-Account-Id header.
     let is_exempt = path == "/api/health"
+        || path == "/api/health/detail"
         || path == "/api/version"
+        || path == "/api/versions"
+        || path == "/api/openapi.json"
+        || path == "/api/v1/health"
+        || path == "/api/v1/health/detail"
+        || path == "/api/v1/version"
         || path.starts_with("/api/auth/")
         || path.starts_with("/api/v1/auth/")
         || path == "/openapi.json";
