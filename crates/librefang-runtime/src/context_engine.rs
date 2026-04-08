@@ -2407,6 +2407,7 @@ impl ContextEngine for ScriptableContextEngine {
             {
                 Ok((output, ms)) => {
                     Self::record_hook(&self.metrics, "ingest", ms, true);
+                    tracing::info!(hook = "ingest", agent_id = %agent_id, elapsed_ms = ms, "Ingest hook succeeded");
                     // Store in cache
                     {
                         let mut guard = cache_arc.lock().unwrap();
@@ -2466,6 +2467,7 @@ impl ContextEngine for ScriptableContextEngine {
             Ok((output, ms)) => {
                 Self::record_hook(&self.metrics, "ingest", ms, true);
                 self.record_per_agent(&agent_id, ms, true);
+                tracing::info!(hook = "ingest", agent_id = %agent_id, elapsed_ms = ms, "Ingest hook succeeded");
                 // Merge hook memories with default memories
                 let mut memories = default_result.recalled_memories;
                 if let Some(hook_memories) = output.get("memories").and_then(|m| m.as_array()) {
