@@ -53,6 +53,8 @@ pub struct TelegramAdapter {
     long_poll_timeout: u64,
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
+    /// Handle for the polling task, used for graceful shutdown.
+    poll_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
     /// When true, remove the reaction on Done instead of showing 🎉.
     clear_done_reaction: bool,
 }
@@ -88,6 +90,7 @@ impl TelegramAdapter {
             long_poll_timeout: 30,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
+            poll_handle: Arc::new(tokio::sync::Mutex::new(None)),
             clear_done_reaction: false,
         }
     }
@@ -201,6 +204,57 @@ impl TelegramAdapter {
         Ok(())
     }
 
+    /// Generic helper for Telegram media API calls (sendPhoto, sendVoice, sendVideo, etc.)
+    ///
+    /// Handles URL construction, optional `message_thread_id`, and a single retry
+    /// on HTTP 429 rate-limit responses (waiting `retry_after` seconds from the
+    /// Telegram response body, defaulting to 2 seconds if the header is missing).
+    async fn api_send_media_request(
+        &self,
+        endpoint: &str,
+        chat_id: i64,
+        body_fields: serde_json::Value,
+        thread_id: Option<i64>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let url = format!(
+            "{}/bot{}/{endpoint}",
+            self.api_base_url,
+            self.token.as_str()
+        );
+        let mut body = body_fields;
+        body["chat_id"] = serde_json::json!(chat_id);
+        if let Some(tid) = thread_id {
+            body["message_thread_id"] = serde_json::json!(tid);
+        }
+
+        let resp = self.client.post(&url).json(&body).send().await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body_text = resp.text().await.unwrap_or_default();
+
+            // Retry once on 429 rate limit
+            if status.as_u16() == 429 {
+                let retry_after = body_text
+                    .parse::<serde_json::Value>()
+                    .ok()
+                    .and_then(|v| v["parameters"]["retry_after"].as_u64())
+                    .unwrap_or(2);
+                warn!("Telegram {endpoint} rate limited, retrying after {retry_after}s");
+                tokio::time::sleep(Duration::from_secs(retry_after)).await;
+
+                let resp2 = self.client.post(&url).json(&body).send().await?;
+                if !resp2.status().is_success() {
+                    let body_text2 = resp2.text().await.unwrap_or_default();
+                    warn!("Telegram {endpoint} failed after retry: {body_text2}");
+                }
+                return Ok(());
+            }
+
+            warn!("Telegram {endpoint} failed ({status}): {body_text}");
+        }
+        Ok(())
+    }
+
     /// Call `sendPhoto` on the Telegram API.
     async fn api_send_photo(
         &self,
@@ -209,24 +263,13 @@ impl TelegramAdapter {
         caption: Option<&str>,
         thread_id: Option<i64>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let url = format!("{}/bot{}/sendPhoto", self.api_base_url, self.token.as_str());
-        let mut body = serde_json::json!({
-            "chat_id": chat_id,
-            "photo": photo_url,
-        });
+        let mut body = serde_json::json!({ "photo": photo_url });
         if let Some(cap) = caption {
             body["caption"] = serde_json::Value::String(cap.to_string());
             body["parse_mode"] = serde_json::Value::String("HTML".to_string());
         }
-        if let Some(tid) = thread_id {
-            body["message_thread_id"] = serde_json::json!(tid);
-        }
-        let resp = self.client.post(&url).json(&body).send().await?;
-        if !resp.status().is_success() {
-            let body_text = resp.text().await.unwrap_or_default();
-            warn!("Telegram sendPhoto failed: {body_text}");
-        }
-        Ok(())
+        self.api_send_media_request("sendPhoto", chat_id, body, thread_id)
+            .await
     }
 
     /// Call `sendDocument` on the Telegram API.
@@ -237,31 +280,19 @@ impl TelegramAdapter {
         filename: &str,
         thread_id: Option<i64>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let url = format!(
-            "{}/bot{}/sendDocument",
-            self.api_base_url,
-            self.token.as_str()
-        );
-        let mut body = serde_json::json!({
-            "chat_id": chat_id,
+        let body = serde_json::json!({
             "document": document_url,
             "caption": filename,
         });
-        if let Some(tid) = thread_id {
-            body["message_thread_id"] = serde_json::json!(tid);
-        }
-        let resp = self.client.post(&url).json(&body).send().await?;
-        if !resp.status().is_success() {
-            let body_text = resp.text().await.unwrap_or_default();
-            warn!("Telegram sendDocument failed: {body_text}");
-        }
-        Ok(())
+        self.api_send_media_request("sendDocument", chat_id, body, thread_id)
+            .await
     }
 
     /// Call `sendDocument` with multipart upload for local file data.
     ///
     /// Used by the proactive `channel_send` tool when `file_path` is provided.
     /// Uploads raw bytes as a multipart form instead of passing a URL.
+    /// Retries once on HTTP 429 rate-limit responses.
     async fn api_send_document_upload(
         &self,
         chat_id: i64,
@@ -275,6 +306,9 @@ impl TelegramAdapter {
             self.api_base_url,
             self.token.as_str()
         );
+
+        // Clone data upfront so we have a copy for a potential retry
+        let retry_data = data.clone();
 
         let file_part = reqwest::multipart::Part::bytes(data)
             .file_name(filename.to_string())
@@ -290,8 +324,39 @@ impl TelegramAdapter {
 
         let resp = self.client.post(&url).multipart(form).send().await?;
         if !resp.status().is_success() {
+            let status = resp.status();
             let body_text = resp.text().await.unwrap_or_default();
-            warn!("Telegram sendDocument upload failed: {body_text}");
+
+            // Retry once on 429 rate limit
+            if status.as_u16() == 429 {
+                let retry_after = body_text
+                    .parse::<serde_json::Value>()
+                    .ok()
+                    .and_then(|v| v["parameters"]["retry_after"].as_u64())
+                    .unwrap_or(2);
+                warn!("Telegram sendDocument upload rate limited, retrying after {retry_after}s");
+                tokio::time::sleep(Duration::from_secs(retry_after)).await;
+
+                // Rebuild the multipart form with the cloned data
+                let file_part = reqwest::multipart::Part::bytes(retry_data)
+                    .file_name(filename.to_string())
+                    .mime_str(mime_type)?;
+                let mut retry_form = reqwest::multipart::Form::new()
+                    .text("chat_id", chat_id.to_string())
+                    .part("document", file_part);
+                if let Some(tid) = thread_id {
+                    retry_form = retry_form.text("message_thread_id", tid.to_string());
+                }
+
+                let resp2 = self.client.post(&url).multipart(retry_form).send().await?;
+                if !resp2.status().is_success() {
+                    let body_text2 = resp2.text().await.unwrap_or_default();
+                    warn!("Telegram sendDocument upload failed after retry: {body_text2}");
+                }
+                return Ok(());
+            }
+
+            warn!("Telegram sendDocument upload failed ({status}): {body_text}");
         }
         Ok(())
     }
@@ -304,24 +369,13 @@ impl TelegramAdapter {
         caption: Option<&str>,
         thread_id: Option<i64>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let url = format!("{}/bot{}/sendVoice", self.api_base_url, self.token.as_str());
-        let mut body = serde_json::json!({
-            "chat_id": chat_id,
-            "voice": voice_url,
-        });
+        let mut body = serde_json::json!({ "voice": voice_url });
         if let Some(cap) = caption {
             body["caption"] = serde_json::Value::String(cap.to_string());
             body["parse_mode"] = serde_json::Value::String("HTML".to_string());
         }
-        if let Some(tid) = thread_id {
-            body["message_thread_id"] = serde_json::json!(tid);
-        }
-        let resp = self.client.post(&url).json(&body).send().await?;
-        if !resp.status().is_success() {
-            let body_text = resp.text().await.unwrap_or_default();
-            warn!("Telegram sendVoice failed: {body_text}");
-        }
-        Ok(())
+        self.api_send_media_request("sendVoice", chat_id, body, thread_id)
+            .await
     }
 
     /// Call `sendVideo` on the Telegram API.
@@ -332,24 +386,13 @@ impl TelegramAdapter {
         caption: Option<&str>,
         thread_id: Option<i64>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let url = format!("{}/bot{}/sendVideo", self.api_base_url, self.token.as_str());
-        let mut body = serde_json::json!({
-            "chat_id": chat_id,
-            "video": video_url,
-        });
+        let mut body = serde_json::json!({ "video": video_url });
         if let Some(cap) = caption {
             body["caption"] = serde_json::Value::String(cap.to_string());
             body["parse_mode"] = serde_json::Value::String("HTML".to_string());
         }
-        if let Some(tid) = thread_id {
-            body["message_thread_id"] = serde_json::json!(tid);
-        }
-        let resp = self.client.post(&url).json(&body).send().await?;
-        if !resp.status().is_success() {
-            let body_text = resp.text().await.unwrap_or_default();
-            warn!("Telegram sendVideo failed: {body_text}");
-        }
-        Ok(())
+        self.api_send_media_request("sendVideo", chat_id, body, thread_id)
+            .await
     }
 
     /// Call `sendLocation` on the Telegram API.
@@ -360,25 +403,12 @@ impl TelegramAdapter {
         lon: f64,
         thread_id: Option<i64>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let url = format!(
-            "{}/bot{}/sendLocation",
-            self.api_base_url,
-            self.token.as_str()
-        );
-        let mut body = serde_json::json!({
-            "chat_id": chat_id,
+        let body = serde_json::json!({
             "latitude": lat,
             "longitude": lon,
         });
-        if let Some(tid) = thread_id {
-            body["message_thread_id"] = serde_json::json!(tid);
-        }
-        let resp = self.client.post(&url).json(&body).send().await?;
-        if !resp.status().is_success() {
-            let body_text = resp.text().await.unwrap_or_default();
-            warn!("Telegram sendLocation failed: {body_text}");
-        }
-        Ok(())
+        self.api_send_media_request("sendLocation", chat_id, body, thread_id)
+            .await
     }
 
     /// Call `sendMessage` with an `InlineKeyboardMarkup` reply_markup.
@@ -452,38 +482,6 @@ impl TelegramAdapter {
         Ok(())
     }
 
-    /// Answer a callback query to dismiss the loading indicator on the button.
-    ///
-    /// Telegram shows a progress spinner on the button until the bot calls
-    /// `answerCallbackQuery`. Fire-and-forget.
-    #[allow(dead_code)]
-    fn fire_answer_callback_query(&self, callback_query_id: &str, notification_text: Option<&str>) {
-        let url = format!(
-            "{}/bot{}/answerCallbackQuery",
-            self.api_base_url,
-            self.token.as_str()
-        );
-        let mut body = serde_json::json!({
-            "callback_query_id": callback_query_id,
-        });
-        if let Some(text) = notification_text {
-            body["text"] = serde_json::json!(text);
-        }
-        let client = self.client.clone();
-        tokio::spawn(async move {
-            match client.post(&url).json(&body).send().await {
-                Ok(resp) if !resp.status().is_success() => {
-                    let body_text = resp.text().await.unwrap_or_default();
-                    debug!("Telegram answerCallbackQuery failed: {body_text}");
-                }
-                Err(e) => {
-                    debug!("Telegram answerCallbackQuery error: {e}");
-                }
-                _ => {}
-            }
-        });
-    }
-
     /// Call `sendChatAction` to show "typing..." indicator.
     ///
     /// When `thread_id` is provided, the typing indicator appears in the forum topic.
@@ -513,9 +511,9 @@ impl TelegramAdapter {
     /// Used for streaming: we send an initial placeholder, then edit it in-place
     /// as tokens arrive. Returns `None` if the API call fails.
     ///
-    /// The initial message is sent as plain text (no `parse_mode`) because the
-    /// content is raw, unformatted LLM output that may contain `<`, `>`, `&`
-    /// characters. HTML formatting is only applied on the final edit.
+    /// The initial message is sent with `parse_mode: HTML` after sanitization.
+    /// The `formatter::format_for_channel` output is expected as input, which
+    /// produces Telegram-compatible HTML from Markdown.
     async fn api_send_message_returning_id(
         &self,
         chat_id: i64,
@@ -527,10 +525,12 @@ impl TelegramAdapter {
             self.api_base_url,
             self.token.as_str()
         );
-        let sanitized = sanitize_telegram_html(text);
+        // No sanitization here — callers (send_streaming) already format via
+        // formatter::format_for_channel which produces Telegram-safe HTML.
+        // Double-sanitizing would escape already-valid entities.
         let mut body = serde_json::json!({
             "chat_id": chat_id,
-            "text": sanitized,
+            "text": text,
             "parse_mode": "HTML",
         });
         if let Some(tid) = thread_id {
@@ -588,11 +588,13 @@ impl TelegramAdapter {
             self.token.as_str()
         );
         let body = if html {
-            let sanitized = sanitize_telegram_html(text);
+            // No sanitization here — callers (send_streaming) already format via
+            // formatter::format_for_channel which produces Telegram-safe HTML.
+            // Double-sanitizing would escape already-valid entities.
             serde_json::json!({
                 "chat_id": chat_id,
                 "message_id": message_id,
-                "text": sanitized,
+                "text": text,
                 "parse_mode": "HTML",
             })
         } else {
@@ -792,8 +794,9 @@ impl ChannelAdapter for TelegramAdapter {
         let initial_backoff = self.initial_backoff;
         let max_backoff = self.max_backoff;
         let long_poll_timeout = self.long_poll_timeout;
+        let poll_handle = self.poll_handle.clone();
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let mut offset: Option<i64> = None;
             let mut backoff = initial_backoff;
 
@@ -818,7 +821,7 @@ impl ChannelAdapter for TelegramAdapter {
                 let result = tokio::select! {
                     res = async {
                         client
-                            .get(&url)
+                            .post(&url)
                             .json(&params)
                             .timeout(request_timeout)
                             .send()
@@ -834,7 +837,7 @@ impl ChannelAdapter for TelegramAdapter {
                     Err(e) => {
                         warn!("Telegram getUpdates network error: {e}, retrying in {backoff:?}");
                         tokio::time::sleep(backoff).await;
-                        backoff = (backoff * 2).min(max_backoff);
+                        backoff = calculate_backoff(backoff, max_backoff);
                         continue;
                     }
                 };
@@ -856,7 +859,7 @@ impl ChannelAdapter for TelegramAdapter {
                 if status.as_u16() == 409 {
                     warn!("Telegram 409 Conflict — stale polling session, retrying in {backoff:?}");
                     tokio::time::sleep(backoff).await;
-                    backoff = (backoff * 2).min(max_backoff);
+                    backoff = calculate_backoff(backoff, max_backoff);
                     continue;
                 }
 
@@ -864,7 +867,7 @@ impl ChannelAdapter for TelegramAdapter {
                     let body_text = resp.text().await.unwrap_or_default();
                     warn!("Telegram getUpdates failed ({status}): {body_text}, retrying in {backoff:?}");
                     tokio::time::sleep(backoff).await;
-                    backoff = (backoff * 2).min(max_backoff);
+                    backoff = calculate_backoff(backoff, max_backoff);
                     continue;
                 }
 
@@ -874,19 +877,19 @@ impl ChannelAdapter for TelegramAdapter {
                     Err(e) => {
                         warn!("Telegram getUpdates parse error: {e}");
                         tokio::time::sleep(backoff).await;
-                        backoff = (backoff * 2).min(max_backoff);
+                        backoff = calculate_backoff(backoff, max_backoff);
                         continue;
                     }
                 };
-
-                // Reset backoff on success
-                backoff = initial_backoff;
 
                 if body["ok"].as_bool() != Some(true) {
                     warn!("Telegram getUpdates returned ok=false");
                     tokio::time::sleep(poll_interval).await;
                     continue;
                 }
+
+                // Reset backoff on success
+                backoff = initial_backoff;
 
                 let updates = match body["result"].as_array() {
                     Some(arr) => arr,
@@ -995,6 +998,12 @@ impl ChannelAdapter for TelegramAdapter {
 
             info!("Telegram polling loop stopped");
         });
+
+        // Store handle for graceful shutdown in stop()
+        {
+            let mut guard = poll_handle.lock().await;
+            *guard = Some(handle);
+        }
 
         let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
         Ok(Box::pin(stream))
@@ -1164,6 +1173,15 @@ impl ChannelAdapter for TelegramAdapter {
 
     async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _ = self.shutdown_tx.send(true);
+        let mut guard = self.poll_handle.lock().await;
+        if let Some(handle) = guard.take() {
+            // Give the polling loop up to 5 seconds to finish
+            match tokio::time::timeout(Duration::from_secs(5), handle).await {
+                Ok(Ok(())) => info!("Telegram polling loop stopped gracefully"),
+                Ok(Err(e)) => warn!("Telegram polling task panicked: {e}"),
+                Err(_) => warn!("Telegram polling loop did not stop within 5s timeout"),
+            }
+        }
         Ok(())
     }
 }
@@ -1351,6 +1369,293 @@ fn parse_telegram_callback_query(
     })
 }
 
+/// Extract sender identity from a Telegram message.
+///
+/// Tries `from` (user) first, then falls back to `sender_chat` (channel/group).
+/// Returns `(user_id, display_name, Option<username>)`.
+fn extract_telegram_sender(
+    message: &serde_json::Value,
+    update_id: i64,
+) -> Result<(i64, String, Option<String>), DropReason> {
+    if let Some(from) = message.get("from") {
+        let uid = match from["id"].as_i64() {
+            Some(id) => id,
+            None => {
+                return Err(DropReason::ParseError(format!(
+                    "update {update_id}: from.id is not an integer"
+                )));
+            }
+        };
+        let first_name = from["first_name"].as_str().unwrap_or("Unknown");
+        let last_name = from["last_name"].as_str().unwrap_or("");
+        let name = if last_name.is_empty() {
+            first_name.to_string()
+        } else {
+            format!("{first_name} {last_name}")
+        };
+        let username = from["username"].as_str().map(String::from);
+        Ok((uid, name, username))
+    } else if let Some(sender_chat) = message.get("sender_chat") {
+        // Messages sent on behalf of a channel or group have `sender_chat` instead of `from`.
+        let uid = match sender_chat["id"].as_i64() {
+            Some(id) => id,
+            None => {
+                return Err(DropReason::ParseError(format!(
+                    "update {update_id}: sender_chat.id is not an integer"
+                )));
+            }
+        };
+        let title = sender_chat["title"].as_str().unwrap_or("Unknown Channel");
+        Ok((uid, title.to_string(), None))
+    } else {
+        Err(DropReason::ParseError(format!(
+            "update {update_id} has no from or sender_chat field"
+        )))
+    }
+}
+
+/// Determine the content type from a Telegram message.
+///
+/// Handles: text, photo, document, audio, voice, video, video_note, location.
+/// Falls back to DropReason::Filtered for unsupported types.
+async fn extract_telegram_content(
+    message: &serde_json::Value,
+    update_id: i64,
+    token: &str,
+    client: &reqwest::Client,
+    api_base_url: &str,
+) -> Result<ChannelContent, DropReason> {
+    if let Some(text) = message["text"].as_str() {
+        // Parse bot commands (Telegram sends entities for /commands)
+        if let Some(entities) = message["entities"].as_array() {
+            let is_bot_command = entities.iter().any(|e| {
+                e["type"].as_str() == Some("bot_command") && e["offset"].as_i64() == Some(0)
+            });
+            if is_bot_command {
+                let parts: Vec<&str> = text.splitn(2, ' ').collect();
+                let cmd_name = parts[0].trim_start_matches('/');
+                let cmd_name = cmd_name.split('@').next().unwrap_or(cmd_name);
+                let args = if parts.len() > 1 {
+                    parts[1].split_whitespace().map(String::from).collect()
+                } else {
+                    vec![]
+                };
+                Ok(ChannelContent::Command {
+                    name: cmd_name.to_string(),
+                    args,
+                })
+            } else {
+                Ok(ChannelContent::Text(text.to_string()))
+            }
+        } else {
+            Ok(ChannelContent::Text(text.to_string()))
+        }
+    } else if let Some(photos) = message["photo"].as_array() {
+        // Photos come as array of sizes; pick the largest (last)
+        let file_id = photos
+            .last()
+            .and_then(|p| p["file_id"].as_str())
+            .unwrap_or("");
+        let caption = message["caption"].as_str().map(String::from);
+        match telegram_get_file_url(token, client, file_id, api_base_url).await {
+            Some(url) => {
+                let mime_type = mime_type_from_telegram_path(&url);
+                Ok(ChannelContent::Image {
+                    url,
+                    caption,
+                    mime_type,
+                })
+            }
+            None => Ok(ChannelContent::Text(format!(
+                "[Photo received{}]",
+                caption
+                    .as_deref()
+                    .map(|c| format!(": {c}"))
+                    .unwrap_or_default()
+            ))),
+        }
+    } else if message.get("document").is_some() {
+        let file_id = message["document"]["file_id"].as_str().unwrap_or("");
+        let filename = message["document"]["file_name"]
+            .as_str()
+            .unwrap_or("document")
+            .to_string();
+        match telegram_get_file_url(token, client, file_id, api_base_url).await {
+            Some(url) => Ok(ChannelContent::File { url, filename }),
+            None => Ok(ChannelContent::Text(format!(
+                "[Document received: {filename}]"
+            ))),
+        }
+    } else if message.get("audio").is_some() {
+        // Audio files (mp3, etc.) — treat as voice for transcription
+        let file_id = message["audio"]["file_id"].as_str().unwrap_or("");
+        let duration = message["audio"]["duration"].as_u64().unwrap_or(0) as u32;
+        let caption = message["caption"].as_str().map(String::from);
+        match telegram_get_file_url(token, client, file_id, api_base_url).await {
+            Some(url) => Ok(ChannelContent::Voice {
+                url,
+                caption,
+                duration_seconds: duration,
+            }),
+            None => Ok(ChannelContent::Text(format!(
+                "[Audio received, {duration}s{}]",
+                caption
+                    .as_deref()
+                    .map(|c| format!(": {c}"))
+                    .unwrap_or_default()
+            ))),
+        }
+    } else if message.get("voice").is_some() {
+        let file_id = message["voice"]["file_id"].as_str().unwrap_or("");
+        let duration = message["voice"]["duration"].as_u64().unwrap_or(0) as u32;
+        let caption = message["caption"].as_str().map(String::from);
+        match telegram_get_file_url(token, client, file_id, api_base_url).await {
+            Some(url) => Ok(ChannelContent::Voice {
+                url,
+                caption,
+                duration_seconds: duration,
+            }),
+            None => Ok(ChannelContent::Text(format!(
+                "[Voice message, {duration}s]"
+            ))),
+        }
+    } else if message.get("video").is_some() {
+        let file_id = message["video"]["file_id"].as_str().unwrap_or("");
+        let duration = message["video"]["duration"].as_u64().unwrap_or(0) as u32;
+        let caption = message["caption"].as_str().map(String::from);
+        let filename = message["video"]["file_name"].as_str().map(String::from);
+        match telegram_get_file_url(token, client, file_id, api_base_url).await {
+            Some(url) => Ok(ChannelContent::Video {
+                url,
+                caption,
+                duration_seconds: duration,
+                filename,
+            }),
+            None => Ok(ChannelContent::Text(format!(
+                "[Video received, {duration}s{}]",
+                caption
+                    .as_deref()
+                    .map(|c| format!(": {c}"))
+                    .unwrap_or_default()
+            ))),
+        }
+    } else if message.get("video_note").is_some() {
+        // Video notes are round video messages (no caption/filename)
+        let file_id = message["video_note"]["file_id"].as_str().unwrap_or("");
+        let duration = message["video_note"]["duration"].as_u64().unwrap_or(0) as u32;
+        match telegram_get_file_url(token, client, file_id, api_base_url).await {
+            Some(url) => Ok(ChannelContent::Video {
+                url,
+                caption: None,
+                duration_seconds: duration,
+                filename: None,
+            }),
+            None => Ok(ChannelContent::Text(format!("[Video note, {duration}s]"))),
+        }
+    } else if message.get("location").is_some() {
+        let lat = message["location"]["latitude"].as_f64().unwrap_or(0.0);
+        let lon = message["location"]["longitude"].as_f64().unwrap_or(0.0);
+        Ok(ChannelContent::Location { lat, lon })
+    } else {
+        // Unsupported message type (stickers, polls, etc.)
+        Err(DropReason::Filtered(format!(
+            "update {update_id}: unsupported message type (no text/photo/document/voice/video/video_note/location)"
+        )))
+    }
+}
+
+/// Apply reply-to-message context to the content.
+///
+/// If the message is a reply, prepends the quoted text and optionally includes
+/// the quoted photo.
+async fn apply_reply_context(
+    content: ChannelContent,
+    message: &serde_json::Value,
+    token: &str,
+    client: &reqwest::Client,
+    api_base_url: &str,
+) -> ChannelContent {
+    let reply = match message.get("reply_to_message") {
+        Some(r) => r,
+        None => return content,
+    };
+
+    let reply_sender = reply["from"]["first_name"].as_str().unwrap_or("Someone");
+    let reply_text = reply["text"].as_str().or_else(|| reply["caption"].as_str());
+
+    // Check if the quoted message has a photo
+    let reply_photo_url = if let Some(photos) = reply["photo"].as_array() {
+        let file_id = photos
+            .last()
+            .and_then(|p| p["file_id"].as_str())
+            .unwrap_or("");
+        if !file_id.is_empty() {
+            telegram_get_file_url(token, client, file_id, api_base_url).await
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    if let Some(photo_url) = reply_photo_url {
+        // Quoted message has a photo.
+        // If the user's own message is already an image, keep it and add
+        // the quoted photo context as text (don't overwrite the user's photo).
+        let quote_context = reply_text
+            .map(|q| {
+                let truncated = if q.len() > 200 {
+                    format!("{}...", &q[..q.floor_char_boundary(200)])
+                } else {
+                    q.to_string()
+                };
+                format!("[Replying to {reply_sender}: \"{truncated}\"]\n")
+            })
+            .unwrap_or_else(|| format!("[Replying to {reply_sender}'s photo]\n"));
+
+        match content {
+            ChannelContent::Image {
+                url,
+                caption,
+                mime_type,
+            } => {
+                // User sent their own photo as reply — keep it, add quoted context to caption
+                let cap = caption.unwrap_or_default();
+                ChannelContent::Image {
+                    url,
+                    caption: Some(format!("{quote_context}{cap}")),
+                    mime_type,
+                }
+            }
+            ChannelContent::Text(t) => {
+                // User sent text reply to a photo — show the quoted photo
+                let caption = format!("{quote_context}{t}");
+                let mime_type = mime_type_from_telegram_path(&photo_url);
+                ChannelContent::Image {
+                    url: photo_url,
+                    caption: Some(caption),
+                    mime_type,
+                }
+            }
+            other => other,
+        }
+    } else if let Some(quoted) = reply_text {
+        // Quoted message has text only — prepend it
+        let truncated = if quoted.len() > 200 {
+            format!("{}...", &quoted[..quoted.floor_char_boundary(200)])
+        } else {
+            quoted.to_string()
+        };
+        let prefix = format!("[Replying to {reply_sender}: \"{truncated}\"]\n");
+        match content {
+            ChannelContent::Text(t) => ChannelContent::Text(format!("{prefix}{t}")),
+            other => other,
+        }
+    } else {
+        content
+    }
+}
+
 async fn parse_telegram_update(
     update: &serde_json::Value,
     allowed_users: &[String],
@@ -1372,42 +1677,7 @@ async fn parse_telegram_update(
         }
     };
 
-    // Extract sender info: prefer `from` (user), fall back to `sender_chat` (channel/group)
-    let (user_id, display_name, username) = if let Some(from) = message.get("from") {
-        let uid = match from["id"].as_i64() {
-            Some(id) => id,
-            None => {
-                return Err(DropReason::ParseError(format!(
-                    "update {update_id}: from.id is not an integer"
-                )));
-            }
-        };
-        let first_name = from["first_name"].as_str().unwrap_or("Unknown");
-        let last_name = from["last_name"].as_str().unwrap_or("");
-        let name = if last_name.is_empty() {
-            first_name.to_string()
-        } else {
-            format!("{first_name} {last_name}")
-        };
-        let username = from["username"].as_str().map(String::from);
-        (uid, name, username)
-    } else if let Some(sender_chat) = message.get("sender_chat") {
-        // Messages sent on behalf of a channel or group have `sender_chat` instead of `from`.
-        let uid = match sender_chat["id"].as_i64() {
-            Some(id) => id,
-            None => {
-                return Err(DropReason::ParseError(format!(
-                    "update {update_id}: sender_chat.id is not an integer"
-                )));
-            }
-        };
-        let title = sender_chat["title"].as_str().unwrap_or("Unknown Channel");
-        (uid, title.to_string(), None)
-    } else {
-        return Err(DropReason::ParseError(format!(
-            "update {update_id} has no from or sender_chat field"
-        )));
-    };
+    let (user_id, display_name, username) = extract_telegram_sender(message, update_id)?;
 
     // Security: check allowed_users (supports user ID and username)
     if !telegram_user_allowed(allowed_users, user_id, username.as_deref()) {
@@ -1417,15 +1687,9 @@ async fn parse_telegram_update(
         )));
     }
 
-    let chat_id = match message["chat"]["id"].as_i64() {
-        Some(id) => id,
-        None => {
-            return Err(DropReason::ParseError(format!(
-                "update {update_id}: chat.id is not an integer"
-            )));
-        }
-    };
-
+    let chat_id = message["chat"]["id"].as_i64().ok_or_else(|| {
+        DropReason::ParseError(format!("update {update_id}: chat.id is not an integer"))
+    })?;
     let chat_type = message["chat"]["type"].as_str().unwrap_or("private");
     let is_group = chat_type == "group" || chat_type == "supergroup";
     let message_id = message["message_id"].as_i64().unwrap_or(0);
@@ -1434,222 +1698,8 @@ async fn parse_telegram_update(
         .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0))
         .unwrap_or_else(chrono::Utc::now);
 
-    // Determine content: text, photo, document, voice, or location
-    let content = if let Some(text) = message["text"].as_str() {
-        // Parse bot commands (Telegram sends entities for /commands)
-        if let Some(entities) = message["entities"].as_array() {
-            let is_bot_command = entities.iter().any(|e| {
-                e["type"].as_str() == Some("bot_command") && e["offset"].as_i64() == Some(0)
-            });
-            if is_bot_command {
-                let parts: Vec<&str> = text.splitn(2, ' ').collect();
-                let cmd_name = parts[0].trim_start_matches('/');
-                let cmd_name = cmd_name.split('@').next().unwrap_or(cmd_name);
-                let args = if parts.len() > 1 {
-                    parts[1].split_whitespace().map(String::from).collect()
-                } else {
-                    vec![]
-                };
-                ChannelContent::Command {
-                    name: cmd_name.to_string(),
-                    args,
-                }
-            } else {
-                ChannelContent::Text(text.to_string())
-            }
-        } else {
-            ChannelContent::Text(text.to_string())
-        }
-    } else if let Some(photos) = message["photo"].as_array() {
-        // Photos come as array of sizes; pick the largest (last)
-        let file_id = photos
-            .last()
-            .and_then(|p| p["file_id"].as_str())
-            .unwrap_or("");
-        let caption = message["caption"].as_str().map(String::from);
-        match telegram_get_file_url(token, client, file_id, api_base_url).await {
-            Some(url) => {
-                let mime_type = mime_type_from_telegram_path(&url);
-                ChannelContent::Image {
-                    url,
-                    caption,
-                    mime_type,
-                }
-            }
-            None => ChannelContent::Text(format!(
-                "[Photo received{}]",
-                caption
-                    .as_deref()
-                    .map(|c| format!(": {c}"))
-                    .unwrap_or_default()
-            )),
-        }
-    } else if message.get("document").is_some() {
-        let file_id = message["document"]["file_id"].as_str().unwrap_or("");
-        let filename = message["document"]["file_name"]
-            .as_str()
-            .unwrap_or("document")
-            .to_string();
-        match telegram_get_file_url(token, client, file_id, api_base_url).await {
-            Some(url) => ChannelContent::File { url, filename },
-            None => ChannelContent::Text(format!("[Document received: {filename}]")),
-        }
-    } else if message.get("audio").is_some() {
-        // Audio files (mp3, etc.) — treat as voice for transcription
-        let file_id = message["audio"]["file_id"].as_str().unwrap_or("");
-        let duration = message["audio"]["duration"].as_u64().unwrap_or(0) as u32;
-        let caption = message["caption"].as_str().map(String::from);
-        match telegram_get_file_url(token, client, file_id, api_base_url).await {
-            Some(url) => ChannelContent::Voice {
-                url,
-                caption,
-                duration_seconds: duration,
-            },
-            None => ChannelContent::Text(format!(
-                "[Audio received, {duration}s{}]",
-                caption
-                    .as_deref()
-                    .map(|c| format!(": {c}"))
-                    .unwrap_or_default()
-            )),
-        }
-    } else if message.get("voice").is_some() {
-        let file_id = message["voice"]["file_id"].as_str().unwrap_or("");
-        let duration = message["voice"]["duration"].as_u64().unwrap_or(0) as u32;
-        let caption = message["caption"].as_str().map(String::from);
-        match telegram_get_file_url(token, client, file_id, api_base_url).await {
-            Some(url) => ChannelContent::Voice {
-                url,
-                caption,
-                duration_seconds: duration,
-            },
-            None => ChannelContent::Text(format!("[Voice message, {duration}s]")),
-        }
-    } else if message.get("video").is_some() {
-        let file_id = message["video"]["file_id"].as_str().unwrap_or("");
-        let duration = message["video"]["duration"].as_u64().unwrap_or(0) as u32;
-        let caption = message["caption"].as_str().map(String::from);
-        let filename = message["video"]["file_name"].as_str().map(String::from);
-        match telegram_get_file_url(token, client, file_id, api_base_url).await {
-            Some(url) => ChannelContent::Video {
-                url,
-                caption,
-                duration_seconds: duration,
-                filename,
-            },
-            None => ChannelContent::Text(format!(
-                "[Video received, {duration}s{}]",
-                caption
-                    .as_deref()
-                    .map(|c| format!(": {c}"))
-                    .unwrap_or_default()
-            )),
-        }
-    } else if message.get("video_note").is_some() {
-        // Video notes are round video messages (no caption/filename)
-        let file_id = message["video_note"]["file_id"].as_str().unwrap_or("");
-        let duration = message["video_note"]["duration"].as_u64().unwrap_or(0) as u32;
-        match telegram_get_file_url(token, client, file_id, api_base_url).await {
-            Some(url) => ChannelContent::Video {
-                url,
-                caption: None,
-                duration_seconds: duration,
-                filename: None,
-            },
-            None => ChannelContent::Text(format!("[Video note, {duration}s]")),
-        }
-    } else if message.get("location").is_some() {
-        let lat = message["location"]["latitude"].as_f64().unwrap_or(0.0);
-        let lon = message["location"]["longitude"].as_f64().unwrap_or(0.0);
-        ChannelContent::Location { lat, lon }
-    } else {
-        // Unsupported message type (stickers, polls, etc.)
-        return Err(DropReason::Filtered(format!(
-            "update {update_id}: unsupported message type (no text/photo/document/voice/video/video_note/location)"
-        )));
-    };
-
-    // Extract reply-to-message context (Telegram `reply_to_message` field).
-    // Prepend the quoted original text so the agent sees what the user is replying to.
-    // If the quoted message has a photo, include it so the agent can see it.
-    let content = if let Some(reply) = message.get("reply_to_message") {
-        let reply_sender = reply["from"]["first_name"].as_str().unwrap_or("Someone");
-        let reply_text = reply["text"].as_str().or_else(|| reply["caption"].as_str());
-
-        // Check if the quoted message has a photo
-        let reply_photo_url = if let Some(photos) = reply["photo"].as_array() {
-            let file_id = photos
-                .last()
-                .and_then(|p| p["file_id"].as_str())
-                .unwrap_or("");
-            if !file_id.is_empty() {
-                telegram_get_file_url(token, client, file_id, api_base_url).await
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        if let Some(photo_url) = reply_photo_url {
-            // Quoted message has a photo.
-            // If the user's own message is already an image, keep it and add
-            // the quoted photo context as text (don't overwrite the user's photo).
-            let quote_context = reply_text
-                .map(|q| {
-                    let truncated = if q.len() > 200 {
-                        format!("{}...", &q[..q.floor_char_boundary(200)])
-                    } else {
-                        q.to_string()
-                    };
-                    format!("[Replying to {reply_sender}: \"{truncated}\"]\n")
-                })
-                .unwrap_or_else(|| format!("[Replying to {reply_sender}'s photo]\n"));
-
-            match content {
-                ChannelContent::Image {
-                    url,
-                    caption,
-                    mime_type,
-                } => {
-                    // User sent their own photo as reply — keep it, add quoted context to caption
-                    let cap = caption.unwrap_or_default();
-                    ChannelContent::Image {
-                        url,
-                        caption: Some(format!("{quote_context}{cap}")),
-                        mime_type,
-                    }
-                }
-                ChannelContent::Text(t) => {
-                    // User sent text reply to a photo — show the quoted photo
-                    let caption = format!("{quote_context}{t}");
-                    let mime_type = mime_type_from_telegram_path(&photo_url);
-                    ChannelContent::Image {
-                        url: photo_url,
-                        caption: Some(caption),
-                        mime_type,
-                    }
-                }
-                other => other,
-            }
-        } else if let Some(quoted) = reply_text {
-            // Quoted message has text only — prepend it
-            let truncated = if quoted.len() > 200 {
-                format!("{}...", &quoted[..quoted.floor_char_boundary(200)])
-            } else {
-                quoted.to_string()
-            };
-            let prefix = format!("[Replying to {reply_sender}: \"{truncated}\"]\n");
-            match content {
-                ChannelContent::Text(t) => ChannelContent::Text(format!("{prefix}{t}")),
-                other => other,
-            }
-        } else {
-            content
-        }
-    } else {
-        content
-    };
+    let content = extract_telegram_content(message, update_id, token, client, api_base_url).await?;
+    let content = apply_reply_context(content, message, token, client, api_base_url).await;
 
     // Extract forum topic thread_id (Telegram sends this as `message_thread_id`
     // for messages inside forum topics / reply threads).
@@ -1657,7 +1707,7 @@ async fn parse_telegram_update(
         .as_i64()
         .map(|tid| tid.to_string());
 
-    // Detect @mention of the bot in entities / caption_entities for MentionOnly group policy.
+    // Build metadata
     let mut metadata = HashMap::new();
 
     // Store reply-to-message metadata for downstream consumers.
@@ -1680,6 +1730,7 @@ async fn parse_telegram_update(
             }),
         );
     }
+
     if is_group {
         if let Some(bot_uname) = bot_username {
             let was_mentioned = check_mention_entities(message, bot_uname);
@@ -1706,6 +1757,20 @@ async fn parse_telegram_update(
     })
 }
 
+/// Convert a UTF-16 code unit offset (as returned by Telegram API) to a byte
+/// offset suitable for Rust `&str` slicing.
+fn utf16_offset_to_byte_offset(text: &str, utf16_offset: usize) -> usize {
+    let mut utf16_count = 0usize;
+    for (byte_idx, ch) in text.char_indices() {
+        if utf16_count >= utf16_offset {
+            return byte_idx;
+        }
+        // BMP characters = 1 UTF-16 unit, non-BMP (surrogate pairs) = 2
+        utf16_count += if ch as u32 > 0xFFFF { 2 } else { 1 };
+    }
+    text.len()
+}
+
 /// Check whether the bot was @mentioned in a Telegram message.
 ///
 /// Inspects both `entities` (for text messages) and `caption_entities` (for media
@@ -1727,10 +1792,12 @@ fn check_mention_entities(message: &serde_json::Value, bot_username: &str) -> bo
                 if entity["type"].as_str() != Some("mention") {
                     continue;
                 }
-                let offset = entity["offset"].as_i64().unwrap_or(0) as usize;
-                let length = entity["length"].as_i64().unwrap_or(0) as usize;
-                if offset + length <= text.len() {
-                    let mention_text = &text[offset..offset + length];
+                let utf16_offset = entity["offset"].as_i64().unwrap_or(0) as usize;
+                let utf16_length = entity["length"].as_i64().unwrap_or(0) as usize;
+                let start = utf16_offset_to_byte_offset(text, utf16_offset);
+                let end = utf16_offset_to_byte_offset(text, utf16_offset + utf16_length);
+                if start < text.len() && end <= text.len() {
+                    let mention_text = &text[start..end];
                     if mention_text.to_lowercase() == bot_mention {
                         return true;
                     }
@@ -2825,6 +2892,131 @@ mod tests {
         let output = sanitize_telegram_html(input);
         assert!(output.contains("<b>bold</b>"));
         assert!(output.contains("&lt;thinking&gt;"));
+    }
+
+    #[test]
+    fn test_sanitize_telegram_html_unclosed_tags() {
+        // Unclosed tags should be auto-closed at the end
+        let input = "<b>bold text";
+        let output = sanitize_telegram_html(input);
+        assert!(
+            output.contains("<b>bold text"),
+            "content should be preserved"
+        );
+        assert!(
+            output.ends_with("</b>"),
+            "unclosed <b> should be auto-closed"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_telegram_html_nested_tags() {
+        // Nested allowed tags should work correctly
+        let input = "<pre><code>fn main() {}</code></pre>";
+        let output = sanitize_telegram_html(input);
+        assert_eq!(output, input, "nested pre+code should be preserved as-is");
+    }
+
+    #[test]
+    fn test_sanitize_telegram_html_link_with_attributes() {
+        // <a> tags with href attribute should be preserved
+        let input = r#"<a href="https://example.com">link</a>"#;
+        let output = sanitize_telegram_html(input);
+        assert!(
+            output.contains(r#"href="https://example.com""#),
+            "href attribute should be preserved"
+        );
+        assert!(
+            output.contains(">link</a>"),
+            "link text should be preserved"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_telegram_html_self_closing_tags() {
+        // Tags ending with /> should not be tracked as open
+        let input = "before <br/> after";
+        let output = sanitize_telegram_html(input);
+        // <br/> is not in ALLOWED, so it gets escaped
+        assert!(output.contains("before"), "text before should remain");
+        assert!(output.contains("after"), "text after should remain");
+    }
+
+    #[test]
+    fn test_sanitize_telegram_html_empty_angle_brackets() {
+        // Lone <> should be escaped
+        let input = "text <> more";
+        let output = sanitize_telegram_html(input);
+        assert!(output.contains("&lt;"), "empty <> should be escaped");
+    }
+
+    #[test]
+    fn test_sanitize_telegram_html_lone_open_bracket() {
+        // Lone < without closing > should be escaped
+        let input = "text < more";
+        let output = sanitize_telegram_html(input);
+        assert!(output.contains("&lt;"), "lone < should be escaped");
+        assert!(output.contains(" more"), "rest of text should be preserved");
+    }
+
+    #[test]
+    fn test_sanitize_telegram_html_unicode() {
+        // Unicode/emoji in text should not be corrupted
+        let input = "<b>Привет 🌍 мир</b> <unknown>test</unknown>";
+        let output = sanitize_telegram_html(input);
+        assert!(
+            output.contains("<b>Привет 🌍 мир</b>"),
+            "unicode in allowed tags should be preserved"
+        );
+        assert!(
+            output.contains("&lt;unknown&gt;"),
+            "unknown tags should be escaped"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_telegram_html_idempotent() {
+        // Sanitizing twice should produce the same output as sanitizing once
+        let input = "<b>bold</b> <thinking>hmm</thinking> <code>inline</code> <foo>bar</foo>";
+        let first = sanitize_telegram_html(input);
+        let second = sanitize_telegram_html(&first);
+        assert_eq!(first, second, "sanitize_telegram_html should be idempotent");
+    }
+
+    #[test]
+    fn test_sanitize_telegram_html_all_allowed_tags() {
+        // Every tag in the ALLOWED list should pass through
+        let tags = [
+            "b",
+            "i",
+            "u",
+            "s",
+            "em",
+            "strong",
+            "code",
+            "pre",
+            "blockquote",
+        ];
+        for tag in tags {
+            let input = format!("<{tag}>text</{tag}>");
+            let output = sanitize_telegram_html(&input);
+            assert_eq!(output, input, "allowed tag <{tag}> should pass through");
+        }
+    }
+
+    #[test]
+    fn test_sanitize_telegram_html_multiple_unknown_tags() {
+        // Multiple unknown tags should all be escaped
+        let input = "<name>John</name> <age>25</age>";
+        let output = sanitize_telegram_html(input);
+        assert!(output.contains("&lt;name&gt;"), "<name> should be escaped");
+        assert!(
+            output.contains("&lt;/name&gt;"),
+            "</name> should be escaped"
+        );
+        assert!(output.contains("&lt;age&gt;"), "<age> should be escaped");
+        assert!(output.contains("John"), "inner text should be preserved");
+        assert!(output.contains("25"), "inner text should be preserved");
     }
 
     #[test]
