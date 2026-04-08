@@ -24,19 +24,26 @@ use tauri_plugin_notification::NotificationExt;
 use tracing::{info, warn};
 
 /// Managed state: the port the embedded server listens on.
-pub struct PortState(pub u16);
+/// Wrapped in `RwLock<Option<_>>` — `None` when running in remote mode or before local boot.
+pub struct PortState(pub std::sync::RwLock<Option<u16>>);
 
-/// Managed state: the kernel instance and startup time.
-pub struct KernelState {
+/// Inner data for `KernelState`.
+pub struct KernelInner {
     pub kernel: Arc<LibreFangKernel>,
     pub started_at: Instant,
 }
 
+/// Managed state: the kernel instance and startup time.
+/// Wrapped in `RwLock<Option<_>>` — `None` when running in remote mode or before local boot.
+pub struct KernelState(pub std::sync::RwLock<Option<KernelInner>>);
+
 /// Managed state: the server URL (local or remote) the WebView points at.
-pub struct ServerUrlState(pub String);
+/// Uses interior mutability so it can be updated when the user changes servers.
+pub struct ServerUrlState(pub std::sync::RwLock<String>);
 
 /// Managed state: whether the app is connected to a remote server.
-pub struct RemoteMode(pub bool);
+/// Uses interior mutability so it can be updated when the user changes servers.
+pub struct RemoteMode(pub std::sync::RwLock<bool>);
 
 /// Managed state: holds the `ServerHandle` for shutdown when running in local mode.
 /// Wrapped in a `Mutex<Option<_>>` so it can be filled after app setup (from the
@@ -149,7 +156,8 @@ pub fn run(server_url: Option<String>, force_local: bool) {
     let (initial_url, server_handle, is_remote) = match &mode {
         StartupMode::Remote(url) => {
             if !url.starts_with("http://") && !url.starts_with("https://") {
-                panic!("Server URL must use http:// or https://, got: {url}");
+                eprintln!("Server URL must use http:// or https://, got: {url}");
+                std::process::exit(1);
             }
             info!("Remote mode: connecting to {url}");
             (url.clone(), None, true)
@@ -207,28 +215,35 @@ pub fn run(server_url: Option<String>, force_local: bool) {
     // Always register the ServerHandleHolder so start_local can fill it later.
     let holder = ServerHandleHolder(std::sync::Mutex::new(server_handle));
 
-    // Conditionally register state depending on the mode.
-    // For direct modes, we know port/kernel/url/remote up front.
-    // For connection screen mode, these are registered later by IPC commands.
-    if let StartupMode::Remote(_) = &mode {
-        builder = builder
-            .manage(ServerUrlState(initial_url.clone()))
-            .manage(RemoteMode(true));
-    } else if let StartupMode::Local = &mode {
-        // Retrieve port + kernel from the holder before Tauri takes ownership.
-        let guard = holder.0.lock().expect("ServerHandleHolder lock poisoned");
-        if let Some(ref handle) = *guard {
-            builder = builder
-                .manage(PortState(handle.port))
-                .manage(KernelState {
-                    kernel: handle.kernel.clone(),
-                    started_at: Instant::now(),
-                })
-                .manage(ServerUrlState(initial_url.clone()))
-                .manage(RemoteMode(false));
+    // Pre-compute initial values for interior-mutable state.
+    let (init_port, init_kernel_inner, init_url, init_remote) = match &mode {
+        StartupMode::Remote(_) => (None, None, initial_url.clone(), true),
+        StartupMode::Local => {
+            let guard = holder.0.lock().expect("ServerHandleHolder lock poisoned");
+            let (p, k) = if let Some(ref handle) = *guard {
+                (
+                    Some(handle.port),
+                    Some(KernelInner {
+                        kernel: handle.kernel.clone(),
+                        started_at: Instant::now(),
+                    }),
+                )
+            } else {
+                (None, None)
+            };
+            drop(guard);
+            (p, k, initial_url.clone(), false)
         }
-        drop(guard);
-    }
+        StartupMode::ConnectionScreen => (None, None, String::new(), false),
+    };
+
+    // Register ALL state types ONCE with initial values. Updates go through
+    // interior-mutable RwLocks — Tauri `manage()` is a no-op for duplicates.
+    builder = builder
+        .manage(PortState(std::sync::RwLock::new(init_port)))
+        .manage(KernelState(std::sync::RwLock::new(init_kernel_inner)))
+        .manage(ServerUrlState(std::sync::RwLock::new(init_url)))
+        .manage(RemoteMode(std::sync::RwLock::new(init_remote)));
 
     builder
         .manage(holder)
@@ -291,11 +306,15 @@ pub fn run(server_url: Option<String>, force_local: bool) {
             // For local direct-boot mode, start event forwarding for notifications
             if !is_remote && !show_connection_screen {
                 if let Some(ks) = app.try_state::<KernelState>() {
-                    let app_handle = app.handle().clone();
-                    let mut event_rx = ks.kernel.event_bus_ref().subscribe_all();
-                    tauri::async_runtime::spawn(async move {
-                        forward_kernel_events(app_handle, &mut event_rx).await;
-                    });
+                    let guard = ks.0.read().unwrap();
+                    if let Some(ref inner) = *guard {
+                        let app_handle = app.handle().clone();
+                        let mut event_rx = inner.kernel.event_bus_ref().subscribe_all();
+                        drop(guard);
+                        tauri::async_runtime::spawn(async move {
+                            forward_kernel_events(app_handle, &mut event_rx).await;
+                        });
+                    }
                 }
             }
 

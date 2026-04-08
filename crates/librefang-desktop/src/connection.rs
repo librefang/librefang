@@ -75,8 +75,9 @@ pub async fn test_connection(url: String) -> Result<serde_json::Value, String> {
         .map_err(|e| format!("Invalid response: {e}"))
 }
 
-/// Connect to a remote LibreFang server. Validates the URL, optionally saves
-/// the preference, and navigates the WebView to the remote dashboard.
+/// Connect to a remote LibreFang server. Validates the URL, verifies the
+/// server is reachable, optionally saves the preference, and navigates the
+/// WebView to the remote dashboard.
 #[tauri::command]
 pub async fn connect_remote(
     url: String,
@@ -88,6 +89,22 @@ pub async fn connect_remote(
         return Err("URL must start with http:// or https://".to_string());
     }
 
+    // Verify server is reachable before committing to the connection.
+    let health_url = format!("{url}/api/health");
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("HTTP client error: {e}"))?;
+    let resp = client
+        .get(&health_url)
+        .send()
+        .await
+        .map_err(|e| format!("Cannot reach server: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("Server returned {}", resp.status()));
+    }
+
+    // Save preference only after health check succeeds.
     if remember {
         save_preference(&ConnectionPreference {
             mode: "remote".to_string(),
@@ -95,10 +112,21 @@ pub async fn connect_remote(
         });
     }
 
-    // Store the server URL in managed state
+    // Update interior-mutable managed state (registered once at startup).
     let app = window.app_handle();
-    app.manage(crate::ServerUrlState(url.clone()));
-    app.manage(crate::RemoteMode(true));
+    if let Some(state) = app.try_state::<crate::ServerUrlState>() {
+        *state.0.write().unwrap() = url.clone();
+    }
+    if let Some(state) = app.try_state::<crate::RemoteMode>() {
+        *state.0.write().unwrap() = true;
+    }
+    // Clear local-only state when switching to remote.
+    if let Some(state) = app.try_state::<crate::PortState>() {
+        *state.0.write().unwrap() = None;
+    }
+    if let Some(state) = app.try_state::<crate::KernelState>() {
+        *state.0.write().unwrap() = None;
+    }
 
     info!("Connecting to remote server: {url}");
 
@@ -135,14 +163,22 @@ pub async fn start_local(
     let port = handle.port;
     let url = format!("http://127.0.0.1:{port}");
 
-    // Store state for tray and commands
-    app.manage(crate::PortState(port));
-    app.manage(crate::KernelState {
-        kernel: handle.kernel.clone(),
-        started_at: Instant::now(),
-    });
-    app.manage(crate::ServerUrlState(url.clone()));
-    app.manage(crate::RemoteMode(false));
+    // Update interior-mutable managed state (registered once at startup).
+    if let Some(state) = app.try_state::<crate::PortState>() {
+        *state.0.write().unwrap() = Some(port);
+    }
+    if let Some(state) = app.try_state::<crate::KernelState>() {
+        *state.0.write().unwrap() = Some(crate::KernelInner {
+            kernel: handle.kernel.clone(),
+            started_at: Instant::now(),
+        });
+    }
+    if let Some(state) = app.try_state::<crate::ServerUrlState>() {
+        *state.0.write().unwrap() = url.clone();
+    }
+    if let Some(state) = app.try_state::<crate::RemoteMode>() {
+        *state.0.write().unwrap() = false;
+    }
 
     // Store the ServerHandle for shutdown
     if let Some(holder) = app.try_state::<crate::ServerHandleHolder>() {
@@ -152,11 +188,15 @@ pub async fn start_local(
 
     // Start event forwarding for native notifications
     if let Some(ks) = app.try_state::<crate::KernelState>() {
-        let app_handle = app.clone();
-        let mut event_rx = ks.kernel.event_bus_ref().subscribe_all();
-        tauri::async_runtime::spawn(async move {
-            crate::forward_kernel_events(app_handle, &mut event_rx).await;
-        });
+        let guard = ks.0.read().unwrap();
+        if let Some(ref inner) = *guard {
+            let app_handle = app.clone();
+            let mut event_rx = inner.kernel.event_bus_ref().subscribe_all();
+            drop(guard);
+            tauri::async_runtime::spawn(async move {
+                crate::forward_kernel_events(app_handle, &mut event_rx).await;
+            });
+        }
     }
 
     if remember {
