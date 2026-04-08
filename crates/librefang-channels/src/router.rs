@@ -661,13 +661,13 @@ mod tests {
             peer_id: Cow::Borrowed("23244855"),
             ..Default::default()
         };
-        let resolved = router.resolve_with_context(
-            &ChannelType::Telegram,
-            "23244855",
-            None,
-            &ctx_admin,
+        let resolved =
+            router.resolve_with_context(&ChannelType::Telegram, "23244855", None, &ctx_admin);
+        assert_eq!(
+            resolved,
+            Some(admin_agent),
+            "admin-bot should route to nick-assistant"
         );
-        assert_eq!(resolved, Some(admin_agent), "admin-bot should route to nick-assistant");
 
         let ctx_samapoedu = BindingContext {
             channel: Cow::Borrowed("telegram"),
@@ -675,13 +675,13 @@ mod tests {
             peer_id: Cow::Borrowed("23244855"),
             ..Default::default()
         };
-        let resolved = router.resolve_with_context(
-            &ChannelType::Telegram,
-            "23244855",
-            None,
-            &ctx_samapoedu,
+        let resolved =
+            router.resolve_with_context(&ChannelType::Telegram, "23244855", None, &ctx_samapoedu);
+        assert_eq!(
+            resolved,
+            Some(samapoedu_agent),
+            "samapoedu-bot should route to nika"
         );
-        assert_eq!(resolved, Some(samapoedu_agent), "samapoedu-bot should route to nika");
     }
 
     #[test]

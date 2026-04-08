@@ -407,7 +407,10 @@ pub async fn get_agent_template_toml(
     match std::fs::read_to_string(&manifest_path) {
         Ok(content) => (
             StatusCode::OK,
-            [(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "text/plain; charset=utf-8",
+            )],
             content,
         )
             .into_response(),

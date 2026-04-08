@@ -14,7 +14,9 @@ use crate::types::{
 use async_trait::async_trait;
 use futures::StreamExt;
 use librefang_types::agent::AgentId;
-use librefang_types::config::{AutoRouteStrategy, ChannelOverrides, DmPolicy, GroupPolicy, OutputFormat};
+use librefang_types::config::{
+    AutoRouteStrategy, ChannelOverrides, DmPolicy, GroupPolicy, OutputFormat,
+};
 use librefang_types::message::ContentBlock;
 use regex::RegexSet;
 use std::collections::HashMap;
@@ -1374,17 +1376,22 @@ fn build_sender_context(
     message: &ChannelMessage,
     overrides: Option<&ChannelOverrides>,
 ) -> SenderContext {
-    let (auto_route, auto_route_ttl_minutes, auto_route_confidence_threshold, auto_route_sticky_bonus, auto_route_divergence_count) =
-        match overrides {
-            Some(ov) => (
-                ov.auto_route.clone(),
-                ov.auto_route_ttl_minutes,
-                ov.auto_route_confidence_threshold,
-                ov.auto_route_sticky_bonus,
-                ov.auto_route_divergence_count,
-            ),
-            None => (AutoRouteStrategy::Off, 0, 0, 0, 0),
-        };
+    let (
+        auto_route,
+        auto_route_ttl_minutes,
+        auto_route_confidence_threshold,
+        auto_route_sticky_bonus,
+        auto_route_divergence_count,
+    ) = match overrides {
+        Some(ov) => (
+            ov.auto_route.clone(),
+            ov.auto_route_ttl_minutes,
+            ov.auto_route_confidence_threshold,
+            ov.auto_route_sticky_bonus,
+            ov.auto_route_divergence_count,
+        ),
+        None => (AutoRouteStrategy::Off, 0, 0, 0, 0),
+    };
     SenderContext {
         channel: channel_type_str(&message.channel).to_string(),
         user_id: sender_user_id(message).to_string(),

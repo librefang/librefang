@@ -2566,13 +2566,12 @@ impl LibreFangKernel {
                             Ok(toml_str) => {
                                 // Try parsing as AgentManifest first; fall back to
                                 // extracting from a hand.toml (HandDefinition format).
-                                let parsed = toml::from_str::<librefang_types::agent::AgentManifest>(
-                                    &toml_str,
-                                )
-                                .ok()
-                                .or_else(|| {
-                                    extract_manifest_from_hand_toml(&toml_str, &name)
-                                });
+                                let parsed =
+                                    toml::from_str::<librefang_types::agent::AgentManifest>(
+                                        &toml_str,
+                                    )
+                                    .ok()
+                                    .or_else(|| extract_manifest_from_hand_toml(&toml_str, &name));
                                 match parsed {
                                     Some(mut disk_manifest) => {
                                         // Compare key fields to detect changes
@@ -4574,10 +4573,8 @@ system_prompt = "You are a helpful assistant."
                             } else {
                                 // Disagreement — increment divergence counter.
                                 let count = {
-                                    let mut div_entry = self
-                                        .route_divergence
-                                        .entry(cache_key.clone())
-                                        .or_insert(0);
+                                    let mut div_entry =
+                                        self.route_divergence.entry(cache_key.clone()).or_insert(0);
                                     *div_entry += 1;
                                     *div_entry
                                 };
