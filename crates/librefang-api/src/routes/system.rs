@@ -11,6 +11,7 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
         .route("/profiles/{name}", axum::routing::get(get_profile))
         .route("/templates", axum::routing::get(list_agent_templates))
         .route("/templates/{name}", axum::routing::get(get_agent_template))
+        .route("/templates/{name}/toml", axum::routing::get(get_agent_template_toml))
         // Agent KV storage
         .route(
             "/memory/agents/{id}/kv",
@@ -378,6 +379,46 @@ pub async fn get_agent_template(
         Err(e) => {
             tracing::warn!("Failed to read template '{name}': {e}");
             ApiErrorResponse::internal(t.t("api-error-template-read-failed")).into_json_tuple()
+        }
+    }
+}
+
+/// GET /api/templates/:name/toml — Get the raw TOML content of a template.
+#[utoipa::path(get, path = "/api/templates/{name}/toml", tag = "system", operation_id = "get_agent_template_toml", params(("name" = String, Path, description = "Template name")), responses((status = 200, description = "Template TOML content as plain text", body = String)))]
+pub async fn get_agent_template_toml(
+    Path(name): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    let agents_dir = librefang_kernel::config::librefang_home()
+        .join("workspaces")
+        .join("agents");
+    let manifest_path = agents_dir.join(&name).join("agent.toml");
+
+    if !manifest_path.exists() {
+        return (
+            StatusCode::NOT_FOUND,
+            [(axum::http::header::CONTENT_TYPE, "text/plain")],
+            t.t("api-error-template-not-found"),
+        )
+            .into_response();
+    }
+
+    match std::fs::read_to_string(&manifest_path) {
+        Ok(content) => (
+            StatusCode::OK,
+            [(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            content,
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::warn!("Failed to read template '{name}': {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [(axum::http::header::CONTENT_TYPE, "text/plain")],
+                t.t("api-error-template-read-failed"),
+            )
+                .into_response()
         }
     }
 }
