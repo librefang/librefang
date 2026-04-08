@@ -783,6 +783,15 @@ export async function listAgentTemplates(): Promise<AgentTemplate[]> {
   return data.templates ?? [];
 }
 
+export async function getAgentTemplateToml(name: string): Promise<string> {
+  const response = await fetch(`/api/templates/${encodeURIComponent(name)}/toml`);
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || `Failed to fetch template: ${response.status}`);
+  }
+  return response.text();
+}
+
 export async function deleteAgent(agentId: string): Promise<ApiActionResponse> {
   return del<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}`);
 }
