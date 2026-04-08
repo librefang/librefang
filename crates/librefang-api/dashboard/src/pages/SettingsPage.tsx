@@ -6,7 +6,7 @@ import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import {
   Globe, Sun, Moon, Settings, PanelLeftClose, PanelLeft, Languages, LayoutDashboard,
-  Shield, CheckCircle, XCircle,
+  Shield, CheckCircle, XCircle, Download,
 } from "lucide-react";
 import { useUIStore } from "../lib/store";
 import { totpSetup, totpConfirm, totpStatus, totpRevoke } from "../api";
@@ -151,6 +151,9 @@ export function SettingsPage() {
 
       {/* TOTP Second Factor */}
       <TotpSection />
+
+      {/* Config Backup */}
+      <ConfigBackupSection />
     </div>
   );
 }
@@ -411,6 +414,42 @@ function TotpSection() {
             <p className="mt-2 text-sm text-success">{success}</p>
           )}
         </div>
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Config Backup Section                                              */
+/* ------------------------------------------------------------------ */
+
+function ConfigBackupSection() {
+  const { t } = useTranslation();
+
+  return (
+    <div className="rounded-2xl border border-border-subtle bg-surface">
+      <div className="px-5 py-3 border-b border-border-subtle/50">
+        <p className="text-[10px] font-black uppercase tracking-widest text-text-dim">
+          {t("settings.backup", "Backup")}
+        </p>
+      </div>
+      <div className="px-5">
+        <SettingRow
+          icon={Download}
+          iconColor="text-blue-500"
+          label={t("settings.export_config_title", "Export Config")}
+          description={t(
+            "settings.export_config_desc",
+            "Download a backup of your current config.toml settings file"
+          )}
+        >
+          <a href="/api/config/export" download="librefang-config.toml">
+            <Button variant="secondary" size="sm">
+              <Download className="w-3.5 h-3.5 mr-1.5" />
+              {t("settings.export_config_btn", "Download")}
+            </Button>
+          </a>
+        </SettingRow>
       </div>
     </div>
   );
