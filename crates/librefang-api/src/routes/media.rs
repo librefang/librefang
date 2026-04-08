@@ -77,7 +77,12 @@ fn resolve_driver(
 ///
 /// The file is registered in the shared `UPLOAD_REGISTRY` so the existing
 /// `serve_upload` handler returns the correct `Content-Type`.
-fn save_upload(data: &[u8], filename: &str, content_type: &str) -> Result<String, String> {
+fn save_upload(
+    data: &[u8],
+    filename: &str,
+    content_type: &str,
+    account_id: &Option<String>,
+) -> Result<String, String> {
     let file_id = uuid::Uuid::new_v4().to_string();
     let upload_dir = std::env::temp_dir().join("librefang_uploads");
     std::fs::create_dir_all(&upload_dir)
@@ -91,6 +96,7 @@ fn save_upload(data: &[u8], filename: &str, content_type: &str) -> Result<String
         super::agents::UploadMeta {
             filename: filename.to_string(),
             content_type: content_type.to_string(),
+            account_id: account_id.clone(),
         },
     );
 
@@ -101,7 +107,7 @@ fn save_upload(data: &[u8], filename: &str, content_type: &str) -> Result<String
 
 /// Generate one or more images from a text prompt.
 pub async fn generate_image(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(body): Json<MediaImageRequest>,
 ) -> impl IntoResponse {
@@ -143,7 +149,7 @@ pub async fn generate_image(
         };
 
         let filename = format!("image_{i}.png");
-        match save_upload(&bytes, &filename, "image/png") {
+        match save_upload(&bytes, &filename, "image/png", &account.0) {
             Ok(url) => {
                 image_urls.push(serde_json::json!({
                     "url": url,
@@ -172,7 +178,7 @@ pub async fn generate_image(
 
 /// Synthesize speech from text (TTS).
 pub async fn synthesize_speech(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(body): Json<MediaTtsRequest>,
 ) -> impl IntoResponse {
@@ -206,7 +212,7 @@ pub async fn synthesize_speech(
     };
     let filename = format!("speech.{}", result.format);
 
-    match save_upload(&result.audio_data, &filename, content_type) {
+    match save_upload(&result.audio_data, &filename, content_type, &account.0) {
         Ok(url) => Json(serde_json::json!({
             "url": url,
             "format": result.format,
@@ -320,7 +326,7 @@ pub async fn poll_video_task(
 
 /// Generate music from a prompt and/or lyrics.
 pub async fn generate_music(
-    _account: AccountId,
+    account: AccountId,
     State(state): State<Arc<AppState>>,
     Json(body): Json<MediaMusicRequest>,
 ) -> impl IntoResponse {
@@ -352,7 +358,7 @@ pub async fn generate_music(
     };
     let filename = format!("music.{}", result.format);
 
-    match save_upload(&result.audio_data, &filename, content_type) {
+    match save_upload(&result.audio_data, &filename, content_type, &account.0) {
         Ok(url) => Json(serde_json::json!({
             "url": url,
             "format": result.format,

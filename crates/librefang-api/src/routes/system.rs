@@ -1895,7 +1895,10 @@ pub async fn webhook_agent(
     headers: axum::http::HeaderMap,
     lang: Option<axum::Extension<RequestLanguage>>,
     Json(body): Json<librefang_types::webhook::AgentHookPayload>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, json)) = require_admin(&account, &state.kernel.config_ref().admin_accounts) {
+        return (code, json).into_response();
+    }
     let (err_webhook_not_enabled, err_invalid_token, err_no_agents) = {
         let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
         (
@@ -1910,18 +1913,24 @@ pub async fn webhook_agent(
     let wh_config = match &cfg2.webhook_triggers {
         Some(c) if c.enabled => c,
         _ => {
-            return ApiErrorResponse::not_found(err_webhook_not_enabled).into_json_tuple();
+            return ApiErrorResponse::not_found(err_webhook_not_enabled)
+                .into_json_tuple()
+                .into_response();
         }
     };
 
     // Validate bearer token
     if !validate_webhook_token(&headers, &wh_config.token_env) {
-        return ApiErrorResponse::bad_request(err_invalid_token).into_json_tuple();
+        return ApiErrorResponse::bad_request(err_invalid_token)
+            .into_json_tuple()
+            .into_response();
     }
 
     // Validate payload
     if let Err(e) = body.validate() {
-        return ApiErrorResponse::bad_request(e).into_json_tuple();
+        return ApiErrorResponse::bad_request(e)
+            .into_json_tuple()
+            .into_response();
     }
 
     // Resolve the agent by name or ID (if not specified, use the first running agent)
@@ -1937,7 +1946,9 @@ pub async fn webhook_agent(
                             let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
                             t.t_args("api-error-webhook-agent-not-found", &[("id", agent_ref)])
                         };
-                        return ApiErrorResponse::not_found(err_msg).into_json_tuple();
+                        return ApiErrorResponse::not_found(err_msg)
+                            .into_json_tuple()
+                            .into_response();
                     }
                 }
             }
@@ -1951,7 +1962,9 @@ pub async fn webhook_agent(
             match agents.first() {
                 Some(entry) => entry.id,
                 None => {
-                    return ApiErrorResponse::not_found(err_no_agents).into_json_tuple();
+                    return ApiErrorResponse::not_found(err_no_agents)
+                        .into_json_tuple()
+                        .into_response();
                 }
             }
         }
@@ -1970,14 +1983,17 @@ pub async fn webhook_agent(
                     "output_tokens": result.total_usage.output_tokens,
                 },
             })),
-        ),
+        )
+            .into_response(),
         Err(e) => {
             let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
             let msg = t.t_args(
                 "api-error-webhook-agent-exec-failed",
                 &[("error", &e.to_string())],
             );
-            ApiErrorResponse::internal(msg).into_json_tuple()
+            ApiErrorResponse::internal(msg)
+                .into_json_tuple()
+                .into_response()
         }
     }
 }

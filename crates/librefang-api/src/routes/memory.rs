@@ -333,12 +333,12 @@ pub async fn memory_get_user(
             }
         } else {
             false
-    };
+        };
     if !ownership_verified && account.0.is_some() {
         return (
-            StatusCode::FORBIDDEN,
+            StatusCode::NOT_FOUND,
             Json(serde_json::json!({
-                "error": "Tenant-scoped memory access requires a registered agent"
+                "error": "Agent not found"
             })),
         );
     }
@@ -405,12 +405,12 @@ pub async fn memory_add(
             }
         } else {
             false
-    };
+        };
     if !ownership_verified && account.0.is_some() {
         return (
-            StatusCode::FORBIDDEN,
+            StatusCode::NOT_FOUND,
             Json(serde_json::json!({
-                "error": "Tenant-scoped memory writes require a registered agent"
+                "error": "Agent not found"
             })),
         );
     }
@@ -576,7 +576,10 @@ pub async fn memory_bulk_delete(
             }
         };
         let result = match account.0.as_deref() {
-            Some(owner) => store.delete_scoped(id, MemoryScope::tenant(owner)).await.map(|_| true),
+            Some(owner) => store
+                .delete_scoped(id, MemoryScope::tenant(owner))
+                .await
+                .map(|_| true),
             None => store.delete(id, &agent_id).await,
         };
         match result {

@@ -1472,6 +1472,7 @@ pub async fn get_agent_session(
                                                     media_type.rsplit('/').next().unwrap_or("png")
                                                 ),
                                                 content_type: media_type.clone(),
+                                                account_id: account.0.clone(),
                                             },
                                         );
                                         msg_images.push(serde_json::json!({
@@ -4496,6 +4497,8 @@ pub(crate) struct UploadMeta {
     #[allow(dead_code)]
     pub(crate) filename: String,
     pub(crate) content_type: String,
+    /// Owning tenant — `None` for system/legacy uploads.
+    pub(crate) account_id: Option<String>,
 }
 
 /// In-memory upload metadata registry.
@@ -4648,6 +4651,7 @@ pub async fn upload_file(
         UploadMeta {
             filename: filename.clone(),
             content_type: content_type.clone(),
+            account_id: account.0.clone(),
         },
     );
 
@@ -4697,7 +4701,7 @@ pub async fn upload_file(
         (status = 200, description = "Serve an uploaded file by ID", body = serde_json::Value)
     )
 )]
-pub async fn serve_upload(_account: AccountId, Path(file_id): Path<String>) -> impl IntoResponse {
+pub async fn serve_upload(account: AccountId, Path(file_id): Path<String>) -> impl IntoResponse {
     // Validate file_id is a UUID to prevent path traversal
     if uuid::Uuid::parse_str(&file_id).is_err() {
         return (
@@ -4717,7 +4721,23 @@ pub async fn serve_upload(_account: AccountId, Path(file_id): Path<String>) -> i
     // Look up metadata from registry; fall back to disk probe for generated images
     // (image_generate saves files without registering in UPLOAD_REGISTRY).
     let content_type = match UPLOAD_REGISTRY.get(&file_id) {
-        Some(m) => m.content_type.clone(),
+        Some(m) => {
+            // Ownership check: scoped tenant can only access own uploads.
+            // Returns 404 (not 403) to avoid confirming file existence.
+            if let Some(ref caller) = account.0 {
+                if m.account_id.as_deref() != Some(caller.as_str()) {
+                    return (
+                        StatusCode::NOT_FOUND,
+                        [(
+                            axum::http::header::CONTENT_TYPE,
+                            "application/json".to_string(),
+                        )],
+                        b"{\"error\":\"File not found\"}".to_vec(),
+                    );
+                }
+            }
+            m.content_type.clone()
+        }
         None => {
             // Infer content type from file magic bytes
             if !file_path.exists() {
