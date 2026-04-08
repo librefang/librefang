@@ -1125,11 +1125,12 @@ impl ScriptableContextEngine {
                             let schemas_c = hook_schemas.clone();
                             let state_c = shared_state_path.clone();
                             let store_c = trace_store.clone();
+                            let runtime_c = runtime.clone();
                             tokio::spawn(async move {
                                 let _ = ScriptableContextEngine::run_hook(
                                     "on_event",
                                     &script,
-                                    runtime,
+                                    runtime_c,
                                     input,
                                     hook_timeout_secs,
                                     &effective_env,
@@ -1421,7 +1422,7 @@ impl ScriptableContextEngine {
                 if std::path::Path::new(&resolved).exists() {
                     match self
                         .process_pool
-                        .prewarm(&resolved, runtime, &self.plugin_env)
+                        .prewarm(&resolved, runtime.clone(), &self.plugin_env)
                         .await
                     {
                         Ok(()) => debug!(hook = name, "Pre-warmed hook subprocess"),
